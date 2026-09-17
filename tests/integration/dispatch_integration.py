@@ -377,14 +377,14 @@ def finish_command(process):
     return json.loads(stdout)
 
 
-def start_host(store, endpoint, *extra, accelerated_retries=True):
+def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacity=1):
     args = [
         str(RUI),
         "serve",
         "--store",
         str(store),
         "--active-capacity",
-        "1",
+        str(active_capacity),
     ]
     if endpoint is not None:
         args += ["--provider-endpoint", endpoint]
@@ -812,18 +812,55 @@ def main():
         )
         message(state, continuation_store, "continuation-pending", "direct/continuation", "after results")
         continuation_actions = continuation_report["actions"]["unresolved"]
+        stop_host(continuation_host)
+        processes.remove(continuation_host)
+        continuation_host = start_host(
+            continuation_store,
+            f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
+            active_capacity=0,
+        )
+        processes.append(continuation_host)
         command(
             "deny-action", "--store", continuation_store,
             "--record", state / "continuation-deny-3.json", "--key", "continuation-deny-3",
             "--session", "direct/continuation", "--action", continuation_actions[1]["action"],
         )
-        time.sleep(0.2)
+        partial_results = command(
+            "inspect-session", "--store", continuation_store, "--session", "direct/continuation"
+        )
+        assert len(partial_results["actions"]["unresolved"]) == 1, partial_results
+        assert len(partial_results["actions"]["resolved"]) == 1, partial_results
+        assert partial_results["actions"]["resolved"][0]["call_ordinal"] == "3", partial_results
+        assert partial_results["actions"]["resolved"][0]["code"] == "denied", partial_results
+        assert int(partial_results["actions"]["resolved"][0]["acceptance_position"]) > 0
+        assert all(int(call["acceptance_position"]) > 0 for call in partial_results["rejected_calls"]["items"])
         assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
+        stop_host(continuation_host)
+        processes.remove(continuation_host)
+        continuation_host = start_host(
+            continuation_store,
+            f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
+            active_capacity=0,
+        )
+        processes.append(continuation_host)
         command(
             "deny-action", "--store", continuation_store,
             "--record", state / "continuation-deny-0.json", "--key", "continuation-deny-0",
             "--session", "direct/continuation", "--action", continuation_actions[0]["action"],
         )
+        complete_results = command(
+            "inspect-session", "--store", continuation_store, "--session", "direct/continuation"
+        )
+        assert complete_results["actions"]["unresolved"] == [], complete_results
+        assert [item["call_ordinal"] for item in complete_results["actions"]["resolved"]] == ["0", "3"]
+        assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
+        stop_host(continuation_host)
+        processes.remove(continuation_host)
+        continuation_host = start_host(
+            continuation_store,
+            f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
+        )
+        processes.append(continuation_host)
         wait_for(lambda: len(continuation_endpoint.requests) == 2, "tool-result continuation request")
         wait_for(
             lambda: completed_observation(continuation_store, "continuation-first"),
@@ -835,13 +872,9 @@ def main():
         continuation_input = continuation_request["input"]
         output_items = [item for item in continuation_input if item.get("type") == "function_call_output"]
         assert [item["call_id"] for item in output_items] == [call[1] for call in continuation_calls], output_items
-        content_domain = b"rui/content/v1"
-        missing_digest = hashlib.sha256(
-            len(content_domain).to_bytes(8, "big") + content_domain + b"missing-tool"
-        ).hexdigest()
         assert [item["output"] for item in output_items] == [
             "Permission denied.",
-            f"Unknown tool (name Rui content digest {missing_digest}).",
+            "Unknown tool: missing-tool.",
             "Invalid arguments for tool 'bash'.",
             "Permission denied.",
         ], output_items
@@ -854,6 +887,16 @@ def main():
         assert output_end < pending_index, continuation_input
         with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
             assert database.execute("SELECT count(*) FROM model_operation").fetchone() == (2,)
+            assert database.execute(
+                "SELECT count(*),count(DISTINCT acceptance_position) FROM model_tool_call "
+                "WHERE rejection_code IS NOT NULL AND rejection_content_id IS NOT NULL "
+                "AND acceptance_position IS NOT NULL"
+            ).fetchone() == (2, 2)
+            assert database.execute(
+                "SELECT count(*),count(DISTINCT acceptance_position) FROM action_operation "
+                "WHERE resolution_code='denied' AND resolution_content_id IS NOT NULL "
+                "AND acceptance_position IS NOT NULL"
+            ).fetchone() == (2, 2)
             assert database.execute(
                 "SELECT count(*) FROM sqlite_schema WHERE name LIKE '%tool_result%'"
             ).fetchone() == (0,)

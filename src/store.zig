@@ -369,6 +369,9 @@ pub const HistoricalView = struct {
     binding: AttemptBinding,
     active: bool = true,
     readers: usize = 0,
+    tool_group_initialized: bool = false,
+    tool_group_scan_after: u64 = 0,
+    next_tool_group: ?HistoricalEntry = null,
 
     pub fn settings(self: *HistoricalView) !HistoricalSettings {
         std.debug.assert(self.active);
@@ -2360,9 +2363,11 @@ pub const Store = struct {
             action_count,
         });
         try self.appendUnresolvedActions(session_ref, capture);
+        try capture.append("],\"resolved\":[");
+        try self.appendResolvedActions(session_ref, capture);
         try capture.appendFmt("]}},\"rejected_calls\":{{\"count\":\"{d}\",\"items\":[", .{rejected_call_count});
         try self.appendRejectedCalls(session_ref, capture);
-        try capture.appendFmt("]}},\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\",\"allow_once\",\"bash_execution\",\"tool_result_publication\"]}}}}", .{
+        try capture.appendFmt("]}},\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\",\"allow_once\",\"bash_execution\"]}}}}", .{
             if (execution.dispatch_fenced) "true" else "false",
             execution.custody_occupied,
             execution.scratch_used_bytes,
@@ -2427,6 +2432,52 @@ pub const Store = struct {
         }
     }
 
+    fn appendResolvedActions(
+        self: *Store,
+        session_ref: []const u8,
+        capture: *SessionReportCapture,
+    ) !void {
+        const statement = try prepare(
+            self.database,
+            "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.resolution_code,a.acceptance_position," ++
+                "result.byte_length,result.digest FROM action_operation a JOIN model_operation operation " ++
+                "ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id " ++
+                "JOIN content result ON result.content_id=a.resolution_content_id " ++
+                "WHERE a.session_ref=?1 AND a.resolution_code IS NOT NULL AND t.outcome_code IS NULL " ++
+                "ORDER BY a.action_id",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (true) {
+            const result = c.sqlite3_step(statement);
+            if (result == c.SQLITE_DONE) return;
+            if (result != c.SQLITE_ROW) return error.ActionReadFailed;
+            const action_id = c.sqlite3_column_int64(statement, 0);
+            const parent = c.sqlite3_column_int64(statement, 1);
+            const ordinal = c.sqlite3_column_int64(statement, 2);
+            const position = c.sqlite3_column_int64(statement, 4);
+            const length = c.sqlite3_column_int64(statement, 5);
+            if (action_id <= 0 or parent <= 0 or ordinal < 0 or position <= 0 or length < 0) return error.CorruptStore;
+            var code: protocol.Bounded(32) = .{};
+            try readText(statement, 3, &code);
+            if (!first) try capture.append(",");
+            first = false;
+            try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"code\":", .{
+                action_id,
+                parent,
+                ordinal,
+            });
+            try capture.appendJsonString(code.slice());
+            try capture.appendFmt(",\"acceptance_position\":\"{d}\",\"result\":", .{position});
+            try capture.appendContentReference(.{
+                .length = @intCast(length),
+                .digest = try readDigest(statement, 6),
+            });
+            try capture.append("}");
+        }
+    }
+
     fn appendRejectedCalls(
         self: *Store,
         session_ref: []const u8,
@@ -2434,7 +2485,8 @@ pub const Store = struct {
     ) !void {
         const statement = try prepare(
             self.database,
-            "SELECT call.operation_id,call.call_ordinal,call.rejection_code," ++
+            "SELECT call.operation_id,call.call_ordinal,call.rejection_code,call.acceptance_position," ++
+                "rejection.byte_length,rejection.digest," ++
                 "item_id.byte_length,item_id.digest,name.byte_length,name.digest," ++
                 "call_id.byte_length,call_id.digest,arguments.byte_length,arguments.digest " ++
                 "FROM model_tool_call call JOIN model_operation operation ON operation.operation_id=call.operation_id " ++
@@ -2442,6 +2494,7 @@ pub const Store = struct {
                 "JOIN content name ON name.content_id=call.name_content_id " ++
                 "JOIN content call_id ON call_id.content_id=call.call_id_content_id " ++
                 "JOIN content arguments ON arguments.content_id=call.arguments_content_id " ++
+                "JOIN content rejection ON rejection.content_id=call.rejection_content_id " ++
                 "WHERE operation.session_ref=?1 AND call.rejection_code IS NOT NULL " ++
                 "ORDER BY call.operation_id,call.call_ordinal",
         );
@@ -2454,7 +2507,9 @@ pub const Store = struct {
             if (result != c.SQLITE_ROW) return error.CallReadFailed;
             const operation_id = c.sqlite3_column_int64(statement, 0);
             const call_ordinal = c.sqlite3_column_int64(statement, 1);
-            if (operation_id <= 0 or call_ordinal < 0) return error.CorruptStore;
+            const acceptance_position = c.sqlite3_column_int64(statement, 3);
+            const rejection_length = c.sqlite3_column_int64(statement, 4);
+            if (operation_id <= 0 or call_ordinal < 0 or acceptance_position <= 0 or rejection_length < 0) return error.CorruptStore;
             var code: protocol.Bounded(32) = .{};
             try readText(statement, 2, &code);
             if (!first) try capture.append(",");
@@ -2464,11 +2519,16 @@ pub const Store = struct {
                 call_ordinal,
             });
             try capture.appendJsonString(code.slice());
+            try capture.appendFmt(",\"acceptance_position\":\"{d}\",\"result\":", .{acceptance_position});
+            try capture.appendContentReference(.{
+                .length = @intCast(rejection_length),
+                .digest = try readDigest(statement, 5),
+            });
             inline for (.{
-                .{ "item_id", 3, 4 },
-                .{ "name", 5, 6 },
-                .{ "call_id", 7, 8 },
-                .{ "arguments", 9, 10 },
+                .{ "item_id", 6, 7 },
+                .{ "name", 8, 9 },
+                .{ "call_id", 10, 11 },
+                .{ "arguments", 12, 13 },
             }) |field| {
                 const length = c.sqlite3_column_int64(statement, field[1]);
                 if (length < 0) return error.CorruptStore;
@@ -2902,26 +2962,74 @@ pub const Store = struct {
 
     fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64) !?HistoricalEntry {
         try self.validateCurrentAttempt(view.binding);
+        if (!view.tool_group_initialized or after_position < view.tool_group_scan_after or
+            (view.next_tool_group != null and view.next_tool_group.?.position <= after_position))
+        {
+            view.next_tool_group = try self.readNextHistoricalToolGroup(view, after_position);
+            view.tool_group_initialized = true;
+            view.tool_group_scan_after = after_position;
+        }
         const statement = try prepare(
             self.database,
-            "SELECT position,kind,content_id,source_operation_id FROM (" ++
-                "SELECT e.session_position AS position,e.entry_kind AS kind,e.content_id AS content_id,NULL AS source_operation_id " ++
+            "SELECT position,kind,content_id FROM (" ++
+                "SELECT e.session_position AS position,e.entry_kind AS kind,e.content_id AS content_id " ++
                 "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
                 "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
                 "AND e.entry_kind IN (1,2) UNION ALL " ++
-                "SELECT item.session_position AS position,3 AS kind,item.content_id AS content_id,NULL AS source_operation_id " ++
+                "SELECT item.session_position AS position,3 AS kind,item.content_id AS content_id " ++
                 "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
-                "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position UNION ALL " ++
-                "SELECT max(coalesce(call.acceptance_position,action.acceptance_position)) AS position,4 AS kind,NULL AS content_id," ++
-                "source.operation_id AS source_operation_id FROM model_operation current JOIN model_operation source " ++
-                "ON source.session_ref=current.session_ref JOIN model_tool_call call ON call.operation_id=source.operation_id " ++
-                "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+                "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position" ++
+                ") ORDER BY position LIMIT 1",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, view.binding.operation_id);
+        try bindU64(statement, 2, after_position);
+        const result = c.sqlite3_step(statement);
+        if (result == c.SQLITE_DONE) return view.next_tool_group;
+        if (result != c.SQLITE_ROW) return error.HistoricalEntryReadFailed;
+        const position = c.sqlite3_column_int64(statement, 0);
+        const kind_value = c.sqlite3_column_int(statement, 1);
+        const content_id = c.sqlite3_column_int64(statement, 2);
+        if (position <= 0 or content_id <= 0) return error.CorruptStore;
+        const kind: HistoricalEntryKind = switch (kind_value) {
+            1 => .user,
+            2 => .instruction,
+            3 => .provider_output,
+            else => return error.CorruptStore,
+        };
+        const metadata = try self.readContentMetadata(content_id);
+        const ordinary = HistoricalEntry{
+            .position = @intCast(position),
+            .kind = kind,
+            .content = .{
+                .view = view,
+                .length = metadata.length,
+                .digest = metadata.digest,
+                .private = kind == .provider_output,
+            },
+        };
+        if (view.next_tool_group) |group| {
+            if (group.position < ordinary.position) return group;
+        }
+        return ordinary;
+    }
+
+    fn readNextHistoricalToolGroup(
+        self: *Store,
+        view: *HistoricalView,
+        after_position: u64,
+    ) !?HistoricalEntry {
+        const statement = try prepare(
+            self.database,
+            "SELECT max(coalesce(call.acceptance_position,action.acceptance_position)) AS position,source.operation_id " ++
+                "FROM model_operation current JOIN model_operation source ON source.session_ref=current.session_ref " ++
+                "JOIN model_tool_call call ON call.operation_id=source.operation_id LEFT JOIN action_operation action " ++
+                "ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
                 "WHERE current.operation_id=?1 AND source.resolution_code='tool_calls' GROUP BY source.operation_id " ++
                 "HAVING position>?2 AND position<current.admission_position AND count(*)=sum(CASE " ++
                 "WHEN call.rejection_code IS NOT NULL AND call.rejection_content_id IS NOT NULL AND call.acceptance_position IS NOT NULL THEN 1 " ++
                 "WHEN call.rejection_code IS NULL AND action.resolution_code IS NOT NULL AND action.resolution_content_id IS NOT NULL " ++
-                "AND action.acceptance_position IS NOT NULL THEN 1 ELSE 0 END)" ++
-                ") ORDER BY position LIMIT 1",
+                "AND action.acceptance_position IS NOT NULL THEN 1 ELSE 0 END) ORDER BY position LIMIT 1",
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, view.binding.operation_id);
@@ -2930,33 +3038,12 @@ pub const Store = struct {
         if (result == c.SQLITE_DONE) return null;
         if (result != c.SQLITE_ROW) return error.HistoricalEntryReadFailed;
         const position = c.sqlite3_column_int64(statement, 0);
-        const kind_value = c.sqlite3_column_int(statement, 1);
-        const content_id = try readNullablePositiveI64(statement, 2);
-        const source_operation_id = try readNullablePositiveI64(statement, 3);
-        if (position <= 0) return error.CorruptStore;
-        const kind: HistoricalEntryKind = switch (kind_value) {
-            1 => .user,
-            2 => .instruction,
-            3 => .provider_output,
-            4 => .tool_results,
-            else => return error.CorruptStore,
-        };
-        if ((kind == .tool_results) != (source_operation_id != null) or
-            (kind == .tool_results) == (content_id != null)) return error.CorruptStore;
-        const historical_content = if (content_id) |id| blk: {
-            const metadata = try self.readContentMetadata(id);
-            break :blk HistoricalContent{
-                .view = view,
-                .length = metadata.length,
-                .digest = metadata.digest,
-                .private = kind == .provider_output,
-            };
-        } else null;
+        const source_operation_id = c.sqlite3_column_int64(statement, 1);
+        if (position <= 0 or source_operation_id <= 0) return error.CorruptStore;
         return .{
             .position = @intCast(position),
-            .kind = kind,
-            .content = historical_content,
-            .source_operation_id = if (source_operation_id) |id| @intCast(id) else null,
+            .kind = .tool_results,
+            .source_operation_id = @intCast(source_operation_id),
         };
     }
 
@@ -3392,9 +3479,9 @@ pub const Store = struct {
                     "unknown_tool"
                 else
                     null;
-                var rejection_buffer: [128]u8 = undefined;
+                var rejection_buffer: [192]u8 = undefined;
                 const rejection_text = if (rejection_code) |code|
-                    try rejectionResult(code, &name.content_digest, &rejection_buffer)
+                    try rejectionResult(self.io, output.source, code, name, &rejection_buffer)
                 else
                     null;
                 const rejection_content_id = if (rejection_text) |text|
@@ -3518,10 +3605,30 @@ pub const Store = struct {
 
     const ContentSlot = struct { id: i64, existing: bool };
 
-    fn rejectionResult(code: []const u8, name_digest: *const [32]u8, buffer: *[128]u8) ![]const u8 {
+    fn rejectionResult(
+        io: std.Io,
+        source_file: std.Io.File,
+        code: []const u8,
+        name: OutputMetadataRecord,
+        buffer: *[192]u8,
+    ) ![]const u8 {
         if (std.mem.eql(u8, code, "unknown_tool")) {
-            const digest_hex = std.fmt.bytesToHex(name_digest.*, .lower);
-            return std.fmt.bufPrint(buffer, "Unknown tool (name Rui content digest {s}).", .{&digest_hex});
+            var decoded = try EncodedStringReader.init(io, source_file, name);
+            var prefix: [32]u8 = undefined;
+            var prefix_length: usize = 0;
+            while (prefix_length < prefix.len) {
+                prefix[prefix_length] = (try decoded.next()) orelse break;
+                prefix_length += 1;
+            }
+            while (!std.unicode.utf8ValidateSlice(prefix[0..prefix_length])) prefix_length -= 1;
+            if (name.decoded_length <= prefix.len) {
+                return std.fmt.bufPrint(buffer, "Unknown tool: {s}.", .{prefix[0..prefix_length]});
+            }
+            const digest_hex = std.fmt.bytesToHex(name.content_digest, .lower);
+            return std.fmt.bufPrint(buffer, "Unknown tool: {s}… (name continues; Rui content digest {s}).", .{
+                prefix[0..prefix_length],
+                &digest_hex,
+            });
         }
         if (std.mem.eql(u8, code, "invalid_arguments")) return "Invalid arguments for tool 'bash'.";
         if (std.mem.eql(u8, code, "tool_unavailable")) return "Tool 'edit' is unavailable.";
@@ -4553,6 +4660,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX model_tool_call_rejections ON model_tool_call(operation_id,call_ordinal) WHERE rejection_code IS NOT NULL;
         \\CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND allowance_used<4;
         \\CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0;
+        \\CREATE INDEX model_operation_session_history ON model_operation(session_ref,operation_id);
         \\CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position);
         \\CREATE INDEX model_output_history ON model_output_item(session_ref,session_position);
     );
@@ -4574,7 +4682,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','session_stop_exclusion','action_operation_session_order','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','conversation_entry_history','model_output_history')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','session_stop_exclusion','action_operation_session_order','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','conversation_entry_history','model_output_history')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -5097,6 +5205,14 @@ const TestingReportAction = struct {
     authorization: []const u8,
 };
 
+const TestingResolvedAction = struct {
+    action: []const u8,
+    call_ordinal: []const u8,
+    code: []const u8,
+    acceptance_position: []const u8,
+    result: TestingContentReference,
+};
+
 const TestingContentReference = struct {
     bytes: []const u8,
     sha256: []const u8,
@@ -5105,6 +5221,8 @@ const TestingContentReference = struct {
 const TestingRejectedCall = struct {
     call_ordinal: []const u8,
     code: []const u8,
+    acceptance_position: []const u8,
+    result: TestingContentReference,
     item_id: TestingContentReference,
     name: TestingContentReference,
     call_id: TestingContentReference,
@@ -5115,6 +5233,7 @@ const TestingSessionReport = struct {
     actions: struct {
         count: []const u8,
         unresolved: []TestingReportAction,
+        resolved: []TestingResolvedAction,
     },
     rejected_calls: struct {
         count: []const u8,
@@ -5384,6 +5503,12 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
         const rejected = report.value.rejected_calls.items[0];
         try std.testing.expectEqualStrings("1", rejected.call_ordinal);
         try std.testing.expectEqualStrings("unknown_tool", rejected.code);
+        try std.testing.expect((try std.fmt.parseInt(u64, rejected.acceptance_position, 10)) > 0);
+        try std.testing.expectEqualStrings("20", rejected.result.bytes);
+        try std.testing.expectEqualStrings(
+            &std.fmt.bytesToHex(protocol.contentDigest("Unknown tool: other."), .lower),
+            rejected.result.sha256,
+        );
         inline for (.{
             .{ rejected.item_id, "item-2" },
             .{ rejected.name, "other" },
@@ -5397,6 +5522,19 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
         }
         break :first try std.fmt.parseInt(u64, report.value.actions.unresolved[0].action, 10);
     };
+    {
+        const content_id = try queryU64(
+            storage.database,
+            "SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=5",
+        );
+        const metadata = try storage.readContentMetadata(@intCast(content_id));
+        var reader = try storage.openContent(.{ .length = metadata.length, .digest = metadata.digest });
+        defer reader.close();
+        var result: [192]u8 = undefined;
+        const count = try reader.read(0, &result);
+        try std.testing.expect(std.mem.startsWith(u8, result[0..count], "Unknown tool: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…"));
+        try std.testing.expect(std.mem.indexOf(u8, result[0..count], "name continues; Rui content digest") != null);
+    }
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
     try deny.key.set("mixed-deny");
     try deny.session.set("direct/mixed-calls");
@@ -5410,6 +5548,16 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
         defer report.deinit();
         try std.testing.expectEqual(@as(usize, 1), report.value.actions.unresolved.len);
         try std.testing.expectEqualStrings("6", report.value.actions.unresolved[0].call_ordinal);
+        try std.testing.expectEqual(@as(usize, 1), report.value.actions.resolved.len);
+        const resolved = report.value.actions.resolved[0];
+        try std.testing.expectEqualStrings("0", resolved.call_ordinal);
+        try std.testing.expectEqualStrings("denied", resolved.code);
+        try std.testing.expect((try std.fmt.parseInt(u64, resolved.acceptance_position, 10)) > 0);
+        try std.testing.expectEqualStrings("18", resolved.result.bytes);
+        try std.testing.expectEqualStrings(
+            &std.fmt.bytesToHex(protocol.contentDigest("Permission denied."), .lower),
+            resolved.result.sha256,
+        );
     }
 
     try storage.close();
@@ -5503,14 +5651,12 @@ test "complete call outcomes continue once in call order ahead of pending input"
     const pending = (try view.nextEntry(position)).?;
     try std.testing.expectEqual(HistoricalEntryKind.user, pending.kind);
     try std.testing.expect((try view.nextEntry(pending.position)) == null);
+    try std.testing.expectEqual(HistoricalEntryKind.user, (try view.nextEntry(0)).?.kind);
 
     const expected_call_ids = [_][]const u8{ "result-call-0", "result-call-1", "result-call-2", "result-call-3" };
-    const unknown_digest = std.fmt.bytesToHex(protocol.contentDigest("unknown"), .lower);
-    var unknown_result_buffer: [128]u8 = undefined;
-    const unknown_result = try std.fmt.bufPrint(&unknown_result_buffer, "Unknown tool (name Rui content digest {s}).", .{&unknown_digest});
     const expected_outputs = [_][]const u8{
         "Permission denied.",
-        unknown_result,
+        "Unknown tool: unknown.",
         "Invalid arguments for tool 'bash'.",
         "Permission denied.",
     };
