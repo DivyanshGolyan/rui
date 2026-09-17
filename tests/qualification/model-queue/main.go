@@ -30,19 +30,47 @@ type population struct {
 	Eligible   int `json:"eligible"`
 }
 
-type executionFact struct {
-	CommandKey          string `json:"command_key"`
-	MessageSession      string `json:"message_session"`
-	MessageTurnID       int64  `json:"message_turn_id"`
-	TurnID              int64  `json:"turn_id"`
-	TurnSession         string `json:"turn_session"`
-	TurnOperationID     int64  `json:"turn_operation_id"`
-	TurnOutcome         string `json:"turn_outcome"`
-	OperationID         int64  `json:"operation_id"`
-	OperationTurnID     int64  `json:"operation_turn_id"`
-	OperationSession    string `json:"operation_session"`
-	OperationResolution string `json:"operation_resolution"`
+type messageExecutionFact struct {
+	CommandKey string `json:"command_key"`
+	Session    string `json:"session"`
+	TurnID     int64  `json:"turn_id"`
 }
+
+type turnExecutionFact struct {
+	TurnID      int64  `json:"turn_id"`
+	Session     string `json:"session"`
+	OperationID int64  `json:"operation_id"`
+	Outcome     string `json:"outcome"`
+}
+
+type operationExecutionFact struct {
+	OperationID int64  `json:"operation_id"`
+	TurnID      int64  `json:"turn_id"`
+	Session     string `json:"session"`
+	Resolution  string `json:"resolution"`
+}
+
+type executionFacts struct {
+	Messages   []messageExecutionFact   `json:"messages"`
+	Turns      []turnExecutionFact      `json:"turns"`
+	Operations []operationExecutionFact `json:"operations"`
+}
+
+const executionAuditSQL = `WITH eligible_turn(turn_id) AS (
+ SELECT turn_id FROM message_admission WHERE session_ref GLOB 'queue/eligible/[0-9]*' AND turn_id IS NOT NULL
+ UNION SELECT turn_id FROM turn WHERE session_ref GLOB 'queue/eligible/[0-9]*'
+ UNION SELECT turn_id FROM model_operation WHERE session_ref GLOB 'queue/eligible/[0-9]*'
+)
+SELECT row FROM (
+ SELECT 1 AS kind,m.admission_id AS ordinal,'M|'||m.command_key||'|'||m.session_ref||'|'||coalesce(m.turn_id,'') AS row
+ FROM message_admission m WHERE m.session_ref GLOB 'queue/eligible/[0-9]*' OR m.turn_id IN eligible_turn
+ UNION ALL
+ SELECT 2,t.turn_id,'T|'||t.turn_id||'|'||t.session_ref||'|'||t.operation_id||'|'||coalesce(t.outcome_code,'')
+ FROM turn t WHERE t.session_ref GLOB 'queue/eligible/[0-9]*' OR t.turn_id IN eligible_turn
+ UNION ALL
+ SELECT 3,o.operation_id,'O|'||o.operation_id||'|'||o.turn_id||'|'||o.session_ref||'|'||coalesce(o.resolution_code,'')
+ FROM model_operation o WHERE o.session_ref GLOB 'queue/eligible/[0-9]*' OR o.turn_id IN eligible_turn
+) ORDER BY kind,ordinal;`
 
 func discoveryStatus(milliseconds int64, available bool) string {
 	if !available {
@@ -232,57 +260,89 @@ func expectedOrder(count int) []string {
 	return result
 }
 
-func parseExecutionFacts(rows string) ([]executionFact, error) {
+func parseExecutionFacts(rows string) (executionFacts, error) {
+	result := executionFacts{Messages: []messageExecutionFact{}, Turns: []turnExecutionFact{}, Operations: []operationExecutionFact{}}
 	if rows == "" {
-		return []executionFact{}, nil
+		return result, nil
 	}
-	result := make([]executionFact, 0, strings.Count(rows, "\n")+1)
 	for _, row := range strings.Split(rows, "\n") {
 		fields := strings.Split(row, "|")
-		if len(fields) != 11 {
-			return result, fmt.Errorf("malformed execution fact %q", row)
+		if len(fields) == 4 && fields[0] == "M" {
+			turnID, err := parseOptionalIdentity(fields[3])
+			if err != nil {
+				return result, fmt.Errorf("malformed message execution fact %q", row)
+			}
+			result.Messages = append(result.Messages, messageExecutionFact{fields[1], fields[2], turnID})
+			continue
 		}
-		messageTurnID, messageTurnError := strconv.ParseInt(fields[2], 10, 64)
-		turnID, turnError := strconv.ParseInt(fields[3], 10, 64)
-		turnOperationID, turnOperationError := strconv.ParseInt(fields[5], 10, 64)
-		operationID, operationError := strconv.ParseInt(fields[7], 10, 64)
-		operationTurnID, operationTurnError := strconv.ParseInt(fields[8], 10, 64)
-		if messageTurnError != nil || turnError != nil || turnOperationError != nil || operationError != nil || operationTurnError != nil {
-			return result, fmt.Errorf("malformed execution identities %q", row)
+		if len(fields) == 5 && fields[0] == "T" {
+			turnID, turnErr := parseOptionalIdentity(fields[1])
+			operationID, operationErr := parseOptionalIdentity(fields[3])
+			if turnErr != nil || operationErr != nil {
+				return result, fmt.Errorf("malformed Turn execution fact %q", row)
+			}
+			result.Turns = append(result.Turns, turnExecutionFact{turnID, fields[2], operationID, fields[4]})
+			continue
 		}
-		result = append(result, executionFact{
-			CommandKey: fields[0], MessageSession: fields[1], MessageTurnID: messageTurnID,
-			TurnID: turnID, TurnSession: fields[4], TurnOperationID: turnOperationID, TurnOutcome: fields[6],
-			OperationID: operationID, OperationTurnID: operationTurnID, OperationSession: fields[9], OperationResolution: fields[10],
-		})
+		if len(fields) == 5 && fields[0] == "O" {
+			operationID, operationErr := parseOptionalIdentity(fields[1])
+			turnID, turnErr := parseOptionalIdentity(fields[2])
+			if operationErr != nil || turnErr != nil {
+				return result, fmt.Errorf("malformed Operation execution fact %q", row)
+			}
+			result.Operations = append(result.Operations, operationExecutionFact{operationID, turnID, fields[3], fields[4]})
+			continue
+		}
+		return result, fmt.Errorf("malformed execution fact %q", row)
 	}
 	return result, nil
 }
 
-func auditExecutions(facts []executionFact, expected []string, providerRequests int64) ([]string, error) {
-	actual := make([]string, 0, len(facts))
-	for _, fact := range facts {
-		actual = append(actual, fact.MessageSession)
+func parseOptionalIdentity(value string) (int64, error) {
+	if value == "" {
+		return 0, nil
 	}
-	if len(facts) != len(expected) {
-		return actual, fmt.Errorf("eligible Operation count=%d want=%d", len(facts), len(expected))
+	return strconv.ParseInt(value, 10, 64)
+}
+
+func auditExecutions(facts executionFacts, expected []string, providerRequests int64) ([]string, error) {
+	actual := make([]string, 0, len(facts.Operations))
+	for _, operation := range facts.Operations {
+		actual = append(actual, operation.Session)
+	}
+	if len(facts.Messages) != len(expected) || len(facts.Turns) != len(expected) || len(facts.Operations) != len(expected) {
+		return actual, fmt.Errorf("eligible execution counts messages=%d turns=%d Operations=%d want=%d", len(facts.Messages), len(facts.Turns), len(facts.Operations), len(expected))
 	}
 	if providerRequests != int64(len(expected)) {
 		return actual, fmt.Errorf("provider request count=%d want=%d", providerRequests, len(expected))
 	}
-	var firstError error
-	for index, fact := range facts {
-		expectedKey := fmt.Sprintf("e-msg-%d", index+1)
-		if firstError == nil && (fact.CommandKey != expectedKey ||
-			fact.MessageSession != expected[index] ||
-			fact.MessageTurnID <= 0 || fact.MessageTurnID != fact.TurnID || fact.TurnSession != expected[index] ||
-			fact.TurnOperationID <= 0 || fact.TurnOperationID != fact.OperationID ||
-			fact.OperationID <= 0 || fact.OperationTurnID != fact.TurnID || fact.OperationSession != expected[index] ||
-			fact.TurnOutcome != "provider_http_422" || fact.OperationResolution != "provider_http_422") {
-			firstError = fmt.Errorf("execution fact[%d]=%+v", index, fact)
+	for index := range expected {
+		if actual[index] != expected[index] {
+			return actual, fmt.Errorf("Operation admission order[%d]=%q want=%q", index, actual[index], expected[index])
 		}
 	}
-	return actual, firstError
+	turns := make(map[int64]turnExecutionFact, len(facts.Turns))
+	for _, turn := range facts.Turns {
+		turns[turn.TurnID] = turn
+	}
+	operations := make(map[int64]operationExecutionFact, len(facts.Operations))
+	for _, operation := range facts.Operations {
+		operations[operation.OperationID] = operation
+	}
+	if len(turns) != len(facts.Turns) || len(operations) != len(facts.Operations) {
+		return actual, errors.New("duplicate Turn or Operation identity")
+	}
+	for index, message := range facts.Messages {
+		expectedKey := fmt.Sprintf("e-msg-%d", index+1)
+		turn, turnOK := turns[message.TurnID]
+		operation, operationOK := operations[turn.OperationID]
+		if message.CommandKey != expectedKey || message.Session != expected[index] || message.TurnID <= 0 || !turnOK ||
+			turn.Session != expected[index] || turn.Outcome != "provider_http_422" || turn.OperationID <= 0 || !operationOK ||
+			operation.TurnID != turn.TurnID || operation.Session != expected[index] || operation.Resolution != "provider_http_422" {
+			return actual, fmt.Errorf("execution[%d] message=%+v turn=%+v operation=%+v", index, message, turn, operation)
+		}
+	}
+	return actual, nil
 }
 
 func physicalFootprintStatus(footprint measurement.Footprint) (string, uint64) {
@@ -448,16 +508,9 @@ func runCase(binary, sqliteBinary, root, name string, p population, resources bo
 		recordBehaviorFailure(result, "Host stop after settlement observation: "+stopError.Error())
 	}
 	auditDeadline := measurement.NewDeadline(15 * time.Second)
-	// Root the audit at every controlled Operation so an older or duplicate
-	// Operation cannot hide behind Turn's current operation_id pointer.
-	rows, auditQueryError := sql(auditDeadline, sqliteBinary, store, `SELECT coalesce(m.command_key,'')||'|'||coalesce(m.session_ref,'')||'|'||coalesce(m.turn_id,'')||'|'||coalesce(t.turn_id,'')||'|'||coalesce(t.session_ref,'')||'|'||coalesce(t.operation_id,'')||'|'||coalesce(t.outcome_code,'')||'|'||o.operation_id||'|'||o.turn_id||'|'||o.session_ref||'|'||coalesce(o.resolution_code,'')
-FROM model_operation o
-LEFT JOIN turn t ON t.turn_id=o.turn_id
-LEFT JOIN message_admission m ON m.turn_id=t.turn_id AND m.command_key GLOB 'e-msg-[0-9]*'
-WHERE o.session_ref GLOB 'queue/eligible/[0-9]*'
-   OR t.session_ref GLOB 'queue/eligible/[0-9]*'
-   OR m.session_ref GLOB 'queue/eligible/[0-9]*'
-ORDER BY o.operation_id,m.admission_id;`)
+	// Enumerate the closure of Messages, Turns and Operations touching the
+	// controlled Sessions so no entity can hide behind another's current pointer.
+	rows, auditQueryError := sql(auditDeadline, sqliteBinary, store, executionAuditSQL)
 	expected := expectedOrder(p.Eligible)
 	providerRequests := e.Requests()
 	result["provider_request_count"] = providerRequests

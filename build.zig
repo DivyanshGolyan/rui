@@ -100,6 +100,14 @@ pub fn build(b: *std.Build) void {
     );
     measurement_test_step.dependOn(&measurement_tests.step);
 
+    const queue_audit_test = b.addSystemCommand(&.{
+        "go", "test", "-mod=readonly", "-run", "^TestExecutionAuditQueryRejectsHiddenEntities$", "./model-queue", "-args", "-sqlite",
+    });
+    queue_audit_test.setCwd(b.path("tests/qualification"));
+    queue_audit_test.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    queue_audit_test.addArtifactArg(addSqliteShell(b, target, .ReleaseSmall));
+    measurement_test_step.dependOn(&queue_audit_test.step);
+
     const linux_cross_step = b.step(
         "cross-check-linux",
         "Compile the supported Linux x86-64/ARM64 targets",

@@ -2,11 +2,14 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"reflect"
 	"testing"
 
 	"rui.local/qualification/measurement"
 )
+
+var sqliteTestBinary = flag.String("sqlite", "", "pinned SQLite shell for query-level tests")
 
 func TestDiscoveryStatusInclusiveBoundary(t *testing.T) {
 	tests := []struct {
@@ -59,41 +62,111 @@ func TestCaseStatusDistinguishesBehaviorAndMeasurementOutcomes(t *testing.T) {
 
 func TestExecutionAuditRequiresOneSettledOperationAndRequestPerTurn(t *testing.T) {
 	want := expectedOrder(2)
-	valid := []executionFact{
-		{CommandKey: "e-msg-1", MessageSession: want[0], MessageTurnID: 1, TurnID: 1, TurnSession: want[0], TurnOperationID: 1, TurnOutcome: "provider_http_422", OperationID: 1, OperationTurnID: 1, OperationSession: want[0], OperationResolution: "provider_http_422"},
-		{CommandKey: "e-msg-2", MessageSession: want[1], MessageTurnID: 2, TurnID: 2, TurnSession: want[1], TurnOperationID: 2, TurnOutcome: "provider_http_422", OperationID: 2, OperationTurnID: 2, OperationSession: want[1], OperationResolution: "provider_http_422"},
+	valid := executionFacts{
+		Messages:   []messageExecutionFact{{"e-msg-1", want[0], 1}, {"e-msg-2", want[1], 2}},
+		Turns:      []turnExecutionFact{{1, want[0], 1, "provider_http_422"}, {2, want[1], 2, "provider_http_422"}},
+		Operations: []operationExecutionFact{{1, 1, want[0], "provider_http_422"}, {2, 2, want[1], "provider_http_422"}},
 	}
 	if actual, err := auditExecutions(valid, want, 2); err != nil || !reflect.DeepEqual(actual, want) {
 		t.Fatalf("auditExecutions(valid) = %v, %v; want %v", actual, err, want)
 	}
 	tests := []struct {
 		name   string
-		mutate func([]executionFact)
+		mutate func(*executionFacts)
 	}{
-		{"wrong turn outcome", func(facts []executionFact) { facts[0].TurnOutcome = "cancelled" }},
-		{"unresolved earlier turn", func(facts []executionFact) { facts[0].TurnOutcome = "" }},
-		{"wrong message binding", func(facts []executionFact) { facts[0].MessageTurnID = facts[1].TurnID }},
-		{"wrong current operation binding", func(facts []executionFact) { facts[0].TurnOperationID = facts[1].OperationID }},
-		{"wrong operation turn binding", func(facts []executionFact) { facts[0].OperationTurnID = facts[1].TurnID }},
+		{"wrong turn outcome", func(facts *executionFacts) { facts.Turns[0].Outcome = "cancelled" }},
+		{"wrong Message Session", func(facts *executionFacts) { facts.Messages[0].Session = want[1] }},
+		{"wrong Turn Session", func(facts *executionFacts) { facts.Turns[0].Session = want[1] }},
+		{"wrong Operation Session", func(facts *executionFacts) { facts.Operations[0].Session = want[1] }},
+		{"wrong message binding", func(facts *executionFacts) { facts.Messages[0].TurnID = 2 }},
+		{"wrong current operation binding", func(facts *executionFacts) { facts.Turns[0].OperationID = 2 }},
+		{"wrong operation turn binding", func(facts *executionFacts) { facts.Operations[0].TurnID = 2 }},
+		{"reversed admission order", func(facts *executionFacts) {
+			facts.Operations[0], facts.Operations[1] = facts.Operations[1], facts.Operations[0]
+		}},
 	}
 	for _, test := range tests {
-		facts := append([]executionFact(nil), valid...)
-		test.mutate(facts)
+		facts := cloneExecutionFacts(valid)
+		test.mutate(&facts)
 		if _, err := auditExecutions(facts, want, 2); err == nil {
 			t.Errorf("%s passed execution audit", test.name)
 		}
 	}
-	extraOperation := append([]executionFact(nil), valid...)
-	extraOperation = append(extraOperation, executionFact{
-		CommandKey: "e-msg-2", MessageSession: want[1], MessageTurnID: 2, TurnID: 2, TurnSession: want[1],
-		TurnOperationID: 2, TurnOutcome: "provider_http_422", OperationID: 3, OperationTurnID: 2,
-		OperationSession: want[1], OperationResolution: "provider_http_422",
-	})
+	extraOperation := cloneExecutionFacts(valid)
+	extraOperation.Operations = append(extraOperation.Operations, operationExecutionFact{3, 2, want[1], "provider_http_422"})
 	if _, err := auditExecutions(extraOperation, want, 3); err == nil {
 		t.Error("duplicate Operation passed execution audit")
 	}
+	extraTurn := cloneExecutionFacts(valid)
+	extraTurn.Turns = append(extraTurn.Turns, turnExecutionFact{3, want[1], 3, "provider_http_422"})
+	if _, err := auditExecutions(extraTurn, want, 2); err == nil {
+		t.Error("Operation-less extra Turn passed execution audit")
+	}
 	if _, err := auditExecutions(valid, want, 3); err == nil {
 		t.Error("duplicate provider request passed execution audit")
+	}
+}
+
+func cloneExecutionFacts(facts executionFacts) executionFacts {
+	return executionFacts{
+		Messages:   append([]messageExecutionFact(nil), facts.Messages...),
+		Turns:      append([]turnExecutionFact(nil), facts.Turns...),
+		Operations: append([]operationExecutionFact(nil), facts.Operations...),
+	}
+}
+
+func TestExecutionAuditQueryRejectsHiddenEntities(t *testing.T) {
+	if *sqliteTestBinary == "" {
+		t.Skip("requires Rui's pinned SQLite shell")
+	}
+	tests := []struct {
+		name           string
+		fixture        string
+		wantTurns      int
+		wantOperations int
+	}{
+		{
+			name: "duplicate Operation behind current pointer",
+			fixture: `INSERT INTO message_admission VALUES(1,'e-msg-1','queue/eligible/000001',1);
+INSERT INTO turn VALUES(1,'queue/eligible/000001',2,'provider_http_422');
+INSERT INTO model_operation VALUES(1,1,'queue/eligible/000001','provider_http_422');
+INSERT INTO model_operation VALUES(2,1,'queue/eligible/000001','provider_http_422');`,
+			wantTurns: 1, wantOperations: 2,
+		},
+		{
+			name: "extra Turn without Operation",
+			fixture: `INSERT INTO message_admission VALUES(1,'e-msg-1','queue/eligible/000001',1);
+INSERT INTO turn VALUES(1,'queue/eligible/000001',1,'provider_http_422');
+INSERT INTO turn VALUES(2,'queue/eligible/000002',2,'provider_http_422');
+INSERT INTO model_operation VALUES(1,1,'queue/eligible/000001','provider_http_422');`,
+			wantTurns: 2, wantOperations: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := t.TempDir()
+			deadline := measurement.NewDeadline(measurement.TeardownAllowance)
+			_, err := sql(deadline, *sqliteTestBinary, store, `CREATE TABLE message_admission(admission_id INTEGER PRIMARY KEY,command_key TEXT,session_ref TEXT,turn_id INTEGER);
+CREATE TABLE turn(turn_id INTEGER PRIMARY KEY,session_ref TEXT,operation_id INTEGER,outcome_code TEXT);
+CREATE TABLE model_operation(operation_id INTEGER PRIMARY KEY,turn_id INTEGER,session_ref TEXT,resolution_code TEXT);`+test.fixture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows, err := sql(deadline, *sqliteTestBinary, store, executionAuditSQL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			facts, err := parseExecutionFacts(rows)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(facts.Turns) != test.wantTurns || len(facts.Operations) != test.wantOperations {
+				t.Fatalf("query returned %d Turns and %d Operations, want %d and %d", len(facts.Turns), len(facts.Operations), test.wantTurns, test.wantOperations)
+			}
+			if _, err := auditExecutions(facts, expectedOrder(1), 1); err == nil {
+				t.Fatal("invalid Store passed execution audit")
+			}
+		})
 	}
 }
 
