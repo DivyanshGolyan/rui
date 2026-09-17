@@ -11,10 +11,13 @@ pub const copy_window_bytes: usize = 16 * 1024;
 
 pub const Faults = struct {
     preparation: bool = false,
+    preparation_after_script: bool = false,
     spawn: bool = false,
+    service: bool = false,
     capture_read: bool = false,
     capture_write: bool = false,
     seal: bool = false,
+    cleanup: bool = false,
 };
 
 const CaptureFailure = enum { none, read, write, exhausted, seal };
@@ -33,6 +36,7 @@ const OwnedFile = struct {
     charged: u64 = 0,
     budget: ScratchBudget,
     published: bool = false,
+    cleanup_fault: bool = false,
 
     fn close(self: *OwnedFile) void {
         if (self.file) |file| file.close(self.io);
@@ -42,6 +46,7 @@ const OwnedFile = struct {
     fn cleanup(self: *OwnedFile, scratch_path: []const u8) !void {
         self.close();
         if (self.published) return;
+        if (self.cleanup_fault) return error.InjectedBashCleanupFailure;
         var scratch = try std.Io.Dir.cwd().openDir(self.io, scratch_path, .{});
         defer scratch.close(self.io);
         try scratch.deleteFile(self.io, self.name.slice());
@@ -127,18 +132,29 @@ pub const Prepared = struct {
 
 pub const PreparedCleanup = struct {
     scratch_path: []const u8,
-    script: OwnedFile,
-    stdout_capture: OwnedFile,
-    stderr_capture: OwnedFile,
+    script: ?OwnedFile = null,
+    stdout_capture: ?OwnedFile = null,
+    stderr_capture: ?OwnedFile = null,
 
     pub fn cleanup(self: *PreparedCleanup) !void {
-        return cleanupOwnedFiles(
-            self.scratch_path,
-            &self.script,
-            &self.stdout_capture,
-            &self.stderr_capture,
-        );
+        var first_error: ?anyerror = null;
+        inline for (.{ &self.script, &self.stdout_capture, &self.stderr_capture }) |slot| {
+            if (slot.*) |*file| file.cleanup(self.scratch_path) catch |err| if (first_error == null) {
+                first_error = err;
+            };
+        }
+        if (first_error) |err| return err;
     }
+};
+
+pub const PreparationFailure = struct {
+    cause: anyerror,
+    cleanup: PreparedCleanup,
+};
+
+pub const PrepareResult = union(enum) {
+    prepared: Prepared,
+    failed: PreparationFailure,
 };
 
 fn cleanupOwnedFiles(
@@ -187,6 +203,7 @@ pub const Execution = struct {
 
     pub fn service(self: *Execution, window: []u8, shutdown: bool) !bool {
         std.debug.assert(window.len == copy_window_bytes);
+        if (self.faults.service) return error.InjectedBashServiceFailure;
         const now = std.Io.Clock.Timestamp.now(self.io, .awake);
         if (shutdown) self.stop(.infrastructure_shutdown);
         if (now.raw.nanoseconds >= self.deadline.raw.nanoseconds) self.stop(.timed_out);
@@ -474,19 +491,51 @@ pub fn prepare(
     action_id: u64,
     attempt_ordinal: u64,
     faults: Faults,
-) !Prepared {
-    if (faults.preparation) return error.BashPreparationFailed;
-    var script = try createOwnedFile(io, scratch_path, budget, "bash-input", action_id, attempt_ordinal);
-    errdefer script.cleanup(scratch_path) catch {};
+) PrepareResult {
+    var cleanup = PreparedCleanup{ .scratch_path = scratch_path };
+    if (faults.preparation) {
+        return .{ .failed = .{ .cause = error.BashPreparationFailed, .cleanup = cleanup } };
+    }
+    cleanup.script = createOwnedFile(
+        io,
+        scratch_path,
+        budget,
+        "bash-input",
+        action_id,
+        attempt_ordinal,
+        faults.cleanup,
+    ) catch |err| return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
+    if (faults.preparation_after_script) {
+        return .{ .failed = .{ .cause = error.BashPreparationFailed, .cleanup = cleanup } };
+    }
     var source = ContentSource{ .reader = reader, .length = arguments_length };
-    var destination = CommandWriter{ .file = &script };
-    if (!try tools.writeBashCommand(&source, &destination)) return error.InvalidCanonicalBashDescriptor;
-    try script.file.?.sync(io);
-    var stdout_capture = try createOwnedFile(io, scratch_path, budget, "bash-stdout", action_id, attempt_ordinal);
-    errdefer stdout_capture.cleanup(scratch_path) catch {};
-    var stderr_capture = try createOwnedFile(io, scratch_path, budget, "bash-stderr", action_id, attempt_ordinal);
-    errdefer stderr_capture.cleanup(scratch_path) catch {};
-    return .{
+    var destination = CommandWriter{ .file = &cleanup.script.? };
+    const valid = tools.writeBashCommand(&source, &destination) catch |err|
+        return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
+    if (!valid) {
+        return .{ .failed = .{ .cause = error.InvalidCanonicalBashDescriptor, .cleanup = cleanup } };
+    }
+    cleanup.script.?.file.?.sync(io) catch |err|
+        return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
+    cleanup.stdout_capture = createOwnedFile(
+        io,
+        scratch_path,
+        budget,
+        "bash-stdout",
+        action_id,
+        attempt_ordinal,
+        faults.cleanup,
+    ) catch |err| return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
+    cleanup.stderr_capture = createOwnedFile(
+        io,
+        scratch_path,
+        budget,
+        "bash-stderr",
+        action_id,
+        attempt_ordinal,
+        faults.cleanup,
+    ) catch |err| return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
+    return .{ .prepared = .{
         .io = io,
         .allocator = allocator,
         .workspace = workspace,
@@ -494,10 +543,10 @@ pub fn prepare(
         .bash_path = bash_path,
         .timeout_ms = timeout_ms,
         .faults = faults,
-        .script = script,
-        .stdout_capture = stdout_capture,
-        .stderr_capture = stderr_capture,
-    };
+        .script = cleanup.script.?,
+        .stdout_capture = cleanup.stdout_capture.?,
+        .stderr_capture = cleanup.stderr_capture.?,
+    } };
 }
 
 fn createOwnedFile(
@@ -507,6 +556,7 @@ fn createOwnedFile(
     prefix: []const u8,
     action_id: u64,
     attempt_ordinal: u64,
+    cleanup_fault: bool,
 ) !OwnedFile {
     var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
     defer scratch.close(io);
@@ -522,6 +572,7 @@ fn createOwnedFile(
         }),
         .name = name,
         .budget = budget,
+        .cleanup_fault = cleanup_fault,
     };
 }
 

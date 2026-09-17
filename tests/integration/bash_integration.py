@@ -196,6 +196,9 @@ def main():
     add_exchange(responses, "capture-read", "printf captured")
     add_exchange(responses, "capture", "printf captured")
     add_exchange(responses, "seal", "printf sealed")
+    add_exchange(responses, "preparation-cleanup", "printf never")
+    service_marker = state / "service-marker"
+    add_exchange(responses, "service", f"printf x >> {service_marker}; sleep 30")
     add_exchange(responses, "small-budget", "printf exhausted")
     add_exchange(responses, "exhaustion", "printf '%0200d' 0")
     import_marker = state / "import-marker"
@@ -681,6 +684,79 @@ def main():
         host = fixture.start_host(
             store,
             endpoint_url,
+            "--fault",
+            "bash-preparation-after-script",
+            "--fault",
+            "bash-cleanup",
+        )
+        configure(state, store, "preparation-cleanup-config", "direct/preparation-cleanup")
+        fixture.message(
+            state,
+            store,
+            "preparation-cleanup-message",
+            "direct/preparation-cleanup",
+            "execute",
+        )
+        action = fixture.wait_for(
+            lambda: action_for(store, "direct/preparation-cleanup"),
+            "preparation-cleanup Bash Action",
+        )
+        allow(
+            state,
+            store,
+            "preparation-cleanup-allow",
+            "direct/preparation-cleanup",
+            action["action"],
+        )
+        fixture.wait_for(
+            lambda: resolution(store, "direct/preparation-cleanup") == "storage_failed",
+            "preparation failure settlement",
+        )
+        assert int(
+            fixture.command(
+                "inspect-session", "--store", store, "--session", "direct/preparation-cleanup"
+            )["execution"]["custody_occupied"]
+        ) > 0
+        assert list((store / "scratch").glob("bash-input-*-1.tmp"))
+        fixture.stop_host(host)
+        host = None
+        host = fixture.start_host(store, endpoint_url)
+        assert not list((store / "scratch").glob("bash-input-*-1.tmp"))
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "preparation-cleanup-message"),
+            "preparation-cleanup continuation",
+        )
+
+        fixture.stop_host(host)
+        host = fixture.start_host(store, endpoint_url, "--fault", "bash-service")
+        configure(state, store, "service-config", "direct/service")
+        fixture.message(state, store, "service-message", "direct/service", "execute")
+        action = fixture.wait_for(lambda: action_for(store, "direct/service"), "service Bash Action")
+        allow(state, store, "service-allow", "direct/service", action["action"])
+        fixture.wait_for(lambda: host.poll() is not None, "persistent Bash service failure shutdown")
+        host.communicate(timeout=5)
+        host = None
+        assert rows(
+            store,
+            "SELECT attempt_ordinal,uncertain,resolution_code FROM action_operation WHERE session_ref=?",
+            ("direct/service",),
+        ) == [(1, 1, None)]
+        host = fixture.start_host(store, endpoint_url)
+        fixture.wait_for(
+            lambda: resolution(store, "direct/service") == "indeterminate",
+            "service failure indeterminate recovery",
+        )
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "service-message"),
+            "service failure continuation",
+        )
+        if service_marker.exists():
+            assert service_marker.read_text() == "x"
+
+        fixture.stop_host(host)
+        host = fixture.start_host(
+            store,
+            endpoint_url,
             "--test-bash-scratch-limit-bytes",
             "128",
         )
@@ -838,7 +914,7 @@ def main():
             "SELECT count(*),count(acceptance_position),min(acceptance_position) FROM action_operation "
             "WHERE resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL",
         )[0]
-        assert settled[0] == settled[1] == 22 and settled[2] > 0, settled
+        assert settled[0] == settled[1] == 24 and settled[2] > 0, settled
         print(json.dumps({"bash_resource_samples": resource_samples}, sort_keys=True))
         completed = True
     finally:

@@ -54,10 +54,13 @@ pub const Faults = struct {
     response_import: bool = false,
     response_commit: bool = false,
     bash_preparation: bool = false,
+    bash_preparation_after_script: bool = false,
     bash_spawn: bool = false,
+    bash_service: bool = false,
     bash_capture_read: bool = false,
     bash_capture_write: bool = false,
     bash_seal: bool = false,
+    bash_cleanup: bool = false,
     bash_scratch_limit_bytes: u64 = scratch_limit_bytes,
     cleanup_delay_ms: i64 = 0,
     provider_inactivity_seconds: i64 = 5 * 60,
@@ -534,7 +537,8 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8, shutdown: bool
     for (slots) |*slot| switch (slot.*) {
         .bash => |*active| {
             const complete = active.execution.service(window, shutdown) catch |err| {
-                fenceDispatch(host, "Bash process service", err);
+                retainBashCleanup(host, slot, false, true, "Bash process service", err);
+                made_progress = true;
                 continue;
             };
             if (!complete) continue;
@@ -578,7 +582,7 @@ fn admitBashAttempt(host: *Host, slot: *ExecutionSlot) AdmissionProgress {
     defer arguments.close();
     var bash_budget = host.retention.sharedBudget();
     bash_budget.limit = @min(bash_budget.limit, host.faults.bash_scratch_limit_bytes);
-    var prepared = bash.prepare(
+    const preparation = bash.prepare(
         host.io,
         host.allocator,
         &arguments,
@@ -592,20 +596,34 @@ fn admitBashAttempt(host: *Host, slot: *ExecutionSlot) AdmissionProgress {
         action_binding.attempt_ordinal,
         .{
             .preparation = host.faults.bash_preparation,
+            .preparation_after_script = host.faults.bash_preparation_after_script,
             .spawn = host.faults.bash_spawn,
+            .service = host.faults.bash_service,
             .capture_read = host.faults.bash_capture_read,
             .capture_write = host.faults.bash_capture_write,
             .seal = host.faults.bash_seal,
+            .cleanup = host.faults.bash_cleanup,
         },
-    ) catch |err| {
-        const canonical_failure = err == error.InvalidCanonicalBashDescriptor or
-            err == error.ShortCanonicalRead;
-        if (!canonical_failure) {
-            settleActionFailure(host, token, action_binding, .storage_failed, "Bash preparation failed.");
-        }
-        finishCustodyNow(host, token);
-        if (canonical_failure or host.store.isFenced()) fenceDispatch(host, "Bash canonical preparation", err);
-        return .admitted;
+    );
+    var prepared = switch (preparation) {
+        .prepared => |value| value,
+        .failed => |value| {
+            var failure = value;
+            const canonical_failure = failure.cause == error.InvalidCanonicalBashDescriptor or
+                failure.cause == error.ShortCanonicalRead;
+            if (!canonical_failure) {
+                settleActionFailure(host, token, action_binding, .storage_failed, "Bash preparation failed.");
+            }
+            failure.cleanup.cleanup() catch |cleanup_err| {
+                retainBashPreparedCleanup(host, slot, token, failure.cleanup, cleanup_err);
+                return .admitted;
+            };
+            finishCustodyNow(host, token);
+            if (canonical_failure or host.store.isFenced()) {
+                fenceDispatch(host, "Bash canonical preparation", failure.cause);
+            }
+            return .admitted;
+        },
     };
     if (host.faults.before_launch_delay_ms != 0) {
         traceAction(host, "prepared_before_handoff", action_binding);
@@ -671,14 +689,14 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
     const token = active.token;
     const binding = active.binding;
     const include_paths = active.execution.reserveOutput(host.retention) catch |err| {
-        retainBashCleanup(host, slot, false, "Bash output reservation", err);
+        retainBashCleanup(host, slot, false, false, "Bash output reservation", err);
         fenceDispatch(host, "Bash output reservation", err);
         return;
     };
     const outcome = active.execution.outcome(include_paths) catch |err| {
         active.execution.releaseOutputReservation(host.retention);
         active.execution.cleanup() catch |cleanup_err| {
-            retainBashCleanup(host, slot, false, "Bash output cleanup", cleanup_err);
+            retainBashCleanup(host, slot, false, false, "Bash output cleanup", cleanup_err);
             return;
         };
         finishCustodyNow(host, token);
@@ -697,7 +715,7 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
         }) catch |err| {
             active.execution.releaseOutputReservation(host.retention);
             active.execution.cleanup() catch |cleanup_err| {
-                retainBashCleanup(host, slot, false, "Bash output cleanup", cleanup_err);
+                retainBashCleanup(host, slot, false, false, "Bash output cleanup", cleanup_err);
                 fenceDispatch(host, "Bash result settlement", err);
                 return;
             };
@@ -712,11 +730,11 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
         _ = host.io.sleep(.fromMilliseconds(host.faults.cleanup_delay_ms), .awake) catch {};
     }
     active.execution.releaseOutput(host.retention) catch |err| {
-        retainBashCleanup(host, slot, true, "Bash output retention", err);
+        retainBashCleanup(host, slot, true, false, "Bash output retention", err);
         return;
     };
     active.execution.cleanup() catch |err| {
-        retainBashCleanup(host, slot, false, "Bash execution cleanup", err);
+        retainBashCleanup(host, slot, false, false, "Bash execution cleanup", err);
         return;
     };
     finishCustodyNow(host, token);
@@ -727,6 +745,7 @@ fn retainBashCleanup(
     host: *Host,
     slot: *ExecutionSlot,
     publish_output: bool,
+    effect_shutdown: bool,
     phase: []const u8,
     err: anyerror,
 ) void {
@@ -737,7 +756,10 @@ fn retainBashCleanup(
         .execution = active.execution,
         .publish_output = publish_output,
     } };
-    retainDispatchFence(host, phase, err);
+    if (effect_shutdown)
+        fenceDispatch(host, phase, err)
+    else
+        retainDispatchFence(host, phase, err);
 }
 
 fn retainBashPreparedCleanup(
