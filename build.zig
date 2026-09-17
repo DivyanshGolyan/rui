@@ -209,9 +209,10 @@ pub fn build(b: *std.Build) void {
     measure_queue.setCwd(b.path("tests/qualification"));
     measure_queue.setEnvironmentVariable("GOTOOLCHAIN", "local");
     measure_queue.addArtifactArg(release);
+    measure_queue.addArtifactArg(addSqliteShell(b, target, .ReleaseSmall));
     const measure_queue_step = b.step(
         "measure-model-queue",
-        "Measure macOS model queue discovery, ordering, settlement, and mixed resources",
+        "Measure model queue discovery, ordering, settlement, and portable mixed resources",
     );
     measure_queue_step.dependOn(&measure_queue.step);
 
@@ -338,4 +339,25 @@ fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     module.addCMacro("SQLITE_TEMP_STORE", "1");
     module.addCMacro("SQLITE_USE_URI", "0");
     module.addCMacro("SQLITE_ENABLE_API_ARMOR", "1");
+}
+
+fn addSqliteShell(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const sqlite = b.dependency("sqlite", .{});
+    const executable = b.addExecutable(.{
+        .name = "rui-qualification-sqlite3",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    configureSqlite(b, executable);
+    executable.root_module.addCSourceFile(.{
+        .file = sqlite.path("shell.c"),
+        .flags = &.{"-std=gnu99"},
+    });
+    return executable;
 }

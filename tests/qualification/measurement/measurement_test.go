@@ -6,11 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/mem"
+	"github.com/shirou/gopsutil/v4/process"
 )
 
 type closeErrorReader struct {
@@ -152,6 +154,43 @@ func TestRuntimeManifestPropagatesPhysicalMemoryFailure(t *testing.T) {
 	manifest, err := RuntimeManifest()
 	if !errors.Is(err, sentinel) || manifest != nil {
 		t.Fatalf("manifest=%v error=%v", manifest, err)
+	}
+}
+
+func TestRequireGoRuntimeAcceptsPinnedRuntimeOnEveryOS(t *testing.T) {
+	if err := RequireGoRuntime(); err != nil {
+		t.Fatalf("RequireGoRuntime() on %s = %v", runtime.GOOS, err)
+	}
+}
+
+func TestSamplePortableProcessReadsCurrentProcess(t *testing.T) {
+	target, err := process.NewProcess(int32(os.Getpid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sample, err := SamplePortableProcess(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sample.RSSBytes == 0 || sample.Threads < 1 || sample.OpenDescriptors < 1 {
+		t.Fatalf("incomplete portable sample: %+v", sample)
+	}
+}
+
+func TestProcessSamplePortableProjection(t *testing.T) {
+	full := ProcessSample{
+		RSSBytes: 1, VirtualBytes: 2, CPUUserSeconds: 3, CPUSystemSeconds: 4,
+		Threads: 5, LiveDescendantProcesses: 6, OpenDescriptorRows: 7,
+		DiskReadBytes: 8, DiskWriteBytes: 9,
+	}
+	got := full.Portable()
+	want := PortableProcessSample{
+		RSSBytes: 1, VirtualBytes: 2, CPUUserSeconds: 3, CPUSystemSeconds: 4,
+		Threads: 5, LiveDescendantProcesses: 6, OpenDescriptors: 7,
+		DiskReadBytes: 8, DiskWriteBytes: 9,
+	}
+	if got != want {
+		t.Fatalf("Portable() = %+v, want %+v", got, want)
 	}
 }
 

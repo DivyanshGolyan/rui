@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -96,12 +97,12 @@ func (e *endpoint) serve(writer http.ResponseWriter, request *http.Request) {
 func (e *endpoint) URL() string { return "http://" + e.listener.Addr().String() + "/responses" }
 func (e *endpoint) Release()    { close(e.release) }
 
-func sql(deadline measurement.Deadline, store, query string) (string, error) {
-	output, err := measurement.Run(deadline, "/usr/bin/sqlite3", "-noheader", filepath.Join(store, "rui.sqlite3"), query)
+func sql(deadline measurement.Deadline, sqliteBinary, store, query string) (string, error) {
+	output, err := measurement.Run(deadline, sqliteBinary, "-noheader", filepath.Join(store, "rui.sqlite3"), query)
 	return strings.TrimSpace(string(output)), err
 }
 
-func initializeTemplate(binary, directory, store string, deadline measurement.Deadline) error {
+func initializeTemplate(binary, sqliteBinary, directory, store string, deadline measurement.Deadline) error {
 	e, err := startEndpoint()
 	if err != nil {
 		return err
@@ -123,11 +124,11 @@ func initializeTemplate(binary, directory, store string, deadline measurement.De
 	if err := errors.Join(work, host.Stop(measurement.TeardownAllowance), e.server.Close()); err != nil {
 		return err
 	}
-	_, err = sql(deadline, store, "BEGIN; DELETE FROM conversation_entry; DELETE FROM model_operation; DELETE FROM turn; DELETE FROM message_admission; DELETE FROM core_command WHERE command_key='template-message'; COMMIT;")
+	_, err = sql(deadline, sqliteBinary, store, "BEGIN; DELETE FROM conversation_entry; DELETE FROM model_operation; DELETE FROM turn; DELETE FROM message_admission; DELETE FROM core_command WHERE command_key='template-message'; COMMIT;")
 	return err
 }
 
-func populate(deadline measurement.Deadline, store string, p population) error {
+func populate(deadline measurement.Deadline, sqliteBinary, store string, p population) error {
 	// Production initialization above owns schema and content creation. This SQL only
 	// expands controlled durable populations while no Host is running.
 	query := fmt.Sprintf(`PRAGMA foreign_keys=ON; BEGIN;
@@ -181,10 +182,10 @@ WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[3]d>0 UNION ALL SELECT i+1 FROM n WHERE
 INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id)
  SELECT 2000100+i,'queue/eligible/'||printf('%%06d',i),'e-msg-'||i,(SELECT v FROM q),NULL FROM n;
 DROP TABLE q; COMMIT;`, p.History, p.Ineligible, p.Eligible)
-	if _, err := sql(deadline, store, query); err != nil {
+	if _, err := sql(deadline, sqliteBinary, store, query); err != nil {
 		return err
 	}
-	check, err := sql(deadline, store, `SELECT 'foreign-key:'||count(*) FROM pragma_foreign_key_check HAVING count(*)!=0
+	check, err := sql(deadline, sqliteBinary, store, `SELECT 'foreign-key:'||count(*) FROM pragma_foreign_key_check HAVING count(*)!=0
 UNION ALL SELECT 'history:'||count(*) FROM model_operation WHERE session_ref='queue/template' HAVING count(*)!=`+strconv.Itoa(p.History)+`
 UNION ALL SELECT 'ineligible:'||count(*) FROM message_admission WHERE session_ref='queue/stopped' HAVING count(*)!=`+strconv.Itoa(p.Ineligible)+`
 UNION ALL SELECT 'eligible:'||count(*) FROM message_admission WHERE session_ref LIKE 'queue/eligible/%' HAVING count(*)!=`+strconv.Itoa(p.Eligible)+`
@@ -208,20 +209,35 @@ func expectedOrder(count int) []string {
 	return result
 }
 
-func runCase(binary, root, name string, p population, resources bool) (map[string]any, error) {
+func settledOrder(rows string) ([]string, error) {
+	result := []string{}
+	if rows == "" {
+		return result, nil
+	}
+	for _, row := range strings.Split(rows, "\n") {
+		session, resolution, ok := strings.Cut(row, "|")
+		if !ok || resolution != "provider_http_422" {
+			return nil, fmt.Errorf("behavior failure: operation settlement %q", row)
+		}
+		result = append(result, session)
+	}
+	return result, nil
+}
+
+func runCase(binary, sqliteBinary, root, name string, p population, resources bool) (map[string]any, error) {
 	directory := filepath.Join(root, name)
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		return nil, err
 	}
 	store := filepath.Join(directory, "store")
 	deadline := measurement.NewDeadline(5 * time.Minute)
-	if err := initializeTemplate(binary, directory, store, deadline); err != nil {
+	if err := initializeTemplate(binary, sqliteBinary, directory, store, deadline); err != nil {
 		return nil, err
 	}
-	if err := populate(deadline, store, p); err != nil {
+	if err := populate(deadline, sqliteBinary, store, p); err != nil {
 		return nil, err
 	}
-	maximumText, err := sql(deadline, store, "SELECT coalesce(max(operation_id),0) FROM model_operation;")
+	maximumText, err := sql(deadline, sqliteBinary, store, "SELECT coalesce(max(operation_id),0) FROM model_operation;")
 	if err != nil {
 		return nil, err
 	}
@@ -257,9 +273,24 @@ func runCase(binary, root, name string, p population, resources bool) (map[strin
 	result["discovery_ms"] = discoveryMS
 	result["status"] = caseStatus(false, true, discoveryMS)
 	if resources {
-		sample, sampleErr := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-held.txt"))
+		var sample measurement.PortableProcessSample
+		var sampleErr error
+		if runtime.GOOS == "darwin" {
+			macOSSample, macOSSampleErr := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-held.txt"))
+			sampleErr = macOSSampleErr
+			if macOSSampleErr != nil {
+				result["macos_physical_footprint"] = map[string]any{"status": "unavailable", "error": macOSSampleErr.Error()}
+			} else {
+				sample = macOSSample.Portable()
+				result["macos_physical_footprint"] = map[string]any{"status": "passed", "process": macOSSample}
+			}
+		} else {
+			sample, sampleErr = measurement.SamplePortableProcess(host.Process)
+			result["macos_physical_footprint"] = map[string]any{"status": "unavailable", "reason": "requires macOS footprint(1)"}
+		}
 		if sampleErr != nil {
 			result["resource_status"] = "unavailable"
+			result["resource_error"] = sampleErr.Error()
 			result["status"] = overallStatus(result["status"].(string), "unavailable")
 		} else {
 			database, databaseErr := measurement.DatabaseSize(store)
@@ -273,24 +304,20 @@ func runCase(binary, root, name string, p population, resources bool) (map[strin
 	}
 	e.Release()
 	settlementStarted := time.Now()
-	const settlementPollInterval = 250 * time.Millisecond
-	result["settlement_poll_interval_ms"] = settlementPollInterval.Milliseconds()
-	err = measurement.WaitFor(deadline, settlementPollInterval, "all eligible operations to settle", func() (bool, error) {
-		value, queryErr := sql(deadline, store, fmt.Sprintf("SELECT count(*) FROM model_operation WHERE operation_id>%d AND resolution_code='provider_http_422';", launchFloor))
-		return value == strconv.Itoa(p.Eligible), queryErr
-	})
+	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
+	_, err = client.WaitResult(fmt.Sprintf("e-msg-%d", p.Eligible))
 	err = errors.Join(err, host.Stop(measurement.TeardownAllowance))
 	if err != nil {
 		return nil, err
 	}
-	result["settlement_ms"] = time.Since(settlementStarted).Milliseconds()
-	rows, err := sql(deadline, store, fmt.Sprintf("SELECT session_ref FROM model_operation WHERE operation_id>%d ORDER BY operation_id;", launchFloor))
+	result["terminal_observation_ms"] = time.Since(settlementStarted).Milliseconds()
+	rows, err := sql(deadline, sqliteBinary, store, fmt.Sprintf("SELECT session_ref||'|'||coalesce(resolution_code,'') FROM model_operation WHERE operation_id>%d ORDER BY operation_id;", launchFloor))
 	if err != nil {
 		return nil, err
 	}
-	actual := []string{}
-	if rows != "" {
-		actual = strings.Split(rows, "\n")
+	actual, err := settledOrder(rows)
+	if err != nil {
+		return nil, err
 	}
 	expected := expectedOrder(p.Eligible)
 	result["operation_launch_order"] = actual
@@ -309,16 +336,17 @@ func runCase(binary, root, name string, p population, resources bool) (map[strin
 func main() {
 	output := flag.String("output", "", "write JSON to path")
 	flag.Parse()
-	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: measure-model-queue [--output path] /absolute/path/to/rui")
+	if flag.NArg() != 2 {
+		fmt.Fprintln(os.Stderr, "usage: measure-model-queue [--output path] /absolute/path/to/rui /absolute/path/to/pinned-sqlite3")
 		os.Exit(2)
 	}
-	if err := measurement.RequireRuntime(); err != nil {
+	if err := measurement.RequireGoRuntime(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	binary, _ := filepath.Abs(flag.Arg(0))
-	root, err := os.MkdirTemp("/private/tmp", "rui-model-queue-")
+	sqliteBinary, _ := filepath.Abs(flag.Arg(1))
+	root, err := os.MkdirTemp("", "rui-model-queue-")
 	if err != nil {
 		panic(err)
 	}
@@ -339,7 +367,7 @@ func main() {
 			cases[requestedCase.name] = map[string]any{"same_measurement_as": existing, "population": requestedCase.population}
 			continue
 		}
-		value, caseErr := runCase(binary, root, requestedCase.name, requestedCase.population, false)
+		value, caseErr := runCase(binary, sqliteBinary, root, requestedCase.name, requestedCase.population, false)
 		if caseErr != nil {
 			panic(caseErr)
 		}
@@ -347,7 +375,7 @@ func main() {
 		byPopulation[requestedCase.population] = requestedCase.name
 		statuses = append(statuses, value["status"].(string))
 	}
-	mixed, err := runCase(binary, root, "maximum-mixed", population{10000, 1000, 100}, true)
+	mixed, err := runCase(binary, sqliteBinary, root, "maximum-mixed", population{10000, 1000, 100}, true)
 	if err != nil {
 		panic(err)
 	}
@@ -356,8 +384,8 @@ func main() {
 	result := map[string]any{
 		"format": "rui-model-queue-v1-go", "scope": "issue-202 production model-only queue discovery, order, settlement, and resource observation",
 		"status": status, "cases": cases, "maximum_mixed": mixed, "artifacts": root,
-		"classification_legend": map[string]string{"behavior_failure": "runner exits nonzero", "unavailable": "required discovery timestamp/counter could not be validly measured", "target_miss": "valid discovery exceeds the inclusive 2000 ms target", "passed": "behavior passed and valid discovery is at most 2000 ms", "diagnostic": "reported observation such as settlement duration; not a qualification target"},
-		"limits":                []string{"model-only qualification; Bash composition remains GitHub issue #168", "macOS Apple Silicon runtime evidence only", "deterministic loopback HTTP; no TLS or live-provider behavior", "direct SQLite builds controlled populations in stopped Stores, but subsequent Host discovery, admission, launch, and settlement are authoritative", "process termination is not power-loss qualification", "population sizes are qualification workloads, not product quotas"},
+		"classification_legend": map[string]string{"behavior_failure": "runner exits nonzero", "unavailable": "required discovery timestamp/counter could not be validly measured", "target_miss": "valid discovery exceeds the inclusive 2000 ms target", "passed": "behavior passed and valid discovery is at most 2000 ms", "diagnostic": "reported observation such as terminal-observation duration; not a qualification target"},
+		"limits":                []string{"model-only qualification; Bash composition remains GitHub issue #168", "Linux runtime results are development evidence under the current platform contract; macOS physical footprint is reported only when available", "deterministic loopback HTTP; no TLS or live-provider behavior", "Rui's pinned SQLite builds controlled populations in stopped Stores, but subsequent Host discovery, admission, launch, and settlement are authoritative", "process termination is not power-loss qualification", "population sizes are qualification workloads, not product quotas"},
 	}
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
 	if err != nil {
@@ -366,6 +394,12 @@ func main() {
 	for key, value := range evidence {
 		result[key] = value
 	}
+	sqliteHash, err := measurement.SHA256File(sqliteBinary)
+	if err != nil {
+		panic(err)
+	}
+	result["sqlite_binary"] = sqliteBinary
+	result["sqlite_binary_sha256"] = sqliteHash
 	if *output != "" {
 		err = measurement.WriteJSON(*output, result)
 	} else {

@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestDiscoveryStatusInclusiveBoundary(t *testing.T) {
 	tests := []struct {
@@ -48,5 +51,16 @@ func TestCaseStatusDistinguishesBehaviorAndMeasurementOutcomes(t *testing.T) {
 		if got := caseStatus(test.behaviorFailure, test.measurementAvailable, test.milliseconds); got != test.want {
 			t.Errorf("caseStatus(%v, %v, %d) = %q, want %q", test.behaviorFailure, test.measurementAvailable, test.milliseconds, got, test.want)
 		}
+	}
+}
+
+func TestSettledOrderRequiresEveryExpectedResolution(t *testing.T) {
+	got, err := settledOrder("queue/eligible/000001|provider_http_422\nqueue/eligible/000002|provider_http_422")
+	want := []string{"queue/eligible/000001", "queue/eligible/000002"}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("settledOrder() = %v, %v; want %v", got, err, want)
+	}
+	if _, err := settledOrder("queue/eligible/000001|temporary"); err == nil {
+		t.Fatal("settledOrder accepted a nonterminal expected resolution")
 	}
 }
