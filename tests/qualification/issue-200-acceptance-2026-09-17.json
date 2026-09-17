@@ -18,7 +18,7 @@
     "src/bash_platform.c": "0d9586e4b401f67e264eca785aa28580836a23fbbc13559038e7e4e9808a35b7",
     "src/cli.zig": "a5825a4071b04c2f75446360181c26af349b5d2d709e7854454567481a3a550f",
     "src/output_retention.zig": "9eaf6aea861c417caf14548c49c4e7bf5a2584191142e8d4e9519aee8b21fef9",
-    "src/server.zig": "c02df977a063bc9fa99fcc857cd35bcf6e2ab6558237c9fb3655c9cd648d6cdf",
+    "src/server.zig": "26955ddd4ee8787b905d8c91a01befbc19761397fcc823a030181716be92c692",
     "src/store.zig": "ed875007917e6d6b0c1bf2f94c05c96f0f3fb2d17cdb3d1f8f9b3c8a565bab20",
     "tests/integration/bash_integration.py": "7d5882fcb12bc053e79f248e354f14fb1bbd8cef2fea0612bd5a40eae32a3b44",
     "tests/integration/bash_lifecycle_integration.py": "2c204f93b9c393ce8588f39565c9e38e83887b441bfdcfd86177ef991ff90864",
@@ -39,16 +39,16 @@
   "linux_resource_samples": [
     {
       "phase": "cold",
-      "rss_bytes": 7499776,
-      "high_water_bytes": 7499776,
+      "rss_bytes": 7524352,
+      "high_water_bytes": 7524352,
       "descriptors": 7,
       "scratch_files": 0,
       "scratch_logical_bytes": 0
     },
     {
       "phase": "retained-output-idle",
-      "rss_bytes": 9080832,
-      "high_water_bytes": 9445376,
+      "rss_bytes": 9138176,
+      "high_water_bytes": 9502720,
       "descriptors": 12,
       "scratch_files": 2,
       "scratch_logical_bytes": 12014,
@@ -56,8 +56,8 @@
     },
     {
       "phase": "active-descendant-pipes",
-      "rss_bytes": 9035776,
-      "high_water_bytes": 9150464,
+      "rss_bytes": 9060352,
+      "high_water_bytes": 9175040,
       "descriptors": 17,
       "scratch_files": 3,
       "scratch_logical_bytes": 22,
@@ -65,8 +65,8 @@
     },
     {
       "phase": "two-sibling-retained-idle",
-      "rss_bytes": 9187328,
-      "high_water_bytes": 9519104,
+      "rss_bytes": 9129984,
+      "high_water_bytes": 9461760,
       "descriptors": 12,
       "scratch_files": 4,
       "scratch_logical_bytes": 0,

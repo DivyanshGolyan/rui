@@ -332,6 +332,7 @@ const BashCleanupSlot = struct {
     token: execution.CustodyToken,
     execution: bash.Execution,
     publish_output: bool,
+    ready_at: ?std.Io.Clock.Timestamp = null,
 };
 
 const BashPreparedCleanupSlot = struct {
@@ -546,6 +547,13 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8, shutdown: bool
             if (!service.complete) continue;
             completeBash(host, slot);
         },
+        .bash_cleanup => |retained| {
+            const ready_at = retained.ready_at orelse continue;
+            const now = std.Io.Clock.Timestamp.now(host.io, .awake);
+            if (now.raw.nanoseconds < ready_at.raw.nanoseconds) continue;
+            finishBashCleanup(host, slot);
+            made_progress = true;
+        },
         else => {},
     };
     return made_progress;
@@ -729,7 +737,19 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
         if (settlement == .session_stop) active.execution.releaseOutputReservation(host.retention);
     } else active.execution.releaseOutputReservation(host.retention);
     if (host.faults.cleanup_delay_ms != 0) {
-        _ = host.io.sleep(.fromMilliseconds(host.faults.cleanup_delay_ms), .awake) catch {};
+        const started = std.Io.Clock.Timestamp.now(host.io, .awake);
+        host.custody.detach(token) catch unreachable;
+        traceAction(host, "cleanup_started", binding);
+        slot.* = .{ .bash_cleanup = .{
+            .token = token,
+            .execution = active.execution,
+            .publish_output = true,
+            .ready_at = started.addDuration(.{
+                .raw = .fromMilliseconds(host.faults.cleanup_delay_ms),
+                .clock = .awake,
+            }),
+        } };
+        return;
     }
     active.execution.releaseOutput(host.retention) catch |err| {
         retainBashCleanup(host, slot, true, false, "Bash output retention", err);
@@ -762,6 +782,26 @@ fn retainBashCleanup(
         fenceDispatch(host, phase, err)
     else
         retainDispatchFence(host, phase, err);
+}
+
+fn finishBashCleanup(host: *Host, slot: *ExecutionSlot) void {
+    const retained = &slot.bash_cleanup;
+    if (retained.publish_output) {
+        retained.execution.releaseOutput(host.retention) catch |err| {
+            retained.ready_at = null;
+            retainDispatchFence(host, "Bash output retention", err);
+            return;
+        };
+        retained.publish_output = false;
+    }
+    retained.execution.cleanup() catch |err| {
+        retained.ready_at = null;
+        retainDispatchFence(host, "Bash execution cleanup", err);
+        return;
+    };
+    const token = retained.token;
+    host.custody.cleanupComplete(token) catch unreachable;
+    slot.* = .free;
 }
 
 fn retainBashPreparedCleanup(
