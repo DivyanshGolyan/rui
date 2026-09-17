@@ -240,8 +240,7 @@ pub fn materialize(
     var after_position: u64 = 0;
     while (try view.nextEntry(after_position)) |entry| {
         if (entry.kind == .tool_results) {
-            var after_call_ordinal: ?u64 = null;
-            while (try view.nextToolResult(entry.source_operation_id.?, after_call_ordinal)) |result| {
+            while (try view.nextToolResult()) |result| {
                 if (input_comma) try writer.write(",");
                 try writer.write("{\"type\":\"function_call_output\",\"call_id\":");
                 {
@@ -257,7 +256,6 @@ pub fn materialize(
                 }
                 try writer.write("}");
                 input_comma = true;
-                after_call_ordinal = result.call_ordinal;
             }
         } else {
             if (input_comma) try writer.write(",");
