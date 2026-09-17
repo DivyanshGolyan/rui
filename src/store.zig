@@ -2816,7 +2816,8 @@ pub const Store = struct {
             try capture.append(",\"source_operation\":");
             try appendNullablePositiveInteger(statement, 6, capture);
             try capture.append(",\"content\":");
-            try self.appendInlineContent(content_id, capture);
+            const metadata = try self.readContentMetadata(content_id);
+            try capture.appendBareContentReference(.{ .length = metadata.length, .digest = metadata.digest });
             try capture.append("}");
         }
     }
@@ -2961,9 +2962,9 @@ pub const Store = struct {
             try capture.appendFmt(",\"status\":\"{s}\",\"code\":", .{if (c.sqlite3_column_int(statement, 1) == 0) "rejected" else "accepted"});
             try appendColumnString(statement, 2, 96, capture);
             try capture.append(",\"turn\":");
-            try appendNullablePositiveInteger(statement, 3, capture);
+            try appendColumnString(statement, 3, 20, capture);
             try capture.append(",\"operation\":");
-            try appendNullablePositiveInteger(statement, 4, capture);
+            try appendColumnString(statement, 4, 20, capture);
             try capture.append("}");
         }
     }
@@ -6048,13 +6049,13 @@ test "Current excludes history while Full exposes exact closed Session inventory
     try std.testing.expect(std.mem.indexOf(u8, current, "\"profile\":\"current\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, current, "\"full\"") == null);
 
-    const unit = "quoted: \\\" line\ncontrol:\t snowman: ☃ ";
-    const text = try std.testing.allocator.alloc(u8, unit.len * 2048);
+    const text = try std.testing.allocator.alloc(u8, 64 * 1024);
     defer std.testing.allocator.free(text);
-    for (0..2048) |index| @memcpy(text[index * unit.len ..][0..unit.len], unit);
+    @memset(text, 1);
     try submitTestMessage(&storage, &tmp, "profile-message", "profile-message", "direct/profile", text);
     _ = (try storage.admitNextModelAttempt(.{})).?;
-    const full = try testingSessionReportWithProfile(&storage, &tmp, "direct/profile", 1024 * 1024, .full);
+    // One worst-case escaped copy fits; duplicating it in Conversation would not.
+    const full = try testingSessionReportWithProfile(&storage, &tmp, "direct/profile", 512 * 1024, .full);
     defer std.testing.allocator.free(full);
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full, .{});
     defer parsed.deinit();
@@ -6064,7 +6065,55 @@ test "Current excludes history while Full exposes exact closed Session inventory
         try std.testing.expect(inventory.get(name) != null);
     }
     try std.testing.expectEqualStrings(text, inventory.get("messages").?.array.items[0].object.get("content").?.object.get("text").?.string);
-    try std.testing.expectEqualStrings(text, inventory.get("conversation").?.array.items[0].object.get("content").?.object.get("text").?.string);
+    const conversation_content = inventory.get("conversation").?.array.items[0].object.get("content").?.object;
+    try std.testing.expectEqualStrings("65536", conversation_content.get("bytes").?.string);
+    const digest = protocol.contentDigest(text);
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(digest, .lower), conversation_content.get("sha256").?.string);
+    try std.testing.expect(conversation_content.get("text") == null);
+}
+
+test "Full preserves rejected model interruption targets as canonical u64 text" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "interrupt-report-config", "direct/interrupt-report");
+
+    const targets = [_]struct { key: []const u8, turn: u64, operation: u64 }{
+        .{ .key = "zero-turn", .turn = 0, .operation = 1 },
+        .{ .key = "zero-operation", .turn = 1, .operation = 0 },
+        .{ .key = "wide-targets", .turn = @as(u64, std.math.maxInt(i64)) + 1, .operation = std.math.maxInt(u64) },
+    };
+    for (targets) |target| {
+        var command: protocol.ModelInterruptionCommand = .{ .turn_id = target.turn, .operation_id = target.operation };
+        try command.key.set(target.key);
+        try command.session.set("direct/interrupt-report");
+        const rejected = storage.interruptModel(&command, .{});
+        try std.testing.expect(rejected == .rejected);
+        try std.testing.expectEqual(ModelInterruptionRejection.invalid_target, rejected.rejected.code);
+        const replay = storage.interruptModel(&command, .{});
+        try std.testing.expect(replay == .rejected);
+        try std.testing.expect(replay.rejected.replayed);
+    }
+
+    const full = try testingSessionReportWithProfile(&storage, &tmp, "direct/interrupt-report", 1024 * 1024, .full);
+    defer std.testing.allocator.free(full);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full, .{});
+    defer parsed.deinit();
+    const interruptions = parsed.value.object.get("full").?.object.get("model_interruptions").?.array.items;
+    try std.testing.expectEqual(targets.len, interruptions.len);
+    for (targets, interruptions) |target, interruption| {
+        const object = interruption.object;
+        try std.testing.expectEqualStrings(target.key, object.get("command_key").?.string);
+        try std.testing.expectEqualStrings("rejected", object.get("status").?.string);
+        try std.testing.expectEqualStrings("invalid_target", object.get("code").?.string);
+        var expected_turn: [20]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_turn, "{d}", .{target.turn}), object.get("turn").?.string);
+        var expected_operation: [20]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_operation, "{d}", .{target.operation}), object.get("operation").?.string);
+    }
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expect((try storage.inspectSession("direct/interrupt-report")).found);
 }
 
 test "Bash proposals retain exact order permission provenance denial and stop terminality" {
