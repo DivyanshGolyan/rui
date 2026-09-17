@@ -418,9 +418,15 @@ func ClassifyFootprint(footprint Footprint, target uint64) FootprintVerdict {
 	if footprint.LifetimePeakBytes > footprint.LifetimePeakTolerance {
 		lower = footprint.LifetimePeakBytes - footprint.LifetimePeakTolerance
 	}
-	upper := footprint.LifetimePeakBytes + footprint.LifetimePeakTolerance
+	upper := ^uint64(0)
+	overflow := footprint.LifetimePeakBytes > upper-footprint.LifetimePeakTolerance
+	if !overflow {
+		upper = footprint.LifetimePeakBytes + footprint.LifetimePeakTolerance
+	}
 	status := "unavailable"
-	if upper <= target {
+	if overflow {
+		status = "unavailable"
+	} else if upper <= target {
 		status = "passed"
 	} else if lower > target {
 		status = "target_miss"
@@ -448,7 +454,7 @@ func (v *SampleValidity) Record(err error) {
 }
 
 func (v SampleValidity) Status() string {
-	if v.Succeeded == 0 {
+	if v.Succeeded == 0 || v.Failed != 0 {
 		return "unavailable"
 	}
 	return "diagnostic"

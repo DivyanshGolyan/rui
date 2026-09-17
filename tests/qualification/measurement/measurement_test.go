@@ -89,6 +89,7 @@ func TestClassifyFootprintDistinguishesPassMissAndRoundedUncertainty(t *testing.
 		{Footprint{LifetimePeakBytes: 99, LifetimePeakTolerance: 1}, "passed", 98, 100},
 		{Footprint{LifetimePeakBytes: 102, LifetimePeakTolerance: 1}, "target_miss", 101, 103},
 		{Footprint{LifetimePeakBytes: 100, LifetimePeakTolerance: 1}, "unavailable", 99, 101},
+		{Footprint{LifetimePeakBytes: ^uint64(0), LifetimePeakTolerance: 1}, "unavailable", ^uint64(0) - 1, ^uint64(0)},
 	}
 	for _, test := range tests {
 		got := ClassifyFootprint(test.footprint, target)
@@ -105,8 +106,13 @@ func TestSampleValidityDoesNotTurnMissingSamplesIntoZeroEvidence(t *testing.T) {
 		t.Fatalf("failed sample validity = %+v", validity)
 	}
 	validity.Record(nil)
-	if validity.Status() != "diagnostic" || validity.Succeeded != 1 || validity.Failed != 1 {
+	if validity.Status() != "unavailable" || validity.Succeeded != 1 || validity.Failed != 1 {
 		t.Fatalf("mixed sample validity = %+v", validity)
+	}
+	validity = SampleValidity{}
+	validity.Record(nil)
+	if validity.Status() != "diagnostic" {
+		t.Fatalf("complete sample validity = %+v", validity)
 	}
 }
 

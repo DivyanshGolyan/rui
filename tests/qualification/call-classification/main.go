@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -24,6 +27,7 @@ import (
 const physicalFootprintTargetBytes uint64 = 256 * 1024 * 1024
 
 type call struct {
+	ItemID    string
 	Name      string
 	ID        string
 	Arguments string
@@ -100,7 +104,7 @@ func encodeCalls(responseID string, calls []call) []byte {
 	}
 	for index, candidate := range calls {
 		item := map[string]any{
-			"type": "function_call", "id": fmt.Sprintf("%s-item-%06d", responseID, index),
+			"type": "function_call", "id": candidate.ItemID,
 			"status": "completed", "name": candidate.Name, "call_id": candidate.ID, "arguments": candidate.Arguments,
 		}
 		items[index] = item
@@ -120,13 +124,13 @@ func scenarioCalls(value scenario, forbidden string) []call {
 	for index := range value.Valid {
 		command := fmt.Sprintf("touch %q # %s", forbidden, padding)
 		arguments, _ := json.Marshal(map[string]string{"cmd": command})
-		calls = append(calls, call{"bash", fmt.Sprintf("valid-%06d", index), string(arguments)})
+		calls = append(calls, call{fmt.Sprintf("%s-item-%06d", value.Name, len(calls)), "bash", fmt.Sprintf("valid-%06d", index), string(arguments)})
 	}
 	for index := range value.Rejected {
 		if index%2 == 0 {
-			calls = append(calls, call{"unknown", fmt.Sprintf("unknown-%06d", index), "{}"})
+			calls = append(calls, call{fmt.Sprintf("%s-item-%06d", value.Name, len(calls)), "unknown", fmt.Sprintf("unknown-%06d", index), "{}"})
 		} else {
-			calls = append(calls, call{"bash", fmt.Sprintf("malformed-%06d", index), "{"})
+			calls = append(calls, call{fmt.Sprintf("%s-item-%06d", value.Name, len(calls)), "bash", fmt.Sprintf("malformed-%06d", index), "{"})
 		}
 	}
 	return calls
@@ -234,6 +238,7 @@ func verifyActionContent(client measurement.Client, session string, inspection m
 	if !ok || len(rows) != len(expected) {
 		return nil, fmt.Errorf("got %d readable Actions, want %d", len(rows), len(expected))
 	}
+	actionIDs := make([]string, len(rows))
 	for index, value := range rows {
 		row, ok := value.(map[string]any)
 		if !ok {
@@ -244,19 +249,76 @@ func verifyActionContent(client measurement.Client, session string, inspection m
 		if !actionOK || !ordinalOK || ordinal != strconv.Itoa(index) {
 			return nil, fmt.Errorf("Action %d identity/order mismatch: %v", index, row)
 		}
+		actionIDs[index] = action
+	}
+	if err := verifyActionBytes(client, session, actionIDs, expected); err != nil {
+		return nil, err
+	}
+	return map[string]any{"status": "passed", "actions_read": len(rows), "fields_per_action": 2}, nil
+}
+
+func verifyActionBytes(client measurement.Client, session string, actions []string, expected []call) error {
+	if len(actions) != len(expected) {
+		return fmt.Errorf("got %d Action identities, want %d", len(actions), len(expected))
+	}
+	for index, action := range actions {
 		callID, err := client.ReadAction(session, action, "call-id")
 		if err != nil {
-			return nil, fmt.Errorf("read Action %d call ID: %w", index, err)
+			return fmt.Errorf("read Action %d call ID: %w", index, err)
 		}
 		arguments, err := client.ReadAction(session, action, "arguments")
 		if err != nil {
-			return nil, fmt.Errorf("read Action %d arguments: %w", index, err)
+			return fmt.Errorf("read Action %d arguments: %w", index, err)
 		}
 		if !bytes.Equal(callID, []byte(expected[index].ID)) || !bytes.Equal(arguments, []byte(expected[index].Arguments)) {
-			return nil, fmt.Errorf("Action %d public content differs from provider bytes", index)
+			return fmt.Errorf("Action %d public content differs from provider bytes", index)
 		}
 	}
-	return map[string]any{"status": "passed", "actions_read": len(rows), "fields_per_action": 2}, nil
+	return nil
+}
+
+func contentReference(value string) map[string]string {
+	domain := []byte("rui/content/v1")
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(domain)))
+	hash := sha256.New()
+	hash.Write(length[:])
+	hash.Write(domain)
+	hash.Write([]byte(value))
+	return map[string]string{"type": "text", "bytes": strconv.Itoa(len(value)), "sha256": hex.EncodeToString(hash.Sum(nil))}
+}
+
+func verifyRejectedReferences(inspection map[string]any, expected []call, valid int) (map[string]any, error) {
+	rejected, ok := inspection["rejected_calls"].(map[string]any)
+	if !ok {
+		return nil, errors.New("inspection omitted rejected calls")
+	}
+	rows, ok := rejected["items"].([]any)
+	if !ok || len(rows) != len(expected)-valid {
+		return nil, fmt.Errorf("got %d rejected-call references, want %d", len(rows), len(expected)-valid)
+	}
+	for index, value := range rows {
+		row, ok := value.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("rejected call %d report is malformed", index)
+		}
+		candidate := expected[valid+index]
+		code := "unknown_tool"
+		if index%2 == 1 {
+			code = "invalid_arguments"
+		}
+		if row["call_ordinal"] != strconv.Itoa(valid+index) || row["code"] != code {
+			return nil, fmt.Errorf("rejected call %d order/code mismatch: %v", index, row)
+		}
+		for field, text := range map[string]string{"item_id": candidate.ItemID, "name": candidate.Name, "call_id": candidate.ID, "arguments": candidate.Arguments} {
+			actual, ok := row[field].(map[string]any)
+			expectedReference := contentReference(text)
+			if !ok || actual["type"] != expectedReference["type"] || actual["bytes"] != expectedReference["bytes"] || actual["sha256"] != expectedReference["sha256"] {
+				return nil, fmt.Errorf("rejected call %d %s reference mismatch: %v", index, field, row[field])
+			}
+		}
+	}
+	return map[string]any{"status": "passed", "calls_checked": len(rows), "references_per_call": 4}, nil
 }
 
 func recordPortableSample(result map[string]any, name string, host *measurement.Host) {
@@ -550,6 +612,11 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 	if err != nil {
 		return result, err
 	}
+	rejectedEvidence, err := verifyRejectedReferences(inspection, calls, value.Valid)
+	result["public_rejected_references"] = rejectedEvidence
+	if err != nil {
+		return result, err
+	}
 	actions, err := actionIDs(inspection)
 	if err != nil {
 		return result, err
@@ -656,6 +723,13 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 		if countError != nil || valid != value.Valid || rejected != value.Rejected {
 			return result, fmt.Errorf("restart changed classified populations: actions=%d rejected=%d error=%v", valid, rejected, countError)
 		}
+		if _, referenceError := verifyRejectedReferences(recovered, calls, value.Valid); referenceError != nil {
+			return result, fmt.Errorf("restart changed rejected call references: %w", referenceError)
+		}
+		if contentError := verifyActionBytes(client, "qualification/"+value.Name, actions, calls[:value.Valid]); contentError != nil {
+			return result, fmt.Errorf("restart changed denied Action content: %w", contentError)
+		}
+		result["restart_exact_content"] = map[string]any{"status": "passed", "denied_actions_read": len(actions), "rejected_references_checked": value.Rejected * 4}
 		remaining, identityError := actionIDs(recovered)
 		if identityError != nil || len(remaining) != 0 {
 			return result, fmt.Errorf("restart changed denial outcomes: unresolved=%v error=%v", remaining, identityError)
