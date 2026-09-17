@@ -196,7 +196,7 @@ install_agent_skills() (
     done
     cp -R "$matt_checkout/skills/productivity/grilling" "$skills_next/"
     cp -R "$matt_checkout/skills/productivity/writing-for-agents" "$skills_next/"
-    cp -R "$humanlayer_checkout/plugins/show-me/skills/show-me" "$skills_next/"
+    cp -R "$humanlayer_checkout/plugins/visual-pr/skills/visual-pr" "$skills_next/"
 
     local matt_revision humanlayer_revision
     matt_revision="$(git -C "$matt_checkout" rev-parse HEAD)"
