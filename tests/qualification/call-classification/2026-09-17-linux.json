@@ -1,10 +1,10 @@
 {
-  "artifacts": "/tmp/rui-call-classification-1776134167",
+  "artifacts": "/tmp/rui-call-classification-3371591155",
   "binary": "/home/user/workspace/repo/.zig-cache/o/e90fc26faaa0fcff80635f7151f05633/rui-release-small-check",
   "binary_sha256": "a2e1222faacd5798a3acc2c39c2d2df59b2b5cfee2ea3edb8f907b7be952ae46",
   "cases": {
     "mixed-restart": {
-      "classification_admission_ms": 140.574,
+      "classification_admission_ms": 148.696,
       "database": {
         "database_allocated_bytes": 192512,
         "database_logical_bytes": 192512
@@ -27,10 +27,10 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 7213056,
+          "rss_bytes": 7184384,
           "virtual_bytes": 162717696,
           "cpu_user_seconds": 0,
-          "cpu_system_seconds": 0,
+          "cpu_system_seconds": 0.01,
           "threads": 3,
           "live_descendant_processes": 0,
           "open_descriptors": 9,
@@ -41,10 +41,10 @@
       },
       "denial_latency": {
         "count": 2,
-        "maximum_ms": 10.029,
-        "minimum_ms": 8.555,
-        "p50_ms": 8.555,
-        "p95_ms": 10.029
+        "maximum_ms": 10.835,
+        "minimum_ms": 9.746,
+        "p50_ms": 9.746,
+        "p95_ms": 10.835
       },
       "denial_replay": {
         "answer": {
@@ -113,21 +113,21 @@
         "restart_and_replay_denial": true,
         "change_catalog_while_response_pending": true
       },
-      "inspection_ms": 5.347,
+      "inspection_ms": 5.847,
       "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
       "physical_footprint_status": "unavailable",
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 389,
-          "succeeded": 389,
+          "attempts": 390,
+          "succeeded": 390,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 7233536,
+          "rss_bytes": 7204864,
           "virtual_bytes": 162717696,
-          "open_descriptors": 15,
+          "open_descriptors": 14,
           "threads": 3
         }
       },
@@ -142,7 +142,7 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 18.308,
+      "response_end_to_classification_ms": 28.091,
       "response_end_to_classification_status": "diagnostic",
       "restart_exact_content": {
         "denied_actions_read": 2,
@@ -151,27 +151,27 @@
       },
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 7213056,
+          "rss_bytes": 7184384,
           "virtual_bytes": 162717696,
-          "cpu_user_seconds": 0.05,
-          "cpu_system_seconds": 0.04,
-          "threads": 3,
+          "cpu_user_seconds": 0.06,
+          "cpu_system_seconds": 0.03,
+          "threads": 2,
           "live_descendant_processes": 0,
-          "open_descriptors": 11,
+          "open_descriptors": 9,
           "disk_read_bytes": 0,
-          "disk_write_bytes": 1241088
+          "disk_write_bytes": 1249280
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 6516736,
+          "rss_bytes": 6828032,
           "virtual_bytes": 162717696,
           "cpu_user_seconds": 0,
           "cpu_system_seconds": 0,
-          "threads": 3,
+          "threads": 2,
           "live_descendant_processes": 0,
-          "open_descriptors": 10,
+          "open_descriptors": 9,
           "disk_read_bytes": 0,
           "disk_write_bytes": 282624
         },
@@ -184,7 +184,7 @@
       "status": "passed"
     },
     "payload-100000": {
-      "classification_admission_ms": 133.943,
+      "classification_admission_ms": 140.931,
       "database": {
         "database_allocated_bytes": 290816,
         "database_logical_bytes": 290816
@@ -207,13 +207,13 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 7135232,
+          "rss_bytes": 7208960,
           "virtual_bytes": 162717696,
-          "cpu_user_seconds": 0.02,
-          "cpu_system_seconds": 0,
+          "cpu_user_seconds": 0.01,
+          "cpu_system_seconds": 0.01,
           "threads": 3,
           "live_descendant_processes": 0,
-          "open_descriptors": 11,
+          "open_descriptors": 9,
           "disk_read_bytes": 0,
           "disk_write_bytes": 995328
         },
@@ -221,10 +221,10 @@
       },
       "denial_latency": {
         "count": 1,
-        "maximum_ms": 12.275,
-        "minimum_ms": 12.275,
-        "p50_ms": 12.275,
-        "p95_ms": 12.275
+        "maximum_ms": 10.15,
+        "minimum_ms": 10.15,
+        "p50_ms": 10.15,
+        "p95_ms": 10.15
       },
       "durable_audit": {
         "counts": {
@@ -258,21 +258,21 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 3.321,
+      "inspection_ms": 5.908,
       "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
       "physical_footprint_status": "unavailable",
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 381,
-          "succeeded": 381,
+          "attempts": 386,
+          "succeeded": 386,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 7155712,
+          "rss_bytes": 7229440,
           "virtual_bytes": 162717696,
-          "open_descriptors": 15,
+          "open_descriptors": 13,
           "threads": 3
         }
       },
@@ -287,25 +287,25 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 24.963,
+      "response_end_to_classification_ms": 39.376,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 7135232,
+          "rss_bytes": 7208960,
           "virtual_bytes": 162717696,
-          "cpu_user_seconds": 0.08,
-          "cpu_system_seconds": 0.03,
+          "cpu_user_seconds": 0.04,
+          "cpu_system_seconds": 0.07,
           "threads": 3,
           "live_descendant_processes": 0,
-          "open_descriptors": 9,
+          "open_descriptors": 11,
           "disk_read_bytes": 0,
-          "disk_write_bytes": 1449984
+          "disk_write_bytes": 1437696
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 6504448,
+          "rss_bytes": 6512640,
           "virtual_bytes": 162717696,
           "cpu_user_seconds": 0,
           "cpu_system_seconds": 0,
@@ -324,7 +324,7 @@
       "status": "passed"
     },
     "payload-4096": {
-      "classification_admission_ms": 125.544,
+      "classification_admission_ms": 122.95,
       "database": {
         "database_allocated_bytes": 196608,
         "database_logical_bytes": 196608
@@ -347,13 +347,13 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 7213056,
+          "rss_bytes": 7188480,
           "virtual_bytes": 162717696,
           "cpu_user_seconds": 0.01,
           "cpu_system_seconds": 0,
           "threads": 3,
           "live_descendant_processes": 0,
-          "open_descriptors": 11,
+          "open_descriptors": 9,
           "disk_read_bytes": 0,
           "disk_write_bytes": 704512
         },
@@ -361,10 +361,10 @@
       },
       "denial_latency": {
         "count": 1,
-        "maximum_ms": 12.448,
-        "minimum_ms": 12.448,
-        "p50_ms": 12.448,
-        "p95_ms": 12.448
+        "maximum_ms": 10.821,
+        "minimum_ms": 10.821,
+        "p50_ms": 10.821,
+        "p95_ms": 10.821
       },
       "durable_audit": {
         "counts": {
@@ -398,19 +398,19 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 7.615,
+      "inspection_ms": 5.475,
       "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
       "physical_footprint_status": "unavailable",
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 385,
-          "succeeded": 385,
+          "attempts": 390,
+          "succeeded": 390,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 7233536,
+          "rss_bytes": 7208960,
           "virtual_bytes": 162717696,
           "open_descriptors": 15,
           "threads": 3
@@ -427,31 +427,31 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 17.959,
+      "response_end_to_classification_ms": 15.477,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 7213056,
+          "rss_bytes": 7188480,
           "virtual_bytes": 162717696,
           "cpu_user_seconds": 0.06,
-          "cpu_system_seconds": 0.04,
-          "threads": 2,
+          "cpu_system_seconds": 0.03,
+          "threads": 3,
           "live_descendant_processes": 0,
-          "open_descriptors": 9,
+          "open_descriptors": 11,
           "disk_read_bytes": 0,
-          "disk_write_bytes": 1155072
+          "disk_write_bytes": 1159168
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 6516736,
+          "rss_bytes": 6557696,
           "virtual_bytes": 162717696,
           "cpu_user_seconds": 0,
           "cpu_system_seconds": 0,
           "threads": 3,
           "live_descendant_processes": 0,
-          "open_descriptors": 10,
+          "open_descriptors": 9,
           "disk_read_bytes": 0,
           "disk_write_bytes": 282624
         },
@@ -464,7 +464,7 @@
       "status": "passed"
     },
     "rejected-1": {
-      "classification_admission_ms": 128.716,
+      "classification_admission_ms": 123.236,
       "database": {
         "database_allocated_bytes": 192512,
         "database_logical_bytes": 192512
@@ -487,13 +487,13 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 6971392,
+          "rss_bytes": 7192576,
           "virtual_bytes": 162717696,
-          "cpu_user_seconds": 0,
-          "cpu_system_seconds": 0.01,
+          "cpu_user_seconds": 0.01,
+          "cpu_system_seconds": 0,
           "threads": 3,
           "live_descendant_processes": 0,
-          "open_descriptors": 9,
+          "open_descriptors": 11,
           "disk_read_bytes": 0,
           "disk_write_bytes": 679936
         },
@@ -534,7 +534,7 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 5.573,
+      "inspection_ms": 3.205,
       "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
       "physical_footprint_status": "unavailable",
       "portable_measurement_status": "diagnostic",
@@ -546,7 +546,7 @@
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 6991872,
+          "rss_bytes": 7192576,
           "virtual_bytes": 162717696,
           "open_descriptors": 15,
           "threads": 3
@@ -563,29 +563,29 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 19.387,
+      "response_end_to_classification_ms": 16.24,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 6971392,
+          "rss_bytes": 7192576,
           "virtual_bytes": 162717696,
-          "cpu_user_seconds": 0.05,
+          "cpu_user_seconds": 0.06,
           "cpu_system_seconds": 0.04,
           "threads": 3,
           "live_descendant_processes": 0,
           "open_descriptors": 9,
           "disk_read_bytes": 0,
-          "disk_write_bytes": 1093632
+          "disk_write_bytes": 1126400
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 6406144,
+          "rss_bytes": 6836224,
           "virtual_bytes": 162717696,
           "cpu_user_seconds": 0,
           "cpu_system_seconds": 0,
-          "threads": 3,
+          "threads": 2,
           "live_descendant_processes": 0,
           "open_descriptors": 9,
           "disk_read_bytes": 0,
@@ -600,7 +600,7 @@
       "status": "passed"
     },
     "rejected-256": {
-      "classification_admission_ms": 347.576,
+      "classification_admission_ms": 268.983,
       "database": {
         "database_allocated_bytes": 385024,
         "database_logical_bytes": 385024
@@ -623,15 +623,15 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 7327744,
+          "rss_bytes": 7450624,
           "virtual_bytes": 162717696,
-          "cpu_user_seconds": 0.09,
+          "cpu_user_seconds": 0.07,
           "cpu_system_seconds": 0.01,
-          "threads": 3,
+          "threads": 2,
           "live_descendant_processes": 0,
           "open_descriptors": 9,
           "disk_read_bytes": 0,
-          "disk_write_bytes": 1466368
+          "disk_write_bytes": 1470464
         },
         "status": "diagnostic"
       },
@@ -2710,19 +2710,19 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 15.744,
+      "inspection_ms": 21.775,
       "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
       "physical_footprint_status": "unavailable",
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 342,
-          "succeeded": 342,
+          "attempts": 344,
+          "succeeded": 344,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 7327744,
+          "rss_bytes": 7565312,
           "virtual_bytes": 162717696,
           "open_descriptors": 15,
           "threads": 3
@@ -2739,31 +2739,31 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 238.717,
+      "response_end_to_classification_ms": 162.016,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 7327744,
+          "rss_bytes": 7450624,
           "virtual_bytes": 162717696,
-          "cpu_user_seconds": 0.16,
+          "cpu_user_seconds": 0.15,
           "cpu_system_seconds": 0.05,
-          "threads": 2,
+          "threads": 3,
           "live_descendant_processes": 0,
           "open_descriptors": 9,
           "disk_read_bytes": 0,
-          "disk_write_bytes": 9543680
+          "disk_write_bytes": 9547776
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 6463488,
+          "rss_bytes": 6631424,
           "virtual_bytes": 162717696,
           "cpu_user_seconds": 0,
           "cpu_system_seconds": 0,
           "threads": 3,
           "live_descendant_processes": 0,
-          "open_descriptors": 9,
+          "open_descriptors": 10,
           "disk_read_bytes": 0,
           "disk_write_bytes": 282624
         },
@@ -2776,7 +2776,7 @@
       "status": "passed"
     },
     "rejected-32": {
-      "classification_admission_ms": 128.965,
+      "classification_admission_ms": 133.408,
       "database": {
         "database_allocated_bytes": 212992,
         "database_logical_bytes": 212992
@@ -2799,15 +2799,15 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 7217152,
+          "rss_bytes": 6971392,
           "virtual_bytes": 162717696,
-          "cpu_user_seconds": 0.01,
-          "cpu_system_seconds": 0,
-          "threads": 3,
+          "cpu_user_seconds": 0.02,
+          "cpu_system_seconds": 0.01,
+          "threads": 2,
           "live_descendant_processes": 0,
-          "open_descriptors": 11,
+          "open_descriptors": 9,
           "disk_read_bytes": 0,
-          "disk_write_bytes": 761856
+          "disk_write_bytes": 757760
         },
         "status": "diagnostic"
       },
@@ -3094,21 +3094,21 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 5.861,
+      "inspection_ms": 11.653,
       "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
       "physical_footprint_status": "unavailable",
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 404,
-          "succeeded": 404,
+          "attempts": 396,
+          "succeeded": 396,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 7237632,
+          "rss_bytes": 6971392,
           "virtual_bytes": 162717696,
-          "open_descriptors": 13,
+          "open_descriptors": 14,
           "threads": 3
         }
       },
@@ -3123,31 +3123,31 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 27.096,
+      "response_end_to_classification_ms": 37.134,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 7217152,
+          "rss_bytes": 6971392,
           "virtual_bytes": 162717696,
-          "cpu_user_seconds": 0.07,
-          "cpu_system_seconds": 0.05,
+          "cpu_user_seconds": 0.08,
+          "cpu_system_seconds": 0.04,
           "threads": 2,
           "live_descendant_processes": 0,
           "open_descriptors": 9,
           "disk_read_bytes": 0,
-          "disk_write_bytes": 2748416
+          "disk_write_bytes": 2826240
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 6520832,
+          "rss_bytes": 6414336,
           "virtual_bytes": 162717696,
           "cpu_user_seconds": 0,
           "cpu_system_seconds": 0,
           "threads": 3,
           "live_descendant_processes": 0,
-          "open_descriptors": 10,
+          "open_descriptors": 9,
           "disk_read_bytes": 0,
           "disk_write_bytes": 282624
         },
@@ -3160,7 +3160,7 @@
       "status": "passed"
     },
     "valid-1": {
-      "classification_admission_ms": 122.707,
+      "classification_admission_ms": 101.343,
       "database": {
         "database_allocated_bytes": 192512,
         "database_logical_bytes": 192512
@@ -3191,16 +3191,16 @@
           "live_descendant_processes": 0,
           "open_descriptors": 9,
           "disk_read_bytes": 0,
-          "disk_write_bytes": 696320
+          "disk_write_bytes": 688128
         },
         "status": "diagnostic"
       },
       "denial_latency": {
         "count": 1,
-        "maximum_ms": 14.001,
-        "minimum_ms": 14.001,
-        "p50_ms": 14.001,
-        "p95_ms": 14.001
+        "maximum_ms": 10.91,
+        "minimum_ms": 10.91,
+        "p50_ms": 10.91,
+        "p95_ms": 10.91
       },
       "durable_audit": {
         "counts": {
@@ -3234,21 +3234,21 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 5.413,
+      "inspection_ms": 6.614,
       "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
       "physical_footprint_status": "unavailable",
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 384,
-          "succeeded": 384,
+          "attempts": 386,
+          "succeeded": 386,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 7249920,
+          "rss_bytes": 7270400,
           "virtual_bytes": 162717696,
-          "open_descriptors": 15,
+          "open_descriptors": 13,
           "threads": 3
         }
       },
@@ -3263,29 +3263,29 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 19.852,
+      "response_end_to_classification_ms": 16.028,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
           "rss_bytes": 7249920,
           "virtual_bytes": 162717696,
-          "cpu_user_seconds": 0.03,
-          "cpu_system_seconds": 0.06,
-          "threads": 3,
+          "cpu_user_seconds": 0.07,
+          "cpu_system_seconds": 0.02,
+          "threads": 2,
           "live_descendant_processes": 0,
           "open_descriptors": 9,
           "disk_read_bytes": 0,
-          "disk_write_bytes": 1134592
+          "disk_write_bytes": 1155072
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 6557696,
+          "rss_bytes": 6893568,
           "virtual_bytes": 162717696,
           "cpu_user_seconds": 0,
           "cpu_system_seconds": 0,
-          "threads": 3,
+          "threads": 2,
           "live_descendant_processes": 0,
           "open_descriptors": 9,
           "disk_read_bytes": 0,
@@ -3300,7 +3300,7 @@
       "status": "passed"
     },
     "valid-256": {
-      "classification_admission_ms": 394.03,
+      "classification_admission_ms": 360.659,
       "database": {
         "database_allocated_bytes": 462848,
         "database_logical_bytes": 462848
@@ -3323,24 +3323,24 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 7454720,
+          "rss_bytes": 7507968,
           "virtual_bytes": 162717696,
-          "cpu_user_seconds": 0.12,
-          "cpu_system_seconds": 0.01,
+          "cpu_user_seconds": 0.08,
+          "cpu_system_seconds": 0.03,
           "threads": 2,
           "live_descendant_processes": 0,
           "open_descriptors": 9,
           "disk_read_bytes": 0,
-          "disk_write_bytes": 1482752
+          "disk_write_bytes": 1490944
         },
         "status": "diagnostic"
       },
       "denial_latency": {
         "count": 256,
-        "maximum_ms": 36.347,
-        "minimum_ms": 3.929,
-        "p50_ms": 9.242,
-        "p95_ms": 13.944
+        "maximum_ms": 14.255,
+        "minimum_ms": 3.785,
+        "p50_ms": 8.751,
+        "p95_ms": 10.126
       },
       "durable_audit": {
         "counts": {
@@ -5414,19 +5414,19 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 21.872,
+      "inspection_ms": 14.311,
       "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
       "physical_footprint_status": "unavailable",
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 881,
-          "succeeded": 881,
+          "attempts": 811,
+          "succeeded": 811,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 7561216,
+          "rss_bytes": 7614464,
           "virtual_bytes": 162717696,
           "open_descriptors": 15,
           "threads": 3
@@ -5443,31 +5443,31 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 293.937,
+      "response_end_to_classification_ms": 251.686,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 7561216,
+          "rss_bytes": 7614464,
           "virtual_bytes": 162717696,
-          "cpu_user_seconds": 0.32,
-          "cpu_system_seconds": 0.2,
+          "cpu_user_seconds": 0.25,
+          "cpu_system_seconds": 0.24,
           "threads": 3,
           "live_descendant_processes": 0,
-          "open_descriptors": 9,
+          "open_descriptors": 11,
           "disk_read_bytes": 0,
-          "disk_write_bytes": 14176256
+          "disk_write_bytes": 14184448
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 6778880,
+          "rss_bytes": 6610944,
           "virtual_bytes": 162717696,
           "cpu_user_seconds": 0,
           "cpu_system_seconds": 0,
-          "threads": 2,
+          "threads": 3,
           "live_descendant_processes": 0,
-          "open_descriptors": 9,
+          "open_descriptors": 10,
           "disk_read_bytes": 0,
           "disk_write_bytes": 282624
         },
@@ -5480,7 +5480,7 @@
       "status": "passed"
     },
     "valid-32": {
-      "classification_admission_ms": 118.158,
+      "classification_admission_ms": 137.491,
       "database": {
         "database_allocated_bytes": 212992,
         "database_logical_bytes": 212992
@@ -5503,13 +5503,13 @@
       },
       "delayed_cleanup_sample": {
         "sample": {
-          "rss_bytes": 7254016,
+          "rss_bytes": 7098368,
           "virtual_bytes": 162717696,
-          "cpu_user_seconds": 0.01,
+          "cpu_user_seconds": 0.02,
           "cpu_system_seconds": 0,
           "threads": 3,
           "live_descendant_processes": 0,
-          "open_descriptors": 11,
+          "open_descriptors": 9,
           "disk_read_bytes": 0,
           "disk_write_bytes": 774144
         },
@@ -5517,10 +5517,10 @@
       },
       "denial_latency": {
         "count": 32,
-        "maximum_ms": 15.986,
-        "minimum_ms": 6.443,
-        "p50_ms": 9.422,
-        "p95_ms": 15.249
+        "maximum_ms": 12.718,
+        "minimum_ms": 4.193,
+        "p50_ms": 9.304,
+        "p95_ms": 11.459
       },
       "durable_audit": {
         "counts": {
@@ -5802,19 +5802,19 @@
         "restart_and_replay_denial": false,
         "change_catalog_while_response_pending": false
       },
-      "inspection_ms": 3.146,
+      "inspection_ms": 6.133,
       "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
       "physical_footprint_status": "unavailable",
       "portable_measurement_status": "diagnostic",
       "portable_observed_peak": {
         "status": "diagnostic",
         "validity": {
-          "attempts": 308,
-          "succeeded": 308,
+          "attempts": 328,
+          "succeeded": 328,
           "failed": 0
         },
         "peak": {
-          "rss_bytes": 7254016,
+          "rss_bytes": 7098368,
           "virtual_bytes": 162717696,
           "open_descriptors": 15,
           "threads": 3
@@ -5831,31 +5831,31 @@
         "references_per_call": 4,
         "status": "passed"
       },
-      "response_end_to_classification_ms": 22.484,
+      "response_end_to_classification_ms": 36.454,
       "response_end_to_classification_status": "diagnostic",
       "retained_idle_after": {
         "sample": {
-          "rss_bytes": 7254016,
+          "rss_bytes": 7098368,
           "virtual_bytes": 162717696,
           "cpu_user_seconds": 0.07,
-          "cpu_system_seconds": 0.05,
-          "threads": 2,
+          "cpu_system_seconds": 0.04,
+          "threads": 3,
           "live_descendant_processes": 0,
           "open_descriptors": 9,
           "disk_read_bytes": 0,
-          "disk_write_bytes": 2564096
+          "disk_write_bytes": 2568192
         },
         "status": "diagnostic"
       },
       "retained_idle_before": {
         "sample": {
-          "rss_bytes": 6897664,
+          "rss_bytes": 6533120,
           "virtual_bytes": 162717696,
           "cpu_user_seconds": 0,
           "cpu_system_seconds": 0,
-          "threads": 2,
+          "threads": 3,
           "live_descendant_processes": 0,
-          "open_descriptors": 9,
+          "open_descriptors": 10,
           "disk_read_bytes": 0,
           "disk_write_bytes": 282624
         },
@@ -5870,13 +5870,13 @@
   },
   "classification_legend": {
     "behavior_error": "a provider/Store/server/client invariant failed",
-    "diagnostic": "portable RSS, latency, database, named scratch, CPU and descriptor observations have no independent acceptance threshold",
-    "passed": "behavior and required measurements passed",
+    "diagnostic": "component or portable RSS, latency, database, named scratch, CPU and descriptor observations have no independent acceptance threshold",
+    "passed": "behavior and required aggregate measurements passed",
     "target_miss": "the lower bound of a valid macOS lifetime-peak interval exceeded 256 MiB",
-    "unavailable": "a required measurement was absent or its uncertainty interval crossed the target"
+    "unavailable": "a required measurement was absent, its uncertainty interval crossed the target, or aggregate helper accounting was incomplete"
   },
   "environment_evidence_status": "passed",
-  "format": "rui-call-classification-v2-go",
+  "format": "rui-call-classification-v3-go",
   "limits": [
     "Linux execution is deterministic production-path development evidence; macOS runtime and physical footprint remain unavailable in this orb",
     "loopback deterministic provider; no live provider, TLS, filesystem power-loss, or Bash execution qualification",
@@ -5900,7 +5900,7 @@
   "sqlite_binary_sha256": "2ae94eed0d43488af48aaa62a06e714c0121292324f94532ecb6ee0349a2fd62",
   "sqlite_binary_status": "passed",
   "status": "unavailable",
-  "tested_revision": "8ef071311a684617ee22d9bb537b5d250a6ee987",
+  "tested_revision": "c462403a5a64e67ee358a2ac53380bb60a6c3ea8",
   "working_tree_dirty": false,
   "zig": "0.16.0"
 }
