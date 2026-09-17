@@ -645,7 +645,7 @@ def maximum_body(kind):
 def check_schema(database_path):
     database = sqlite3.connect(database_path)
     try:
-        assert database.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 14
         stop_columns = [
             row[1] for row in database.execute("PRAGMA table_info(session_stop)")
         ]

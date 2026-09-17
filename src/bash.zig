@@ -196,6 +196,7 @@ pub const Prepared = struct {
         );
         var empty_environment = std.process.Environ.Map.init(self.allocator);
         defer empty_environment.deinit();
+        const started = std.Io.Clock.Timestamp.now(self.io, .awake);
         var child = std.process.spawn(self.io, .{
             .argv = &.{ self.bash_path, script_path },
             .cwd = .{ .path = self.workspace.slice() },
@@ -221,7 +222,7 @@ pub const Prepared = struct {
             .stderr_capture = self.stderr_capture,
             .script = self.script,
             .scratch_path = self.scratch_path,
-            .started = std.Io.Clock.Timestamp.now(self.io, .awake),
+            .started = started,
             .faults = self.faults,
         };
         execution.process.running.deadline = execution.started.addDuration(.{
@@ -631,6 +632,15 @@ pub const Execution = struct {
     ) !bool {
         var tail = pipe_slot.tail;
         if (tail.remaining == 0) {
+            var descriptor = [_]std.posix.pollfd{.{
+                .fd = tail.file.handle,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+            if (try std.posix.poll(&descriptor, 0) == 0) {
+                self.closePipe(pipe_slot, .incomplete);
+                return true;
+            }
             var probe: [1]u8 = undefined;
             const count = std.posix.read(tail.file.handle, &probe) catch |err| {
                 if (err == error.WouldBlock) {
@@ -1028,7 +1038,7 @@ test "Bash descriptor decoding preserves authorized command bytes" {
             if (try self.take() != byte) return error.InvalidDescriptorJson;
         }
     };
-    var source = Source{ .bytes = "{\"cmd\":\"false && \\u0074ouch marker\"}" };
+    var source = Source{ .bytes = "{\"cmd\":\"false && \\u0074ouch marker\",\"timeout_ms\":null}" };
     var output_buffer: [64]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output_buffer);
     try std.testing.expect(try tools.writeBashCommand(&source, &writer));
@@ -1038,7 +1048,8 @@ test "Bash descriptor decoding preserves authorized command bytes" {
     const inspected = (try tools.inspectBashArguments(&override)).?;
     try std.testing.expectEqual(@as(?u64, 17), inspected.timeout_ms);
     inline for (.{
-        "{\"cmd\":\"echo\\u0000bad\"}",
+        "{\"cmd\":\"echo\\u0000bad\",\"timeout_ms\":null}",
+        "{\"cmd\":\"echo\"}",
         "{\"cmd\":\"echo\",\"timeout_ms\":0}",
         "{\"cmd\":\"echo\",\"timeout_ms\":9223372036854775808}",
         "{\"cmd\":\"echo\",\"timeout_ms\":1.5}",

@@ -587,10 +587,10 @@ def main():
     try:
         forbidden_effect = state / "proposal-must-not-launch"
         calls = [
-            ("bash", "call\nA", json.dumps({"cmd": f"touch {forbidden_effect}"}, separators=(",", ":"))),
+            ("bash", "call\nA", json.dumps({"cmd": f"touch {forbidden_effect}", "timeout_ms": None}, separators=(",", ":"))),
             ("other", "call-unknown", "{}"),
             ("bash", "call-invalid", "{"),
-            ("bash", "call-B", json.dumps({"cmd": "printf second"}, separators=(",", ":"))),
+            ("bash", "call-B", json.dumps({"cmd": "printf second", "timeout_ms": None}, separators=(",", ":"))),
         ]
         race_calls = []
         race_responses = []
@@ -598,8 +598,8 @@ def main():
             first_effect = state / f"{order}-first-must-not-launch"
             second_effect = state / f"{order}-second-must-not-launch"
             order_calls = [
-                ("bash", f"{order}-call-0", json.dumps({"cmd": f"touch {first_effect}"}, separators=(",", ":"))),
-                ("bash", f"{order}-call-1", json.dumps({"cmd": f"touch {second_effect}"}, separators=(",", ":"))),
+                ("bash", f"{order}-call-0", json.dumps({"cmd": f"touch {first_effect}", "timeout_ms": None}, separators=(",", ":"))),
+                ("bash", f"{order}-call-1", json.dumps({"cmd": f"touch {second_effect}", "timeout_ms": None}, separators=(",", ":"))),
             ]
             race_calls.append((order_calls, first_effect, second_effect))
             race_responses.append(sse_tool_calls(f"{order}-response", order_calls))
@@ -786,17 +786,17 @@ def main():
         proposal_gate_keeper = None
 
         continuation_calls = [
-            ("bash", "continuation-call-0", json.dumps({"cmd": "printf zero"}, separators=(",", ":"))),
+            ("bash", "continuation-call-0", json.dumps({"cmd": "printf zero", "timeout_ms": None}, separators=(",", ":"))),
             ("missing-tool", "continuation-call-1", "{}"),
             ("bash", "continuation-call-2", "{"),
-            ("bash", "continuation-call-3", json.dumps({"cmd": "printf three"}, separators=(",", ":"))),
+            ("bash", "continuation-call-3", json.dumps({"cmd": "printf three", "timeout_ms": None}, separators=(",", ":"))),
         ]
         continuation_answer = b"continued after complete tool results"
         continuation_sse, _, _ = sse_answer(
             "continuation-answer", "continuation-reasoning", "continuation-message", continuation_answer.decode()
         )
         queued_calls = [
-            ("bash", "queued-call-0", json.dumps({"cmd": "printf queued"}, separators=(",", ":"))),
+            ("bash", "queued-call-0", json.dumps({"cmd": "printf queued", "timeout_ms": None}, separators=(",", ":"))),
             ("missing-tool", "queued-call-1", "{}"),
         ]
         queued_answer = b"continued with queued input"

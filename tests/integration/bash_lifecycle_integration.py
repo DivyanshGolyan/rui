@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import json
+import os
 import pathlib
 import shutil
+import signal
 import sys
 import tempfile
 import threading
@@ -19,9 +21,10 @@ def endpoint_for(name, command):
     return endpoint, thread, f"http://127.0.0.1:{endpoint.server_port}/responses"
 
 
-def admit(state, store, endpoint_url, name, fault):
+def admit(state, store, endpoint_url, name, fault=None):
     session = f"direct/{name}"
-    host = fixture.start_host(store, endpoint_url, "--fault", fault)
+    arguments = ("--fault", fault) if fault is not None else ()
+    host = fixture.start_host(store, endpoint_url, *arguments)
     bash_fixture.configure(state, store, f"{name}-config", session)
     fixture.message(state, store, f"{name}-message", session, "execute")
     action = fixture.wait_for(
@@ -80,6 +83,45 @@ def main():
                 endpoint.shutdown()
                 endpoint.server_close()
                 thread.join(timeout=5)
+
+        name = "lifecycle-idle-detached-writer"
+        state = root / name
+        state.mkdir(mode=0o700)
+        store = state / "store"
+        detached_pid_path = state / "detached-pid"
+        endpoint, thread, endpoint_url = endpoint_for(
+            name,
+            f"setsid sh -c 'echo $$ > {detached_pid_path}; sleep 30' &",
+        )
+        host = None
+        detached_pid = None
+        try:
+            host, session = admit(state, store, endpoint_url, name)
+            fixture.wait_for(
+                detached_pid_path.exists,
+                "idle detached writer identity",
+            )
+            detached_pid = int(detached_pid_path.read_text())
+            fixture.wait_for(
+                lambda: bash_fixture.resolution(store, session) == "succeeded",
+                "idle detached writer finite-tail settlement",
+                interval=0.5,
+            )
+            result = bash_fixture.result_text(store, session)
+            assert "Capture may be incomplete" in result, result
+            fixture.wait_for(
+                lambda: fixture.completed_observation(store, f"{name}-message"),
+                "idle detached writer continuation",
+            )
+            assert bash_fixture.process_exists(detached_pid)
+        finally:
+            if host is not None:
+                fixture.stop_host(host)
+            if detached_pid is not None and bash_fixture.process_exists(detached_pid):
+                os.kill(detached_pid, signal.SIGKILL)
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
 
         name = "lifecycle-tail-snapshot"
         state = root / name

@@ -8,7 +8,7 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 13;
+pub const schema_version: u32 = 14;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 const complete_tool_results_sql =
@@ -6480,16 +6480,16 @@ fn settleTwoActionsForTesting(
             .name = "bash",
             .encoded_call_id = "call\\nA",
             .decoded_call_id = "call\nA",
-            .encoded_arguments = "{\\\"cmd\\\":\\\"one\\\"}",
-            .decoded_arguments = "{\"cmd\":\"one\"}",
+            .encoded_arguments = "{\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"cmd\":\"one\",\"timeout_ms\":null}",
         },
         .{
             .item_id = "item-2",
             .name = "bash",
             .encoded_call_id = "call-B",
             .decoded_call_id = "call-B",
-            .encoded_arguments = "{\\\"cmd\\\":\\\"two\\\"}",
-            .decoded_arguments = "{\"cmd\":\"two\"}",
+            .encoded_arguments = "{\\\"cmd\\\":\\\"two\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"cmd\":\"two\",\"timeout_ms\":null}",
         },
     };
     try settleCallsForTesting(storage, tmp, binding, file_prefix, &calls);
@@ -6821,7 +6821,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     try std.testing.expectError(error.ActionNotFound, storage.actionArguments("direct/actions", std.math.maxInt(u64)));
     try std.testing.expect(!storage.isFenced());
     try expectContent(&storage, try storage.actionCallId("direct/actions", first_action_id), "call\nA");
-    try expectContent(&storage, try storage.actionArguments("direct/actions", first_action_id), "{\"cmd\":\"one\"}");
+    try expectContent(&storage, try storage.actionArguments("direct/actions", first_action_id), "{\"cmd\":\"one\",\"timeout_ms\":null}");
 
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
     try deny.key.set("deny-first");
@@ -6850,7 +6850,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
         break :second try std.fmt.parseInt(u64, second.action, 10);
     };
     try expectContent(&storage, try storage.actionCallId("direct/actions", second_action_id), "call-B");
-    try expectContent(&storage, try storage.actionArguments("direct/actions", second_action_id), "{\"cmd\":\"two\"}");
+    try expectContent(&storage, try storage.actionArguments("direct/actions", second_action_id), "{\"cmd\":\"two\",\"timeout_ms\":null}");
 
     var stop = try completeSessionStop("action-stop", "direct/actions");
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
@@ -6923,8 +6923,8 @@ test "Action settlement atomically yields to an earlier Session stop" {
         .name = "bash",
         .encoded_call_id = "settlement-stop-call",
         .decoded_call_id = "settlement-stop-call",
-        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\"}",
-        .decoded_arguments = "{\"cmd\":\"true\"}",
+        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
     }};
     try settleCallsForTesting(&storage, &tmp, model_binding, "settlement-stop-metadata", &calls);
     const action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation");
@@ -7095,13 +7095,13 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     try submitTestMessage(&storage, &tmp, "mixed-message", "mixed-message", "direct/mixed-calls", "classify");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
-        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"cmd\\\":\\\"one\\\"}", .decoded_arguments = "{\"cmd\":\"one\"}" },
+        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"one\",\"timeout_ms\":null}" },
         .{ .item_id = "item-2", .name = "other", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{}", .decoded_arguments = "{}" },
         .{ .item_id = "item-3", .name = "bash", .encoded_call_id = "call-3", .decoded_call_id = "call-3", .encoded_arguments = "{", .decoded_arguments = "{" },
         .{ .item_id = "item-4", .name = "bash", .encoded_call_id = "call-4", .decoded_call_id = "call-4", .encoded_arguments = "{\\\"command\\\":\\\"wrong\\\"}", .decoded_arguments = "{\"command\":\"wrong\"}" },
         .{ .item_id = "item-5", .name = "edit", .encoded_call_id = "call-5", .decoded_call_id = "call-5", .encoded_arguments = "{}", .decoded_arguments = "{}" },
         .{ .item_id = "item-6", .name = "x" ** 300, .encoded_call_id = "call-6", .decoded_call_id = "call-6", .encoded_arguments = "{}", .decoded_arguments = "{}" },
-        .{ .item_id = "item-7", .name = "bash", .encoded_call_id = "call-7", .decoded_call_id = "call-7", .encoded_arguments = "{\\\"cmd\\\":\\\"seven\\\"}", .decoded_arguments = "{\"cmd\":\"seven\"}" },
+        .{ .item_id = "item-7", .name = "bash", .encoded_call_id = "call-7", .decoded_call_id = "call-7", .encoded_arguments = "{\\\"cmd\\\":\\\"seven\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"seven\",\"timeout_ms\":null}" },
     };
     try settleCallsForTesting(&storage, &tmp, binding, "mixed-metadata", &calls);
 
@@ -7228,7 +7228,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
             "AND action_id=CAST((SELECT min(action_id) FROM action_operation) AS TEXT)",
     ));
     try expectContent(&reopened, try reopened.actionCallId("direct/mixed-calls", first_action_id), "call-1");
-    try expectContent(&reopened, try reopened.actionArguments("direct/mixed-calls", first_action_id), "{\"cmd\":\"one\"}");
+    try expectContent(&reopened, try reopened.actionArguments("direct/mixed-calls", first_action_id), "{\"cmd\":\"one\",\"timeout_ms\":null}");
     const recovered_bytes = try testingSessionReport(&reopened, &tmp, "direct/mixed-calls", 1024 * 1024);
     defer std.testing.allocator.free(recovered_bytes);
     const recovered_report = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, recovered_bytes, .{ .ignore_unknown_fields = true });
@@ -7248,10 +7248,10 @@ test "complete call outcomes continue once in call order ahead of pending input"
     try submitTestMessage(&storage, &tmp, "result-first", "result-first", "direct/tool-results", "first");
     const first_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
-        .{ .item_id = "result-item-0", .name = "bash", .encoded_call_id = "result-call-0", .decoded_call_id = "result-call-0", .encoded_arguments = "{\\\"cmd\\\":\\\"zero\\\"}", .decoded_arguments = "{\"cmd\":\"zero\"}" },
+        .{ .item_id = "result-item-0", .name = "bash", .encoded_call_id = "result-call-0", .decoded_call_id = "result-call-0", .encoded_arguments = "{\\\"cmd\\\":\\\"zero\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"zero\",\"timeout_ms\":null}" },
         .{ .item_id = "result-item-1", .name = "unknown", .encoded_call_id = "result-call-1", .decoded_call_id = "result-call-1", .encoded_arguments = "{}", .decoded_arguments = "{}" },
         .{ .item_id = "result-item-2", .name = "bash", .encoded_call_id = "result-call-2", .decoded_call_id = "result-call-2", .encoded_arguments = "{", .decoded_arguments = "{" },
-        .{ .item_id = "result-item-3", .name = "bash", .encoded_call_id = "result-call-3", .decoded_call_id = "result-call-3", .encoded_arguments = "{\\\"cmd\\\":\\\"three\\\"}", .decoded_arguments = "{\"cmd\":\"three\"}" },
+        .{ .item_id = "result-item-3", .name = "bash", .encoded_call_id = "result-call-3", .decoded_call_id = "result-call-3", .encoded_arguments = "{\\\"cmd\\\":\\\"three\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"three\",\"timeout_ms\":null}" },
     };
     try settleCallsForTesting(&storage, &tmp, first_binding, "result-metadata", &calls);
     try submitTestMessage(&storage, &tmp, "result-second", "result-second", "direct/tool-results", "second");
@@ -7335,7 +7335,7 @@ test "terminal call-result import and read failures preserve canonical authority
     try configureTestSession(&import_store, "result-import-config", "direct/result-import");
     try submitTestMessage(&import_store, &import_tmp, "result-import-message", "result-import-message", "direct/result-import", "call");
     const import_binding = (try import_store.admitNextModelAttempt(.{})).?.permit.binding;
-    const valid_call = [_]TestingCall{.{ .item_id = "import-item", .name = "bash", .encoded_call_id = "import-call", .decoded_call_id = "import-call", .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\"}", .decoded_arguments = "{\"cmd\":\"true\"}" }};
+    const valid_call = [_]TestingCall{.{ .item_id = "import-item", .name = "bash", .encoded_call_id = "import-call", .decoded_call_id = "import-call", .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}" }};
     try settleCallsForTesting(&import_store, &import_tmp, import_binding, "result-import-metadata", &valid_call);
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = try queryU64(import_store.database, "SELECT action_id FROM action_operation") };
     try deny.key.set("result-import-deny");
@@ -7392,8 +7392,8 @@ test "runnable discovery fences structurally incomplete current tool calls" {
             .name = "bash",
             .encoded_call_id = "discovery-call",
             .decoded_call_id = "discovery-call",
-            .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\"}",
-            .decoded_arguments = "{\"cmd\":\"true\"}",
+            .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
         }};
         try settleCallsForTesting(&storage, &tmp, source, metadata[index], &calls);
         try exec(storage.database, "PRAGMA foreign_keys=OFF");
@@ -7438,8 +7438,8 @@ test "missing canonical call outcome rows fence history and inspection" {
             .name = "bash",
             .encoded_call_id = "missing-call",
             .decoded_call_id = "missing-call",
-            .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\"}",
-            .decoded_arguments = "{\"cmd\":\"true\"}",
+            .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
         }};
         try settleCallsForTesting(
             &storage,
@@ -7839,8 +7839,8 @@ test "call classification uses the proposing Operation frozen catalog" {
         .name = "bash",
         .encoded_call_id = "frozen-call",
         .decoded_call_id = "frozen-call",
-        .encoded_arguments = "{\\\"cmd\\\":\\\"echo frozen\\\"}",
-        .decoded_arguments = "{\"cmd\":\"echo frozen\"}",
+        .encoded_arguments = "{\\\"cmd\\\":\\\"echo frozen\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"cmd\":\"echo frozen\",\"timeout_ms\":null}",
     }};
     try settleCallsForTesting(&storage, &tmp, binding, "frozen-call-metadata", &calls);
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation"));
@@ -7857,8 +7857,8 @@ test "duplicate trustworthy call identity rolls back every imported consequence"
     try submitTestMessage(&storage, &tmp, "duplicate-call-message", "duplicate-call-message", "direct/duplicate-call", "duplicate");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
-        .{ .item_id = "duplicate-item-1", .name = "bash", .encoded_call_id = "same-call", .decoded_call_id = "same-call", .encoded_arguments = "{\\\"cmd\\\":\\\"one\\\"}", .decoded_arguments = "{\"cmd\":\"one\"}" },
-        .{ .item_id = "duplicate-item-2", .name = "bash", .encoded_call_id = "same-call", .decoded_call_id = "same-call", .encoded_arguments = "{\\\"cmd\\\":\\\"two\\\"}", .decoded_arguments = "{\"cmd\":\"two\"}" },
+        .{ .item_id = "duplicate-item-1", .name = "bash", .encoded_call_id = "same-call", .decoded_call_id = "same-call", .encoded_arguments = "{\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"one\",\"timeout_ms\":null}" },
+        .{ .item_id = "duplicate-item-2", .name = "bash", .encoded_call_id = "same-call", .decoded_call_id = "same-call", .encoded_arguments = "{\\\"cmd\\\":\\\"two\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"two\",\"timeout_ms\":null}" },
     };
     try std.testing.expectError(
         error.InvalidProviderEnvelope,
@@ -7891,8 +7891,8 @@ test "valid and rejected call populations grow independently" {
             .name = "bash",
             .encoded_call_id = valid_call,
             .decoded_call_id = valid_call,
-            .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\"}",
-            .decoded_arguments = "{\"cmd\":\"true\"}",
+            .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
         };
         const rejected_item = try std.fmt.bufPrint(&rejected_item_storage[index], "rejected-item-{d}", .{index});
         const rejected_call = try std.fmt.bufPrint(&rejected_call_storage[index], "rejected-call-{d}", .{index});
@@ -9112,7 +9112,10 @@ test "fresh Store uses current schema and rejects the prior version" {
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(removed_index));
         try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(removed_index, 0));
     }
-    try exec(storage.database, "PRAGMA user_version=7");
+    try exec(
+        storage.database,
+        std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version - 1}),
+    );
     try storage.close();
 
     try std.testing.expectError(

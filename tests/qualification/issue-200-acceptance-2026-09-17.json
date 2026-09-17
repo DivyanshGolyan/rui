@@ -1,6 +1,6 @@
 {
-  "recorded_utc": "2026-09-17T21:48:00Z",
-  "tested_base_revision": "30f618eb092fe2d09ad2f51197e1b0501df00a5f",
+  "recorded_utc": "2026-09-17T22:49:44Z",
+  "tested_base_revision": "353436b5bc759938cf0b0a52cbb11c2a6b21e91d",
   "working_tree_dirty": true,
   "scope": "Exact source hashes below identify the uncommitted issue #200 implementation that was tested before its local commit.",
   "environment": {
@@ -14,15 +14,18 @@
   },
   "source_sha256": {
     "build.zig": "87fba0b7aaa34da07a48ca2a37a0ed271e96624ca3bf52432fa4d6cdb9718e2a",
-    "src/bash.zig": "acaf5703a2a25119279b574424aaf3586969d4b4aa99ea27ece680883924b900",
+    "src/bash.zig": "4b54725a01b5a49b9d1ab31203b27b6d3544e8a308896f56229fbed5bbee462a",
     "src/bash_platform.c": "0d9586e4b401f67e264eca785aa28580836a23fbbc13559038e7e4e9808a35b7",
     "src/cli.zig": "a5825a4071b04c2f75446360181c26af349b5d2d709e7854454567481a3a550f",
     "src/output_retention.zig": "9eaf6aea861c417caf14548c49c4e7bf5a2584191142e8d4e9519aee8b21fef9",
     "src/server.zig": "26955ddd4ee8787b905d8c91a01befbc19761397fcc823a030181716be92c692",
-    "src/store.zig": "ed875007917e6d6b0c1bf2f94c05c96f0f3fb2d17cdb3d1f8f9b3c8a565bab20",
-    "tests/integration/bash_integration.py": "3ba29f791b0a76d7c649d08903fdcb358a249ce1c143f0b13f78b729f9fde6cb",
-    "tests/integration/bash_lifecycle_integration.py": "2c204f93b9c393ce8588f39565c9e38e83887b441bfdcfd86177ef991ff90864",
-    "tests/integration/dispatch_integration.py": "17a06c25d36f6c5193ad48173e1980c0ad1f973b4cd2105b35e38ad79c1d70d2"
+    "src/store.zig": "a5324f53e2a5baa1c16d5f836d587069e3b150e9c394287aa911d1dde7851791",
+    "src/tools.zig": "b349a628f13aabac8a08e504ea8dbe8eb5f9268c644a0385ab112a26252a7acc",
+    "tests/integration/admission_integration.sh": "4d83ca530443a373a1b2a96ba9b08b1e3d85f17b2ae907b4c6bbe70733384958",
+    "tests/integration/bash_integration.py": "5f11182287529785a31d015de591a18a826dd65090a4fae730de9f5cd443791a",
+    "tests/integration/bash_lifecycle_integration.py": "226936cd183990529b41f2412446a718269220f198d911827a7ec373f92cc8f5",
+    "tests/integration/control_integration.py": "7d2ce3ba197d1470e1eb90d5c4d3ddab5d42871a68d4275cbeccc367929139f5",
+    "tests/integration/dispatch_integration.py": "22ff2e04a786dcf2def6024a3d76b365f2d96c7b64e14a435153dc198033bd0d"
   },
   "fixed_resources": {
     "active_capacity": 1000,
@@ -56,8 +59,8 @@
     },
     {
       "phase": "active-descendant-pipes",
-      "rss_bytes": 9043968,
-      "high_water_bytes": 9158656,
+      "rss_bytes": 9031680,
+      "high_water_bytes": 9146368,
       "descriptors": 17,
       "scratch_files": 3,
       "scratch_logical_bytes": 22,
@@ -65,8 +68,8 @@
     },
     {
       "phase": "two-sibling-retained-idle",
-      "rss_bytes": 9166848,
-      "high_water_bytes": 9498624,
+      "rss_bytes": 9191424,
+      "high_water_bytes": 9523200,
       "descriptors": 12,
       "scratch_files": 4,
       "scratch_logical_bytes": 0,
@@ -75,7 +78,7 @@
   ],
   "gates": [
     {"command": "zig build check", "result": "passed", "native_tests": 137},
-    {"command": "zig build bash-lifecycle-integration", "result": "passed", "faults": ["observe", "reap", "reap-watchdog", "group-probe", "tail-snapshot", "signal", "cleanup-watchdog"]},
+    {"command": "zig build bash-lifecycle-integration", "result": "passed", "faults": ["observe", "reap", "reap-watchdog", "group-probe", "tail-snapshot", "signal", "cleanup-watchdog"], "finite_tail_cases": ["idle detached writer"]},
     {"command": "zig build measurement-check", "result": "passed"},
     {"command": "zig build cross-check-linux", "result": "passed", "targets": ["Linux x86-64", "Linux ARM64"]},
     {"command": "python3 -m py_compile tests/integration/*.py", "result": "passed"},

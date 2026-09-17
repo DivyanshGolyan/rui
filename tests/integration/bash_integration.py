@@ -147,9 +147,7 @@ def result_text(store, session):
 
 
 def add_exchange(responses, name, command, answer="continued", timeout_ms=None):
-    arguments = {"cmd": command}
-    if timeout_ms is not None:
-        arguments["timeout_ms"] = timeout_ms
+    arguments = {"cmd": command, "timeout_ms": timeout_ms}
     responses.append(
         fixture.sse_tool_calls(
             f"{name}-calls",
@@ -174,14 +172,14 @@ def main():
     responses.append(
         fixture.sse_tool_calls(
             "unattempted-calls",
-            [("bash", "unattempted-call", json.dumps({"cmd": f"printf x >> {unattempted_marker}"}))],
+            [("bash", "unattempted-call", json.dumps({"cmd": f"printf x >> {unattempted_marker}", "timeout_ms": None}))],
         )
     )
     prelaunch_stop_marker = state / "prelaunch-stop-marker"
     responses.append(
         fixture.sse_tool_calls(
             "prelaunch-stop-calls",
-            [("bash", "prelaunch-stop-call", json.dumps({"cmd": f"printf x >> {prelaunch_stop_marker}"}))],
+            [("bash", "prelaunch-stop-call", json.dumps({"cmd": f"printf x >> {prelaunch_stop_marker}", "timeout_ms": None}))],
         )
     )
     before_launch_marker = state / "before-launch-marker"
@@ -191,13 +189,13 @@ def main():
     responses.append(
         fixture.sse_tool_calls(
             "stop-calls",
-            [("bash", "stop-call", json.dumps({"cmd": "trap '' TERM; sleep 30"}, separators=(",", ":")))],
+            [("bash", "stop-call", json.dumps({"cmd": "trap '' TERM; sleep 30", "timeout_ms": None}, separators=(",", ":")))],
         )
     )
     responses.append(
         fixture.sse_tool_calls(
             "settlement-stop-calls",
-            [("bash", "settlement-stop-call", json.dumps({"cmd": "printf sealed"}))],
+            [("bash", "settlement-stop-call", json.dumps({"cmd": "printf sealed", "timeout_ms": None}))],
         )
     )
     exited_bash_pid = state / "exited-bash-pid"
@@ -211,7 +209,8 @@ def main():
                 json.dumps(
                     {
                         "cmd": f"printf $$ > {exited_bash_pid}; "
-                        f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & printf $! > {exited_child_pid}"
+                        f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & printf $! > {exited_child_pid}",
+                        "timeout_ms": None,
                     },
                     separators=(",", ":"),
                 ),
@@ -237,7 +236,8 @@ def main():
                 json.dumps(
                     {
                         "cmd": f"printf $$ > {stopped_pipes_bash_pid}; "
-                        f"(trap '' TERM; sleep 30) & printf $! > {stopped_pipes_child_pid}"
+                        f"(trap '' TERM; sleep 30) & printf $! > {stopped_pipes_child_pid}",
+                        "timeout_ms": None,
                     },
                     separators=(",", ":"),
                 ),
@@ -284,7 +284,7 @@ def main():
     responses.append(
         fixture.sse_tool_calls(
             "post-resolution-calls",
-            [("bash", "post-resolution-call", json.dumps({"cmd": "printf complete"}))],
+            [("bash", "post-resolution-call", json.dumps({"cmd": "printf complete", "timeout_ms": None}))],
         )
     )
     sibling_marker = state / "sibling-marker"
@@ -296,7 +296,7 @@ def main():
                     "bash",
                     "sibling-call-0",
                     json.dumps(
-                        {"cmd": f"sleep 0.2; printf a >> {sibling_marker}"},
+                        {"cmd": f"sleep 0.2; printf a >> {sibling_marker}", "timeout_ms": None},
                         separators=(",", ":"),
                     ),
                 ),
@@ -304,7 +304,7 @@ def main():
                     "bash",
                     "sibling-call-1",
                     json.dumps(
-                        {"cmd": f"printf b >> {sibling_marker}"},
+                        {"cmd": f"printf b >> {sibling_marker}", "timeout_ms": None},
                         separators=(",", ":"),
                     ),
                 ),

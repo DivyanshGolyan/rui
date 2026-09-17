@@ -60,7 +60,7 @@ fn parseBashArgumentsStrict(source: anytype, writer: anytype) !?BashArguments {
         }
     }
     try source.space();
-    if (try source.peek() != null or !has_command) return null;
+    if (try source.peek() != null or !has_command or !has_timeout) return null;
     return result;
 }
 
