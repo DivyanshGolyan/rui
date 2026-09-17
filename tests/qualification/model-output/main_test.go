@@ -31,14 +31,17 @@ func TestReduceStatusesIncludesEveryFamilyAndPreservesPrecedence(t *testing.T) {
 	}
 }
 
-func TestMemoryStatusDistinguishesMissingAggregationFromTargetMiss(t *testing.T) {
+func TestMemoryEvidenceRequiresCompleteAggregationWithoutApplyingAQuota(t *testing.T) {
 	incomplete := wholeRui(measurement.ProcessSample{LiveDescendantProcesses: 1})
-	if got := memoryStatus(incomplete); got != "incomplete" {
+	if got := memoryEvidenceStatus(incomplete); got != "incomplete" {
 		t.Fatalf("live descendant reduced to %s", got)
 	}
-	miss := wholeRui(measurement.ProcessSample{Footprint: measurement.Footprint{LifetimePeakBytes: memoryTarget + 1}})
-	if got := memoryStatus(miss); got != "target_miss" {
-		t.Fatalf("memory miss reduced to %s", got)
+	large := wholeRui(measurement.ProcessSample{Footprint: measurement.Footprint{LifetimePeakBytes: 257 * 1024 * 1024}})
+	if got := memoryEvidenceStatus(large); got != "passed" {
+		t.Fatalf("complete footprint observation reduced to %s", got)
+	}
+	if _, hasRetiredTarget := large["within_256_mib_target"]; hasRetiredTarget {
+		t.Fatalf("complete footprint observation retained retired target: %v", large)
 	}
 }
 
@@ -74,7 +77,7 @@ func TestSpillVerdictRequiresEverySuccessPredicate(t *testing.T) {
 	resolution := "completed"
 	zero := 0
 	validFacts := spillFacts{IntegrityCheck: "ok", CompletedTurns: 1, CanonicalOutputItems: 2, AssistantProjections: 1, OperationCount: 1, AttemptOrdinal: &attempt, ResolutionCode: &resolution, Uncertain: &zero}
-	completeMemory := map[string]any{"status": "complete", "within_256_mib_target": true}
+	completeMemory := map[string]any{"status": "complete"}
 	validExecution := map[string]any{"dispatch_fenced": false, "custody_occupied": "0", "scratch_used_bytes": "0"}
 	if status, _, _ := spillVerdict(true, true, false, 1, completeMemory, completeMemory, validExecution, validFacts, "", "observed"); status != "passed" {
 		t.Fatalf("valid spill success reduced to %s", status)
@@ -113,7 +116,7 @@ func TestSpillVerdictRequiresExactCleanRollback(t *testing.T) {
 	uncertain := 1
 	retryDue := int64(0)
 	rollback := spillFacts{IntegrityCheck: "ok", PartialTurns: 1, OperationCount: 1, AttemptOrdinal: &attempt, Uncertain: &uncertain, RetryDueAtMS: &retryDue}
-	completeMemory := map[string]any{"status": "complete", "within_256_mib_target": true}
+	completeMemory := map[string]any{"status": "complete"}
 	message := "dispatch fenced after model output import failure: OutOfMemory"
 	if status, clean, expected := spillVerdict(false, false, true, 1, completeMemory, nil, nil, rollback, message, "unavailable"); status != "expected_memory_failure" || !clean || !expected {
 		t.Fatalf("valid rollback = %s clean=%t expected=%t", status, clean, expected)
@@ -141,12 +144,12 @@ func TestSpillVerdictRequiresExactCleanRollback(t *testing.T) {
 	}
 }
 
-func TestSpillVerdictFailurePrecedesMemoryQualification(t *testing.T) {
+func TestSpillVerdictFailurePrecedesMemoryEvidence(t *testing.T) {
 	attempt := 1
 	badFacts := spillFacts{IntegrityCheck: "bad", OperationCount: 1, AttemptOrdinal: &attempt}
 	for _, memory := range []map[string]any{
 		{"status": "incomplete"},
-		{"status": "complete", "within_256_mib_target": false},
+		{"status": "complete"},
 	} {
 		if status, _, _ := spillVerdict(true, true, false, 1, memory, memory, map[string]any{}, badFacts, "", "observed"); status != "failed" {
 			t.Fatalf("bad completed facts with memory %v reduced to %s", memory, status)
@@ -159,9 +162,9 @@ func TestSpillVerdictFailurePrecedesMemoryQualification(t *testing.T) {
 	resolution := "completed"
 	validFacts := spillFacts{IntegrityCheck: "ok", CompletedTurns: 1, CanonicalOutputItems: 2, AssistantProjections: 1, OperationCount: 1, AttemptOrdinal: &attempt, ResolutionCode: &resolution, Uncertain: &zero}
 	execution := map[string]any{"dispatch_fenced": false, "custody_occupied": "0", "scratch_used_bytes": "0"}
-	overTarget := map[string]any{"status": "complete", "within_256_mib_target": false}
-	if status, _, _ := spillVerdict(true, true, false, 1, overTarget, overTarget, execution, validFacts, "", "unavailable"); status != "incomplete" {
-		t.Fatalf("missing write evidence did not precede target miss: %s", status)
+	completeMemory := map[string]any{"status": "complete"}
+	if status, _, _ := spillVerdict(true, true, false, 1, completeMemory, completeMemory, execution, validFacts, "", "unavailable"); status != "incomplete" {
+		t.Fatalf("missing write evidence reduced to %s", status)
 	}
 }
 

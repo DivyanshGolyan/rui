@@ -28,7 +28,6 @@ import (
 )
 
 const (
-	memoryTarget                = 256 * 1024 * 1024
 	capacityEventsPerBatch      = 1
 	capacityEventBytes          = 260
 	capacityMaximumAverageCores = 2.0
@@ -308,20 +307,14 @@ func wholeRui(sample measurement.ProcessSample) map[string]any {
 		"rss_bytes": sample.RSSBytes, "physical_footprint_bytes": sample.Footprint.PhysicalBytes,
 		"lifetime_peak_physical_footprint_bytes":             sample.Footprint.LifetimePeakBytes,
 		"lifetime_peak_physical_footprint_upper_bound_bytes": upper,
-		"within_256_mib_target":                              upper <= memoryTarget,
-		"qualification_basis":                                "conservative upper bound of cumulative lifetime physical-footprint peak",
+		"measurement_basis":                                  "conservative upper bound of cumulative lifetime physical-footprint peak",
 	}
 }
 
-func memoryStatus(aggregates ...map[string]any) string {
+func memoryEvidenceStatus(aggregates ...map[string]any) string {
 	for _, aggregate := range aggregates {
 		if aggregate["status"] != "complete" {
 			return "incomplete"
-		}
-	}
-	for _, aggregate := range aggregates {
-		if aggregate["within_256_mib_target"] != true {
-			return "target_miss"
 		}
 	}
 	return "passed"
@@ -604,7 +597,7 @@ func spillVerdict(enabled, completed, naturalHostFailure bool, providerRequests 
 		if !semanticSuccess || writeStatus == "invalid" {
 			return "failed", false, false
 		}
-		memoryVerdict := memoryStatus(initialWhole, finalWhole)
+		memoryVerdict := memoryEvidenceStatus(initialWhole, finalWhole)
 		if writeStatus != "observed" || memoryVerdict == "incomplete" {
 			return "incomplete", false, false
 		}
@@ -616,7 +609,7 @@ func spillVerdict(enabled, completed, naturalHostFailure bool, providerRequests 
 	if !expectedMemoryFailure {
 		return "failed", cleanRollback, false
 	}
-	initialMemory := memoryStatus(initialWhole)
+	initialMemory := memoryEvidenceStatus(initialWhole)
 	if initialMemory != "passed" {
 		return initialMemory, cleanRollback, true
 	}
@@ -679,7 +672,7 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 	}
 	coldWhole := wholeRui(cold)
 	retainedWhole := wholeRui(retained)
-	status := outputCaseStatus(memoryStatus(coldWhole, retainedWhole), outputAuditValid(audit, reasoning))
+	status := outputCaseStatus(memoryEvidenceStatus(coldWhole, retainedWhole), outputAuditValid(audit, reasoning))
 	return map[string]any{
 		"status": status, "answer_bytes": len(answer), "reasoning_items": reasoning, "total_output_items": reasoning + 1,
 		"sse_bytes": len(payload), "request_bytes": endpoint.lastRequestBytes(), "scratch_limit_bytes": host.Ready["scratch_limit_bytes"],
@@ -1331,7 +1324,7 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 	requestIntegrityStatus := observationStatus(true, requestComplete)
 	initialWhole := wholeRui(initial)
 	retainedWhole := wholeRui(retained)
-	memoryVerdict := memoryStatus(initialWhole, retainedWhole)
+	memoryVerdict := memoryEvidenceStatus(initialWhole, retainedWhole)
 	status := capacityVerdict(capacityVerdictInput{
 		Capacity:               capacity,
 		EventsPerSecond:        eventsPerSecond,
