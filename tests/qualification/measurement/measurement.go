@@ -406,6 +406,54 @@ type Footprint struct {
 	LifetimePeakTolerance uint64 `json:"lifetime_peak_physical_footprint_rounding_tolerance_bytes"`
 }
 
+type FootprintVerdict struct {
+	Status          string `json:"status"`
+	TargetBytes     uint64 `json:"target_bytes"`
+	LowerBoundBytes uint64 `json:"lifetime_peak_lower_bound_bytes"`
+	UpperBoundBytes uint64 `json:"lifetime_peak_upper_bound_bytes"`
+}
+
+func ClassifyFootprint(footprint Footprint, target uint64) FootprintVerdict {
+	lower := uint64(0)
+	if footprint.LifetimePeakBytes > footprint.LifetimePeakTolerance {
+		lower = footprint.LifetimePeakBytes - footprint.LifetimePeakTolerance
+	}
+	upper := footprint.LifetimePeakBytes + footprint.LifetimePeakTolerance
+	status := "unavailable"
+	if upper <= target {
+		status = "passed"
+	} else if lower > target {
+		status = "target_miss"
+	}
+	return FootprintVerdict{Status: status, TargetBytes: target, LowerBoundBytes: lower, UpperBoundBytes: upper}
+}
+
+type SampleValidity struct {
+	Attempts   uint64 `json:"attempts"`
+	Succeeded  uint64 `json:"succeeded"`
+	Failed     uint64 `json:"failed"`
+	FirstError string `json:"first_error,omitempty"`
+}
+
+func (v *SampleValidity) Record(err error) {
+	v.Attempts++
+	if err == nil {
+		v.Succeeded++
+		return
+	}
+	v.Failed++
+	if v.FirstError == "" {
+		v.FirstError = err.Error()
+	}
+}
+
+func (v SampleValidity) Status() string {
+	if v.Succeeded == 0 {
+		return "unavailable"
+	}
+	return "diagnostic"
+}
+
 var footprintCounter = regexp.MustCompile(`^\s*(phys_footprint|phys_footprint_peak):\s+([0-9]+(?:\.[0-9]+)?)\s+(B|KB|MB|GB)\s*$`)
 
 func ParseFootprint(report string) (Footprint, error) {

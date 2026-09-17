@@ -22,6 +22,9 @@ func TestScenarioCallsVaryClassificationAndPayloadIndependently(t *testing.T) {
 		if err := json.Unmarshal([]byte(calls[index].Arguments), &descriptor); err != nil {
 			t.Fatal(err)
 		}
+		if !bytes.HasPrefix([]byte(descriptor.Cmd), []byte("touch \"/must/not/run\"")) {
+			t.Fatalf("valid call does not create the forbidden-effect sentinel if launched: %q", descriptor.Cmd)
+		}
 		if !bytes.Contains([]byte(descriptor.Cmd), bytes.Repeat([]byte("x"), 37)) {
 			t.Fatalf("valid descriptor omitted independent payload: %q", descriptor.Cmd)
 		}

@@ -83,6 +83,14 @@ func (c Client) Inspect(session string) (map[string]any, error) {
 	return result, nil
 }
 
+func (c Client) ReadAction(session, action, field string) ([]byte, error) {
+	command := "read-action-" + field
+	if field != "call-id" && field != "arguments" {
+		return nil, fmt.Errorf("unsupported Action field %q", field)
+	}
+	return Run(c.Deadline, c.Binary, command, "--store", c.Store, "--session", session, "--action", action)
+}
+
 func (c Client) WaitResult(key string) (map[string]any, error) {
 	var result map[string]any
 	err := WaitFor(c.Deadline, 25*time.Millisecond, "terminal result for "+key, func() (bool, error) {

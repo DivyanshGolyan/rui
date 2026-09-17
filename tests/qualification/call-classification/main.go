@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -120,7 +118,7 @@ func scenarioCalls(value scenario, forbidden string) []call {
 	calls := make([]call, 0, value.Valid+value.Rejected)
 	padding := strings.Repeat("x", value.ArgumentBytes)
 	for index := range value.Valid {
-		command := fmt.Sprintf("test ! -e %q # %s", forbidden, padding)
+		command := fmt.Sprintf("touch %q # %s", forbidden, padding)
 		arguments, _ := json.Marshal(map[string]string{"cmd": command})
 		calls = append(calls, call{"bash", fmt.Sprintf("valid-%06d", index), string(arguments)})
 	}
@@ -139,27 +137,33 @@ type portablePeak struct {
 	VirtualBytes    uint64 `json:"virtual_bytes"`
 	OpenDescriptors int32  `json:"open_descriptors"`
 	Threads         int32  `json:"threads"`
-	ScratchFiles    uint64 `json:"scratch_files"`
-	ScratchBytes    uint64 `json:"scratch_logical_bytes"`
-	DatabaseBytes   uint64 `json:"database_logical_bytes"`
+}
+
+type portableObservation struct {
+	Status   string                     `json:"status"`
+	Validity measurement.SampleValidity `json:"validity"`
+	Peak     *portablePeak              `json:"peak,omitempty"`
 }
 
 type sampler struct {
-	stop chan struct{}
-	done chan struct{}
-	mu   sync.Mutex
-	peak portablePeak
+	stop     chan struct{}
+	done     chan struct{}
+	mu       sync.Mutex
+	peak     portablePeak
+	validity measurement.SampleValidity
 }
 
-func startSampler(host *measurement.Host, store string) *sampler {
+func startSampler(host *measurement.Host) *sampler {
 	s := &sampler{stop: make(chan struct{}), done: make(chan struct{})}
 	go func() {
 		defer close(s.done)
 		ticker := time.NewTicker(5 * time.Millisecond)
 		defer ticker.Stop()
 		for {
-			if sample, err := measurement.SamplePortableProcess(host.Process); err == nil {
-				s.mu.Lock()
+			sample, err := measurement.SamplePortableProcess(host.Process)
+			s.mu.Lock()
+			s.validity.Record(err)
+			if err == nil {
 				if sample.RSSBytes > s.peak.RSSBytes {
 					s.peak.RSSBytes = sample.RSSBytes
 				}
@@ -172,19 +176,8 @@ func startSampler(host *measurement.Host, store string) *sampler {
 				if sample.Threads > s.peak.Threads {
 					s.peak.Threads = sample.Threads
 				}
-				if scratch, sampleError := scratchPopulation(store); sampleError == nil {
-					if scratch["files"] > s.peak.ScratchFiles {
-						s.peak.ScratchFiles = scratch["files"]
-					}
-					if scratch["logical_bytes"] > s.peak.ScratchBytes {
-						s.peak.ScratchBytes = scratch["logical_bytes"]
-					}
-				}
-				if database, sampleError := measurement.DatabaseSize(store); sampleError == nil && database["database_logical_bytes"] > s.peak.DatabaseBytes {
-					s.peak.DatabaseBytes = database["database_logical_bytes"]
-				}
-				s.mu.Unlock()
 			}
+			s.mu.Unlock()
 			select {
 			case <-s.stop:
 				return
@@ -195,12 +188,17 @@ func startSampler(host *measurement.Host, store string) *sampler {
 	return s
 }
 
-func (s *sampler) finish() portablePeak {
+func (s *sampler) finish() portableObservation {
 	close(s.stop)
 	<-s.done
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.peak
+	observation := portableObservation{Status: s.validity.Status(), Validity: s.validity}
+	if s.validity.Succeeded > 0 {
+		peak := s.peak
+		observation.Peak = &peak
+	}
+	return observation
 }
 
 func actionIDs(inspection map[string]any) ([]string, error) {
@@ -225,6 +223,53 @@ func actionIDs(inspection map[string]any) ([]string, error) {
 		result = append(result, id)
 	}
 	return result, nil
+}
+
+func verifyActionContent(client measurement.Client, session string, inspection map[string]any, expected []call) (map[string]any, error) {
+	actions, ok := inspection["actions"].(map[string]any)
+	if !ok {
+		return nil, errors.New("inspection omitted actions")
+	}
+	rows, ok := actions["unresolved"].([]any)
+	if !ok || len(rows) != len(expected) {
+		return nil, fmt.Errorf("got %d readable Actions, want %d", len(rows), len(expected))
+	}
+	for index, value := range rows {
+		row, ok := value.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("Action %d report is malformed", index)
+		}
+		action, actionOK := row["action"].(string)
+		ordinal, ordinalOK := row["call_ordinal"].(string)
+		if !actionOK || !ordinalOK || ordinal != strconv.Itoa(index) {
+			return nil, fmt.Errorf("Action %d identity/order mismatch: %v", index, row)
+		}
+		callID, err := client.ReadAction(session, action, "call-id")
+		if err != nil {
+			return nil, fmt.Errorf("read Action %d call ID: %w", index, err)
+		}
+		arguments, err := client.ReadAction(session, action, "arguments")
+		if err != nil {
+			return nil, fmt.Errorf("read Action %d arguments: %w", index, err)
+		}
+		if !bytes.Equal(callID, []byte(expected[index].ID)) || !bytes.Equal(arguments, []byte(expected[index].Arguments)) {
+			return nil, fmt.Errorf("Action %d public content differs from provider bytes", index)
+		}
+	}
+	return map[string]any{"status": "passed", "actions_read": len(rows), "fields_per_action": 2}, nil
+}
+
+func recordPortableSample(result map[string]any, name string, host *measurement.Host) {
+	sample, err := measurement.SamplePortableProcess(host.Process)
+	if err != nil {
+		result[name] = map[string]any{"status": "unavailable", "error": err.Error()}
+		result["portable_measurement_status"] = "unavailable"
+		return
+	}
+	result[name] = map[string]any{"status": "diagnostic", "sample": sample}
+	if result["portable_measurement_status"] == nil {
+		result["portable_measurement_status"] = "diagnostic"
+	}
 }
 
 func observedCounts(inspection map[string]any) (int, int, error) {
@@ -296,7 +341,7 @@ func deny(client measurement.Client, directory, session, action string, index in
 	return float64(time.Since(started).Microseconds()) / 1000, err
 }
 
-func scratchPopulation(store string) (map[string]uint64, error) {
+func namedScratchPopulation(store string) (map[string]uint64, error) {
 	entries, err := os.ReadDir(filepath.Join(store, "scratch"))
 	if err != nil {
 		return nil, err
@@ -309,35 +354,19 @@ func scratchPopulation(store string) (map[string]uint64, error) {
 		}
 		bytes += uint64(info.Size())
 	}
-	return map[string]uint64{"files": uint64(len(entries)), "logical_bytes": bytes}, nil
+	return map[string]uint64{"named_files": uint64(len(entries)), "named_logical_bytes": bytes}, nil
 }
 
 type auditedCall struct {
-	Ordinal         int     `json:"ordinal"`
-	NameBytes       int     `json:"name_bytes"`
-	NameSHA256      string  `json:"name_sha256"`
-	CallIDBytes     int     `json:"call_id_bytes"`
-	CallIDSHA256    string  `json:"call_id_sha256"`
-	ArgumentsBytes  int     `json:"arguments_bytes"`
-	ArgumentsSHA256 string  `json:"arguments_sha256"`
-	Rejection       *string `json:"rejection"`
-	ActionID        *int    `json:"action_id"`
-	Permission      *int    `json:"permission"`
-	ActionOutcome   *string `json:"action_outcome"`
+	CallOrdinal   int     `json:"call_ordinal"`
+	ItemOrdinal   int     `json:"item_ordinal"`
+	Rejection     *string `json:"rejection"`
+	ActionID      *int    `json:"action_id"`
+	Permission    *int    `json:"permission"`
+	ActionOutcome *string `json:"action_outcome"`
 }
 
-func contentDigest(value string) string {
-	hash := sha256.New()
-	domain := []byte("rui/content/v1")
-	var length [8]byte
-	binary.BigEndian.PutUint64(length[:], uint64(len(domain)))
-	hash.Write(length[:])
-	hash.Write(domain)
-	hash.Write([]byte(value))
-	return fmt.Sprintf("%X", hash.Sum(nil))
-}
-
-func audit(deadline measurement.Deadline, sqliteBinary, store string, expected scenario, expectedCalls []call) (map[string]any, error) {
+func audit(deadline measurement.Deadline, sqliteBinary, store string, expected scenario) (map[string]any, error) {
 	query := `SELECT printf('%d|%d|%d|%d|%d|%d|%d|%d|%d',` +
 		`(SELECT count(*) FROM model_tool_call),(SELECT count(*) FROM action_operation),` +
 		`(SELECT count(*) FROM model_tool_call WHERE rejection_code IS NOT NULL),` +
@@ -371,14 +400,9 @@ func audit(deadline measurement.Deadline, sqliteBinary, store string, expected s
 		counts["pending"] != 0 || counts["decisions"] != expected.Valid || counts["foreign_key_failures"] != 0 {
 		return map[string]any{"counts": counts}, fmt.Errorf("audit mismatch for %+v: %v", expected, counts)
 	}
-	rowsQuery := `SELECT call.call_ordinal AS ordinal,name.byte_length AS name_bytes,hex(name.digest) AS name_sha256,` +
-		`call_id.byte_length AS call_id_bytes,hex(call_id.digest) AS call_id_sha256,` +
-		`arguments.byte_length AS arguments_bytes,hex(arguments.digest) AS arguments_sha256,` +
+	rowsQuery := `SELECT call.call_ordinal,call.item_ordinal,` +
 		`call.rejection_code AS rejection,action.action_id AS action_id,action.permission_state AS permission,` +
 		`action.resolution_code AS action_outcome FROM model_tool_call call ` +
-		`JOIN content name ON name.content_id=call.name_content_id ` +
-		`JOIN content call_id ON call_id.content_id=call.call_id_content_id ` +
-		`JOIN content arguments ON arguments.content_id=call.arguments_content_id ` +
 		`LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal ` +
 		`ORDER BY call.call_ordinal;`
 	encoded, err := measurement.Run(deadline, sqliteBinary, "-json", filepath.Join(store, "rui.sqlite3"), rowsQuery)
@@ -389,18 +413,12 @@ func audit(deadline measurement.Deadline, sqliteBinary, store string, expected s
 	if err := json.Unmarshal(encoded, &rows); err != nil {
 		return map[string]any{"counts": counts}, fmt.Errorf("decode ordered call audit: %w", err)
 	}
-	if len(rows) != len(expectedCalls) {
-		return map[string]any{"counts": counts, "ordered_calls": rows}, fmt.Errorf("got %d audited calls, want %d", len(rows), len(expectedCalls))
+	if len(rows) != expected.Valid+expected.Rejected {
+		return map[string]any{"counts": counts, "ordered_calls": rows}, fmt.Errorf("got %d audited calls, want %d", len(rows), expected.Valid+expected.Rejected)
 	}
 	for index, row := range rows {
-		expectedCall := expectedCalls[index]
-		nameDigest := contentDigest(expectedCall.Name)
-		callIDDigest := contentDigest(expectedCall.ID)
-		argumentsDigest := contentDigest(expectedCall.Arguments)
-		if row.Ordinal != index || row.NameBytes != len(expectedCall.Name) || row.NameSHA256 != nameDigest ||
-			row.CallIDBytes != len(expectedCall.ID) || row.CallIDSHA256 != callIDDigest ||
-			row.ArgumentsBytes != len(expectedCall.Arguments) || row.ArgumentsSHA256 != argumentsDigest {
-			return map[string]any{"counts": counts, "ordered_calls": rows}, fmt.Errorf("call %d identity/order mismatch: %+v", index, row)
+		if row.CallOrdinal != index || row.ItemOrdinal != index {
+			return map[string]any{"counts": counts, "ordered_calls": rows}, fmt.Errorf("call %d relational order mismatch: %+v", index, row)
 		}
 		if index < expected.Valid {
 			if row.Rejection != nil || row.ActionID == nil || row.Permission == nil || *row.Permission != 2 || row.ActionOutcome == nil || *row.ActionOutcome != "denied" {
@@ -449,7 +467,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 			measurement.JoinCleanup(&returnedError, func() error { return host.Stop(measurement.TeardownAllowance) })
 		}
 	}()
-	samples := startSampler(host, store)
+	samples := startSampler(host)
 	samplersRunning := true
 	defer func() {
 		if samplersRunning {
@@ -460,11 +478,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 	if err := client.Configure(value.Name, "qualification/"+value.Name, "--tools", "bash"); err != nil {
 		return result, err
 	}
-	idle, err := measurement.SamplePortableProcess(host.Process)
-	if err != nil {
-		return result, err
-	}
-	result["retained_idle_before"] = idle
+	recordPortableSample(result, "retained_idle_before", host)
 	admissionStarted := time.Now()
 	if err := client.Message(value.Name, "qualification/"+value.Name, "classify raw provider calls"); err != nil {
 		return result, err
@@ -520,16 +534,21 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 		return result, err
 	}
 	result["inspection_ms"] = float64(time.Since(inspectStarted).Microseconds()) / 1000
-	held, err := measurement.SamplePortableProcess(host.Process)
-	if err != nil {
-		return result, err
-	}
-	result["delayed_cleanup_sample"] = held
+	recordPortableSample(result, "delayed_cleanup_sample", host)
 	result["delayed_cleanup_execution"] = inspection["execution"]
-	if population, populationError := scratchPopulation(store); populationError == nil {
-		result["delayed_cleanup_scratch"] = population
+	execution, ok := inspection["execution"].(map[string]any)
+	if !ok || execution["custody_occupied"] != "1" {
+		return result, fmt.Errorf("delayed cleanup did not retain one custody slot: %v", inspection["execution"])
+	}
+	if population, populationError := namedScratchPopulation(store); populationError == nil {
+		result["delayed_cleanup_named_scratch"] = population
 	} else {
 		return result, populationError
+	}
+	contentEvidence, err := verifyActionContent(client, "qualification/"+value.Name, inspection, calls[:value.Valid])
+	result["public_action_content"] = contentEvidence
+	if err != nil {
+		return result, err
 	}
 	actions, err := actionIDs(inspection)
 	if err != nil {
@@ -561,30 +580,58 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 		}
 	}
 	result["denial_latency"] = latencySummary(denialLatencies)
+	err = measurement.WaitFor(deadline, 10*time.Millisecond, "physical cleanup", func() (bool, error) {
+		candidate, inspectError := client.Inspect("qualification/" + value.Name)
+		if inspectError != nil {
+			return false, inspectError
+		}
+		execution, ok := candidate["execution"].(map[string]any)
+		if !ok {
+			return false, errors.New("inspection omitted execution")
+		}
+		return execution["custody_occupied"] == "0" && execution["scratch_used_bytes"] == "0", nil
+	})
+	if err != nil {
+		return result, err
+	}
+	recordPortableSample(result, "retained_idle_after", host)
+	result["database"], err = measurement.DatabaseSize(store)
+	if err != nil {
+		return result, err
+	}
+	result["retained_named_scratch"], err = namedScratchPopulation(store)
+	if err != nil {
+		return result, err
+	}
 	if runtime.GOOS == "darwin" {
-		physical, physicalError := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint.txt"))
+		physical, physicalError := measurement.SampleProcess(host.Process, filepath.Join(directory, "retained-footprint.txt"))
 		if physicalError != nil {
 			result["physical_footprint_status"] = "unavailable"
 			result["physical_footprint_error"] = physicalError.Error()
 		} else {
-			result["physical_footprint"] = physical.Footprint
-			if physical.Footprint.LifetimePeakBytes > physicalFootprintTargetBytes+physical.Footprint.LifetimePeakTolerance {
-				result["physical_footprint_status"] = "target_miss"
-			} else {
-				result["physical_footprint_status"] = "passed"
-			}
+			verdict := measurement.ClassifyFootprint(physical.Footprint, physicalFootprintTargetBytes)
+			result["physical_footprint_status"] = verdict.Status
+			result["physical_footprint"] = map[string]any{"lifecycle": "same Host cold through work, drain, and retained idle", "verdict": verdict, "retained_sample": physical}
 		}
 	} else {
 		result["physical_footprint_status"] = "unavailable"
 		result["physical_footprint_error"] = "accepted physical-footprint counter requires macOS /usr/bin/footprint"
 	}
+	portablePeak := samples.finish()
+	result["portable_observed_peak"] = portablePeak
+	if portablePeak.Status == "unavailable" {
+		result["portable_measurement_status"] = "unavailable"
+	}
+	samplersRunning = false
+	if _, statError := os.Stat(forbidden); !errors.Is(statError, os.ErrNotExist) {
+		return result, fmt.Errorf("forbidden Bash effect exists: %v", statError)
+	}
+	result["forbidden_bash_launch_absent"] = true
+	if err := host.Stop(measurement.TeardownAllowance); err != nil {
+		return result, err
+	}
+	hostRunning = false
 	if value.ReplayDenial && len(actions) > 0 {
-		if err := host.Stop(measurement.TeardownAllowance); err != nil {
-			return result, err
-		}
-		hostRunning = false
-		result["portable_observed_peak"] = samples.finish()
-		samplersRunning = false
 		host, err = measurement.StartHost(binary, store, endpoint.URL(), 1, filepath.Join(directory, "restart-stderr.log"), deadline)
 		if err != nil {
 			return result, err
@@ -613,47 +660,12 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 		if identityError != nil || len(remaining) != 0 {
 			return result, fmt.Errorf("restart changed denial outcomes: unresolved=%v error=%v", remaining, identityError)
 		}
-	}
-	err = measurement.WaitFor(deadline, 10*time.Millisecond, "physical cleanup", func() (bool, error) {
-		candidate, inspectError := client.Inspect("qualification/" + value.Name)
-		if inspectError != nil {
-			return false, inspectError
+		if err := host.Stop(measurement.TeardownAllowance); err != nil {
+			return result, err
 		}
-		execution, ok := candidate["execution"].(map[string]any)
-		if !ok {
-			return false, errors.New("inspection omitted execution")
-		}
-		return execution["custody_occupied"] == "0" && execution["scratch_used_bytes"] == "0", nil
-	})
-	if err != nil {
-		return result, err
+		hostRunning = false
 	}
-	retained, err := measurement.SamplePortableProcess(host.Process)
-	if err != nil {
-		return result, err
-	}
-	result["retained_idle_after"] = retained
-	result["database"], err = measurement.DatabaseSize(store)
-	if err != nil {
-		return result, err
-	}
-	result["retained_scratch"], err = scratchPopulation(store)
-	if err != nil {
-		return result, err
-	}
-	if _, statError := os.Stat(forbidden); !errors.Is(statError, os.ErrNotExist) {
-		return result, fmt.Errorf("forbidden Bash effect exists: %v", statError)
-	}
-	result["forbidden_bash_launch_absent"] = true
-	if err := host.Stop(measurement.TeardownAllowance); err != nil {
-		return result, err
-	}
-	hostRunning = false
-	if samplersRunning {
-		result["portable_observed_peak"] = samples.finish()
-		samplersRunning = false
-	}
-	facts, err := audit(deadline, sqliteBinary, store, value, calls)
+	facts, err := audit(deadline, sqliteBinary, store, value)
 	result["durable_audit"] = facts
 	if err != nil {
 		return result, err
@@ -701,6 +713,9 @@ func main() {
 		}
 		if physicalStatus, ok := value["physical_footprint_status"].(string); ok {
 			status = combineStatus(status, physicalStatus)
+		}
+		if portableStatus, ok := value["portable_measurement_status"].(string); ok && portableStatus == "unavailable" {
+			status = combineStatus(status, portableStatus)
 		}
 		cases[candidate.Name] = value
 	}
