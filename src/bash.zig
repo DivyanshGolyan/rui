@@ -340,6 +340,20 @@ pub const Execution = struct {
         if (try std.posix.poll(&descriptor, 0) == 0) return;
         const reserved: usize = @intCast(destination.budget.reserveUpTo(window.len));
         if (reserved == 0) {
+            var probe: [1]u8 = undefined;
+            const count = std.posix.read(pipe.handle, &probe) catch |err| {
+                if (err == error.WouldBlock) return;
+                self.capture_failure = .read;
+                self.stop(.capture_failed);
+                pipe.close(self.io);
+                pipe_slot.* = null;
+                return;
+            };
+            if (count == 0) {
+                pipe.close(self.io);
+                pipe_slot.* = null;
+                return;
+            }
             self.capture_failure = .exhausted;
             self.stop(.capture_failed);
             pipe.close(self.io);

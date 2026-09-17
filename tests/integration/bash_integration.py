@@ -211,8 +211,8 @@ def main():
     add_exchange(responses, "preparation-cleanup", "printf never")
     service_marker = state / "service-marker"
     add_exchange(responses, "service", f"printf x >> {service_marker}; sleep 30")
-    add_exchange(responses, "small-budget", "printf exhausted")
-    add_exchange(responses, "exhaustion", "printf '%0200d' 0")
+    add_exchange(responses, "small-budget", "printf %05d 0")
+    add_exchange(responses, "exhaustion", "printf %06d 0")
     import_marker = state / "import-marker"
     add_exchange(responses, "import", f"printf x >> {import_marker}")
     commit_marker = state / "commit-marker"
@@ -847,7 +847,7 @@ def main():
             store,
             endpoint_url,
             "--test-bash-scratch-limit-bytes",
-            "128",
+            "18",
         )
         configure(state, store, "small-budget-config", "direct/small-budget")
         fixture.message(state, store, "small-budget-message", "direct/small-budget", "execute")
@@ -857,7 +857,7 @@ def main():
         allow(state, store, "small-budget-allow", "direct/small-budget", action["action"])
         fixture.wait_for(
             lambda: resolution(store, "direct/small-budget") == "succeeded",
-            "small readable capture within remaining budget",
+            "capture ending exactly at the scratch limit",
         )
         fixture.wait_for(
             lambda: fixture.completed_observation(store, "small-budget-message"),
