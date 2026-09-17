@@ -707,7 +707,7 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
             return;
         };
         if (settlement == .session_stop) active.execution.releaseOutputReservation(host.retention);
-    }
+    } else active.execution.releaseOutputReservation(host.retention);
     if (host.faults.cleanup_delay_ms != 0) {
         _ = host.io.sleep(.fromMilliseconds(host.faults.cleanup_delay_ms), .awake) catch {};
     }
