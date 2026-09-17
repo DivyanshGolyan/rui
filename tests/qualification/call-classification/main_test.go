@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"os/exec"
 	"testing"
+	"time"
 
 	"rui.local/qualification/measurement"
 )
@@ -66,13 +69,74 @@ func TestCombineStatusPreservesVerdictPrecedence(t *testing.T) {
 	}
 }
 
-func TestAggregatePhysicalStatusCannotPassWithoutCLIEvidence(t *testing.T) {
-	status, reason := aggregatePhysicalStatus(measurement.FootprintVerdict{Status: "passed"})
-	if status != "unavailable" || reason == "" {
-		t.Fatalf("Host-only pass became aggregate %q: %q", status, reason)
+func TestAggregatePhysicalVerdictBoundaries(t *testing.T) {
+	tests := []struct {
+		name      string
+		host      *measurement.FootprintVerdict
+		aggregate *aggregateFootprint
+		want      string
+	}{
+		{"aggregate miss without Host evidence", nil, &aggregateFootprint{ObservedAggregatePeakBytes: 101}, "target_miss"},
+		{"target-straddling uncertainty", &measurement.FootprintVerdict{Status: "passed", LowerBoundBytes: 90, UpperBoundBytes: 95}, &aggregateFootprint{ObservedAggregatePeakBytes: 99}, "unavailable"},
+		{"sampled lower bound only", &measurement.FootprintVerdict{Status: "passed", LowerBoundBytes: 90, UpperBoundBytes: 95}, &aggregateFootprint{ObservedAggregatePeakBytes: 95}, "unavailable"},
+		{"missing CLI", &measurement.FootprintVerdict{Status: "passed", LowerBoundBytes: 90, UpperBoundBytes: 95}, nil, "unavailable"},
+		{"Host miss", &measurement.FootprintVerdict{Status: "target_miss", LowerBoundBytes: 101, UpperBoundBytes: 102}, nil, "target_miss"},
 	}
-	status, _ = aggregatePhysicalStatus(measurement.FootprintVerdict{Status: "target_miss"})
-	if status != "target_miss" {
-		t.Fatalf("Host-only miss was hidden as %q", status)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			verdict, reason := classifyAggregateFootprint(test.host, test.aggregate, 100)
+			if verdict.Status != test.want || reason == "" {
+				t.Fatalf("verdict=%+v reason=%q", verdict, reason)
+			}
+			if verdict.UpperBoundBytes != ^uint64(0) {
+				t.Fatalf("aggregate upper bound falsely finite: %+v", verdict)
+			}
+		})
+	}
+}
+
+func TestWaitCommandKillsChildThatIgnoresInterrupt(t *testing.T) {
+	command := exec.Command("sh", "-c", "trap '' INT; exec sleep 30")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := command.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if err := waitCommand(command, 50*time.Millisecond); err == nil {
+		t.Fatal("timed-out child cleanup reported success")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("child cleanup exceeded bound: %v", elapsed)
+	}
+}
+
+func TestKillCommandTreatsIntentionalTerminationAsCleanup(t *testing.T) {
+	command := exec.Command("sleep", "30")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := killCommand(command); err != nil {
+		t.Fatalf("intentional child termination = %v", err)
+	}
+}
+
+func TestAggregateFootprintRequiresHostAndCLIInEverySample(t *testing.T) {
+	complete := footprintSamples{Samples: []footprintSample{{
+		Processes:      []footprintProcess{{PID: 10, Footprint: 70}, {PID: 20, Footprint: 40}},
+		TotalFootprint: 100,
+	}}}
+	got, err := summarizeAggregateFootprint(complete, 10, 20)
+	if err != nil || got.HostComponentPeakBytes != 70 || got.CLIComponentPeakBytes != 40 || got.CLIIncrementPeakBytes != 30 || got.ObservedAggregatePeakBytes != 100 {
+		t.Fatalf("summary=%+v error=%v", got, err)
+	}
+	omitted := footprintSamples{Samples: []footprintSample{{
+		Processes:      []footprintProcess{{PID: 10, Footprint: 70}},
+		TotalFootprint: 70,
+	}}}
+	if _, err := summarizeAggregateFootprint(omitted, 10, 20); err == nil {
+		t.Fatal("Host-only sample did not report omitted CLI")
 	}
 }

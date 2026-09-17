@@ -245,6 +245,7 @@ pub fn build(b: *std.Build) void {
     });
     measure_call_classification.setCwd(b.path("tests/qualification"));
     measure_call_classification.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    if (b.args) |args| measure_call_classification.addArgs(args);
     measure_call_classification.addArtifactArg(release);
     measure_call_classification.addArtifactArg(addSqliteShell(b, target, .ReleaseSmall));
     const measure_call_classification_step = b.step(

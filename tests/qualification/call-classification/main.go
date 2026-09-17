@@ -13,12 +13,14 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"rui.local/qualification/measurement"
@@ -388,11 +390,77 @@ func combineStatus(current, next string) string {
 	return current
 }
 
-func aggregatePhysicalStatus(host measurement.FootprintVerdict) (string, string) {
-	if host.Status == "target_miss" {
-		return "target_miss", "Host lower bound alone exceeds the aggregate 256 MiB target"
+type footprintProcess struct {
+	PID       int    `json:"pid"`
+	Footprint uint64 `json:"footprint"`
+}
+
+type footprintSample struct {
+	Processes      []footprintProcess `json:"processes"`
+	Errors         []any              `json:"errors"`
+	TotalFootprint uint64             `json:"total footprint"`
+}
+
+type footprintSamples struct {
+	Samples []footprintSample `json:"samples"`
+}
+
+type aggregateFootprint struct {
+	Samples                    uint64 `json:"samples"`
+	HostComponentPeakBytes     uint64 `json:"host_component_peak_bytes"`
+	CLIComponentPeakBytes      uint64 `json:"cli_component_peak_bytes"`
+	CLIIncrementPeakBytes      uint64 `json:"cli_deduplicated_increment_peak_bytes"`
+	ObservedAggregatePeakBytes uint64 `json:"observed_deduplicated_aggregate_peak_bytes"`
+}
+
+func summarizeAggregateFootprint(report footprintSamples, hostPID, cliPID int) (aggregateFootprint, error) {
+	if len(report.Samples) == 0 {
+		return aggregateFootprint{}, errors.New("footprint returned no aggregate samples")
 	}
-	return "unavailable", "separate ordinary Rui CLI physical footprint and aggregate accounting are not collected"
+	result := aggregateFootprint{Samples: uint64(len(report.Samples))}
+	for index, sample := range report.Samples {
+		if len(sample.Errors) != 0 {
+			return aggregateFootprint{}, fmt.Errorf("footprint sample %d reported errors", index)
+		}
+		var hostBytes, cliBytes uint64
+		var hostFound, cliFound bool
+		for _, process := range sample.Processes {
+			switch process.PID {
+			case hostPID:
+				hostBytes, hostFound = process.Footprint, true
+			case cliPID:
+				cliBytes, cliFound = process.Footprint, true
+			}
+		}
+		if !hostFound || !cliFound || len(sample.Processes) != 2 {
+			return aggregateFootprint{}, fmt.Errorf("footprint sample %d omitted Host or ordinary CLI: pids=%v", index, sample.Processes)
+		}
+		if sample.TotalFootprint < hostBytes {
+			return aggregateFootprint{}, fmt.Errorf("footprint sample %d aggregate is below Host component", index)
+		}
+		result.HostComponentPeakBytes = max(result.HostComponentPeakBytes, hostBytes)
+		result.CLIComponentPeakBytes = max(result.CLIComponentPeakBytes, cliBytes)
+		result.CLIIncrementPeakBytes = max(result.CLIIncrementPeakBytes, sample.TotalFootprint-hostBytes)
+		result.ObservedAggregatePeakBytes = max(result.ObservedAggregatePeakBytes, sample.TotalFootprint)
+	}
+	return result, nil
+}
+
+func classifyAggregateFootprint(host *measurement.FootprintVerdict, aggregate *aggregateFootprint, target uint64) (measurement.FootprintVerdict, string) {
+	lower := uint64(0)
+	if host != nil {
+		lower = host.LowerBoundBytes
+	}
+	if aggregate != nil {
+		lower = max(lower, aggregate.ObservedAggregatePeakBytes)
+	}
+	if lower > target {
+		return measurement.FootprintVerdict{Status: "target_miss", TargetBytes: target, LowerBoundBytes: lower, UpperBoundBytes: ^uint64(0)}, "observed de-duplicated aggregate lower bound exceeds the target"
+	}
+	if aggregate == nil {
+		return measurement.FootprintVerdict{Status: "unavailable", TargetBytes: target, LowerBoundBytes: lower, UpperBoundBytes: ^uint64(0)}, "ordinary Rui CLI or de-duplicated process-set evidence is missing"
+	}
+	return measurement.FootprintVerdict{Status: "unavailable", TargetBytes: target, LowerBoundBytes: lower, UpperBoundBytes: ^uint64(0)}, "installed footprint reports a de-duplicated current total but no de-duplicated process-set lifetime peak upper bound"
 }
 
 func deny(client measurement.Client, directory, session, action string, index int) (float64, error) {
@@ -504,6 +572,177 @@ func audit(deadline measurement.Deadline, sqliteBinary, store string, expected s
 		}
 	}
 	return map[string]any{"counts": counts, "ordered_calls": rows}, nil
+}
+
+type aggregateCollector struct {
+	hostPID       int
+	cli           *exec.Cmd
+	cliOutput     bytes.Buffer
+	cliError      bytes.Buffer
+	sampler       *exec.Cmd
+	samplerOutput *os.File
+	samplerError  *os.File
+	jsonPath      string
+	finished      bool
+}
+
+var (
+	errChildCleanupTimedOut = errors.New("child cleanup timed out")
+	errChildDidNotReap      = errors.New("child did not reap after forced termination")
+)
+
+func waitCommand(command *exec.Cmd, allowance time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	timer := time.NewTimer(allowance)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		killError := command.Process.Kill()
+		if errors.Is(killError, os.ErrProcessDone) {
+			killError = nil
+		}
+		select {
+		case <-done:
+			return errors.Join(errChildCleanupTimedOut, killError)
+		case <-time.After(allowance):
+			return errors.Join(errChildDidNotReap, killError)
+		}
+	}
+}
+
+func killCommand(command *exec.Cmd) error {
+	killError := command.Process.Kill()
+	if errors.Is(killError, os.ErrProcessDone) {
+		killError = nil
+	}
+	waitError := waitCommand(command, measurement.TeardownAllowance)
+	var exitError *exec.ExitError
+	if killError == nil && errors.As(waitError, &exitError) {
+		waitError = nil
+	}
+	return errors.Join(killError, waitError)
+}
+
+func startAggregateCollector(binary, store, session, directory string, hostPID int) (*aggregateCollector, error, error) {
+	collector := &aggregateCollector{hostPID: hostPID}
+	if err := syscall.Kill(hostPID, syscall.SIGSTOP); err != nil {
+		return nil, fmt.Errorf("hold retained Host before ordinary CLI launch: %w", err), nil
+	}
+	collector.cli = exec.Command(binary, "inspect-session", "--store", store, "--session", session)
+	collector.cli.Stdout = &collector.cliOutput
+	collector.cli.Stderr = &collector.cliError
+	if err := collector.cli.Start(); err != nil {
+		return nil, err, syscall.Kill(hostPID, syscall.SIGCONT)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := syscall.Kill(collector.cli.Process.Pid, syscall.SIGSTOP); err != nil {
+		return nil, fmt.Errorf("hold ordinary Rui CLI: %w", err), errors.Join(killCommand(collector.cli), syscall.Kill(hostPID, syscall.SIGCONT))
+	}
+	if err := syscall.Kill(hostPID, syscall.SIGCONT); err != nil {
+		return nil, nil, errors.Join(fmt.Errorf("resume retained Host: %w", err), killCommand(collector.cli))
+	}
+	collector.jsonPath = filepath.Join(directory, "aggregate-footprint.json")
+	var err error
+	collector.samplerOutput, err = os.OpenFile(filepath.Join(directory, "aggregate-footprint.txt"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err, collector.abort()
+	}
+	collector.samplerError, err = os.OpenFile(filepath.Join(directory, "aggregate-footprint-stderr.txt"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err, collector.abort()
+	}
+	collector.sampler = exec.Command(
+		"/usr/bin/footprint", "-f", "bytes", "--sample", "0.2", "--sample-duration", "0.5", "-j", collector.jsonPath,
+		"-p", strconv.Itoa(hostPID), "-p", strconv.Itoa(collector.cli.Process.Pid),
+	)
+	collector.sampler.Stdout = collector.samplerOutput
+	collector.sampler.Stderr = collector.samplerError
+	if err := collector.sampler.Start(); err != nil {
+		return nil, err, collector.abort()
+	}
+	return collector, nil, nil
+}
+
+func (c *aggregateCollector) abort() error {
+	if c == nil || c.finished {
+		return nil
+	}
+	c.finished = true
+	var result error
+	if c.sampler != nil && c.sampler.Process != nil {
+		signalError := c.sampler.Process.Signal(os.Interrupt)
+		if errors.Is(signalError, os.ErrProcessDone) {
+			signalError = nil
+		}
+		result = errors.Join(result, signalError, waitCommand(c.sampler, measurement.TeardownAllowance))
+	}
+	if c.samplerOutput != nil {
+		result = errors.Join(result, c.samplerOutput.Close())
+	}
+	if c.samplerError != nil {
+		result = errors.Join(result, c.samplerError.Close())
+	}
+	if c.cli != nil && c.cli.Process != nil {
+		continueError := syscall.Kill(c.cli.Process.Pid, syscall.SIGCONT)
+		if errors.Is(continueError, os.ErrProcessDone) {
+			continueError = nil
+		}
+		result = errors.Join(result, continueError, killCommand(c.cli))
+	}
+	return result
+}
+
+func (c *aggregateCollector) finish() (aggregateFootprint, error, error) {
+	if c == nil || c.finished {
+		return aggregateFootprint{}, nil, errors.New("aggregate collector is not live")
+	}
+	var measurementError, behaviorError error
+	waitError := waitCommand(c.sampler, measurement.TeardownAllowance)
+	if errors.Is(waitError, errChildDidNotReap) {
+		behaviorError = errors.Join(behaviorError, waitError)
+	} else {
+		measurementError = errors.Join(measurementError, waitError)
+	}
+	c.sampler = nil
+	closeError := errors.Join(c.samplerOutput.Close(), c.samplerError.Close())
+	c.samplerOutput = nil
+	c.samplerError = nil
+	behaviorError = errors.Join(behaviorError, closeError)
+	var aggregate aggregateFootprint
+	if measurementError == nil {
+		encoded, readError := os.ReadFile(c.jsonPath)
+		if readError != nil {
+			measurementError = errors.Join(measurementError, readError)
+		} else {
+			var report footprintSamples
+			if decodeError := json.Unmarshal(encoded, &report); decodeError != nil {
+				measurementError = errors.Join(measurementError, fmt.Errorf("decode aggregate footprint: %w", decodeError))
+			} else {
+				aggregate, measurementError = summarizeAggregateFootprint(report, c.hostPID, c.cli.Process.Pid)
+			}
+		}
+	}
+	cliPID := c.cli.Process.Pid
+	if err := syscall.Kill(cliPID, syscall.SIGCONT); err != nil {
+		behaviorError = errors.Join(behaviorError, fmt.Errorf("resume ordinary Rui CLI: %w", err), killCommand(c.cli))
+		c.cli = nil
+	} else {
+		waitError = waitCommand(c.cli, measurement.TeardownAllowance)
+		c.cli = nil
+		if waitError != nil {
+			behaviorError = errors.Join(behaviorError, fmt.Errorf("ordinary Rui CLI failed: %w; stderr=%q", waitError, c.cliError.String()))
+		} else {
+			var inspection map[string]any
+			if err := json.Unmarshal(c.cliOutput.Bytes(), &inspection); err != nil {
+				behaviorError = errors.Join(behaviorError, fmt.Errorf("ordinary Rui CLI output: %w", err))
+			}
+		}
+	}
+	c.finished = true
+	return aggregate, measurementError, behaviorError
 }
 
 func runScenario(binary, sqliteBinary, root string, value scenario) (result map[string]any, returnedError error) {
@@ -678,15 +917,47 @@ func runScenario(binary, sqliteBinary, root string, value scenario) (result map[
 		return result, err
 	}
 	if runtime.GOOS == "darwin" {
+		aggregateCollectorValue, aggregateCollectorError, aggregateCleanupError := startAggregateCollector(binary, store, "qualification/"+value.Name, directory, host.Cmd.Process.Pid)
+		if aggregateCleanupError != nil {
+			return result, aggregateCleanupError
+		}
+		if aggregateCollectorValue != nil {
+			defer measurement.JoinCleanup(&returnedError, aggregateCollectorValue.abort)
+		}
+		var aggregate *aggregateFootprint
+		if aggregateCollectorError == nil && aggregateCollectorValue != nil {
+			measured, measurementError, behaviorError := aggregateCollectorValue.finish()
+			if behaviorError != nil {
+				return result, behaviorError
+			}
+			aggregateCollectorError = measurementError
+			if measurementError == nil {
+				aggregate = &measured
+				result["aggregate_process_set"] = measured
+			}
+		}
+		if aggregateCollectorError != nil {
+			result["aggregate_process_set_error"] = aggregateCollectorError.Error()
+		}
+		var hostVerdict *measurement.FootprintVerdict
+		var retainedSample any
 		physical, physicalError := measurement.SampleProcess(host.Process, filepath.Join(directory, "retained-footprint.txt"))
 		if physicalError != nil {
-			result["physical_footprint_status"] = "unavailable"
 			result["physical_footprint_error"] = physicalError.Error()
 		} else {
-			verdict := measurement.ClassifyFootprint(physical.Footprint, physicalFootprintTargetBytes)
-			status, reason := aggregatePhysicalStatus(verdict)
-			result["physical_footprint_status"] = status
-			result["physical_footprint"] = map[string]any{"lifecycle": "same Host cold through work, drain, and retained idle", "host_component_verdict": verdict, "aggregate_reason": reason, "retained_sample": physical}
+			value := measurement.ClassifyFootprint(physical.Footprint, physicalFootprintTargetBytes)
+			hostVerdict = &value
+			retainedSample = physical
+		}
+		aggregateVerdict, reason := classifyAggregateFootprint(hostVerdict, aggregate, physicalFootprintTargetBytes)
+		result["physical_footprint_status"] = aggregateVerdict.Status
+		result["physical_footprint"] = map[string]any{
+			"lifecycle":              "same Host lifetime peak from cold through work, drain, and retained idle; one ordinary Rui CLI directly sampled with that retained Host",
+			"maximum_live_rui_clis":  1,
+			"host_component_verdict": hostVerdict,
+			"aggregate_verdict":      aggregateVerdict,
+			"aggregate_reason":       reason,
+			"retained_sample":        retainedSample,
 		}
 	} else {
 		result["physical_footprint_status"] = "unavailable"
@@ -801,11 +1072,27 @@ func main() {
 		}
 		cases[candidate.Name] = value
 	}
+	limits := []string{"loopback deterministic provider; no live provider, TLS, filesystem power-loss, or Bash execution qualification", "Bash launch is intentionally forbidden: denial qualification ends before the later execution slice", "population and payload values are workloads, not product quotas", "process-crash and restart evidence does not certify power loss"}
+	if runtime.GOOS == "darwin" {
+		limits = append(limits, fmt.Sprintf("macOS %s runtime evidence; the other supported architecture is compile-only", runtime.GOARCH))
+	} else {
+		limits = append(limits, "Linux execution cannot supply the accepted macOS physical-footprint counter")
+	}
 	result := map[string]any{
-		"format": "rui-call-classification-v3-go", "scope": "GitHub issue #228 production raw-provider call classification, exact denial, restart recovery, and independent population scaling",
+		"format": "rui-call-classification-v4-go", "scope": "GitHub issue #228 production raw-provider call classification, exact denial, restart recovery, and independent population scaling",
 		"status": status, "cases": cases, "artifacts": root,
 		"classification_legend": map[string]string{"behavior_error": "a provider/Store/server/client invariant failed", "unavailable": "a required measurement was absent, its uncertainty interval crossed the target, or aggregate helper accounting was incomplete", "target_miss": "the lower bound of a valid macOS lifetime-peak interval exceeded 256 MiB", "passed": "behavior and required aggregate measurements passed", "diagnostic": "component or portable RSS, latency, database, named scratch, CPU and descriptor observations have no independent acceptance threshold"},
-		"limits":                []string{"Linux execution is deterministic production-path development evidence; macOS runtime and physical footprint remain unavailable in this orb", "loopback deterministic provider; no live provider, TLS, filesystem power-loss, or Bash execution qualification", "Bash launch is intentionally forbidden: denial qualification ends before the later execution slice", "population and payload values are workloads, not product quotas", "process-crash and restart evidence does not certify power loss"},
+		"physical_measurement_method": map[string]any{
+			"tool":                           "/usr/bin/footprint",
+			"installed_tool_contract":        "multiple -p arguments de-duplicate multiply mapped objects and report a total de-duplicated footprint",
+			"sampling_interval_seconds":      0.2,
+			"ordinary_cli_population":        1,
+			"ordinary_cli_command":           "rui inspect-session",
+			"aggregate_lower_bound":          "maximum directly observed de-duplicated Host-plus-CLI total footprint",
+			"aggregate_upper_bound":          "unavailable: installed footprint exposes no de-duplicated process-set lifetime peak",
+			"incomparable_counters_excluded": "RSS and separately sampled per-process footprint values are not added",
+		},
+		"limits": limits,
 	}
 	evidence, evidenceError := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
 	if evidenceError != nil {
