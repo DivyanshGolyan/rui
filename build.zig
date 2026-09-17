@@ -100,6 +100,14 @@ pub fn build(b: *std.Build) void {
     );
     measurement_test_step.dependOn(&measurement_tests.step);
 
+    const queue_audit_test = b.addSystemCommand(&.{
+        "go", "test", "-mod=readonly", "-run", "^TestExecutionAuditQueryRejectsHiddenEntities$", "./model-queue", "-args", "-sqlite",
+    });
+    queue_audit_test.setCwd(b.path("tests/qualification"));
+    queue_audit_test.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    queue_audit_test.addArtifactArg(addSqliteShell(b, target, .ReleaseSmall));
+    measurement_test_step.dependOn(&queue_audit_test.step);
+
     const linux_cross_step = b.step(
         "cross-check-linux",
         "Compile the supported Linux x86-64/ARM64 targets",
@@ -202,6 +210,19 @@ pub fn build(b: *std.Build) void {
         "Measure macOS retry discovery, launch separation, churn, and custody",
     );
     measure_retry_step.dependOn(&measure_retry.step);
+
+    const measure_queue = b.addSystemCommand(&.{
+        "go", "run", "-mod=readonly", "./model-queue",
+    });
+    measure_queue.setCwd(b.path("tests/qualification"));
+    measure_queue.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    measure_queue.addArtifactArg(release);
+    measure_queue.addArtifactArg(addSqliteShell(b, target, .ReleaseSmall));
+    const measure_queue_step = b.step(
+        "measure-model-queue",
+        "Measure model queue discovery, ordering, settlement, and portable mixed resources",
+    );
+    measure_queue_step.dependOn(&measure_queue.step);
 
     const measure_control = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./model-control",
@@ -326,4 +347,25 @@ fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     module.addCMacro("SQLITE_TEMP_STORE", "1");
     module.addCMacro("SQLITE_USE_URI", "0");
     module.addCMacro("SQLITE_ENABLE_API_ARMOR", "1");
+}
+
+fn addSqliteShell(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const sqlite = b.dependency("sqlite", .{});
+    const executable = b.addExecutable(.{
+        .name = "rui-qualification-sqlite3",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    configureSqlite(b, executable);
+    executable.root_module.addCSourceFile(.{
+        .file = sqlite.path("shell.c"),
+        .flags = &.{"-std=gnu99"},
+    });
+    return executable;
 }

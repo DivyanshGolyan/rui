@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/process"
 )
@@ -480,29 +481,88 @@ type ProcessSample struct {
 	Threads                 int32     `json:"threads"`
 	LiveDescendantProcesses int       `json:"live_descendant_processes"`
 	OpenDescriptorRows      int       `json:"open_descriptor_rows"`
+	OpenDescriptors         int32     `json:"open_descriptors"`
 	DiskReadBytes           uint64    `json:"disk_read_bytes"`
 	DiskWriteBytes          uint64    `json:"disk_write_bytes"`
 	Footprint               Footprint `json:"footprint"`
 }
 
-func SampleProcess(target *process.Process, rawFootprintPath string) (ProcessSample, error) {
+type PortableProcessSample struct {
+	RSSBytes                uint64  `json:"rss_bytes"`
+	VirtualBytes            uint64  `json:"virtual_bytes"`
+	CPUUserSeconds          float64 `json:"cpu_user_seconds"`
+	CPUSystemSeconds        float64 `json:"cpu_system_seconds"`
+	Threads                 int32   `json:"threads"`
+	LiveDescendantProcesses int     `json:"live_descendant_processes"`
+	OpenDescriptors         int32   `json:"open_descriptors"`
+	DiskReadBytes           uint64  `json:"disk_read_bytes"`
+	DiskWriteBytes          uint64  `json:"disk_write_bytes"`
+}
+
+type processSampleCore struct {
+	memory      *process.MemoryInfoStat
+	times       *cpu.TimesStat
+	threads     int32
+	children    []*process.Process
+	descriptors int32
+	ioCounters  *process.IOCountersStat
+}
+
+func sampleProcessCore(target *process.Process) (processSampleCore, error) {
 	memory, err := target.MemoryInfo()
 	if err != nil {
-		return ProcessSample{}, err
+		return processSampleCore{}, err
 	}
 	times, err := target.Times()
 	if err != nil {
-		return ProcessSample{}, err
+		return processSampleCore{}, err
 	}
 	threads, err := target.NumThreads()
 	if err != nil {
-		return ProcessSample{}, err
+		return processSampleCore{}, err
 	}
 	children, err := target.Children()
 	if err != nil {
-		return ProcessSample{}, err
+		return processSampleCore{}, err
+	}
+	descriptors, err := target.NumFDs()
+	if err != nil {
+		return processSampleCore{}, err
 	}
 	ioCounters, err := target.IOCounters()
+	if err != nil {
+		return processSampleCore{}, err
+	}
+	return processSampleCore{
+		memory:      memory,
+		times:       times,
+		threads:     threads,
+		children:    children,
+		descriptors: descriptors,
+		ioCounters:  ioCounters,
+	}, nil
+}
+
+func SamplePortableProcess(target *process.Process) (PortableProcessSample, error) {
+	core, err := sampleProcessCore(target)
+	if err != nil {
+		return PortableProcessSample{}, err
+	}
+	return PortableProcessSample{
+		RSSBytes:                core.memory.RSS,
+		VirtualBytes:            core.memory.VMS,
+		CPUUserSeconds:          core.times.User,
+		CPUSystemSeconds:        core.times.System,
+		Threads:                 core.threads,
+		LiveDescendantProcesses: len(core.children),
+		OpenDescriptors:         core.descriptors,
+		DiskReadBytes:           core.ioCounters.DiskReadBytes,
+		DiskWriteBytes:          core.ioCounters.DiskWriteBytes,
+	}, nil
+}
+
+func SampleProcess(target *process.Process, rawFootprintPath string) (ProcessSample, error) {
+	core, err := sampleProcessCore(target)
 	if err != nil {
 		return ProcessSample{}, err
 	}
@@ -528,17 +588,32 @@ func SampleProcess(target *process.Process, rawFootprintPath string) (ProcessSam
 		rows = 0
 	}
 	return ProcessSample{
-		RSSBytes:                memory.RSS,
-		VirtualBytes:            memory.VMS,
-		CPUUserSeconds:          times.User,
-		CPUSystemSeconds:        times.System,
-		Threads:                 threads,
-		LiveDescendantProcesses: len(children),
+		RSSBytes:                core.memory.RSS,
+		VirtualBytes:            core.memory.VMS,
+		CPUUserSeconds:          core.times.User,
+		CPUSystemSeconds:        core.times.System,
+		Threads:                 core.threads,
+		LiveDescendantProcesses: len(core.children),
 		OpenDescriptorRows:      rows,
-		DiskReadBytes:           ioCounters.DiskReadBytes,
-		DiskWriteBytes:          ioCounters.DiskWriteBytes,
+		OpenDescriptors:         core.descriptors,
+		DiskReadBytes:           core.ioCounters.DiskReadBytes,
+		DiskWriteBytes:          core.ioCounters.DiskWriteBytes,
 		Footprint:               footprint,
 	}, nil
+}
+
+func (s ProcessSample) Portable() PortableProcessSample {
+	return PortableProcessSample{
+		RSSBytes:                s.RSSBytes,
+		VirtualBytes:            s.VirtualBytes,
+		CPUUserSeconds:          s.CPUUserSeconds,
+		CPUSystemSeconds:        s.CPUSystemSeconds,
+		Threads:                 s.Threads,
+		LiveDescendantProcesses: s.LiveDescendantProcesses,
+		OpenDescriptors:         s.OpenDescriptors,
+		DiskReadBytes:           s.DiskReadBytes,
+		DiskWriteBytes:          s.DiskWriteBytes,
+	}
 }
 
 func CPUSeconds(target *process.Process) (float64, error) {
@@ -576,14 +651,18 @@ func WaitFor(deadline Deadline, interval time.Duration, description string, pred
 	}
 }
 
-func RequireRuntime() error {
-	if runtime.GOOS != "darwin" {
-		return fmt.Errorf("measurement requires macOS; got %s", runtime.GOOS)
-	}
+func RequireGoRuntime() error {
 	if runtime.Version() != GoVersion {
 		return fmt.Errorf("measurement requires %s; got %s", GoVersion, runtime.Version())
 	}
 	return nil
+}
+
+func RequireRuntime() error {
+	if runtime.GOOS != "darwin" {
+		return fmt.Errorf("measurement requires macOS; got %s", runtime.GOOS)
+	}
+	return RequireGoRuntime()
 }
 
 func SourceProvenance(deadline Deadline, root, ignoredOutput string) (string, *bool, error) {
