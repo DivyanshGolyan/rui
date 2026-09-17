@@ -18,7 +18,10 @@ import (
 	"rui.local/qualification/measurement"
 )
 
-const discoveryTargetMS int64 = 2000
+const (
+	discoveryTargetMS            int64  = 2000
+	physicalFootprintTargetBytes uint64 = 256 * 1024 * 1024
+)
 
 type population struct {
 	History    int `json:"history"`
@@ -211,17 +214,51 @@ func expectedOrder(count int) []string {
 
 func settledOrder(rows string) ([]string, error) {
 	result := []string{}
+	var firstError error
 	if rows == "" {
 		return result, nil
 	}
 	for _, row := range strings.Split(rows, "\n") {
 		session, resolution, ok := strings.Cut(row, "|")
-		if !ok || resolution != "provider_http_422" {
-			return nil, fmt.Errorf("behavior failure: operation settlement %q", row)
+		if !ok {
+			session = row
 		}
 		result = append(result, session)
+		if (!ok || resolution != "provider_http_422") && firstError == nil {
+			firstError = fmt.Errorf("operation settlement %q", row)
+		}
 	}
-	return result, nil
+	return result, firstError
+}
+
+func physicalFootprintStatus(footprint measurement.Footprint) (string, uint64) {
+	upper := footprint.LifetimePeakBytes + footprint.LifetimePeakTolerance
+	if upper > physicalFootprintTargetBytes {
+		return "target_miss", upper
+	}
+	return "passed", upper
+}
+
+func recordOrder(result map[string]any, actual, expected []string, settlementError error) {
+	result["operation_launch_order"] = actual
+	result["expected_oldest_first_order"] = expected
+	failure := ""
+	if settlementError != nil {
+		failure = settlementError.Error()
+	} else if len(actual) != len(expected) {
+		failure = fmt.Sprintf("operation order count=%d want=%d", len(actual), len(expected))
+	} else {
+		for i := range expected {
+			if actual[i] != expected[i] {
+				failure = fmt.Sprintf("operation order[%d]=%q want=%q", i, actual[i], expected[i])
+				break
+			}
+		}
+	}
+	if failure != "" {
+		result["status"] = overallStatus(result["status"].(string), "behavior_error")
+		result["behavior_failure"] = failure
+	}
 }
 
 func runCase(binary, sqliteBinary, root, name string, p population, resources bool) (map[string]any, error) {
@@ -275,6 +312,7 @@ func runCase(binary, sqliteBinary, root, name string, p population, resources bo
 	if resources {
 		var sample measurement.PortableProcessSample
 		var sampleErr error
+		physicalStatus := "unavailable"
 		if runtime.GOOS == "darwin" {
 			macOSSample, macOSSampleErr := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-held.txt"))
 			sampleErr = macOSSampleErr
@@ -282,25 +320,32 @@ func runCase(binary, sqliteBinary, root, name string, p population, resources bo
 				result["macos_physical_footprint"] = map[string]any{"status": "unavailable", "error": macOSSampleErr.Error()}
 			} else {
 				sample = macOSSample.Portable()
-				result["macos_physical_footprint"] = map[string]any{"status": "passed", "process": macOSSample}
+				if macOSSample.LiveDescendantProcesses != 0 {
+					result["macos_physical_footprint"] = map[string]any{"status": "unavailable", "reason": "live descendants require aggregate physical footprint", "process": macOSSample}
+				} else {
+					var upper uint64
+					physicalStatus, upper = physicalFootprintStatus(macOSSample.Footprint)
+					result["macos_physical_footprint"] = map[string]any{"status": physicalStatus, "target_bytes": physicalFootprintTargetBytes, "lifetime_peak_upper_bound_bytes": upper, "process": macOSSample}
+				}
 			}
 		} else {
 			sample, sampleErr = measurement.SamplePortableProcess(host.Process)
-			result["macos_physical_footprint"] = map[string]any{"status": "unavailable", "reason": "requires macOS footprint(1)"}
+			result["macos_physical_footprint"] = map[string]any{"status": "unavailable", "target_bytes": physicalFootprintTargetBytes, "reason": "requires macOS footprint(1)"}
 		}
 		if sampleErr != nil {
-			result["resource_status"] = "unavailable"
+			result["resource_collection_status"] = "unavailable"
 			result["resource_error"] = sampleErr.Error()
-			result["status"] = overallStatus(result["status"].(string), "unavailable")
 		} else {
 			database, databaseErr := measurement.DatabaseSize(store)
 			if databaseErr != nil {
 				e.Release()
 				return nil, errors.Join(databaseErr, host.Stop(measurement.TeardownAllowance))
 			}
-			result["resource_status"] = "passed"
+			result["resource_collection_status"] = "passed"
 			result["held_first_request_resources"] = map[string]any{"process": sample, "ready_record": host.Ready, "database": database}
 		}
+		result["resource_status"] = physicalStatus
+		result["status"] = overallStatus(result["status"].(string), physicalStatus)
 	}
 	e.Release()
 	settlementStarted := time.Now()
@@ -315,21 +360,9 @@ func runCase(binary, sqliteBinary, root, name string, p population, resources bo
 	if err != nil {
 		return nil, err
 	}
-	actual, err := settledOrder(rows)
-	if err != nil {
-		return nil, err
-	}
+	actual, settlementError := settledOrder(rows)
 	expected := expectedOrder(p.Eligible)
-	result["operation_launch_order"] = actual
-	result["expected_oldest_first_order"] = expected
-	if len(actual) != len(expected) {
-		return nil, fmt.Errorf("behavior failure: operation order count=%d want=%d", len(actual), len(expected))
-	}
-	for i := range expected {
-		if actual[i] != expected[i] {
-			return nil, fmt.Errorf("behavior failure: operation order[%d]=%q want=%q", i, actual[i], expected[i])
-		}
-	}
+	recordOrder(result, actual, expected, settlementError)
 	return result, nil
 }
 

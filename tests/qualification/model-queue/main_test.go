@@ -3,6 +3,8 @@ package main
 import (
 	"reflect"
 	"testing"
+
+	"rui.local/qualification/measurement"
 )
 
 func TestDiscoveryStatusInclusiveBoundary(t *testing.T) {
@@ -62,5 +64,36 @@ func TestSettledOrderRequiresEveryExpectedResolution(t *testing.T) {
 	}
 	if _, err := settledOrder("queue/eligible/000001|temporary"); err == nil {
 		t.Fatal("settledOrder accepted a nonterminal expected resolution")
+	}
+}
+
+func TestPhysicalFootprintStatusUsesConservativeUpperBound(t *testing.T) {
+	tests := []struct {
+		footprint  measurement.Footprint
+		wantStatus string
+		wantUpper  uint64
+	}{
+		{measurement.Footprint{LifetimePeakBytes: physicalFootprintTargetBytes}, "passed", physicalFootprintTargetBytes},
+		{measurement.Footprint{LifetimePeakBytes: physicalFootprintTargetBytes - 1, LifetimePeakTolerance: 1}, "passed", physicalFootprintTargetBytes},
+		{measurement.Footprint{LifetimePeakBytes: physicalFootprintTargetBytes, LifetimePeakTolerance: 1}, "target_miss", physicalFootprintTargetBytes + 1},
+	}
+	for _, test := range tests {
+		status, upper := physicalFootprintStatus(test.footprint)
+		if status != test.wantStatus || upper != test.wantUpper {
+			t.Errorf("physicalFootprintStatus(%+v) = %q, %d; want %q, %d", test.footprint, status, upper, test.wantStatus, test.wantUpper)
+		}
+	}
+}
+
+func TestBehaviorFailureRetainsOrderEvidence(t *testing.T) {
+	result := map[string]any{"status": "passed"}
+	actual := []string{"queue/eligible/000002", "queue/eligible/000001"}
+	expected := []string{"queue/eligible/000001", "queue/eligible/000002"}
+	recordOrder(result, actual, expected, nil)
+	if result["status"] != "behavior_error" || result["behavior_failure"] == nil {
+		t.Fatalf("wrong-order result = %v", result)
+	}
+	if !reflect.DeepEqual(result["operation_launch_order"], actual) || !reflect.DeepEqual(result["expected_oldest_first_order"], expected) {
+		t.Fatalf("order evidence was not retained: %v", result)
 	}
 }
