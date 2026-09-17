@@ -579,6 +579,8 @@ def main():
     success_thread = None
     proposal_endpoint = None
     proposal_thread = None
+    continuation_endpoint = None
+    continuation_thread = None
     proposal_milestones = None
     proposal_gate_keeper = None
     completed = False
@@ -777,6 +779,86 @@ def main():
         proposal_milestones = None
         os.close(proposal_gate_keeper)
         proposal_gate_keeper = None
+
+        continuation_calls = [
+            ("bash", "continuation-call-0", json.dumps({"cmd": "printf zero"}, separators=(",", ":"))),
+            ("missing-tool", "continuation-call-1", "{}"),
+            ("bash", "continuation-call-2", "{"),
+            ("bash", "continuation-call-3", json.dumps({"cmd": "printf three"}, separators=(",", ":"))),
+        ]
+        continuation_answer = b"continued after complete tool results"
+        continuation_sse, _, _ = sse_answer(
+            "continuation-answer", "continuation-reasoning", "continuation-message", continuation_answer.decode()
+        )
+        continuation_endpoint = SuccessEndpoint([
+            sse_tool_calls("continuation-calls", continuation_calls),
+            continuation_sse,
+        ])
+        continuation_thread = threading.Thread(target=continuation_endpoint.serve_forever, daemon=True)
+        continuation_thread.start()
+        continuation_store = state / "continuation-store"
+        continuation_host = start_host(
+            continuation_store,
+            f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
+        )
+        processes.append(continuation_host)
+        configure(state, continuation_store, "continuation-config", "direct/continuation", "model-a")
+        message(state, continuation_store, "continuation-first", "direct/continuation", "make calls")
+        continuation_report = wait_for(
+            lambda: (lambda value: value if len(value["actions"]["unresolved"]) == 2 else None)(
+                command("inspect-session", "--store", continuation_store, "--session", "direct/continuation")
+            ),
+            "continuation Actions",
+        )
+        message(state, continuation_store, "continuation-pending", "direct/continuation", "after results")
+        continuation_actions = continuation_report["actions"]["unresolved"]
+        command(
+            "deny-action", "--store", continuation_store,
+            "--record", state / "continuation-deny-3.json", "--key", "continuation-deny-3",
+            "--session", "direct/continuation", "--action", continuation_actions[1]["action"],
+        )
+        time.sleep(0.2)
+        assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
+        command(
+            "deny-action", "--store", continuation_store,
+            "--record", state / "continuation-deny-0.json", "--key", "continuation-deny-0",
+            "--session", "direct/continuation", "--action", continuation_actions[0]["action"],
+        )
+        wait_for(lambda: len(continuation_endpoint.requests) == 2, "tool-result continuation request")
+        wait_for(
+            lambda: completed_observation(continuation_store, "continuation-first"),
+            "tool-result continuation answer",
+        )
+        assert read_result(continuation_store, "continuation-first") == continuation_answer
+        assert read_result(continuation_store, "continuation-pending") == continuation_answer
+        continuation_request = json.loads(continuation_endpoint.requests[1])
+        continuation_input = continuation_request["input"]
+        output_items = [item for item in continuation_input if item.get("type") == "function_call_output"]
+        assert [item["call_id"] for item in output_items] == [call[1] for call in continuation_calls], output_items
+        content_domain = b"rui/content/v1"
+        missing_digest = hashlib.sha256(
+            len(content_domain).to_bytes(8, "big") + content_domain + b"missing-tool"
+        ).hexdigest()
+        assert [item["output"] for item in output_items] == [
+            "Permission denied.",
+            f"Unknown tool (name Rui content digest {missing_digest}).",
+            "Invalid arguments for tool 'bash'.",
+            "Permission denied.",
+        ], output_items
+        output_end = max(continuation_input.index(item) for item in output_items)
+        pending_index = next(
+            index for index, item in enumerate(continuation_input)
+            if item.get("role") == "user"
+            and item.get("content", [{}])[0].get("text") == "after results"
+        )
+        assert output_end < pending_index, continuation_input
+        with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
+            assert database.execute("SELECT count(*) FROM model_operation").fetchone() == (2,)
+            assert database.execute(
+                "SELECT count(*) FROM sqlite_schema WHERE name LIKE '%tool_result%'"
+            ).fetchone() == (0,)
+        stop_host(continuation_host)
+        processes.remove(continuation_host)
 
         first_answer = 'First "answer"\n🙂'.encode()
         second_answer = ("second answer " + "x" * 5000).encode()
@@ -3792,6 +3874,11 @@ def main():
             proposal_endpoint.server_close()
         if proposal_thread is not None:
             proposal_thread.join(timeout=5)
+        if continuation_endpoint is not None:
+            continuation_endpoint.shutdown()
+            continuation_endpoint.server_close()
+        if continuation_thread is not None:
+            continuation_thread.join(timeout=5)
         if proposal_milestones is not None:
             proposal_milestones.close()
         if proposal_gate_keeper is not None:

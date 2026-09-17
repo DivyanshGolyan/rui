@@ -8,9 +8,18 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 11;
+pub const schema_version: u32 = 12;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
+const complete_tool_results_sql =
+    "current.resolution_code='tool_calls' AND EXISTS(" ++
+    " SELECT 1 FROM model_tool_call call WHERE call.operation_id=current.operation_id" ++
+    ") AND NOT EXISTS(" ++
+    " SELECT 1 FROM model_tool_call call LEFT JOIN action_operation action " ++
+    " ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+    " WHERE call.operation_id=current.operation_id AND call.rejection_code IS NULL " ++
+    " AND (action.action_id IS NULL OR action.resolution_code IS NULL)" ++
+    ")";
 const runnable_eligibility_sql =
     "m.turn_id IS NULL AND NOT EXISTS(" ++
     " SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
@@ -20,11 +29,13 @@ const runnable_eligibility_sql =
     ") OR EXISTS(" ++
     " SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     " WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
-    " AND current.resolution_code IN ('continued','interrupted')" ++
+    " AND (current.resolution_code IN ('continued','interrupted') OR (" ++ complete_tool_results_sql ++ "))" ++
     "))";
 const runnable_probe_sql =
     "SELECT 1 FROM message_admission m INDEXED BY message_admission_pending WHERE " ++
-    runnable_eligibility_sql ++ " LIMIT 1";
+    runnable_eligibility_sql ++ " UNION ALL SELECT 1 FROM turn active " ++
+    "JOIN model_operation current ON current.operation_id=active.operation_id " ++
+    "WHERE active.outcome_code IS NULL AND " ++ complete_tool_results_sql ++ " LIMIT 1";
 const runnable_selection_sql =
     "WITH candidate AS (" ++
     "SELECT m.session_ref FROM message_admission m INDEXED BY message_admission_pending WHERE " ++
@@ -32,11 +43,16 @@ const runnable_selection_sql =
     "SELECT m.session_ref,min(m.admission_id),max(m.admission_id),count(*),s.revision,s.next_position," ++
     "(SELECT active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     "WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
-    "AND current.resolution_code IN ('continued','interrupted')) " ++
+    "AND (current.resolution_code IN ('continued','interrupted') OR (" ++ complete_tool_results_sql ++ "))) " ++
     "FROM candidate chosen JOIN message_admission m INDEXED BY message_admission_session_order " ++
     "ON m.session_ref=chosen.session_ref JOIN session s ON s.session_ref=m.session_ref " ++
     "WHERE " ++ runnable_eligibility_sql ++
     " GROUP BY m.session_ref";
+const tool_continuation_selection_sql =
+    "SELECT active.session_ref,active.first_admission_id,active.input_cutoff,0,s.revision,s.next_position,active.turn_id " ++
+    "FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
+    "JOIN session s ON s.session_ref=active.session_ref WHERE active.outcome_code IS NULL AND " ++
+    complete_tool_results_sql ++ " ORDER BY current.operation_id LIMIT 1";
 const continuation_risk_sql =
     "SELECT 1 FROM model_output_item WHERE session_ref=?1 UNION ALL " ++
     "SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
@@ -331,12 +347,19 @@ pub const HistoricalSettings = struct {
     tools_mask: u8,
 };
 
-pub const HistoricalEntryKind = enum { user, instruction, provider_output };
+pub const HistoricalEntryKind = enum { user, instruction, provider_output, tool_results };
 
 pub const HistoricalEntry = struct {
     position: u64,
     kind: HistoricalEntryKind,
-    content: HistoricalContent,
+    content: ?HistoricalContent = null,
+    source_operation_id: ?u64 = null,
+};
+
+pub const HistoricalToolResult = struct {
+    call_ordinal: u64,
+    call_id: HistoricalContent,
+    output: HistoricalContent,
 };
 
 /// The preparation owner keeps this value at one address until every borrowed
@@ -355,6 +378,15 @@ pub const HistoricalView = struct {
     pub fn nextEntry(self: *HistoricalView, after_position: u64) !?HistoricalEntry {
         std.debug.assert(self.active);
         return self.store.readHistoricalEntry(self, after_position);
+    }
+
+    pub fn nextToolResult(
+        self: *HistoricalView,
+        source_operation_id: u64,
+        after_call_ordinal: ?u64,
+    ) !?HistoricalToolResult {
+        std.debug.assert(self.active);
+        return self.store.readHistoricalToolResult(self, source_operation_id, after_call_ordinal);
     }
 
     pub fn openContent(self: *HistoricalView, reference: HistoricalContent) !HistoricalReader {
@@ -1721,13 +1753,26 @@ pub const Store = struct {
                 };
                 interrupted_operation_id = current_operation_id;
             }
+            var current = try self.readSession(command.session.slice()) orelse return error.CorruptStore;
+            const cancellation_content_id = try self.importBytesContent("Cancelled by Session stop.", false, faults.content_import);
             const cancel_actions = try prepare(
                 self.database,
-                "UPDATE action_operation SET resolution_code='cancelled' WHERE parent_operation_id=?1 AND resolution_code IS NULL",
+                "WITH cancelled(action_id,acceptance_position) AS MATERIALIZED (" ++
+                    "SELECT action_id,?3+row_number() OVER (ORDER BY call_ordinal)-1 FROM action_operation " ++
+                    "WHERE parent_operation_id=?1 AND resolution_code IS NULL) " ++
+                    "UPDATE action_operation SET resolution_code='cancelled',resolution_content_id=?2," ++
+                    "acceptance_position=(SELECT acceptance_position FROM cancelled WHERE cancelled.action_id=action_operation.action_id) " ++
+                    "WHERE action_id IN (SELECT action_id FROM cancelled)",
             );
             defer _ = c.sqlite3_finalize(cancel_actions);
             try bindU64(cancel_actions, 1, current_operation_id.?);
+            try bindI64(cancel_actions, 2, cancellation_content_id);
+            try bindU64(cancel_actions, 3, current.next_position);
             try expectDone(cancel_actions);
+            const cancelled_count = c.sqlite3_changes(self.database);
+            if (cancelled_count < 0) return error.CorruptStore;
+            current.next_position = try std.math.add(u64, current.next_position, @intCast(cancelled_count));
+            try self.updateSession(command.session.slice(), &current);
             const update_turn = try prepare(
                 self.database,
                 "UPDATE turn SET outcome_code='cancelled' WHERE turn_id=?1 AND outcome_code IS NULL",
@@ -2030,11 +2075,21 @@ pub const Store = struct {
         try bindText(save, 2, action_text);
         try expectDone(save);
         if (rejection == null) {
-            const update = try prepare(self.database, "UPDATE action_operation SET permission_state=2,resolution_code='denied' WHERE action_id=?1 AND permission_state=0 AND resolution_code IS NULL");
+            var current = try self.readSession(command.session.slice()) orelse return error.CorruptStore;
+            const result_content_id = try self.importBytesContent("Permission denied.", false, faults.content_import);
+            const update = try prepare(
+                self.database,
+                "UPDATE action_operation SET permission_state=2,resolution_code='denied',resolution_content_id=?2,acceptance_position=?3 " ++
+                    "WHERE action_id=?1 AND permission_state=0 AND resolution_code IS NULL",
+            );
             defer _ = c.sqlite3_finalize(update);
             try bindU64(update, 1, command.action_id);
+            try bindI64(update, 2, result_content_id);
+            try bindU64(update, 3, current.next_position);
             try expectDone(update);
             if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
+            current.next_position = try std.math.add(u64, current.next_position, 1);
+            try self.updateSession(command.session.slice(), &current);
         }
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
@@ -2512,13 +2567,15 @@ pub const Store = struct {
         if (!try self.hasRunnableWorkLocked()) return null;
         try exec(self.database, "BEGIN IMMEDIATE");
 
-        const select = try prepare(self.database, runnable_selection_sql);
-        defer _ = c.sqlite3_finalize(select);
-        const step_result = c.sqlite3_step(select);
+        var select = try prepare(self.database, runnable_selection_sql);
+        var step_result = c.sqlite3_step(select);
         if (step_result == c.SQLITE_DONE) {
-            try exec(self.database, "ROLLBACK");
-            return null;
+            if (c.sqlite3_finalize(select) != c.SQLITE_OK) return error.RunnableSelectionFailed;
+            select = try prepare(self.database, tool_continuation_selection_sql);
+            step_result = c.sqlite3_step(select);
         }
+        defer _ = c.sqlite3_finalize(select);
+        if (step_result == c.SQLITE_DONE) return error.RunnableSelectionFailed;
         if (step_result != c.SQLITE_ROW) return error.RunnableSelectionFailed;
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(select, 0, &session_ref);
@@ -2528,7 +2585,7 @@ pub const Store = struct {
         const revision = c.sqlite3_column_int64(select, 4);
         const initial_position = c.sqlite3_column_int64(select, 5);
         const existing_turn = try readNullablePositiveI64(select, 6);
-        if (first_admission <= 0 or cutoff < first_admission or selected <= 0 or revision <= 0 or initial_position <= 0) {
+        if (first_admission <= 0 or cutoff < first_admission or selected < 0 or revision <= 0 or initial_position <= 0) {
             return error.CorruptStore;
         }
 
@@ -2559,7 +2616,7 @@ pub const Store = struct {
             try expectDone(update);
             if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
         }
-        {
+        if (selected != 0) {
             const bind = try prepare(
                 self.database,
                 "UPDATE message_admission SET turn_id=?1 WHERE session_ref=?2 AND turn_id IS NULL AND admission_id<=?3 " ++
@@ -2573,7 +2630,7 @@ pub const Store = struct {
             try expectDone(bind);
             if (c.sqlite3_changes(self.database) != selected) return error.SelectionChanged;
         }
-        {
+        if (selected != 0) {
             const project = try prepare(
                 self.database,
                 "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id) " ++
@@ -2847,14 +2904,23 @@ pub const Store = struct {
         try self.validateCurrentAttempt(view.binding);
         const statement = try prepare(
             self.database,
-            "SELECT position,kind,content_id FROM (" ++
-                "SELECT e.session_position AS position,e.entry_kind AS kind,e.content_id AS content_id " ++
+            "SELECT position,kind,content_id,source_operation_id FROM (" ++
+                "SELECT e.session_position AS position,e.entry_kind AS kind,e.content_id AS content_id,NULL AS source_operation_id " ++
                 "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
                 "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
                 "AND e.entry_kind IN (1,2) UNION ALL " ++
-                "SELECT item.session_position AS position,3 AS kind,item.content_id AS content_id " ++
+                "SELECT item.session_position AS position,3 AS kind,item.content_id AS content_id,NULL AS source_operation_id " ++
                 "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
-                "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position" ++
+                "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position UNION ALL " ++
+                "SELECT max(coalesce(call.acceptance_position,action.acceptance_position)) AS position,4 AS kind,NULL AS content_id," ++
+                "source.operation_id AS source_operation_id FROM model_operation current JOIN model_operation source " ++
+                "ON source.session_ref=current.session_ref JOIN model_tool_call call ON call.operation_id=source.operation_id " ++
+                "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+                "WHERE current.operation_id=?1 AND source.resolution_code='tool_calls' GROUP BY source.operation_id " ++
+                "HAVING position>?2 AND position<current.admission_position AND count(*)=sum(CASE " ++
+                "WHEN call.rejection_code IS NOT NULL AND call.rejection_content_id IS NOT NULL AND call.acceptance_position IS NOT NULL THEN 1 " ++
+                "WHEN call.rejection_code IS NULL AND action.resolution_code IS NOT NULL AND action.resolution_content_id IS NOT NULL " ++
+                "AND action.acceptance_position IS NOT NULL THEN 1 ELSE 0 END)" ++
                 ") ORDER BY position LIMIT 1",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -2865,24 +2931,85 @@ pub const Store = struct {
         if (result != c.SQLITE_ROW) return error.HistoricalEntryReadFailed;
         const position = c.sqlite3_column_int64(statement, 0);
         const kind_value = c.sqlite3_column_int(statement, 1);
-        const content_id = c.sqlite3_column_int64(statement, 2);
-        if (position <= 0 or content_id <= 0) return error.CorruptStore;
+        const content_id = try readNullablePositiveI64(statement, 2);
+        const source_operation_id = try readNullablePositiveI64(statement, 3);
+        if (position <= 0) return error.CorruptStore;
         const kind: HistoricalEntryKind = switch (kind_value) {
             1 => .user,
             2 => .instruction,
             3 => .provider_output,
+            4 => .tool_results,
             else => return error.CorruptStore,
         };
-        const metadata = try self.readContentMetadata(content_id);
-        return .{
-            .position = @intCast(position),
-            .kind = kind,
-            .content = .{
+        if ((kind == .tool_results) != (source_operation_id != null) or
+            (kind == .tool_results) == (content_id != null)) return error.CorruptStore;
+        const historical_content = if (content_id) |id| blk: {
+            const metadata = try self.readContentMetadata(id);
+            break :blk HistoricalContent{
                 .view = view,
                 .length = metadata.length,
                 .digest = metadata.digest,
                 .private = kind == .provider_output,
-            },
+            };
+        } else null;
+        return .{
+            .position = @intCast(position),
+            .kind = kind,
+            .content = historical_content,
+            .source_operation_id = if (source_operation_id) |id| @intCast(id) else null,
+        };
+    }
+
+    fn readHistoricalToolResult(
+        self: *Store,
+        view: *HistoricalView,
+        source_operation_id: u64,
+        after_call_ordinal: ?u64,
+    ) !?HistoricalToolResult {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.readHistoricalToolResultLocked(view, source_operation_id, after_call_ordinal) catch |err| switch (err) {
+            error.StaleAttemptBinding, error.SupersededByControl => err,
+            else => self.fenceReadFailure(err),
+        };
+    }
+
+    fn readHistoricalToolResultLocked(
+        self: *Store,
+        view: *HistoricalView,
+        source_operation_id: u64,
+        after_call_ordinal: ?u64,
+    ) !?HistoricalToolResult {
+        try self.validateCurrentAttempt(view.binding);
+        const statement = try prepare(
+            self.database,
+            "SELECT call.call_ordinal,call.call_id_content_id," ++
+                "coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_operation current " ++
+                "JOIN model_operation source ON source.operation_id=?2 AND source.session_ref=current.session_ref " ++
+                "JOIN model_tool_call call ON call.operation_id=source.operation_id LEFT JOIN action_operation action " ++
+                "ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+                "WHERE current.operation_id=?1 AND source.resolution_code='tool_calls' " ++
+                "AND coalesce(call.acceptance_position,action.acceptance_position)<current.admission_position " ++
+                "AND (?3 IS NULL OR call.call_ordinal>?3) ORDER BY call.call_ordinal LIMIT 1",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, view.binding.operation_id);
+        try bindU64(statement, 2, source_operation_id);
+        try bindNullableU64(statement, 3, after_call_ordinal);
+        const result = c.sqlite3_step(statement);
+        if (result == c.SQLITE_DONE) return null;
+        if (result != c.SQLITE_ROW) return error.HistoricalEntryReadFailed;
+        const call_ordinal = c.sqlite3_column_int64(statement, 0);
+        const call_id_content_id = c.sqlite3_column_int64(statement, 1);
+        const output_content_id = c.sqlite3_column_int64(statement, 2);
+        if (call_ordinal < 0 or call_id_content_id <= 0 or output_content_id <= 0) return error.CorruptStore;
+        const call_id = try self.readContentMetadata(call_id_content_id);
+        const output = try self.readContentMetadata(output_content_id);
+        return .{
+            .call_ordinal = @intCast(call_ordinal),
+            .call_id = .{ .view = view, .length = call_id.length, .digest = call_id.digest },
+            .output = .{ .view = view, .length = output.length, .digest = output.digest },
         };
     }
 
@@ -3265,10 +3392,24 @@ pub const Store = struct {
                     "unknown_tool"
                 else
                     null;
+                var rejection_buffer: [128]u8 = undefined;
+                const rejection_text = if (rejection_code) |code|
+                    try rejectionResult(code, &name.content_digest, &rejection_buffer)
+                else
+                    null;
+                const rejection_content_id = if (rejection_text) |text|
+                    try self.importBytesContent(text, false, faults.output_import)
+                else
+                    null;
+                const acceptance_position = if (rejection_code != null) position: {
+                    const position = current.next_position;
+                    current.next_position = try std.math.add(u64, current.next_position, 1);
+                    break :position position;
+                } else null;
                 const insert_call = try prepare(
                     self.database,
-                    "INSERT INTO model_tool_call(operation_id,call_ordinal,item_ordinal,item_id_content_id,name_content_id,call_id_content_id,arguments_content_id,rejection_code,action_kind) " ++
-                        "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    "INSERT INTO model_tool_call(operation_id,call_ordinal,item_ordinal,item_id_content_id,name_content_id,call_id_content_id,arguments_content_id," ++
+                        "rejection_code,rejection_content_id,acceptance_position,action_kind) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                 );
                 defer _ = c.sqlite3_finalize(insert_call);
                 try bindU64(insert_call, 1, binding.operation_id);
@@ -3279,7 +3420,9 @@ pub const Store = struct {
                 try bindI64(insert_call, 6, call_id_content_id);
                 try bindI64(insert_call, 7, arguments_content_id);
                 try bindOptionalText(insert_call, 8, if (rejection_code) |code| code else "");
-                if (rejection_code == null) try bindI64(insert_call, 9, 1) else try bindNullableI64(insert_call, 9, null);
+                try bindNullableI64(insert_call, 9, rejection_content_id);
+                try bindNullableU64(insert_call, 10, acceptance_position);
+                if (rejection_code == null) try bindI64(insert_call, 11, 1) else try bindNullableI64(insert_call, 11, null);
                 try expectDone(insert_call);
 
                 if (rejection_code == null) {
@@ -3375,6 +3518,16 @@ pub const Store = struct {
 
     const ContentSlot = struct { id: i64, existing: bool };
 
+    fn rejectionResult(code: []const u8, name_digest: *const [32]u8, buffer: *[128]u8) ![]const u8 {
+        if (std.mem.eql(u8, code, "unknown_tool")) {
+            const digest_hex = std.fmt.bytesToHex(name_digest.*, .lower);
+            return std.fmt.bufPrint(buffer, "Unknown tool (name Rui content digest {s}).", .{&digest_hex});
+        }
+        if (std.mem.eql(u8, code, "invalid_arguments")) return "Invalid arguments for tool 'bash'.";
+        if (std.mem.eql(u8, code, "tool_unavailable")) return "Tool 'edit' is unavailable.";
+        return error.CorruptStore;
+    }
+
     fn contentSlot(self: *Store, digest: *const [32]u8, length: u64, private: bool) !ContentSlot {
         const find = try prepare(self.database, "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3");
         defer _ = c.sqlite3_finalize(find);
@@ -3400,6 +3553,22 @@ pub const Store = struct {
         const id = c.sqlite3_last_insert_rowid(self.database);
         if (id <= 0) return error.ContentWriteFailed;
         return .{ .id = id, .existing = false };
+    }
+
+    fn importBytesContent(self: *Store, bytes: []const u8, private: bool, fail_import: bool) !i64 {
+        if (fail_import) return error.InjectedContentImportFailure;
+        const digest = protocol.contentDigest(bytes);
+        const slot = try self.contentSlot(&digest, bytes.len, private);
+        if (slot.existing or bytes.len == 0) return slot.id;
+        var blob: ?*c.sqlite3_blob = null;
+        if (c.sqlite3_blob_open(self.database, "main", "content", "payload", slot.id, 1, &blob) != c.SQLITE_OK) {
+            return error.ContentWriteFailed;
+        }
+        defer _ = c.sqlite3_blob_close(blob);
+        if (c.sqlite3_blob_write(blob, bytes.ptr, @intCast(bytes.len), 0) != c.SQLITE_OK) {
+            return error.ContentWriteFailed;
+        }
+        return slot.id;
     }
 
     fn importSourceRange(
@@ -4334,12 +4503,15 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ call_id_content_id INTEGER NOT NULL REFERENCES content(content_id),
         \\ arguments_content_id INTEGER NOT NULL REFERENCES content(content_id),
         \\ rejection_code TEXT CHECK(rejection_code IS NULL OR rejection_code IN ('unknown_tool','invalid_arguments','tool_unavailable')),
+        \\ rejection_content_id INTEGER REFERENCES content(content_id),
+        \\ acceptance_position INTEGER CHECK(acceptance_position IS NULL OR acceptance_position>0),
         \\ action_kind INTEGER CHECK(action_kind IS NULL OR action_kind=1),
         \\ PRIMARY KEY(operation_id,call_ordinal),
         \\ UNIQUE(operation_id,item_ordinal),
         \\ UNIQUE(operation_id,call_id_content_id),
         \\ UNIQUE(operation_id,call_ordinal,action_kind),
-        \\ CHECK((rejection_code IS NULL AND action_kind=1) OR (rejection_code IS NOT NULL AND action_kind IS NULL))
+        \\ CHECK((rejection_code IS NULL AND rejection_content_id IS NULL AND acceptance_position IS NULL AND action_kind=1) OR
+        \\       (rejection_code IS NOT NULL AND rejection_content_id IS NOT NULL AND acceptance_position IS NOT NULL AND action_kind IS NULL))
         \\) STRICT, WITHOUT ROWID;
         \\CREATE TABLE action_operation(
         \\ action_id INTEGER PRIMARY KEY CHECK(action_id>0),
@@ -4350,12 +4522,16 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ permission_revision INTEGER NOT NULL CHECK(permission_revision>0),
         \\ permission_state INTEGER NOT NULL CHECK(permission_state IN (0,1,2)),
         \\ resolution_code TEXT CHECK(resolution_code IS NULL OR resolution_code IN ('denied','cancelled')),
+        \\ resolution_content_id INTEGER REFERENCES content(content_id),
+        \\ acceptance_position INTEGER CHECK(acceptance_position IS NULL OR acceptance_position>0),
         \\ UNIQUE(parent_operation_id,call_ordinal),
         \\ FOREIGN KEY(parent_operation_id,session_ref) REFERENCES model_operation(operation_id,session_ref),
         \\ FOREIGN KEY(parent_operation_id,call_ordinal,tool_kind) REFERENCES model_tool_call(operation_id,call_ordinal,action_kind),
         \\ FOREIGN KEY(session_ref,permission_revision) REFERENCES session_revision(session_ref,revision),
         \\ CHECK((permission_state=2 AND resolution_code='denied') OR
-        \\       (permission_state IN (0,1) AND (resolution_code IS NULL OR resolution_code='cancelled')))
+        \\       (permission_state IN (0,1) AND (resolution_code IS NULL OR resolution_code='cancelled'))),
+        \\ CHECK((resolution_code IS NULL AND resolution_content_id IS NULL AND acceptance_position IS NULL) OR
+        \\       (resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL AND acceptance_position IS NOT NULL))
         \\) STRICT;
         \\CREATE TABLE permission_decision_command(
         \\ command_key TEXT PRIMARY KEY REFERENCES core_command(command_key),
@@ -5270,6 +5446,136 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     try std.testing.expectEqual(@as(usize, 1), recovered_report.value.actions.unresolved.len);
     try std.testing.expectEqualStrings("6", recovered_report.value.actions.unresolved[0].call_ordinal);
     try std.testing.expectEqual(@as(usize, 5), recovered_report.value.rejected_calls.items.len);
+}
+
+test "complete call outcomes continue once in call order ahead of pending input" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try configureTestSession(&storage, "result-config", "direct/tool-results");
+    try submitTestMessage(&storage, &tmp, "result-first", "result-first", "direct/tool-results", "first");
+    const first_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "result-item-0", .name = "bash", .encoded_call_id = "result-call-0", .decoded_call_id = "result-call-0", .encoded_arguments = "{\\\"cmd\\\":\\\"zero\\\"}", .decoded_arguments = "{\"cmd\":\"zero\"}" },
+        .{ .item_id = "result-item-1", .name = "unknown", .encoded_call_id = "result-call-1", .decoded_call_id = "result-call-1", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        .{ .item_id = "result-item-2", .name = "bash", .encoded_call_id = "result-call-2", .decoded_call_id = "result-call-2", .encoded_arguments = "{", .decoded_arguments = "{" },
+        .{ .item_id = "result-item-3", .name = "bash", .encoded_call_id = "result-call-3", .decoded_call_id = "result-call-3", .encoded_arguments = "{\\\"cmd\\\":\\\"three\\\"}", .decoded_arguments = "{\"cmd\":\"three\"}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, first_binding, "result-metadata", &calls);
+    try submitTestMessage(&storage, &tmp, "result-second", "result-second", "direct/tool-results", "second");
+    try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+
+    const first_action_id = try queryU64(storage.database, "SELECT min(action_id) FROM action_operation");
+    const second_action_id = try queryU64(storage.database, "SELECT max(action_id) FROM action_operation");
+    var deny_second: protocol.PermissionDecisionCommand = .{ .action_id = second_action_id };
+    try deny_second.key.set("result-deny-second");
+    try deny_second.session.set("direct/tool-results");
+    try std.testing.expect(storage.denyPermission(&deny_second, .{}) == .accepted);
+    try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+
+    var deny_first: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
+    try deny_first.key.set("result-deny-first");
+    try deny_first.session.set("direct/tool-results");
+    try std.testing.expect(storage.denyPermission(&deny_first, .{}) == .accepted);
+    try storage.close();
+    storage = try testingStore(&tmp, std.testing.io);
+    const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expectEqual(first_binding.turn_id, continuation.turn_id);
+    try std.testing.expectEqual(first_binding.operation_id + 1, continuation.operation_id);
+    try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+
+    var view = try storage.openHistoricalView(continuation);
+    defer view.close();
+    var position: u64 = 0;
+    try std.testing.expectEqual(HistoricalEntryKind.user, (try view.nextEntry(position)).?.kind);
+    position = (try view.nextEntry(position)).?.position;
+    for (0..calls.len) |_| {
+        const item = (try view.nextEntry(position)).?;
+        try std.testing.expectEqual(HistoricalEntryKind.provider_output, item.kind);
+        position = item.position;
+    }
+    const group = (try view.nextEntry(position)).?;
+    try std.testing.expectEqual(HistoricalEntryKind.tool_results, group.kind);
+    try std.testing.expectEqual(first_binding.operation_id, group.source_operation_id.?);
+    position = group.position;
+    const pending = (try view.nextEntry(position)).?;
+    try std.testing.expectEqual(HistoricalEntryKind.user, pending.kind);
+    try std.testing.expect((try view.nextEntry(pending.position)) == null);
+
+    const expected_call_ids = [_][]const u8{ "result-call-0", "result-call-1", "result-call-2", "result-call-3" };
+    const unknown_digest = std.fmt.bytesToHex(protocol.contentDigest("unknown"), .lower);
+    var unknown_result_buffer: [128]u8 = undefined;
+    const unknown_result = try std.fmt.bufPrint(&unknown_result_buffer, "Unknown tool (name Rui content digest {s}).", .{&unknown_digest});
+    const expected_outputs = [_][]const u8{
+        "Permission denied.",
+        unknown_result,
+        "Invalid arguments for tool 'bash'.",
+        "Permission denied.",
+    };
+    var after_call_ordinal: ?u64 = null;
+    for (expected_call_ids, expected_outputs, 0..) |expected_call_id, expected_output, ordinal| {
+        const result = (try view.nextToolResult(group.source_operation_id.?, after_call_ordinal)).?;
+        try std.testing.expectEqual(ordinal, result.call_ordinal);
+        var call_id = try view.openContent(result.call_id);
+        var output = try view.openContent(result.output);
+        var buffer: [128]u8 = undefined;
+        const call_id_count = try call_id.read(0, &buffer);
+        try std.testing.expectEqualStrings(expected_call_id, buffer[0..call_id_count]);
+        const output_count = try output.read(0, &buffer);
+        try std.testing.expectEqualStrings(expected_output, buffer[0..output_count]);
+        output.close();
+        call_id.close();
+        after_call_ordinal = result.call_ordinal;
+    }
+    try std.testing.expect((try view.nextToolResult(group.source_operation_id.?, after_call_ordinal)) == null);
+}
+
+test "terminal call-result import and read failures preserve canonical authority" {
+    var import_tmp = std.testing.tmpDir(.{});
+    defer import_tmp.cleanup();
+    var import_store = try testingStore(&import_tmp, std.testing.io);
+    defer import_store.close() catch unreachable;
+    try configureTestSession(&import_store, "result-import-config", "direct/result-import");
+    try submitTestMessage(&import_store, &import_tmp, "result-import-message", "result-import-message", "direct/result-import", "call");
+    const import_binding = (try import_store.admitNextModelAttempt(.{})).?.permit.binding;
+    const valid_call = [_]TestingCall{.{ .item_id = "import-item", .name = "bash", .encoded_call_id = "import-call", .decoded_call_id = "import-call", .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\"}", .decoded_arguments = "{\"cmd\":\"true\"}" }};
+    try settleCallsForTesting(&import_store, &import_tmp, import_binding, "result-import-metadata", &valid_call);
+    var deny: protocol.PermissionDecisionCommand = .{ .action_id = try queryU64(import_store.database, "SELECT action_id FROM action_operation") };
+    try deny.key.set("result-import-deny");
+    try deny.session.set("direct/result-import");
+    try std.testing.expectEqual(PermissionDecisionReply.infrastructure_failure, import_store.denyPermission(&deny, .{ .content_import = true }));
+    try std.testing.expect(import_store.isFenced());
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(import_store.database, "SELECT count(*) FROM core_command WHERE command_key='result-import-deny'"));
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(import_store.database, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL"));
+
+    var read_tmp = std.testing.tmpDir(.{});
+    defer read_tmp.cleanup();
+    var read_store = try testingStore(&read_tmp, std.testing.io);
+    defer read_store.close() catch unreachable;
+    try configureTestSession(&read_store, "result-read-config", "direct/result-read");
+    try submitTestMessage(&read_store, &read_tmp, "result-read-message", "result-read-message", "direct/result-read", "call");
+    const read_binding = (try read_store.admitNextModelAttempt(.{})).?.permit.binding;
+    const rejected_call = [_]TestingCall{.{ .item_id = "read-item", .name = "unknown", .encoded_call_id = "read-call", .decoded_call_id = "read-call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+    try settleCallsForTesting(&read_store, &read_tmp, read_binding, "result-read-metadata", &rejected_call);
+    const continuation = (try read_store.admitNextModelAttempt(.{})).?.permit.binding;
+    try exec(read_store.database, "PRAGMA foreign_keys=OFF");
+    try exec(read_store.database, "UPDATE model_tool_call SET rejection_content_id=9223372036854775807");
+    try exec(read_store.database, "PRAGMA foreign_keys=ON");
+    var view = try read_store.openHistoricalView(continuation);
+    defer view.close();
+    var position: u64 = 0;
+    var group: ?HistoricalEntry = null;
+    while (try view.nextEntry(position)) |entry| {
+        position = entry.position;
+        if (entry.kind == .tool_results) {
+            group = entry;
+            break;
+        }
+    }
+    try std.testing.expectError(error.CorruptStore, view.nextToolResult(group.?.source_operation_id.?, null));
+    try std.testing.expect(read_store.isFenced());
 }
 
 test "call classification uses the proposing Operation frozen catalog" {
@@ -6917,21 +7223,21 @@ test "one committed selection freezes its settings and input prefix" {
     const instruction = (try view.nextEntry(second_input.position)).?;
     try std.testing.expect(instruction.kind == .instruction);
     try std.testing.expect((try view.nextEntry(instruction.position)) == null);
-    var first_reader = try view.openContent(first_input.content);
+    var first_reader = try view.openContent(first_input.content.?);
     defer if (first_reader.active) first_reader.close();
     var actual: [5]u8 = undefined;
     try std.testing.expectEqual(actual.len, try first_reader.read(0, &actual));
     try std.testing.expectEqualStrings("first", &actual);
 
     var foreign_view = try storage.openHistoricalView(binding);
-    try std.testing.expect(first_input.content.belongsTo(&view));
-    try std.testing.expect(!first_input.content.belongsTo(&foreign_view));
+    try std.testing.expect(first_input.content.?.belongsTo(&view));
+    try std.testing.expect(!first_input.content.?.belongsTo(&foreign_view));
     foreign_view.close();
     try std.testing.expectEqual(@as(usize, 1), view.readers);
     first_reader.close();
     try std.testing.expectEqual(@as(usize, 0), view.readers);
     view.close();
-    try std.testing.expect(!first_input.content.belongsTo(&view));
+    try std.testing.expect(!first_input.content.?.belongsTo(&view));
     try std.testing.expect(!first_reader.usable());
 
     try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
