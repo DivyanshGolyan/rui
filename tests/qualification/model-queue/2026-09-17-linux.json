@@ -1,5 +1,5 @@
 {
-  "artifacts": "/tmp/rui-model-queue-2010480091",
+  "artifacts": "/tmp/rui-model-queue-3016150831",
   "binary": "/home/user/workspace/repo/.zig-cache/o/c3c65f9dd8937e6b893b3cbacbfac0e9/rui-release-small-check",
   "binary_sha256": "dd6952fb9c37f147a64a7851fbfb241e052a09e02088dab12b6ad0599ccdc210",
   "cases": {
@@ -7,10 +7,34 @@
       "capacity": 1,
       "discovery_ms": 6,
       "discovery_target_ms": 2000,
-      "expected_oldest_first_order": [
+      "expected_oldest_first_admission_order": [
         "queue/eligible/000001"
       ],
-      "operation_launch_order": [
+      "last_message_observation": {
+        "code": "accepted",
+        "input": {
+          "bytes": "19",
+          "sha256": "1a0a2ce1b20431184603d9250d0d04cac1f7ed3406ab31202209398ab4c42941",
+          "type": "text"
+        },
+        "kind": "message",
+        "processing": {
+          "attempt": "1",
+          "operation": "1",
+          "turn": "1"
+        },
+        "queue": {
+          "admission": "2000101",
+          "status": "failed"
+        },
+        "result": {
+          "code": "provider_http_422",
+          "status": "failed"
+        },
+        "status": "accepted",
+        "target": "queue/eligible/000001"
+      },
+      "operation_admission_order": [
         "queue/eligible/000001"
       ],
       "population": {
@@ -18,9 +42,22 @@
         "ineligible_stopped_pending": 0,
         "eligible": 1
       },
+      "settlement_facts": [
+        {
+          "command_key": "e-msg-1",
+          "message_session": "queue/eligible/000001",
+          "turn_id": 1,
+          "turn_session": "queue/eligible/000001",
+          "operation_id": 1,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 1,
+          "operation_session": "queue/eligible/000001",
+          "operation_resolution": "provider_http_422"
+        }
+      ],
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 3
+      "terminal_observation_ms": 4
     },
     "eligible-1": {
       "population": {
@@ -32,9 +69,9 @@
     },
     "eligible-10": {
       "capacity": 1,
-      "discovery_ms": 6,
+      "discovery_ms": 7,
       "discovery_target_ms": 2000,
-      "expected_oldest_first_order": [
+      "expected_oldest_first_admission_order": [
         "queue/eligible/000001",
         "queue/eligible/000002",
         "queue/eligible/000003",
@@ -46,7 +83,31 @@
         "queue/eligible/000009",
         "queue/eligible/000010"
       ],
-      "operation_launch_order": [
+      "last_message_observation": {
+        "code": "accepted",
+        "input": {
+          "bytes": "19",
+          "sha256": "1a0a2ce1b20431184603d9250d0d04cac1f7ed3406ab31202209398ab4c42941",
+          "type": "text"
+        },
+        "kind": "message",
+        "processing": {
+          "attempt": "1",
+          "operation": "10",
+          "turn": "10"
+        },
+        "queue": {
+          "admission": "2000110",
+          "status": "failed"
+        },
+        "result": {
+          "code": "provider_http_422",
+          "status": "failed"
+        },
+        "status": "accepted",
+        "target": "queue/eligible/000010"
+      },
+      "operation_admission_order": [
         "queue/eligible/000001",
         "queue/eligible/000002",
         "queue/eligible/000003",
@@ -63,6 +124,118 @@
         "ineligible_stopped_pending": 0,
         "eligible": 10
       },
+      "settlement_facts": [
+        {
+          "command_key": "e-msg-1",
+          "message_session": "queue/eligible/000001",
+          "turn_id": 1,
+          "turn_session": "queue/eligible/000001",
+          "operation_id": 1,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 1,
+          "operation_session": "queue/eligible/000001",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-2",
+          "message_session": "queue/eligible/000002",
+          "turn_id": 2,
+          "turn_session": "queue/eligible/000002",
+          "operation_id": 2,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 2,
+          "operation_session": "queue/eligible/000002",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-3",
+          "message_session": "queue/eligible/000003",
+          "turn_id": 3,
+          "turn_session": "queue/eligible/000003",
+          "operation_id": 3,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 3,
+          "operation_session": "queue/eligible/000003",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-4",
+          "message_session": "queue/eligible/000004",
+          "turn_id": 4,
+          "turn_session": "queue/eligible/000004",
+          "operation_id": 4,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 4,
+          "operation_session": "queue/eligible/000004",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-5",
+          "message_session": "queue/eligible/000005",
+          "turn_id": 5,
+          "turn_session": "queue/eligible/000005",
+          "operation_id": 5,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 5,
+          "operation_session": "queue/eligible/000005",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-6",
+          "message_session": "queue/eligible/000006",
+          "turn_id": 6,
+          "turn_session": "queue/eligible/000006",
+          "operation_id": 6,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 6,
+          "operation_session": "queue/eligible/000006",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-7",
+          "message_session": "queue/eligible/000007",
+          "turn_id": 7,
+          "turn_session": "queue/eligible/000007",
+          "operation_id": 7,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 7,
+          "operation_session": "queue/eligible/000007",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-8",
+          "message_session": "queue/eligible/000008",
+          "turn_id": 8,
+          "turn_session": "queue/eligible/000008",
+          "operation_id": 8,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 8,
+          "operation_session": "queue/eligible/000008",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-9",
+          "message_session": "queue/eligible/000009",
+          "turn_id": 9,
+          "turn_session": "queue/eligible/000009",
+          "operation_id": 9,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 9,
+          "operation_session": "queue/eligible/000009",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-10",
+          "message_session": "queue/eligible/000010",
+          "turn_id": 10,
+          "turn_session": "queue/eligible/000010",
+          "operation_id": 10,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 10,
+          "operation_session": "queue/eligible/000010",
+          "operation_resolution": "provider_http_422"
+        }
+      ],
       "status": "passed",
       "target_inclusive": true,
       "terminal_observation_ms": 76
@@ -71,7 +244,7 @@
       "capacity": 1,
       "discovery_ms": 7,
       "discovery_target_ms": 2000,
-      "expected_oldest_first_order": [
+      "expected_oldest_first_admission_order": [
         "queue/eligible/000001",
         "queue/eligible/000002",
         "queue/eligible/000003",
@@ -173,7 +346,31 @@
         "queue/eligible/000099",
         "queue/eligible/000100"
       ],
-      "operation_launch_order": [
+      "last_message_observation": {
+        "code": "accepted",
+        "input": {
+          "bytes": "19",
+          "sha256": "1a0a2ce1b20431184603d9250d0d04cac1f7ed3406ab31202209398ab4c42941",
+          "type": "text"
+        },
+        "kind": "message",
+        "processing": {
+          "attempt": "1",
+          "operation": "100",
+          "turn": "100"
+        },
+        "queue": {
+          "admission": "2000200",
+          "status": "failed"
+        },
+        "result": {
+          "code": "provider_http_422",
+          "status": "failed"
+        },
+        "status": "accepted",
+        "target": "queue/eligible/000100"
+      },
+      "operation_admission_order": [
         "queue/eligible/000001",
         "queue/eligible/000002",
         "queue/eligible/000003",
@@ -280,18 +477,1144 @@
         "ineligible_stopped_pending": 0,
         "eligible": 100
       },
+      "settlement_facts": [
+        {
+          "command_key": "e-msg-1",
+          "message_session": "queue/eligible/000001",
+          "turn_id": 1,
+          "turn_session": "queue/eligible/000001",
+          "operation_id": 1,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 1,
+          "operation_session": "queue/eligible/000001",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-2",
+          "message_session": "queue/eligible/000002",
+          "turn_id": 2,
+          "turn_session": "queue/eligible/000002",
+          "operation_id": 2,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 2,
+          "operation_session": "queue/eligible/000002",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-3",
+          "message_session": "queue/eligible/000003",
+          "turn_id": 3,
+          "turn_session": "queue/eligible/000003",
+          "operation_id": 3,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 3,
+          "operation_session": "queue/eligible/000003",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-4",
+          "message_session": "queue/eligible/000004",
+          "turn_id": 4,
+          "turn_session": "queue/eligible/000004",
+          "operation_id": 4,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 4,
+          "operation_session": "queue/eligible/000004",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-5",
+          "message_session": "queue/eligible/000005",
+          "turn_id": 5,
+          "turn_session": "queue/eligible/000005",
+          "operation_id": 5,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 5,
+          "operation_session": "queue/eligible/000005",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-6",
+          "message_session": "queue/eligible/000006",
+          "turn_id": 6,
+          "turn_session": "queue/eligible/000006",
+          "operation_id": 6,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 6,
+          "operation_session": "queue/eligible/000006",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-7",
+          "message_session": "queue/eligible/000007",
+          "turn_id": 7,
+          "turn_session": "queue/eligible/000007",
+          "operation_id": 7,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 7,
+          "operation_session": "queue/eligible/000007",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-8",
+          "message_session": "queue/eligible/000008",
+          "turn_id": 8,
+          "turn_session": "queue/eligible/000008",
+          "operation_id": 8,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 8,
+          "operation_session": "queue/eligible/000008",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-9",
+          "message_session": "queue/eligible/000009",
+          "turn_id": 9,
+          "turn_session": "queue/eligible/000009",
+          "operation_id": 9,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 9,
+          "operation_session": "queue/eligible/000009",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-10",
+          "message_session": "queue/eligible/000010",
+          "turn_id": 10,
+          "turn_session": "queue/eligible/000010",
+          "operation_id": 10,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 10,
+          "operation_session": "queue/eligible/000010",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-11",
+          "message_session": "queue/eligible/000011",
+          "turn_id": 11,
+          "turn_session": "queue/eligible/000011",
+          "operation_id": 11,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 11,
+          "operation_session": "queue/eligible/000011",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-12",
+          "message_session": "queue/eligible/000012",
+          "turn_id": 12,
+          "turn_session": "queue/eligible/000012",
+          "operation_id": 12,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 12,
+          "operation_session": "queue/eligible/000012",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-13",
+          "message_session": "queue/eligible/000013",
+          "turn_id": 13,
+          "turn_session": "queue/eligible/000013",
+          "operation_id": 13,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 13,
+          "operation_session": "queue/eligible/000013",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-14",
+          "message_session": "queue/eligible/000014",
+          "turn_id": 14,
+          "turn_session": "queue/eligible/000014",
+          "operation_id": 14,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 14,
+          "operation_session": "queue/eligible/000014",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-15",
+          "message_session": "queue/eligible/000015",
+          "turn_id": 15,
+          "turn_session": "queue/eligible/000015",
+          "operation_id": 15,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 15,
+          "operation_session": "queue/eligible/000015",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-16",
+          "message_session": "queue/eligible/000016",
+          "turn_id": 16,
+          "turn_session": "queue/eligible/000016",
+          "operation_id": 16,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 16,
+          "operation_session": "queue/eligible/000016",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-17",
+          "message_session": "queue/eligible/000017",
+          "turn_id": 17,
+          "turn_session": "queue/eligible/000017",
+          "operation_id": 17,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 17,
+          "operation_session": "queue/eligible/000017",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-18",
+          "message_session": "queue/eligible/000018",
+          "turn_id": 18,
+          "turn_session": "queue/eligible/000018",
+          "operation_id": 18,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 18,
+          "operation_session": "queue/eligible/000018",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-19",
+          "message_session": "queue/eligible/000019",
+          "turn_id": 19,
+          "turn_session": "queue/eligible/000019",
+          "operation_id": 19,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 19,
+          "operation_session": "queue/eligible/000019",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-20",
+          "message_session": "queue/eligible/000020",
+          "turn_id": 20,
+          "turn_session": "queue/eligible/000020",
+          "operation_id": 20,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 20,
+          "operation_session": "queue/eligible/000020",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-21",
+          "message_session": "queue/eligible/000021",
+          "turn_id": 21,
+          "turn_session": "queue/eligible/000021",
+          "operation_id": 21,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 21,
+          "operation_session": "queue/eligible/000021",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-22",
+          "message_session": "queue/eligible/000022",
+          "turn_id": 22,
+          "turn_session": "queue/eligible/000022",
+          "operation_id": 22,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 22,
+          "operation_session": "queue/eligible/000022",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-23",
+          "message_session": "queue/eligible/000023",
+          "turn_id": 23,
+          "turn_session": "queue/eligible/000023",
+          "operation_id": 23,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 23,
+          "operation_session": "queue/eligible/000023",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-24",
+          "message_session": "queue/eligible/000024",
+          "turn_id": 24,
+          "turn_session": "queue/eligible/000024",
+          "operation_id": 24,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 24,
+          "operation_session": "queue/eligible/000024",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-25",
+          "message_session": "queue/eligible/000025",
+          "turn_id": 25,
+          "turn_session": "queue/eligible/000025",
+          "operation_id": 25,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 25,
+          "operation_session": "queue/eligible/000025",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-26",
+          "message_session": "queue/eligible/000026",
+          "turn_id": 26,
+          "turn_session": "queue/eligible/000026",
+          "operation_id": 26,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 26,
+          "operation_session": "queue/eligible/000026",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-27",
+          "message_session": "queue/eligible/000027",
+          "turn_id": 27,
+          "turn_session": "queue/eligible/000027",
+          "operation_id": 27,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 27,
+          "operation_session": "queue/eligible/000027",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-28",
+          "message_session": "queue/eligible/000028",
+          "turn_id": 28,
+          "turn_session": "queue/eligible/000028",
+          "operation_id": 28,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 28,
+          "operation_session": "queue/eligible/000028",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-29",
+          "message_session": "queue/eligible/000029",
+          "turn_id": 29,
+          "turn_session": "queue/eligible/000029",
+          "operation_id": 29,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 29,
+          "operation_session": "queue/eligible/000029",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-30",
+          "message_session": "queue/eligible/000030",
+          "turn_id": 30,
+          "turn_session": "queue/eligible/000030",
+          "operation_id": 30,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 30,
+          "operation_session": "queue/eligible/000030",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-31",
+          "message_session": "queue/eligible/000031",
+          "turn_id": 31,
+          "turn_session": "queue/eligible/000031",
+          "operation_id": 31,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 31,
+          "operation_session": "queue/eligible/000031",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-32",
+          "message_session": "queue/eligible/000032",
+          "turn_id": 32,
+          "turn_session": "queue/eligible/000032",
+          "operation_id": 32,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 32,
+          "operation_session": "queue/eligible/000032",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-33",
+          "message_session": "queue/eligible/000033",
+          "turn_id": 33,
+          "turn_session": "queue/eligible/000033",
+          "operation_id": 33,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 33,
+          "operation_session": "queue/eligible/000033",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-34",
+          "message_session": "queue/eligible/000034",
+          "turn_id": 34,
+          "turn_session": "queue/eligible/000034",
+          "operation_id": 34,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 34,
+          "operation_session": "queue/eligible/000034",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-35",
+          "message_session": "queue/eligible/000035",
+          "turn_id": 35,
+          "turn_session": "queue/eligible/000035",
+          "operation_id": 35,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 35,
+          "operation_session": "queue/eligible/000035",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-36",
+          "message_session": "queue/eligible/000036",
+          "turn_id": 36,
+          "turn_session": "queue/eligible/000036",
+          "operation_id": 36,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 36,
+          "operation_session": "queue/eligible/000036",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-37",
+          "message_session": "queue/eligible/000037",
+          "turn_id": 37,
+          "turn_session": "queue/eligible/000037",
+          "operation_id": 37,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 37,
+          "operation_session": "queue/eligible/000037",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-38",
+          "message_session": "queue/eligible/000038",
+          "turn_id": 38,
+          "turn_session": "queue/eligible/000038",
+          "operation_id": 38,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 38,
+          "operation_session": "queue/eligible/000038",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-39",
+          "message_session": "queue/eligible/000039",
+          "turn_id": 39,
+          "turn_session": "queue/eligible/000039",
+          "operation_id": 39,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 39,
+          "operation_session": "queue/eligible/000039",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-40",
+          "message_session": "queue/eligible/000040",
+          "turn_id": 40,
+          "turn_session": "queue/eligible/000040",
+          "operation_id": 40,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 40,
+          "operation_session": "queue/eligible/000040",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-41",
+          "message_session": "queue/eligible/000041",
+          "turn_id": 41,
+          "turn_session": "queue/eligible/000041",
+          "operation_id": 41,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 41,
+          "operation_session": "queue/eligible/000041",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-42",
+          "message_session": "queue/eligible/000042",
+          "turn_id": 42,
+          "turn_session": "queue/eligible/000042",
+          "operation_id": 42,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 42,
+          "operation_session": "queue/eligible/000042",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-43",
+          "message_session": "queue/eligible/000043",
+          "turn_id": 43,
+          "turn_session": "queue/eligible/000043",
+          "operation_id": 43,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 43,
+          "operation_session": "queue/eligible/000043",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-44",
+          "message_session": "queue/eligible/000044",
+          "turn_id": 44,
+          "turn_session": "queue/eligible/000044",
+          "operation_id": 44,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 44,
+          "operation_session": "queue/eligible/000044",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-45",
+          "message_session": "queue/eligible/000045",
+          "turn_id": 45,
+          "turn_session": "queue/eligible/000045",
+          "operation_id": 45,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 45,
+          "operation_session": "queue/eligible/000045",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-46",
+          "message_session": "queue/eligible/000046",
+          "turn_id": 46,
+          "turn_session": "queue/eligible/000046",
+          "operation_id": 46,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 46,
+          "operation_session": "queue/eligible/000046",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-47",
+          "message_session": "queue/eligible/000047",
+          "turn_id": 47,
+          "turn_session": "queue/eligible/000047",
+          "operation_id": 47,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 47,
+          "operation_session": "queue/eligible/000047",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-48",
+          "message_session": "queue/eligible/000048",
+          "turn_id": 48,
+          "turn_session": "queue/eligible/000048",
+          "operation_id": 48,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 48,
+          "operation_session": "queue/eligible/000048",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-49",
+          "message_session": "queue/eligible/000049",
+          "turn_id": 49,
+          "turn_session": "queue/eligible/000049",
+          "operation_id": 49,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 49,
+          "operation_session": "queue/eligible/000049",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-50",
+          "message_session": "queue/eligible/000050",
+          "turn_id": 50,
+          "turn_session": "queue/eligible/000050",
+          "operation_id": 50,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 50,
+          "operation_session": "queue/eligible/000050",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-51",
+          "message_session": "queue/eligible/000051",
+          "turn_id": 51,
+          "turn_session": "queue/eligible/000051",
+          "operation_id": 51,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 51,
+          "operation_session": "queue/eligible/000051",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-52",
+          "message_session": "queue/eligible/000052",
+          "turn_id": 52,
+          "turn_session": "queue/eligible/000052",
+          "operation_id": 52,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 52,
+          "operation_session": "queue/eligible/000052",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-53",
+          "message_session": "queue/eligible/000053",
+          "turn_id": 53,
+          "turn_session": "queue/eligible/000053",
+          "operation_id": 53,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 53,
+          "operation_session": "queue/eligible/000053",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-54",
+          "message_session": "queue/eligible/000054",
+          "turn_id": 54,
+          "turn_session": "queue/eligible/000054",
+          "operation_id": 54,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 54,
+          "operation_session": "queue/eligible/000054",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-55",
+          "message_session": "queue/eligible/000055",
+          "turn_id": 55,
+          "turn_session": "queue/eligible/000055",
+          "operation_id": 55,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 55,
+          "operation_session": "queue/eligible/000055",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-56",
+          "message_session": "queue/eligible/000056",
+          "turn_id": 56,
+          "turn_session": "queue/eligible/000056",
+          "operation_id": 56,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 56,
+          "operation_session": "queue/eligible/000056",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-57",
+          "message_session": "queue/eligible/000057",
+          "turn_id": 57,
+          "turn_session": "queue/eligible/000057",
+          "operation_id": 57,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 57,
+          "operation_session": "queue/eligible/000057",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-58",
+          "message_session": "queue/eligible/000058",
+          "turn_id": 58,
+          "turn_session": "queue/eligible/000058",
+          "operation_id": 58,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 58,
+          "operation_session": "queue/eligible/000058",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-59",
+          "message_session": "queue/eligible/000059",
+          "turn_id": 59,
+          "turn_session": "queue/eligible/000059",
+          "operation_id": 59,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 59,
+          "operation_session": "queue/eligible/000059",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-60",
+          "message_session": "queue/eligible/000060",
+          "turn_id": 60,
+          "turn_session": "queue/eligible/000060",
+          "operation_id": 60,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 60,
+          "operation_session": "queue/eligible/000060",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-61",
+          "message_session": "queue/eligible/000061",
+          "turn_id": 61,
+          "turn_session": "queue/eligible/000061",
+          "operation_id": 61,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 61,
+          "operation_session": "queue/eligible/000061",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-62",
+          "message_session": "queue/eligible/000062",
+          "turn_id": 62,
+          "turn_session": "queue/eligible/000062",
+          "operation_id": 62,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 62,
+          "operation_session": "queue/eligible/000062",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-63",
+          "message_session": "queue/eligible/000063",
+          "turn_id": 63,
+          "turn_session": "queue/eligible/000063",
+          "operation_id": 63,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 63,
+          "operation_session": "queue/eligible/000063",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-64",
+          "message_session": "queue/eligible/000064",
+          "turn_id": 64,
+          "turn_session": "queue/eligible/000064",
+          "operation_id": 64,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 64,
+          "operation_session": "queue/eligible/000064",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-65",
+          "message_session": "queue/eligible/000065",
+          "turn_id": 65,
+          "turn_session": "queue/eligible/000065",
+          "operation_id": 65,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 65,
+          "operation_session": "queue/eligible/000065",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-66",
+          "message_session": "queue/eligible/000066",
+          "turn_id": 66,
+          "turn_session": "queue/eligible/000066",
+          "operation_id": 66,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 66,
+          "operation_session": "queue/eligible/000066",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-67",
+          "message_session": "queue/eligible/000067",
+          "turn_id": 67,
+          "turn_session": "queue/eligible/000067",
+          "operation_id": 67,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 67,
+          "operation_session": "queue/eligible/000067",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-68",
+          "message_session": "queue/eligible/000068",
+          "turn_id": 68,
+          "turn_session": "queue/eligible/000068",
+          "operation_id": 68,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 68,
+          "operation_session": "queue/eligible/000068",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-69",
+          "message_session": "queue/eligible/000069",
+          "turn_id": 69,
+          "turn_session": "queue/eligible/000069",
+          "operation_id": 69,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 69,
+          "operation_session": "queue/eligible/000069",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-70",
+          "message_session": "queue/eligible/000070",
+          "turn_id": 70,
+          "turn_session": "queue/eligible/000070",
+          "operation_id": 70,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 70,
+          "operation_session": "queue/eligible/000070",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-71",
+          "message_session": "queue/eligible/000071",
+          "turn_id": 71,
+          "turn_session": "queue/eligible/000071",
+          "operation_id": 71,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 71,
+          "operation_session": "queue/eligible/000071",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-72",
+          "message_session": "queue/eligible/000072",
+          "turn_id": 72,
+          "turn_session": "queue/eligible/000072",
+          "operation_id": 72,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 72,
+          "operation_session": "queue/eligible/000072",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-73",
+          "message_session": "queue/eligible/000073",
+          "turn_id": 73,
+          "turn_session": "queue/eligible/000073",
+          "operation_id": 73,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 73,
+          "operation_session": "queue/eligible/000073",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-74",
+          "message_session": "queue/eligible/000074",
+          "turn_id": 74,
+          "turn_session": "queue/eligible/000074",
+          "operation_id": 74,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 74,
+          "operation_session": "queue/eligible/000074",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-75",
+          "message_session": "queue/eligible/000075",
+          "turn_id": 75,
+          "turn_session": "queue/eligible/000075",
+          "operation_id": 75,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 75,
+          "operation_session": "queue/eligible/000075",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-76",
+          "message_session": "queue/eligible/000076",
+          "turn_id": 76,
+          "turn_session": "queue/eligible/000076",
+          "operation_id": 76,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 76,
+          "operation_session": "queue/eligible/000076",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-77",
+          "message_session": "queue/eligible/000077",
+          "turn_id": 77,
+          "turn_session": "queue/eligible/000077",
+          "operation_id": 77,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 77,
+          "operation_session": "queue/eligible/000077",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-78",
+          "message_session": "queue/eligible/000078",
+          "turn_id": 78,
+          "turn_session": "queue/eligible/000078",
+          "operation_id": 78,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 78,
+          "operation_session": "queue/eligible/000078",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-79",
+          "message_session": "queue/eligible/000079",
+          "turn_id": 79,
+          "turn_session": "queue/eligible/000079",
+          "operation_id": 79,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 79,
+          "operation_session": "queue/eligible/000079",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-80",
+          "message_session": "queue/eligible/000080",
+          "turn_id": 80,
+          "turn_session": "queue/eligible/000080",
+          "operation_id": 80,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 80,
+          "operation_session": "queue/eligible/000080",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-81",
+          "message_session": "queue/eligible/000081",
+          "turn_id": 81,
+          "turn_session": "queue/eligible/000081",
+          "operation_id": 81,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 81,
+          "operation_session": "queue/eligible/000081",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-82",
+          "message_session": "queue/eligible/000082",
+          "turn_id": 82,
+          "turn_session": "queue/eligible/000082",
+          "operation_id": 82,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 82,
+          "operation_session": "queue/eligible/000082",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-83",
+          "message_session": "queue/eligible/000083",
+          "turn_id": 83,
+          "turn_session": "queue/eligible/000083",
+          "operation_id": 83,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 83,
+          "operation_session": "queue/eligible/000083",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-84",
+          "message_session": "queue/eligible/000084",
+          "turn_id": 84,
+          "turn_session": "queue/eligible/000084",
+          "operation_id": 84,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 84,
+          "operation_session": "queue/eligible/000084",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-85",
+          "message_session": "queue/eligible/000085",
+          "turn_id": 85,
+          "turn_session": "queue/eligible/000085",
+          "operation_id": 85,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 85,
+          "operation_session": "queue/eligible/000085",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-86",
+          "message_session": "queue/eligible/000086",
+          "turn_id": 86,
+          "turn_session": "queue/eligible/000086",
+          "operation_id": 86,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 86,
+          "operation_session": "queue/eligible/000086",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-87",
+          "message_session": "queue/eligible/000087",
+          "turn_id": 87,
+          "turn_session": "queue/eligible/000087",
+          "operation_id": 87,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 87,
+          "operation_session": "queue/eligible/000087",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-88",
+          "message_session": "queue/eligible/000088",
+          "turn_id": 88,
+          "turn_session": "queue/eligible/000088",
+          "operation_id": 88,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 88,
+          "operation_session": "queue/eligible/000088",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-89",
+          "message_session": "queue/eligible/000089",
+          "turn_id": 89,
+          "turn_session": "queue/eligible/000089",
+          "operation_id": 89,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 89,
+          "operation_session": "queue/eligible/000089",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-90",
+          "message_session": "queue/eligible/000090",
+          "turn_id": 90,
+          "turn_session": "queue/eligible/000090",
+          "operation_id": 90,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 90,
+          "operation_session": "queue/eligible/000090",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-91",
+          "message_session": "queue/eligible/000091",
+          "turn_id": 91,
+          "turn_session": "queue/eligible/000091",
+          "operation_id": 91,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 91,
+          "operation_session": "queue/eligible/000091",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-92",
+          "message_session": "queue/eligible/000092",
+          "turn_id": 92,
+          "turn_session": "queue/eligible/000092",
+          "operation_id": 92,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 92,
+          "operation_session": "queue/eligible/000092",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-93",
+          "message_session": "queue/eligible/000093",
+          "turn_id": 93,
+          "turn_session": "queue/eligible/000093",
+          "operation_id": 93,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 93,
+          "operation_session": "queue/eligible/000093",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-94",
+          "message_session": "queue/eligible/000094",
+          "turn_id": 94,
+          "turn_session": "queue/eligible/000094",
+          "operation_id": 94,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 94,
+          "operation_session": "queue/eligible/000094",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-95",
+          "message_session": "queue/eligible/000095",
+          "turn_id": 95,
+          "turn_session": "queue/eligible/000095",
+          "operation_id": 95,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 95,
+          "operation_session": "queue/eligible/000095",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-96",
+          "message_session": "queue/eligible/000096",
+          "turn_id": 96,
+          "turn_session": "queue/eligible/000096",
+          "operation_id": 96,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 96,
+          "operation_session": "queue/eligible/000096",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-97",
+          "message_session": "queue/eligible/000097",
+          "turn_id": 97,
+          "turn_session": "queue/eligible/000097",
+          "operation_id": 97,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 97,
+          "operation_session": "queue/eligible/000097",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-98",
+          "message_session": "queue/eligible/000098",
+          "turn_id": 98,
+          "turn_session": "queue/eligible/000098",
+          "operation_id": 98,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 98,
+          "operation_session": "queue/eligible/000098",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-99",
+          "message_session": "queue/eligible/000099",
+          "turn_id": 99,
+          "turn_session": "queue/eligible/000099",
+          "operation_id": 99,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 99,
+          "operation_session": "queue/eligible/000099",
+          "operation_resolution": "provider_http_422"
+        },
+        {
+          "command_key": "e-msg-100",
+          "message_session": "queue/eligible/000100",
+          "turn_id": 100,
+          "turn_session": "queue/eligible/000100",
+          "operation_id": 100,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 100,
+          "operation_session": "queue/eligible/000100",
+          "operation_resolution": "provider_http_422"
+        }
+      ],
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 523
+      "terminal_observation_ms": 529
     },
     "history-1000": {
       "capacity": 1,
-      "discovery_ms": 6,
+      "discovery_ms": 7,
       "discovery_target_ms": 2000,
-      "expected_oldest_first_order": [
+      "expected_oldest_first_admission_order": [
         "queue/eligible/000001"
       ],
-      "operation_launch_order": [
+      "last_message_observation": {
+        "code": "accepted",
+        "input": {
+          "bytes": "19",
+          "sha256": "1a0a2ce1b20431184603d9250d0d04cac1f7ed3406ab31202209398ab4c42941",
+          "type": "text"
+        },
+        "kind": "message",
+        "processing": {
+          "attempt": "1",
+          "operation": "1101",
+          "turn": "1101"
+        },
+        "queue": {
+          "admission": "2000101",
+          "status": "failed"
+        },
+        "result": {
+          "code": "provider_http_422",
+          "status": "failed"
+        },
+        "status": "accepted",
+        "target": "queue/eligible/000001"
+      },
+      "operation_admission_order": [
         "queue/eligible/000001"
       ],
       "population": {
@@ -299,6 +1622,19 @@
         "ineligible_stopped_pending": 0,
         "eligible": 1
       },
+      "settlement_facts": [
+        {
+          "command_key": "e-msg-1",
+          "message_session": "queue/eligible/000001",
+          "turn_id": 1101,
+          "turn_session": "queue/eligible/000001",
+          "operation_id": 1101,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 1101,
+          "operation_session": "queue/eligible/000001",
+          "operation_resolution": "provider_http_422"
+        }
+      ],
       "status": "passed",
       "target_inclusive": true,
       "terminal_observation_ms": 4
@@ -307,10 +1643,34 @@
       "capacity": 1,
       "discovery_ms": 7,
       "discovery_target_ms": 2000,
-      "expected_oldest_first_order": [
+      "expected_oldest_first_admission_order": [
         "queue/eligible/000001"
       ],
-      "operation_launch_order": [
+      "last_message_observation": {
+        "code": "accepted",
+        "input": {
+          "bytes": "19",
+          "sha256": "1a0a2ce1b20431184603d9250d0d04cac1f7ed3406ab31202209398ab4c42941",
+          "type": "text"
+        },
+        "kind": "message",
+        "processing": {
+          "attempt": "1",
+          "operation": "10101",
+          "turn": "10101"
+        },
+        "queue": {
+          "admission": "2000101",
+          "status": "failed"
+        },
+        "result": {
+          "code": "provider_http_422",
+          "status": "failed"
+        },
+        "status": "accepted",
+        "target": "queue/eligible/000001"
+      },
+      "operation_admission_order": [
         "queue/eligible/000001"
       ],
       "population": {
@@ -318,9 +1678,22 @@
         "ineligible_stopped_pending": 0,
         "eligible": 1
       },
+      "settlement_facts": [
+        {
+          "command_key": "e-msg-1",
+          "message_session": "queue/eligible/000001",
+          "turn_id": 10101,
+          "turn_session": "queue/eligible/000001",
+          "operation_id": 10101,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 10101,
+          "operation_session": "queue/eligible/000001",
+          "operation_resolution": "provider_http_422"
+        }
+      ],
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 3
+      "terminal_observation_ms": 4
     },
     "ineligible-0": {
       "population": {
@@ -332,12 +1705,36 @@
     },
     "ineligible-100": {
       "capacity": 1,
-      "discovery_ms": 6,
+      "discovery_ms": 8,
       "discovery_target_ms": 2000,
-      "expected_oldest_first_order": [
+      "expected_oldest_first_admission_order": [
         "queue/eligible/000001"
       ],
-      "operation_launch_order": [
+      "last_message_observation": {
+        "code": "accepted",
+        "input": {
+          "bytes": "19",
+          "sha256": "1a0a2ce1b20431184603d9250d0d04cac1f7ed3406ab31202209398ab4c42941",
+          "type": "text"
+        },
+        "kind": "message",
+        "processing": {
+          "attempt": "1",
+          "operation": "1",
+          "turn": "1"
+        },
+        "queue": {
+          "admission": "2000101",
+          "status": "failed"
+        },
+        "result": {
+          "code": "provider_http_422",
+          "status": "failed"
+        },
+        "status": "accepted",
+        "target": "queue/eligible/000001"
+      },
+      "operation_admission_order": [
         "queue/eligible/000001"
       ],
       "population": {
@@ -345,18 +1742,55 @@
         "ineligible_stopped_pending": 100,
         "eligible": 1
       },
+      "settlement_facts": [
+        {
+          "command_key": "e-msg-1",
+          "message_session": "queue/eligible/000001",
+          "turn_id": 1,
+          "turn_session": "queue/eligible/000001",
+          "operation_id": 1,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 1,
+          "operation_session": "queue/eligible/000001",
+          "operation_resolution": "provider_http_422"
+        }
+      ],
       "status": "passed",
       "target_inclusive": true,
-      "terminal_observation_ms": 3
+      "terminal_observation_ms": 4
     },
     "ineligible-1000": {
       "capacity": 1,
       "discovery_ms": 7,
       "discovery_target_ms": 2000,
-      "expected_oldest_first_order": [
+      "expected_oldest_first_admission_order": [
         "queue/eligible/000001"
       ],
-      "operation_launch_order": [
+      "last_message_observation": {
+        "code": "accepted",
+        "input": {
+          "bytes": "19",
+          "sha256": "1a0a2ce1b20431184603d9250d0d04cac1f7ed3406ab31202209398ab4c42941",
+          "type": "text"
+        },
+        "kind": "message",
+        "processing": {
+          "attempt": "1",
+          "operation": "1",
+          "turn": "1"
+        },
+        "queue": {
+          "admission": "2000101",
+          "status": "failed"
+        },
+        "result": {
+          "code": "provider_http_422",
+          "status": "failed"
+        },
+        "status": "accepted",
+        "target": "queue/eligible/000001"
+      },
+      "operation_admission_order": [
         "queue/eligible/000001"
       ],
       "population": {
@@ -364,6 +1798,19 @@
         "ineligible_stopped_pending": 1000,
         "eligible": 1
       },
+      "settlement_facts": [
+        {
+          "command_key": "e-msg-1",
+          "message_session": "queue/eligible/000001",
+          "turn_id": 1,
+          "turn_session": "queue/eligible/000001",
+          "operation_id": 1,
+          "turn_outcome": "provider_http_422",
+          "operation_turn_id": 1,
+          "operation_session": "queue/eligible/000001",
+          "operation_resolution": "provider_http_422"
+        }
+      ],
       "status": "passed",
       "target_inclusive": true,
       "terminal_observation_ms": 4
@@ -376,20 +1823,22 @@
     "target_miss": "valid discovery exceeds the inclusive 2000 ms target",
     "unavailable": "required discovery timestamp/counter could not be validly measured"
   },
+  "environment_evidence_status": "passed",
   "format": "rui-model-queue-v1-go",
   "limits": [
     "model-only qualification; Bash composition remains GitHub issue #168",
     "Linux runtime results are development evidence under the current platform contract; macOS physical footprint is reported only when available",
     "deterministic loopback HTTP; no TLS or live-provider behavior",
-    "Rui's pinned SQLite builds controlled populations in stopped Stores, but subsequent Host discovery, admission, launch, and settlement are authoritative",
+    "Rui's pinned SQLite builds controlled populations in stopped Stores, but subsequent Host discovery, Operation admission, provider request, and settlement are authoritative",
+    "Operation IDs prove admission order, not independent provider-request launch identity",
     "process termination is not power-loss qualification",
     "population sizes are qualification workloads, not product quotas"
   ],
   "maximum_mixed": {
     "capacity": 1,
-    "discovery_ms": 7,
+    "discovery_ms": 8,
     "discovery_target_ms": 2000,
-    "expected_oldest_first_order": [
+    "expected_oldest_first_admission_order": [
       "queue/eligible/000001",
       "queue/eligible/000002",
       "queue/eligible/000003",
@@ -497,7 +1946,7 @@
         "database_logical_bytes": 5361664
       },
       "process": {
-        "rss_bytes": 6586368,
+        "rss_bytes": 6651904,
         "virtual_bytes": 94294016,
         "cpu_user_seconds": 0,
         "cpu_system_seconds": 0,
@@ -515,16 +1964,40 @@
         "execution_slot_bytes": "1216",
         "openssl": "OpenSSL/3.6.3",
         "scratch_limit_bytes": "8589934592",
-        "socket": "/tmp/rui-1000/768b536f0e6ef249b9cb45d6b68e5824.sock",
-        "store": "/tmp/rui-model-queue-2010480091/maximum-mixed/store"
+        "socket": "/tmp/rui-1000/02beea7e60e69ab3455bb22307848ad7.sock",
+        "store": "/tmp/rui-model-queue-3016150831/maximum-mixed/store"
       }
+    },
+    "last_message_observation": {
+      "code": "accepted",
+      "input": {
+        "bytes": "19",
+        "sha256": "1a0a2ce1b20431184603d9250d0d04cac1f7ed3406ab31202209398ab4c42941",
+        "type": "text"
+      },
+      "kind": "message",
+      "processing": {
+        "attempt": "1",
+        "operation": "10200",
+        "turn": "10200"
+      },
+      "queue": {
+        "admission": "2000200",
+        "status": "failed"
+      },
+      "result": {
+        "code": "provider_http_422",
+        "status": "failed"
+      },
+      "status": "accepted",
+      "target": "queue/eligible/000100"
     },
     "macos_physical_footprint": {
       "reason": "requires macOS footprint(1)",
       "status": "unavailable",
       "target_bytes": 268435456
     },
-    "operation_launch_order": [
+    "operation_admission_order": [
       "queue/eligible/000001",
       "queue/eligible/000002",
       "queue/eligible/000003",
@@ -633,9 +2106,1111 @@
     },
     "resource_collection_status": "passed",
     "resource_status": "unavailable",
+    "settlement_facts": [
+      {
+        "command_key": "e-msg-1",
+        "message_session": "queue/eligible/000001",
+        "turn_id": 10101,
+        "turn_session": "queue/eligible/000001",
+        "operation_id": 10101,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10101,
+        "operation_session": "queue/eligible/000001",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-2",
+        "message_session": "queue/eligible/000002",
+        "turn_id": 10102,
+        "turn_session": "queue/eligible/000002",
+        "operation_id": 10102,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10102,
+        "operation_session": "queue/eligible/000002",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-3",
+        "message_session": "queue/eligible/000003",
+        "turn_id": 10103,
+        "turn_session": "queue/eligible/000003",
+        "operation_id": 10103,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10103,
+        "operation_session": "queue/eligible/000003",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-4",
+        "message_session": "queue/eligible/000004",
+        "turn_id": 10104,
+        "turn_session": "queue/eligible/000004",
+        "operation_id": 10104,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10104,
+        "operation_session": "queue/eligible/000004",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-5",
+        "message_session": "queue/eligible/000005",
+        "turn_id": 10105,
+        "turn_session": "queue/eligible/000005",
+        "operation_id": 10105,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10105,
+        "operation_session": "queue/eligible/000005",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-6",
+        "message_session": "queue/eligible/000006",
+        "turn_id": 10106,
+        "turn_session": "queue/eligible/000006",
+        "operation_id": 10106,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10106,
+        "operation_session": "queue/eligible/000006",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-7",
+        "message_session": "queue/eligible/000007",
+        "turn_id": 10107,
+        "turn_session": "queue/eligible/000007",
+        "operation_id": 10107,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10107,
+        "operation_session": "queue/eligible/000007",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-8",
+        "message_session": "queue/eligible/000008",
+        "turn_id": 10108,
+        "turn_session": "queue/eligible/000008",
+        "operation_id": 10108,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10108,
+        "operation_session": "queue/eligible/000008",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-9",
+        "message_session": "queue/eligible/000009",
+        "turn_id": 10109,
+        "turn_session": "queue/eligible/000009",
+        "operation_id": 10109,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10109,
+        "operation_session": "queue/eligible/000009",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-10",
+        "message_session": "queue/eligible/000010",
+        "turn_id": 10110,
+        "turn_session": "queue/eligible/000010",
+        "operation_id": 10110,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10110,
+        "operation_session": "queue/eligible/000010",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-11",
+        "message_session": "queue/eligible/000011",
+        "turn_id": 10111,
+        "turn_session": "queue/eligible/000011",
+        "operation_id": 10111,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10111,
+        "operation_session": "queue/eligible/000011",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-12",
+        "message_session": "queue/eligible/000012",
+        "turn_id": 10112,
+        "turn_session": "queue/eligible/000012",
+        "operation_id": 10112,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10112,
+        "operation_session": "queue/eligible/000012",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-13",
+        "message_session": "queue/eligible/000013",
+        "turn_id": 10113,
+        "turn_session": "queue/eligible/000013",
+        "operation_id": 10113,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10113,
+        "operation_session": "queue/eligible/000013",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-14",
+        "message_session": "queue/eligible/000014",
+        "turn_id": 10114,
+        "turn_session": "queue/eligible/000014",
+        "operation_id": 10114,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10114,
+        "operation_session": "queue/eligible/000014",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-15",
+        "message_session": "queue/eligible/000015",
+        "turn_id": 10115,
+        "turn_session": "queue/eligible/000015",
+        "operation_id": 10115,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10115,
+        "operation_session": "queue/eligible/000015",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-16",
+        "message_session": "queue/eligible/000016",
+        "turn_id": 10116,
+        "turn_session": "queue/eligible/000016",
+        "operation_id": 10116,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10116,
+        "operation_session": "queue/eligible/000016",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-17",
+        "message_session": "queue/eligible/000017",
+        "turn_id": 10117,
+        "turn_session": "queue/eligible/000017",
+        "operation_id": 10117,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10117,
+        "operation_session": "queue/eligible/000017",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-18",
+        "message_session": "queue/eligible/000018",
+        "turn_id": 10118,
+        "turn_session": "queue/eligible/000018",
+        "operation_id": 10118,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10118,
+        "operation_session": "queue/eligible/000018",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-19",
+        "message_session": "queue/eligible/000019",
+        "turn_id": 10119,
+        "turn_session": "queue/eligible/000019",
+        "operation_id": 10119,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10119,
+        "operation_session": "queue/eligible/000019",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-20",
+        "message_session": "queue/eligible/000020",
+        "turn_id": 10120,
+        "turn_session": "queue/eligible/000020",
+        "operation_id": 10120,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10120,
+        "operation_session": "queue/eligible/000020",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-21",
+        "message_session": "queue/eligible/000021",
+        "turn_id": 10121,
+        "turn_session": "queue/eligible/000021",
+        "operation_id": 10121,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10121,
+        "operation_session": "queue/eligible/000021",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-22",
+        "message_session": "queue/eligible/000022",
+        "turn_id": 10122,
+        "turn_session": "queue/eligible/000022",
+        "operation_id": 10122,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10122,
+        "operation_session": "queue/eligible/000022",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-23",
+        "message_session": "queue/eligible/000023",
+        "turn_id": 10123,
+        "turn_session": "queue/eligible/000023",
+        "operation_id": 10123,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10123,
+        "operation_session": "queue/eligible/000023",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-24",
+        "message_session": "queue/eligible/000024",
+        "turn_id": 10124,
+        "turn_session": "queue/eligible/000024",
+        "operation_id": 10124,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10124,
+        "operation_session": "queue/eligible/000024",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-25",
+        "message_session": "queue/eligible/000025",
+        "turn_id": 10125,
+        "turn_session": "queue/eligible/000025",
+        "operation_id": 10125,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10125,
+        "operation_session": "queue/eligible/000025",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-26",
+        "message_session": "queue/eligible/000026",
+        "turn_id": 10126,
+        "turn_session": "queue/eligible/000026",
+        "operation_id": 10126,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10126,
+        "operation_session": "queue/eligible/000026",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-27",
+        "message_session": "queue/eligible/000027",
+        "turn_id": 10127,
+        "turn_session": "queue/eligible/000027",
+        "operation_id": 10127,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10127,
+        "operation_session": "queue/eligible/000027",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-28",
+        "message_session": "queue/eligible/000028",
+        "turn_id": 10128,
+        "turn_session": "queue/eligible/000028",
+        "operation_id": 10128,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10128,
+        "operation_session": "queue/eligible/000028",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-29",
+        "message_session": "queue/eligible/000029",
+        "turn_id": 10129,
+        "turn_session": "queue/eligible/000029",
+        "operation_id": 10129,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10129,
+        "operation_session": "queue/eligible/000029",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-30",
+        "message_session": "queue/eligible/000030",
+        "turn_id": 10130,
+        "turn_session": "queue/eligible/000030",
+        "operation_id": 10130,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10130,
+        "operation_session": "queue/eligible/000030",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-31",
+        "message_session": "queue/eligible/000031",
+        "turn_id": 10131,
+        "turn_session": "queue/eligible/000031",
+        "operation_id": 10131,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10131,
+        "operation_session": "queue/eligible/000031",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-32",
+        "message_session": "queue/eligible/000032",
+        "turn_id": 10132,
+        "turn_session": "queue/eligible/000032",
+        "operation_id": 10132,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10132,
+        "operation_session": "queue/eligible/000032",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-33",
+        "message_session": "queue/eligible/000033",
+        "turn_id": 10133,
+        "turn_session": "queue/eligible/000033",
+        "operation_id": 10133,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10133,
+        "operation_session": "queue/eligible/000033",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-34",
+        "message_session": "queue/eligible/000034",
+        "turn_id": 10134,
+        "turn_session": "queue/eligible/000034",
+        "operation_id": 10134,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10134,
+        "operation_session": "queue/eligible/000034",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-35",
+        "message_session": "queue/eligible/000035",
+        "turn_id": 10135,
+        "turn_session": "queue/eligible/000035",
+        "operation_id": 10135,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10135,
+        "operation_session": "queue/eligible/000035",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-36",
+        "message_session": "queue/eligible/000036",
+        "turn_id": 10136,
+        "turn_session": "queue/eligible/000036",
+        "operation_id": 10136,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10136,
+        "operation_session": "queue/eligible/000036",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-37",
+        "message_session": "queue/eligible/000037",
+        "turn_id": 10137,
+        "turn_session": "queue/eligible/000037",
+        "operation_id": 10137,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10137,
+        "operation_session": "queue/eligible/000037",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-38",
+        "message_session": "queue/eligible/000038",
+        "turn_id": 10138,
+        "turn_session": "queue/eligible/000038",
+        "operation_id": 10138,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10138,
+        "operation_session": "queue/eligible/000038",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-39",
+        "message_session": "queue/eligible/000039",
+        "turn_id": 10139,
+        "turn_session": "queue/eligible/000039",
+        "operation_id": 10139,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10139,
+        "operation_session": "queue/eligible/000039",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-40",
+        "message_session": "queue/eligible/000040",
+        "turn_id": 10140,
+        "turn_session": "queue/eligible/000040",
+        "operation_id": 10140,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10140,
+        "operation_session": "queue/eligible/000040",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-41",
+        "message_session": "queue/eligible/000041",
+        "turn_id": 10141,
+        "turn_session": "queue/eligible/000041",
+        "operation_id": 10141,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10141,
+        "operation_session": "queue/eligible/000041",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-42",
+        "message_session": "queue/eligible/000042",
+        "turn_id": 10142,
+        "turn_session": "queue/eligible/000042",
+        "operation_id": 10142,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10142,
+        "operation_session": "queue/eligible/000042",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-43",
+        "message_session": "queue/eligible/000043",
+        "turn_id": 10143,
+        "turn_session": "queue/eligible/000043",
+        "operation_id": 10143,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10143,
+        "operation_session": "queue/eligible/000043",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-44",
+        "message_session": "queue/eligible/000044",
+        "turn_id": 10144,
+        "turn_session": "queue/eligible/000044",
+        "operation_id": 10144,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10144,
+        "operation_session": "queue/eligible/000044",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-45",
+        "message_session": "queue/eligible/000045",
+        "turn_id": 10145,
+        "turn_session": "queue/eligible/000045",
+        "operation_id": 10145,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10145,
+        "operation_session": "queue/eligible/000045",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-46",
+        "message_session": "queue/eligible/000046",
+        "turn_id": 10146,
+        "turn_session": "queue/eligible/000046",
+        "operation_id": 10146,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10146,
+        "operation_session": "queue/eligible/000046",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-47",
+        "message_session": "queue/eligible/000047",
+        "turn_id": 10147,
+        "turn_session": "queue/eligible/000047",
+        "operation_id": 10147,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10147,
+        "operation_session": "queue/eligible/000047",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-48",
+        "message_session": "queue/eligible/000048",
+        "turn_id": 10148,
+        "turn_session": "queue/eligible/000048",
+        "operation_id": 10148,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10148,
+        "operation_session": "queue/eligible/000048",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-49",
+        "message_session": "queue/eligible/000049",
+        "turn_id": 10149,
+        "turn_session": "queue/eligible/000049",
+        "operation_id": 10149,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10149,
+        "operation_session": "queue/eligible/000049",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-50",
+        "message_session": "queue/eligible/000050",
+        "turn_id": 10150,
+        "turn_session": "queue/eligible/000050",
+        "operation_id": 10150,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10150,
+        "operation_session": "queue/eligible/000050",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-51",
+        "message_session": "queue/eligible/000051",
+        "turn_id": 10151,
+        "turn_session": "queue/eligible/000051",
+        "operation_id": 10151,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10151,
+        "operation_session": "queue/eligible/000051",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-52",
+        "message_session": "queue/eligible/000052",
+        "turn_id": 10152,
+        "turn_session": "queue/eligible/000052",
+        "operation_id": 10152,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10152,
+        "operation_session": "queue/eligible/000052",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-53",
+        "message_session": "queue/eligible/000053",
+        "turn_id": 10153,
+        "turn_session": "queue/eligible/000053",
+        "operation_id": 10153,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10153,
+        "operation_session": "queue/eligible/000053",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-54",
+        "message_session": "queue/eligible/000054",
+        "turn_id": 10154,
+        "turn_session": "queue/eligible/000054",
+        "operation_id": 10154,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10154,
+        "operation_session": "queue/eligible/000054",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-55",
+        "message_session": "queue/eligible/000055",
+        "turn_id": 10155,
+        "turn_session": "queue/eligible/000055",
+        "operation_id": 10155,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10155,
+        "operation_session": "queue/eligible/000055",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-56",
+        "message_session": "queue/eligible/000056",
+        "turn_id": 10156,
+        "turn_session": "queue/eligible/000056",
+        "operation_id": 10156,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10156,
+        "operation_session": "queue/eligible/000056",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-57",
+        "message_session": "queue/eligible/000057",
+        "turn_id": 10157,
+        "turn_session": "queue/eligible/000057",
+        "operation_id": 10157,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10157,
+        "operation_session": "queue/eligible/000057",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-58",
+        "message_session": "queue/eligible/000058",
+        "turn_id": 10158,
+        "turn_session": "queue/eligible/000058",
+        "operation_id": 10158,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10158,
+        "operation_session": "queue/eligible/000058",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-59",
+        "message_session": "queue/eligible/000059",
+        "turn_id": 10159,
+        "turn_session": "queue/eligible/000059",
+        "operation_id": 10159,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10159,
+        "operation_session": "queue/eligible/000059",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-60",
+        "message_session": "queue/eligible/000060",
+        "turn_id": 10160,
+        "turn_session": "queue/eligible/000060",
+        "operation_id": 10160,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10160,
+        "operation_session": "queue/eligible/000060",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-61",
+        "message_session": "queue/eligible/000061",
+        "turn_id": 10161,
+        "turn_session": "queue/eligible/000061",
+        "operation_id": 10161,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10161,
+        "operation_session": "queue/eligible/000061",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-62",
+        "message_session": "queue/eligible/000062",
+        "turn_id": 10162,
+        "turn_session": "queue/eligible/000062",
+        "operation_id": 10162,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10162,
+        "operation_session": "queue/eligible/000062",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-63",
+        "message_session": "queue/eligible/000063",
+        "turn_id": 10163,
+        "turn_session": "queue/eligible/000063",
+        "operation_id": 10163,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10163,
+        "operation_session": "queue/eligible/000063",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-64",
+        "message_session": "queue/eligible/000064",
+        "turn_id": 10164,
+        "turn_session": "queue/eligible/000064",
+        "operation_id": 10164,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10164,
+        "operation_session": "queue/eligible/000064",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-65",
+        "message_session": "queue/eligible/000065",
+        "turn_id": 10165,
+        "turn_session": "queue/eligible/000065",
+        "operation_id": 10165,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10165,
+        "operation_session": "queue/eligible/000065",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-66",
+        "message_session": "queue/eligible/000066",
+        "turn_id": 10166,
+        "turn_session": "queue/eligible/000066",
+        "operation_id": 10166,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10166,
+        "operation_session": "queue/eligible/000066",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-67",
+        "message_session": "queue/eligible/000067",
+        "turn_id": 10167,
+        "turn_session": "queue/eligible/000067",
+        "operation_id": 10167,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10167,
+        "operation_session": "queue/eligible/000067",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-68",
+        "message_session": "queue/eligible/000068",
+        "turn_id": 10168,
+        "turn_session": "queue/eligible/000068",
+        "operation_id": 10168,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10168,
+        "operation_session": "queue/eligible/000068",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-69",
+        "message_session": "queue/eligible/000069",
+        "turn_id": 10169,
+        "turn_session": "queue/eligible/000069",
+        "operation_id": 10169,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10169,
+        "operation_session": "queue/eligible/000069",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-70",
+        "message_session": "queue/eligible/000070",
+        "turn_id": 10170,
+        "turn_session": "queue/eligible/000070",
+        "operation_id": 10170,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10170,
+        "operation_session": "queue/eligible/000070",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-71",
+        "message_session": "queue/eligible/000071",
+        "turn_id": 10171,
+        "turn_session": "queue/eligible/000071",
+        "operation_id": 10171,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10171,
+        "operation_session": "queue/eligible/000071",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-72",
+        "message_session": "queue/eligible/000072",
+        "turn_id": 10172,
+        "turn_session": "queue/eligible/000072",
+        "operation_id": 10172,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10172,
+        "operation_session": "queue/eligible/000072",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-73",
+        "message_session": "queue/eligible/000073",
+        "turn_id": 10173,
+        "turn_session": "queue/eligible/000073",
+        "operation_id": 10173,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10173,
+        "operation_session": "queue/eligible/000073",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-74",
+        "message_session": "queue/eligible/000074",
+        "turn_id": 10174,
+        "turn_session": "queue/eligible/000074",
+        "operation_id": 10174,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10174,
+        "operation_session": "queue/eligible/000074",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-75",
+        "message_session": "queue/eligible/000075",
+        "turn_id": 10175,
+        "turn_session": "queue/eligible/000075",
+        "operation_id": 10175,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10175,
+        "operation_session": "queue/eligible/000075",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-76",
+        "message_session": "queue/eligible/000076",
+        "turn_id": 10176,
+        "turn_session": "queue/eligible/000076",
+        "operation_id": 10176,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10176,
+        "operation_session": "queue/eligible/000076",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-77",
+        "message_session": "queue/eligible/000077",
+        "turn_id": 10177,
+        "turn_session": "queue/eligible/000077",
+        "operation_id": 10177,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10177,
+        "operation_session": "queue/eligible/000077",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-78",
+        "message_session": "queue/eligible/000078",
+        "turn_id": 10178,
+        "turn_session": "queue/eligible/000078",
+        "operation_id": 10178,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10178,
+        "operation_session": "queue/eligible/000078",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-79",
+        "message_session": "queue/eligible/000079",
+        "turn_id": 10179,
+        "turn_session": "queue/eligible/000079",
+        "operation_id": 10179,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10179,
+        "operation_session": "queue/eligible/000079",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-80",
+        "message_session": "queue/eligible/000080",
+        "turn_id": 10180,
+        "turn_session": "queue/eligible/000080",
+        "operation_id": 10180,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10180,
+        "operation_session": "queue/eligible/000080",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-81",
+        "message_session": "queue/eligible/000081",
+        "turn_id": 10181,
+        "turn_session": "queue/eligible/000081",
+        "operation_id": 10181,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10181,
+        "operation_session": "queue/eligible/000081",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-82",
+        "message_session": "queue/eligible/000082",
+        "turn_id": 10182,
+        "turn_session": "queue/eligible/000082",
+        "operation_id": 10182,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10182,
+        "operation_session": "queue/eligible/000082",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-83",
+        "message_session": "queue/eligible/000083",
+        "turn_id": 10183,
+        "turn_session": "queue/eligible/000083",
+        "operation_id": 10183,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10183,
+        "operation_session": "queue/eligible/000083",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-84",
+        "message_session": "queue/eligible/000084",
+        "turn_id": 10184,
+        "turn_session": "queue/eligible/000084",
+        "operation_id": 10184,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10184,
+        "operation_session": "queue/eligible/000084",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-85",
+        "message_session": "queue/eligible/000085",
+        "turn_id": 10185,
+        "turn_session": "queue/eligible/000085",
+        "operation_id": 10185,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10185,
+        "operation_session": "queue/eligible/000085",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-86",
+        "message_session": "queue/eligible/000086",
+        "turn_id": 10186,
+        "turn_session": "queue/eligible/000086",
+        "operation_id": 10186,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10186,
+        "operation_session": "queue/eligible/000086",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-87",
+        "message_session": "queue/eligible/000087",
+        "turn_id": 10187,
+        "turn_session": "queue/eligible/000087",
+        "operation_id": 10187,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10187,
+        "operation_session": "queue/eligible/000087",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-88",
+        "message_session": "queue/eligible/000088",
+        "turn_id": 10188,
+        "turn_session": "queue/eligible/000088",
+        "operation_id": 10188,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10188,
+        "operation_session": "queue/eligible/000088",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-89",
+        "message_session": "queue/eligible/000089",
+        "turn_id": 10189,
+        "turn_session": "queue/eligible/000089",
+        "operation_id": 10189,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10189,
+        "operation_session": "queue/eligible/000089",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-90",
+        "message_session": "queue/eligible/000090",
+        "turn_id": 10190,
+        "turn_session": "queue/eligible/000090",
+        "operation_id": 10190,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10190,
+        "operation_session": "queue/eligible/000090",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-91",
+        "message_session": "queue/eligible/000091",
+        "turn_id": 10191,
+        "turn_session": "queue/eligible/000091",
+        "operation_id": 10191,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10191,
+        "operation_session": "queue/eligible/000091",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-92",
+        "message_session": "queue/eligible/000092",
+        "turn_id": 10192,
+        "turn_session": "queue/eligible/000092",
+        "operation_id": 10192,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10192,
+        "operation_session": "queue/eligible/000092",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-93",
+        "message_session": "queue/eligible/000093",
+        "turn_id": 10193,
+        "turn_session": "queue/eligible/000093",
+        "operation_id": 10193,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10193,
+        "operation_session": "queue/eligible/000093",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-94",
+        "message_session": "queue/eligible/000094",
+        "turn_id": 10194,
+        "turn_session": "queue/eligible/000094",
+        "operation_id": 10194,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10194,
+        "operation_session": "queue/eligible/000094",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-95",
+        "message_session": "queue/eligible/000095",
+        "turn_id": 10195,
+        "turn_session": "queue/eligible/000095",
+        "operation_id": 10195,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10195,
+        "operation_session": "queue/eligible/000095",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-96",
+        "message_session": "queue/eligible/000096",
+        "turn_id": 10196,
+        "turn_session": "queue/eligible/000096",
+        "operation_id": 10196,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10196,
+        "operation_session": "queue/eligible/000096",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-97",
+        "message_session": "queue/eligible/000097",
+        "turn_id": 10197,
+        "turn_session": "queue/eligible/000097",
+        "operation_id": 10197,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10197,
+        "operation_session": "queue/eligible/000097",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-98",
+        "message_session": "queue/eligible/000098",
+        "turn_id": 10198,
+        "turn_session": "queue/eligible/000098",
+        "operation_id": 10198,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10198,
+        "operation_session": "queue/eligible/000098",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-99",
+        "message_session": "queue/eligible/000099",
+        "turn_id": 10199,
+        "turn_session": "queue/eligible/000099",
+        "operation_id": 10199,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10199,
+        "operation_session": "queue/eligible/000099",
+        "operation_resolution": "provider_http_422"
+      },
+      {
+        "command_key": "e-msg-100",
+        "message_session": "queue/eligible/000100",
+        "turn_id": 10200,
+        "turn_session": "queue/eligible/000100",
+        "operation_id": 10200,
+        "turn_outcome": "provider_http_422",
+        "operation_turn_id": 10200,
+        "operation_session": "queue/eligible/000100",
+        "operation_resolution": "provider_http_422"
+      }
+    ],
     "status": "unavailable",
     "target_inclusive": true,
-    "terminal_observation_ms": 548
+    "terminal_observation_ms": 578
   },
   "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
   "measurement_runtime": {
@@ -648,11 +3223,12 @@
     "physical_memory_bytes": 2079363072
   },
   "platform": "Linux e2b.local 6.1.158+ #1 SMP PREEMPT_DYNAMIC Tue Jul 28 15:38:05 UTC 2026 x86_64 GNU/Linux",
-  "scope": "issue-202 production model-only queue discovery, order, settlement, and resource observation",
+  "scope": "issue-202 production model-only queue discovery, Operation admission order, settlement, and resource observation",
   "sqlite_binary": "/home/user/workspace/repo/.zig-cache/o/7b0928a464f4035a2d8952f39ab93f69/rui-qualification-sqlite3",
   "sqlite_binary_sha256": "2ae94eed0d43488af48aaa62a06e714c0121292324f94532ecb6ee0349a2fd62",
+  "sqlite_binary_status": "passed",
   "status": "unavailable",
-  "tested_revision": "bd0fa5167e7663b5f200724e1ce5f42d588ee18b",
+  "tested_revision": "cf3528a22d19594ea0ffc851fb5425c1ba28fd4f",
   "working_tree_dirty": false,
   "zig": "0.16.0"
 }
