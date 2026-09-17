@@ -18,6 +18,10 @@ Inspect source before claiming implementation. Distinguish accepted behavior, pr
 
 Use the `writing-for-agents` skill when creating or editing skills, `AGENTS.md` or Markdown reached from `AGENTS.md`.
 
+### Pull request descriptions
+
+Use the `visual-pr` skill when creating or updating a pull request description.
+
 ### Issue tracker
 
 Issues are tracked in GitHub. See [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
