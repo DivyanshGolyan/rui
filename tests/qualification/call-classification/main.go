@@ -720,9 +720,9 @@ func main() {
 		cases[candidate.Name] = value
 	}
 	result := map[string]any{
-		"format": "rui-call-classification-v1-go", "scope": "GitHub issue #228 production raw-provider call classification, exact denial, restart recovery, and independent population scaling",
+		"format": "rui-call-classification-v2-go", "scope": "GitHub issue #228 production raw-provider call classification, exact denial, restart recovery, and independent population scaling",
 		"status": status, "cases": cases, "artifacts": root,
-		"classification_legend": map[string]string{"behavior_error": "a provider/Store/server/client invariant failed", "unavailable": "required macOS physical-footprint evidence could not be collected", "target_miss": "valid macOS lifetime peak exceeded 256 MiB", "passed": "behavior and required measurements passed", "diagnostic": "portable RSS, latency, database, scratch, CPU and descriptor observations have no independent acceptance threshold"},
+		"classification_legend": map[string]string{"behavior_error": "a provider/Store/server/client invariant failed", "unavailable": "a required measurement was absent or its uncertainty interval crossed the target", "target_miss": "the lower bound of a valid macOS lifetime-peak interval exceeded 256 MiB", "passed": "behavior and required measurements passed", "diagnostic": "portable RSS, latency, database, named scratch, CPU and descriptor observations have no independent acceptance threshold"},
 		"limits":                []string{"Linux execution is deterministic production-path development evidence; macOS runtime and physical footprint remain unavailable in this orb", "loopback deterministic provider; no live provider, TLS, filesystem power-loss, or Bash execution qualification", "Bash launch is intentionally forbidden: denial qualification ends before the later execution slice", "population and payload values are workloads, not product quotas", "process-crash and restart evidence does not certify power loss"},
 	}
 	evidence, evidenceError := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
