@@ -1,5 +1,7 @@
 const std = @import("std");
+const bash = @import("bash.zig");
 const execution = @import("execution.zig");
+const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const provider = @import("provider.zig");
 const provider_output = @import("provider_output.zig");
@@ -8,6 +10,8 @@ const store_module = @import("store.zig");
 
 pub const default_active_capacity = 1000;
 pub const default_retry_waits_ms = [3]u64{ 2_000, 4_000, 8_000 };
+pub const default_bash_timeout_ms: u64 = 5 * 60 * 1000;
+pub const default_bash_path = "/bin/bash";
 pub const scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
 pub const max_clients = 12;
 pub const max_ordinary_clients = 10;
@@ -49,6 +53,12 @@ pub const Faults = struct {
     response_read: bool = false,
     response_import: bool = false,
     response_commit: bool = false,
+    bash_preparation: bool = false,
+    bash_spawn: bool = false,
+    bash_capture_read: bool = false,
+    bash_capture_write: bool = false,
+    bash_seal: bool = false,
+    bash_scratch_limit_bytes: u64 = scratch_limit_bytes,
     cleanup_delay_ms: i64 = 0,
     provider_inactivity_seconds: i64 = 5 * 60,
     retry_waits_ms: [3]u64 = default_retry_waits_ms,
@@ -73,6 +83,9 @@ const Host = struct {
     store: *store_module.Store,
     faults: Faults,
     provider_endpoint: ?[]const u8 = null,
+    bash_path: []const u8 = default_bash_path,
+    bash_timeout_ms: u64 = default_bash_timeout_ms,
+    retention: *output_retention.Queue = undefined,
     custody: execution.CustodyPool = .{ .records = &.{} },
     execution_shutdown: std.atomic.Value(bool) = .init(false),
     effect_shutdown: std.atomic.Value(bool) = .init(false),
@@ -118,6 +131,8 @@ pub fn serve(
     active_capacity: usize,
     faults: Faults,
     provider_endpoint: ?[]const u8,
+    bash_path: []const u8,
+    bash_timeout_ms: u64,
 ) !void {
     var lease = try platform.StoreLease.acquire(io, store_path);
     defer lease.release();
@@ -147,6 +162,11 @@ pub fn serve(
 
     const custody_records = try allocator.alloc(execution.CustodyRecord, active_capacity);
     defer allocator.free(custody_records);
+    const retention_entries = try allocator.alloc(
+        output_retention.Entry,
+        output_retention.orchestration_bytes / @sizeOf(output_retention.Entry),
+    );
+    defer allocator.free(retention_entries);
     var host = Host{
         .io = io,
         .allocator = allocator,
@@ -154,15 +174,28 @@ pub fn serve(
         .store = &storage,
         .faults = faults,
         .provider_endpoint = provider_endpoint,
+        .bash_path = bash_path,
+        .bash_timeout_ms = bash_timeout_ms,
+        .retention = undefined,
         .custody = execution.CustodyPool.initialize(custody_records),
     };
-    var execution_thread: ?std.Thread = null;
+    var retention = output_retention.Queue.initialize(
+        io,
+        lease.paths.scratch.slice(),
+        .{ .used = &host.scratch_used, .limit = scratch_limit_bytes },
+        retention_entries,
+    );
+    host.retention = &retention;
+    defer retention.cleanupAll();
+    var provider_initialization_owned = false;
     if (provider_endpoint) |endpoint| {
         try provider.validateEndpoint(endpoint);
         try provider.initialize();
-        errdefer provider.deinitialize();
-        execution_thread = try std.Thread.spawn(.{}, executionMain, .{&host});
+        provider_initialization_owned = true;
     }
+    errdefer if (provider_initialization_owned) provider.deinitialize();
+    const execution_thread = try std.Thread.spawn(.{}, executionMain, .{&host});
+    provider_initialization_owned = false;
     defer {
         // Stop admitting new connections before releasing any Host-owned
         // execution or request custody. Store and lease outlive both drains.
@@ -174,21 +207,21 @@ pub fn serve(
             std.debug.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
         socket_owned = false;
-        if (execution_thread) |thread| {
-            host.execution_shutdown.store(true, .release);
-            thread.join();
-            provider.deinitialize();
-        }
+        host.execution_shutdown.store(true, .release);
+        execution_thread.join();
+        if (provider_endpoint != null) provider.deinitialize();
         host.drain();
     }
     var ready: protocol.ResponseBuffer = .{};
-    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} custody_record_bytes={d} execution_slot_bytes={d} scratch_limit_bytes={d} execution={s}", .{
+    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} custody_record_bytes={d} execution_slot_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
         lease.paths.store.slice(),
         lease.paths.socket.slice(),
         active_capacity,
         @sizeOf(execution.CustodyRecord),
         @sizeOf(ExecutionSlot),
         scratch_limit_bytes,
+        @sizeOf(output_retention.Entry),
+        retention_entries.len,
         if (provider_endpoint != null) "enabled" else "unavailable",
     });
     if (provider_endpoint != null) {
@@ -285,9 +318,29 @@ const RetainedMetadataSlot = struct {
     metadata: store_module.RetainedOutputMetadata,
 };
 
+const BashSlot = struct {
+    token: execution.CustodyToken,
+    binding: store_module.ActionAttemptBinding,
+    execution: bash.Execution,
+};
+
+const BashCleanupSlot = struct {
+    token: execution.CustodyToken,
+    execution: bash.Execution,
+    publish_output: bool,
+};
+
+const BashPreparedCleanupSlot = struct {
+    token: execution.CustodyToken,
+    cleanup: bash.PreparedCleanup,
+};
+
 const ExecutionSlot = union(enum) {
     free,
     provider: ProviderSlot,
+    bash: BashSlot,
+    bash_cleanup: BashCleanupSlot,
+    bash_prepared_cleanup: BashPreparedCleanupSlot,
     cleanup: CleanupSlot,
     retained_scratch: RetainedScratchSlot,
     retained_metadata: RetainedMetadataSlot,
@@ -302,19 +355,24 @@ fn executionMain(host: *Host) void {
     };
     defer host.allocator.free(slots);
     for (slots) |*slot| slot.* = .free;
-    var reactor = provider.Reactor.init() catch |err| {
-        fenceDispatch(host, "transport reactor initialization", err);
-        return;
-    };
-    defer reactor.deinit();
-    defer shutdownExecution(host, &reactor, slots);
+    var reactor: ?provider.Reactor = if (host.provider_endpoint != null)
+        provider.Reactor.init() catch |err| {
+            fenceDispatch(host, "transport reactor initialization", err);
+            return;
+        }
+    else
+        null;
+    defer if (reactor) |*active| active.deinit();
+    defer shutdownExecution(host, if (reactor) |*active| active else null, slots);
 
     var last_retry_poll: ?std.Io.Clock.Timestamp = null;
     var capacity_was_full = slots.len == 0;
     while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
         var made_progress = false;
+        var bash_window: [bash.copy_window_bytes]u8 = undefined;
+        if (advanceBash(host, slots, &bash_window, false)) made_progress = true;
         const now = std.Io.Clock.Timestamp.now(host.io, .awake);
-        const free_slots = countFreeSlots(slots);
+        var free_slots = countFreeSlots(slots);
         const capacity_released = capacity_was_full and free_slots != 0;
         const retry_poll_due = if (last_retry_poll) |last|
             last.durationTo(now).raw.nanoseconds >= std.time.ns_per_s
@@ -327,7 +385,28 @@ fn executionMain(host: *Host) void {
                 .containsFn = activeOperationContains,
                 .maximum_exclusions = slots.len,
             };
-            const maintain_retries = retry_poll_due or capacity_released;
+            const active_actions = store_module.ActiveOperationFilter{
+                .context = &active_slots,
+                .containsFn = activeActionContains,
+                .maximum_exclusions = slots.len,
+            };
+            const recovered_action = host.store.recoverOneUncertainAction(active_actions) catch |err| {
+                fenceDispatch(host, "uncertain Bash recovery", err);
+                break;
+            };
+            if (recovered_action) made_progress = true;
+            if (free_slots != 0) {
+                for (slots) |*slot| {
+                    if (!slotIsFree(slot)) continue;
+                    switch (admitBashAttempt(host, slot)) {
+                        .admitted => made_progress = true,
+                        .no_work, .retry_later => {},
+                    }
+                    break;
+                }
+                free_slots = countFreeSlots(slots);
+            }
+            const maintain_retries = host.provider_endpoint != null and (retry_poll_due or capacity_released);
             var may_admit_new = !maintain_retries;
             if (maintain_retries) {
                 const recovered = host.store.recoverOneExhaustedModelAttempt(active_filter) catch |err| {
@@ -343,7 +422,7 @@ fn executionMain(host: *Host) void {
                 if (free_slots != 0) {
                     for (slots) |*slot| {
                         if (!slotIsFree(slot)) continue;
-                        switch (admitRetryAttempt(host, &reactor, slot, active_filter)) {
+                        switch (admitRetryAttempt(host, &reactor.?, slot, active_filter)) {
                             .admitted => {
                                 made_progress = true;
                                 last_retry_poll = null;
@@ -357,10 +436,10 @@ fn executionMain(host: *Host) void {
                     }
                 }
             }
-            if (may_admit_new) {
+            if (host.provider_endpoint != null and may_admit_new) {
                 for (slots) |*slot| {
                     if (!slotIsFree(slot)) continue;
-                    switch (admitNewAttempt(host, &reactor, slot)) {
+                    switch (admitNewAttempt(host, &reactor.?, slot)) {
                         .admitted => made_progress = true,
                         .no_work, .retry_later => {},
                     }
@@ -369,21 +448,23 @@ fn executionMain(host: *Host) void {
             }
         }
         if (host.controls_changed.swap(false, .acq_rel)) {
-            cancelSupersededTransfers(host, &reactor, slots);
+            cancelSupersededTransfers(host, if (reactor) |*active| active else null, slots);
+            stopSupersededBash(host, slots);
             made_progress = true;
         }
         capacity_was_full = countFreeSlots(slots) == 0;
         if (hasTransport(slots)) {
-            reactor.drive(if (made_progress) 0 else 25) catch |err| {
+            reactor.?.drive(if (made_progress) 0 else 25) catch |err| {
                 fenceDispatch(host, "transport reactor", err);
                 break;
             };
         } else if (!made_progress) {
-            _ = host.io.sleep(.fromMilliseconds(100), .awake) catch {};
+            _ = host.io.sleep(.fromMilliseconds(if (hasBash(slots)) 25 else 100), .awake) catch {};
         }
         while (true) {
             const active_transfers = ActiveSlots{ .slots = slots };
-            const completion = reactor.nextCompletion(.{
+            const active_reactor = if (reactor) |*active| active else break;
+            const completion = active_reactor.nextCompletion(.{
                 .context = &active_transfers,
                 .find_fn = findActiveTransfer,
             }) catch |err| {
@@ -396,7 +477,7 @@ fn executionMain(host: *Host) void {
     }
 }
 
-fn cancelSupersededTransfers(host: *Host, reactor: *provider.Reactor, slots: []ExecutionSlot) void {
+fn cancelSupersededTransfers(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) void {
     for (slots) |*slot| switch (slot.*) {
         .provider => |*active| {
             const superseded = host.store.operationSupersededByControl(active.owner.binding) catch |err| {
@@ -405,11 +486,11 @@ fn cancelSupersededTransfers(host: *Host, reactor: *provider.Reactor, slots: []E
             };
             if (!superseded) continue;
             const owner = active.owner;
-            reactor.cancel(&active.transfer);
+            reactor.?.cancel(&active.transfer);
             active.transfer.deinit();
             beginCleanup(host, slot, owner);
         },
-        .free, .cleanup, .retained_scratch, .retained_metadata => {},
+        .free, .bash, .bash_cleanup, .bash_prepared_cleanup, .cleanup, .retained_scratch, .retained_metadata => {},
     };
 }
 
@@ -434,9 +515,257 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
     for (active.slots) |slot| switch (slot) {
         .provider => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .cleanup => |value| if (value.owner.binding.operation_id == operation_id) return true,
-        .free, .retained_scratch, .retained_metadata => {},
+        .free, .bash, .bash_cleanup, .bash_prepared_cleanup, .retained_scratch, .retained_metadata => {},
     };
     return false;
+}
+
+fn activeActionContains(context: *const anyopaque, action_id: u64) bool {
+    const active: *const ActiveSlots = @ptrCast(@alignCast(context));
+    for (active.slots) |slot| switch (slot) {
+        .bash => |value| if (value.binding.action_id == action_id) return true,
+        else => {},
+    };
+    return false;
+}
+
+fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8, shutdown: bool) bool {
+    var made_progress = false;
+    for (slots) |*slot| switch (slot.*) {
+        .bash => |*active| {
+            const complete = active.execution.service(window, shutdown) catch |err| {
+                fenceDispatch(host, "Bash process service", err);
+                continue;
+            };
+            if (!complete) continue;
+            made_progress = true;
+            completeBash(host, slot);
+        },
+        else => {},
+    };
+    return made_progress;
+}
+
+fn admitBashAttempt(host: *Host, slot: *ExecutionSlot) AdmissionProgress {
+    const token = host.custody.reserve() orelse return .no_work;
+    var admission = host.store.admitNextActionAttempt(host.bash_timeout_ms, .{
+        .attempt_before_commit = host.faults.attempt_before_commit,
+    }) catch |err| {
+        host.custody.releaseUnused(token) catch unreachable;
+        if (err != error.InjectedAttemptCommitFailure) fenceDispatch(host, "Bash Attempt admission", err);
+        return .retry_later;
+    } orelse {
+        host.custody.releaseUnused(token) catch unreachable;
+        return .no_work;
+    };
+    const action_binding = host.custody.attachAction(token, &admission.permit) catch |err| {
+        host.custody.releaseUnused(token) catch unreachable;
+        fenceDispatch(host, "Bash custody attachment", err);
+        return .admitted;
+    };
+    const input = host.store.readBashExecutionInput(action_binding) catch |err| {
+        settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be read.");
+        finishCustodyNow(host, token);
+        if (host.store.isFenced()) fenceDispatch(host, "Bash canonical input", err);
+        return .admitted;
+    };
+    var arguments = host.store.openContent(input.arguments) catch |err| {
+        settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be opened.");
+        finishCustodyNow(host, token);
+        fenceDispatch(host, "Bash canonical input", err);
+        return .admitted;
+    };
+    defer arguments.close();
+    var bash_budget = host.retention.sharedBudget();
+    bash_budget.limit = @min(bash_budget.limit, host.faults.bash_scratch_limit_bytes);
+    var prepared = bash.prepare(
+        host.io,
+        host.allocator,
+        &arguments,
+        input.arguments.length,
+        input.workspace,
+        host.lease.paths.scratch.slice(),
+        host.bash_path,
+        input.timeout_ms,
+        bash_budget,
+        action_binding.action_id,
+        action_binding.attempt_ordinal,
+        .{
+            .preparation = host.faults.bash_preparation,
+            .spawn = host.faults.bash_spawn,
+            .capture_read = host.faults.bash_capture_read,
+            .capture_write = host.faults.bash_capture_write,
+            .seal = host.faults.bash_seal,
+        },
+    ) catch |err| {
+        const canonical_failure = err == error.InvalidCanonicalBashDescriptor or
+            err == error.ShortCanonicalRead;
+        if (!canonical_failure) {
+            settleActionFailure(host, token, action_binding, .storage_failed, "Bash preparation failed.");
+        }
+        finishCustodyNow(host, token);
+        if (canonical_failure or host.store.isFenced()) fenceDispatch(host, "Bash canonical preparation", err);
+        return .admitted;
+    };
+    if (host.faults.before_launch_delay_ms != 0) {
+        traceAction(host, "prepared_before_handoff", action_binding);
+        _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
+    }
+    host.custody.consumeActionLaunchAuthority(token, action_binding) catch |err| {
+        prepared.cleanup() catch |cleanup_err| {
+            retainBashPreparedCleanup(host, slot, token, prepared.cleanupOwner(), cleanup_err);
+            fenceDispatch(host, "Bash launch authority", err);
+            return .admitted;
+        };
+        finishCustodyNow(host, token);
+        fenceDispatch(host, "Bash launch authority", err);
+        return .admitted;
+    };
+    var launched: ?bash.Execution = null;
+    host.store.withActionDispatchHandoff(action_binding, .{
+        .prepared = &prepared,
+        .launched = &launched,
+    }, struct {
+        fn handoff(context: anytype) !void {
+            context.launched.* = try context.prepared.launch();
+        }
+    }.handoff) catch |err| {
+        if (err == error.SupersededByControl) {
+            settleActionFailure(host, token, action_binding, .cancelled, "Bash was stopped before launch.");
+        } else if (err == error.BashSpawnFailed) {
+            settleActionFailure(host, token, action_binding, .spawn_failed, "Bash process creation failed.");
+        } else {
+            fenceDispatch(host, "Bash dispatch handoff", err);
+        }
+        prepared.cleanup() catch |cleanup_err| {
+            retainBashPreparedCleanup(host, slot, token, prepared.cleanupOwner(), cleanup_err);
+            return .admitted;
+        };
+        finishCustodyNow(host, token);
+        return .admitted;
+    };
+    slot.* = .{ .bash = .{
+        .token = token,
+        .binding = action_binding,
+        .execution = launched.?,
+    } };
+    traceAction(host, "bash_handoff_committed", action_binding);
+    return .admitted;
+}
+
+fn stopSupersededBash(host: *Host, slots: []ExecutionSlot) void {
+    for (slots) |*slot| switch (slot.*) {
+        .bash => |*active| {
+            const stopped = host.store.actionSupersededByStop(active.binding) catch |err| {
+                fenceDispatch(host, "Bash stop reconciliation", err);
+                return;
+            };
+            if (stopped) active.execution.requestStop();
+        },
+        else => {},
+    };
+}
+
+fn completeBash(host: *Host, slot: *ExecutionSlot) void {
+    const active = &slot.bash;
+    const token = active.token;
+    const binding = active.binding;
+    const include_paths = active.execution.reserveOutput(host.retention) catch |err| {
+        retainBashCleanup(host, slot, false, "Bash output reservation", err);
+        fenceDispatch(host, "Bash output reservation", err);
+        return;
+    };
+    var outcome = active.execution.outcome(include_paths) catch |err| {
+        active.execution.releaseOutputReservation(host.retention);
+        active.execution.cleanup() catch |cleanup_err| {
+            retainBashCleanup(host, slot, false, "Bash output cleanup", cleanup_err);
+            return;
+        };
+        finishCustodyNow(host, token);
+        slot.* = .free;
+        fenceDispatch(host, "Bash outcome materialization", err);
+        return;
+    };
+    if (host.faults.before_result_delay_ms != 0) {
+        traceAction(host, "sealed_before_settlement", binding);
+        _ = host.io.sleep(.fromMilliseconds(host.faults.before_result_delay_ms), .awake) catch {};
+    }
+    if (host.custody.claimTerminalDelivery(token)) {
+        host.store.settleActionAttempt(binding, outcome.code, outcome.text(), .{
+            .content_import = host.faults.content_import,
+            .before_commit = host.faults.result_before_commit,
+        }) catch |err| {
+            active.execution.releaseOutputReservation(host.retention);
+            active.execution.cleanup() catch |cleanup_err| {
+                retainBashCleanup(host, slot, false, "Bash output cleanup", cleanup_err);
+                fenceDispatch(host, "Bash result settlement", err);
+                return;
+            };
+            finishCustodyNow(host, token);
+            slot.* = .free;
+            fenceDispatch(host, "Bash result settlement", err);
+            return;
+        };
+    }
+    if (host.faults.cleanup_delay_ms != 0) {
+        _ = host.io.sleep(.fromMilliseconds(host.faults.cleanup_delay_ms), .awake) catch {};
+    }
+    active.execution.releaseOutput(host.retention) catch |err| {
+        retainBashCleanup(host, slot, true, "Bash output retention", err);
+        return;
+    };
+    active.execution.cleanup() catch |err| {
+        retainBashCleanup(host, slot, false, "Bash execution cleanup", err);
+        return;
+    };
+    finishCustodyNow(host, token);
+    slot.* = .free;
+}
+
+fn retainBashCleanup(
+    host: *Host,
+    slot: *ExecutionSlot,
+    publish_output: bool,
+    phase: []const u8,
+    err: anyerror,
+) void {
+    const active = slot.bash;
+    host.custody.detach(active.token) catch unreachable;
+    slot.* = .{ .bash_cleanup = .{
+        .token = active.token,
+        .execution = active.execution,
+        .publish_output = publish_output,
+    } };
+    retainDispatchFence(host, phase, err);
+}
+
+fn retainBashPreparedCleanup(
+    host: *Host,
+    slot: *ExecutionSlot,
+    token: execution.CustodyToken,
+    cleanup: bash.PreparedCleanup,
+    err: anyerror,
+) void {
+    host.custody.detach(token) catch unreachable;
+    slot.* = .{ .bash_prepared_cleanup = .{
+        .token = token,
+        .cleanup = cleanup,
+    } };
+    retainDispatchFence(host, "Bash preparation cleanup", err);
+}
+
+fn settleActionFailure(
+    host: *Host,
+    token: execution.CustodyToken,
+    binding: store_module.ActionAttemptBinding,
+    code: store_module.ActionResolutionCode,
+    result: []const u8,
+) void {
+    if (!host.custody.claimTerminalDelivery(token)) return;
+    host.store.settleActionAttempt(binding, code, result, .{
+        .content_import = host.faults.content_import,
+        .before_commit = host.faults.result_before_commit,
+    }) catch |err| fenceDispatch(host, "Bash failure settlement", err);
 }
 
 fn findActiveTransfer(
@@ -520,10 +849,8 @@ fn beginAdmittedAttempt(
         return .admitted;
     };
     defer view.close();
-    const request_budget = provider.ScratchBudget{
-        .used = &host.scratch_used,
-        .limit = if (host.faults.request_scratch_acquire) 0 else host.faults.request_scratch_limit_bytes,
-    };
+    var request_budget = host.retention.sharedBudget();
+    request_budget.limit = if (host.faults.request_scratch_acquire) 0 else host.faults.request_scratch_limit_bytes;
     var retained_scratch: ?provider.RetainedScratch = null;
     var request = provider.materialize(
         host.io,
@@ -869,12 +1196,39 @@ fn finishSlotCleanup(host: *Host, slot: *ExecutionSlot) void {
     slot.* = .free;
 }
 
-fn shutdownExecution(host: *Host, reactor: *provider.Reactor, slots: []ExecutionSlot) void {
+fn shutdownExecution(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) void {
+    var bash_window: [bash.copy_window_bytes]u8 = undefined;
+    while (hasBash(slots)) {
+        _ = advanceBash(host, slots, &bash_window, true);
+        if (hasBash(slots)) _ = host.io.sleep(.fromMilliseconds(10), .awake) catch {};
+    }
     for (slots) |*slot| switch (slot.*) {
         .free => {},
+        .bash => unreachable,
+        .bash_cleanup => |*retained| {
+            if (retained.publish_output) {
+                retained.execution.releaseOutput(host.retention) catch |err| {
+                    std.debug.print("rui: retained Bash output after cleanup failure: {s}\n", .{@errorName(err)});
+                    continue;
+                };
+                retained.publish_output = false;
+            }
+            retained.execution.cleanup() catch |err| {
+                std.debug.print("rui: retained Bash scratch after cleanup failure: {s}\n", .{@errorName(err)});
+                continue;
+            };
+            host.custody.cleanupComplete(retained.token) catch unreachable;
+        },
+        .bash_prepared_cleanup => |*retained| {
+            retained.cleanup.cleanup() catch |err| {
+                std.debug.print("rui: retained Bash preparation after cleanup failure: {s}\n", .{@errorName(err)});
+                continue;
+            };
+            host.custody.cleanupComplete(retained.token) catch unreachable;
+        },
         .provider => |*active| {
             const token = active.owner.token;
-            reactor.cancel(&active.transfer);
+            reactor.?.cancel(&active.transfer);
             active.transfer.deinit();
             host.custody.detach(token) catch unreachable;
             host.custody.cleanupComplete(token) catch unreachable;
@@ -904,6 +1258,13 @@ fn shutdownExecution(host: *Host, reactor: *provider.Reactor, slots: []Execution
 fn hasTransport(slots: []const ExecutionSlot) bool {
     for (slots) |slot| {
         if (slot == .provider) return true;
+    }
+    return false;
+}
+
+fn hasBash(slots: []const ExecutionSlot) bool {
+    for (slots) |slot| {
+        if (slot == .bash) return true;
     }
     return false;
 }
@@ -994,6 +1355,20 @@ fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptB
         nowNs(host),
         binding.turn_id,
         binding.operation_id,
+    }) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttemptBinding) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"rui_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
+        nowNs(host),
+        binding.turn_id,
+        binding.parent_operation_id,
+        binding.action_id,
     }) catch return;
     writeTestTrace(host, &trace);
 }
@@ -1269,7 +1644,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
         .fault_content_write = host.faults.content_write,
         .fault_content_seal = host.faults.content_seal,
         .cleanup_failed = &cleanup_failed,
-        .scratch_budget = .{ .used = &host.scratch_used, .limit = scratch_limit_bytes },
+        .scratch_budget = host.retention.sharedBudget(),
     }) catch |err| {
         if (cleanup_failed) std.debug.print("rui: retained ingress file and charge after cleanup failure\n", .{});
         return respondStatic(host.io, fd, if (err == error.ScratchCapacityExhausted) @as(u16, 507) else 400, "invocation_error", @errorName(err));
@@ -1383,7 +1758,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
         },
         .permission_decision => |*command| {
             var timing = ControlTiming.init(host, command.key.slice(), "permission_decision", accepted_at_ns);
-            const result = host.store.denyPermission(command, .{
+            const result = host.store.decidePermission(command, .{
                 .before_commit = host.faults.before_commit,
                 .control_trace = timing.storeTrace(),
             });
@@ -1433,7 +1808,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
         .inspect_session => |request_value| {
             var report = host.store.captureSessionReport(request_value.session.slice(), .{
                 .scratch_path = host.lease.paths.scratch.slice(),
-                .scratch_budget = .{ .used = &host.scratch_used, .limit = scratch_limit_bytes },
+                .scratch_budget = host.retention.sharedBudget(),
                 .request_number = request_number,
                 .profile = request_value.profile,
                 .fail_unlink = host.faults.report_unlink,
@@ -1784,7 +2159,10 @@ fn renderPermissionDecisionReply(
     try response.append(if (replayed) "\",\"replayed\":true" else "\",\"replayed\":false");
     try response.append(",\"session\":");
     try response.appendJsonString(command.session.slice());
-    try response.appendFmt(",\"action\":\"{d}\",\"decision\":\"deny\"", .{command.action_id});
+    try response.appendFmt(",\"action\":\"{d}\",\"decision\":\"{s}\"", .{
+        command.action_id,
+        @tagName(command.decision),
+    });
     switch (result) {
         .rejected => |value| {
             try response.append(",\"code\":");
@@ -1878,7 +2256,10 @@ fn renderCommandObservation(
             });
         }
         if (observation.permission_action_id) |action_id| {
-            try response.appendFmt(",\"permission_target\":{{\"action\":\"{d}\",\"decision\":\"deny\"}}", .{action_id});
+            try response.appendFmt(",\"permission_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{
+                action_id,
+                @tagName(observation.permission_decision orelse return error.InvalidCommandObservation),
+            });
         }
     }
     try response.append("}}");

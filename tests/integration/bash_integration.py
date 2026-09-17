@@ -1,0 +1,730 @@
+#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import shutil
+import signal
+import sqlite3
+import sys
+import tempfile
+import threading
+import time
+
+import dispatch_integration as fixture
+
+
+def configure(state, store, key, session, permission="ask"):
+    result = fixture.command(
+        "configure",
+        "--store",
+        store,
+        "--record",
+        state / f"{key}.json",
+        "--key",
+        key,
+        "--session",
+        session,
+        "--workspace",
+        fixture.ROOT,
+        "--model",
+        "model-a",
+        "--permission-mode",
+        permission,
+    )
+    assert result["answer"]["status"] == "accepted", result
+
+
+def action_for(store, session):
+    report = fixture.command("inspect-session", "--store", store, "--session", session)
+    unresolved = report["actions"]["unresolved"]
+    return unresolved[0] if len(unresolved) == 1 else None
+
+
+def allow(state, store, key, session, action):
+    result = fixture.command(
+        "allow-action",
+        "--store",
+        store,
+        "--record",
+        state / f"{key}.json",
+        "--key",
+        key,
+        "--session",
+        session,
+        "--action",
+        action,
+    )
+    assert result["answer"]["status"] == "accepted", result
+    return result
+
+
+def rows(store, sql, parameters=()):
+    with sqlite3.connect(store / "rui.sqlite3") as database:
+        return database.execute(sql, parameters).fetchall()
+
+
+def process_resources(process):
+    process_root = pathlib.Path(f"/proc/{process.pid}")
+    if not process_root.exists():
+        return {"process_resources": "unavailable"}
+    status = {}
+    for line in (process_root / "status").read_text().splitlines():
+        if line.startswith(("VmRSS:", "VmHWM:")):
+            name, value, unit = line.split()
+            assert unit == "kB", line
+            status[name[:-1]] = int(value) * 1024
+    status["descriptors"] = len(os.listdir(process_root / "fd"))
+    return status
+
+
+def scratch_resources(store):
+    files = list((store / "scratch").iterdir())
+    return {
+        "files": len(files),
+        "logical_bytes": sum(path.stat().st_size for path in files),
+    }
+
+
+def process_exists(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def resolution(store, session):
+    values = rows(
+        store,
+        "SELECT resolution_code FROM action_operation WHERE session_ref=?",
+        (session,),
+    )
+    return values[0][0] if len(values) == 1 and values[0][0] is not None else None
+
+
+def add_exchange(responses, name, command, answer="continued"):
+    responses.append(
+        fixture.sse_tool_calls(
+            f"{name}-calls",
+            [("bash", f"{name}-call", json.dumps({"cmd": command}, separators=(",", ":")))],
+        )
+    )
+    responses.append(fixture.sse_answer(f"{name}-answer", f"{name}-reasoning", f"{name}-message", answer)[0])
+
+
+def main():
+    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-bash."))
+    responses = []
+    counter = state / "launch-counter"
+    large_command = (
+        f"printf x >> {counter}; "
+        "head -c 12000 /dev/zero | tr '\\0' z; printf '\\377'; printf stderr-marker >&2"
+    )
+    add_exchange(responses, "success", large_command)
+    rollback_marker = state / "rollback-marker"
+    add_exchange(responses, "rollback", f"printf x >> {rollback_marker}")
+    unattempted_marker = state / "unattempted-marker"
+    responses.append(
+        fixture.sse_tool_calls(
+            "unattempted-calls",
+            [("bash", "unattempted-call", json.dumps({"cmd": f"printf x >> {unattempted_marker}"}))],
+        )
+    )
+    prelaunch_stop_marker = state / "prelaunch-stop-marker"
+    responses.append(
+        fixture.sse_tool_calls(
+            "prelaunch-stop-calls",
+            [("bash", "prelaunch-stop-call", json.dumps({"cmd": f"printf x >> {prelaunch_stop_marker}"}))],
+        )
+    )
+    before_launch_marker = state / "before-launch-marker"
+    add_exchange(responses, "before-launch", f"printf x >> {before_launch_marker}")
+    changed_marker = state / "changed-marker"
+    add_exchange(responses, "changed", f"printf x >> {changed_marker}; sleep 30")
+    responses.append(
+        fixture.sse_tool_calls(
+            "stop-calls",
+            [("bash", "stop-call", json.dumps({"cmd": "trap '' TERM; sleep 30"}, separators=(",", ":")))],
+        )
+    )
+    exited_bash_pid = state / "exited-bash-pid"
+    exited_child_pid = state / "exited-child-pid"
+    responses.append(
+        fixture.sse_tool_calls(
+            "exited-pipes-calls",
+            [(
+                "bash",
+                "exited-pipes-call",
+                json.dumps(
+                    {
+                        "cmd": f"printf $$ > {exited_bash_pid}; "
+                        f"(trap '' TERM; sleep 30) & printf $! > {exited_child_pid}"
+                    },
+                    separators=(",", ":"),
+                ),
+            )],
+        )
+    )
+    add_exchange(responses, "timeout", "sleep 30")
+    add_exchange(responses, "preparation", "printf never")
+    add_exchange(responses, "spawn", "printf never")
+    add_exchange(responses, "capture-read", "printf captured")
+    add_exchange(responses, "capture", "printf captured")
+    add_exchange(responses, "seal", "printf sealed")
+    add_exchange(responses, "exhaustion", "printf exhausted")
+    import_marker = state / "import-marker"
+    add_exchange(responses, "import", f"printf x >> {import_marker}")
+    commit_marker = state / "commit-marker"
+    add_exchange(responses, "commit", f"printf x >> {commit_marker}")
+    responses.append(
+        fixture.sse_tool_calls(
+            "post-resolution-calls",
+            [("bash", "post-resolution-call", json.dumps({"cmd": "printf complete"}))],
+        )
+    )
+    sibling_marker = state / "sibling-marker"
+    responses.append(
+        fixture.sse_tool_calls(
+            "sibling-calls",
+            [
+                (
+                    "bash",
+                    "sibling-call-0",
+                    json.dumps(
+                        {"cmd": f"sleep 0.2; printf a >> {sibling_marker}"},
+                        separators=(",", ":"),
+                    ),
+                ),
+                (
+                    "bash",
+                    "sibling-call-1",
+                    json.dumps(
+                        {"cmd": f"printf b >> {sibling_marker}"},
+                        separators=(",", ":"),
+                    ),
+                ),
+            ],
+        )
+    )
+    responses.append(
+        fixture.sse_answer(
+            "sibling-answer", "sibling-reasoning", "sibling-message", "continued"
+        )[0]
+    )
+
+    endpoint = fixture.SuccessEndpoint(responses)
+    endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    endpoint_thread.start()
+    endpoint_url = f"http://127.0.0.1:{endpoint.server_port}/responses"
+    store = state / "store"
+    host = None
+    completed = False
+    resource_samples = []
+    try:
+        host = fixture.start_host(store, endpoint_url, active_capacity=2)
+        resource_samples.append({"phase": "cold", **process_resources(host), **scratch_resources(store)})
+
+        configure(state, store, "success-config", "direct/success")
+        fixture.message(state, store, "success-message", "direct/success", "execute")
+        success_action = fixture.wait_for(
+            lambda: action_for(store, "direct/success"), "successful Bash Action"
+        )
+        decision = allow(state, store, "success-allow", "direct/success", success_action["action"])
+        assert decision["answer"]["replayed"] is False, decision
+        replay = fixture.command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            state / "success-allow.json",
+            "--kind",
+            "permission-decision",
+        )
+        assert replay["answer"]["replayed"] is True, replay
+        conflict = fixture.command(
+            "deny-action",
+            "--store",
+            store,
+            "--record",
+            state / "success-conflict.json",
+            "--key",
+            "success-allow",
+            "--session",
+            "direct/success",
+            "--action",
+            success_action["action"],
+        )
+        assert conflict["answer"]["status"] == "conflict", conflict
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "success-message"),
+            "successful Bash continuation",
+        )
+        assert counter.read_text() == "x"
+        assert resolution(store, "direct/success") == "succeeded"
+        continuation = json.loads(endpoint.requests[1])
+        outputs = [item for item in continuation["input"] if item.get("type") == "function_call_output"]
+        assert [item["call_id"] for item in outputs] == ["success-call"], outputs
+        output = outputs[0]["output"]
+        assert "Bash succeeded." in output and "stderr-mark" in output, output
+        assert "�" in output and "[earlier output omitted]" in output, output
+        assert "Full stdout:" in output and "Full stderr:" in output, output
+        success_resources = fixture.command(
+            "inspect-session", "--store", store, "--session", "direct/success"
+        )["execution"]
+        resource_samples.append(
+            {
+                "phase": "retained-output-idle",
+                **process_resources(host),
+                **scratch_resources(store),
+                "accounted_scratch_bytes": int(success_resources["scratch_used_bytes"]),
+            }
+        )
+
+        fixture.stop_host(host)
+        host = fixture.start_host(store, endpoint_url, active_capacity=0)
+        configure(state, store, "rollback-config", "direct/rollback")
+        fixture.stop_host(host)
+        host = fixture.start_host(store, endpoint_url)
+        fixture.message(state, store, "rollback-message", "direct/rollback", "execute")
+        rollback_action = fixture.wait_for(
+            lambda: action_for(store, "direct/rollback"), "rollback Bash Action"
+        )
+        fixture.stop_host(host)
+        host = fixture.start_host(store, endpoint_url, "--fault", "attempt-before-commit")
+        allow(state, store, "rollback-allow", "direct/rollback", rollback_action["action"])
+        time.sleep(0.2)
+        assert not rollback_marker.exists()
+        assert rows(
+            store,
+            "SELECT attempt_ordinal,uncertain FROM action_operation WHERE session_ref=?",
+            ("direct/rollback",),
+        ) == [(0, 0)]
+        fixture.stop_host(host)
+        host = fixture.start_host(store, None)
+        fixture.wait_for(lambda: rollback_marker.exists(), "Bash launch without provider transport")
+        fixture.wait_for(
+            lambda: resolution(store, "direct/rollback") == "succeeded",
+            "Bash settlement without provider transport",
+        )
+        assert host.poll() is None
+        fixture.stop_host(host)
+        host = fixture.start_host(store, endpoint_url)
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "rollback-message"),
+            "rolled-back Bash continuation",
+        )
+        assert rollback_marker.read_text() == "x"
+
+        configure(state, store, "unattempted-config", "direct/unattempted")
+        fixture.message(state, store, "unattempted-message", "direct/unattempted", "execute")
+        fixture.wait_for(
+            lambda: action_for(store, "direct/unattempted"), "unattempted stoppable Action"
+        )
+        stopped = fixture.command(
+            "stop-session",
+            "--store",
+            store,
+            "--record",
+            state / "unattempted-stop.json",
+            "--key",
+            "unattempted-stop",
+            "--session",
+            "direct/unattempted",
+        )
+        assert stopped["answer"]["status"] == "accepted", stopped
+        assert rows(
+            store,
+            "SELECT attempt_ordinal,resolution_code FROM action_operation WHERE session_ref=?",
+            ("direct/unattempted",),
+        ) == [(0, "cancelled")]
+        assert not unattempted_marker.exists()
+
+        configure(state, store, "prelaunch-stop-config", "direct/prelaunch-stop")
+        fixture.message(state, store, "prelaunch-stop-message", "direct/prelaunch-stop", "execute")
+        prelaunch_stop_action = fixture.wait_for(
+            lambda: action_for(store, "direct/prelaunch-stop"), "pre-launch stoppable Action"
+        )
+        fixture.stop_host(host)
+        host = fixture.start_host(
+            store,
+            endpoint_url,
+            "--test-before-launch-delay-ms",
+            "1000",
+        )
+        allow(
+            state,
+            store,
+            "prelaunch-stop-allow",
+            "direct/prelaunch-stop",
+            prelaunch_stop_action["action"],
+        )
+        fixture.wait_for(
+            lambda: rows(
+                store,
+                "SELECT uncertain FROM action_operation WHERE session_ref=?",
+                ("direct/prelaunch-stop",),
+            ) == [(1,)],
+            "pre-launch stoppable Attempt",
+        )
+        fixture.command(
+            "stop-session",
+            "--store",
+            store,
+            "--record",
+            state / "prelaunch-stop.json",
+            "--key",
+            "prelaunch-stop",
+            "--session",
+            "direct/prelaunch-stop",
+        )
+        fixture.wait_for(
+            lambda: resolution(store, "direct/prelaunch-stop") == "cancelled",
+            "pre-launch stopped Action",
+        )
+        assert not prelaunch_stop_marker.exists()
+
+        configure(state, store, "before-launch-config", "direct/before-launch")
+        fixture.message(state, store, "before-launch-message", "direct/before-launch", "execute")
+        pending = fixture.wait_for(
+            lambda: action_for(store, "direct/before-launch"), "pre-launch Bash Action"
+        )
+        fixture.stop_host(host)
+        host = fixture.start_host(store, endpoint_url, active_capacity=0)
+        allow(state, store, "before-launch-allow", "direct/before-launch", pending["action"])
+        configure(state, store, "before-launch-mode-change", "direct/before-launch", "bypass")
+        report = fixture.command(
+            "inspect-session", "--store", store, "--session", "direct/before-launch"
+        )
+        assert report["actions"]["unresolved"][0]["authorization"] == "allow_once", report
+        assert rows(
+            store,
+            "SELECT permission_state,attempt_ordinal FROM action_operation WHERE session_ref=?",
+            ("direct/before-launch",),
+        ) == [(1, 0)]
+        fixture.stop_host(host)
+        host = fixture.start_host(
+            store,
+            endpoint_url,
+            "--test-before-launch-delay-ms",
+            "5000",
+        )
+        fixture.wait_for(
+            lambda: rows(
+                store,
+                "SELECT uncertain FROM action_operation WHERE session_ref=?",
+                ("direct/before-launch",),
+            ) == [(1,)],
+            "committed pre-launch Attempt",
+        )
+        named_first_acquisition = sorted((store / "scratch").glob("bash-*-*.tmp"))
+        assert len(named_first_acquisition) >= 3, named_first_acquisition
+        assert not before_launch_marker.exists()
+        crash = fixture.crash_host(host, state, "before-launch-crash")
+        host = None
+        assert crash["returncode"] == -signal.SIGKILL
+        host = fixture.start_host(store, endpoint_url)
+        assert not list((store / "scratch").glob("bash-*-*.tmp"))
+        fixture.wait_for(
+            lambda: resolution(store, "direct/before-launch") == "indeterminate",
+            "pre-launch indeterminate recovery",
+        )
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "before-launch-message"),
+            "pre-launch recovery continuation",
+        )
+        assert not before_launch_marker.exists()
+
+        configure(state, store, "changed-config", "direct/changed")
+        fixture.message(state, store, "changed-message", "direct/changed", "execute")
+        changed_action = fixture.wait_for(
+            lambda: action_for(store, "direct/changed"), "changed Bash Action"
+        )
+        allow(state, store, "changed-allow", "direct/changed", changed_action["action"])
+        fixture.wait_for(lambda: changed_marker.exists(), "Bash side effect")
+        crash = fixture.crash_host(host, state, "changed-crash")
+        host = None
+        assert crash["returncode"] == -signal.SIGKILL
+        host = fixture.start_host(store, endpoint_url)
+        fixture.wait_for(
+            lambda: resolution(store, "direct/changed") == "indeterminate",
+            "changed-command indeterminate recovery",
+        )
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "changed-message"),
+            "changed-command recovery continuation",
+        )
+        assert changed_marker.read_text() == "x"
+
+        configure(state, store, "stop-config", "direct/stop")
+        fixture.message(state, store, "stop-message", "direct/stop", "execute")
+        stop_action = fixture.wait_for(lambda: action_for(store, "direct/stop"), "stoppable Bash Action")
+        allow(state, store, "stop-allow", "direct/stop", stop_action["action"])
+        fixture.wait_for(
+            lambda: rows(
+                store,
+                "SELECT uncertain FROM action_operation WHERE session_ref=?",
+                ("direct/stop",),
+            ) == [(1,)],
+            "launched stoppable Bash",
+        )
+        active_resources = fixture.command(
+            "inspect-session", "--store", store, "--session", "direct/stop"
+        )["execution"]
+        resource_samples.append(
+            {
+                "phase": "active-descendant-pipes",
+                **process_resources(host),
+                **scratch_resources(store),
+                "accounted_scratch_bytes": int(active_resources["scratch_used_bytes"]),
+            }
+        )
+        stopped = fixture.command(
+            "stop-session",
+            "--store",
+            store,
+            "--record",
+            state / "stop.json",
+            "--key",
+            "stop",
+            "--session",
+            "direct/stop",
+        )
+        assert stopped["answer"]["status"] == "accepted", stopped
+        fixture.wait_for(lambda: resolution(store, "direct/stop") == "cancelled", "cancelled Bash")
+        assert rows(store, "SELECT outcome_code FROM turn WHERE session_ref=?", ("direct/stop",)) == [
+            ("cancelled",)
+        ]
+
+        configure(state, store, "exited-pipes-config", "direct/exited-pipes")
+        fixture.message(state, store, "exited-pipes-message", "direct/exited-pipes", "execute")
+        exited_action = fixture.wait_for(
+            lambda: action_for(store, "direct/exited-pipes"), "exited-with-open-pipes Action"
+        )
+        allow(state, store, "exited-pipes-allow", "direct/exited-pipes", exited_action["action"])
+        fixture.wait_for(
+            lambda: exited_bash_pid.exists() and exited_child_pid.exists(),
+            "Bash and descendant process identities",
+        )
+        bash_pid = int(exited_bash_pid.read_text())
+        child_pid = int(exited_child_pid.read_text())
+        fixture.wait_for(lambda: not process_exists(bash_pid), "Bash exit with descendant pipes open")
+        assert process_exists(child_pid)
+        assert resolution(store, "direct/exited-pipes") is None
+        fixture.command(
+            "stop-session",
+            "--store",
+            store,
+            "--record",
+            state / "exited-pipes-stop.json",
+            "--key",
+            "exited-pipes-stop",
+            "--session",
+            "direct/exited-pipes",
+        )
+        fixture.wait_for(
+            lambda: resolution(store, "direct/exited-pipes") == "cancelled",
+            "exited-with-open-pipes stop",
+            timeout=20,
+        )
+        fixture.wait_for(lambda: not process_exists(child_pid), "exited Bash descendant cleanup")
+
+        fixture.stop_host(host)
+        host = fixture.start_host(store, endpoint_url, "--bash-timeout-ms", "100")
+        configure(state, store, "timeout-config", "direct/timeout")
+        fixture.message(state, store, "timeout-message", "direct/timeout", "execute")
+        timeout_action = fixture.wait_for(
+            lambda: action_for(store, "direct/timeout"), "timeout Bash Action"
+        )
+        allow(state, store, "timeout-allow", "direct/timeout", timeout_action["action"])
+        fixture.wait_for(
+            lambda: resolution(store, "direct/timeout") == "timed_out",
+            "timed-out Bash",
+            timeout=20,
+        )
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "timeout-message"), "timeout continuation"
+        )
+
+        for name, fault, expected in (
+            ("preparation", "bash-preparation", "storage_failed"),
+            ("spawn", "bash-spawn", "spawn_failed"),
+            ("capture-read", "bash-capture-read", "storage_failed"),
+            ("capture", "bash-capture-write", "storage_failed"),
+            ("seal", "bash-seal", "storage_failed"),
+        ):
+            fixture.stop_host(host)
+            host = fixture.start_host(store, endpoint_url, "--fault", fault)
+            session = f"direct/{name}"
+            configure(state, store, f"{name}-config", session)
+            fixture.message(state, store, f"{name}-message", session, "execute")
+            action = fixture.wait_for(lambda: action_for(store, session), f"{name} Bash Action")
+            allow(state, store, f"{name}-allow", session, action["action"])
+            fixture.wait_for(lambda: resolution(store, session) == expected, f"{name} result")
+            fixture.wait_for(
+                lambda: fixture.completed_observation(store, f"{name}-message"),
+                f"{name} continuation",
+            )
+
+        fixture.stop_host(host)
+        host = fixture.start_host(
+            store,
+            endpoint_url,
+            "--test-bash-scratch-limit-bytes",
+            "128",
+        )
+        configure(state, store, "exhaustion-config", "direct/exhaustion")
+        fixture.message(state, store, "exhaustion-message", "direct/exhaustion", "execute")
+        action = fixture.wait_for(
+            lambda: action_for(store, "direct/exhaustion"), "exhaustion Bash Action"
+        )
+        allow(state, store, "exhaustion-allow", "direct/exhaustion", action["action"])
+        fixture.wait_for(
+            lambda: resolution(store, "direct/exhaustion") == "storage_failed",
+            "capture exhaustion result",
+        )
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "exhaustion-message"),
+            "capture exhaustion continuation",
+        )
+
+        fixture.stop_host(host)
+        host = None
+        for name, fault, marker in (
+            ("import", "content-import", import_marker),
+            ("commit", "result-before-commit", commit_marker),
+        ):
+            host = fixture.start_host(store, endpoint_url, active_capacity=0)
+            session = f"direct/{name}"
+            configure(state, store, f"{name}-config", session)
+            fixture.stop_host(host)
+            host = fixture.start_host(store, endpoint_url)
+            fixture.message(state, store, f"{name}-message", session, "execute")
+            action = fixture.wait_for(lambda: action_for(store, session), f"{name} Bash Action")
+            fixture.stop_host(host)
+            host = fixture.start_host(store, endpoint_url, "--fault", fault)
+            allow(state, store, f"{name}-allow", session, action["action"])
+            fixture.wait_for(lambda: marker.exists(), f"{name} side effect")
+            fixture.wait_for(lambda: host.poll() is not None, f"{name} canonical shutdown")
+            host.communicate(timeout=5)
+            host = None
+            assert rows(
+                store,
+                "SELECT uncertain,resolution_code FROM action_operation WHERE session_ref=?",
+                (session,),
+            ) == [(1, None)]
+            host = fixture.start_host(store, endpoint_url)
+            fixture.wait_for(
+                lambda: resolution(store, session) == "indeterminate",
+                f"{name} indeterminate recovery",
+            )
+            fixture.wait_for(
+                lambda: fixture.completed_observation(store, f"{name}-message"),
+                f"{name} recovery continuation",
+            )
+            assert marker.read_text() == "x"
+            fixture.stop_host(host)
+            host = None
+
+        host = fixture.start_host(
+            store,
+            endpoint_url,
+            "--test-cleanup-delay-ms",
+            "1000",
+        )
+        configure(state, store, "post-resolution-config", "direct/post-resolution", "bypass")
+        fixture.message(state, store, "post-resolution-message", "direct/post-resolution", "execute")
+        fixture.wait_for(
+            lambda: resolution(store, "direct/post-resolution") == "succeeded",
+            "post-Resolution Bash result",
+        )
+        delayed = fixture.command(
+            "inspect-session", "--store", store, "--session", "direct/post-resolution"
+        )
+        assert delayed["execution"]["custody_occupied"] == "1", delayed
+        fixture.command(
+            "stop-session",
+            "--store",
+            store,
+            "--record",
+            state / "post-resolution-stop.json",
+            "--key",
+            "post-resolution-stop",
+            "--session",
+            "direct/post-resolution",
+        )
+        fixture.wait_for(
+            lambda: fixture.command(
+                "inspect-session", "--store", store, "--session", "direct/post-resolution"
+            )["execution"]["custody_occupied"]
+            == "0",
+            "post-Resolution physical cleanup",
+        )
+        assert resolution(store, "direct/post-resolution") == "succeeded"
+        fixture.stop_host(host)
+        host = None
+
+        host = fixture.start_host(store, endpoint_url, active_capacity=2)
+        configure(state, store, "sibling-config", "direct/sibling", "bypass")
+        fixture.message(state, store, "sibling-message", "direct/sibling", "execute")
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "sibling-message"),
+            "independent sibling continuation",
+        )
+        sibling_rows = rows(
+            store,
+            "SELECT call_ordinal,permission_state,resolution_code,acceptance_position "
+            "FROM action_operation WHERE session_ref=? ORDER BY call_ordinal",
+            ("direct/sibling",),
+        )
+        assert [row[:3] for row in sibling_rows] == [
+            (0, 1, "succeeded"),
+            (1, 1, "succeeded"),
+        ], sibling_rows
+        assert sibling_rows[1][3] < sibling_rows[0][3], sibling_rows
+        assert sibling_marker.read_text() == "ba"
+        sibling_request = json.loads(endpoint.requests[-1])
+        sibling_outputs = [
+            item for item in sibling_request["input"] if item.get("type") == "function_call_output"
+        ]
+        assert [item["call_id"] for item in sibling_outputs] == [
+            "sibling-call-0",
+            "sibling-call-1",
+        ], sibling_outputs
+        sibling_resources = fixture.command(
+            "inspect-session", "--store", store, "--session", "direct/sibling"
+        )["execution"]
+        resource_samples.append(
+            {
+                "phase": "two-sibling-retained-idle",
+                **process_resources(host),
+                **scratch_resources(store),
+                "accounted_scratch_bytes": int(sibling_resources["scratch_used_bytes"]),
+            }
+        )
+
+        assert rows(
+            store,
+            "SELECT count(*) FROM action_operation WHERE attempt_ordinal=1 AND uncertain!=0",
+        ) == [(0,)]
+        settled = rows(
+            store,
+            "SELECT count(*),count(acceptance_position),min(acceptance_position) FROM action_operation "
+            "WHERE resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL",
+        )[0]
+        assert settled[0] == settled[1] == 20 and settled[2] > 0, settled
+        print(json.dumps({"bash_resource_samples": resource_samples}, sort_keys=True))
+        completed = True
+    finally:
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        endpoint_thread.join(timeout=5)
+        if completed:
+            shutil.rmtree(state)
+        else:
+            print(f"retained Bash integration failure state: {state}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

@@ -179,6 +179,7 @@ pub const CommandObservation = struct {
     session_stop: ?SessionStopObservation = null,
     model_interruption: ?ModelInterruptionTarget = null,
     permission_action_id: ?u64 = null,
+    permission_decision: ?protocol.PermissionDecision = null,
 };
 
 pub const SessionStopSelection = struct {
@@ -240,6 +241,45 @@ pub const PermissionDecisionReply = union(enum) {
     rejected: struct { replayed: bool, code: PermissionDecisionRejection },
     conflict,
     infrastructure_failure,
+};
+
+pub const ActionAttemptBinding = struct {
+    turn_id: u64,
+    parent_operation_id: u64,
+    action_id: u64,
+    attempt_ordinal: u64,
+};
+
+pub const ActionAttemptAdmission = struct {
+    permit: ActionDispatchPermit,
+};
+
+pub const ActionResolutionCode = enum {
+    cancelled,
+    succeeded,
+    failed,
+    timed_out,
+    indeterminate,
+    storage_failed,
+    spawn_failed,
+    infrastructure_shutdown,
+};
+
+pub const ActionDispatchPermit = struct {
+    binding: ActionAttemptBinding,
+    available: bool = true,
+
+    pub fn consume(self: *ActionDispatchPermit) !ActionAttemptBinding {
+        if (!self.available) return error.DispatchPermitConsumed;
+        self.available = false;
+        return self.binding;
+    }
+};
+
+pub const BashExecutionInput = struct {
+    workspace: protocol.Bounded(protocol.max_workspace_bytes),
+    arguments: ContentReference,
+    timeout_ms: u64,
 };
 
 pub const ContentReference = struct {
@@ -1828,7 +1868,7 @@ pub const Store = struct {
                 self.database,
                 "WITH cancelled(action_id,acceptance_position) AS MATERIALIZED (" ++
                     "SELECT action_id,?3+row_number() OVER (ORDER BY call_ordinal)-1 FROM action_operation " ++
-                    "WHERE parent_operation_id=?1 AND resolution_code IS NULL) " ++
+                    "WHERE parent_operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=0) " ++
                     "UPDATE action_operation SET resolution_code='cancelled',resolution_content_id=?2," ++
                     "acceptance_position=(SELECT acceptance_position FROM cancelled WHERE cancelled.action_id=action_operation.action_id) " ++
                     "WHERE action_id IN (SELECT action_id FROM cancelled)",
@@ -1842,14 +1882,7 @@ pub const Store = struct {
             if (cancelled_count < 0) return error.CorruptStore;
             current.next_position = try std.math.add(u64, current.next_position, @intCast(cancelled_count));
             try self.updateSession(command.session.slice(), &current);
-            const update_turn = try prepare(
-                self.database,
-                "UPDATE turn SET outcome_code='cancelled' WHERE turn_id=?1 AND outcome_code IS NULL",
-            );
-            defer _ = c.sqlite3_finalize(update_turn);
-            try bindU64(update_turn, 1, turn_id);
-            try expectDone(update_turn);
-            if (c.sqlite3_changes(self.database) != 1) return error.StopSelectionChanged;
+            try self.completeStoppedTurnIfReady(turn_id);
         }
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
@@ -2075,7 +2108,7 @@ pub const Store = struct {
         try expectDone(insert);
     }
 
-    pub fn denyPermission(
+    pub fn decidePermission(
         self: *Store,
         command: *const protocol.PermissionDecisionCommand,
         faults: Faults,
@@ -2087,7 +2120,7 @@ pub const Store = struct {
         if (faults.control_trace) |trace| trace.mark(.lock_acquired);
         const result: PermissionDecisionReply = result: {
             if (self.fenced.load(.acquire)) break :result .infrastructure_failure;
-            break :result self.denyPermissionLocked(command, faults) catch {
+            break :result self.decidePermissionLocked(command, faults) catch {
                 self.finishTransactionFailure(faults);
                 break :result .infrastructure_failure;
             };
@@ -2096,7 +2129,15 @@ pub const Store = struct {
         return result;
     }
 
-    fn denyPermissionLocked(
+    pub fn denyPermission(
+        self: *Store,
+        command: *const protocol.PermissionDecisionCommand,
+        faults: Faults,
+    ) PermissionDecisionReply {
+        return self.decidePermission(command, faults);
+    }
+
+    fn decidePermissionLocked(
         self: *Store,
         command: *const protocol.PermissionDecisionCommand,
         faults: Faults,
@@ -2139,27 +2180,42 @@ pub const Store = struct {
         try self.insertCommand(command.key.slice(), .permission_decision, command.session.slice(), &digest, null, null, answer);
         var action_buffer: [20]u8 = undefined;
         const action_text = try std.fmt.bufPrint(&action_buffer, "{d}", .{command.action_id});
-        const save = try prepare(self.database, "INSERT INTO permission_decision_command(command_key,action_id) VALUES(?1,?2)");
+        const save = try prepare(self.database, "INSERT INTO permission_decision_command(command_key,action_id,decision) VALUES(?1,?2,?3)");
         defer _ = c.sqlite3_finalize(save);
         try bindText(save, 1, command.key.slice());
         try bindText(save, 2, action_text);
+        try bindText(save, 3, @tagName(command.decision));
         try expectDone(save);
         if (rejection == null) {
-            var current = try self.readSession(command.session.slice()) orelse return error.CorruptStore;
-            const result_content_id = try self.importBytesContent("Permission denied.", false, faults.content_import);
-            const update = try prepare(
-                self.database,
-                "UPDATE action_operation SET permission_state=2,resolution_code='denied',resolution_content_id=?2,acceptance_position=?3 " ++
-                    "WHERE action_id=?1 AND permission_state=0 AND resolution_code IS NULL",
-            );
-            defer _ = c.sqlite3_finalize(update);
-            try bindU64(update, 1, command.action_id);
-            try bindI64(update, 2, result_content_id);
-            try bindU64(update, 3, current.next_position);
-            try expectDone(update);
-            if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
-            current.next_position = try std.math.add(u64, current.next_position, 1);
-            try self.updateSession(command.session.slice(), &current);
+            switch (command.decision) {
+                .allow_once => {
+                    const update = try prepare(
+                        self.database,
+                        "UPDATE action_operation SET permission_state=1 WHERE action_id=?1 AND permission_state=0 AND resolution_code IS NULL",
+                    );
+                    defer _ = c.sqlite3_finalize(update);
+                    try bindU64(update, 1, command.action_id);
+                    try expectDone(update);
+                    if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
+                },
+                .deny => {
+                    var current = try self.readSession(command.session.slice()) orelse return error.CorruptStore;
+                    const result_content_id = try self.importBytesContent("Permission denied.", false, faults.content_import);
+                    const update = try prepare(
+                        self.database,
+                        "UPDATE action_operation SET permission_state=2,resolution_code='denied',resolution_content_id=?2,acceptance_position=?3 " ++
+                            "WHERE action_id=?1 AND permission_state=0 AND resolution_code IS NULL",
+                    );
+                    defer _ = c.sqlite3_finalize(update);
+                    try bindU64(update, 1, command.action_id);
+                    try bindI64(update, 2, result_content_id);
+                    try bindU64(update, 3, current.next_position);
+                    try expectDone(update);
+                    if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
+                    current.next_position = try std.math.add(u64, current.next_position, 1);
+                    try self.updateSession(command.session.slice(), &current);
+                },
+            }
         }
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
@@ -2213,8 +2269,10 @@ pub const Store = struct {
             observation.model_interruption = self.readModelInterruptionTarget(key) catch |err|
                 return self.fenceReadFailure(err);
         } else if (command.kind == .permission_decision) {
-            observation.permission_action_id = self.readPermissionAction(key) catch |err|
+            const target = self.readPermissionTarget(key) catch |err|
                 return self.fenceReadFailure(err);
+            observation.permission_action_id = target.action_id;
+            observation.permission_decision = target.decision;
         }
         return observation;
     }
@@ -2444,7 +2502,7 @@ pub const Store = struct {
             try self.appendToolResults(session_ref, capture);
             try capture.append("]}");
         }
-        try capture.appendFmt(",\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\",\"allow_once\",\"bash_execution\"]}}}}", .{
+        try capture.appendFmt(",\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":{s},\"custody_occupied\":\"{d}\",\"scratch_used_bytes\":\"{d}\",\"unavailable\":[\"structured_output\"]}}}}", .{
             if (execution.dispatch_fenced) "true" else "false",
             execution.custody_occupied,
             execution.scratch_used_bytes,
@@ -2569,13 +2627,16 @@ pub const Store = struct {
         const statement = try prepare(
             self.database,
             "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.permission_state," ++
-                "call_id.byte_length,call_id.digest,arguments.byte_length,arguments.digest " ++
+                "call_id.byte_length,call_id.digest,arguments.byte_length,arguments.digest," ++
+                "decision.command_key " ++
                 "FROM turn active INDEXED BY turn_one_active_per_session " ++
                 "CROSS JOIN action_operation a ON a.parent_operation_id=active.operation_id " ++
                 "CROSS JOIN model_tool_call call ON call.operation_id=a.parent_operation_id " ++
                 "AND call.call_ordinal=a.call_ordinal CROSS JOIN content call_id " ++
                 "ON call_id.content_id=call.call_id_content_id CROSS JOIN content arguments " ++
-                "ON arguments.content_id=call.arguments_content_id WHERE active.session_ref=?1 " ++
+                "ON arguments.content_id=call.arguments_content_id LEFT JOIN permission_decision_command decision " ++
+                "ON decision.action_id=CAST(a.action_id AS TEXT) AND decision.decision='allow_once' " ++
+                "WHERE active.session_ref=?1 " ++
                 "AND active.outcome_code IS NULL AND a.permission_state IN (0,1) " ++
                 "AND a.resolution_code IS NULL ORDER BY a.action_id",
         );
@@ -2605,7 +2666,7 @@ pub const Store = struct {
                 parent,
                 ordinal,
                 revision,
-                if (permission == 0) "pending" else "bypass",
+                if (permission == 0) "pending" else if (c.sqlite3_column_type(statement, 9) == c.SQLITE_NULL) "bypass" else "allow_once",
             });
             try capture.appendContentReference(.{
                 .length = @intCast(call_id_length),
@@ -3335,6 +3396,305 @@ pub const Store = struct {
                 err == error.InjectedAttemptCommitFailure,
             );
         };
+    }
+
+    pub fn admitNextActionAttempt(
+        self: *Store,
+        bash_timeout_ms: u64,
+        faults: Faults,
+    ) !?ActionAttemptAdmission {
+        if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        return self.admitNextActionAttemptLocked(bash_timeout_ms, faults) catch |err| {
+            return self.finishTransactionError(err, faults, err == error.InjectedAttemptCommitFailure);
+        };
+    }
+
+    fn admitNextActionAttemptLocked(
+        self: *Store,
+        bash_timeout_ms: u64,
+        faults: Faults,
+    ) !?ActionAttemptAdmission {
+        try exec(self.database, "BEGIN IMMEDIATE");
+        const select = try prepare(
+            self.database,
+            "SELECT action.action_id,action.parent_operation_id,operation.turn_id FROM action_operation action " ++
+                "INDEXED BY action_operation_executable JOIN model_operation operation " ++
+                "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
+                "WHERE action.permission_state=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
+                "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
+                "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
+                "ORDER BY action.action_id LIMIT 1",
+        );
+        defer _ = c.sqlite3_finalize(select);
+        const step = c.sqlite3_step(select);
+        if (step == c.SQLITE_DONE) {
+            try exec(self.database, "ROLLBACK");
+            return null;
+        }
+        if (step != c.SQLITE_ROW) return error.ActionSelectionFailed;
+        const action_id = c.sqlite3_column_int64(select, 0);
+        const parent_operation_id = c.sqlite3_column_int64(select, 1);
+        const turn_id = c.sqlite3_column_int64(select, 2);
+        if (action_id <= 0 or parent_operation_id <= 0 or turn_id <= 0) return error.CorruptStore;
+        const update = try prepare(
+            self.database,
+            "UPDATE action_operation SET attempt_ordinal=1,uncertain=1,bash_timeout_ms=?2 " ++
+                "WHERE action_id=?1 AND permission_state=1 AND resolution_code IS NULL AND attempt_ordinal=0",
+        );
+        defer _ = c.sqlite3_finalize(update);
+        try bindI64(update, 1, action_id);
+        try bindU64(update, 2, bash_timeout_ms);
+        try expectDone(update);
+        if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
+        if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
+        try exec(self.database, "COMMIT");
+        return .{ .permit = .{ .binding = .{
+            .turn_id = @intCast(turn_id),
+            .parent_operation_id = @intCast(parent_operation_id),
+            .action_id = @intCast(action_id),
+            .attempt_ordinal = 1,
+        } } };
+    }
+
+    pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding) !BashExecutionInput {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        const statement = prepare(
+            self.database,
+            "SELECT revision.workspace,call.arguments_content_id,action.bash_timeout_ms,operation.turn_id " ++
+                "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+                "JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
+                "JOIN model_tool_call call ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal " ++
+                "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3 " ++
+                "AND action.resolution_code IS NULL AND action.uncertain=1",
+        ) catch |err| return self.fenceReadFailure(err);
+        defer _ = c.sqlite3_finalize(statement);
+        bindU64(statement, 1, binding.action_id) catch |err| return self.fenceReadFailure(err);
+        bindU64(statement, 2, binding.parent_operation_id) catch |err| return self.fenceReadFailure(err);
+        bindU64(statement, 3, binding.attempt_ordinal) catch |err| return self.fenceReadFailure(err);
+        const step = c.sqlite3_step(statement);
+        if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
+        if (step != c.SQLITE_ROW) return self.fenceReadFailure(error.ActionReadFailed);
+        if (c.sqlite3_column_int64(statement, 3) != binding.turn_id) return error.StaleActionAttemptBinding;
+        var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+        readText(statement, 0, &workspace) catch |err| return self.fenceReadFailure(err);
+        const content_id = c.sqlite3_column_int64(statement, 1);
+        const timeout_ms = c.sqlite3_column_int64(statement, 2);
+        if (content_id <= 0 or timeout_ms <= 0) return self.fenceReadFailure(error.CorruptStore);
+        const metadata = self.readContentMetadata(content_id) catch |err| return self.fenceReadFailure(err);
+        return .{
+            .workspace = workspace,
+            .arguments = .{ .length = metadata.length, .digest = metadata.digest },
+            .timeout_ms = @intCast(timeout_ms),
+        };
+    }
+
+    pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !bool {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        const statement = prepare(
+            self.database,
+            "SELECT EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
+                "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+                "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3",
+        ) catch |err| return self.fenceReadFailure(err);
+        defer _ = c.sqlite3_finalize(statement);
+        bindU64(statement, 1, binding.action_id) catch |err| return self.fenceReadFailure(err);
+        bindU64(statement, 2, binding.parent_operation_id) catch |err| return self.fenceReadFailure(err);
+        bindU64(statement, 3, binding.attempt_ordinal) catch |err| return self.fenceReadFailure(err);
+        const step = c.sqlite3_step(statement);
+        if (step != c.SQLITE_ROW) return self.fenceReadFailure(if (step == c.SQLITE_DONE) error.CorruptStore else error.ActionReadFailed);
+        const stopped = c.sqlite3_column_int(statement, 0);
+        if (stopped != 0 and stopped != 1) return self.fenceReadFailure(error.CorruptStore);
+        return stopped == 1;
+    }
+
+    pub fn withActionDispatchHandoff(
+        self: *Store,
+        binding: ActionAttemptBinding,
+        context: anytype,
+        comptime handoff: anytype,
+    ) !void {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        const statement = prepare(
+            self.database,
+            "SELECT operation.turn_id,EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
+                "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+                "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3 " ++
+                "AND action.uncertain=1 AND action.resolution_code IS NULL",
+        ) catch |err| return self.fenceReadFailure(err);
+        defer _ = c.sqlite3_finalize(statement);
+        bindU64(statement, 1, binding.action_id) catch |err| return self.fenceReadFailure(err);
+        bindU64(statement, 2, binding.parent_operation_id) catch |err| return self.fenceReadFailure(err);
+        bindU64(statement, 3, binding.attempt_ordinal) catch |err| return self.fenceReadFailure(err);
+        const step = c.sqlite3_step(statement);
+        if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
+        if (step != c.SQLITE_ROW) return self.fenceReadFailure(error.ActionReadFailed);
+        if (c.sqlite3_column_int64(statement, 0) != binding.turn_id) return error.StaleActionAttemptBinding;
+        if (c.sqlite3_column_int(statement, 1) != 0) return error.SupersededByControl;
+        try handoff(context);
+    }
+
+    pub fn settleActionAttempt(
+        self: *Store,
+        binding: ActionAttemptBinding,
+        code: ActionResolutionCode,
+        result: []const u8,
+        faults: Faults,
+    ) !void {
+        if (result.len == 0) return error.InvalidActionResult;
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.settleActionAttemptLocked(binding, code, result, faults) catch |err| {
+            return self.finishTransactionError(err, faults, err == error.StaleActionAttemptBinding);
+        };
+    }
+
+    fn settleActionAttemptLocked(
+        self: *Store,
+        binding: ActionAttemptBinding,
+        code: ActionResolutionCode,
+        result: []const u8,
+        faults: Faults,
+    ) !void {
+        try exec(self.database, "BEGIN IMMEDIATE");
+        const statement = try prepare(
+            self.database,
+            "SELECT session_ref FROM action_operation WHERE action_id=?1 AND parent_operation_id=?2 " ++
+                "AND attempt_ordinal=?3 AND uncertain=1 AND resolution_code IS NULL",
+        );
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, binding.action_id);
+        try bindU64(statement, 2, binding.parent_operation_id);
+        try bindU64(statement, 3, binding.attempt_ordinal);
+        const step = c.sqlite3_step(statement);
+        if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
+        if (step != c.SQLITE_ROW) return error.ActionReadFailed;
+        var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try readText(statement, 0, &session_ref);
+        var current = try self.readSession(session_ref.slice()) orelse return error.CorruptStore;
+        const content_id = try self.importBytesContent(result, false, faults.content_import);
+        const update = try prepare(
+            self.database,
+            "UPDATE action_operation SET uncertain=0,resolution_code=?2,resolution_content_id=?3,acceptance_position=?4 " ++
+                "WHERE action_id=?1 AND parent_operation_id=?5 AND attempt_ordinal=?6 AND uncertain=1 AND resolution_code IS NULL",
+        );
+        defer _ = c.sqlite3_finalize(update);
+        try bindU64(update, 1, binding.action_id);
+        try bindText(update, 2, @tagName(code));
+        try bindI64(update, 3, content_id);
+        try bindU64(update, 4, current.next_position);
+        try bindU64(update, 5, binding.parent_operation_id);
+        try bindU64(update, 6, binding.attempt_ordinal);
+        try expectDone(update);
+        if (c.sqlite3_changes(self.database) != 1) return error.StaleActionAttemptBinding;
+        current.next_position = try std.math.add(u64, current.next_position, 1);
+        try self.updateSession(session_ref.slice(), &current);
+        try self.completeStoppedTurnIfReady(binding.turn_id);
+        if (faults.before_commit) return error.InjectedCommitFailure;
+        try exec(self.database, "COMMIT");
+    }
+
+    pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        return self.recoverOneUncertainActionLocked(active) catch |err| return self.finishTransactionError(err, .{}, false);
+    }
+
+    fn recoverOneUncertainActionLocked(self: *Store, active: ActiveOperationFilter) !bool {
+        const limit = try std.math.add(usize, active.maximum_exclusions, 1);
+        if (limit > std.math.maxInt(i64)) return error.ActionSelectionLimitExceeded;
+        var selected: ?u64 = null;
+        {
+            const select = try prepare(
+                self.database,
+                "SELECT action_id,parent_operation_id FROM action_operation INDEXED BY action_operation_uncertain " ++
+                    "WHERE resolution_code IS NULL AND uncertain=1 ORDER BY action_id LIMIT ?1",
+            );
+            defer _ = c.sqlite3_finalize(select);
+            try bindI64(select, 1, @as(i64, @intCast(limit)));
+            while (true) switch (c.sqlite3_step(select)) {
+                c.SQLITE_ROW => {
+                    const action_id = c.sqlite3_column_int64(select, 0);
+                    const operation_id = c.sqlite3_column_int64(select, 1);
+                    if (action_id <= 0 or operation_id <= 0) return error.CorruptStore;
+                    if (!active.contains(@intCast(action_id))) {
+                        selected = @intCast(action_id);
+                        break;
+                    }
+                },
+                c.SQLITE_DONE => break,
+                else => return error.ActionReadFailed,
+            };
+        }
+        const action_id = selected orelse return false;
+        try exec(self.database, "BEGIN IMMEDIATE");
+        const action = try prepare(self.database, "SELECT session_ref FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL AND uncertain=1");
+        defer _ = c.sqlite3_finalize(action);
+        try bindU64(action, 1, action_id);
+        if (c.sqlite3_step(action) != c.SQLITE_ROW) return error.ActionSelectionChanged;
+        var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try readText(action, 0, &session_ref);
+        var current = try self.readSession(session_ref.slice()) orelse return error.CorruptStore;
+        const content_id = try self.importBytesContent(
+            "Bash outcome is indeterminate after Host recovery; the command was not replayed.",
+            false,
+            false,
+        );
+        const update = try prepare(
+            self.database,
+            "UPDATE action_operation SET uncertain=0,resolution_code='indeterminate',resolution_content_id=?2,acceptance_position=?3 " ++
+                "WHERE action_id=?1 AND resolution_code IS NULL AND uncertain=1",
+        );
+        defer _ = c.sqlite3_finalize(update);
+        try bindU64(update, 1, action_id);
+        try bindI64(update, 2, content_id);
+        try bindU64(update, 3, current.next_position);
+        try expectDone(update);
+        if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
+        current.next_position = try std.math.add(u64, current.next_position, 1);
+        try self.updateSession(session_ref.slice(), &current);
+        const turn_statement = try prepare(
+            self.database,
+            "SELECT operation.turn_id FROM action_operation action JOIN model_operation operation " ++
+                "ON operation.operation_id=action.parent_operation_id WHERE action.action_id=?1",
+        );
+        defer _ = c.sqlite3_finalize(turn_statement);
+        try bindU64(turn_statement, 1, action_id);
+        if (c.sqlite3_step(turn_statement) != c.SQLITE_ROW) return error.CorruptStore;
+        const turn_id = c.sqlite3_column_int64(turn_statement, 0);
+        if (turn_id <= 0) return error.CorruptStore;
+        try self.completeStoppedTurnIfReady(@intCast(turn_id));
+        try exec(self.database, "COMMIT");
+        return true;
+    }
+
+    fn completeStoppedTurnIfReady(self: *Store, turn_id: u64) !void {
+        const update = try prepare(
+            self.database,
+            "UPDATE turn SET outcome_code='cancelled' WHERE turn_id=?1 AND outcome_code IS NULL " ++
+                "AND EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=turn.turn_id) " ++
+                "AND NOT EXISTS(SELECT 1 FROM action_operation action " ++
+                "WHERE action.parent_operation_id=turn.operation_id AND action.resolution_code IS NULL)",
+        );
+        defer _ = c.sqlite3_finalize(update);
+        try bindU64(update, 1, turn_id);
+        try expectDone(update);
     }
 
     fn admitNextModelAttemptLocked(self: *Store, faults: Faults) !?AttemptAdmission {
@@ -4892,14 +5252,25 @@ pub const Store = struct {
         return target;
     }
 
-    fn readPermissionAction(self: *Store, command_key: []const u8) !u64 {
-        const statement = try prepare(self.database, "SELECT action_id FROM permission_decision_command WHERE command_key=?1");
+    const PermissionTarget = struct {
+        action_id: u64,
+        decision: protocol.PermissionDecision,
+    };
+
+    fn readPermissionTarget(self: *Store, command_key: []const u8) !PermissionTarget {
+        const statement = try prepare(self.database, "SELECT action_id,decision FROM permission_decision_command WHERE command_key=?1");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, command_key);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
         var value: protocol.Bounded(20) = .{};
         try readText(statement, 0, &value);
-        return std.fmt.parseInt(u64, value.slice(), 10) catch error.CorruptStore;
+        var decision: protocol.Bounded(16) = .{};
+        try readText(statement, 1, &decision);
+        return .{
+            .action_id = std.fmt.parseInt(u64, value.slice(), 10) catch return error.CorruptStore,
+            .decision = std.meta.stringToEnum(protocol.PermissionDecision, decision.slice()) orelse
+                return error.CorruptStore,
+        };
     }
 
     fn turnIsComplete(self: *Store, turn_id: u64) !bool {
@@ -5424,21 +5795,28 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ tool_kind INTEGER NOT NULL CHECK(tool_kind=1),
         \\ permission_revision INTEGER NOT NULL CHECK(permission_revision>0),
         \\ permission_state INTEGER NOT NULL CHECK(permission_state IN (0,1,2)),
-        \\ resolution_code TEXT CHECK(resolution_code IS NULL OR resolution_code IN ('denied','cancelled')),
+        \\ attempt_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(attempt_ordinal IN (0,1)),
+        \\ uncertain INTEGER NOT NULL DEFAULT 0 CHECK(uncertain IN (0,1)),
+        \\ bash_timeout_ms INTEGER CHECK(bash_timeout_ms IS NULL OR bash_timeout_ms>0),
+        \\ resolution_code TEXT CHECK(resolution_code IS NULL OR resolution_code IN ('denied','cancelled','succeeded','failed','timed_out','indeterminate','storage_failed','spawn_failed','infrastructure_shutdown')),
         \\ resolution_content_id INTEGER REFERENCES content(content_id),
         \\ acceptance_position INTEGER CHECK(acceptance_position IS NULL OR acceptance_position>0),
         \\ UNIQUE(parent_operation_id,call_ordinal),
         \\ FOREIGN KEY(parent_operation_id,session_ref) REFERENCES model_operation(operation_id,session_ref),
         \\ FOREIGN KEY(parent_operation_id,call_ordinal,tool_kind) REFERENCES model_tool_call(operation_id,call_ordinal,action_kind),
         \\ FOREIGN KEY(session_ref,permission_revision) REFERENCES session_revision(session_ref,revision),
-        \\ CHECK((permission_state=2 AND resolution_code='denied') OR
-        \\       (permission_state IN (0,1) AND (resolution_code IS NULL OR resolution_code='cancelled'))),
+        \\ CHECK((permission_state=2 AND resolution_code='denied' AND attempt_ordinal=0) OR
+        \\       (permission_state IN (0,1) AND (resolution_code IS NULL OR resolution_code!='denied'))),
+        \\ CHECK((attempt_ordinal=0 AND uncertain=0 AND bash_timeout_ms IS NULL) OR
+        \\       (attempt_ordinal=1 AND bash_timeout_ms IS NOT NULL)),
+        \\ CHECK(uncertain=0 OR (attempt_ordinal=1 AND resolution_code IS NULL)),
         \\ CHECK((resolution_code IS NULL AND resolution_content_id IS NULL AND acceptance_position IS NULL) OR
         \\       (resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL AND acceptance_position IS NOT NULL))
         \\) STRICT;
         \\CREATE TABLE permission_decision_command(
         \\ command_key TEXT PRIMARY KEY REFERENCES core_command(command_key),
-        \\ action_id TEXT NOT NULL CHECK(length(action_id) BETWEEN 1 AND 20)
+        \\ action_id TEXT NOT NULL CHECK(length(action_id) BETWEEN 1 AND 20),
+        \\ decision TEXT NOT NULL CHECK(decision IN ('allow_once','deny'))
         \\) STRICT, WITHOUT ROWID;
         \\CREATE TABLE answer_text_projection(
         \\ answer_content_id INTEGER NOT NULL REFERENCES content(content_id),
@@ -5454,6 +5832,8 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL;
         \\CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff);
         \\CREATE INDEX action_operation_session_order ON action_operation(session_ref,action_id);
+        \\CREATE INDEX action_operation_executable ON action_operation(action_id) WHERE permission_state=1 AND resolution_code IS NULL AND attempt_ordinal=0;
+        \\CREATE INDEX action_operation_uncertain ON action_operation(action_id) WHERE resolution_code IS NULL AND uncertain=1;
         \\CREATE INDEX model_tool_call_rejections ON model_tool_call(operation_id,call_ordinal) WHERE rejection_code IS NOT NULL;
         \\CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND allowance_used<4;
         \\CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0;
@@ -5481,7 +5861,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','message_admission_session_pending','session_stop_exclusion','action_operation_session_order','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','conversation_entry_history','model_output_history','turn_session_latest')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','message_admission_session_pending','session_stop_exclusion','action_operation_session_order','action_operation_executable','action_operation_uncertain','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','conversation_entry_history','model_output_history','turn_session_latest')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);

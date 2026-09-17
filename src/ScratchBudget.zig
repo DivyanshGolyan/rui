@@ -3,8 +3,17 @@ const ScratchBudget = @This();
 
 used: *std.atomic.Value(u64),
 limit: u64,
+reclaim_context: ?*anyopaque = null,
+reclaim_fn: ?*const fn (*anyopaque, u64, u64) bool = null,
 
 pub fn reserve(self: ScratchBudget, amount: u64) bool {
+    if (self.reserveWithoutReclaim(amount)) return true;
+    const reclaim = self.reclaim_fn orelse return false;
+    const context = self.reclaim_context orelse return false;
+    return reclaim(context, amount, self.limit);
+}
+
+pub fn reserveWithoutReclaim(self: ScratchBudget, amount: u64) bool {
     if (amount > self.limit) return false;
     var current = self.used.load(.acquire);
     while (true) {

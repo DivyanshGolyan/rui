@@ -45,6 +45,15 @@ pub fn build(b: *std.Build) void {
     );
     dispatch_integration_step.dependOn(&dispatch_integration.step);
 
+    const bash_integration = b.addSystemCommand(&.{"python3"});
+    bash_integration.addFileArg(b.path("tests/integration/bash_integration.py"));
+    bash_integration.addArtifactArg(release_safe);
+    const bash_integration_step = b.step(
+        "bash-integration",
+        "Run authorized Bash execution, stop, failure, and recovery cases",
+    );
+    bash_integration_step.dependOn(&bash_integration.step);
+
     const control_integration = b.addSystemCommand(&.{"python3"});
     control_integration.addFileArg(b.path("tests/integration/control_integration.py"));
     control_integration.addArtifactArg(release_safe);
@@ -80,6 +89,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&run_tests.step);
     check_step.dependOn(&integration.step);
     check_step.dependOn(&dispatch_integration.step);
+    check_step.dependOn(&bash_integration.step);
     check_step.dependOn(&control_integration.step);
     check_step.dependOn(&debug_integration.step);
 

@@ -761,7 +761,7 @@ def main():
             assert after["actions"]["resolved"] == [], after
             assert after["rejected_calls"] == {"count": "0", "items": []}, after
             assert after["execution"]["custody_occupied"] == "0", after
-            assert "bash_execution" in after["execution"]["unavailable"], after
+            assert "bash_execution" not in after["execution"]["unavailable"], after
             with sqlite3.connect(proposal_store / "rui.sqlite3") as database:
                 rows = database.execute(
                     "SELECT call_ordinal,permission_state,resolution_code FROM action_operation "

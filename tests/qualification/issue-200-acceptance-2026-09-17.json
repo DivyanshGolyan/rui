@@ -1,0 +1,89 @@
+{
+  "recorded_utc": "2026-09-17T16:05:27Z",
+  "tested_base_revision": "6a192a25bf1a4750f9b6733d006cc72d83d6d5e9",
+  "working_tree_dirty": true,
+  "scope": "Exact source hashes below identify the uncommitted issue #200 implementation that was tested before its local commit.",
+  "environment": {
+    "runtime": "Amp Linux orb",
+    "platform": "Linux 6.1.158+ x86_64",
+    "os": "Debian GNU/Linux 12 (bookworm)",
+    "zig_version": "0.16.0",
+    "python_version": "3.11.6",
+    "go_version": "1.27.1",
+    "apple_sdk": "unavailable"
+  },
+  "source_sha256": {
+    "build.zig": "241a5941436c9c0b7b50b4977d2bf6a8c73fc935c311d11ac41b281db03e2b18",
+    "src/bash.zig": "372473204497ed918213900cf478c8b4c31794ea466c3e4a8a3e515b79a21f44",
+    "src/output_retention.zig": "9eaf6aea861c417caf14548c49c4e7bf5a2584191142e8d4e9519aee8b21fef9",
+    "src/server.zig": "b2afb7276df81d92b31e6ba2d5d1464cf6ae343debac2580c7b3a9e09763d2ea",
+    "src/store.zig": "c72ddb1d54b40cad8eede685a234e99df0f27fb060d948204fe57083f17e1488",
+    "tests/integration/bash_integration.py": "10aadc61cda45353732bc3807377058a4ef780646583291075acb607672402c5"
+  },
+  "fixed_resources": {
+    "active_capacity": 1000,
+    "custody_record_bytes": 72,
+    "execution_slot_bytes": 1248,
+    "preceding_model_queue_slot_bytes": 1216,
+    "incremental_slot_bytes_at_default_capacity": 32000,
+    "incremental_custody_bytes_at_default_capacity": 32000,
+    "retention_entry_bytes": 136,
+    "retention_capacity": 481,
+    "retention_allocation_bytes": 65416,
+    "inline_payload_or_excerpt_bytes_per_slot": 0
+  },
+  "linux_resource_samples": [
+    {
+      "phase": "cold",
+      "rss_bytes": 7598080,
+      "high_water_bytes": 7598080,
+      "descriptors": 7,
+      "scratch_files": 0,
+      "scratch_logical_bytes": 0
+    },
+    {
+      "phase": "retained-output-idle",
+      "rss_bytes": 9003008,
+      "high_water_bytes": 9072640,
+      "descriptors": 12,
+      "scratch_files": 2,
+      "scratch_logical_bytes": 12014,
+      "accounted_scratch_bytes": 12014
+    },
+    {
+      "phase": "active-descendant-pipes",
+      "rss_bytes": 9048064,
+      "high_water_bytes": 9048064,
+      "descriptors": 17,
+      "scratch_files": 3,
+      "scratch_logical_bytes": 22,
+      "accounted_scratch_bytes": 22
+    },
+    {
+      "phase": "two-sibling-retained-idle",
+      "rss_bytes": 8863744,
+      "high_water_bytes": 8933376,
+      "descriptors": 12,
+      "scratch_files": 4,
+      "scratch_logical_bytes": 0,
+      "accounted_scratch_bytes": 0
+    }
+  ],
+  "gates": [
+    {"command": "zig build check", "result": "passed", "native_tests": 125},
+    {"command": "zig build measurement-check", "result": "passed"},
+    {"command": "zig build cross-check-linux", "result": "passed", "targets": ["Linux x86-64", "Linux ARM64"]},
+    {"command": "python3 -m py_compile tests/integration/*.py", "result": "passed"},
+    {"command": "zig fmt --check --ast-check build.zig src", "result": "passed"},
+    {"command": "git diff --check", "result": "passed"},
+    {"command": "empty-cache pinned dependency fetch and build", "result": "unavailable", "diagnostic": "ResolvConfParseFailed"},
+    {"command": "zig build cross-check-macos", "result": "unavailable", "diagnostic": "xcrun and Apple SDK unavailable in Linux orb"}
+  ],
+  "qualification_limits": [
+    "Linux RSS/HWM are portable diagnostics, not the accepted macOS physical-footprint counter.",
+    "Deterministic loopback provider and local Bash; no live provider or TLS qualification.",
+    "Process termination and fresh-process reopen do not establish filesystem power-loss durability.",
+    "Process-group cleanup does not establish containment of detached descendants.",
+    "Broad model/Bash/Edit mixed qualification at default capacity 1000 remains issue #168."
+  ]
+}

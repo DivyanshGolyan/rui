@@ -59,6 +59,7 @@ pub const PermissionDecisionInput = struct {
     key: []const u8,
     session: []const u8,
     action_id: u64,
+    decision: protocol.PermissionDecision = .deny,
     drop_reply: ?[]const u8 = null,
 };
 
@@ -390,7 +391,10 @@ fn capturePermissionDecision(io: std.Io, paths: *const platform.Paths, input: Pe
     try capture.write(",\"session\":");
     try capture.writeJsonString(input.session);
     var suffix: [96]u8 = undefined;
-    try capture.write(try std.fmt.bufPrint(&suffix, ",\"action\":\"{d}\",\"decision\":\"deny\"}}", .{input.action_id}));
+    try capture.write(try std.fmt.bufPrint(&suffix, ",\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{
+        input.action_id,
+        @tagName(input.decision),
+    }));
     try capture.commit();
 }
 
@@ -1197,6 +1201,7 @@ test "control captures attain their exact worst-case request bounds" {
         .key = &escaped_key,
         .session = &escaped_session,
         .action_id = std.math.maxInt(u64),
+        .decision = .allow_once,
     });
     const permission_file = try std.Io.Dir.cwd().openFile(std.testing.io, permission_path, .{});
     defer permission_file.close(std.testing.io);
