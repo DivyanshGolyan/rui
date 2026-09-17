@@ -1,5 +1,6 @@
 const std = @import("std");
 const client = @import("client.zig");
+const protocol = @import("protocol.zig");
 const server = @import("server.zig");
 
 pub fn main(init: std.process.Init) !void {
@@ -251,10 +252,23 @@ fn observe(io: std.Io, args: []const []const u8) !void {
 fn inspect(io: std.Io, args: []const []const u8) !void {
     var store_path: ?[]const u8 = null;
     var session: ?[]const u8 = null;
+    var profile: protocol.ReportProfile = .current;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--session")) session = try takeValue(args, &index) else return error.UnknownArgument;
+        if (std.mem.eql(u8, arg, "--store")) {
+            store_path = try takeValue(args, &index);
+        } else if (std.mem.eql(u8, arg, "--session")) {
+            session = try takeValue(args, &index);
+        } else if (std.mem.eql(u8, arg, "--profile")) {
+            const value = try takeValue(args, &index);
+            profile = if (std.mem.eql(u8, value, "current"))
+                .current
+            else if (std.mem.eql(u8, value, "full"))
+                .full
+            else
+                return error.UnknownReportProfile;
+        } else return error.UnknownArgument;
         index += 1;
     }
     var reply_buffer: client.ReplyBuffer = .{};
@@ -262,6 +276,7 @@ fn inspect(io: std.Io, args: []const []const u8) !void {
         io,
         store_path orelse return usage(),
         session orelse return usage(),
+        profile,
         std.Io.File.stdout(),
         &reply_buffer,
     );
@@ -353,7 +368,7 @@ fn usage() error{InvalidArguments} {
         \\  rui read-result --store PATH --key KEY
         \\  rui read-action-call-id --store PATH --session REF --action ID
         \\  rui read-action-arguments --store PATH --session REF --action ID
-        \\  rui inspect-session --store PATH --session REF
+        \\  rui inspect-session --store PATH --session REF [--profile current|full]
         \\
     , .{});
     return error.InvalidArguments;
