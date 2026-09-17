@@ -1019,6 +1019,36 @@ const SessionReportCapture = struct {
         try self.append("\"}");
     }
 
+    fn appendOwnedContentReference(
+        self: *SessionReportCapture,
+        reference: ContentReference,
+        owner_revision: i64,
+        owner_field: RevisionContentField,
+    ) !void {
+        try self.appendFmt("{{\"bytes\":\"{d}\",\"sha256\":\"", .{reference.length});
+        try self.append(&std.fmt.bytesToHex(reference.digest, .lower));
+        try self.appendFmt("\",\"owner\":{{\"revision\":\"{d}\",\"field\":\"{s}\"}}}}", .{ owner_revision, @tagName(owner_field) });
+    }
+
+    fn appendTools(self: *SessionReportCapture, tools_mask: u8) !void {
+        if (tools_mask > 3) return error.CorruptStore;
+        try self.append("[");
+        if (tools_mask & 1 != 0) try self.append("\"bash\"");
+        if (tools_mask & 2 != 0) {
+            if (tools_mask & 1 != 0) try self.append(",");
+            try self.append("\"edit\"");
+        }
+        try self.append("]");
+    }
+
+    fn appendPermissionMode(self: *SessionReportCapture, permission_mode: u8) !void {
+        try self.appendJsonString(switch (permission_mode) {
+            0 => "ask",
+            1 => "bypass",
+            else => return error.CorruptStore,
+        });
+    }
+
     fn flush(self: *SessionReportCapture) !void {
         if (self.buffered == 0) return;
         const amount: u64 = self.buffered;
@@ -1124,6 +1154,11 @@ const MessageProjection = struct {
             outcome_content_id: ?i64,
         },
     },
+};
+
+const RevisionContentField = enum(c_int) {
+    instructions = 0,
+    output_schema = 1,
 };
 
 const ConfigurationContentAction = enum(u2) {
@@ -2209,7 +2244,14 @@ pub const Store = struct {
         if (step == c.SQLITE_DONE) return if (accepted) error.CorruptStore else null;
         if (step != c.SQLITE_ROW) return error.CorruptStore;
         if (!accepted) return error.CorruptStore;
-        const projection = try readMessageProjectionRow(statement);
+        var stop_key: protocol.Bounded(128) = .{};
+        const excluding_stop = if (c.sqlite3_column_type(statement, 9) == c.SQLITE_NULL)
+            null
+        else blk: {
+            try readText(statement, 9, &stop_key);
+            break :blk stop_key.slice();
+        };
+        const projection = try readMessageProjectionRow(statement, excluding_stop);
         if (!projection.session.eql(session_ref) or projection.content_id != content_id or
             !projection.command_key.eql(command_key)) return error.CorruptStore;
         return switch (projection.state) {
@@ -2352,19 +2394,11 @@ pub const Store = struct {
         try capture.appendJsonString(current.workspace.slice());
         try capture.append(",\"model\":");
         try capture.appendJsonString(current.model.slice());
-        try capture.appendFmt(",\"revision\":\"{d}\",\"tools\":[", .{current.revision});
-        var need_comma = false;
-        if (current.tools_mask & 1 != 0) {
-            try capture.append("\"bash\"");
-            need_comma = true;
-        }
-        if (current.tools_mask & 2 != 0) {
-            if (need_comma) try capture.append(",");
-            try capture.append("\"edit\"");
-        }
-        try capture.append("],\"permission_mode\":\"");
-        try capture.append(if (current.permission_mode == 0) "ask" else "bypass");
-        try capture.append("\",\"instructions\":");
+        try capture.appendFmt(",\"revision\":\"{d}\",\"tools\":", .{current.revision});
+        try capture.appendTools(current.tools_mask);
+        try capture.append(",\"permission_mode\":");
+        try capture.appendPermissionMode(current.permission_mode);
+        try capture.append(",\"instructions\":");
         try capture.appendBareContentReference(.{ .length = instructions.length, .digest = instructions.digest });
         try capture.append(",\"output_schema\":");
         if (output_schema) |reference| {
@@ -2706,8 +2740,18 @@ pub const Store = struct {
     fn appendSessionRevisions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
         const statement = try prepare(
             self.database,
-            "SELECT revision,command_key,workspace,model,tools_mask,permission_mode,instructions_content_id,output_schema_content_id " ++
-                "FROM session_revision WHERE session_ref=?1 ORDER BY revision",
+            "WITH occurrence(revision,field_order,content_id) AS MATERIALIZED (" ++
+                "SELECT revision,0,instructions_content_id FROM session_revision WHERE session_ref=?1 UNION ALL " ++
+                "SELECT revision,1,output_schema_content_id FROM session_revision WHERE session_ref=?1 AND output_schema_content_id IS NOT NULL)," ++
+                "ownership AS MATERIALIZED (SELECT revision,field_order,content_id," ++
+                "first_value(revision) OVER (PARTITION BY content_id ORDER BY revision,field_order) owner_revision," ++
+                "first_value(field_order) OVER (PARTITION BY content_id ORDER BY revision,field_order) owner_field FROM occurrence) " ++
+                "SELECT revision_row.revision,revision_row.command_key,revision_row.workspace,revision_row.model," ++
+                "revision_row.tools_mask,revision_row.permission_mode,revision_row.instructions_content_id,revision_row.output_schema_content_id," ++
+                "instructions.owner_revision,instructions.owner_field,output_schema.owner_revision,output_schema.owner_field " ++
+                "FROM session_revision revision_row JOIN ownership instructions ON instructions.revision=revision_row.revision AND instructions.field_order=0 " ++
+                "LEFT JOIN ownership output_schema ON output_schema.revision=revision_row.revision AND output_schema.field_order=1 " ++
+                "WHERE revision_row.session_ref=?1 ORDER BY revision_row.revision",
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
@@ -2724,31 +2768,104 @@ pub const Store = struct {
             try appendColumnString(statement, 2, protocol.max_workspace_bytes, capture);
             try capture.append(",\"model\":");
             try appendColumnString(statement, 3, protocol.max_model_bytes, capture);
-            try capture.appendFmt(",\"tools_mask\":\"{d}\",\"permission_mode\":\"{s}\",\"instructions\":", .{ tools, if (permission == 0) "ask" else "bypass" });
-            try self.appendInlineContent(instructions_id, capture);
+            try capture.append(",\"tools\":");
+            try capture.appendTools(@intCast(tools));
+            try capture.append(",\"permission_mode\":");
+            try capture.appendPermissionMode(@intCast(permission));
+            try capture.append(",\"instructions\":");
+            try self.appendRevisionContent(
+                instructions_id,
+                revision,
+                .instructions,
+                c.sqlite3_column_int64(statement, 8),
+                c.sqlite3_column_int(statement, 9),
+                capture,
+            );
             try capture.append(",\"output_schema\":");
-            if (try readNullablePositiveI64(statement, 7)) |content_id| try self.appendInlineContent(content_id, capture) else try capture.append("null");
+            if (try readNullablePositiveI64(statement, 7)) |content_id| {
+                if (c.sqlite3_column_type(statement, 10) == c.SQLITE_NULL or c.sqlite3_column_type(statement, 11) == c.SQLITE_NULL) return error.CorruptStore;
+                try self.appendRevisionContent(
+                    content_id,
+                    revision,
+                    .output_schema,
+                    c.sqlite3_column_int64(statement, 10),
+                    c.sqlite3_column_int(statement, 11),
+                    capture,
+                );
+            } else {
+                if (c.sqlite3_column_type(statement, 10) != c.SQLITE_NULL or c.sqlite3_column_type(statement, 11) != c.SQLITE_NULL) return error.CorruptStore;
+                try capture.append("null");
+            }
             try capture.append("}");
         }
+    }
+
+    fn appendRevisionContent(
+        self: *Store,
+        content_id: i64,
+        revision: i64,
+        field: RevisionContentField,
+        owner_revision: i64,
+        owner_field_value: c_int,
+        capture: *SessionReportCapture,
+    ) !void {
+        if (content_id <= 0 or revision <= 0 or owner_revision <= 0 or owner_revision > revision) return error.CorruptStore;
+        const owner_field: RevisionContentField = switch (owner_field_value) {
+            0 => .instructions,
+            1 => .output_schema,
+            else => return error.CorruptStore,
+        };
+        if (owner_revision == revision and @intFromEnum(owner_field) > @intFromEnum(field)) return error.CorruptStore;
+        if (owner_revision == revision and owner_field == field) return self.appendInlineContent(content_id, capture);
+        const metadata = try self.readContentMetadata(content_id);
+        try capture.appendOwnedContentReference(
+            .{ .length = metadata.length, .digest = metadata.digest },
+            owner_revision,
+            owner_field,
+        );
     }
 
     fn appendMessages(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
         const statement = try prepare(
             self.database,
             "SELECT m.session_ref,m.content_id,m.admission_id,m.command_key,m.turn_id,t.operation_id,o.attempt_ordinal," ++
-                "t.outcome_code,t.outcome_content_id,CASE WHEN m.turn_id IS NULL THEN (" ++
-                "SELECT stopped.command_key FROM session_stop stopped JOIN core_command stop_command " ++
-                "ON stop_command.command_key=stopped.command_key WHERE stopped.session_ref=m.session_ref " ++
-                "AND m.admission_id<=stopped.admission_cutoff ORDER BY stop_command.rowid LIMIT 1) END " ++
+                "t.outcome_code,t.outcome_content_id " ++
                 "FROM message_admission m LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
                 "LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
                 "WHERE m.session_ref=?1 ORDER BY m.admission_id",
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
+        const stops = try prepare(
+            self.database,
+            "SELECT stopped.command_key,stopped.admission_cutoff FROM session_stop stopped " ++
+                "JOIN core_command command ON command.command_key=stopped.command_key " ++
+                "WHERE stopped.session_ref=?1 ORDER BY command.rowid",
+        );
+        defer _ = c.sqlite3_finalize(stops);
+        try bindText(stops, 1, session_ref);
+        var stop_result = c.sqlite3_step(stops);
+        if (stop_result != c.SQLITE_ROW and stop_result != c.SQLITE_DONE) return error.SessionStopReadFailed;
         var first = true;
         while (try nextReportRow(statement, &first, capture, error.MessageReadFailed)) {
-            const projection = try readMessageProjectionRow(statement);
+            const admission_id = c.sqlite3_column_int64(statement, 2);
+            if (admission_id <= 0) return error.CorruptStore;
+            var excluding_key: protocol.Bounded(128) = .{};
+            var excluding_stop: ?[]const u8 = null;
+            if (c.sqlite3_column_type(statement, 4) == c.SQLITE_NULL) {
+                while (stop_result == c.SQLITE_ROW) {
+                    const cutoff = c.sqlite3_column_int64(stops, 1);
+                    if (cutoff < 0) return error.CorruptStore;
+                    if (cutoff >= admission_id) {
+                        try readText(stops, 0, &excluding_key);
+                        excluding_stop = excluding_key.slice();
+                        break;
+                    }
+                    stop_result = c.sqlite3_step(stops);
+                    if (stop_result != c.SQLITE_ROW and stop_result != c.SQLITE_DONE) return error.SessionStopReadFailed;
+                }
+            }
+            const projection = try readMessageProjectionRow(statement, excluding_stop);
             if (!projection.session.eql(session_ref)) return error.CorruptStore;
             try capture.appendFmt("{{\"admission\":\"{d}\",\"command_key\":", .{projection.admission_id});
             try capture.appendJsonString(projection.command_key.slice());
@@ -5597,7 +5714,7 @@ fn appendNullableNonnegativeInteger(statement: *c.sqlite3_stmt, index: c_int, ca
     try capture.appendFmt("\"{d}\"", .{value});
 }
 
-fn readMessageProjectionRow(statement: *c.sqlite3_stmt) !MessageProjection {
+fn readMessageProjectionRow(statement: *c.sqlite3_stmt, excluding_stop: ?[]const u8) !MessageProjection {
     var projection: MessageProjection = undefined;
     try readText(statement, 0, &projection.session);
     projection.content_id = c.sqlite3_column_int64(statement, 1);
@@ -5609,16 +5726,16 @@ fn readMessageProjectionRow(statement: *c.sqlite3_stmt) !MessageProjection {
     if (turn_id == null) {
         if (c.sqlite3_column_type(statement, 5) != c.SQLITE_NULL or c.sqlite3_column_type(statement, 6) != c.SQLITE_NULL or
             c.sqlite3_column_type(statement, 7) != c.SQLITE_NULL or c.sqlite3_column_type(statement, 8) != c.SQLITE_NULL) return error.CorruptStore;
-        if (c.sqlite3_column_type(statement, 9) == c.SQLITE_NULL) {
-            projection.state = .pending;
-        } else {
+        if (excluding_stop) |key| {
             var stop_key: protocol.Bounded(128) = .{};
-            try readText(statement, 9, &stop_key);
+            try stop_key.set(key);
             projection.state = .{ .excluded = stop_key };
+        } else {
+            projection.state = .pending;
         }
         return projection;
     }
-    if (c.sqlite3_column_type(statement, 9) != c.SQLITE_NULL) return error.CorruptStore;
+    if (excluding_stop != null) return error.CorruptStore;
     const operation_id = try readNullablePositiveI64(statement, 5) orelse return error.CorruptStore;
     const attempt_ordinal = try readNullablePositiveI64(statement, 6) orelse return error.CorruptStore;
     var outcome_code: ?protocol.Bounded(96) = null;
@@ -5744,6 +5861,19 @@ fn testingContent(tmp: *std.testing.TmpDir, name: []const u8, fill: u8, length: 
         .file = file,
         .length = length,
         .digest = hash.finalResult(),
+    };
+}
+
+fn testingBytesContent(tmp: *std.testing.TmpDir, name: []const u8, bytes: []const u8) !protocol.ContentField {
+    const file = try tmp.dir.createFile(std.testing.io, name, .{ .read = true });
+    errdefer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, bytes);
+    try file.sync(std.testing.io);
+    return .{
+        .state = .value,
+        .file = file,
+        .length = bytes.len,
+        .digest = protocol.contentDigest(bytes),
     };
 }
 
@@ -6114,6 +6244,133 @@ test "Full preserves rejected model interruption targets as canonical u64 text" 
     }
     try std.testing.expect(!storage.isFenced());
     try std.testing.expect((try storage.inspectSession("direct/interrupt-report")).found);
+}
+
+test "Full revisions own repeated content once and render semantic settings" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var initial = try completeConfiguration("revision-owner-1", "direct/revision-owner", workspace, "model-a");
+    initial.configuration.instructions = try testingContent(&tmp, "revision-owner-instructions", 1, 64 * 1024);
+    const schema_a = "{}";
+    initial.configuration.output_schema = try testingBytesContent(&tmp, "revision-owner-schema-a", schema_a);
+    defer initial.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&initial, .{}) == .accepted);
+
+    var second: protocol.ConfigureCommand = .{};
+    try second.key.set("revision-owner-2");
+    try second.session.set("direct/revision-owner");
+    second.configuration.tools.state = .value;
+    second.configuration.tools.count = 1;
+    second.configuration.tools.values[0] = .edit;
+    second.configuration.permission_mode.state = .value;
+    try second.configuration.permission_mode.value.set("bypass");
+    const schema_b = "{\"type\":\"object\"}";
+    second.configuration.output_schema = try testingBytesContent(&tmp, "revision-owner-schema-b", schema_b);
+    defer second.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&second, .{}) == .accepted);
+
+    var third: protocol.ConfigureCommand = .{};
+    try third.key.set("revision-owner-3");
+    try third.session.set("direct/revision-owner");
+    third.configuration.tools.state = .value;
+    third.configuration.tools.count = 1;
+    third.configuration.tools.values[0] = .bash;
+    third.configuration.output_schema = try testingBytesContent(&tmp, "revision-owner-schema-a-again", schema_a);
+    defer third.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&third, .{}) == .accepted);
+
+    var fourth: protocol.ConfigureCommand = .{};
+    try fourth.key.set("revision-owner-4");
+    try fourth.session.set("direct/revision-owner");
+    fourth.configuration.tools.state = .value;
+    fourth.configuration.tools.count = 0;
+    try std.testing.expect(storage.configure(&fourth, .{}) == .accepted);
+
+    var fifth: protocol.ConfigureCommand = .{};
+    try fifth.key.set("revision-owner-5");
+    try fifth.session.set("direct/revision-owner");
+    fifth.configuration.instructions = try testingBytesContent(&tmp, "revision-owner-instructions-schema-a", schema_a);
+    defer fifth.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&fifth, .{}) == .accepted);
+
+    const full = try testingSessionReportWithProfile(&storage, &tmp, "direct/revision-owner", 512 * 1024, .full);
+    defer std.testing.allocator.free(full);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full, .{});
+    defer parsed.deinit();
+    const revisions = parsed.value.object.get("full").?.object.get("session_revisions").?.array.items;
+    try std.testing.expectEqual(@as(usize, 5), revisions.len);
+
+    const first = revisions[0].object;
+    const first_instructions = first.get("instructions").?.object;
+    try std.testing.expectEqual(@as(usize, 64 * 1024), first_instructions.get("text").?.string.len);
+    for (first_instructions.get("text").?.string) |byte| try std.testing.expectEqual(@as(u8, 1), byte);
+    try std.testing.expectEqualStrings(schema_a, first.get("output_schema").?.object.get("text").?.string);
+
+    for (revisions[1..4]) |revision| {
+        const owner = revision.object.get("instructions").?.object.get("owner").?.object;
+        try std.testing.expectEqualStrings("1", owner.get("revision").?.string);
+        try std.testing.expectEqualStrings("instructions", owner.get("field").?.string);
+        try std.testing.expect(revision.object.get("tools_mask") == null);
+        try std.testing.expectEqualStrings("bypass", revision.object.get("permission_mode").?.string);
+    }
+    const fifth_instruction_owner = revisions[4].object.get("instructions").?.object.get("owner").?.object;
+    try std.testing.expectEqualStrings("1", fifth_instruction_owner.get("revision").?.string);
+    try std.testing.expectEqualStrings("output_schema", fifth_instruction_owner.get("field").?.string);
+    const third_schema_owner = revisions[2].object.get("output_schema").?.object.get("owner").?.object;
+    try std.testing.expectEqualStrings("1", third_schema_owner.get("revision").?.string);
+    try std.testing.expectEqualStrings("output_schema", third_schema_owner.get("field").?.string);
+    const fourth_schema_owner = revisions[3].object.get("output_schema").?.object.get("owner").?.object;
+    try std.testing.expectEqualStrings("1", fourth_schema_owner.get("revision").?.string);
+    try std.testing.expectEqualStrings("output_schema", fourth_schema_owner.get("field").?.string);
+
+    const expected_tools = [_][]const []const u8{
+        &.{ "bash", "edit" },
+        &.{"edit"},
+        &.{"bash"},
+        &.{},
+        &.{},
+    };
+    for (revisions, expected_tools) |revision, expected| {
+        const tools = revision.object.get("tools").?.array.items;
+        try std.testing.expectEqual(expected.len, tools.len);
+        for (tools, expected) |actual, name| try std.testing.expectEqualStrings(name, actual.string);
+    }
+}
+
+test "Full attributes unbound Messages to the earliest covering stop" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "stop-merge-config", "direct/stop-merge");
+
+    try submitTestMessage(&storage, &tmp, "stop-merge-message-1-file", "stop-merge-message-1", "direct/stop-merge", "one");
+    var first_stop = try completeSessionStop("z-first-stop", "direct/stop-merge");
+    try std.testing.expect(storage.stopSession(&first_stop, .{}) == .accepted);
+    var same_cutoff_stop = try completeSessionStop("a-second-stop", "direct/stop-merge");
+    try std.testing.expect(storage.stopSession(&same_cutoff_stop, .{}) == .accepted);
+
+    try submitTestMessage(&storage, &tmp, "stop-merge-message-2-file", "stop-merge-message-2", "direct/stop-merge", "two");
+    var later_stop = try completeSessionStop("m-third-stop", "direct/stop-merge");
+    try std.testing.expect(storage.stopSession(&later_stop, .{}) == .accepted);
+
+    const full = try testingSessionReportWithProfile(&storage, &tmp, "direct/stop-merge", 1024 * 1024, .full);
+    defer std.testing.allocator.free(full);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full, .{});
+    defer parsed.deinit();
+    const messages = parsed.value.object.get("full").?.object.get("messages").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), messages.len);
+    try std.testing.expectEqualStrings("z-first-stop", messages[0].object.get("exclusion").?.object.get("command_key").?.string);
+    try std.testing.expectEqualStrings("m-third-stop", messages[1].object.get("exclusion").?.object.get("command_key").?.string);
+    const first_observation = (try storage.observeCommand("stop-merge-message-1")).message.?.queue.?.state.excluded;
+    const second_observation = (try storage.observeCommand("stop-merge-message-2")).message.?.queue.?.state.excluded;
+    try std.testing.expectEqualStrings("session_stopped", first_observation.code.slice());
+    try std.testing.expectEqualStrings("session_stopped", second_observation.code.slice());
 }
 
 test "Bash proposals retain exact order permission provenance denial and stop terminality" {
@@ -6955,6 +7212,71 @@ test "Current pending count skips excluded Message history by indexed cutoff" {
             c.sqlite3_stmt_status(count_statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
     }
     try std.testing.expect(costs[1] <= costs[0] + 8);
+}
+
+test "Full Message projection work does not multiply Messages by stops" {
+    const Measure = struct {
+        const Counter = struct {
+            steps: u64 = 0,
+
+            fn progress(context: ?*anyopaque) callconv(.c) c_int {
+                const counter: *Counter = @ptrCast(@alignCast(context orelse return 1));
+                counter.steps += 1;
+                return 0;
+            }
+        };
+
+        fn run(message_count: usize, stop_count: usize) !u64 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "full-scale-config", "direct/full-scale");
+            try exec(storage.database, "PRAGMA foreign_keys=OFF");
+
+            for (1..message_count + 1) |index| {
+                const insert = try std.fmt.allocPrintSentinel(
+                    std.testing.allocator,
+                    "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id) " ++
+                        "VALUES({0},'direct/full-scale','message-{0}',1,NULL)",
+                    .{index},
+                    0,
+                );
+                defer std.testing.allocator.free(insert);
+                try exec(storage.database, insert);
+            }
+            for (1..stop_count + 1) |index| {
+                const insert = try std.fmt.allocPrintSentinel(
+                    std.testing.allocator,
+                    "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created) " ++
+                        "VALUES('stop-{0}',3,'direct/full-scale',zeroblob(32),NULL,NULL,1,'accepted',0,0);" ++
+                        "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff) " ++
+                        "VALUES('stop-{0}','direct/full-scale',NULL,{1})",
+                    .{ index, message_count },
+                    0,
+                );
+                defer std.testing.allocator.free(insert);
+                try exec(storage.database, insert);
+            }
+
+            var counter: Counter = .{};
+            c.sqlite3_progress_handler(storage.database, 1, Counter.progress, &counter);
+            defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+            const full = try testingSessionReportWithProfile(&storage, &tmp, "direct/full-scale", 8 * 1024 * 1024, .full);
+            defer std.testing.allocator.free(full);
+            return counter.steps;
+        }
+    };
+
+    const baseline = try Measure.run(32, 32);
+    const more_messages = try Measure.run(128, 32);
+    const more_stops = try Measure.run(32, 128);
+    const both_larger = try Measure.run(128, 128);
+    try std.testing.expect(more_messages > baseline);
+    try std.testing.expect(more_stops > baseline);
+    try std.testing.expect(both_larger > more_messages);
+    try std.testing.expect(both_larger > more_stops);
+    try std.testing.expect(both_larger * 2 < (more_messages + more_stops) * 3);
 }
 
 test "call classification uses the proposing Operation frozen catalog" {
