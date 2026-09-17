@@ -21,7 +21,7 @@ import (
 
 const (
 	discoveryTargetMS            int64  = 2000
-	physicalFootprintTargetBytes uint64 = 256 * 1024 * 1024
+	physicalFootprintTargetBytes uint64 = 24 * 1024 * 1024
 )
 
 type population struct {
@@ -578,7 +578,7 @@ func main() {
 	result := map[string]any{
 		"format": "rui-model-queue-v1-go", "scope": "issue-202 production model-only queue discovery, Operation admission order, settlement, and resource observation",
 		"status": status, "cases": cases, "maximum_mixed": mixed, "artifacts": root,
-		"classification_legend": map[string]string{"behavior_failure": "runner exits nonzero", "unavailable": "required discovery timestamp/counter could not be validly measured", "target_miss": "valid discovery exceeds the inclusive 2000 ms target", "passed": "behavior passed and valid discovery is at most 2000 ms", "diagnostic": "reported observation such as terminal-observation duration; not a qualification target"},
+		"classification_legend": map[string]string{"behavior_failure": "runner exits nonzero", "unavailable": "a required measurement could not be validly collected", "target_miss": "a valid required measurement exceeds its target", "passed": "behavior and every valid required measurement pass their targets", "diagnostic": "reported observation such as terminal-observation duration; not a qualification target"},
 		"limits":                []string{"model-only qualification; Bash composition remains GitHub issue #168", "Linux runtime results are development evidence under the current platform contract; macOS physical footprint is reported only when available", "deterministic loopback HTTP; no TLS or live-provider behavior", "Rui's pinned SQLite builds controlled populations in stopped Stores, but subsequent Host discovery, Operation admission, provider request, and settlement are authoritative", "Operation IDs prove admission order, not independent provider-request launch identity", "process termination is not power-loss qualification", "population sizes are qualification workloads, not product quotas"},
 	}
 	evidence, environmentError := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
