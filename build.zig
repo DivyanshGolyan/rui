@@ -20,6 +20,7 @@ pub fn build(b: *std.Build) void {
         .filters = if (test_filter) |filter| &.{filter} else &.{},
     });
     configureSqlite(b, tests);
+    configureBashPlatform(b, tests);
     configureTransport(b, tests, target, pinned_transport);
     const run_tests = b.addRunArtifact(tests);
 
@@ -53,6 +54,15 @@ pub fn build(b: *std.Build) void {
         "Run authorized Bash execution, stop, failure, and recovery cases",
     );
     bash_integration_step.dependOn(&bash_integration.step);
+
+    const bash_lifecycle_integration = b.addSystemCommand(&.{"python3"});
+    bash_lifecycle_integration.addFileArg(b.path("tests/integration/bash_lifecycle_integration.py"));
+    bash_lifecycle_integration.addArtifactArg(release_safe);
+    const bash_lifecycle_integration_step = b.step(
+        "bash-lifecycle-integration",
+        "Run Bash lifecycle syscall-failure and custody cases",
+    );
+    bash_lifecycle_integration_step.dependOn(&bash_lifecycle_integration.step);
 
     const control_integration = b.addSystemCommand(&.{"python3"});
     control_integration.addFileArg(b.path("tests/integration/control_integration.py"));
@@ -90,6 +100,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&integration.step);
     check_step.dependOn(&dispatch_integration.step);
     check_step.dependOn(&bash_integration.step);
+    check_step.dependOn(&bash_lifecycle_integration.step);
     check_step.dependOn(&control_integration.step);
     check_step.dependOn(&debug_integration.step);
 
@@ -274,6 +285,7 @@ fn addRui(
     });
     executable.root_module.link_libc = true;
     configureSqlite(b, executable);
+    configureBashPlatform(b, executable);
     configureTransport(b, executable, target, pinned_transport);
     return executable;
 }
@@ -361,6 +373,13 @@ fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     module.addCMacro("SQLITE_TEMP_STORE", "1");
     module.addCMacro("SQLITE_USE_URI", "0");
     module.addCMacro("SQLITE_ENABLE_API_ARMOR", "1");
+}
+
+fn configureBashPlatform(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    compile.root_module.addCSourceFile(.{
+        .file = b.path("src/bash_platform.c"),
+        .flags = &.{"-std=c11"},
+    });
 }
 
 fn addSqliteShell(

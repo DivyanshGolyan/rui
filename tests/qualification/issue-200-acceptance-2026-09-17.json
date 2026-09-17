@@ -1,6 +1,6 @@
 {
-  "recorded_utc": "2026-09-17T16:05:27Z",
-  "tested_base_revision": "6a192a25bf1a4750f9b6733d006cc72d83d6d5e9",
+  "recorded_utc": "2026-09-17T20:51:53Z",
+  "tested_base_revision": "30f618eb092fe2d09ad2f51197e1b0501df00a5f",
   "working_tree_dirty": true,
   "scope": "Exact source hashes below identify the uncommitted issue #200 implementation that was tested before its local commit.",
   "environment": {
@@ -13,12 +13,14 @@
     "apple_sdk": "unavailable"
   },
   "source_sha256": {
-    "build.zig": "241a5941436c9c0b7b50b4977d2bf6a8c73fc935c311d11ac41b281db03e2b18",
-    "src/bash.zig": "372473204497ed918213900cf478c8b4c31794ea466c3e4a8a3e515b79a21f44",
+    "build.zig": "87fba0b7aaa34da07a48ca2a37a0ed271e96624ca3bf52432fa4d6cdb9718e2a",
+    "src/bash.zig": "ec0de79155d4bdd2a54fbd22f817195d6da56eeb1d69b725fad418c9c34e54d4",
+    "src/bash_platform.c": "0d9586e4b401f67e264eca785aa28580836a23fbbc13559038e7e4e9808a35b7",
     "src/output_retention.zig": "9eaf6aea861c417caf14548c49c4e7bf5a2584191142e8d4e9519aee8b21fef9",
-    "src/server.zig": "b2afb7276df81d92b31e6ba2d5d1464cf6ae343debac2580c7b3a9e09763d2ea",
-    "src/store.zig": "c72ddb1d54b40cad8eede685a234e99df0f27fb060d948204fe57083f17e1488",
-    "tests/integration/bash_integration.py": "10aadc61cda45353732bc3807377058a4ef780646583291075acb607672402c5"
+    "src/server.zig": "c6fe48188ab294f2890d134769c31867fb00e3bb2584975a7e271bc22c0d0103",
+    "src/store.zig": "ed875007917e6d6b0c1bf2f94c05c96f0f3fb2d17cdb3d1f8f9b3c8a565bab20",
+    "tests/integration/bash_integration.py": "304282a604b0b5f6bbb9b7b23cade98dcddc1b580a85ff5561021ee19d745e8a",
+    "tests/integration/bash_lifecycle_integration.py": "259d51554242b46ca05fad114c2a6075604b045ff7ca948bbf059f87bd7f8c0f"
   },
   "fixed_resources": {
     "active_capacity": 1000,
@@ -35,16 +37,16 @@
   "linux_resource_samples": [
     {
       "phase": "cold",
-      "rss_bytes": 7598080,
-      "high_water_bytes": 7598080,
+      "rss_bytes": 7528448,
+      "high_water_bytes": 7528448,
       "descriptors": 7,
       "scratch_files": 0,
       "scratch_logical_bytes": 0
     },
     {
       "phase": "retained-output-idle",
-      "rss_bytes": 9003008,
-      "high_water_bytes": 9072640,
+      "rss_bytes": 9068544,
+      "high_water_bytes": 9068544,
       "descriptors": 12,
       "scratch_files": 2,
       "scratch_logical_bytes": 12014,
@@ -52,8 +54,8 @@
     },
     {
       "phase": "active-descendant-pipes",
-      "rss_bytes": 9048064,
-      "high_water_bytes": 9048064,
+      "rss_bytes": 9117696,
+      "high_water_bytes": 9117696,
       "descriptors": 17,
       "scratch_files": 3,
       "scratch_logical_bytes": 22,
@@ -61,8 +63,8 @@
     },
     {
       "phase": "two-sibling-retained-idle",
-      "rss_bytes": 8863744,
-      "high_water_bytes": 8933376,
+      "rss_bytes": 9146368,
+      "high_water_bytes": 9216000,
       "descriptors": 12,
       "scratch_files": 4,
       "scratch_logical_bytes": 0,
@@ -70,7 +72,8 @@
     }
   ],
   "gates": [
-    {"command": "zig build check", "result": "passed", "native_tests": 125},
+    {"command": "zig build check", "result": "passed", "native_tests": 137},
+    {"command": "zig build bash-lifecycle-integration", "result": "passed", "faults": ["observe", "reap", "group-probe", "tail-snapshot", "signal", "cleanup-watchdog"]},
     {"command": "zig build measurement-check", "result": "passed"},
     {"command": "zig build cross-check-linux", "result": "passed", "targets": ["Linux x86-64", "Linux ARM64"]},
     {"command": "python3 -m py_compile tests/integration/*.py", "result": "passed"},

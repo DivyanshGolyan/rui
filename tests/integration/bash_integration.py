@@ -61,8 +61,11 @@ def allow(state, store, key, session, action):
 
 
 def rows(store, sql, parameters=()):
-    with sqlite3.connect(store / "rui.sqlite3") as database:
+    database = sqlite3.connect(store / "rui.sqlite3")
+    try:
         return database.execute(sql, parameters).fetchall()
+    finally:
+        database.close()
 
 
 def process_resources(process):
@@ -200,7 +203,33 @@ def main():
                 json.dumps(
                     {
                         "cmd": f"printf $$ > {exited_bash_pid}; "
-                        f"(trap '' TERM; sleep 30) & printf $! > {exited_child_pid}"
+                        f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & printf $! > {exited_child_pid}"
+                    },
+                    separators=(",", ":"),
+                ),
+            )],
+        )
+    )
+    responses.append(
+        fixture.sse_answer(
+            "exited-pipes-answer",
+            "exited-pipes-reasoning",
+            "exited-pipes-message-result",
+            "continued",
+        )[0]
+    )
+    stopped_pipes_bash_pid = state / "stopped-pipes-bash-pid"
+    stopped_pipes_child_pid = state / "stopped-pipes-child-pid"
+    responses.append(
+        fixture.sse_tool_calls(
+            "stopped-pipes-calls",
+            [(
+                "bash",
+                "stopped-pipes-call",
+                json.dumps(
+                    {
+                        "cmd": f"printf $$ > {stopped_pipes_bash_pid}; "
+                        f"(trap '' TERM; sleep 30) & printf $! > {stopped_pipes_child_pid}"
                     },
                     separators=(",", ":"),
                 ),
@@ -213,7 +242,7 @@ def main():
     add_exchange(
         responses,
         "detached-timeout",
-        f"printf $$ > {detached_bash_pid}; setsid sh -c 'trap \"\" TERM PIPE; echo $$ > {detached_pid}; while :; do printf detached; sleep 1; done' &",
+        f"printf $$ > {detached_bash_pid}; setsid sh -c 'trap \"\" TERM PIPE; echo $$ > {detached_pid}; head -c 32768 /dev/zero; while :; do printf detached; sleep 1; done' &",
         timeout_ms=100,
     )
     same_group_pid = state / "same-group-pid"
@@ -664,23 +693,53 @@ def main():
         fixture.wait_for(lambda: process_is_zombie(bash_pid), "unreaped Bash with descendant pipes open")
         assert process_exists(child_pid)
         assert resolution(store, "direct/exited-pipes") is None
+        fixture.wait_for(
+            lambda: resolution(store, "direct/exited-pipes") == "succeeded",
+            "natural Bash result after descendant cleanup",
+            timeout=20,
+        )
+        fixture.wait_for(lambda: not process_exists(child_pid), "natural Bash descendant cleanup")
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "exited-pipes-message"),
+            "natural Bash continuation",
+        )
+
+        configure(state, store, "stopped-pipes-config", "direct/stopped-pipes")
+        fixture.message(state, store, "stopped-pipes-message", "direct/stopped-pipes", "execute")
+        stopped_pipes_action = fixture.wait_for(
+            lambda: action_for(store, "direct/stopped-pipes"), "stopped-with-open-pipes Action"
+        )
+        allow(
+            state,
+            store,
+            "stopped-pipes-allow",
+            "direct/stopped-pipes",
+            stopped_pipes_action["action"],
+        )
+        fixture.wait_for(
+            lambda: stopped_pipes_bash_pid.exists() and stopped_pipes_child_pid.exists(),
+            "stopped Bash and descendant identities",
+        )
+        stopped_bash = int(stopped_pipes_bash_pid.read_text())
+        stopped_child = int(stopped_pipes_child_pid.read_text())
+        fixture.wait_for(lambda: process_is_zombie(stopped_bash), "stoppable reaped leader")
+        assert process_exists(stopped_child)
         fixture.command(
             "stop-session",
             "--store",
             store,
-            "--record",
-            state / "exited-pipes-stop.json",
+            "--record", state / "stopped-pipes-stop.json",
             "--key",
-            "exited-pipes-stop",
+            "stopped-pipes-stop",
             "--session",
-            "direct/exited-pipes",
+            "direct/stopped-pipes",
         )
         fixture.wait_for(
-            lambda: resolution(store, "direct/exited-pipes") == "cancelled",
+            lambda: resolution(store, "direct/stopped-pipes") == "cancelled",
             "exited-with-open-pipes stop",
             timeout=20,
         )
-        fixture.wait_for(lambda: not process_exists(child_pid), "exited Bash descendant cleanup")
+        fixture.wait_for(lambda: not process_exists(stopped_child), "stopped Bash descendant cleanup")
 
         fixture.stop_host(host)
         host = fixture.start_host(store, endpoint_url, "--bash-timeout-ms", "30000")
@@ -724,8 +783,8 @@ def main():
             "unreaped Bash identity anchor",
         )
         fixture.wait_for(
-            lambda: resolution(store, "direct/detached-timeout") == "timed_out",
-            "detached writer timeout",
+            lambda: resolution(store, "direct/detached-timeout") == "succeeded",
+            "detached writer leader result",
             timeout=20,
         )
         result = rows(
@@ -736,6 +795,12 @@ def main():
             ("direct/detached-timeout",),
         )[0][0]
         assert b"Capture may be incomplete" in result, result
+        stdout_path = pathlib.Path(
+            next(line for line in result.splitlines() if line.startswith(b"Full stdout: "))[
+                len(b"Full stdout: ") :
+            ].decode()
+        )
+        assert stdout_path.stat().st_size >= 32768, stdout_path.stat().st_size
         assert process_exists(detached_process)
         fixture.wait_for(
             lambda: int(
@@ -1059,7 +1124,7 @@ def main():
             "SELECT count(*),count(acceptance_position),min(acceptance_position) FROM action_operation "
             "WHERE resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL",
         )[0]
-        assert settled[0] == settled[1] == 27 and settled[2] > 0, settled
+        assert settled[0] == settled[1] == 28 and settled[2] > 0, settled
         print(json.dumps({"bash_resource_samples": resource_samples}, sort_keys=True))
         completed = True
     finally:

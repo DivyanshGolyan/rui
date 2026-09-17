@@ -61,6 +61,7 @@ pub const Faults = struct {
     bash_capture_write: bool = false,
     bash_seal: bool = false,
     bash_cleanup: bool = false,
+    bash_lifecycle_fault: bash.LifecycleFault = .none,
     bash_scratch_limit_bytes: u64 = scratch_limit_bytes,
     cleanup_delay_ms: i64 = 0,
     provider_inactivity_seconds: i64 = 5 * 60,
@@ -603,6 +604,7 @@ fn admitBashAttempt(host: *Host, slot: *ExecutionSlot) AdmissionProgress {
             .capture_write = host.faults.bash_capture_write,
             .seal = host.faults.bash_seal,
             .cleanup = host.faults.bash_cleanup,
+            .lifecycle = host.faults.bash_lifecycle_fault,
         },
     );
     var prepared = switch (preparation) {
