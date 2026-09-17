@@ -36,6 +36,7 @@ type settlementFact struct {
 	TurnSession         string `json:"turn_session"`
 	OperationID         int64  `json:"operation_id"`
 	TurnOutcome         string `json:"turn_outcome"`
+	OperationTurnID     int64  `json:"operation_turn_id"`
 	OperationSession    string `json:"operation_session"`
 	OperationResolution string `json:"operation_resolution"`
 }
@@ -230,17 +231,19 @@ func parseSettlementFacts(rows string) ([]settlementFact, error) {
 	result := make([]settlementFact, 0, strings.Count(rows, "\n")+1)
 	for _, row := range strings.Split(rows, "\n") {
 		fields := strings.Split(row, "|")
-		if len(fields) != 8 {
+		if len(fields) != 9 {
 			return result, fmt.Errorf("malformed settlement fact %q", row)
 		}
 		turnID, turnError := strconv.ParseInt(fields[2], 10, 64)
 		operationID, operationError := strconv.ParseInt(fields[4], 10, 64)
-		if turnError != nil || operationError != nil {
+		operationTurnID, operationTurnError := strconv.ParseInt(fields[6], 10, 64)
+		if turnError != nil || operationError != nil || operationTurnError != nil {
 			return result, fmt.Errorf("malformed settlement identities %q", row)
 		}
 		result = append(result, settlementFact{
 			CommandKey: fields[0], MessageSession: fields[1], TurnID: turnID, TurnSession: fields[3],
-			OperationID: operationID, TurnOutcome: fields[5], OperationSession: fields[6], OperationResolution: fields[7],
+			OperationID: operationID, TurnOutcome: fields[5], OperationTurnID: operationTurnID,
+			OperationSession: fields[7], OperationResolution: fields[8],
 		})
 	}
 	return result, nil
@@ -260,7 +263,7 @@ func auditSettlementFacts(facts []settlementFact, expected []string) ([]string, 
 		if firstError == nil && (fact.CommandKey != expectedKey ||
 			fact.MessageSession != expected[index] ||
 			fact.TurnID <= 0 || fact.TurnSession != expected[index] ||
-			fact.OperationID <= 0 || fact.OperationSession != expected[index] ||
+			fact.OperationID <= 0 || fact.OperationTurnID != fact.TurnID || fact.OperationSession != expected[index] ||
 			fact.TurnOutcome != "provider_http_422" || fact.OperationResolution != "provider_http_422") {
 			firstError = fmt.Errorf("settlement fact[%d]=%+v", index, fact)
 		}
@@ -321,31 +324,50 @@ func recordAdmissionOrder(result map[string]any, actual, expected []string, sett
 	recordBehaviorFailure(result, failure)
 }
 
+func retainCaseFailure(result map[string]any, p population, caseError error) map[string]any {
+	if result == nil {
+		result = map[string]any{"population": p, "capacity": 1, "discovery_target_ms": discoveryTargetMS, "target_inclusive": true}
+	}
+	if _, ok := result["status"]; !ok {
+		result["status"] = "passed"
+	}
+	result["case_error"] = caseError.Error()
+	recordBehaviorFailure(result, "case execution: "+caseError.Error())
+	return result
+}
+
+func failureExitCode(status string, provenanceErrors ...error) int {
+	if status == "behavior_error" || errors.Join(provenanceErrors...) != nil {
+		return 1
+	}
+	return 0
+}
+
 func runCase(binary, sqliteBinary, root, name string, p population, resources bool) (map[string]any, error) {
+	result := map[string]any{"population": p, "capacity": 1, "discovery_target_ms": discoveryTargetMS, "target_inclusive": true}
 	directory := filepath.Join(root, name)
 	if err := os.Mkdir(directory, 0o700); err != nil {
-		return nil, err
+		return result, fmt.Errorf("create case directory: %w", err)
 	}
 	store := filepath.Join(directory, "store")
 	deadline := measurement.NewDeadline(5 * time.Minute)
 	if err := initializeTemplate(binary, sqliteBinary, directory, store, deadline); err != nil {
-		return nil, err
+		return result, fmt.Errorf("initialize template: %w", err)
 	}
 	if err := populate(deadline, sqliteBinary, store, p); err != nil {
-		return nil, err
+		return result, fmt.Errorf("populate Store: %w", err)
 	}
 	e, err := startEndpoint()
 	if err != nil {
-		return nil, err
+		return result, fmt.Errorf("start provider endpoint: %w", err)
 	}
 	defer e.server.Close()
 	started := time.Now()
 	host, err := measurement.StartHost(binary, store, e.URL(), 1, filepath.Join(directory, "host-stderr.log"), deadline)
 	if err != nil {
 		e.Release()
-		return nil, err
+		return result, fmt.Errorf("start Host: %w", err)
 	}
-	result := map[string]any{"population": p, "capacity": 1, "discovery_target_ms": discoveryTargetMS, "target_inclusive": true}
 	var first time.Time
 	select {
 	case first = <-e.first:
@@ -392,7 +414,7 @@ func runCase(binary, sqliteBinary, root, name string, p population, resources bo
 			database, databaseErr := measurement.DatabaseSize(store)
 			if databaseErr != nil {
 				e.Release()
-				return nil, errors.Join(databaseErr, host.Stop(measurement.TeardownAllowance))
+				return result, fmt.Errorf("sample database: %w", errors.Join(databaseErr, host.Stop(measurement.TeardownAllowance)))
 			}
 			result["resource_collection_status"] = "passed"
 			result["held_first_request_resources"] = map[string]any{"process": sample, "ready_record": host.Ready, "database": database}
@@ -412,7 +434,7 @@ func runCase(binary, sqliteBinary, root, name string, p population, resources bo
 		recordBehaviorFailure(result, "Host stop after settlement observation: "+stopError.Error())
 	}
 	auditDeadline := measurement.NewDeadline(15 * time.Second)
-	rows, auditQueryError := sql(auditDeadline, sqliteBinary, store, `SELECT m.command_key||'|'||m.session_ref||'|'||coalesce(m.turn_id,'')||'|'||coalesce(t.session_ref,'')||'|'||coalesce(t.operation_id,'')||'|'||coalesce(t.outcome_code,'')||'|'||coalesce(o.session_ref,'')||'|'||coalesce(o.resolution_code,'')
+	rows, auditQueryError := sql(auditDeadline, sqliteBinary, store, `SELECT m.command_key||'|'||m.session_ref||'|'||coalesce(m.turn_id,'')||'|'||coalesce(t.session_ref,'')||'|'||coalesce(t.operation_id,'')||'|'||coalesce(t.outcome_code,'')||'|'||coalesce(o.turn_id,'')||'|'||coalesce(o.session_ref,'')||'|'||coalesce(o.resolution_code,'')
 FROM message_admission m
 LEFT JOIN turn t ON t.turn_id=m.turn_id
 LEFT JOIN model_operation o ON o.operation_id=t.operation_id
@@ -467,7 +489,7 @@ func main() {
 		}
 		value, caseErr := runCase(binary, sqliteBinary, root, requestedCase.name, requestedCase.population, false)
 		if caseErr != nil {
-			panic(caseErr)
+			value = retainCaseFailure(value, requestedCase.population, caseErr)
 		}
 		cases[requestedCase.name] = value
 		byPopulation[requestedCase.population] = requestedCase.name
@@ -475,7 +497,7 @@ func main() {
 	}
 	mixed, err := runCase(binary, sqliteBinary, root, "maximum-mixed", population{10000, 1000, 100}, true)
 	if err != nil {
-		panic(err)
+		mixed = retainCaseFailure(mixed, population{10000, 1000, 100}, err)
 	}
 	statuses = append(statuses, mixed["status"].(string))
 	status := overallStatus(statuses...)
@@ -485,10 +507,10 @@ func main() {
 		"classification_legend": map[string]string{"behavior_failure": "runner exits nonzero", "unavailable": "required discovery timestamp/counter could not be validly measured", "target_miss": "valid discovery exceeds the inclusive 2000 ms target", "passed": "behavior passed and valid discovery is at most 2000 ms", "diagnostic": "reported observation such as terminal-observation duration; not a qualification target"},
 		"limits":                []string{"model-only qualification; Bash composition remains GitHub issue #168", "Linux runtime results are development evidence under the current platform contract; macOS physical footprint is reported only when available", "deterministic loopback HTTP; no TLS or live-provider behavior", "Rui's pinned SQLite builds controlled populations in stopped Stores, but subsequent Host discovery, Operation admission, provider request, and settlement are authoritative", "Operation IDs prove admission order, not independent provider-request launch identity", "process termination is not power-loss qualification", "population sizes are qualification workloads, not product quotas"},
 	}
-	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
-	if err != nil {
+	evidence, environmentError := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
+	if environmentError != nil {
 		result["environment_evidence_status"] = "unavailable"
-		result["environment_evidence_error"] = err.Error()
+		result["environment_evidence_error"] = environmentError.Error()
 		status = overallStatus(status, "unavailable")
 		result["status"] = status
 	} else {
@@ -497,10 +519,10 @@ func main() {
 			result[key] = value
 		}
 	}
-	sqliteHash, err := measurement.SHA256File(sqliteBinary)
-	if err != nil {
+	sqliteHash, sqliteHashError := measurement.SHA256File(sqliteBinary)
+	if sqliteHashError != nil {
 		result["sqlite_binary_status"] = "unavailable"
-		result["sqlite_binary_error"] = err.Error()
+		result["sqlite_binary_error"] = sqliteHashError.Error()
 		status = overallStatus(status, "unavailable")
 		result["status"] = status
 	} else {
@@ -516,7 +538,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	if status == "behavior_error" {
-		os.Exit(1)
+	if exitCode := failureExitCode(status, environmentError, sqliteHashError); exitCode != 0 {
+		os.Exit(exitCode)
 	}
 }

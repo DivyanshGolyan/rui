@@ -60,8 +60,8 @@ func TestCaseStatusDistinguishesBehaviorAndMeasurementOutcomes(t *testing.T) {
 func TestSettledOrderRequiresEveryExpectedResolution(t *testing.T) {
 	want := expectedOrder(2)
 	valid := []settlementFact{
-		{CommandKey: "e-msg-1", MessageSession: want[0], TurnID: 1, TurnSession: want[0], OperationID: 1, TurnOutcome: "provider_http_422", OperationSession: want[0], OperationResolution: "provider_http_422"},
-		{CommandKey: "e-msg-2", MessageSession: want[1], TurnID: 2, TurnSession: want[1], OperationID: 2, TurnOutcome: "provider_http_422", OperationSession: want[1], OperationResolution: "provider_http_422"},
+		{CommandKey: "e-msg-1", MessageSession: want[0], TurnID: 1, TurnSession: want[0], OperationID: 1, TurnOutcome: "provider_http_422", OperationTurnID: 1, OperationSession: want[0], OperationResolution: "provider_http_422"},
+		{CommandKey: "e-msg-2", MessageSession: want[1], TurnID: 2, TurnSession: want[1], OperationID: 2, TurnOutcome: "provider_http_422", OperationTurnID: 2, OperationSession: want[1], OperationResolution: "provider_http_422"},
 	}
 	if actual, err := auditSettlementFacts(valid, want); err != nil || !reflect.DeepEqual(actual, want) {
 		t.Fatalf("auditSettlementFacts(valid) = %v, %v; want %v", actual, err, want)
@@ -73,6 +73,7 @@ func TestSettledOrderRequiresEveryExpectedResolution(t *testing.T) {
 		{"wrong turn outcome", func(facts []settlementFact) { facts[0].TurnOutcome = "cancelled" }},
 		{"unresolved earlier turn", func(facts []settlementFact) { facts[0].TurnOutcome = "" }},
 		{"wrong message binding", func(facts []settlementFact) { facts[0].TurnSession = want[1] }},
+		{"wrong operation turn binding", func(facts []settlementFact) { facts[0].OperationTurnID = facts[1].TurnID }},
 	}
 	for _, test := range tests {
 		facts := append([]settlementFact(nil), valid...)
@@ -125,5 +126,31 @@ func TestTerminalObservationFailuresRemainSerializable(t *testing.T) {
 	recordTerminalObservation(result, wrong, nil)
 	if result["status"] != "behavior_error" {
 		t.Fatalf("wrong terminal observation passed: %v", result)
+	}
+}
+
+func TestLaterCaseFailureRetainsEarlierBehaviorEvidence(t *testing.T) {
+	cases := map[string]any{
+		"baseline": map[string]any{"status": "behavior_error", "behavior_failure": "missing settlement"},
+	}
+	later := retainCaseFailure(nil, population{History: 1000, Eligible: 1}, errors.New("template failed"))
+	cases["history-1000"] = later
+	if cases["baseline"].(map[string]any)["behavior_failure"] != "missing settlement" {
+		t.Fatalf("earlier evidence was discarded: %v", cases)
+	}
+	if later["status"] != "behavior_error" || later["case_error"] != "template failed" {
+		t.Fatalf("later case failure was not serializable: %v", later)
+	}
+}
+
+func TestProvenanceFailuresExitNonzeroAfterPublication(t *testing.T) {
+	if got := failureExitCode("unavailable"); got != 0 {
+		t.Fatalf("intentional unavailable measurement exit = %d, want 0", got)
+	}
+	if got := failureExitCode("passed", errors.New("environment evidence")); got != 1 {
+		t.Fatalf("environment provenance failure exit = %d, want 1", got)
+	}
+	if got := failureExitCode("passed", nil, errors.New("sqlite hash")); got != 1 {
+		t.Fatalf("SQLite provenance failure exit = %d, want 1", got)
 	}
 }
