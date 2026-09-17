@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import select
 import shutil
 import signal
 import sqlite3
@@ -93,6 +94,24 @@ def process_exists(pid):
         return False
 
 
+def wait_for_phase(process, phase, timeout=8):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([process.stderr], [], [], deadline - time.monotonic())
+        if not ready:
+            break
+        line = process.stderr.readline()
+        if not line:
+            break
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("rui_test_phase") == phase:
+            return event
+    raise TimeoutError(f"timed out waiting for phase {phase}")
+
+
 def resolution(store, session):
     values = rows(
         store,
@@ -147,6 +166,12 @@ def main():
             [("bash", "stop-call", json.dumps({"cmd": "trap '' TERM; sleep 30"}, separators=(",", ":")))],
         )
     )
+    responses.append(
+        fixture.sse_tool_calls(
+            "settlement-stop-calls",
+            [("bash", "settlement-stop-call", json.dumps({"cmd": "printf sealed"}))],
+        )
+    )
     exited_bash_pid = state / "exited-bash-pid"
     exited_child_pid = state / "exited-child-pid"
     responses.append(
@@ -171,7 +196,8 @@ def main():
     add_exchange(responses, "capture-read", "printf captured")
     add_exchange(responses, "capture", "printf captured")
     add_exchange(responses, "seal", "printf sealed")
-    add_exchange(responses, "exhaustion", "printf exhausted")
+    add_exchange(responses, "small-budget", "printf exhausted")
+    add_exchange(responses, "exhaustion", "printf '%0200d' 0")
     import_marker = state / "import-marker"
     add_exchange(responses, "import", f"printf x >> {import_marker}")
     commit_marker = state / "commit-marker"
@@ -391,10 +417,27 @@ def main():
         fixture.stop_host(host)
         host = fixture.start_host(store, endpoint_url, active_capacity=0)
         allow(state, store, "before-launch-allow", "direct/before-launch", pending["action"])
+        rejected_allow = fixture.command(
+            "allow-action",
+            "--store",
+            store,
+            "--record",
+            state / "before-launch-rejected-allow.json",
+            "--key",
+            "before-launch-rejected-allow",
+            "--session",
+            "direct/before-launch",
+            "--action",
+            pending["action"],
+        )
+        assert rejected_allow["answer"]["status"] == "rejected", rejected_allow
+        assert rejected_allow["answer"]["code"] == "action_not_pending", rejected_allow
+        assert rejected_allow["answer"]["replayed"] is False, rejected_allow
         configure(state, store, "before-launch-mode-change", "direct/before-launch", "bypass")
         report = fixture.command(
             "inspect-session", "--store", store, "--session", "direct/before-launch"
         )
+        assert len(report["actions"]["unresolved"]) == 1, report
         assert report["actions"]["unresolved"][0]["authorization"] == "allow_once", report
         assert rows(
             store,
@@ -495,6 +538,75 @@ def main():
             ("cancelled",)
         ]
 
+        fixture.stop_host(host)
+        host = fixture.start_host(
+            store,
+            endpoint_url,
+            "--test-before-result-delay-ms",
+            "5000",
+            "--test-cleanup-delay-ms",
+            "1000",
+            "--test-phase-trace",
+        )
+        configure(state, store, "settlement-stop-config", "direct/settlement-stop")
+        fixture.message(
+            state,
+            store,
+            "settlement-stop-message",
+            "direct/settlement-stop",
+            "execute",
+        )
+        settlement_stop_action = fixture.wait_for(
+            lambda: action_for(store, "direct/settlement-stop"),
+            "settlement-stop Bash Action",
+        )
+        allow(
+            state,
+            store,
+            "settlement-stop-allow",
+            "direct/settlement-stop",
+            settlement_stop_action["action"],
+        )
+        wait_for_phase(host, "sealed_before_settlement")
+        fixture.command(
+            "stop-session",
+            "--store",
+            store,
+            "--record",
+            state / "settlement-stop.json",
+            "--key",
+            "settlement-stop",
+            "--session",
+            "direct/settlement-stop",
+        )
+        fixture.wait_for(
+            lambda: resolution(store, "direct/settlement-stop") == "cancelled",
+            "stop winning sealed Bash settlement",
+        )
+        assert rows(
+            store,
+            "SELECT content.payload FROM action_operation action "
+            "JOIN content ON content.content_id=action.resolution_content_id "
+            "WHERE action.session_ref=?",
+            ("direct/settlement-stop",),
+        ) == [(b"Cancelled by Session stop.",)]
+        assert int(
+            fixture.command(
+                "inspect-session", "--store", store, "--session", "direct/settlement-stop"
+            )["execution"]["custody_occupied"]
+        ) > 0
+        fixture.wait_for(
+            lambda: int(
+                fixture.command(
+                    "inspect-session", "--store", store, "--session", "direct/settlement-stop"
+                )["execution"]["custody_occupied"]
+            )
+            == 0,
+            "post-settlement Bash cleanup",
+        )
+        fixture.stop_host(host)
+        host = fixture.start_host(store, endpoint_url)
+
         configure(state, store, "exited-pipes-config", "direct/exited-pipes")
         fixture.message(state, store, "exited-pipes-message", "direct/exited-pipes", "execute")
         exited_action = fixture.wait_for(
@@ -572,6 +684,21 @@ def main():
             "--test-bash-scratch-limit-bytes",
             "128",
         )
+        configure(state, store, "small-budget-config", "direct/small-budget")
+        fixture.message(state, store, "small-budget-message", "direct/small-budget", "execute")
+        action = fixture.wait_for(
+            lambda: action_for(store, "direct/small-budget"), "small-budget Bash Action"
+        )
+        allow(state, store, "small-budget-allow", "direct/small-budget", action["action"])
+        fixture.wait_for(
+            lambda: resolution(store, "direct/small-budget") == "succeeded",
+            "small readable capture within remaining budget",
+        )
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "small-budget-message"),
+            "small-budget continuation",
+        )
+
         configure(state, store, "exhaustion-config", "direct/exhaustion")
         fixture.message(state, store, "exhaustion-message", "direct/exhaustion", "execute")
         action = fixture.wait_for(
@@ -711,7 +838,7 @@ def main():
             "SELECT count(*),count(acceptance_position),min(acceptance_position) FROM action_operation "
             "WHERE resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL",
         )[0]
-        assert settled[0] == settled[1] == 20 and settled[2] > 0, settled
+        assert settled[0] == settled[1] == 22 and settled[2] > 0, settled
         print(json.dumps({"bash_resource_samples": resource_samples}, sort_keys=True))
         completed = True
     finally:

@@ -309,15 +309,16 @@ pub const Execution = struct {
             .revents = 0,
         }};
         if (try std.posix.poll(&descriptor, 0) == 0) return;
-        if (!destination.budget.reserve(window.len)) {
+        const reserved: usize = @intCast(destination.budget.reserveUpTo(window.len));
+        if (reserved == 0) {
             self.capture_failure = .exhausted;
             self.stop(.capture_failed);
             pipe.close(self.io);
             pipe_slot.* = null;
             return;
         }
-        const count = std.posix.read(pipe.handle, window) catch |err| {
-            destination.budget.release(window.len);
+        const count = std.posix.read(pipe.handle, window[0..reserved]) catch |err| {
+            destination.budget.release(reserved);
             if (err == error.WouldBlock) return;
             self.capture_failure = .read;
             self.stop(.capture_failed);
@@ -325,7 +326,7 @@ pub const Execution = struct {
             pipe_slot.* = null;
             return;
         };
-        if (count < window.len) destination.budget.release(window.len - count);
+        if (count < reserved) destination.budget.release(reserved - count);
         if (count == 0) {
             pipe.close(self.io);
             pipe_slot.* = null;
@@ -413,12 +414,21 @@ pub const Execution = struct {
             );
             if (count != stderr_take) return error.ShortCaptureRead;
         }
-        var remaining: usize = excerpt_bytes;
+        const stdout_bytes = tail[0..stdout_take];
+        const stderr_bytes = tail[stdout_take .. stdout_take + stderr_take];
+        const stderr_encoded_base = @min(validUtf8Length(stderr_bytes), excerpt_bytes / 2);
+        const stdout_allowance = @min(validUtf8Length(stdout_bytes), excerpt_bytes - stderr_encoded_base);
+        const stderr_allowance = stderr_encoded_base + @min(
+            validUtf8Length(stderr_bytes) - stderr_encoded_base,
+            excerpt_bytes - stderr_encoded_base - stdout_allowance,
+        );
         try writer.writeAll("stdout tail:\n");
-        try appendValidUtf8(writer, tail[0..stdout_take], &remaining);
+        const stdout_sanitized_omission = try appendValidUtf8Tail(writer, stdout_bytes, stdout_allowance);
         try writer.writeAll("\nstderr tail:\n");
-        try appendValidUtf8(writer, tail[stdout_take .. stdout_take + stderr_take], &remaining);
-        if (stdout_length + stderr_length > stdout_take + stderr_take) {
+        const stderr_sanitized_omission = try appendValidUtf8Tail(writer, stderr_bytes, stderr_allowance);
+        if (stdout_length + stderr_length > stdout_take + stderr_take or
+            stdout_sanitized_omission or stderr_sanitized_omission)
+        {
             try writer.writeAll("\n[earlier output omitted]\n");
         }
         if (!include_paths) {
@@ -563,34 +573,67 @@ const ContentSource = struct {
     }
 };
 
-fn appendValidUtf8(writer: *std.Io.Writer, bytes: []const u8, remaining: *usize) !void {
-    var index: usize = 0;
-    while (index < bytes.len and remaining.* != 0) {
-        const sequence_length = std.unicode.utf8ByteSequenceLength(bytes[index]) catch {
-            if (remaining.* < "�".len) return;
-            try writer.writeAll("�");
-            remaining.* -= "�".len;
-            index += 1;
-            continue;
-        };
-        const valid = if (index + sequence_length > bytes.len)
-            false
-        else blk: {
-            _ = std.unicode.utf8Decode(bytes[index .. index + sequence_length]) catch break :blk false;
-            break :blk true;
-        };
-        if (!valid) {
-            if (remaining.* < "�".len) return;
-            try writer.writeAll("�");
-            remaining.* -= "�".len;
-            index += 1;
-            continue;
-        }
-        if (sequence_length > remaining.*) return;
-        try writer.writeAll(bytes[index .. index + sequence_length]);
-        remaining.* -= sequence_length;
-        index += sequence_length;
+const Utf8Unit = struct {
+    source_length: usize,
+    encoded_length: usize,
+    valid: bool,
+};
+
+fn utf8Unit(bytes: []const u8, index: usize) Utf8Unit {
+    const sequence_length = std.unicode.utf8ByteSequenceLength(bytes[index]) catch {
+        return .{ .source_length = 1, .encoded_length = "�".len, .valid = false };
+    };
+    if (index + sequence_length > bytes.len) {
+        return .{ .source_length = 1, .encoded_length = "�".len, .valid = false };
     }
+    _ = std.unicode.utf8Decode(bytes[index .. index + sequence_length]) catch {
+        return .{ .source_length = 1, .encoded_length = "�".len, .valid = false };
+    };
+    return .{ .source_length = sequence_length, .encoded_length = sequence_length, .valid = true };
+}
+
+fn validUtf8Length(bytes: []const u8) usize {
+    var length: usize = 0;
+    var index: usize = 0;
+    while (index < bytes.len) {
+        const unit = utf8Unit(bytes, index);
+        length += unit.encoded_length;
+        index += unit.source_length;
+    }
+    return length;
+}
+
+fn appendValidUtf8Tail(writer: *std.Io.Writer, bytes: []const u8, allowance: usize) !bool {
+    var encoded_length = validUtf8Length(bytes);
+    var start: usize = 0;
+    while (encoded_length > allowance) {
+        const unit = utf8Unit(bytes, start);
+        encoded_length -= unit.encoded_length;
+        start += unit.source_length;
+    }
+    var index = start;
+    while (index < bytes.len) {
+        const unit = utf8Unit(bytes, index);
+        if (unit.valid) {
+            try writer.writeAll(bytes[index .. index + unit.source_length]);
+        } else {
+            try writer.writeAll("�");
+        }
+        index += unit.source_length;
+    }
+    return start != 0;
+}
+
+test "UTF-8 excerpt keeps the newest source and reports replacement expansion" {
+    var source: [5000]u8 = @splat(0xff);
+    source[source.len - 1] = '!';
+    var output: [excerpt_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output);
+    try std.testing.expect(try appendValidUtf8Tail(&writer, &source, excerpt_bytes));
+    const written = writer.buffered();
+    try std.testing.expect(written.len <= excerpt_bytes);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(written));
+    try std.testing.expectEqual(@as(u8, '!'), written[written.len - 1]);
 }
 
 test "Bash descriptor decoding preserves authorized command bytes" {

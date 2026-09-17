@@ -675,7 +675,7 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
         fenceDispatch(host, "Bash output reservation", err);
         return;
     };
-    var outcome = active.execution.outcome(include_paths) catch |err| {
+    const outcome = active.execution.outcome(include_paths) catch |err| {
         active.execution.releaseOutputReservation(host.retention);
         active.execution.cleanup() catch |cleanup_err| {
             retainBashCleanup(host, slot, false, "Bash output cleanup", cleanup_err);
@@ -691,7 +691,7 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_result_delay_ms), .awake) catch {};
     }
     if (host.custody.claimTerminalDelivery(token)) {
-        host.store.settleActionAttempt(binding, outcome.code, outcome.text(), .{
+        const settlement = host.store.settleActionAttempt(binding, outcome.code, outcome.text(), .{
             .content_import = host.faults.content_import,
             .before_commit = host.faults.result_before_commit,
         }) catch |err| {
@@ -706,6 +706,7 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
             fenceDispatch(host, "Bash result settlement", err);
             return;
         };
+        if (settlement == .session_stop) active.execution.releaseOutputReservation(host.retention);
     }
     if (host.faults.cleanup_delay_ms != 0) {
         _ = host.io.sleep(.fromMilliseconds(host.faults.cleanup_delay_ms), .awake) catch {};
@@ -762,10 +763,13 @@ fn settleActionFailure(
     result: []const u8,
 ) void {
     if (!host.custody.claimTerminalDelivery(token)) return;
-    host.store.settleActionAttempt(binding, code, result, .{
+    _ = host.store.settleActionAttempt(binding, code, result, .{
         .content_import = host.faults.content_import,
         .before_commit = host.faults.result_before_commit,
-    }) catch |err| fenceDispatch(host, "Bash failure settlement", err);
+    }) catch |err| {
+        fenceDispatch(host, "Bash failure settlement", err);
+        return;
+    };
 }
 
 fn findActiveTransfer(
