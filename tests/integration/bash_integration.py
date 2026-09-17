@@ -197,6 +197,12 @@ def main():
         "detached-timeout",
         f"setsid sh -c 'trap \"\" TERM PIPE; echo $$ > {detached_pid}; while :; do printf detached; sleep 1; done' & sleep 30",
     )
+    same_group_pid = state / "same-group-pid"
+    add_exchange(
+        responses,
+        "same-group-timeout",
+        f"(trap '' TERM; exec >/dev/null 2>&1; echo $BASHPID > {same_group_pid}; sleep 30) & wait",
+    )
     add_exchange(responses, "preparation", "printf never")
     add_exchange(responses, "spawn", "printf never")
     add_exchange(responses, "capture-read", "printf captured")
@@ -713,6 +719,36 @@ def main():
         os.kill(detached_process, signal.SIGKILL)
         detached_process = None
 
+        configure(state, store, "same-group-timeout-config", "direct/same-group-timeout")
+        fixture.message(
+            state, store, "same-group-timeout-message", "direct/same-group-timeout", "execute"
+        )
+        same_group_action = fixture.wait_for(
+            lambda: action_for(store, "direct/same-group-timeout"), "same-group timeout Action"
+        )
+        allow(
+            state,
+            store,
+            "same-group-timeout-allow",
+            "direct/same-group-timeout",
+            same_group_action["action"],
+        )
+        fixture.wait_for(lambda: same_group_pid.exists(), "same-group child identity")
+        same_group_process = int(same_group_pid.read_text())
+        fixture.wait_for(
+            lambda: resolution(store, "direct/same-group-timeout") == "timed_out",
+            "same-group child timeout",
+            timeout=20,
+        )
+        fixture.wait_for(
+            lambda: not process_exists(same_group_process),
+            "TERM-ignoring same-group child KILL escalation",
+        )
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "same-group-timeout-message"),
+            "same-group timeout continuation",
+        )
+
         for name, fault, expected in (
             ("preparation", "bash-preparation", "storage_failed"),
             ("spawn", "bash-spawn", "spawn_failed"),
@@ -967,7 +1003,7 @@ def main():
             "SELECT count(*),count(acceptance_position),min(acceptance_position) FROM action_operation "
             "WHERE resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL",
         )[0]
-        assert settled[0] == settled[1] == 25 and settled[2] > 0, settled
+        assert settled[0] == settled[1] == 26 and settled[2] > 0, settled
         print(json.dumps({"bash_resource_samples": resource_samples}, sort_keys=True))
         completed = True
     finally:

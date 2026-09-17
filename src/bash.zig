@@ -223,7 +223,8 @@ pub const Execution = struct {
             self.closePipes();
             self.capture_incomplete = true;
         }
-        return self.term != null and self.stdout_pipe == null and self.stderr_pipe == null;
+        return self.term != null and self.stdout_pipe == null and self.stderr_pipe == null and
+            (self.signal_started == null or self.killed);
     }
 
     pub fn reserveOutput(self: *Execution, retention: *output_retention.Queue) !bool {
