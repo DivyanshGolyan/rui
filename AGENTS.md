@@ -42,11 +42,13 @@ Follow the [Zig 0.16 style guide](https://ziglang.org/documentation/0.16.0/#Styl
 
 Keep state, validation and transitions with their owner. Express lifecycle decisions as compact value transitions that can be tested without OS effects. Keep handles, storage, processes and accounting in a thin imperative owner that executes those decisions while preserving atomic checks and resource lifetimes. Test transition cases exhaustively through the owner interface, then use focused native integrations to verify adapters and handoffs. Do not copy or abstract resource handles merely to make code functional; expose semantic intent and opaque, pointer-stable handles rather than storage rows, internal lifecycle state or generic command buses. Use closed typed variants for cases with different authority.
 
+Before correcting a failure, identify the owner, its invariant and the earliest transition that violated it. Correct that transition or replace the owning model rather than patching a downstream observer. When another corrective patch touches the same lifecycle, stop and redraw its states, authorities, handoffs and release conditions. Prefer deleting or replacing superseded state over adding flags, retry paths, test hooks or timing allowances.
+
 Every allocation/resource needs an owner, population multiplier, bound, failure behavior and release point. Stream variable content without duplicating complete payloads. Derive limits from consumers; retain guards until replacement storage is verified. Never silently truncate semantic input. Separate orchestration from workload memory; account for shared budgets and justify independent pools against aggregate demand and isolation needs.
 
 Use [Abseil Performance Hints](https://abseil.io/fast/hints.html) when implementing or reviewing performance: estimate repeated work, copies and allocation multipliers before adding complexity. Keep optimizations behind owning interfaces and measure gains on representative end-to-end workloads. Preserve clarity, required pointer stability, asynchronous lifetimes and the accepted contract.
 
-Make allocator dependencies explicit at allocation sites. Document returned pointers/slices as owned or borrowed, including invalidation. Use `defer`/`errdefer` when scope exit is the release boundary; transferred/asynchronous resources stay owned until cleanup is safe.
+Make allocator dependencies explicit at allocation sites. Document returned pointers/slices as owned or borrowed, including invalidation. Use `defer`/`errdefer` when scope exit is the release boundary; transferred/asynchronous resources stay owned until cleanup is safe. Treat cleanup as an owner transition: reclamation must be retry-safe, distinguish confirmed absence from unconfirmed removal, retain actionable resources after failure and release custody and accounting exactly once after success.
 
 Respect architectural transaction/effect boundaries. Give each mutable handle one owner. Construct callback state in its final storage before registration; retain its address and custody through safe cleanup. Validate external syntax and consequential meaning. Notifications are hints; committed facts are authority. Trust validated local/SQLite facts within their documented boundary.
 
@@ -67,6 +69,6 @@ Give each independent opinion one programmer's lens: Rich Hickey by default; Joh
 
 ## Verify and finish
 
-Run applicable [verification gates](VERIFICATION.md#canonical-gates); confirm commands in `build.zig`. Test meaningful failures and recovery boundaries with independent expectations. Keep live provider checks opt-in. Broaden/repeat checks only for changes or unresolved concerns.
+Run applicable [verification gates](VERIFICATION.md#canonical-gates); confirm commands in `build.zig`. Test meaningful failures and recovery boundaries with independent expectations. Drive fault injection through production transitions. Unit tests may inspect owner internals; integration and qualification evidence must assert durable owner-boundary outcomes rather than timing, scheduler order, private representation or fixture-only authority. Keep live provider checks opt-in. Broaden/repeat checks only for changes or unresolved concerns.
 
 For documentation, check contract preservation, references and `git diff --check`. Report changes, passed checks and material limits, including pre-existing failures and interrupted/unrun checks. Keep prototype, compile and process-crash evidence distinct from production and power-loss qualification.
