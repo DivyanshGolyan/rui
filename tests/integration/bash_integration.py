@@ -262,7 +262,9 @@ def main():
     add_exchange(
         responses,
         "same-group-timeout",
-        f"(trap '' TERM; exec >/dev/null 2>&1; echo $BASHPID > {same_group_pid}; sleep 30) & wait",
+        f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & child=$!; "
+        f"printf '%s\n' \"$child\" > {same_group_pid}.tmp; "
+        f"mv {same_group_pid}.tmp {same_group_pid}; wait \"$child\"",
         timeout_ms=100,
     )
     add_exchange(
