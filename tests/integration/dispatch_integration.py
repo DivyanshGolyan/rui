@@ -4047,6 +4047,7 @@ def main():
         leftovers = wait_for(
             lambda: list(unlink_store.rglob("request-*")),
             "retained named request scratch",
+            timeout=20,
         )
         resources = command(
             "inspect-session", "--store", unlink_store, "--session", "direct/unlink"

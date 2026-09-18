@@ -109,6 +109,12 @@ def scratch_resources(store):
     }
 
 
+def execution_idle(store, session):
+    report = fixture.command("inspect-session", "--store", store, "--session", session)
+    execution = report["execution"]
+    return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0" else None
+
+
 def process_exists(pid):
     try:
         os.kill(pid, 0)
@@ -1014,6 +1020,11 @@ def main():
         fixture.message(state, store, "small-budget-message", "direct/small-budget", "execute")
         action = fixture.wait_for(
             lambda: action_for(store, "direct/small-budget"), "small-budget Bash Action"
+        )
+        fixture.wait_for(
+            lambda: execution_idle(store, "direct/small-budget"),
+            "small-budget Action creation physical cleanup",
+            timeout=20,
         )
         fixture.stop_host(host)
         host = fixture.start_host(
