@@ -115,6 +115,11 @@ def execution_idle(store, session):
     return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0" else None
 
 
+def execution_custody_idle(store, session):
+    report = fixture.command("inspect-session", "--store", store, "--session", session)
+    return report if report["execution"]["custody_occupied"] == "0" else None
+
+
 def process_exists(pid):
     try:
         os.kill(pid, 0)
@@ -1029,7 +1034,7 @@ def main():
         fixture.stop_host(host)
         host = fixture.start_host(
             store,
-            endpoint_url,
+            None,
             "--test-bash-scratch-limit-bytes",
             "18",
         )
@@ -1038,6 +1043,13 @@ def main():
             lambda: resolution(store, "direct/small-budget") == "succeeded",
             "capture ending exactly at the scratch limit",
         )
+        fixture.wait_for(
+            lambda: execution_custody_idle(store, "direct/small-budget"),
+            "small-budget physical cleanup",
+            timeout=20,
+        )
+        fixture.stop_host(host)
+        host = fixture.start_host(store, endpoint_url)
         fixture.wait_for(
             lambda: fixture.completed_observation(store, "small-budget-message"),
             "small-budget continuation",
@@ -1048,11 +1060,30 @@ def main():
         action = fixture.wait_for(
             lambda: action_for(store, "direct/exhaustion"), "exhaustion Bash Action"
         )
+        fixture.wait_for(
+            lambda: execution_idle(store, "direct/exhaustion"),
+            "exhaustion Action creation physical cleanup",
+            timeout=20,
+        )
+        fixture.stop_host(host)
+        host = fixture.start_host(
+            store,
+            None,
+            "--test-bash-scratch-limit-bytes",
+            "18",
+        )
         allow(state, store, "exhaustion-allow", "direct/exhaustion", action["action"])
         fixture.wait_for(
             lambda: resolution(store, "direct/exhaustion") == "storage_failed",
             "capture exhaustion result",
         )
+        fixture.wait_for(
+            lambda: execution_custody_idle(store, "direct/exhaustion"),
+            "capture exhaustion physical cleanup",
+            timeout=20,
+        )
+        fixture.stop_host(host)
+        host = fixture.start_host(store, endpoint_url)
         fixture.wait_for(
             lambda: fixture.completed_observation(store, "exhaustion-message"),
             "capture exhaustion continuation",

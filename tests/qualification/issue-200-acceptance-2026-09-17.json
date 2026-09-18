@@ -1,5 +1,5 @@
 {
-  "recorded_utc": "2026-09-18T10:44:11Z",
+  "recorded_utc": "2026-09-18T11:05:30Z",
   "tested_base_revision": "cf25fa805ead62d72afebc09b9653811696fd053",
   "working_tree_dirty": true,
   "scope": "Exact source hashes below identify the uncommitted issue #200 implementation, single-owner Bash lifecycle and bounded owner-progress follow-up tested before its local commit.",
@@ -23,7 +23,7 @@
     "src/store.zig": "a5324f53e2a5baa1c16d5f836d587069e3b150e9c394287aa911d1dde7851791",
     "src/tools.zig": "2da4685bdbc9f5571e359d395d448fe7c1ec9f2332971ff2e63fa4afa20f41e5",
     "tests/integration/admission_integration.sh": "4d83ca530443a373a1b2a96ba9b08b1e3d85f17b2ae907b4c6bbe70733384958",
-    "tests/integration/bash_integration.py": "8b9eec23649a9152f06d3d6b4384b7813670ef00781df50df68188a6dc0ffeff",
+    "tests/integration/bash_integration.py": "33d9a3deef6c8903ba543e6ffc18c8502b0bbbf411f083f41149baf7eea11b52",
     "tests/integration/bash_lifecycle_integration.py": "f7ac7d529af74941db79c2d968ea9731f295f03e2b2271d9148ad238cf02ed82",
     "tests/integration/check.sh": "d754e4761b625dcdb4190e543a373105b5fbbcc74698ca87a21edbf853f549bf",
     "tests/integration/control_integration.py": "7d2ce3ba197d1470e1eb90d5c4d3ddab5d42871a68d4275cbeccc367929139f5",
@@ -45,16 +45,16 @@
   "linux_resource_samples": [
     {
       "phase": "cold",
-      "rss_bytes": 7585792,
-      "high_water_bytes": 7585792,
+      "rss_bytes": 7561216,
+      "high_water_bytes": 7561216,
       "descriptors": 7,
       "scratch_files": 0,
       "scratch_logical_bytes": 0
     },
     {
       "phase": "retained-output-idle",
-      "rss_bytes": 9269248,
-      "high_water_bytes": 9646080,
+      "rss_bytes": 9191424,
+      "high_water_bytes": 9555968,
       "descriptors": 12,
       "scratch_files": 2,
       "scratch_logical_bytes": 12014,
@@ -62,8 +62,8 @@
     },
     {
       "phase": "active-descendant-pipes",
-      "rss_bytes": 9129984,
-      "high_water_bytes": 9244672,
+      "rss_bytes": 9068544,
+      "high_water_bytes": 9183232,
       "descriptors": 17,
       "scratch_files": 3,
       "scratch_logical_bytes": 22,
