@@ -15,6 +15,7 @@ import threading
 import time
 
 import dispatch_integration as fixture
+from host_process import MilestoneLog
 
 
 def detached_shell(command):
@@ -49,6 +50,8 @@ def configure(state, store, key, session, permission="ask"):
         fixture.ROOT,
         "--model",
         "model-a",
+        "--tools",
+        "bash",
         "--permission-mode",
         permission,
     )
@@ -177,12 +180,34 @@ def add_exchange(responses, name, command, answer="continued", timeout_ms=None):
 def main():
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-bash."))
     responses = []
-    counter = state / "launch-counter"
+    success_workspace = state / "success-workspace"
+    success_workspace.mkdir()
+    counter = success_workspace / "launch-counter"
     large_command = (
-        f"printf x >> {counter}; "
+        "printf x >> launch-counter; "
         "head -c 12000 /dev/zero | tr '\\0' z; printf '\\377'; printf stderr-marker >&2"
     )
-    add_exchange(responses, "success", large_command)
+    success_arguments = json.dumps(
+        {"cmd": large_command, "timeout_ms": None}, separators=(",", ":")
+    )
+    responses.append(
+        fixture.sse_tool_calls(
+            "success-calls",
+            [
+                ("bash", "success-call", success_arguments),
+                ("missing-tool", "success-unknown-call", "{}"),
+                ("bash", "success-invalid-call", '{"cmd":7}'),
+            ],
+        )
+    )
+    responses.append(
+        fixture.sse_answer(
+            "success-answer",
+            "success-reasoning",
+            "success-message-result",
+            "continued",
+        )[0]
+    )
     rollback_marker = state / "rollback-marker"
     add_exchange(responses, "rollback", f"printf x >> {rollback_marker}")
     unattempted_marker = state / "unattempted-marker"
@@ -344,19 +369,92 @@ def main():
     endpoint_thread.start()
     endpoint_url = f"http://127.0.0.1:{endpoint.server_port}/responses"
     store = state / "store"
+    success_cleanup_gate = state / "success-cleanup-gate"
+    success_cleanup_gate.write_text("blocked")
     host = None
+    success_milestones = None
     detached_process = None
     completed = False
     resource_samples = []
     try:
-        host = fixture.start_host(store, endpoint_url, active_capacity=2)
+        host = fixture.start_host(
+            store,
+            endpoint_url,
+            "--test-bash-cleanup-gate-path",
+            success_cleanup_gate,
+            "--test-phase-trace",
+            active_capacity=3,
+        )
+        success_milestones = MilestoneLog(host)
         resource_samples.append({"phase": "cold", **process_resources(host), **scratch_resources(store)})
 
-        configure(state, store, "success-config", "direct/success")
-        fixture.message(state, store, "success-message", "direct/success", "execute")
+        fixture.configure_lost_reply(
+            state,
+            store,
+            "success-config",
+            "direct/success",
+            "model-a",
+            workspace=success_workspace,
+            tools="bash",
+            permission="ask",
+        )
+        recovered_configuration = fixture.command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            state / "success-config.json",
+            "--kind",
+            "configure",
+        )
+        assert recovered_configuration["answer"]["status"] == "accepted", recovered_configuration
+        assert recovered_configuration["answer"]["replayed"] is True, recovered_configuration
+        fixture.message_lost_reply(
+            state, store, "success-message", "direct/success", "execute"
+        )
+        recovered_message = fixture.command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            state / "success-message.json",
+            "--kind",
+            "message",
+        )
+        assert recovered_message["answer"]["status"] == "accepted", recovered_message
+        assert recovered_message["answer"]["replayed"] is True, recovered_message
         success_action = fixture.wait_for(
             lambda: action_for(store, "direct/success"), "successful Bash Action"
         )
+        proposal = fixture.command(
+            "inspect-session",
+            "--store",
+            store,
+            "--session",
+            "direct/success",
+            "--profile",
+            "full",
+        )
+        assert proposal["actions"]["count"] == "1", proposal
+        assert proposal["actions"]["unresolved"] == [success_action], proposal
+        assert success_action["call_ordinal"] == "0", proposal
+        assert success_action["authorization"] == "pending", proposal
+        assert success_action["permission_revision"] == "1", proposal
+        assert fixture.read_action(
+            store, "direct/success", success_action["action"], "call-id"
+        ) == b"success-call"
+        assert fixture.read_action(
+            store, "direct/success", success_action["action"], "arguments"
+        ) == success_arguments.encode()
+        rejected = [
+            call for call in proposal["full"]["tool_calls"] if call["rejection"] is not None
+        ]
+        assert [(call["call_ordinal"], call["rejection"]) for call in rejected] == [
+            ("1", "unknown_tool"),
+            ("2", "invalid_arguments"),
+        ], proposal
+        assert all(int(call["acceptance_position"]) > 0 for call in rejected), proposal
+        assert len(endpoint.requests) == 1, endpoint.requests
         decision = allow(state, store, "success-allow", "direct/success", success_action["action"])
         assert decision["answer"]["replayed"] is False, decision
         replay = fixture.command(
@@ -383,22 +481,59 @@ def main():
             success_action["action"],
         )
         assert conflict["answer"]["status"] == "conflict", conflict
+        bash_cleanup_started = success_milestones.wait(
+            "cleanup_started",
+            action=str(success_action["action"]),
+        )[-1]
         fixture.wait_for(
             lambda: fixture.completed_observation(store, "success-message"),
             "successful Bash continuation",
         )
         assert counter.read_text() == "x"
-        assert resolution(store, "direct/success") == "succeeded"
+        assert fixture.read_result(store, "success-message") == b"continued"
+        recovered_completed_message = fixture.command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            state / "success-message.json",
+            "--kind",
+            "message",
+        )
+        assert recovered_completed_message["answer"]["status"] == "accepted", recovered_completed_message
+        assert recovered_completed_message["answer"]["replayed"] is True, recovered_completed_message
+        assert len(endpoint.requests) == 2, endpoint.requests
         continuation = json.loads(endpoint.requests[1])
         outputs = [item for item in continuation["input"] if item.get("type") == "function_call_output"]
-        assert [item["call_id"] for item in outputs] == ["success-call"], outputs
+        assert [item["call_id"] for item in outputs] == [
+            "success-call",
+            "success-unknown-call",
+            "success-invalid-call",
+        ], outputs
+        assert outputs[1]["output"] == "Unknown tool: missing-tool.", outputs
+        assert outputs[2]["output"] == "Invalid arguments for tool 'bash'.", outputs
         output = outputs[0]["output"]
         assert "Bash succeeded." in output and "stderr-mark" in output, output
         assert "�" in output and "[earlier output omitted]" in output, output
         assert "Full stdout:" in output and "Full stderr:" in output, output
-        success_resources = fixture.command(
-            "inspect-session", "--store", store, "--session", "direct/success"
-        )["execution"]
+        answer_report = fixture.command(
+            "inspect-session",
+            "--store",
+            store,
+            "--session",
+            "direct/success",
+            "--profile",
+            "full",
+        )
+        success_actions = answer_report["full"]["actions"]
+        assert len(success_actions) == 1, answer_report
+        assert success_actions[0]["action"] == success_action["action"], answer_report
+        assert success_actions[0]["resolution"] == "succeeded", answer_report
+        success_resources = answer_report["execution"]
+        assert success_resources["custody_occupied"] != "0", success_resources
+        assert success_milestones.matching(
+            "cleanup_completed", action=str(success_action["action"])
+        ) == [], success_milestones.records
         resource_samples.append(
             {
                 "phase": "retained-output-idle",
@@ -407,8 +542,17 @@ def main():
                 "accounted_scratch_bytes": int(success_resources["scratch_used_bytes"]),
             }
         )
+        success_cleanup_gate.unlink()
+        bash_cleanup_completed = success_milestones.wait(
+            "cleanup_completed",
+            action=str(success_action["action"]),
+        )[-1]
+        assert int(bash_cleanup_completed["at_ns"]) >= int(bash_cleanup_started["at_ns"])
 
         fixture.stop_host(host)
+        host = None
+        success_milestones.close()
+        success_milestones = None
         host = fixture.start_host(store, endpoint_url, active_capacity=0)
         configure(state, store, "rollback-config", "direct/rollback")
         fixture.stop_host(host)
@@ -1181,6 +1325,8 @@ def main():
     finally:
         if host is not None:
             fixture.stop_host(host)
+        if success_milestones is not None:
+            success_milestones.close()
         if detached_process is not None and process_exists(detached_process):
             os.kill(detached_process, signal.SIGKILL)
         endpoint.shutdown()

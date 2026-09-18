@@ -469,26 +469,32 @@ def configure(state, store, key, session, model, schema=None, instructions=None)
     assert result["answer"]["status"] == "accepted", result
 
 
-def configure_lost_reply(state, store, key, session, model):
+def configure_lost_reply(
+    state, store, key, session, model, *, workspace=ROOT, tools=None, permission=None
+):
+    arguments = [
+        str(RUI),
+        "configure",
+        "--store",
+        str(store),
+        "--record",
+        str(state / f"{key}.json"),
+        "--key",
+        key,
+        "--session",
+        session,
+        "--workspace",
+        str(workspace),
+        "--model",
+        model,
+    ]
+    if tools is not None:
+        arguments += ["--tools", tools]
+    if permission is not None:
+        arguments += ["--permission-mode", permission]
+    arguments += ["--test-drop-reply", "after-commit"]
     completed = subprocess.run(
-        [
-            str(RUI),
-            "configure",
-            "--store",
-            str(store),
-            "--record",
-            str(state / f"{key}.json"),
-            "--key",
-            key,
-            "--session",
-            session,
-            "--workspace",
-            str(ROOT),
-            "--model",
-            model,
-            "--test-drop-reply",
-            "after-commit",
-        ],
+        arguments,
         text=True,
         capture_output=True,
         timeout=15,

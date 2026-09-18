@@ -97,6 +97,8 @@ fn serve(io: std.Io, args: []const []const u8) !void {
             faults.test_phase_trace = true;
         } else if (std.mem.eql(u8, arg, "--test-bash-observed-exit-gate-path")) {
             faults.bash_observed_exit_gate_path = try takeValue(args, &index);
+        } else if (std.mem.eql(u8, arg, "--test-bash-cleanup-gate-path")) {
+            faults.bash_cleanup_gate_path = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--test-control-gate-keys")) {
             faults.control_gate_keys = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--test-control-gate-path")) {

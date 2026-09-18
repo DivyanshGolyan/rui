@@ -79,6 +79,7 @@ pub const Faults = struct {
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
     bash_observed_exit_gate_path: ?[]const u8 = null,
+    bash_cleanup_gate_path: ?[]const u8 = null,
     control_gate_keys: ?[]const u8 = null,
     control_gate_path: ?[]const u8 = null,
     suppress_first_control_hint: bool = false,
@@ -857,6 +858,15 @@ fn closeBashDelivery(host: *Host, active: *BashSlot) void {
 
 fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) bool {
     const active = &slot.bash;
+    if (host.faults.bash_cleanup_gate_path) |path| {
+        if (testGateActive(host, path)) {
+            active.delivery.closed.reclaim_at = now.addDuration(.{
+                .raw = .fromMilliseconds(100),
+                .clock = .awake,
+            });
+            return false;
+        }
+    }
     active.execution.reclaim(host.retention) catch |err| {
         const first_failure = !active.delivery.closed.reclaim_failed;
         active.delivery.closed.reclaim_failed = true;
@@ -1561,6 +1571,12 @@ fn waitAtTestGate(host: *Host, path: []const u8) void {
     defer gate.close(host.io);
     var release: [1]u8 = undefined;
     _ = gate.readStreaming(host.io, &.{&release}) catch return;
+}
+
+fn testGateActive(host: *Host, path: []const u8) bool {
+    const gate = std.Io.Dir.cwd().openFile(host.io, path, .{}) catch return false;
+    gate.close(host.io);
+    return true;
 }
 
 fn appendOptionalUnsigned(
