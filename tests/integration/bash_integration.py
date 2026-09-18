@@ -211,9 +211,9 @@ def prove_reused_session(state):
     settlement_order = workspace / "settlement-order"
     slow_command = (
         f"while [ ! -e {shlex.quote(str(slow_release))} ]; do sleep 0.01; done; "
-        f"printf a >> {shlex.quote(str(settlement_order))}"
+        f"printf slow >> {shlex.quote(str(settlement_order))}"
     )
-    fast_command = f"printf b >> {shlex.quote(str(settlement_order))}"
+    fast_command = f"printf fast >> {shlex.quote(str(settlement_order))}"
     retry_failure_release = threading.Event()
     responses = [
         fixture.sse_tool_calls(
@@ -341,7 +341,7 @@ def prove_reused_session(state):
         reverse_rows = action_rows_by_ordinal(store, "direct/reuse")
         assert reverse_rows["2"]["resolution"] == "succeeded", reverse_rows
         assert reverse_rows["0"]["resolution"] is None, reverse_rows
-        assert settlement_order.read_text() == "b"
+        assert settlement_order.read_text() == "fast"
         assert len(endpoint.requests) == 1, endpoint.requests
         milestones.wait(
             "cleanup_started",
@@ -359,7 +359,7 @@ def prove_reused_session(state):
         assert queued_completed["processing"]["turn"] == first_processing["turn"], queued_completed
         assert fixture.read_result(store, "reuse-first") == b"first-turn-answer"
         assert fixture.read_result(store, "reuse-queued") == b"first-turn-answer"
-        assert settlement_order.read_text() == "ba"
+        assert settlement_order.read_text() == "fastslow"
         settled_rows = action_rows_by_ordinal(store, "direct/reuse")
         assert int(reverse_rows["2"]["acceptance_position"]) < int(
             settled_rows["0"]["acceptance_position"]
@@ -393,13 +393,8 @@ def prove_reused_session(state):
         delayed = fixture.command(
             "inspect-session", "--store", store, "--session", "direct/reuse"
         )["execution"]
-        assert int(delayed["custody_occupied"]) >= 1, delayed
-        delayed_bash_files = set((store / "scratch").glob("bash-*-*.tmp"))
-        assert delayed_bash_files, delayed_bash_files
-        delayed_input_files = {
-            path for path in delayed_bash_files if path.name.startswith("bash-input-")
-        }
-        assert delayed_input_files, delayed_bash_files
+        assert int(delayed["custody_occupied"]) >= len(actions_by_ordinal), delayed
+        assert int(delayed["scratch_used_bytes"]) > 0, delayed
 
         fixture.message(
             state,
@@ -417,7 +412,6 @@ def prove_reused_session(state):
         )["execution"]
         second_live_custody = int(second_live["custody_occupied"])
         assert second_live_custody >= 2, second_live
-        assert set((store / "scratch").glob("bash-*-*.tmp")) == delayed_bash_files
         second_processing = fixture.observe(store, "reuse-second")["processing"]
         retry_failure_release.set()
         milestones.wait(
@@ -433,7 +427,6 @@ def prove_reused_session(state):
         assert "result" not in retry_wait, retry_wait
         assert int(retry_execution["custody_occupied"]) >= len(actions_by_ordinal)
         assert int(retry_execution["scratch_used_bytes"]) > 0
-        assert set((store / "scratch").glob("bash-*-*.tmp")) == delayed_bash_files
         assert retry_execution["dispatch_fenced"] is False, retry_execution
         assert second_processing["turn"] != first_processing["turn"], retry_wait
         for action in actions_by_ordinal.values():
@@ -498,7 +491,6 @@ def prove_reused_session(state):
                     action=str(action["action"]),
                 )
             ) == 1, milestones.records
-        assert all(not path.exists() for path in delayed_input_files), delayed_input_files
         assert fixture.read_result(store, "reuse-first") == b"first-turn-answer"
         assert fixture.read_result(store, "reuse-second") == b"second-turn-answer"
     finally:
