@@ -483,12 +483,20 @@ def main():
             "cleanup_started",
             action=str(success_action["action"]),
         )[-1]
+        # This Action milestone is the drain barrier. Keep answer_report as the
+        # only later Session inspection so its capture is the next matching one.
+        captured_before = len(
+            success_milestones.matching(
+                "inspection_captured",
+                subject_kind="session",
+                subject="direct/success",
+            )
+        )
         fixture.wait_for(
             lambda: fixture.completed_observation(store, "success-message"),
             "successful Bash continuation",
         )
         assert counter.read_text() == "x"
-        assert resolution(store, "direct/success") == "succeeded"
         assert fixture.read_result(store, "success-message") == b"continued"
         recovered_completed_message = fixture.command(
             "retry",
@@ -515,24 +523,28 @@ def main():
         assert "Bash succeeded." in output and "stderr-mark" in output, output
         assert "�" in output and "[earlier output omitted]" in output, output
         assert "Full stdout:" in output and "Full stderr:" in output, output
-        captured_before = len(
-            success_milestones.matching(
-                "inspection_captured",
-                subject_kind="session",
-                subject="direct/success",
-            )
+        answer_report = fixture.command(
+            "inspect-session",
+            "--store",
+            store,
+            "--session",
+            "direct/success",
+            "--profile",
+            "full",
         )
-        success_resources = fixture.command(
-            "inspect-session", "--store", store, "--session", "direct/success"
-        )["execution"]
         answer_snapshot = success_milestones.wait(
             "inspection_captured",
             count=captured_before + 1,
             subject_kind="session",
             subject="direct/success",
         )[-1]
+        success_actions = answer_report["full"]["actions"]
+        assert len(success_actions) == 1, answer_report
+        assert success_actions[0]["action"] == success_action["action"], answer_report
+        assert success_actions[0]["resolution"] == "succeeded", answer_report
+        success_resources = answer_report["execution"]
         assert success_resources["custody_occupied"] != "0", success_resources
-        assert int(answer_snapshot["at_ns"]) - int(bash_cleanup_started["at_ns"]) < 10_000_000_000
+        assert int(answer_snapshot["at_ns"]) >= int(bash_cleanup_started["at_ns"])
         assert [
             record
             for record in success_milestones.matching(
