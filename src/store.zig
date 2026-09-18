@@ -9,7 +9,7 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 14;
+pub const schema_version: u32 = 15;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 const complete_tool_results_sql =
@@ -3435,7 +3435,7 @@ pub const Store = struct {
             bash_timeout_ms;
         const update = try prepare(
             self.database,
-            "UPDATE action_operation SET attempt_ordinal=1,uncertain=1,bash_timeout_ms=?2 " ++
+            "UPDATE action_operation SET attempt_ordinal=1,bash_timeout_ms=?2 " ++
                 "WHERE action_id=?1 AND permission_state=1 AND resolution_code IS NULL AND attempt_ordinal=0",
         );
         defer _ = c.sqlite3_finalize(update);
@@ -3465,7 +3465,7 @@ pub const Store = struct {
                 "JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
                 "JOIN model_tool_call call ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal " ++
                 "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3 " ++
-                "AND action.resolution_code IS NULL AND action.uncertain=1",
+                "AND action.resolution_code IS NULL",
         ) catch |err| return self.fenceReadFailure(err);
         defer _ = c.sqlite3_finalize(statement);
         bindU64(statement, 1, binding.action_id) catch |err| return self.fenceReadFailure(err);
@@ -3525,7 +3525,7 @@ pub const Store = struct {
             "SELECT operation.turn_id,EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
                 "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3 " ++
-                "AND action.uncertain=1 AND action.resolution_code IS NULL",
+                "AND action.resolution_code IS NULL",
         ) catch |err| return self.fenceReadFailure(err);
         defer _ = c.sqlite3_finalize(statement);
         bindU64(statement, 1, binding.action_id) catch |err| return self.fenceReadFailure(err);
@@ -3571,7 +3571,7 @@ pub const Store = struct {
                 "FROM action_operation action JOIN model_operation operation " ++
                 "ON operation.operation_id=action.parent_operation_id " ++
                 "WHERE action.action_id=?1 AND action.parent_operation_id=?2 " ++
-                "AND action.attempt_ordinal=?3 AND action.uncertain=1 AND action.resolution_code IS NULL",
+                "AND action.attempt_ordinal=?3 AND action.resolution_code IS NULL",
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, binding.action_id);
@@ -3591,8 +3591,8 @@ pub const Store = struct {
         const content_id = try self.importBytesContent(effective_result, false, faults.content_import);
         const update = try prepare(
             self.database,
-            "UPDATE action_operation SET uncertain=0,resolution_code=?2,resolution_content_id=?3,acceptance_position=?4 " ++
-                "WHERE action_id=?1 AND parent_operation_id=?5 AND attempt_ordinal=?6 AND uncertain=1 AND resolution_code IS NULL",
+            "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4 " ++
+                "WHERE action_id=?1 AND parent_operation_id=?5 AND attempt_ordinal=?6 AND resolution_code IS NULL",
         );
         defer _ = c.sqlite3_finalize(update);
         try bindU64(update, 1, binding.action_id);
@@ -3626,8 +3626,8 @@ pub const Store = struct {
         {
             const select = try prepare(
                 self.database,
-                "SELECT action_id,parent_operation_id FROM action_operation INDEXED BY action_operation_uncertain " ++
-                    "WHERE resolution_code IS NULL AND uncertain=1 ORDER BY action_id LIMIT ?1",
+                "SELECT action_id,parent_operation_id FROM action_operation INDEXED BY action_operation_unresolved_attempt " ++
+                    "WHERE resolution_code IS NULL AND attempt_ordinal=1 ORDER BY action_id LIMIT ?1",
             );
             defer _ = c.sqlite3_finalize(select);
             try bindI64(select, 1, @as(i64, @intCast(limit)));
@@ -3647,7 +3647,7 @@ pub const Store = struct {
         }
         const action_id = selected orelse return false;
         try exec(self.database, "BEGIN IMMEDIATE");
-        const action = try prepare(self.database, "SELECT session_ref FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL AND uncertain=1");
+        const action = try prepare(self.database, "SELECT session_ref FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL AND attempt_ordinal=1");
         defer _ = c.sqlite3_finalize(action);
         try bindU64(action, 1, action_id);
         if (c.sqlite3_step(action) != c.SQLITE_ROW) return error.ActionSelectionChanged;
@@ -3661,8 +3661,8 @@ pub const Store = struct {
         );
         const update = try prepare(
             self.database,
-            "UPDATE action_operation SET uncertain=0,resolution_code='indeterminate',resolution_content_id=?2,acceptance_position=?3 " ++
-                "WHERE action_id=?1 AND resolution_code IS NULL AND uncertain=1",
+            "UPDATE action_operation SET resolution_code='indeterminate',resolution_content_id=?2,acceptance_position=?3 " ++
+                "WHERE action_id=?1 AND resolution_code IS NULL AND attempt_ordinal=1",
         );
         defer _ = c.sqlite3_finalize(update);
         try bindU64(update, 1, action_id);
@@ -5804,7 +5804,6 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ permission_revision INTEGER NOT NULL CHECK(permission_revision>0),
         \\ permission_state INTEGER NOT NULL CHECK(permission_state IN (0,1,2)),
         \\ attempt_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(attempt_ordinal IN (0,1)),
-        \\ uncertain INTEGER NOT NULL DEFAULT 0 CHECK(uncertain IN (0,1)),
         \\ bash_timeout_override_ms INTEGER CHECK(bash_timeout_override_ms IS NULL OR bash_timeout_override_ms>0),
         \\ bash_timeout_ms INTEGER CHECK(bash_timeout_ms IS NULL OR bash_timeout_ms>0),
         \\ resolution_code TEXT CHECK(resolution_code IS NULL OR resolution_code IN ('denied','cancelled','succeeded','failed','timed_out','indeterminate','storage_failed','spawn_failed','infrastructure_shutdown')),
@@ -5816,9 +5815,8 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ FOREIGN KEY(session_ref,permission_revision) REFERENCES session_revision(session_ref,revision),
         \\ CHECK((permission_state=2 AND resolution_code='denied' AND attempt_ordinal=0) OR
         \\       (permission_state IN (0,1) AND (resolution_code IS NULL OR resolution_code!='denied'))),
-        \\ CHECK((attempt_ordinal=0 AND uncertain=0 AND bash_timeout_ms IS NULL) OR
+        \\ CHECK((attempt_ordinal=0 AND bash_timeout_ms IS NULL) OR
         \\       (attempt_ordinal=1 AND bash_timeout_ms IS NOT NULL)),
-        \\ CHECK(uncertain=0 OR (attempt_ordinal=1 AND resolution_code IS NULL)),
         \\ CHECK((resolution_code IS NULL AND resolution_content_id IS NULL AND acceptance_position IS NULL) OR
         \\       (resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL AND acceptance_position IS NOT NULL))
         \\) STRICT;
@@ -5842,7 +5840,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff);
         \\CREATE INDEX action_operation_session_order ON action_operation(session_ref,action_id);
         \\CREATE INDEX action_operation_executable ON action_operation(action_id) WHERE permission_state=1 AND resolution_code IS NULL AND attempt_ordinal=0;
-        \\CREATE INDEX action_operation_uncertain ON action_operation(action_id) WHERE resolution_code IS NULL AND uncertain=1;
+        \\CREATE INDEX action_operation_unresolved_attempt ON action_operation(action_id) WHERE resolution_code IS NULL AND attempt_ordinal=1;
         \\CREATE INDEX model_tool_call_rejections ON model_tool_call(operation_id,call_ordinal) WHERE rejection_code IS NOT NULL;
         \\CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND allowance_used<4;
         \\CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0;
@@ -5870,7 +5868,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','message_admission_session_pending','session_stop_exclusion','action_operation_session_order','action_operation_executable','action_operation_uncertain','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','conversation_entry_history','model_output_history','turn_session_latest')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','message_admission_session_pending','session_stop_exclusion','action_operation_session_order','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','conversation_entry_history','model_output_history','turn_session_latest')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -9087,6 +9085,15 @@ test "fresh Store uses current schema and rejects the prior version" {
         defer _ = c.sqlite3_finalize(removed_index);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(removed_index));
         try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(removed_index, 0));
+    }
+    {
+        const duplicated_action_uncertainty = try prepare(
+            storage.database,
+            "SELECT count(*) FROM pragma_table_info('action_operation') WHERE name='uncertain'",
+        );
+        defer _ = c.sqlite3_finalize(duplicated_action_uncertainty);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(duplicated_action_uncertainty));
+        try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(duplicated_action_uncertainty, 0));
     }
     try exec(
         storage.database,

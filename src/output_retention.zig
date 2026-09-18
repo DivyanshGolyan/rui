@@ -1,4 +1,5 @@
 const std = @import("std");
+const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 
@@ -160,22 +161,13 @@ pub const Queue = struct {
             const charged = entry.charged;
             entry.state = .evicting;
             self.mutex.unlock(self.io);
-            var scratch = std.Io.Dir.cwd().openDir(self.io, self.scratch_path, .{}) catch {
+            _ = named_scratch.removeName(self.io, self.scratch_path, name.slice()) catch {
                 self.markEvictionFailed(index, generation);
                 continue;
             };
-            const removed = result: {
-                defer scratch.close(self.io);
-                scratch.deleteFile(self.io, name.slice()) catch break :result false;
-                break :result true;
-            };
             self.mutex.lockUncancelable(self.io);
-            if (removed) {
-                self.entries[index] = .{ .generation = generation };
-                self.budget.release(charged);
-            } else {
-                self.entries[index].state = .failed;
-            }
+            self.entries[index] = .{ .generation = generation };
+            self.budget.release(charged);
             self.mutex.unlock(self.io);
         }
     }
@@ -215,24 +207,15 @@ pub const Queue = struct {
         const charged = entry.charged;
         self.mutex.unlock(self.io);
 
-        var scratch = std.Io.Dir.cwd().openDir(self.io, self.scratch_path, .{}) catch |err| {
+        _ = named_scratch.removeName(self.io, self.scratch_path, name.slice()) catch |err| {
             self.markEvictionFailed(index, generation);
             return err;
-        };
-        const removed = result: {
-            defer scratch.close(self.io);
-            scratch.deleteFile(self.io, name.slice()) catch break :result false;
-            break :result true;
         };
         self.mutex.lockUncancelable(self.io);
         const selected = &self.entries[index];
         std.debug.assert(selected.generation == generation and selected.state == .evicting);
-        if (removed) {
-            selected.* = .{ .generation = generation };
-            self.budget.release(charged);
-        } else {
-            selected.state = .failed;
-        }
+        selected.* = .{ .generation = generation };
+        self.budget.release(charged);
         self.mutex.unlock(self.io);
         return true;
     }
@@ -313,7 +296,7 @@ test "shared scratch reservations reclaim retained output and fail when none is 
     shared.release(3);
 }
 
-test "failed retained-file deletion preserves its entry and scratch charge" {
+test "already absent retained files release their entries and scratch charge" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -331,9 +314,80 @@ test "failed retained-file deletion preserves its entry and scratch charge" {
     try tmp.dir.deleteFile(std.testing.io, "stderr");
 
     const shared = queue.sharedBudget();
+    try std.testing.expect(shared.reserve(2));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    shared.release(2);
+}
+
+test "unconfirmed retained-file deletion preserves its entry and scratch charge" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var missing_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const missing = try std.fmt.bufPrint(&missing_buffer, "{s}/missing", .{root});
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 2 };
+    var entries: [2]Entry = undefined;
+    var queue = Queue.initialize(std.testing.io, missing, budget, &entries);
+
+    try std.testing.expect(budget.reserve(2));
+    try std.testing.expect(try queue.retainPair("stdout", 1, "stderr", 1));
+
+    const shared = queue.sharedBudget();
     try std.testing.expect(!shared.reserve(1));
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), queue.occupied());
     try std.testing.expectEqual(State.failed, entries[0].state);
-    try std.testing.expectEqual(State.failed, entries[1].state);
+    try std.testing.expectEqual(State.retained, entries[1].state);
+}
+
+test "reserved output is not evictable before producer aliases close and publication completes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 2 };
+    var entries: [2]Entry = undefined;
+    var queue = Queue.initialize(std.testing.io, root, budget, &entries);
+    defer queue.cleanupAll();
+
+    var stdout = try tmp.dir.createFile(std.testing.io, "stdout", .{ .read = true });
+    var stderr = try tmp.dir.createFile(std.testing.io, "stderr", .{ .read = true });
+    try std.testing.expect(budget.reserve(2));
+    const pair = (try queue.reservePair("stdout", 1, "stderr", 1)).?;
+
+    const Reservation = struct {
+        queue: *Queue,
+        result: *std.atomic.Value(bool),
+
+        fn run(context: @This()) void {
+            context.result.store(context.queue.sharedBudget().reserve(1), .release);
+        }
+    };
+    var reclaimed: std.atomic.Value(bool) = .init(true);
+    var thread = try std.Thread.spawn(.{}, Reservation.run, .{Reservation{
+        .queue = &queue,
+        .result = &reclaimed,
+    }});
+    thread.join();
+    try std.testing.expect(!reclaimed.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+
+    stdout.close(std.testing.io);
+    stderr.close(std.testing.io);
+    try queue.publishPair(pair);
+    reclaimed.store(false, .release);
+    thread = try std.Thread.spawn(.{}, Reservation.run, .{Reservation{
+        .queue = &queue,
+        .result = &reclaimed,
+    }});
+    thread.join();
+    try std.testing.expect(reclaimed.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), queue.occupied());
+    queue.sharedBudget().release(1);
 }

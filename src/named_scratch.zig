@@ -61,7 +61,7 @@ pub const Owner = struct {
     }
 };
 
-fn removeName(io: std.Io, scratch_path: []const u8, name: []const u8) !Reclamation {
+pub fn removeName(io: std.Io, scratch_path: []const u8, name: []const u8) !Reclamation {
     var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
     defer scratch.close(io);
     scratch.deleteFile(io, name) catch |err| switch (err) {

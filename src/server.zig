@@ -722,7 +722,7 @@ fn launchPreparedBash(
     }
     host.custody.consumeActionLaunchAuthority(token, action_binding) catch |err| {
         prepared.cleanup() catch |cleanup_err| {
-            retainBashPreparedCleanup(host, slot, token, prepared.cleanupOwner(), cleanup_err);
+            retainBashPreparedCleanup(host, slot, token, prepared.takeCleanup(), cleanup_err);
             fenceDispatch(host, "Bash launch authority", err);
             return;
         };
@@ -748,7 +748,7 @@ fn launchPreparedBash(
             fenceDispatch(host, "Bash dispatch handoff", err);
         }
         prepared.cleanup() catch |cleanup_err| {
-            retainBashPreparedCleanup(host, slot, token, prepared.cleanupOwner(), cleanup_err);
+            retainBashPreparedCleanup(host, slot, token, prepared.takeCleanup(), cleanup_err);
             return;
         };
         finishCustodyNow(host, token);

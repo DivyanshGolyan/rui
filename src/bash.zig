@@ -187,9 +187,9 @@ pub const Prepared = struct {
     bash_path: []const u8,
     timeout_ms: u64,
     faults: Faults,
-    script: OwnedFile,
-    stdout_capture: OwnedFile,
-    stderr_capture: OwnedFile,
+    script: ?OwnedFile,
+    stdout_capture: ?OwnedFile,
+    stderr_capture: ?OwnedFile,
 
     pub fn cleanup(self: *Prepared) !void {
         return cleanupOwnedFiles(
@@ -200,13 +200,17 @@ pub const Prepared = struct {
         );
     }
 
-    pub fn cleanupOwner(self: *const Prepared) PreparedCleanup {
-        return .{
+    pub fn takeCleanup(self: *Prepared) PreparedCleanup {
+        const resources = PreparedCleanup{
             .scratch_path = self.scratch_path,
             .script = self.script,
             .stdout_capture = self.stdout_capture,
             .stderr_capture = self.stderr_capture,
         };
+        self.script = null;
+        self.stdout_capture = null;
+        self.stderr_capture = null;
+        return resources;
     }
 
     pub fn launch(self: *Prepared) !Execution {
@@ -215,7 +219,7 @@ pub const Prepared = struct {
         const script_path = try std.fmt.bufPrint(
             &script_path_buffer,
             "{s}/{s}",
-            .{ self.scratch_path, self.script.name.slice() },
+            .{ self.scratch_path, self.script.?.name.slice() },
         );
         var empty_environment = std.process.Environ.Map.init(self.allocator);
         defer empty_environment.deinit();
@@ -233,6 +237,12 @@ pub const Prepared = struct {
         child.stdout = null;
         const stderr_pipe = child.stderr.?;
         child.stderr = null;
+        const script = self.script.?;
+        const stdout_capture = self.stdout_capture.?;
+        const stderr_capture = self.stderr_capture.?;
+        self.script = null;
+        self.stdout_capture = null;
+        self.stderr_capture = null;
         var execution = Execution{
             .io = self.io,
             .process = .{ .running = .{
@@ -241,9 +251,9 @@ pub const Prepared = struct {
             } },
             .stdout_pipe = .{ .reading = stdout_pipe },
             .stderr_pipe = .{ .reading = stderr_pipe },
-            .stdout_capture = self.stdout_capture,
-            .stderr_capture = self.stderr_capture,
-            .script = self.script,
+            .stdout_capture = stdout_capture,
+            .stderr_capture = stderr_capture,
+            .script = script,
             .scratch_path = self.scratch_path,
             .started = started,
             .faults = self.faults,
@@ -263,13 +273,12 @@ pub const PreparedCleanup = struct {
     stderr_capture: ?OwnedFile = null,
 
     pub fn cleanup(self: *PreparedCleanup) !void {
-        var first_error: ?anyerror = null;
-        inline for (.{ &self.script, &self.stdout_capture, &self.stderr_capture }) |slot| {
-            if (slot.*) |*file| file.cleanup(self.scratch_path) catch |err| if (first_error == null) {
-                first_error = err;
-            };
-        }
-        if (first_error) |err| return err;
+        return cleanupOwnedFiles(
+            self.scratch_path,
+            &self.script,
+            &self.stdout_capture,
+            &self.stderr_capture,
+        );
     }
 };
 
@@ -291,20 +300,20 @@ pub const PreparationProgress = union(enum) {
 
 fn cleanupOwnedFiles(
     scratch_path: []const u8,
-    script: *OwnedFile,
-    stdout_capture: *OwnedFile,
-    stderr_capture: *OwnedFile,
+    script: *?OwnedFile,
+    stdout_capture: *?OwnedFile,
+    stderr_capture: *?OwnedFile,
 ) !void {
     var first_error: ?anyerror = null;
-    script.cleanup(scratch_path) catch |err| {
-        first_error = err;
-    };
-    stdout_capture.cleanup(scratch_path) catch |err| if (first_error == null) {
-        first_error = err;
-    };
-    stderr_capture.cleanup(scratch_path) catch |err| if (first_error == null) {
-        first_error = err;
-    };
+    for ([_]*?OwnedFile{ script, stdout_capture, stderr_capture }) |slot| {
+        if (slot.*) |*file| {
+            file.cleanup(scratch_path) catch |err| {
+                if (first_error == null) first_error = err;
+                continue;
+            };
+            slot.* = null;
+        }
+    }
     if (first_error) |err| return err;
 }
 
@@ -365,6 +374,7 @@ pub const Execution = struct {
             self.beginGrace(now);
             made_progress = true;
         }
+        made_progress = self.freezeCaptureIfRequired(now, &fault) or made_progress;
         made_progress = self.servicePipe(&self.stdout_pipe, &self.stdout_capture, window, &fault) or made_progress;
         made_progress = self.servicePipe(&self.stderr_pipe, &self.stderr_capture, window, &fault) or made_progress;
         if (self.process == .grace and timestampReached(now, self.process.grace.kill_at)) {
@@ -386,19 +396,12 @@ pub const Execution = struct {
             if (check == 1) {
                 const term = self.process.checking_group.term;
                 self.process = .{ .gone = term };
-                self.beginCaptureTails() catch |err| {
-                    fault = fault orelse err;
-                };
                 made_progress = true;
             } else if (check < 0) {
                 fault = fault orelse error.BashGroupProbeFailed;
-            } else if (timestampReached(now, self.process.checking_group.cleanup_deadline)) {
-                self.beginCaptureTails() catch |err| {
-                    fault = fault orelse err;
-                };
-                fault = fault orelse error.BashCleanupUnconfirmed;
             }
         }
+        made_progress = self.freezeCaptureIfRequired(now, &fault) or made_progress;
         if (self.process == .gone) {
             made_progress = self.servicePipe(&self.stdout_pipe, &self.stdout_capture, window, &fault) or made_progress;
             made_progress = self.servicePipe(&self.stderr_pipe, &self.stderr_capture, window, &fault) or made_progress;
@@ -464,6 +467,10 @@ pub const Execution = struct {
         std.debug.assert(self.retired());
         var first_error: ?anyerror = null;
         if (self.output_reservation) |pair| {
+            // Reserved entries are protected from eviction. Relinquish the
+            // producer aliases before publication makes the names reclaimable.
+            self.stdout_capture.close();
+            self.stderr_capture.close();
             retention.publishPair(pair) catch |err| {
                 first_error = err;
             };
@@ -471,8 +478,6 @@ pub const Execution = struct {
                 self.output_reservation = null;
                 self.stdout_capture.published = true;
                 self.stderr_capture.published = true;
-                self.stdout_capture.close();
-                self.stderr_capture.close();
             }
         } else {
             self.stdout_capture.cleanup(self.scratch_path) catch |err| {
@@ -677,6 +682,28 @@ pub const Execution = struct {
         if (self.faults.lifecycle != expected) return false;
         if (!self.faults.fault_gated) return true;
         return faultGateActive(self.io, self.scratch_path);
+    }
+
+    fn freezeCaptureIfRequired(
+        self: *Execution,
+        now: std.Io.Clock.Timestamp,
+        fault: *?anyerror,
+    ) bool {
+        const deadline_expired = switch (self.process) {
+            .grace => |value| timestampReached(now, value.cleanup_deadline),
+            .reaping => |value| timestampReached(now, value.cleanup_deadline),
+            .checking_group => |value| timestampReached(now, value.cleanup_deadline),
+            .running, .gone => false,
+        };
+        if (self.process != .gone and !deadline_expired) return false;
+        const changed = self.stdout_pipe == .reading or self.stderr_pipe == .reading;
+        self.beginCaptureTails() catch |err| {
+            fault.* = fault.* orelse err;
+        };
+        if (deadline_expired and self.process != .gone) {
+            fault.* = fault.* orelse error.BashCleanupUnconfirmed;
+        }
+        return changed;
     }
 
     fn beginCaptureTails(self: *Execution) !void {
@@ -906,6 +933,7 @@ pub const Preparation = struct {
             cleanup_fault,
         ) catch |err| return self.fail(err);
         self.source.reader.close();
+        const cleanup = self.takeCleanup();
         return .{ .prepared = .{
             .io = self.io,
             .allocator = self.allocator,
@@ -914,20 +942,26 @@ pub const Preparation = struct {
             .bash_path = self.bash_path,
             .timeout_ms = self.timeout_ms,
             .faults = self.faults,
-            .script = self.cleanup.script.?,
-            .stdout_capture = self.cleanup.stdout_capture.?,
-            .stderr_capture = self.cleanup.stderr_capture.?,
+            .script = cleanup.script,
+            .stdout_capture = cleanup.stdout_capture,
+            .stderr_capture = cleanup.stderr_capture,
         } };
     }
 
     pub fn cancel(self: *Preparation) PreparedCleanup {
         self.source.reader.close();
-        return self.cleanup;
+        return self.takeCleanup();
     }
 
     fn fail(self: *Preparation, cause: anyerror) PreparationProgress {
         self.source.reader.close();
-        return .{ .failed = .{ .cause = cause, .cleanup = self.cleanup } };
+        return .{ .failed = .{ .cause = cause, .cleanup = self.takeCleanup() } };
+    }
+
+    fn takeCleanup(self: *Preparation) PreparedCleanup {
+        const cleanup = self.cleanup;
+        self.cleanup = .{ .scratch_path = self.scratch_path };
+        return cleanup;
     }
 
     fn flushCommand(self: *Preparation) !void {
@@ -1043,6 +1077,45 @@ fn createOwnedFile(
         .budget = budget,
         .cleanup_fault = cleanup_fault,
     };
+}
+
+test "cleanup ownership transfers consume their source" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var used: std.atomic.Value(u64) = .init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 6 };
+    try std.testing.expect(budget.reserve(6));
+    var prepared = Prepared{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .workspace = .{},
+        .scratch_path = root,
+        .bash_path = "/bin/bash",
+        .timeout_ms = 1,
+        .faults = .{},
+        .script = try createOwnedFile(std.testing.io, root, budget, "script", 1, 1, .none),
+        .stdout_capture = try createOwnedFile(std.testing.io, root, budget, "stdout", 1, 1, .none),
+        .stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", 1, 1, .none),
+    };
+    prepared.script.?.charged = 1;
+    prepared.stdout_capture.?.charged = 2;
+    prepared.stderr_capture.?.charged = 3;
+
+    var cleanup = prepared.takeCleanup();
+    try std.testing.expect(prepared.script == null);
+    try std.testing.expect(prepared.stdout_capture == null);
+    try std.testing.expect(prepared.stderr_capture == null);
+    try prepared.cleanup();
+    try std.testing.expectEqual(@as(u64, 6), used.load(.acquire));
+
+    try cleanup.cleanup();
+    try std.testing.expect(cleanup.script == null);
+    try std.testing.expect(cleanup.stdout_capture == null);
+    try std.testing.expect(cleanup.stderr_capture == null);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
 const ContentSource = struct {

@@ -425,9 +425,9 @@ def main():
         fixture.stop_host(host)
         assert rows(
             store,
-            "SELECT attempt_ordinal,uncertain FROM action_operation WHERE session_ref=?",
+            "SELECT attempt_ordinal,resolution_code FROM action_operation WHERE session_ref=?",
             ("direct/rollback",),
-        ) == [(0, 0)]
+        ) == [(0, None)]
         host = fixture.start_host(store, None)
         fixture.wait_for(lambda: rollback_marker.exists(), "Bash launch without provider transport")
         fixture.wait_for(
@@ -1029,9 +1029,9 @@ def main():
         host = None
         assert rows(
             store,
-            "SELECT attempt_ordinal,uncertain,resolution_code FROM action_operation WHERE session_ref=?",
+            "SELECT attempt_ordinal,resolution_code FROM action_operation WHERE session_ref=?",
             ("direct/service",),
-        ) == [(1, 1, None)]
+        ) == [(1, None)]
         host = fixture.start_host(store, endpoint_url)
         fixture.wait_for(
             lambda: resolution(store, "direct/service") == "indeterminate",
@@ -1066,7 +1066,7 @@ def main():
             host = None
             assert rows(
                 store,
-                "SELECT uncertain,resolution_code FROM action_operation WHERE session_ref=?",
+                "SELECT attempt_ordinal,resolution_code FROM action_operation WHERE session_ref=?",
                 (session,),
             ) == [(1, None)]
             host = fixture.start_host(store, endpoint_url)
@@ -1168,7 +1168,7 @@ def main():
         host = None
         assert rows(
             store,
-            "SELECT count(*) FROM action_operation WHERE attempt_ordinal=1 AND uncertain!=0",
+            "SELECT count(*) FROM action_operation WHERE attempt_ordinal=1 AND resolution_code IS NULL",
         ) == [(0,)]
         settled = rows(
             store,
