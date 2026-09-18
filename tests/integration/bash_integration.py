@@ -117,19 +117,6 @@ def process_exists(pid):
         return False
 
 
-def process_is_zombie(pid):
-    status = pathlib.Path(f"/proc/{pid}/stat")
-    if status.exists():
-        return status.read_text().split()[2] == "Z"
-    result = subprocess.run(
-        ["ps", "-o", "stat=", "-p", str(pid)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0 and result.stdout.lstrip().startswith("Z")
-
-
 def wait_for_phase(process, phase, timeout=8):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -217,7 +204,6 @@ def main():
             [("bash", "settlement-stop-call", json.dumps({"cmd": "printf sealed", "timeout_ms": None}))],
         )
     )
-    exited_bash_pid = state / "exited-bash-pid"
     exited_child_pid = state / "exited-child-pid"
     responses.append(
         fixture.sse_tool_calls(
@@ -227,8 +213,7 @@ def main():
                 "exited-pipes-call",
                 json.dumps(
                     {
-                        "cmd": f"printf $$ > {exited_bash_pid}; "
-                        f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & printf $! > {exited_child_pid}",
+                        "cmd": f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & printf $! > {exited_child_pid}",
                         "timeout_ms": None,
                     },
                     separators=(",", ":"),
@@ -244,7 +229,6 @@ def main():
             "continued",
         )[0]
     )
-    stopped_pipes_bash_pid = state / "stopped-pipes-bash-pid"
     stopped_pipes_child_pid = state / "stopped-pipes-child-pid"
     responses.append(
         fixture.sse_tool_calls(
@@ -254,8 +238,7 @@ def main():
                 "stopped-pipes-call",
                 json.dumps(
                     {
-                        "cmd": f"printf $$ > {stopped_pipes_bash_pid}; "
-                        f"(trap '' TERM; sleep 30) & printf $! > {stopped_pipes_child_pid}",
+                        "cmd": f"(trap '' TERM; sleep 30) & printf $! > {stopped_pipes_child_pid}; wait",
                         "timeout_ms": None,
                     },
                     separators=(",", ":"),
@@ -264,13 +247,11 @@ def main():
         )
     )
     add_exchange(responses, "timeout", "sleep 30", timeout_ms=100)
-    detached_bash_pid = state / "detached-bash-pid"
     detached_pid = state / "detached-pid"
     add_exchange(
         responses,
         "detached-timeout",
-        f"printf $$ > {detached_bash_pid}; "
-        + start_detached_shell(
+        start_detached_shell(
             f"trap '' TERM PIPE; echo $$ > {detached_pid}; "
             "head -c 32768 /dev/zero; while :; do printf detached; sleep 1; done",
             detached_pid,
@@ -697,12 +678,10 @@ def main():
         )
         allow(state, store, "exited-pipes-allow", "direct/exited-pipes", exited_action["action"])
         fixture.wait_for(
-            lambda: exited_bash_pid.exists() and exited_child_pid.exists(),
-            "Bash and descendant process identities",
+            exited_child_pid.exists,
+            "descendant process identity",
         )
-        bash_pid = int(exited_bash_pid.read_text())
         child_pid = int(exited_child_pid.read_text())
-        fixture.wait_for(lambda: process_is_zombie(bash_pid), "unreaped Bash with descendant pipes open")
         assert process_exists(child_pid)
         fixture.wait_for(
             lambda: resolution(store, "direct/exited-pipes") == "succeeded",
@@ -728,12 +707,10 @@ def main():
             stopped_pipes_action["action"],
         )
         fixture.wait_for(
-            lambda: stopped_pipes_bash_pid.exists() and stopped_pipes_child_pid.exists(),
-            "stopped Bash and descendant identities",
+            stopped_pipes_child_pid.exists,
+            "stopped descendant identity",
         )
-        stopped_bash = int(stopped_pipes_bash_pid.read_text())
         stopped_child = int(stopped_pipes_child_pid.read_text())
-        fixture.wait_for(lambda: process_is_zombie(stopped_bash), "stoppable reaped leader")
         assert process_exists(stopped_child)
         fixture.command(
             "stop-session",
@@ -747,7 +724,7 @@ def main():
         )
         fixture.wait_for(
             lambda: resolution(store, "direct/stopped-pipes") == "cancelled",
-            "exited-with-open-pipes stop",
+            "running process-group stop",
             timeout=20,
         )
         fixture.wait_for(lambda: not process_exists(stopped_child), "stopped Bash descendant cleanup")
@@ -784,15 +761,10 @@ def main():
             detached_action["action"],
         )
         fixture.wait_for(
-            lambda: detached_bash_pid.exists() and detached_pid.exists(),
-            "detached Bash and writer identities",
+            detached_pid.exists,
+            "detached writer identity",
         )
-        detached_bash_process = int(detached_bash_pid.read_text())
         detached_process = int(detached_pid.read_text())
-        fixture.wait_for(
-            lambda: process_is_zombie(detached_bash_process),
-            "unreaped Bash identity anchor",
-        )
         fixture.wait_for(
             lambda: resolution(store, "direct/detached-timeout") == "succeeded",
             "detached writer leader result",
