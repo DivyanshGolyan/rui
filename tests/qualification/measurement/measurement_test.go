@@ -78,6 +78,44 @@ func TestParseFootprintIntegralBytesAreExact(t *testing.T) {
 	}
 }
 
+func TestClassifyFootprintDistinguishesPassMissAndRoundedUncertainty(t *testing.T) {
+	target := uint64(100)
+	tests := []struct {
+		footprint Footprint
+		status    string
+		lower     uint64
+		upper     uint64
+	}{
+		{Footprint{LifetimePeakBytes: 99, LifetimePeakTolerance: 1}, "passed", 98, 100},
+		{Footprint{LifetimePeakBytes: 102, LifetimePeakTolerance: 1}, "target_miss", 101, 103},
+		{Footprint{LifetimePeakBytes: 100, LifetimePeakTolerance: 1}, "unavailable", 99, 101},
+		{Footprint{LifetimePeakBytes: ^uint64(0), LifetimePeakTolerance: 1}, "unavailable", ^uint64(0) - 1, ^uint64(0)},
+	}
+	for _, test := range tests {
+		got := ClassifyFootprint(test.footprint, target)
+		if got.Status != test.status || got.LowerBoundBytes != test.lower || got.UpperBoundBytes != test.upper {
+			t.Errorf("ClassifyFootprint(%+v) = %+v", test.footprint, got)
+		}
+	}
+}
+
+func TestSampleValidityDoesNotTurnMissingSamplesIntoZeroEvidence(t *testing.T) {
+	var validity SampleValidity
+	validity.Record(errors.New("counter unavailable"))
+	if validity.Status() != "unavailable" || validity.Attempts != 1 || validity.Succeeded != 0 || validity.Failed != 1 || validity.FirstError == "" {
+		t.Fatalf("failed sample validity = %+v", validity)
+	}
+	validity.Record(nil)
+	if validity.Status() != "unavailable" || validity.Succeeded != 1 || validity.Failed != 1 {
+		t.Fatalf("mixed sample validity = %+v", validity)
+	}
+	validity = SampleValidity{}
+	validity.Record(nil)
+	if validity.Status() != "diagnostic" {
+		t.Fatalf("complete sample validity = %+v", validity)
+	}
+}
+
 func TestParseFootprintRejectsMissingMalformedNonpositiveAndInconsistent(t *testing.T) {
 	reports := []string{
 		"phys_footprint: 1 MB\n",

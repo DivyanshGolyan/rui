@@ -254,6 +254,20 @@ pub fn build(b: *std.Build) void {
         "Measure control headroom, acknowledgment latency, and cleanup resources",
     );
     measure_control_step.dependOn(&measure_control.step);
+
+    const measure_call_classification = b.addSystemCommand(&.{
+        "go", "run", "-mod=readonly", "./call-classification",
+    });
+    measure_call_classification.setCwd(b.path("tests/qualification"));
+    measure_call_classification.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    if (b.args) |args| measure_call_classification.addArgs(args);
+    measure_call_classification.addArtifactArg(release);
+    measure_call_classification.addArtifactArg(addSqliteShell(b, target, .ReleaseSmall));
+    const measure_call_classification_step = b.step(
+        "measure-call-classification",
+        "Measure production call classification, exact denial, recovery, and population scaling",
+    );
+    measure_call_classification_step.dependOn(&measure_call_classification.step);
 }
 
 fn sameTransportTarget(a: std.Build.ResolvedTarget, b: std.Build.ResolvedTarget) bool {

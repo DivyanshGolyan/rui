@@ -256,6 +256,26 @@ def sse_tool_calls(response_id, calls):
     return encode_sse(payloads)
 
 
+def classification_population(prefix, forbidden_effect, count=32):
+    calls = []
+    for index in range(count):
+        if index % 3 == 0:
+            calls.append(
+                (
+                    "bash",
+                    f"{prefix}-valid-{index}",
+                    json.dumps(
+                        {"cmd": f"touch {forbidden_effect}"}, separators=(",", ":")
+                    ),
+                )
+            )
+        elif index % 3 == 1:
+            calls.append(("unknown", f"{prefix}-unknown-{index}", "{}"))
+        else:
+            calls.append(("bash", f"{prefix}-malformed-{index}", "{"))
+    return calls
+
+
 class SuccessEndpoint(http.server.ThreadingHTTPServer):
     allow_reuse_address = True
 
@@ -2125,10 +2145,15 @@ def main():
         invalid_endpoint.server_close()
         invalid_thread.join(timeout=5)
 
+        fault_effect = state / "output-fault-must-not-launch"
+        fault_calls = classification_population("fault", fault_effect)
         fault_responses = []
         for index in range(7):
             fault_responses.append(
-                sse_answer(f"fault-response-{index}", f"fault-r-{index}", f"fault-m-{index}", "answer")[0]
+                sse_tool_calls(
+                    f"fault-response-{index}",
+                    fault_calls,
+                )
             )
         output_fault_endpoint = SuccessEndpoint(fault_responses)
         output_fault_thread = threading.Thread(
@@ -2161,6 +2186,10 @@ def main():
                 f"{fault} rejection",
             )
             assert rejected["result"]["code"] == expected_code, rejected
+            with sqlite3.connect(fault_store / "rui.sqlite3") as database:
+                assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
+                assert database.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 0
+                assert database.execute("SELECT count(*) FROM action_operation").fetchone()[0] == 0
             stop_host(fault_host)
             processes.remove(fault_host)
 
@@ -2183,7 +2212,10 @@ def main():
             assert database.execute(
                 "SELECT uncertain,resolution_code FROM model_operation"
             ).fetchone() == (1, None)
+            assert database.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 0
+            assert database.execute("SELECT count(*) FROM action_operation").fetchone()[0] == 0
             database.close()
+        assert not fault_effect.exists()
         output_fault_endpoint.shutdown()
         output_fault_endpoint.server_close()
         output_fault_thread.join(timeout=5)
@@ -3966,8 +3998,11 @@ def main():
         # Response and validation-metadata unlink failures retain one named
         # file under custody and fence dispatch. A second failed cleanup leaves
         # it owned for the next startup, which removes only recognized names.
-        unlink_output, _, _ = sse_answer(
-            "unlink-response", "unlink-reasoning", "unlink-message", "must not publish"
+        unlink_effect = state / "unlink-fault-must-not-launch"
+        unlink_calls = classification_population("unlink", unlink_effect)
+        unlink_output = sse_tool_calls(
+            "unlink-response",
+            unlink_calls,
         )
         unlink_endpoint = SuccessEndpoint([unlink_output])
         unlink_thread = threading.Thread(target=unlink_endpoint.serve_forever, daemon=True)
@@ -4031,6 +4066,7 @@ def main():
             assert resources["scratch_used_bytes"] == "0", resources
             stop_host(cleanup_host)
             processes.remove(cleanup_host)
+        assert not unlink_effect.exists()
         unlink_endpoint.shutdown()
         unlink_endpoint.server_close()
         unlink_thread.join(timeout=5)

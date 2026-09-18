@@ -9,19 +9,30 @@ pub fn main(init: std.process.Init) !void {
     if (args.len < 2) return usage();
     const command = args[1];
     if (std.mem.eql(u8, command, "serve")) return serve(init.io, args[2..]);
-    if (std.mem.eql(u8, command, "configure")) return configure(init.io, args[2..]);
-    if (std.mem.eql(u8, command, "message")) return message(init.io, args[2..]);
-    if (std.mem.eql(u8, command, "stop-session")) return stopSession(init.io, args[2..]);
-    if (std.mem.eql(u8, command, "interrupt-model")) return interruptModel(init.io, args[2..]);
-    if (std.mem.eql(u8, command, "deny-action")) return denyAction(init.io, args[2..]);
-    if (std.mem.eql(u8, command, "allow-action")) return decideAction(init.io, args[2..], .allow_once);
-    if (std.mem.eql(u8, command, "retry")) return retry(init.io, args[2..]);
-    if (std.mem.eql(u8, command, "observe-command")) return observe(init.io, args[2..]);
-    if (std.mem.eql(u8, command, "read-result")) return readResult(init.io, args[2..]);
-    if (std.mem.eql(u8, command, "read-action-call-id")) return readActionContent(init.io, args[2..], .call_id);
-    if (std.mem.eql(u8, command, "read-action-arguments")) return readActionArguments(init.io, args[2..]);
-    if (std.mem.eql(u8, command, "inspect-session")) return inspect(init.io, args[2..]);
-    return usage();
+    if (std.mem.eql(u8, command, "configure")) try configure(init.io, args[2..]) else if (std.mem.eql(u8, command, "message")) try message(init.io, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init.io, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init.io, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try denyAction(init.io, args[2..]) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init.io, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init.io, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init.io, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init.io, args[2..]) else return usage();
+    try postCommandHold(init);
+}
+
+const post_command_ready_fd_environment = "RUI_TEST_POST_COMMAND_READY_FD";
+const post_command_release_fd_environment = "RUI_TEST_POST_COMMAND_RELEASE_FD";
+
+fn postCommandHold(init: std.process.Init) !void {
+    const ready_text = init.environ_map.get(post_command_ready_fd_environment);
+    const release_text = init.environ_map.get(post_command_release_fd_environment);
+    if (ready_text == null and release_text == null) return;
+    if (ready_text == null or release_text == null) return error.IncompletePostCommandHold;
+    const ready = try std.fmt.parseInt(std.posix.fd_t, ready_text.?, 10);
+    const release = try std.fmt.parseInt(std.posix.fd_t, release_text.?, 10);
+    try postCommandHoldDescriptors(ready, release);
+}
+
+fn postCommandHoldDescriptors(ready: std.posix.fd_t, release: std.posix.fd_t) !void {
+    defer closeDescriptor(ready);
+    defer closeDescriptor(release);
+    const signal = [_]u8{1};
+    if (std.c.write(ready, &signal, signal.len) != 1) return error.PostCommandHoldSignalFailed;
+    var acknowledgment: [1]u8 = undefined;
+    if (std.c.read(release, &acknowledgment, acknowledgment.len) != 1) return error.PostCommandHoldClosed;
 }
 
 fn serve(io: std.Io, args: []const []const u8) !void {
@@ -404,4 +415,36 @@ fn usage() error{InvalidArguments} {
         \\
     , .{});
     return error.InvalidArguments;
+}
+
+test "post-command hold signals only after work and exits on release" {
+    const ready = try testPipe();
+    defer closeDescriptor(ready[0]);
+    const release = try testPipe();
+    defer closeDescriptor(release[1]);
+    const thread = try std.Thread.spawn(.{}, postCommandHoldDescriptors, .{ ready[1], release[0] });
+
+    var signal: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 1), std.c.read(ready[0], &signal, signal.len));
+    try std.testing.expectEqual(@as(u8, 1), signal[0]);
+    try std.testing.expectEqual(@as(isize, 1), std.c.write(release[1], &[_]u8{1}, 1));
+    thread.join();
+}
+
+test "post-command hold reports release-pipe cleanup" {
+    const ready = try testPipe();
+    defer closeDescriptor(ready[0]);
+    const release = try testPipe();
+    closeDescriptor(release[1]);
+    try std.testing.expectError(error.PostCommandHoldClosed, postCommandHoldDescriptors(ready[1], release[0]));
+}
+
+fn testPipe() ![2]std.posix.fd_t {
+    var descriptors: [2]std.posix.fd_t = undefined;
+    if (std.c.pipe(&descriptors) != 0) return error.TestPipeFailed;
+    return descriptors;
+}
+
+fn closeDescriptor(fd: std.posix.fd_t) void {
+    _ = std.c.close(fd);
 }
