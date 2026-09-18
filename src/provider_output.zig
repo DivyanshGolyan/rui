@@ -1039,8 +1039,7 @@ fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limi
         std.testing.io,
         root[0..root_length],
         "provider-test-metadata",
-        &used,
-        metadata_limit,
+        .{ .used = &used, .limit = metadata_limit },
         false,
         &retained,
     );

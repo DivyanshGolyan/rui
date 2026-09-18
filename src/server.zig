@@ -610,8 +610,7 @@ fn admitBashAttempt(
         fenceDispatch(host, "Bash canonical input", err);
         return .admitted;
     };
-    var bash_budget = host.retention.sharedBudget();
-    bash_budget.limit = @min(bash_budget.limit, host.faults.bash_scratch_limit_bytes);
+    const bash_budget = host.retention.sharedBudget().narrowed(host.faults.bash_scratch_limit_bytes);
     const started = bash.startPreparation(
         host.io,
         host.allocator,
@@ -983,8 +982,9 @@ fn beginAdmittedAttempt(
         return .admitted;
     };
     defer view.close();
-    var request_budget = host.retention.sharedBudget();
-    request_budget.limit = if (host.faults.request_scratch_acquire) 0 else host.faults.request_scratch_limit_bytes;
+    const request_budget = host.retention.sharedBudget().narrowed(
+        if (host.faults.request_scratch_acquire) 0 else host.faults.request_scratch_limit_bytes,
+    );
     var retained_scratch: ?named_scratch.Owner = null;
     var request = provider.materialize(
         host.io,
@@ -1218,12 +1218,12 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         owner.binding.attempt_ordinal,
     }) catch unreachable;
     var retained_metadata: ?named_scratch.Owner = null;
+    const metadata_budget = host.retention.sharedBudget().narrowed(host.faults.request_scratch_limit_bytes);
     var metadata = store_module.OutputMetadataWriter.init(
         host.io,
         host.lease.paths.scratch.slice(),
         metadata_name,
-        &host.scratch_used,
-        host.faults.request_scratch_limit_bytes,
+        metadata_budget,
         host.faults.response_metadata_unlink,
         &retained_metadata,
     ) catch |err| {
@@ -2715,6 +2715,62 @@ test "named scratch retry releases custody through the shutdown owner path" {
         scratch.statFile(std.testing.io, "named-owner.tmp", .{}),
     );
     try std.testing.expect(!advanceRetainedCleanup(&host, &slots, now, &retry_at));
+}
+
+test "provider metadata uses shared scratch reclamation without widening its limit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    const root_budget = protocol.ScratchBudget{ .used = &used, .limit = 104 };
+    var entries: [2]output_retention.Entry = undefined;
+    var retention = output_retention.Queue.initialize(std.testing.io, root, root_budget, &entries);
+    defer retention.cleanupAll();
+
+    var stdout = try tmp.dir.createFile(std.testing.io, "stdout", .{ .read = true });
+    var stderr = try tmp.dir.createFile(std.testing.io, "stderr", .{ .read = true });
+    try std.testing.expect(root_budget.reserve(2));
+    const pair = (try retention.reservePair("stdout", 1, "stderr", 1)).?;
+    var retained_metadata: ?named_scratch.Owner = null;
+    var metadata = try store_module.OutputMetadataWriter.init(
+        std.testing.io,
+        root,
+        "metadata",
+        retention.sharedBudget(),
+        false,
+        &retained_metadata,
+    );
+    try std.testing.expectError(
+        error.MetadataScratchExhausted,
+        metadata.append(.{ .tag = .usage, .start = 0, .length = 0 }),
+    );
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), retention.occupied());
+
+    stdout.close(std.testing.io);
+    stderr.close(std.testing.io);
+    try retention.publishPair(pair);
+    try metadata.append(.{ .tag = .usage, .start = 0, .length = 0 });
+    try std.testing.expectEqual(@as(u64, 104), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), retention.occupied());
+    metadata.deinit();
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+
+    var limited = try store_module.OutputMetadataWriter.init(
+        std.testing.io,
+        root,
+        "limited-metadata",
+        retention.sharedBudget().narrowed(103),
+        false,
+        &retained_metadata,
+    );
+    defer limited.deinit();
+    try std.testing.expectError(
+        error.MetadataScratchExhausted,
+        limited.append(.{ .tag = .usage, .start = 0, .length = 0 }),
+    );
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
 test "message observation renders every closed queue state without fabricated rejection state" {

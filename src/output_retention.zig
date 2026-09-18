@@ -222,8 +222,7 @@ pub const Queue = struct {
 
     fn reclaimForReservation(context: *anyopaque, amount: u64, limit: u64) bool {
         const self: *Queue = @ptrCast(@alignCast(context));
-        var limited = self.budget;
-        limited.limit = @min(limited.limit, limit);
+        const limited = self.budget.narrowed(limit);
         while (!limited.reserveWithoutReclaim(amount)) {
             if (!(self.evictOldest() catch return false)) return false;
         }

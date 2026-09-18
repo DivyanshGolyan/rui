@@ -6,6 +6,12 @@ limit: u64,
 reclaim_context: ?*anyopaque = null,
 reclaim_fn: ?*const fn (*anyopaque, u64, u64) bool = null,
 
+pub fn narrowed(self: ScratchBudget, limit: u64) ScratchBudget {
+    var result = self;
+    result.limit = @min(result.limit, limit);
+    return result;
+}
+
 pub fn reserve(self: ScratchBudget, amount: u64) bool {
     if (self.reserveWithoutReclaim(amount)) return true;
     const reclaim = self.reclaim_fn orelse return false;
@@ -78,4 +84,11 @@ test "partial scratch reservation owns only available capacity" {
     try std.testing.expectEqual(@as(u64, 0), budget.reserveUpTo(1));
     budget.release(3);
     try std.testing.expectEqual(@as(u64, 7), used.load(.acquire));
+}
+
+test "narrowing a scratch budget cannot widen its authority" {
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 10 };
+    try std.testing.expectEqual(@as(u64, 10), budget.narrowed(11).limit);
+    try std.testing.expectEqual(@as(u64, 9), budget.narrowed(9).limit);
 }

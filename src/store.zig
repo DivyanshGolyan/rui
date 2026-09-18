@@ -511,8 +511,7 @@ const output_metadata_record_bytes = 104;
 pub const OutputMetadataWriter = struct {
     io: std.Io,
     file: std.Io.File,
-    used: *std.atomic.Value(u64),
-    limit: u64,
+    budget: protocol.ScratchBudget,
     charged: u64 = 0,
     records: u64 = 0,
     decoded_length: u64 = 0,
@@ -523,8 +522,7 @@ pub const OutputMetadataWriter = struct {
         io: std.Io,
         scratch_path: []const u8,
         name: []const u8,
-        used: *std.atomic.Value(u64),
-        limit: u64,
+        budget: protocol.ScratchBudget,
         fail_unlink: bool,
         retained: *?named_scratch.Owner,
     ) !OutputMetadataWriter {
@@ -542,23 +540,23 @@ pub const OutputMetadataWriter = struct {
                 file,
                 null,
                 name,
-                .{ .used = used, .limit = limit },
+                budget,
                 0,
                 .injected_failure,
             );
             return error.InjectedMetadataUnlinkFailure;
         }
         scratch.deleteFile(io, name) catch |err| {
-            retained.* = .init(io, file, null, name, .{ .used = used, .limit = limit }, 0, .native);
+            retained.* = .init(io, file, null, name, budget, 0, .native);
             return err;
         };
-        return .{ .io = io, .file = file, .used = used, .limit = limit };
+        return .{ .io = io, .file = file, .budget = budget };
     }
 
     pub fn append(self: *OutputMetadataWriter, record: OutputMetadataRecord) !void {
         std.debug.assert(!self.sealed);
         if (self.fail_writes) return error.InjectedMetadataFailure;
-        if (!reserveAtomic(self.used, self.limit, output_metadata_record_bytes)) {
+        if (!self.budget.reserve(output_metadata_record_bytes)) {
             return error.MetadataScratchExhausted;
         }
         // A failed write ends validation; retain the complete fixed-record
@@ -589,7 +587,7 @@ pub const OutputMetadataWriter = struct {
 
     pub fn deinit(self: *OutputMetadataWriter) void {
         self.file.close(self.io);
-        releaseAtomic(self.used, self.charged);
+        self.budget.release(self.charged);
         self.* = undefined;
     }
 };
@@ -874,21 +872,6 @@ pub const ValidatedOutput = struct {
     x_openai_model: protocol.Bounded(protocol.max_model_bytes),
     request_id: protocol.Bounded(256),
 };
-
-fn reserveAtomic(used: *std.atomic.Value(u64), limit: u64, amount: u64) bool {
-    if (amount > limit) return false;
-    var current = used.load(.acquire);
-    while (true) {
-        const next = std.math.add(u64, current, amount) catch return false;
-        if (next > limit) return false;
-        current = used.cmpxchgWeak(current, next, .acq_rel, .acquire) orelse return true;
-    }
-}
-
-fn releaseAtomic(used: *std.atomic.Value(u64), amount: u64) void {
-    const prior = used.fetchSub(amount, .acq_rel);
-    std.debug.assert(prior >= amount);
-}
 
 pub const SessionObservation = struct {
     found: bool = false,
@@ -6356,8 +6339,10 @@ fn settleCallsForTesting(
         std.testing.io,
         root_buffer[0..root_length],
         file_prefix,
-        &metadata_used,
-        try std.math.mul(u64, calls.len, 5 * output_metadata_record_bytes),
+        .{
+            .used = &metadata_used,
+            .limit = try std.math.mul(u64, calls.len, 5 * output_metadata_record_bytes),
+        },
         false,
         &retained_metadata,
     );
@@ -9585,8 +9570,7 @@ test "continued accepted output keeps model continuation incompatible" {
         std.testing.io,
         root_buffer[0..root_length],
         "continued-metadata",
-        &metadata_used,
-        1_024,
+        .{ .used = &metadata_used, .limit = 1_024 },
         false,
         &retained_metadata,
     );
