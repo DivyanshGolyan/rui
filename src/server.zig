@@ -1,6 +1,7 @@
 const std = @import("std");
 const bash = @import("bash.zig");
 const execution = @import("execution.zig");
+const named_scratch = @import("named_scratch.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const provider = @import("provider.zig");
@@ -314,14 +315,9 @@ const CleanupSlot = struct {
     cleanup_deadline: std.Io.Clock.Timestamp,
 };
 
-const RetainedScratchSlot = struct {
+const NamedScratchSlot = struct {
     token: execution.CustodyToken,
-    scratch: provider.RetainedScratch,
-};
-
-const RetainedMetadataSlot = struct {
-    token: execution.CustodyToken,
-    metadata: store_module.RetainedOutputMetadata,
+    owner: named_scratch.Owner,
 };
 
 const BashSlot = struct {
@@ -354,8 +350,7 @@ const ExecutionSlot = union(enum) {
     bash: BashSlot,
     bash_prepared_cleanup: BashPreparedCleanupSlot,
     cleanup: CleanupSlot,
-    retained_scratch: RetainedScratchSlot,
-    retained_metadata: RetainedMetadataSlot,
+    named_scratch: NamedScratchSlot,
 };
 
 const AdmissionProgress = enum { no_work, retry_later, admitted };
@@ -511,7 +506,7 @@ fn cancelSupersededTransfers(host: *Host, reactor: ?*provider.Reactor, slots: []
             active.transfer.deinit();
             beginCleanup(host, slot, owner);
         },
-        .free, .bash_preparing, .bash, .bash_prepared_cleanup, .cleanup, .retained_scratch, .retained_metadata => {},
+        .free, .bash_preparing, .bash, .bash_prepared_cleanup, .cleanup, .named_scratch => {},
     };
 }
 
@@ -536,7 +531,7 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
     for (active.slots) |slot| switch (slot) {
         .provider => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .cleanup => |value| if (value.owner.binding.operation_id == operation_id) return true,
-        .free, .bash_preparing, .bash, .bash_prepared_cleanup, .retained_scratch, .retained_metadata => {},
+        .free, .bash_preparing, .bash, .bash_prepared_cleanup, .named_scratch => {},
     };
     return false;
 }
@@ -990,7 +985,7 @@ fn beginAdmittedAttempt(
     defer view.close();
     var request_budget = host.retention.sharedBudget();
     request_budget.limit = if (host.faults.request_scratch_acquire) 0 else host.faults.request_scratch_limit_bytes;
-    var retained_scratch: ?provider.RetainedScratch = null;
+    var retained_scratch: ?named_scratch.Owner = null;
     var request = provider.materialize(
         host.io,
         &view,
@@ -1006,9 +1001,9 @@ fn beginAdmittedAttempt(
     ) catch |err| {
         if (retained_scratch) |retained| {
             host.custody.detach(token) catch unreachable;
-            slot.* = .{ .retained_scratch = .{
+            slot.* = .{ .named_scratch = .{
                 .token = token,
-                .scratch = retained,
+                .owner = retained,
             } };
             retainDispatchFence(host, "request scratch unlink", err);
             return .admitted;
@@ -1026,7 +1021,7 @@ fn beginAdmittedAttempt(
         finishCustodyNow(host, token);
         return .admitted;
     };
-    var retained_response: ?provider.RetainedScratch = null;
+    var retained_response: ?named_scratch.Owner = null;
     if (host.faults.provider_prepare) {
         request.deinit();
         settleAttemptFailure(host, token, binding, "provider_transport_failure", .{ .retryable = .{
@@ -1053,9 +1048,9 @@ fn beginAdmittedAttempt(
         request.deinit();
         if (retained_response) |retained| {
             host.custody.detach(token) catch unreachable;
-            slot.* = .{ .retained_scratch = .{
+            slot.* = .{ .named_scratch = .{
                 .token = token,
-                .scratch = retained,
+                .owner = retained,
             } };
             retainDispatchFence(host, "response scratch unlink", err);
             return .admitted;
@@ -1146,11 +1141,11 @@ fn completeTransfer(
     if (evidence.disposition == .success) {
         switch (completeSuccessfulTransfer(host, active)) {
             .cleanup => beginCleanup(host, slot, owner),
-            .retained_metadata => |metadata| {
+            .named_scratch => |scratch| {
                 host.custody.detach(owner.token) catch unreachable;
-                slot.* = .{ .retained_metadata = .{
+                slot.* = .{ .named_scratch = .{
                     .token = owner.token,
-                    .metadata = metadata,
+                    .owner = scratch,
                 } };
             },
         }
@@ -1190,7 +1185,7 @@ fn completeTransfer(
 
 const SuccessfulCompletion = union(enum) {
     cleanup,
-    retained_metadata: store_module.RetainedOutputMetadata,
+    named_scratch: named_scratch.Owner,
 };
 
 fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulCompletion {
@@ -1222,7 +1217,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         owner.binding.operation_id,
         owner.binding.attempt_ordinal,
     }) catch unreachable;
-    var retained_metadata: ?store_module.RetainedOutputMetadata = null;
+    var retained_metadata: ?named_scratch.Owner = null;
     var metadata = store_module.OutputMetadataWriter.init(
         host.io,
         host.lease.paths.scratch.slice(),
@@ -1234,7 +1229,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     ) catch |err| {
         if (retained_metadata) |retained| {
             retainDispatchFence(host, "response metadata unlink", err);
-            return .{ .retained_metadata = retained };
+            return .{ .named_scratch = retained };
         }
         std.debug.print("rui: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         settleAttemptFailure(host, owner.token, owner.binding, "response_metadata_exhausted", .terminal);
@@ -1376,14 +1371,8 @@ fn advanceRetainedCleanup(
             slot.* = .free;
             made_progress = true;
         },
-        .retained_scratch => |*retained| {
-            retained.scratch.cleanup(host.lease.paths.scratch.slice()) catch continue;
-            host.custody.cleanupComplete(retained.token) catch unreachable;
-            slot.* = .free;
-            made_progress = true;
-        },
-        .retained_metadata => |*retained| {
-            retained.metadata.cleanup(host.lease.paths.scratch.slice()) catch continue;
+        .named_scratch => |*retained| {
+            _ = retained.owner.reclaim(host.lease.paths.scratch.slice()) catch continue;
             host.custody.cleanupComplete(retained.token) catch unreachable;
             slot.* = .free;
             made_progress = true;
@@ -1412,7 +1401,7 @@ fn shutdownExecution(
             slot.* = .free;
         },
         .bash => |*active| active.execution.requestInfrastructureShutdown(),
-        .bash_prepared_cleanup, .retained_scratch, .retained_metadata => {},
+        .bash_prepared_cleanup, .named_scratch => {},
         .provider => |*active| {
             const token = active.owner.token;
             reactor.?.cancel(&active.transfer);

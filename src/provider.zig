@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 const provider_output = @import("provider_output.zig");
 const store = @import("store.zig");
@@ -51,25 +52,6 @@ pub const PreparedRequest = struct {
     }
 };
 
-pub const RetainedScratch = struct {
-    io: std.Io,
-    file: std.Io.File,
-    secondary_file: ?std.Io.File = null,
-    name: protocol.Bounded(96),
-    charged: u64,
-    budget: ScratchBudget,
-
-    pub fn cleanup(self: *RetainedScratch, scratch_path: []const u8) !void {
-        var scratch = try std.Io.Dir.cwd().openDir(self.io, scratch_path, .{});
-        defer scratch.close(self.io);
-        try scratch.deleteFile(self.io, self.name.slice());
-        self.file.close(self.io);
-        if (self.secondary_file) |file| file.close(self.io);
-        self.budget.release(self.charged);
-        self.* = undefined;
-    }
-};
-
 fn retainedNamedScratch(
     io: std.Io,
     file: std.Io.File,
@@ -77,17 +59,9 @@ fn retainedNamedScratch(
     name: []const u8,
     budget: ScratchBudget,
     charged: u64,
-) RetainedScratch {
-    var retained = RetainedScratch{
-        .io = io,
-        .file = file,
-        .secondary_file = secondary_file,
-        .name = .{},
-        .charged = charged,
-        .budget = budget,
-    };
-    retained.name.set(name) catch unreachable;
-    return retained;
+    removal: named_scratch.Removal,
+) named_scratch.Owner {
+    return .init(io, file, secondary_file, name, budget, charged, removal);
 }
 
 const RequestWriter = struct {
@@ -187,7 +161,7 @@ pub fn materialize(
     scratch_path: []const u8,
     budget: ScratchBudget,
     faults: PreparationFaults,
-    retained: *?RetainedScratch,
+    retained: *?named_scratch.Owner,
 ) !PreparedRequest {
     retained.* = null;
     if (faults.first_step) return error.InjectedFirstPreparationFailure;
@@ -201,15 +175,15 @@ pub fn materialize(
     });
     const file = try scratch.createFile(io, name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
     const readonly = scratch.openFile(io, name, .{}) catch |err| {
-        retained.* = retainedNamedScratch(io, file, null, name, budget, 0);
+        retained.* = retainedNamedScratch(io, file, null, name, budget, 0, .native);
         return err;
     };
     if (faults.unlink) {
-        retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0);
+        retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0, .injected_failure);
         return error.InjectedRequestUnlinkFailure;
     }
     scratch.deleteFile(io, name) catch |err| {
-        retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0);
+        retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0, .native);
         return err;
     };
 
@@ -489,7 +463,7 @@ pub const ResponseCapture = struct {
         fail_acquire: bool,
         fail_unlink: bool,
         fail_write: bool,
-        retained: *?RetainedScratch,
+        retained: *?named_scratch.Owner,
     ) !ResponseCapture {
         retained.* = null;
         if (fail_acquire) return error.InjectedResponseAcquireFailure;
@@ -506,15 +480,15 @@ pub const ResponseCapture = struct {
             .permissions = .fromMode(0o600),
         });
         const readonly = scratch.openFile(io, name, .{}) catch |err| {
-            retained.* = retainedNamedScratch(io, file, null, name, budget, 0);
+            retained.* = retainedNamedScratch(io, file, null, name, budget, 0, .native);
             return err;
         };
         if (fail_unlink) {
-            retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0);
+            retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0, .injected_failure);
             return error.InjectedResponseUnlinkFailure;
         }
         scratch.deleteFile(io, name) catch |err| {
-            retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0);
+            retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0, .native);
             return err;
         };
         return .{
@@ -615,7 +589,7 @@ pub const Transfer = struct {
         options: TransportOptions,
         scratch_path: []const u8,
         response_budget: ScratchBudget,
-        retained_response: *?RetainedScratch,
+        retained_response: *?named_scratch.Owner,
     ) !void {
         if (options.inactivity_seconds <= 0) return error.InvalidTransportTimeout;
         const inactivity_ns = std.math.mul(i64, options.inactivity_seconds, std.time.ns_per_s) catch

@@ -1,4 +1,5 @@
 const std = @import("std");
+const named_scratch = @import("named_scratch.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const tool_catalog = @import("tools.zig");
@@ -525,7 +526,7 @@ pub const OutputMetadataWriter = struct {
         used: *std.atomic.Value(u64),
         limit: u64,
         fail_unlink: bool,
-        retained: *?RetainedOutputMetadata,
+        retained: *?named_scratch.Owner,
     ) !OutputMetadataWriter {
         retained.* = null;
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
@@ -536,11 +537,19 @@ pub const OutputMetadataWriter = struct {
             .permissions = .fromMode(0o600),
         });
         if (fail_unlink) {
-            retained.* = retainedOutputMetadata(io, file, name, used);
+            retained.* = .init(
+                io,
+                file,
+                null,
+                name,
+                .{ .used = used, .limit = limit },
+                0,
+                .injected_failure,
+            );
             return error.InjectedMetadataUnlinkFailure;
         }
         scratch.deleteFile(io, name) catch |err| {
-            retained.* = retainedOutputMetadata(io, file, name, used);
+            retained.* = .init(io, file, null, name, .{ .used = used, .limit = limit }, 0, .native);
             return err;
         };
         return .{ .io = io, .file = file, .used = used, .limit = limit };
@@ -584,39 +593,6 @@ pub const OutputMetadataWriter = struct {
         self.* = undefined;
     }
 };
-
-pub const RetainedOutputMetadata = struct {
-    io: std.Io,
-    file: std.Io.File,
-    name: protocol.Bounded(96),
-    used: *std.atomic.Value(u64),
-    charged: u64 = 0,
-
-    pub fn cleanup(self: *RetainedOutputMetadata, scratch_path: []const u8) !void {
-        var scratch = try std.Io.Dir.cwd().openDir(self.io, scratch_path, .{});
-        defer scratch.close(self.io);
-        try scratch.deleteFile(self.io, self.name.slice());
-        self.file.close(self.io);
-        releaseAtomic(self.used, self.charged);
-        self.* = undefined;
-    }
-};
-
-fn retainedOutputMetadata(
-    io: std.Io,
-    file: std.Io.File,
-    name: []const u8,
-    used: *std.atomic.Value(u64),
-) RetainedOutputMetadata {
-    var retained = RetainedOutputMetadata{
-        .io = io,
-        .file = file,
-        .name = .{},
-        .used = used,
-    };
-    retained.name.set(name) catch unreachable;
-    return retained;
-}
 
 pub const OutputMetadataReader = struct {
     io: std.Io,
@@ -6377,7 +6353,7 @@ fn settleCallsForTesting(
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
     var metadata_used: std.atomic.Value(u64) = .init(0);
-    var retained_metadata: ?RetainedOutputMetadata = null;
+    var retained_metadata: ?named_scratch.Owner = null;
     var metadata = try OutputMetadataWriter.init(
         std.testing.io,
         root_buffer[0..root_length],
@@ -9597,7 +9573,7 @@ test "continued accepted output keeps model continuation incompatible" {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
     var metadata_used: std.atomic.Value(u64) = .init(0);
-    var retained_metadata: ?RetainedOutputMetadata = null;
+    var retained_metadata: ?named_scratch.Owner = null;
     var metadata = try OutputMetadataWriter.init(
         std.testing.io,
         root_buffer[0..root_length],
