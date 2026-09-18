@@ -49,6 +49,8 @@ def configure(state, store, key, session, permission="ask"):
         fixture.ROOT,
         "--model",
         "model-a",
+        "--tools",
+        "bash",
         "--permission-mode",
         permission,
     )
@@ -128,7 +130,7 @@ def process_exists(pid):
         return False
 
 
-def wait_for_phase(process, phase, timeout=8):
+def wait_for_phase(process, phase, timeout=8, action=None):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         ready, _, _ = select.select([process.stderr], [], [], deadline - time.monotonic())
@@ -141,7 +143,9 @@ def wait_for_phase(process, phase, timeout=8):
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("rui_test_phase") == phase:
+        if event.get("rui_test_phase") == phase and (
+            action is None or event.get("action") == str(action)
+        ):
             return event
     raise TimeoutError(f"timed out waiting for phase {phase}")
 
@@ -177,12 +181,34 @@ def add_exchange(responses, name, command, answer="continued", timeout_ms=None):
 def main():
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-bash."))
     responses = []
-    counter = state / "launch-counter"
+    success_workspace = state / "success-workspace"
+    success_workspace.mkdir()
+    counter = success_workspace / "launch-counter"
     large_command = (
-        f"printf x >> {counter}; "
+        "printf x >> launch-counter; "
         "head -c 12000 /dev/zero | tr '\\0' z; printf '\\377'; printf stderr-marker >&2"
     )
-    add_exchange(responses, "success", large_command)
+    success_arguments = json.dumps(
+        {"cmd": large_command, "timeout_ms": None}, separators=(",", ":")
+    )
+    responses.append(
+        fixture.sse_tool_calls(
+            "success-calls",
+            [
+                ("bash", "success-call", success_arguments),
+                ("missing-tool", "success-unknown-call", "{}"),
+                ("bash", "success-invalid-call", '{"cmd":7}'),
+            ],
+        )
+    )
+    responses.append(
+        fixture.sse_answer(
+            "success-answer",
+            "success-reasoning",
+            "success-message-result",
+            "continued",
+        )[0]
+    )
     rollback_marker = state / "rollback-marker"
     add_exchange(responses, "rollback", f"printf x >> {rollback_marker}")
     unattempted_marker = state / "unattempted-marker"
@@ -349,14 +375,83 @@ def main():
     completed = False
     resource_samples = []
     try:
-        host = fixture.start_host(store, endpoint_url, active_capacity=2)
+        host = fixture.start_host(
+            store,
+            endpoint_url,
+            "--test-cleanup-delay-ms",
+            "10000",
+            "--test-phase-trace",
+            active_capacity=3,
+        )
         resource_samples.append({"phase": "cold", **process_resources(host), **scratch_resources(store)})
 
-        configure(state, store, "success-config", "direct/success")
-        fixture.message(state, store, "success-message", "direct/success", "execute")
+        fixture.configure_lost_reply(
+            state,
+            store,
+            "success-config",
+            "direct/success",
+            "model-a",
+            workspace=success_workspace,
+            tools="bash",
+            permission="ask",
+        )
+        recovered_configuration = fixture.command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            state / "success-config.json",
+            "--kind",
+            "configure",
+        )
+        assert recovered_configuration["answer"]["status"] == "accepted", recovered_configuration
+        assert recovered_configuration["answer"]["replayed"] is True, recovered_configuration
+        fixture.message_lost_reply(
+            state, store, "success-message", "direct/success", "execute"
+        )
+        recovered_message = fixture.command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            state / "success-message.json",
+            "--kind",
+            "message",
+        )
+        assert recovered_message["answer"]["status"] == "accepted", recovered_message
+        assert recovered_message["answer"]["replayed"] is True, recovered_message
         success_action = fixture.wait_for(
             lambda: action_for(store, "direct/success"), "successful Bash Action"
         )
+        proposal = fixture.command(
+            "inspect-session",
+            "--store",
+            store,
+            "--session",
+            "direct/success",
+            "--profile",
+            "full",
+        )
+        assert proposal["actions"]["count"] == "1", proposal
+        assert proposal["actions"]["unresolved"] == [success_action], proposal
+        assert success_action["call_ordinal"] == "0", proposal
+        assert success_action["authorization"] == "pending", proposal
+        assert success_action["permission_revision"] == "1", proposal
+        assert fixture.read_action(
+            store, "direct/success", success_action["action"], "call-id"
+        ) == b"success-call"
+        assert fixture.read_action(
+            store, "direct/success", success_action["action"], "arguments"
+        ) == success_arguments.encode()
+        rejected = [
+            call for call in proposal["full"]["tool_calls"] if call["rejection"] is not None
+        ]
+        assert [(call["call_ordinal"], call["rejection"]) for call in rejected] == [
+            ("1", "unknown_tool"),
+            ("2", "invalid_arguments"),
+        ], proposal
+        assert all(int(call["acceptance_position"]) > 0 for call in rejected), proposal
+        assert len(endpoint.requests) == 1, endpoint.requests
         decision = allow(state, store, "success-allow", "direct/success", success_action["action"])
         assert decision["answer"]["replayed"] is False, decision
         replay = fixture.command(
@@ -383,15 +478,39 @@ def main():
             success_action["action"],
         )
         assert conflict["answer"]["status"] == "conflict", conflict
+        wait_for_phase(
+            host,
+            "cleanup_started",
+            action=success_action["action"],
+        )
         fixture.wait_for(
             lambda: fixture.completed_observation(store, "success-message"),
             "successful Bash continuation",
         )
         assert counter.read_text() == "x"
         assert resolution(store, "direct/success") == "succeeded"
+        assert fixture.read_result(store, "success-message") == b"continued"
+        recovered_completed_message = fixture.command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            state / "success-message.json",
+            "--kind",
+            "message",
+        )
+        assert recovered_completed_message["answer"]["status"] == "accepted", recovered_completed_message
+        assert recovered_completed_message["answer"]["replayed"] is True, recovered_completed_message
+        assert len(endpoint.requests) == 2, endpoint.requests
         continuation = json.loads(endpoint.requests[1])
         outputs = [item for item in continuation["input"] if item.get("type") == "function_call_output"]
-        assert [item["call_id"] for item in outputs] == ["success-call"], outputs
+        assert [item["call_id"] for item in outputs] == [
+            "success-call",
+            "success-unknown-call",
+            "success-invalid-call",
+        ], outputs
+        assert outputs[1]["output"] == "Unknown tool: missing-tool.", outputs
+        assert outputs[2]["output"] == "Invalid arguments for tool 'bash'.", outputs
         output = outputs[0]["output"]
         assert "Bash succeeded." in output and "stderr-mark" in output, output
         assert "�" in output and "[earlier output omitted]" in output, output
@@ -399,6 +518,7 @@ def main():
         success_resources = fixture.command(
             "inspect-session", "--store", store, "--session", "direct/success"
         )["execution"]
+        assert success_resources["custody_occupied"] != "0", success_resources
         resource_samples.append(
             {
                 "phase": "retained-output-idle",
@@ -409,6 +529,24 @@ def main():
         )
 
         fixture.stop_host(host)
+        host = None
+        assert rows(store, "SELECT count(*) FROM model_operation") == [(2,)]
+        assert rows(
+            store,
+            "SELECT count(*),count(rejection_content_id),count(acceptance_position) "
+            "FROM model_tool_call WHERE rejection_code IS NOT NULL",
+        ) == [(2, 2, 2)]
+        assert rows(
+            store,
+            "SELECT count(*),count(resolution_content_id),count(acceptance_position) "
+            "FROM action_operation WHERE resolution_code IS NOT NULL",
+        ) == [(1, 1, 1)]
+        assert rows(
+            store,
+            "SELECT count(*) FROM sqlite_schema WHERE "
+            "lower(name) LIKE '%tool_result%' OR lower(name) LIKE '%result_batch%' "
+            "OR lower(name) LIKE '%publication%'",
+        ) == [(0,)]
         host = fixture.start_host(store, endpoint_url, active_capacity=0)
         configure(state, store, "rollback-config", "direct/rollback")
         fixture.stop_host(host)
