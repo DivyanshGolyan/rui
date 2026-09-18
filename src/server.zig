@@ -2633,6 +2633,90 @@ test "cleanup delay follows elapsed time and preserves custody reuse" {
     try std.testing.expect(slots[0] == .free);
 }
 
+test "named scratch retry releases custody through the shutdown owner path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var scratch_path_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const scratch_path_length = try tmp.dir.realPath(std.testing.io, &scratch_path_buffer);
+    var paths: platform.Paths = .{};
+    try paths.scratch.set(scratch_path_buffer[0..scratch_path_length]);
+    var lease = platform.StoreLease{
+        .io = std.testing.io,
+        .paths = paths,
+        .store_dir = undefined,
+        .lock_file = undefined,
+    };
+    var scratch = try std.Io.Dir.cwd().openDir(std.testing.io, lease.paths.scratch.slice(), .{});
+    defer scratch.close(std.testing.io);
+    const primary = try scratch.createFile(std.testing.io, "named-owner.tmp", .{ .read = true });
+    const secondary = try scratch.openFile(std.testing.io, "named-owner.tmp", .{});
+    var scratch_used: std.atomic.Value(u64) = .init(9);
+    var removal_gate: std.atomic.Value(bool) = .init(true);
+    var records: [1]execution.CustodyRecord = undefined;
+    var host = Host{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .lease = &lease,
+        .store = undefined,
+        .faults = .{},
+        .custody = execution.CustodyPool.initialize(&records),
+    };
+    const token = host.custody.reserve().?;
+    var permit = store_module.DispatchPermit{ .binding = .{
+        .turn_id = 1,
+        .operation_id = 1,
+        .attempt_ordinal = 1,
+    } };
+    _ = try host.custody.attach(token, &permit);
+    try host.custody.detach(token);
+    var slots = [_]ExecutionSlot{.{ .named_scratch = .{
+        .token = token,
+        .owner = .init(
+            std.testing.io,
+            primary,
+            secondary,
+            "named-owner.tmp",
+            .{ .used = &scratch_used, .limit = 9 },
+            9,
+            .{ .gated = &removal_gate },
+        ),
+    } }};
+
+    const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+    var retry_at = now;
+    try std.testing.expect(!advanceRetainedCleanup(&host, &slots, now, &retry_at));
+    try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
+    try std.testing.expectEqual(@as(u64, 9), scratch_used.load(.acquire));
+    _ = try scratch.statFile(std.testing.io, "named-owner.tmp", .{});
+
+    var preparation: ?bash.Preparation = null;
+    const Shutdown = struct {
+        fn run(
+            test_host: *Host,
+            test_slots: []ExecutionSlot,
+            test_preparation: *?bash.Preparation,
+        ) void {
+            shutdownExecution(test_host, null, test_slots, test_preparation);
+        }
+    };
+    const shutdown = try std.Thread.spawn(
+        .{},
+        Shutdown.run,
+        .{ &host, slots[0..], &preparation },
+    );
+    removal_gate.store(false, .release);
+    shutdown.join();
+
+    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    try std.testing.expectEqual(@as(u64, 0), scratch_used.load(.acquire));
+    try std.testing.expect(slots[0] == .free);
+    try std.testing.expectError(
+        error.FileNotFound,
+        scratch.statFile(std.testing.io, "named-owner.tmp", .{}),
+    );
+    try std.testing.expect(!advanceRetainedCleanup(&host, &slots, now, &retry_at));
+}
+
 test "message observation renders every closed queue state without fabricated rejection state" {
     const zero_digest = "0000000000000000000000000000000000000000000000000000000000000000";
     const full_digest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
