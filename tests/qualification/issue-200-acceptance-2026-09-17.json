@@ -1,33 +1,48 @@
 {
-  "recorded_utc": "2026-09-18T11:05:30Z",
-  "tested_base_revision": "cf25fa805ead62d72afebc09b9653811696fd053",
-  "working_tree_dirty": true,
-  "scope": "Exact source hashes below identify the uncommitted issue #200 implementation, single-owner Bash lifecycle and bounded owner-progress follow-up tested before its local commit.",
-  "environment": {
-    "runtime": "Amp Linux orb",
-    "platform": "Linux 6.1.158+ x86_64",
-    "os": "Debian GNU/Linux 12 (bookworm)",
-    "zig_version": "0.16.0",
-    "python_version": "3.11.6",
-    "go_version": "1.27.1",
-    "apple_sdk": "unavailable"
+  "recorded_utc": "2026-09-18T12:18:49Z",
+  "tested_revision": "506a8b72bbd63aa61f31476c01e2ad2d0ba6c617",
+  "tested_tree": "44fae36db00080ae248970f4290ab278159f3046",
+  "working_tree_dirty": false,
+  "scope": "Frozen issue #200 bundle revision qualified once on Linux and once on native macOS. The macOS batch stopped on any unexpected result, allowed no retries or cadence changes, and passed on its first run.",
+  "environments": {
+    "linux": {
+      "runtime": "Amp Linux orb",
+      "platform": "Linux 6.1.158+ x86_64",
+      "os": "Debian GNU/Linux 12 (bookworm)",
+      "zig_version": "0.16.0",
+      "python_version": "3.11.6",
+      "go_version": "1.27.1",
+      "apple_sdk": "unavailable"
+    },
+    "macos": {
+      "platform": "macOS 15.7.7 (24G720), Darwin 24.6.0 arm64",
+      "logical_cpus": 10,
+      "memory_bytes": 17179869184,
+      "zig_version": "0.16.0",
+      "python_version": "3.14.7",
+      "go_version": "1.27.1 darwin/arm64",
+      "xcode_version": "26.3 (17C529)",
+      "open_file_limit": 1048576
+    }
   },
   "source_sha256": {
-    "VERIFICATION.md": "390c5f959237d3dd7ff32aeb3a641a042a0adeafbcbf9d319dfd5b476c01d1fc",
-    "build.zig": "8c80e53eb805cc0d0e3903c6781c29ba0585c2eeb71e5ca23bba08fbee41a43a",
-    "src/bash.zig": "41047ecd709975bb57dc4c587108264c0e9301b5fe6c8f1607c4d940bba63e78",
+    "ARCHITECTURE.md": "f7fec50cec8a38e94646c19c2b37eae0fd89c18f26b25f542073a17a45ee9ba8",
+    "VERIFICATION.md": "767949ddcea5bd01f3cfc6932c8e3b04489e092e755d346b58b2019dc7025fdd",
+    "build.zig": "4aa0d6c7430109c4821e94216f1e1375b199b9c6c2ef4747b7134d0fbe27849c",
+    "src/bash.zig": "e9954fe815d172769c0484ac448e42bd596e257bb11f5561c6dbc59d5bda4b6a",
     "src/bash_platform.c": "0d9586e4b401f67e264eca785aa28580836a23fbbc13559038e7e4e9808a35b7",
-    "src/cli.zig": "7acc3c1468c2db3e431c2162bbb56a7dac03c24f02ca1eea9696b3ea69e81e41",
+    "src/cli.zig": "681222322b5691a8e091e7424ea31c139d4de2120722573a862bf44a437aded7",
     "src/output_retention.zig": "9eaf6aea861c417caf14548c49c4e7bf5a2584191142e8d4e9519aee8b21fef9",
-    "src/server.zig": "797fa3382a77eddf403c176a2405e0a28b1a0f9e34416d53b354eae6cf04bba0",
+    "src/server.zig": "b85d2220815462d7ce8f750c5c29977ed76684225805943a873b9b8fbbe2f312",
     "src/store.zig": "a5324f53e2a5baa1c16d5f836d587069e3b150e9c394287aa911d1dde7851791",
     "src/tools.zig": "2da4685bdbc9f5571e359d395d448fe7c1ec9f2332971ff2e63fa4afa20f41e5",
     "tests/integration/admission_integration.sh": "4d83ca530443a373a1b2a96ba9b08b1e3d85f17b2ae907b4c6bbe70733384958",
-    "tests/integration/bash_integration.py": "33d9a3deef6c8903ba543e6ffc18c8502b0bbbf411f083f41149baf7eea11b52",
-    "tests/integration/bash_lifecycle_integration.py": "f7ac7d529af74941db79c2d968ea9731f295f03e2b2271d9148ad238cf02ed82",
-    "tests/integration/check.sh": "d754e4761b625dcdb4190e543a373105b5fbbcc74698ca87a21edbf853f549bf",
+    "tests/integration/bash_integration.py": "4847ff8ca35b3b746ff6c54ae75377f4316fac7da13f217816a38dbfcdab3f58",
+    "tests/integration/bash_lifecycle_integration.py": "352f3add35a54e8db398d7932f91fe5b1a05d9016f38399c44d7adf7ae7bfcde",
+    "tests/integration/bash_owner_integration.py": "23383a6d8a23ab97170a78006089982c04de824305c221bd941aec9a790de36d",
+    "tests/integration/check.sh": "8ed8859c482bd1278492dfc1dedb9e328d93d6b77cd66cf5f06d764f325d94ee",
     "tests/integration/control_integration.py": "7d2ce3ba197d1470e1eb90d5c4d3ddab5d42871a68d4275cbeccc367929139f5",
-    "tests/integration/dispatch_integration.py": "6feadfd786adf1f7f615ff183b0c3fbff02178a0e89b9563b3458835184d8ed8",
+    "tests/integration/dispatch_integration.py": "088b82c6f3071a9c3d2c7faaa7977f8a2cbf6a05e19c19563ed3f0d515b19713",
     "tests/integration/host_process_test.py": "59a5c90671b83d3fec6b7cf6c2698e187be4bc157b79ea779486438307994999"
   },
   "fixed_resources": {
@@ -42,59 +57,52 @@
     "retention_allocation_bytes": 65416,
     "inline_payload_or_excerpt_bytes_per_slot": 0
   },
-  "linux_resource_samples": [
-    {
-      "phase": "cold",
-      "rss_bytes": 7561216,
-      "high_water_bytes": 7561216,
-      "descriptors": 7,
-      "scratch_files": 0,
-      "scratch_logical_bytes": 0
-    },
-    {
-      "phase": "retained-output-idle",
-      "rss_bytes": 9191424,
-      "high_water_bytes": 9555968,
-      "descriptors": 12,
-      "scratch_files": 2,
-      "scratch_logical_bytes": 12014,
-      "accounted_scratch_bytes": 12014
-    },
-    {
-      "phase": "active-descendant-pipes",
-      "rss_bytes": 9068544,
-      "high_water_bytes": 9183232,
-      "descriptors": 17,
-      "scratch_files": 3,
-      "scratch_logical_bytes": 22,
-      "accounted_scratch_bytes": 22
-    },
-    {
-      "phase": "two-sibling-retained-idle",
-      "rss_bytes": 9216000,
-      "high_water_bytes": 9547776,
-      "descriptors": 12,
-      "scratch_files": 4,
-      "scratch_logical_bytes": 0,
-      "accounted_scratch_bytes": 0
-    }
+  "linux_bash_resource_samples": [
+    {"phase": "cold", "rss_bytes": 7499776, "high_water_bytes": 7499776, "descriptors": 7, "scratch_files": 0, "scratch_logical_bytes": 0},
+    {"phase": "retained-output-idle", "rss_bytes": 9207808, "high_water_bytes": 9572352, "descriptors": 12, "scratch_files": 2, "scratch_logical_bytes": 12014, "accounted_scratch_bytes": 12014},
+    {"phase": "active-descendant-pipes", "rss_bytes": 9134080, "high_water_bytes": 9211904, "descriptors": 17, "scratch_files": 3, "scratch_logical_bytes": 22, "accounted_scratch_bytes": 22},
+    {"phase": "two-sibling-retained-idle", "rss_bytes": 9224192, "high_water_bytes": 9555968, "descriptors": 12, "scratch_files": 4, "scratch_logical_bytes": 0, "accounted_scratch_bytes": 0}
   ],
-  "gates": [
-    {"command": "zig build check", "result": "passed", "native_tests": 139, "owner_progress_proof": ["build and unit prerequisites complete before process integrations run serially", "Bash descriptor decoding resumes across every byte boundary", "one shared preparation workspace adds no payload-sized state to each execution slot", "retained preparation cleanup retries on the original Host and releases custody after the fault gate clears", "detached-writer fixtures use the same os.setsid primitive on Linux and macOS without assuming a setsid utility"]},
-    {"command": "zig build bash-lifecycle-integration", "result": "passed", "faults": ["observe", "reap", "reap-watchdog", "group-probe", "tail-snapshot", "signal", "cleanup-watchdog"], "finite_tail_cases": ["idle detached writer"], "ownership_proof": ["observation fault still reaches TERM-to-KILL, reap and clean retirement", "persistent reap/group/watchdog faults retain the Store lease and custody", "clearing a test fault lets the same owner finish without relaunch", "forced Host death recovers indeterminate without replay"]},
-    {"command": "zig build measurement-check", "result": "passed"},
-    {"command": "zig build cross-check-linux", "result": "passed", "targets": ["Linux x86-64", "Linux ARM64"]},
-    {"command": "python3 -m py_compile tests/integration/*.py", "result": "passed"},
-    {"command": "zig fmt --check --ast-check build.zig src", "result": "passed"},
-    {"command": "git diff --check", "result": "passed"},
-    {"command": "empty-cache pinned dependency fetch and build", "result": "unavailable", "diagnostic": "ResolvConfParseFailed"},
-    {"command": "zig build cross-check-macos", "result": "unavailable", "diagnostic": "xcrun and Apple SDK unavailable in Linux orb"}
+  "macos_bash_resource_samples": [
+    {"phase": "cold", "scratch_files": 0, "scratch_logical_bytes": 0},
+    {"phase": "retained-output-idle", "scratch_files": 2, "scratch_logical_bytes": 12014, "accounted_scratch_bytes": 12014},
+    {"phase": "active-descendant-pipes", "scratch_files": 3, "scratch_logical_bytes": 22, "accounted_scratch_bytes": 22},
+    {"phase": "two-sibling-retained-idle", "scratch_files": 4, "scratch_logical_bytes": 0, "accounted_scratch_bytes": 0}
+  ],
+  "gates": {
+    "linux": [
+      {"command": "zig build check", "result": "passed", "native_tests": 142},
+      {"command": "zig build measurement-check", "result": "passed"},
+      {"command": "zig build cross-check-linux", "result": "passed", "targets": ["Linux x86-64", "Linux ARM64"]},
+      {"command": "python3 -m py_compile tests/integration/*.py", "result": "passed"},
+      {"command": "sh -n tests/integration/check.sh", "result": "passed"},
+      {"command": "zig fmt --check --ast-check build.zig src", "result": "passed"},
+      {"command": "git diff --check", "result": "passed"},
+      {"command": "zig build cross-check-macos", "result": "unavailable", "diagnostic": "xcrun and Apple SDK unavailable in Linux orb; native macOS cross-check below passed"}
+    ],
+    "macos": [
+      {"command": "zig build check", "result": "passed", "seconds": 444.10, "single_bounded_run": true, "process_integrations_serial": true, "maximum_rss_bytes": 670760960, "peak_memory_footprint_bytes": 521294208, "user_cpu_seconds": 71.22, "system_cpu_seconds": 28.11},
+      {"command": "zig build measurement-check", "result": "passed", "seconds": 5.85, "maximum_rss_bytes": 173850624, "peak_memory_footprint_bytes": 10438848},
+      {"command": "zig build cross-check", "result": "passed", "seconds": 3.19, "targets": ["macOS ARM64", "macOS x86-64", "Linux ARM64", "Linux x86-64"], "maximum_rss_bytes": 89358336, "peak_memory_footprint_bytes": 10127616},
+      {"command": "zig fmt --check --ast-check build.zig src", "result": "passed"},
+      {"command": "python3 -m py_compile tests/integration/*.py", "result": "passed"},
+      {"command": "sh -n tests/integration/check.sh", "result": "passed"},
+      {"command": "git diff --check 30f618eb092fe2d09ad2f51197e1b0501df00a5f..HEAD", "result": "passed"},
+      {"command": "exact commit/tree and clean-worktree assertions", "result": "passed"}
+    ]
+  },
+  "owner_proofs": [
+    "Incremental Bash preparation failure releases scratch, custody and the execution slot; a second Action runs in the same slot.",
+    "Exact and crossing shared-scratch arithmetic run in fresh Stores without a live inspection consuming the measured budget; provider continuation proves settlement before offline canonical-row audit.",
+    "Cleanup-watchdog expiry enters finite-tail capture; a detached writer observes pipe hangup and EPIPE while process custody remains retained until the original owner confirms retirement.",
+    "Native lifecycle faults retain the Store lease and custody, clear through the same owner without relaunch, and recover indeterminate after forced custody loss.",
+    "The complete journey proves authorization, execution, timeout, stop, capture, settlement, continuation, cleanup and recovery through final outcomes rather than transient process states."
   ],
   "qualification_limits": [
-    "Linux RSS/HWM are portable diagnostics, not the accepted macOS physical-footprint counter.",
     "Deterministic loopback provider and local Bash; no live provider or TLS qualification.",
     "Process termination and fresh-process reopen do not establish filesystem power-loss durability.",
     "Process-group cleanup does not establish containment of detached descendants.",
+    "The macOS /usr/bin/time memory counters cover the complete build gate and are diagnostics, not a Rui-only Host footprint measurement.",
     "Broad model/Bash/Edit mixed qualification at default capacity 1000 remains issue #168."
   ]
 }
