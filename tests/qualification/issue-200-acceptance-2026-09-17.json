@@ -1,5 +1,5 @@
 {
-  "recorded_utc": "2026-09-18T07:56:56Z",
+  "recorded_utc": "2026-09-18T08:11:55Z",
   "tested_base_revision": "cf25fa805ead62d72afebc09b9653811696fd053",
   "working_tree_dirty": true,
   "scope": "Exact source hashes below identify the uncommitted issue #200 implementation, single-owner Bash lifecycle and bounded owner-progress follow-up tested before its local commit.",
@@ -22,8 +22,8 @@
     "src/store.zig": "a5324f53e2a5baa1c16d5f836d587069e3b150e9c394287aa911d1dde7851791",
     "src/tools.zig": "2da4685bdbc9f5571e359d395d448fe7c1ec9f2332971ff2e63fa4afa20f41e5",
     "tests/integration/admission_integration.sh": "4d83ca530443a373a1b2a96ba9b08b1e3d85f17b2ae907b4c6bbe70733384958",
-    "tests/integration/bash_integration.py": "96b7611cb6e501a1441e677ac31bd99c81dff97757e081816e1b69956b81a5a0",
-    "tests/integration/bash_lifecycle_integration.py": "9d836122a1577340bea74c1b28d08ef72568224f770a9ba0afaa94d3f05fe9a6",
+    "tests/integration/bash_integration.py": "ca2fff6e6ca452b5464615ac6d1808ff6c8004b33aef0e2a11da544c2cfc5cd4",
+    "tests/integration/bash_lifecycle_integration.py": "f7ac7d529af74941db79c2d968ea9731f295f03e2b2271d9148ad238cf02ed82",
     "tests/integration/control_integration.py": "7d2ce3ba197d1470e1eb90d5c4d3ddab5d42871a68d4275cbeccc367929139f5",
     "tests/integration/dispatch_integration.py": "4633dd5f43068c9c89a01ff88b07e438ce7b492c02e12ddf0053aa1a983e8836"
   },
@@ -42,16 +42,16 @@
   "linux_resource_samples": [
     {
       "phase": "cold",
-      "rss_bytes": 7561216,
-      "high_water_bytes": 7561216,
+      "rss_bytes": 7499776,
+      "high_water_bytes": 7499776,
       "descriptors": 7,
       "scratch_files": 0,
       "scratch_logical_bytes": 0
     },
     {
       "phase": "retained-output-idle",
-      "rss_bytes": 9191424,
-      "high_water_bytes": 9555968,
+      "rss_bytes": 9195520,
+      "high_water_bytes": 9560064,
       "descriptors": 12,
       "scratch_files": 2,
       "scratch_logical_bytes": 12014,
@@ -59,8 +59,8 @@
     },
     {
       "phase": "active-descendant-pipes",
-      "rss_bytes": 9187328,
-      "high_water_bytes": 9302016,
+      "rss_bytes": 9175040,
+      "high_water_bytes": 9289728,
       "descriptors": 17,
       "scratch_files": 3,
       "scratch_logical_bytes": 22,
@@ -68,8 +68,8 @@
     },
     {
       "phase": "two-sibling-retained-idle",
-      "rss_bytes": 9269248,
-      "high_water_bytes": 9601024,
+      "rss_bytes": 9244672,
+      "high_water_bytes": 9576448,
       "descriptors": 12,
       "scratch_files": 4,
       "scratch_logical_bytes": 0,

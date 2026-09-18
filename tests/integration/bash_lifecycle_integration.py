@@ -206,7 +206,9 @@ def main():
         detached_pid_path = state / "detached-pid"
         endpoint, thread, endpoint_url = endpoint_for(
             name,
-            bash_fixture.detached_shell(f"echo $$ > {detached_pid_path}; sleep 30") + " &",
+            bash_fixture.start_detached_shell(
+                f"echo $$ > {detached_pid_path}; sleep 30", detached_pid_path
+            ),
         )
         host = None
         detached_pid = None
@@ -242,8 +244,12 @@ def main():
         state = root / name
         state.mkdir(mode=0o700)
         store = state / "store"
+        detached_ready = state / "detached-ready"
         endpoint, thread, endpoint_url = endpoint_for(
-            name, bash_fixture.detached_shell("sleep 2") + " &"
+            name,
+            bash_fixture.start_detached_shell(
+                f"echo $$ > {detached_ready}; sleep 2", detached_ready
+            ),
         )
         host = None
         try:

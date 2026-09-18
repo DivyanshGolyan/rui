@@ -29,6 +29,11 @@ def detached_shell(command):
     )
 
 
+def start_detached_shell(command, ready_path):
+    ready = shlex.quote(str(ready_path))
+    return f"{detached_shell(command)} & while [ ! -s {ready} ]; do :; done"
+
+
 def configure(state, store, key, session, permission="ask"):
     result = fixture.command(
         "configure",
@@ -265,11 +270,11 @@ def main():
         responses,
         "detached-timeout",
         f"printf $$ > {detached_bash_pid}; "
-        + detached_shell(
+        + start_detached_shell(
             f"trap '' TERM PIPE; echo $$ > {detached_pid}; "
-            "head -c 32768 /dev/zero; while :; do printf detached; sleep 1; done"
-        )
-        + " &",
+            "head -c 32768 /dev/zero; while :; do printf detached; sleep 1; done",
+            detached_pid,
+        ),
         timeout_ms=100,
     )
     same_group_pid = state / "same-group-pid"
