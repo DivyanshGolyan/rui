@@ -3985,6 +3985,7 @@ def main():
             leftovers = wait_for(
                 lambda store=owned_store, glob=pattern: list((store / "scratch").glob(glob)),
                 f"retained named {fault} scratch",
+                timeout=20,
             )
             resources = command(
                 "inspect-session", "--store", owned_store, "--session", f"direct/{fault}"

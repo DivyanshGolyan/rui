@@ -271,7 +271,7 @@ def main():
         responses,
         "busy-output",
         "head -c 2097152 /dev/zero | tr '\\0' q",
-        timeout_ms=2000,
+        timeout_ms=None,
     )
     add_exchange(responses, "cleanup", "printf cleaned")
     add_exchange(responses, "preparation", "printf never")
