@@ -7,13 +7,16 @@ pub const CustodyToken = struct {
 };
 
 const State = enum(u8) { free, reserved, attached, detached };
+const BindingKind = enum(u8) { model, action };
 
 pub const CustodyRecord = struct {
     state: std.atomic.Value(State) = .init(.free),
     generation: std.atomic.Value(u64) = .init(0),
     delivered: std.atomic.Value(bool) = .init(false),
     launch_available: std.atomic.Value(bool) = .init(false),
+    binding_kind: BindingKind = .model,
     binding: store.AttemptBinding = undefined,
+    action_binding: store.ActionAttemptBinding = undefined,
 };
 
 pub const CustodyPool = struct {
@@ -43,9 +46,25 @@ pub const CustodyPool = struct {
         if (record.state.load(.acquire) != .reserved) return error.InvalidCustodyTransition;
         const attempt_binding = try permit.consume();
         record.binding = attempt_binding;
+        record.binding_kind = .model;
         record.launch_available.store(true, .release);
         record.state.store(.attached, .release);
         return attempt_binding;
+    }
+
+    pub fn attachAction(
+        self: *CustodyPool,
+        token: CustodyToken,
+        permit: *store.ActionDispatchPermit,
+    ) !store.ActionAttemptBinding {
+        const record = try self.current(token);
+        if (record.state.load(.acquire) != .reserved) return error.InvalidCustodyTransition;
+        const action_binding = try permit.consume();
+        record.action_binding = action_binding;
+        record.binding_kind = .action;
+        record.launch_available.store(true, .release);
+        record.state.store(.attached, .release);
+        return action_binding;
     }
 
     pub fn consumeLaunchAuthority(
@@ -54,7 +73,7 @@ pub const CustodyPool = struct {
         attempt_binding: store.AttemptBinding,
     ) !void {
         const record = try self.current(token);
-        if (record.state.load(.acquire) != .attached or
+        if (record.state.load(.acquire) != .attached or record.binding_kind != .model or
             record.binding.turn_id != attempt_binding.turn_id or
             record.binding.operation_id != attempt_binding.operation_id or
             record.binding.attempt_ordinal != attempt_binding.attempt_ordinal)
@@ -66,10 +85,34 @@ pub const CustodyPool = struct {
         }
     }
 
+    pub fn consumeActionLaunchAuthority(
+        self: *CustodyPool,
+        token: CustodyToken,
+        action_binding: store.ActionAttemptBinding,
+    ) !void {
+        const record = try self.current(token);
+        if (record.state.load(.acquire) != .attached or record.binding_kind != .action or
+            record.action_binding.action_id != action_binding.action_id or
+            record.action_binding.parent_operation_id != action_binding.parent_operation_id or
+            record.action_binding.attempt_ordinal != action_binding.attempt_ordinal)
+        {
+            return error.ForeignLaunchAuthority;
+        }
+        if (record.launch_available.cmpxchgStrong(true, false, .acq_rel, .acquire) != null) {
+            return error.DispatchPermitConsumed;
+        }
+    }
+
     pub fn binding(self: *CustodyPool, token: CustodyToken) !store.AttemptBinding {
         const record = try self.current(token);
-        if (record.state.load(.acquire) != .attached) return error.CustodyDetached;
+        if (record.state.load(.acquire) != .attached or record.binding_kind != .model) return error.CustodyDetached;
         return record.binding;
+    }
+
+    pub fn actionBinding(self: *CustodyPool, token: CustodyToken) !store.ActionAttemptBinding {
+        const record = try self.current(token);
+        if (record.state.load(.acquire) != .attached or record.binding_kind != .action) return error.CustodyDetached;
+        return record.action_binding;
     }
 
     pub fn claimTerminalDelivery(self: *CustodyPool, token: CustodyToken) bool {
@@ -196,4 +239,40 @@ test "unused reservation returns without an Attempt binding" {
     const token = pool.reserve().?;
     try pool.releaseUnused(token);
     try std.testing.expectEqual(@as(usize, 0), pool.occupied());
+}
+
+test "model and Action Attempt bindings cannot cross custody paths" {
+    var records: [2]CustodyRecord = undefined;
+    var pool = CustodyPool.initialize(&records);
+    const model_token = pool.reserve().?;
+    var model_permit = store.DispatchPermit{ .binding = .{
+        .turn_id = 1,
+        .operation_id = 2,
+        .attempt_ordinal = 3,
+    } };
+    const model_binding = try pool.attach(model_token, &model_permit);
+    try std.testing.expectError(error.CustodyDetached, pool.actionBinding(model_token));
+
+    const action_token = pool.reserve().?;
+    var action_permit = store.ActionDispatchPermit{ .binding = .{
+        .turn_id = 1,
+        .parent_operation_id = 2,
+        .action_id = 4,
+        .attempt_ordinal = 1,
+    } };
+    const action_binding = try pool.attachAction(action_token, &action_permit);
+    try std.testing.expectError(error.CustodyDetached, pool.binding(action_token));
+    try std.testing.expectError(
+        error.ForeignLaunchAuthority,
+        pool.consumeLaunchAuthority(action_token, model_binding),
+    );
+    try std.testing.expectError(
+        error.ForeignLaunchAuthority,
+        pool.consumeActionLaunchAuthority(model_token, action_binding),
+    );
+
+    try pool.detach(model_token);
+    try pool.cleanupComplete(model_token);
+    try pool.detach(action_token);
+    try pool.cleanupComplete(action_token);
 }

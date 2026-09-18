@@ -1,4 +1,5 @@
 const std = @import("std");
+const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 const store = @import("store.zig");
 
@@ -1033,13 +1034,12 @@ fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limi
     var root: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root);
     var used: std.atomic.Value(u64) = .init(0);
-    var retained: ?store.RetainedOutputMetadata = null;
+    var retained: ?named_scratch.Owner = null;
     var metadata = try store.OutputMetadataWriter.init(
         std.testing.io,
         root[0..root_length],
         "provider-test-metadata",
-        &used,
-        metadata_limit,
+        .{ .used = &used, .limit = metadata_limit },
         false,
         &retained,
     );

@@ -178,19 +178,23 @@ pub const ModelInterruptionCommand = struct {
     }
 };
 
+pub const PermissionDecision = enum { allow_once, deny };
+
 pub const PermissionDecisionCommand = struct {
     store: Bounded(max_store_bytes) = .{},
     key: Bounded(max_key_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
     action_id: u64 = 0,
+    decision: PermissionDecision = .deny,
 
     pub fn semanticDigest(self: *const PermissionDecisionCommand) [32]u8 {
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hashField(&hash, "rui/core/permission-decision/deny/v1");
+        hashField(&hash, "rui/core/permission-decision/v1");
         hashField(&hash, self.session.slice());
         var value: [8]u8 = undefined;
         std.mem.writeInt(u64, &value, self.action_id, .big);
         hash.update(&value);
+        hashField(&hash, @tagName(self.decision));
         return hash.finalResult();
     }
 };
@@ -512,7 +516,12 @@ const Parser = struct {
         try self.expectKey("decision");
         var decision: Bounded(16) = .{};
         try self.readSmallString(&decision);
-        if (!decision.eql("deny")) return error.UnsupportedPermissionDecision;
+        request.decision = if (decision.eql("deny"))
+            .deny
+        else if (decision.eql("allow_once"))
+            .allow_once
+        else
+            return error.UnsupportedPermissionDecision;
         return request;
     }
 
@@ -908,7 +917,7 @@ pub const max_permission_decision_request_bytes =
     maximumJsonStringBytes(max_store_bytes) +
     ",\"key\":".len + maximumJsonStringBytes(max_key_bytes) +
     ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"action\":\"".len + 20 + "\",\"decision\":\"deny\"}".len;
+    ",\"action\":\"".len + 20 + "\",\"decision\":\"allow_once\"}".len;
 
 pub const max_control_request_bytes = @max(
     @max(max_session_stop_request_bytes, max_model_interruption_request_bytes),
@@ -1003,7 +1012,7 @@ const permission_decision_reply_prefix_bytes =
     "{\"version\":\"1\",\"type\":\"permission_decision_reply\",\"answer\":{\"status\":\"".len;
 const max_permission_decision_target_bytes =
     "\",\"replayed\":false,\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"action\":\"".len + 20 + "\",\"decision\":\"deny\"".len;
+    ",\"action\":\"".len + 20 + "\",\"decision\":\"allow_once\"".len;
 pub const max_permission_decision_reply_bytes = @max(
     permission_decision_reply_prefix_bytes + "infrastructure_failure".len + max_permission_decision_target_bytes +
         ",\"code\":\"canonical_store_failure\"}}".len,
@@ -1037,7 +1046,7 @@ pub const max_permission_decision_observation_bytes =
     control_observation_prefix_bytes + "rejected".len +
     "\",\"kind\":\"permission_decision\",\"target\":".len + maximumJsonStringBytes(max_session_bytes) +
     ",\"code\":\"".len + max_permission_decision_rejection_code_bytes +
-    "\",\"permission_target\":{\"action\":\"".len + 20 + "\",\"decision\":\"deny\"}}}".len;
+    "\",\"permission_target\":{\"action\":\"".len + 20 + "\",\"decision\":\"allow_once\"}}}".len;
 pub const max_control_observation_bytes = @max(
     @max(@max(max_session_stop_accepted_observation_bytes, max_session_stop_rejected_observation_bytes), max_permission_decision_observation_bytes),
     @max(max_model_interruption_accepted_observation_bytes, max_model_interruption_rejected_observation_bytes),

@@ -20,6 +20,7 @@ pub fn build(b: *std.Build) void {
         .filters = if (test_filter) |filter| &.{filter} else &.{},
     });
     configureSqlite(b, tests);
+    configureBashPlatform(b, tests);
     configureTransport(b, tests, target, pinned_transport);
     const run_tests = b.addRunArtifact(tests);
 
@@ -44,6 +45,33 @@ pub fn build(b: *std.Build) void {
         "Run the targeted model dispatch, output, retry, and recovery shortcut",
     );
     dispatch_integration_step.dependOn(&dispatch_integration.step);
+
+    const bash_integration = b.addSystemCommand(&.{"python3"});
+    bash_integration.addFileArg(b.path("tests/integration/bash_integration.py"));
+    bash_integration.addArtifactArg(release_safe);
+    const bash_integration_step = b.step(
+        "bash-integration",
+        "Run authorized Bash execution, stop, failure, and recovery cases",
+    );
+    bash_integration_step.dependOn(&bash_integration.step);
+
+    const bash_owner_integration = b.addSystemCommand(&.{"python3"});
+    bash_owner_integration.addFileArg(b.path("tests/integration/bash_owner_integration.py"));
+    bash_owner_integration.addArtifactArg(release_safe);
+    const bash_owner_integration_step = b.step(
+        "bash-owner-integration",
+        "Run focused Bash owner transition cases",
+    );
+    bash_owner_integration_step.dependOn(&bash_owner_integration.step);
+
+    const bash_lifecycle_integration = b.addSystemCommand(&.{"python3"});
+    bash_lifecycle_integration.addFileArg(b.path("tests/integration/bash_lifecycle_integration.py"));
+    bash_lifecycle_integration.addArtifactArg(release_safe);
+    const bash_lifecycle_integration_step = b.step(
+        "bash-lifecycle-integration",
+        "Run Bash lifecycle syscall-failure and custody cases",
+    );
+    bash_lifecycle_integration_step.dependOn(&bash_lifecycle_integration.step);
 
     const control_integration = b.addSystemCommand(&.{"python3"});
     control_integration.addFileArg(b.path("tests/integration/control_integration.py"));
@@ -76,19 +104,15 @@ pub fn build(b: *std.Build) void {
         b.pathFromRoot("build.zig"),
         b.pathFromRoot("src"),
     });
-    check_step.dependOn(&format.step);
-    check_step.dependOn(&run_tests.step);
-    check_step.dependOn(&integration.step);
-    check_step.dependOn(&dispatch_integration.step);
-    check_step.dependOn(&control_integration.step);
-    check_step.dependOn(&debug_integration.step);
-
-    const host_process_test = b.addSystemCommand(&.{"python3"});
-    host_process_test.addFileArg(b.path("tests/integration/host_process_test.py"));
-    check_step.dependOn(&host_process_test.step);
-
     const release = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
-    check_step.dependOn(&release.step);
+    const process_integrations = b.addSystemCommand(&.{"sh"});
+    process_integrations.addFileArg(b.path("tests/integration/check.sh"));
+    process_integrations.addArtifactArg(release_safe);
+    process_integrations.addArtifactArg(debug);
+    process_integrations.step.dependOn(&format.step);
+    process_integrations.step.dependOn(&run_tests.step);
+    process_integrations.step.dependOn(&release.step);
+    check_step.dependOn(&process_integrations.step);
 
     const measurement_tests = b.addSystemCommand(&.{
         "go", "test", "-mod=readonly", "./...",
@@ -278,6 +302,7 @@ fn addRui(
     });
     executable.root_module.link_libc = true;
     configureSqlite(b, executable);
+    configureBashPlatform(b, executable);
     configureTransport(b, executable, target, pinned_transport);
     return executable;
 }
@@ -365,6 +390,13 @@ fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     module.addCMacro("SQLITE_TEMP_STORE", "1");
     module.addCMacro("SQLITE_USE_URI", "0");
     module.addCMacro("SQLITE_ENABLE_API_ARMOR", "1");
+}
+
+fn configureBashPlatform(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    compile.root_module.addCSourceFile(.{
+        .file = b.path("src/bash_platform.c"),
+        .flags = &.{"-std=c11"},
+    });
 }
 
 fn addSqliteShell(

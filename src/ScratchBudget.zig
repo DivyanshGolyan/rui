@@ -3,8 +3,23 @@ const ScratchBudget = @This();
 
 used: *std.atomic.Value(u64),
 limit: u64,
+reclaim_context: ?*anyopaque = null,
+reclaim_fn: ?*const fn (*anyopaque, u64, u64) bool = null,
+
+pub fn narrowed(self: ScratchBudget, limit: u64) ScratchBudget {
+    var result = self;
+    result.limit = @min(result.limit, limit);
+    return result;
+}
 
 pub fn reserve(self: ScratchBudget, amount: u64) bool {
+    if (self.reserveWithoutReclaim(amount)) return true;
+    const reclaim = self.reclaim_fn orelse return false;
+    const context = self.reclaim_context orelse return false;
+    return reclaim(context, amount, self.limit);
+}
+
+pub fn reserveWithoutReclaim(self: ScratchBudget, amount: u64) bool {
     if (amount > self.limit) return false;
     var current = self.used.load(.acquire);
     while (true) {
@@ -12,6 +27,24 @@ pub fn reserve(self: ScratchBudget, amount: u64) bool {
         if (next > self.limit) return false;
         current = self.used.cmpxchgWeak(current, next, .acq_rel, .acquire) orelse return true;
     }
+}
+
+pub fn reserveUpTo(self: ScratchBudget, maximum: u64) u64 {
+    const reserved = self.reserveUpToWithoutReclaim(maximum);
+    if (reserved != 0 or maximum == 0) return reserved;
+    const reclaim = self.reclaim_fn orelse return 0;
+    const context = self.reclaim_context orelse return 0;
+    return if (reclaim(context, 1, self.limit)) 1 else 0;
+}
+
+pub fn reserveUpToWithoutReclaim(self: ScratchBudget, maximum: u64) u64 {
+    var current = self.used.load(.acquire);
+    while (current < self.limit and maximum != 0) {
+        const amount = @min(maximum, self.limit - current);
+        const next = current + amount;
+        current = self.used.cmpxchgWeak(current, next, .acq_rel, .acquire) orelse return amount;
+    }
+    return 0;
 }
 
 pub fn release(self: ScratchBudget, amount: u64) void {
@@ -41,4 +74,21 @@ test "concurrent scratch reservations share one ceiling" {
     try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
     budget.release(3);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "partial scratch reservation owns only available capacity" {
+    var used = std.atomic.Value(u64).init(7);
+    const budget = ScratchBudget{ .used = &used, .limit = 10 };
+    try std.testing.expectEqual(@as(u64, 3), budget.reserveUpTo(16));
+    try std.testing.expectEqual(@as(u64, 10), used.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), budget.reserveUpTo(1));
+    budget.release(3);
+    try std.testing.expectEqual(@as(u64, 7), used.load(.acquire));
+}
+
+test "narrowing a scratch budget cannot widen its authority" {
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 10 };
+    try std.testing.expectEqual(@as(u64, 10), budget.narrowed(11).limit);
+    try std.testing.expectEqual(@as(u64, 9), budget.narrowed(9).limit);
 }

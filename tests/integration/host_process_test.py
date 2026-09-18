@@ -2,9 +2,7 @@
 """Failure-sensitive checks for bounded Host process startup."""
 
 import os
-import pathlib
 import sys
-import tempfile
 import time
 
 from host_process import (
@@ -16,37 +14,33 @@ from host_process import (
 )
 
 
-def child(source, pid_file):
+def child(source):
     return [
         sys.executable,
         "-u",
         "-c",
-        "import os, pathlib, sys, time; "
-        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); "
-        + source,
+        "import sys, time; " + source,
     ]
 
 
 def assert_reaped(source, description, *, timeout=0.2, required_fields=None):
-    with tempfile.TemporaryDirectory(prefix="rui-host-start-test-") as temporary:
-        pid_file = pathlib.Path(temporary) / "pid"
-        started = time.monotonic()
+    started = time.monotonic()
+    try:
+        start_ready_process(
+            child(source),
+            timeout=timeout,
+            required_fields=required_fields,
+        )
+    except HostStartError as error:
+        elapsed = time.monotonic() - started
+        assert elapsed < timeout + 2, description
+        assert error.pid > 0, description
         try:
-            start_ready_process(
-                child(source, pid_file),
-                timeout=timeout,
-                required_fields=required_fields,
-            )
-        except HostStartError as error:
-            elapsed = time.monotonic() - started
-            assert elapsed < timeout + 2, description
-            assert error.pid == int(pid_file.read_text()), description
-            try:
-                os.kill(error.pid, 0)
-            except ProcessLookupError:
-                return error, elapsed
-            raise AssertionError(f"{description} child was not reaped")
-        raise AssertionError(f"{description} unexpectedly became ready")
+            os.kill(error.pid, 0)
+        except ProcessLookupError:
+            return error, elapsed
+        raise AssertionError(f"{description} child was not reaped")
+    raise AssertionError(f"{description} unexpectedly became ready")
 
 
 def main():
@@ -75,18 +69,16 @@ def main():
     assert stdout_elapsed < 1
     assert "readiness exceeded 16 KiB" in str(stdout_error)
     assert len(str(stdout_error)) <= error_text_limit
-    with tempfile.TemporaryDirectory(prefix="rui-host-start-test-") as temporary:
-        pid_file = pathlib.Path(temporary) / "pid"
-        process, fields = start_ready_process(
-            child("print('ready execution=enabled curl=8.22.0'); time.sleep(10)", pid_file),
-            timeout=1,
-            required_fields={"execution": "enabled", "curl": "8.22.0"},
-        )
-        try:
-            assert fields == {"execution": "enabled", "curl": "8.22.0"}
-            assert process.poll() is None
-        finally:
-            stop_process(process)
+    process, fields = start_ready_process(
+        child("print('ready execution=enabled curl=8.22.0'); time.sleep(10)"),
+        timeout=1,
+        required_fields={"execution": "enabled", "curl": "8.22.0"},
+    )
+    try:
+        assert fields == {"execution": "enabled", "curl": "8.22.0"}
+        assert process.poll() is None
+    finally:
+        stop_process(process)
 
 
 if __name__ == "__main__":

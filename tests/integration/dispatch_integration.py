@@ -423,6 +423,7 @@ def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacit
 
 
 def stop_host(process):
+    # Fixture disposal is an unclean SIGKILL, not evidence of graceful shutdown.
     stop_process(process)
 
 
@@ -573,13 +574,13 @@ def read_action(store, session, action, field):
     return completed.stdout
 
 
-def wait_for(predicate, description, timeout=8):
+def wait_for(predicate, description, timeout=8, interval=0.025):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = predicate()
         if value:
             return value
-        time.sleep(0.025)
+        time.sleep(interval)
     raise AssertionError(f"timed out waiting for {description}")
 
 
@@ -607,10 +608,10 @@ def main():
     try:
         forbidden_effect = state / "proposal-must-not-launch"
         calls = [
-            ("bash", "call\nA", json.dumps({"cmd": f"touch {forbidden_effect}"}, separators=(",", ":"))),
+            ("bash", "call\nA", json.dumps({"cmd": f"touch {forbidden_effect}", "timeout_ms": None}, separators=(",", ":"))),
             ("other", "call-unknown", "{}"),
             ("bash", "call-invalid", "{"),
-            ("bash", "call-B", json.dumps({"cmd": "printf second"}, separators=(",", ":"))),
+            ("bash", "call-B", json.dumps({"cmd": "printf second", "timeout_ms": None}, separators=(",", ":"))),
         ]
         race_calls = []
         race_responses = []
@@ -618,8 +619,8 @@ def main():
             first_effect = state / f"{order}-first-must-not-launch"
             second_effect = state / f"{order}-second-must-not-launch"
             order_calls = [
-                ("bash", f"{order}-call-0", json.dumps({"cmd": f"touch {first_effect}"}, separators=(",", ":"))),
-                ("bash", f"{order}-call-1", json.dumps({"cmd": f"touch {second_effect}"}, separators=(",", ":"))),
+                ("bash", f"{order}-call-0", json.dumps({"cmd": f"touch {first_effect}", "timeout_ms": None}, separators=(",", ":"))),
+                ("bash", f"{order}-call-1", json.dumps({"cmd": f"touch {second_effect}", "timeout_ms": None}, separators=(",", ":"))),
             ]
             race_calls.append((order_calls, first_effect, second_effect))
             race_responses.append(sse_tool_calls(f"{order}-response", order_calls))
@@ -781,7 +782,7 @@ def main():
             assert after["actions"]["resolved"] == [], after
             assert after["rejected_calls"] == {"count": "0", "items": []}, after
             assert after["execution"]["custody_occupied"] == "0", after
-            assert "bash_execution" in after["execution"]["unavailable"], after
+            assert "bash_execution" not in after["execution"]["unavailable"], after
             with sqlite3.connect(proposal_store / "rui.sqlite3") as database:
                 rows = database.execute(
                     "SELECT call_ordinal,permission_state,resolution_code FROM action_operation "
@@ -806,17 +807,17 @@ def main():
         proposal_gate_keeper = None
 
         continuation_calls = [
-            ("bash", "continuation-call-0", json.dumps({"cmd": "printf zero"}, separators=(",", ":"))),
+            ("bash", "continuation-call-0", json.dumps({"cmd": "printf zero", "timeout_ms": None}, separators=(",", ":"))),
             ("missing-tool", "continuation-call-1", "{}"),
             ("bash", "continuation-call-2", "{"),
-            ("bash", "continuation-call-3", json.dumps({"cmd": "printf three"}, separators=(",", ":"))),
+            ("bash", "continuation-call-3", json.dumps({"cmd": "printf three", "timeout_ms": None}, separators=(",", ":"))),
         ]
         continuation_answer = b"continued after complete tool results"
         continuation_sse, _, _ = sse_answer(
             "continuation-answer", "continuation-reasoning", "continuation-message", continuation_answer.decode()
         )
         queued_calls = [
-            ("bash", "queued-call-0", json.dumps({"cmd": "printf queued"}, separators=(",", ":"))),
+            ("bash", "queued-call-0", json.dumps({"cmd": "printf queued", "timeout_ms": None}, separators=(",", ":"))),
             ("missing-tool", "queued-call-1", "{}"),
         ]
         queued_answer = b"continued with queued input"
@@ -2456,8 +2457,15 @@ def main():
                     "strict": True,
                     "parameters": {
                         "type": "object",
-                        "properties": {"cmd": {"type": "string"}},
-                        "required": ["cmd"],
+                        "properties": {
+                            "cmd": {"type": "string"},
+                            "timeout_ms": {
+                                "type": ["integer", "null"],
+                                "minimum": 1,
+                                "maximum": 9223372036854775807,
+                            },
+                        },
+                        "required": ["cmd", "timeout_ms"],
                         "additionalProperties": False,
                     },
                 },
@@ -2988,10 +2996,14 @@ def main():
         # A candidate observed while full cannot survive until release and
         # bypass an older Operation that becomes due in the meantime.
         stale_release = threading.Event()
+        newer_initial_release = threading.Event()
         stale_endpoint = SuccessEndpoint(
             [
-                ResponseSpec(b"older waiting", {}, 503),
-                ResponseSpec(b"newer waiting", {}, 503),
+                ResponseSpec(b"older waiting", {"Retry-After": "3"}, 503),
+                (
+                    ResponseSpec(b"newer waiting", {"Retry-After": "1"}, 503),
+                    newer_initial_release,
+                ),
                 (ResponseSpec(b"capacity owner", {}, 422), stale_release),
                 ResponseSpec(b"selected after release", {}, 422),
                 ResponseSpec(b"remaining retry", {}, 422),
@@ -3004,10 +3016,10 @@ def main():
             stale_store,
             f"http://127.0.0.1:{stale_endpoint.server_port}/responses",
             "--test-retry-waits-ms",
-            "60000,60000,60000",
+            "50,100,150",
         )
         processes.append(stale_host)
-        for name in ("older", "newer", "capacity"):
+        for name in ("older", "newer"):
             expected_requests = len(stale_endpoint.requests) + 1
             configure(
                 state,
@@ -3027,22 +3039,31 @@ def main():
                 lambda expected=expected_requests: len(stale_endpoint.requests) >= expected,
                 f"{name} initial Attempt",
             )
-        database = sqlite3.connect(stale_store / "rui.sqlite3")
-        try:
-            now_ms = time.time_ns() // 1_000_000
-            database.execute(
-                "UPDATE model_operation SET retry_due_at_ms=? WHERE operation_id=1",
-                (now_ms + 3000,),
-            )
-            database.execute(
-                "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=2"
-            )
-            database.commit()
-        finally:
-            database.close()
+        configure(
+            state,
+            stale_store,
+            "stale-capacity-config",
+            "direct/stale-capacity",
+            "model-a",
+        )
+        message(
+            state,
+            stale_store,
+            "stale-capacity-message",
+            "direct/stale-capacity",
+            "stale-capacity",
+        )
+        time.sleep(0.2)
+        assert len(stale_endpoint.requests) == 2
+        newer_initial_release.set()
+        wait_for(lambda: len(stale_endpoint.requests) == 3, "capacity owner initial Attempt")
         time.sleep(3.2)
         stale_release.set()
-        wait_for(lambda: len(stale_endpoint.requests) >= 4, "retry after capacity release")
+        wait_for(
+            lambda: len(stale_endpoint.requests) >= 4,
+            "retry after capacity release",
+            timeout=8,
+        )
         released_request = json.loads(stale_endpoint.requests[3])
         released_user_text = next(
             content["text"]
@@ -3997,24 +4018,29 @@ def main():
             processes.append(owned_host)
             configure(state, owned_store, f"{fault}-config", f"direct/{fault}", "model-a")
             message(state, owned_store, f"{fault}-message", f"direct/{fault}", "unlink")
-            leftovers = wait_for(
-                lambda store=owned_store, glob=pattern: list((store / "scratch").glob(glob)),
-                f"retained named {fault} scratch",
+            resources = wait_for(
+                lambda store=owned_store, session=f"direct/{fault}": (
+                    report["execution"]
+                    if (report := command(
+                        "inspect-session", "--store", store, "--session", session
+                    ))["execution"]["dispatch_fenced"]
+                    else None
+                ),
+                f"{fault} cleanup ownership",
+                timeout=20,
             )
-            resources = command(
-                "inspect-session", "--store", owned_store, "--session", f"direct/{fault}"
-            )["execution"]
-            assert resources["dispatch_fenced"] is True, resources
             assert resources["custody_occupied"] == "1", resources
             assert len(unlink_endpoint.requests) == (1 if launched else 0)
+            stop_host(owned_host)
+            processes.remove(owned_host)
+            leftovers = list((owned_store / "scratch").glob(pattern))
+            assert len(leftovers) == 1, leftovers
             database = sqlite3.connect(owned_store / "rui.sqlite3")
             assert database.execute(
                 "SELECT uncertain,resolution_code FROM model_operation"
             ).fetchone() == (1, None)
             assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
             database.close()
-            stop_host(owned_host)
-            processes.remove(owned_host)
             assert leftovers[0].exists()
 
             failed_cleanup = subprocess.run(
@@ -4059,19 +4085,24 @@ def main():
         processes.append(host)
         configure(state, unlink_store, "unlink-config", "direct/unlink", "model-a")
         message(state, unlink_store, "unlink-message", "direct/unlink", "unlink")
-        leftovers = wait_for(
-            lambda: list(unlink_store.rglob("request-*")),
-            "retained named request scratch",
+        resources = wait_for(
+            lambda: (
+                report["execution"]
+                if (report := command(
+                    "inspect-session", "--store", unlink_store, "--session", "direct/unlink"
+                ))["execution"]["dispatch_fenced"]
+                else None
+            ),
+            "request-unlink cleanup ownership",
+            timeout=20,
         )
-        resources = command(
-            "inspect-session", "--store", unlink_store, "--session", "direct/unlink"
-        )["execution"]
-        assert resources["dispatch_fenced"] is True, resources
         assert resources["custody_occupied"] == "1", resources
         assert resources["scratch_used_bytes"] == "0", resources
         assert endpoint.requests == []
         stop_host(host)
         processes.remove(host)
+        leftovers = list(unlink_store.rglob("request-*"))
+        assert len(leftovers) == 1, leftovers
         assert leftovers[0].exists()
 
         offline = start_host(unlink_store, None)
