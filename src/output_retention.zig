@@ -30,6 +30,7 @@ pub const Queue = struct {
     scratch_path: []const u8,
     budget: ScratchBudget,
     entries: []Entry,
+    removal: named_scratch.Removal,
     mutex: std.Io.Mutex = .init,
     next_sequence: u64 = 1,
 
@@ -39,12 +40,23 @@ pub const Queue = struct {
         budget: ScratchBudget,
         entries: []Entry,
     ) Queue {
+        return initializeWithRemoval(io, scratch_path, budget, entries, .native);
+    }
+
+    pub fn initializeWithRemoval(
+        io: std.Io,
+        scratch_path: []const u8,
+        budget: ScratchBudget,
+        entries: []Entry,
+        removal: named_scratch.Removal,
+    ) Queue {
         for (entries) |*entry| entry.* = .{};
         return .{
             .io = io,
             .scratch_path = scratch_path,
             .budget = budget,
             .entries = entries,
+            .removal = removal,
         };
     }
 
@@ -114,13 +126,13 @@ pub const Queue = struct {
                 return .{ .stdout = tokens[0], .stderr = tokens[1] };
             }
             self.mutex.unlock(self.io);
-            if (!(try self.evictOldest())) return null;
+            if (!self.evictOldest()) return null;
         }
     }
 
-    pub fn reserveGrowth(self: *Queue, amount: u64) !bool {
+    pub fn reserveGrowth(self: *Queue, amount: u64) bool {
         while (!self.budget.reserve(amount)) {
-            if (!(try self.evictOldest())) return false;
+            if (!self.evictOldest()) return false;
         }
         return true;
     }
@@ -161,7 +173,7 @@ pub const Queue = struct {
             const charged = entry.charged;
             entry.state = .evicting;
             self.mutex.unlock(self.io);
-            _ = named_scratch.removeName(self.io, self.scratch_path, name.slice()) catch {
+            _ = named_scratch.removeNameWith(self.io, self.scratch_path, name.slice(), self.removal) catch {
                 self.markEvictionFailed(index, generation);
                 continue;
             };
@@ -189,7 +201,7 @@ pub const Queue = struct {
         return entry;
     }
 
-    fn evictOldest(self: *Queue) !bool {
+    fn evictOldest(self: *Queue) bool {
         self.mutex.lockUncancelable(self.io);
         var oldest: ?usize = null;
         for (self.entries, 0..) |entry, index| {
@@ -207,9 +219,9 @@ pub const Queue = struct {
         const charged = entry.charged;
         self.mutex.unlock(self.io);
 
-        _ = named_scratch.removeName(self.io, self.scratch_path, name.slice()) catch |err| {
+        _ = named_scratch.removeNameWith(self.io, self.scratch_path, name.slice(), self.removal) catch {
             self.markEvictionFailed(index, generation);
-            return err;
+            return false;
         };
         self.mutex.lockUncancelable(self.io);
         const selected = &self.entries[index];
@@ -224,7 +236,7 @@ pub const Queue = struct {
         const self: *Queue = @ptrCast(@alignCast(context));
         const limited = self.budget.narrowed(limit);
         while (!limited.reserveWithoutReclaim(amount)) {
-            if (!(self.evictOldest() catch return false)) return false;
+            if (!self.evictOldest()) return false;
         }
         return true;
     }
@@ -334,12 +346,20 @@ test "unconfirmed retained-file deletion preserves its entry and scratch charge"
     try std.testing.expect(budget.reserve(2));
     try std.testing.expect(try queue.retainPair("stdout", 1, "stderr", 1));
 
+    try std.testing.expectEqual(
+        @as(?Pair, null),
+        try queue.reservePair("new-stdout", 0, "new-stderr", 0),
+    );
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+    try std.testing.expectEqual(State.failed, entries[0].state);
+    try std.testing.expectEqual(State.retained, entries[1].state);
     const shared = queue.sharedBudget();
     try std.testing.expect(!shared.reserve(1));
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), queue.occupied());
     try std.testing.expectEqual(State.failed, entries[0].state);
-    try std.testing.expectEqual(State.retained, entries[1].state);
+    try std.testing.expectEqual(State.failed, entries[1].state);
 }
 
 test "reserved output is not evictable before producer aliases close and publication completes" {

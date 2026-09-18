@@ -14,6 +14,8 @@ pub const default_retry_waits_ms = [3]u64{ 2_000, 4_000, 8_000 };
 pub const default_bash_timeout_ms: u64 = 5 * 60 * 1000;
 pub const default_bash_path = "/bin/bash";
 pub const scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
+pub const default_retention_entry_capacity =
+    output_retention.orchestration_bytes / @sizeOf(output_retention.Entry);
 pub const max_clients = 12;
 pub const max_ordinary_clients = 10;
 pub const control_headroom = 2;
@@ -65,6 +67,8 @@ pub const Faults = struct {
     bash_lifecycle_fault: bash.LifecycleFault = .none,
     bash_fault_gated: bool = false,
     bash_scratch_limit_bytes: u64 = scratch_limit_bytes,
+    retention_entry_capacity: ?usize = null,
+    retention_removal: bool = false,
     cleanup_delay_ms: i64 = 0,
     provider_inactivity_seconds: i64 = 5 * 60,
     retry_waits_ms: [3]u64 = default_retry_waits_ms,
@@ -169,10 +173,11 @@ pub fn serve(
 
     const custody_records = try allocator.alloc(execution.CustodyRecord, active_capacity);
     defer allocator.free(custody_records);
-    const retention_entries = try allocator.alloc(
-        output_retention.Entry,
-        output_retention.orchestration_bytes / @sizeOf(output_retention.Entry),
+    const retention_capacity = @min(
+        default_retention_entry_capacity,
+        faults.retention_entry_capacity orelse default_retention_entry_capacity,
     );
+    const retention_entries = try allocator.alloc(output_retention.Entry, retention_capacity);
     defer allocator.free(retention_entries);
     var host = Host{
         .io = io,
@@ -186,11 +191,12 @@ pub fn serve(
         .retention = undefined,
         .custody = execution.CustodyPool.initialize(custody_records),
     };
-    var retention = output_retention.Queue.initialize(
+    var retention = output_retention.Queue.initializeWithRemoval(
         io,
         lease.paths.scratch.slice(),
         .{ .used = &host.scratch_used, .limit = scratch_limit_bytes },
         retention_entries,
+        if (faults.retention_removal) .injected_failure else .native,
     );
     host.retention = &retention;
     defer retention.cleanupAll();

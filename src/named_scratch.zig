@@ -51,8 +51,12 @@ pub const Owner = struct {
 
     pub fn reclaim(self: *Owner, scratch_path: []const u8) !Reclamation {
         const resources = &(self.resources orelse unreachable);
-        if (resources.removal.blocked()) return error.InjectedScratchRemovalFailure;
-        const result = try removeName(self.io, scratch_path, resources.name.slice());
+        const result = try removeNameWith(
+            self.io,
+            scratch_path,
+            resources.name.slice(),
+            resources.removal,
+        );
         resources.primary.close(self.io);
         if (resources.secondary) |secondary| secondary.close(self.io);
         self.budget.release(resources.charged);
@@ -69,6 +73,16 @@ pub fn removeName(io: std.Io, scratch_path: []const u8, name: []const u8) !Recla
         else => return err,
     };
     return .removed;
+}
+
+pub fn removeNameWith(
+    io: std.Io,
+    scratch_path: []const u8,
+    name: []const u8,
+    removal: Removal,
+) !Reclamation {
+    if (removal.blocked()) return error.InjectedScratchRemovalFailure;
+    return removeName(io, scratch_path, name);
 }
 
 test "owner retains every resource after retryable removal failure" {

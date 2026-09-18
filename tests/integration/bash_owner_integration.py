@@ -192,6 +192,83 @@ def main():
         endpoint_thread.join(timeout=5)
         assert resolution_after_stop(isolated_store, f"direct/{name}") == "succeeded"
         assert not list((isolated_store / "scratch").glob("bash-script-*.tmp"))
+
+        retention_store = root / "retention-store"
+        retention_actions = {
+            "retention-first": stage_action(
+                state, retention_store, "retention-first", "printf old"
+            ),
+            "retention-second": stage_action(
+                state, retention_store, "retention-second", "printf current"
+            ),
+        }
+        endpoint, endpoint_thread, continuations = continuation_endpoint(
+            ("retention-first", "retention-second")
+        )
+        host = fixture.start_host(
+            retention_store,
+            f"http://127.0.0.1:{endpoint.server_port}/responses",
+            "--test-retention-entry-capacity",
+            "2",
+            "--test-retention-removal-failure",
+        )
+        bash_fixture.allow(
+            state,
+            retention_store,
+            "retention-first-allow",
+            "direct/retention-first",
+            retention_actions["retention-first"]["action"],
+        )
+        fixture.wait_for(
+            lambda: continuations[0].body_finished_at,
+            "first retained-output continuation",
+        )
+        first_result = bash_fixture.result_text(
+            retention_store, "direct/retention-first"
+        )
+        retained_paths = [
+            pathlib.Path(line.split(": ", 1)[1])
+            for line in first_result.splitlines()
+            if line.startswith(("Full stdout: ", "Full stderr: "))
+        ]
+        assert len(retained_paths) == 2 and all(path.exists() for path in retained_paths)
+        before = fixture.wait_for(
+            lambda: bash_fixture.execution_custody_idle(
+                retention_store, "direct/retention-first"
+            ),
+            "first retained-output cleanup",
+        )["execution"]
+
+        bash_fixture.allow(
+            state,
+            retention_store,
+            "retention-second-allow",
+            "direct/retention-second",
+            retention_actions["retention-second"]["action"],
+        )
+        fixture.wait_for(
+            lambda: continuations[1].body_finished_at,
+            "settlement despite retained-output removal failure",
+        )
+        second_result = bash_fixture.result_text(
+            retention_store, "direct/retention-second"
+        )
+        assert "stdout tail:\ncurrent" in second_result, second_result
+        assert "Full output was not retained." in second_result, second_result
+        after = fixture.wait_for(
+            lambda: bash_fixture.execution_custody_idle(
+                retention_store, "direct/retention-second"
+            ),
+            "retention-unavailable cleanup",
+        )["execution"]
+        assert after["dispatch_fenced"] is False, after
+        assert after["scratch_used_bytes"] == before["scratch_used_bytes"], (before, after)
+        assert all(path.exists() for path in retained_paths)
+        fixture.stop_host(host)
+        host = None
+        endpoint.shutdown()
+        endpoint.server_close()
+        endpoint_thread.join(timeout=5)
         completed = True
     finally:
         if host is not None:

@@ -57,6 +57,15 @@ fn serve(io: std.Io, args: []const []const u8) !void {
             if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
         } else if (std.mem.eql(u8, arg, "--test-bash-scratch-limit-bytes")) {
             faults.bash_scratch_limit_bytes = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
+        } else if (std.mem.eql(u8, arg, "--test-retention-entry-capacity")) {
+            faults.retention_entry_capacity = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
+            if (faults.retention_entry_capacity.? < 2 or
+                faults.retention_entry_capacity.? > server.default_retention_entry_capacity)
+            {
+                return error.InvalidRetentionEntryCapacity;
+            }
+        } else if (std.mem.eql(u8, arg, "--test-retention-removal-failure")) {
+            faults.retention_removal = true;
         } else if (std.mem.eql(u8, arg, "--active-capacity")) {
             active_capacity = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
         } else if (std.mem.eql(u8, arg, "--fault")) {
