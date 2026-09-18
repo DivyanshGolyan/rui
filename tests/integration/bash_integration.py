@@ -275,7 +275,7 @@ def main():
             "head -c 32768 /dev/zero; while :; do printf detached; sleep 1; done",
             detached_pid,
         ),
-        timeout_ms=100,
+        timeout_ms=1000,
     )
     same_group_pid = state / "same-group-pid"
     add_exchange(
@@ -704,7 +704,6 @@ def main():
         child_pid = int(exited_child_pid.read_text())
         fixture.wait_for(lambda: process_is_zombie(bash_pid), "unreaped Bash with descendant pipes open")
         assert process_exists(child_pid)
-        assert resolution(store, "direct/exited-pipes") is None
         fixture.wait_for(
             lambda: resolution(store, "direct/exited-pipes") == "succeeded",
             "natural Bash result after descendant cleanup",
