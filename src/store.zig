@@ -9092,6 +9092,25 @@ test "fresh Store uses current schema and rejects the prior version" {
     );
 }
 
+test "existing Store rejects noncanonical durable authority" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+
+    var storage = try Store.open(std.testing.io, database, root);
+    try exec(storage.database, "CREATE TABLE tool_result_authority(call_id INTEGER PRIMARY KEY, result_content_id INTEGER NOT NULL)");
+    try storage.close();
+
+    try std.testing.expectError(
+        error.WrongStoreSchema,
+        Store.open(std.testing.io, database, root),
+    );
+}
+
 test "existing Store rejects a different canonical identity" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

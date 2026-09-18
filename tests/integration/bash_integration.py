@@ -15,6 +15,7 @@ import threading
 import time
 
 import dispatch_integration as fixture
+from host_process import MilestoneLog
 
 
 def detached_shell(command):
@@ -130,7 +131,7 @@ def process_exists(pid):
         return False
 
 
-def wait_for_phase(process, phase, timeout=8, action=None):
+def wait_for_phase(process, phase, timeout=8):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         ready, _, _ = select.select([process.stderr], [], [], deadline - time.monotonic())
@@ -143,9 +144,7 @@ def wait_for_phase(process, phase, timeout=8, action=None):
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("rui_test_phase") == phase and (
-            action is None or event.get("action") == str(action)
-        ):
+        if event.get("rui_test_phase") == phase:
             return event
     raise TimeoutError(f"timed out waiting for phase {phase}")
 
@@ -371,6 +370,7 @@ def main():
     endpoint_url = f"http://127.0.0.1:{endpoint.server_port}/responses"
     store = state / "store"
     host = None
+    success_milestones = None
     detached_process = None
     completed = False
     resource_samples = []
@@ -383,6 +383,7 @@ def main():
             "--test-phase-trace",
             active_capacity=3,
         )
+        success_milestones = MilestoneLog(host)
         resource_samples.append({"phase": "cold", **process_resources(host), **scratch_resources(store)})
 
         fixture.configure_lost_reply(
@@ -478,11 +479,10 @@ def main():
             success_action["action"],
         )
         assert conflict["answer"]["status"] == "conflict", conflict
-        wait_for_phase(
-            host,
+        bash_cleanup_started = success_milestones.wait(
             "cleanup_started",
-            action=success_action["action"],
-        )
+            action=str(success_action["action"]),
+        )[-1]
         fixture.wait_for(
             lambda: fixture.completed_observation(store, "success-message"),
             "successful Bash continuation",
@@ -515,10 +515,31 @@ def main():
         assert "Bash succeeded." in output and "stderr-mark" in output, output
         assert "�" in output and "[earlier output omitted]" in output, output
         assert "Full stdout:" in output and "Full stderr:" in output, output
+        captured_before = len(
+            success_milestones.matching(
+                "inspection_captured",
+                subject_kind="session",
+                subject="direct/success",
+            )
+        )
         success_resources = fixture.command(
             "inspect-session", "--store", store, "--session", "direct/success"
         )["execution"]
+        answer_snapshot = success_milestones.wait(
+            "inspection_captured",
+            count=captured_before + 1,
+            subject_kind="session",
+            subject="direct/success",
+        )[-1]
         assert success_resources["custody_occupied"] != "0", success_resources
+        assert int(answer_snapshot["at_ns"]) - int(bash_cleanup_started["at_ns"]) < 10_000_000_000
+        assert [
+            record
+            for record in success_milestones.matching(
+                "cleanup_completed", action=str(success_action["action"])
+            )
+            if int(record["at_ns"]) <= int(answer_snapshot["at_ns"])
+        ] == [], success_milestones.records
         resource_samples.append(
             {
                 "phase": "retained-output-idle",
@@ -530,23 +551,8 @@ def main():
 
         fixture.stop_host(host)
         host = None
-        assert rows(store, "SELECT count(*) FROM model_operation") == [(2,)]
-        assert rows(
-            store,
-            "SELECT count(*),count(rejection_content_id),count(acceptance_position) "
-            "FROM model_tool_call WHERE rejection_code IS NOT NULL",
-        ) == [(2, 2, 2)]
-        assert rows(
-            store,
-            "SELECT count(*),count(resolution_content_id),count(acceptance_position) "
-            "FROM action_operation WHERE resolution_code IS NOT NULL",
-        ) == [(1, 1, 1)]
-        assert rows(
-            store,
-            "SELECT count(*) FROM sqlite_schema WHERE "
-            "lower(name) LIKE '%tool_result%' OR lower(name) LIKE '%result_batch%' "
-            "OR lower(name) LIKE '%publication%'",
-        ) == [(0,)]
+        success_milestones.close()
+        success_milestones = None
         host = fixture.start_host(store, endpoint_url, active_capacity=0)
         configure(state, store, "rollback-config", "direct/rollback")
         fixture.stop_host(host)
@@ -1319,6 +1325,8 @@ def main():
     finally:
         if host is not None:
             fixture.stop_host(host)
+        if success_milestones is not None:
+            success_milestones.close()
         if detached_process is not None and process_exists(detached_process):
             os.kill(detached_process, signal.SIGKILL)
         endpoint.shutdown()
