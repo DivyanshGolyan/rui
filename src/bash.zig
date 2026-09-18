@@ -11,6 +11,8 @@ pub const copy_window_bytes: usize = 16 * 1024;
 const command_write_window_bytes: usize = 4096;
 const termination_grace_ms: u64 = 100;
 const cleanup_observation_ms: u64 = 5_000;
+const fault_observation_delay_ms: u64 = 500;
+pub const fault_gate_name = "bash-fault-gate";
 
 const BashObservation = extern struct {
     kind: c_int,
@@ -43,6 +45,7 @@ pub const Faults = struct {
     seal: bool = false,
     cleanup: bool = false,
     lifecycle: LifecycleFault = .none,
+    fault_gated: bool = false,
 };
 
 const CaptureFailure = enum { none, read, write, exhausted, seal };
@@ -89,6 +92,7 @@ const Process = union(enum) {
 };
 
 const PipeClose = enum { eof, incomplete, failed };
+const CleanupFault = enum { none, persistent, gated };
 
 const Pipe = union(enum) {
     reading: std.Io.File,
@@ -121,6 +125,16 @@ fn pipeIncomplete(pipe: Pipe) bool {
     };
 }
 
+fn faultGateActive(io: std.Io, scratch_path: []const u8) bool {
+    var scratch = std.Io.Dir.cwd().openDir(io, scratch_path, .{}) catch return true;
+    defer scratch.close(io);
+    _ = scratch.statFile(io, fault_gate_name, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return true,
+    };
+    return true;
+}
+
 fn decodeObservation(observation: BashObservation) Term {
     return switch (observation.kind) {
         1 => .{ .exited = @intCast(observation.value) },
@@ -136,7 +150,7 @@ const OwnedFile = struct {
     charged: u64 = 0,
     budget: ScratchBudget,
     published: bool = false,
-    cleanup_fault: bool = false,
+    cleanup_fault: CleanupFault = .none,
 
     fn close(self: *OwnedFile) void {
         if (self.file) |file| file.close(self.io);
@@ -146,7 +160,11 @@ const OwnedFile = struct {
     fn cleanup(self: *OwnedFile, scratch_path: []const u8) !void {
         self.close();
         if (self.published) return;
-        if (self.cleanup_fault) return error.InjectedBashCleanupFailure;
+        if (self.cleanup_fault == .persistent or
+            (self.cleanup_fault == .gated and faultGateActive(self.io, scratch_path)))
+        {
+            return error.InjectedBashCleanupFailure;
+        }
         var scratch = try std.Io.Dir.cwd().openDir(self.io, scratch_path, .{});
         defer scratch.close(self.io);
         try scratch.deleteFile(self.io, self.name.slice());
@@ -307,59 +325,77 @@ pub const Execution = struct {
 
     pub const ServiceResult = struct {
         made_progress: bool,
-        complete: bool,
+        retired: bool,
+        fault: ?anyerror,
     };
 
-    pub fn service(self: *Execution, window: []u8, shutdown: bool) !ServiceResult {
+    pub fn service(self: *Execution, window: []u8) ServiceResult {
         std.debug.assert(window.len == copy_window_bytes);
+        var fault: ?anyerror = null;
         if (self.faults.service and !self.service_fault_used) {
             self.service_fault_used = true;
-            return error.InjectedBashServiceFailure;
+            fault = error.InjectedBashServiceFailure;
+            self.requestTermination(.infrastructure_shutdown);
         }
         const now = std.Io.Clock.Timestamp.now(self.io, .awake);
         var made_progress = false;
-        if (shutdown) self.requestTermination(.infrastructure_shutdown);
         if (self.process == .running and timestampReached(now, self.process.running.deadline)) {
             self.requestTermination(.timed_out);
             made_progress = true;
         }
-        made_progress = try self.observeLeader() or made_progress;
+        made_progress = (self.observeLeader(now) catch |err| observed: {
+            fault = fault orelse err;
+            self.requestTermination(.infrastructure_shutdown);
+            break :observed false;
+        }) or made_progress;
         if (self.process == .running and self.process.running.anchor.observed != null) {
             self.beginGrace(now);
             made_progress = true;
         }
-        made_progress = try self.readPipe(&self.stdout_pipe, &self.stdout_capture, window) or made_progress;
-        made_progress = try self.readPipe(&self.stderr_pipe, &self.stderr_capture, window) or made_progress;
+        made_progress = self.servicePipe(&self.stdout_pipe, &self.stdout_capture, window, &fault) or made_progress;
+        made_progress = self.servicePipe(&self.stderr_pipe, &self.stderr_capture, window, &fault) or made_progress;
         if (self.process == .grace and timestampReached(now, self.process.grace.kill_at)) {
             self.finishSignaling();
             made_progress = true;
         }
-        made_progress = try self.reapLeader(now) or made_progress;
+        made_progress = (self.reapLeader(now) catch |err| reaped: {
+            fault = fault orelse err;
+            break :reaped false;
+        }) or made_progress;
         if (self.process == .checking_group) {
-            if (self.faults.lifecycle == .group_probe) return error.InjectedBashGroupProbeFailure;
-            const check = if (self.faults.lifecycle == .cleanup_watchdog)
+            const check = if (self.lifecycleFaultActive(.group_probe)) check: {
+                fault = fault orelse error.InjectedBashGroupProbeFailure;
+                break :check 0;
+            } else if (self.lifecycleFaultActive(.cleanup_watchdog))
                 0
             else
                 rui_bash_group_absent(self.process.checking_group.pgid);
             if (check == 1) {
                 const term = self.process.checking_group.term;
                 self.process = .{ .gone = term };
-                try self.beginCaptureTails();
+                self.beginCaptureTails() catch |err| {
+                    fault = fault orelse err;
+                };
                 made_progress = true;
             } else if (check < 0) {
-                return error.BashGroupProbeFailed;
+                fault = fault orelse error.BashGroupProbeFailed;
             } else if (timestampReached(now, self.process.checking_group.cleanup_deadline)) {
-                return error.BashCleanupUnconfirmed;
+                fault = fault orelse error.BashCleanupUnconfirmed;
             }
         }
         if (self.process == .gone) {
-            made_progress = try self.readPipe(&self.stdout_pipe, &self.stdout_capture, window) or made_progress;
-            made_progress = try self.readPipe(&self.stderr_pipe, &self.stderr_capture, window) or made_progress;
+            made_progress = self.servicePipe(&self.stdout_pipe, &self.stdout_capture, window, &fault) or made_progress;
+            made_progress = self.servicePipe(&self.stderr_pipe, &self.stderr_capture, window, &fault) or made_progress;
         }
         return .{
             .made_progress = made_progress,
-            .complete = self.process == .gone and pipeClosed(self.stdout_pipe) and pipeClosed(self.stderr_pipe),
+            .retired = self.retired(),
+            .fault = fault,
         };
+    }
+
+    pub fn retired(self: *const Execution) bool {
+        return self.process == .gone and pipeClosed(self.stdout_pipe) and pipeClosed(self.stderr_pipe);
     }
 
     pub fn reserveOutput(self: *Execution, retention: *output_retention.Queue) !bool {
@@ -406,38 +442,48 @@ pub const Execution = struct {
         return result;
     }
 
-    pub fn releaseOutput(self: *Execution, retention: *output_retention.Queue) !void {
-        self.stdout_capture.close();
-        self.stderr_capture.close();
-        if (self.output_reservation) |pair| {
-            try retention.publishPair(pair);
-            self.output_reservation = null;
-            self.stdout_capture.published = true;
-            self.stderr_capture.published = true;
-            return;
-        }
-        try self.stdout_capture.cleanup(self.scratch_path);
-        try self.stderr_capture.cleanup(self.scratch_path);
-    }
-
-    pub fn cleanup(self: *Execution) !void {
-        var window: [copy_window_bytes]u8 = undefined;
-        while (true) {
-            const result = try self.service(&window, true);
-            if (result.complete) break;
-            _ = self.io.sleep(.fromMilliseconds(10), .awake) catch {};
-        }
+    pub fn reclaim(self: *Execution, retention: *output_retention.Queue) !void {
+        std.debug.assert(self.retired());
         var first_error: ?anyerror = null;
+        if (self.output_reservation) |pair| {
+            retention.publishPair(pair) catch |err| {
+                first_error = err;
+            };
+            if (first_error == null) {
+                self.output_reservation = null;
+                self.stdout_capture.published = true;
+                self.stderr_capture.published = true;
+                self.stdout_capture.close();
+                self.stderr_capture.close();
+            }
+        } else {
+            self.stdout_capture.cleanup(self.scratch_path) catch |err| {
+                first_error = err;
+            };
+            self.stderr_capture.cleanup(self.scratch_path) catch |err| if (first_error == null) {
+                first_error = err;
+            };
+        }
         self.script.cleanup(self.scratch_path) catch |err| {
-            first_error = err;
-        };
-        self.stdout_capture.cleanup(self.scratch_path) catch |err| if (first_error == null) {
-            first_error = err;
-        };
-        self.stderr_capture.cleanup(self.scratch_path) catch |err| if (first_error == null) {
-            first_error = err;
+            if (first_error == null) first_error = err;
         };
         if (first_error) |err| return err;
+    }
+
+    fn servicePipe(
+        self: *Execution,
+        pipe_slot: *Pipe,
+        destination: *OwnedFile,
+        window: []u8,
+        fault: *?anyerror,
+    ) bool {
+        return self.readPipe(pipe_slot, destination, window) catch |err| {
+            fault.* = fault.* orelse err;
+            self.capture_failure = .read;
+            self.requestTermination(.capture_failed);
+            self.closePipe(pipe_slot, .failed);
+            return true;
+        };
     }
 
     fn requestTermination(self: *Execution, reason: StopReason) void {
@@ -561,14 +607,18 @@ pub const Execution = struct {
         return true;
     }
 
-    fn observeLeader(self: *Execution) !bool {
-        if (self.faults.lifecycle == .observe) return error.InjectedBashObserveFailure;
+    fn observeLeader(self: *Execution, now: std.Io.Clock.Timestamp) !bool {
         const anchor = switch (self.process) {
             .running => |*value| &value.anchor,
             .grace => |*value| &value.anchor,
             .reaping, .checking_group, .gone => return false,
         };
         if (anchor.observed != null) return false;
+        if (self.lifecycleFaultActive(.observe) and
+            timestampReached(now, addMilliseconds(self.started, fault_observation_delay_ms)))
+        {
+            return error.InjectedBashObserveFailure;
+        }
         var observation: BashObservation = undefined;
         const result = rui_bash_observe(anchor.child.id.?, &observation);
         if (result < 0) return error.BashObserveFailed;
@@ -579,11 +629,11 @@ pub const Execution = struct {
 
     fn reapLeader(self: *Execution, now: std.Io.Clock.Timestamp) !bool {
         if (self.process != .reaping) return false;
-        if (self.faults.lifecycle == .reap) return error.InjectedBashReapFailure;
+        if (self.lifecycleFaultActive(.reap)) return error.InjectedBashReapFailure;
         var reaping = self.process.reaping;
         const child_id = reaping.owner.child.id.?;
         var observation: BashObservation = undefined;
-        const result = if (self.faults.lifecycle == .reap_watchdog)
+        const result = if (self.lifecycleFaultActive(.reap_watchdog))
             0
         else
             rui_bash_reap(child_id, &observation);
@@ -594,15 +644,21 @@ pub const Execution = struct {
         if (result < 0) return error.BashWaitFailed;
         reaping.owner.child.id = null;
         const term = decodeObservation(observation);
-        if (reaping.owner.observed) |observed| {
-            if (!std.meta.eql(observed, term)) return error.BashStatusChanged;
-        }
         self.process = .{ .checking_group = .{
             .pgid = reaping.owner.pgid,
             .term = reaping.owner.observed orelse term,
             .cleanup_deadline = reaping.cleanup_deadline,
         } };
+        if (reaping.owner.observed) |observed| {
+            if (!std.meta.eql(observed, term)) return error.BashStatusChanged;
+        }
         return true;
+    }
+
+    fn lifecycleFaultActive(self: *const Execution, expected: LifecycleFault) bool {
+        if (self.faults.lifecycle != expected) return false;
+        if (!self.faults.fault_gated) return true;
+        return faultGateActive(self.io, self.scratch_path);
     }
 
     fn beginCaptureTails(self: *Execution) !void {
@@ -799,6 +855,12 @@ pub fn prepare(
     faults: Faults,
 ) PrepareResult {
     var cleanup = PreparedCleanup{ .scratch_path = scratch_path };
+    const cleanup_fault: CleanupFault = if (!faults.cleanup)
+        .none
+    else if (faults.fault_gated)
+        .gated
+    else
+        .persistent;
     if (faults.preparation) {
         return .{ .failed = .{ .cause = error.BashPreparationFailed, .cleanup = cleanup } };
     }
@@ -809,7 +871,7 @@ pub fn prepare(
         "bash-input",
         action_id,
         attempt_ordinal,
-        faults.cleanup,
+        cleanup_fault,
     ) catch |err| return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
     if (faults.preparation_after_script) {
         return .{ .failed = .{ .cause = error.BashPreparationFailed, .cleanup = cleanup } };
@@ -832,7 +894,7 @@ pub fn prepare(
         "bash-stdout",
         action_id,
         attempt_ordinal,
-        faults.cleanup,
+        cleanup_fault,
     ) catch |err| return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
     cleanup.stderr_capture = createOwnedFile(
         io,
@@ -841,7 +903,7 @@ pub fn prepare(
         "bash-stderr",
         action_id,
         attempt_ordinal,
-        faults.cleanup,
+        cleanup_fault,
     ) catch |err| return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
     return .{ .prepared = .{
         .io = io,
@@ -864,7 +926,7 @@ fn createOwnedFile(
     prefix: []const u8,
     action_id: u64,
     attempt_ordinal: u64,
-    cleanup_fault: bool,
+    cleanup_fault: CleanupFault,
 ) !OwnedFile {
     var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
     defer scratch.close(io);

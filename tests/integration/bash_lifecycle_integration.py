@@ -4,6 +4,7 @@ import os
 import pathlib
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -21,10 +22,14 @@ def endpoint_for(name, command):
     return endpoint, thread, f"http://127.0.0.1:{endpoint.server_port}/responses"
 
 
-def admit(state, store, endpoint_url, name, fault=None):
+def admit(state, store, endpoint_url, name, fault=None, gated=False):
     session = f"direct/{name}"
-    arguments = ("--fault", fault) if fault is not None else ()
+    arguments = ["--fault", fault] if fault is not None else []
+    if gated:
+        arguments += ["--fault", "bash-fault-gated"]
     host = fixture.start_host(store, endpoint_url, *arguments)
+    if gated:
+        (store / "scratch" / "bash-fault-gate").write_text("blocked")
     bash_fixture.configure(state, store, f"{name}-config", session)
     fixture.message(state, store, f"{name}-message", session, "execute")
     action = fixture.wait_for(
@@ -34,12 +39,77 @@ def admit(state, store, endpoint_url, name, fault=None):
     return host, session
 
 
+def control_closed_while_host_alive(host, store, session):
+    assert host.poll() is None, host.returncode
+    try:
+        fixture.command("inspect-session", "--store", store, "--session", session)
+    except AssertionError as error:
+        return "FileNotFound" in str(error)
+    return False
+
+
+def competing_host_is_rejected(store):
+    completed = subprocess.run(
+        [str(fixture.RUI), "serve", "--store", str(store), "--active-capacity", "1"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert completed.returncode != 0, completed.stdout
+    assert "StoreAlreadyOwned" in completed.stderr, completed.stderr
+
+
 def main():
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-bash-lifecycle."))
     completed = False
     try:
+        name = "lifecycle-observe"
+        state = root / name
+        state.mkdir(mode=0o700)
+        store = state / "store"
+        bash_pid_path = state / "bash-pid"
+        endpoint, thread, endpoint_url = endpoint_for(
+            name,
+            f"printf $$ > {bash_pid_path}; trap '' TERM; sleep 30",
+        )
+        host = None
+        try:
+            host, session = admit(state, store, endpoint_url, name, "bash-observe")
+            fixture.wait_for(bash_pid_path.exists, "observe-fault Bash identity")
+            bash_pid = int(bash_pid_path.read_text())
+            fixture.wait_for(
+                lambda: host.poll() is not None,
+                "observe fault forced retirement shutdown",
+                timeout=12,
+            )
+            host.communicate(timeout=5)
+            host = None
+            assert not bash_fixture.process_exists(bash_pid)
+            assert bash_fixture.rows(
+                store,
+                "SELECT resolution_code FROM action_operation WHERE session_ref=?",
+                (session,),
+            ) == [(None,)]
+            assert not list((store / "scratch").glob("bash-*.tmp"))
+            host = fixture.start_host(store, endpoint_url)
+            fixture.wait_for(
+                lambda: bash_fixture.resolution(store, session) == "indeterminate",
+                "observe fault indeterminate recovery",
+                interval=0.5,
+            )
+            fixture.wait_for(
+                lambda: fixture.completed_observation(store, f"{name}-message"),
+                "observe fault recovery continuation",
+            )
+        finally:
+            if host is not None:
+                fixture.stop_host(host)
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
+
         for fault in (
-            "observe",
             "reap",
             "reap-watchdog",
             "group-probe",
@@ -49,23 +119,33 @@ def main():
             state = root / name
             state.mkdir(mode=0o700)
             store = state / "store"
-            endpoint, thread, endpoint_url = endpoint_for(name, "true")
+            launch_counter = state / "launch-counter"
+            endpoint, thread, endpoint_url = endpoint_for(name, f"printf x >> {launch_counter}")
             host = None
             try:
-                host, session = admit(state, store, endpoint_url, name, f"bash-{fault}")
+                host, session = admit(state, store, endpoint_url, name, f"bash-{fault}", gated=True)
+                fixture.wait_for(
+                    lambda: control_closed_while_host_alive(host, store, session),
+                    f"{fault} fault entered blocked shutdown",
+                    timeout=12,
+                )
+                assert host.poll() is None
+                competing_host_is_rejected(store)
+                (store / "scratch" / "bash-fault-gate").unlink()
                 fixture.wait_for(
                     lambda: host.poll() is not None,
-                    f"{fault} fault fenced shutdown",
+                    f"{fault} original owner retirement after fault cleared",
                     timeout=12,
                 )
                 host.communicate(timeout=5)
                 host = None
+                assert launch_counter.read_text() == "x"
                 assert bash_fixture.rows(
                     store,
                     "SELECT resolution_code FROM action_operation WHERE session_ref=?",
                     (session,),
                 ) == [(None,)]
-                assert list((store / "scratch").glob("bash-*.tmp"))
+                assert not list((store / "scratch").glob("bash-*.tmp"))
                 host = fixture.start_host(store, endpoint_url)
                 fixture.wait_for(
                     lambda: bash_fixture.resolution(store, session) == "indeterminate",
@@ -83,6 +163,41 @@ def main():
                 endpoint.shutdown()
                 endpoint.server_close()
                 thread.join(timeout=5)
+
+        name = "lifecycle-forced-reap"
+        state = root / name
+        state.mkdir(mode=0o700)
+        store = state / "store"
+        endpoint, thread, endpoint_url = endpoint_for(name, "true")
+        host = None
+        try:
+            host, session = admit(state, store, endpoint_url, name, "bash-reap")
+            fixture.wait_for(
+                lambda: control_closed_while_host_alive(host, store, session),
+                "forced termination fault entered blocked shutdown",
+                timeout=12,
+            )
+            competing_host_is_rejected(store)
+            fixture.stop_host(host)
+            host = None
+            assert bash_fixture.rows(
+                store,
+                "SELECT resolution_code FROM action_operation WHERE session_ref=?",
+                (session,),
+            ) == [(None,)]
+            assert list((store / "scratch").glob("bash-*.tmp"))
+            host = fixture.start_host(store, endpoint_url)
+            fixture.wait_for(
+                lambda: bash_fixture.resolution(store, session) == "indeterminate",
+                "forced termination indeterminate recovery",
+                interval=0.5,
+            )
+        finally:
+            if host is not None:
+                fixture.stop_host(host)
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
 
         name = "lifecycle-idle-detached-writer"
         state = root / name

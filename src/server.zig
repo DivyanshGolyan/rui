@@ -62,6 +62,7 @@ pub const Faults = struct {
     bash_seal: bool = false,
     bash_cleanup: bool = false,
     bash_lifecycle_fault: bash.LifecycleFault = .none,
+    bash_fault_gated: bool = false,
     bash_scratch_limit_bytes: u64 = scratch_limit_bytes,
     cleanup_delay_ms: i64 = 0,
     provider_inactivity_seconds: i64 = 5 * 60,
@@ -326,13 +327,13 @@ const BashSlot = struct {
     token: execution.CustodyToken,
     binding: store_module.ActionAttemptBinding,
     execution: bash.Execution,
-};
-
-const BashCleanupSlot = struct {
-    token: execution.CustodyToken,
-    execution: bash.Execution,
-    publish_output: bool,
-    ready_at: ?std.Io.Clock.Timestamp = null,
+    delivery: union(enum) {
+        open,
+        closed: struct {
+            reclaim_at: std.Io.Clock.Timestamp,
+            reclaim_failed: bool = false,
+        },
+    } = .open,
 };
 
 const BashPreparedCleanupSlot = struct {
@@ -344,7 +345,6 @@ const ExecutionSlot = union(enum) {
     free,
     provider: ProviderSlot,
     bash: BashSlot,
-    bash_cleanup: BashCleanupSlot,
     bash_prepared_cleanup: BashPreparedCleanupSlot,
     cleanup: CleanupSlot,
     retained_scratch: RetainedScratchSlot,
@@ -375,7 +375,7 @@ fn executionMain(host: *Host) void {
     while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
         var made_progress = false;
         var bash_window: [bash.copy_window_bytes]u8 = undefined;
-        if (advanceBash(host, slots, &bash_window, false)) made_progress = true;
+        if (advanceBash(host, slots, &bash_window)) made_progress = true;
         const now = std.Io.Clock.Timestamp.now(host.io, .awake);
         var free_slots = countFreeSlots(slots);
         const capacity_released = capacity_was_full and free_slots != 0;
@@ -495,7 +495,7 @@ fn cancelSupersededTransfers(host: *Host, reactor: ?*provider.Reactor, slots: []
             active.transfer.deinit();
             beginCleanup(host, slot, owner);
         },
-        .free, .bash, .bash_cleanup, .bash_prepared_cleanup, .cleanup, .retained_scratch, .retained_metadata => {},
+        .free, .bash, .bash_prepared_cleanup, .cleanup, .retained_scratch, .retained_metadata => {},
     };
 }
 
@@ -520,7 +520,7 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
     for (active.slots) |slot| switch (slot) {
         .provider => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .cleanup => |value| if (value.owner.binding.operation_id == operation_id) return true,
-        .free, .bash, .bash_cleanup, .bash_prepared_cleanup, .retained_scratch, .retained_metadata => {},
+        .free, .bash, .bash_prepared_cleanup, .retained_scratch, .retained_metadata => {},
     };
     return false;
 }
@@ -534,25 +534,26 @@ fn activeActionContains(context: *const anyopaque, action_id: u64) bool {
     return false;
 }
 
-fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8, shutdown: bool) bool {
+fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8) bool {
     var made_progress = false;
     for (slots) |*slot| switch (slot.*) {
         .bash => |*active| {
-            const service = active.execution.service(window, shutdown) catch |err| {
-                retainBashCleanup(host, slot, false, true, "Bash process service", err);
-                made_progress = true;
-                continue;
-            };
+            const service = active.execution.service(window);
             made_progress = made_progress or service.made_progress;
-            if (!service.complete) continue;
-            completeBash(host, slot);
-        },
-        .bash_cleanup => |retained| {
-            const ready_at = retained.ready_at orelse continue;
-            const now = std.Io.Clock.Timestamp.now(host.io, .awake);
-            if (now.raw.nanoseconds < ready_at.raw.nanoseconds) continue;
-            finishBashCleanup(host, slot);
-            made_progress = true;
+            if (service.fault) |err| {
+                made_progress = failBash(host, active, "Bash process service", err) or made_progress;
+            }
+            if (active.delivery == .open and service.retired) {
+                completeBash(host, active);
+                made_progress = true;
+            }
+            if (active.delivery == .closed and service.retired) {
+                const closed = &active.delivery.closed;
+                const now = std.Io.Clock.Timestamp.now(host.io, .awake);
+                if (now.raw.nanoseconds >= closed.reclaim_at.raw.nanoseconds) {
+                    made_progress = reclaimBash(host, slot, now) or made_progress;
+                }
+            }
         },
         else => {},
     };
@@ -613,6 +614,7 @@ fn admitBashAttempt(host: *Host, slot: *ExecutionSlot) AdmissionProgress {
             .seal = host.faults.bash_seal,
             .cleanup = host.faults.bash_cleanup,
             .lifecycle = host.faults.bash_lifecycle_fault,
+            .fault_gated = host.faults.bash_fault_gated,
         },
     );
     var prepared = switch (preparation) {
@@ -694,24 +696,16 @@ fn stopSupersededBash(host: *Host, slots: []ExecutionSlot) void {
     };
 }
 
-fn completeBash(host: *Host, slot: *ExecutionSlot) void {
-    const active = &slot.bash;
+fn completeBash(host: *Host, active: *BashSlot) void {
     const token = active.token;
     const binding = active.binding;
     const include_paths = active.execution.reserveOutput(host.retention) catch |err| {
-        retainBashCleanup(host, slot, false, false, "Bash output reservation", err);
-        fenceDispatch(host, "Bash output reservation", err);
+        _ = failBash(host, active, "Bash output reservation", err);
         return;
     };
     const outcome = active.execution.outcome(include_paths) catch |err| {
         active.execution.releaseOutputReservation(host.retention);
-        active.execution.cleanup() catch |cleanup_err| {
-            retainBashCleanup(host, slot, false, false, "Bash output cleanup", cleanup_err);
-            return;
-        };
-        finishCustodyNow(host, token);
-        slot.* = .free;
-        fenceDispatch(host, "Bash outcome materialization", err);
+        _ = failBash(host, active, "Bash outcome materialization", err);
         return;
     };
     if (host.faults.before_result_delay_ms != 0) {
@@ -724,84 +718,56 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
             .before_commit = host.faults.result_before_commit,
         }) catch |err| {
             active.execution.releaseOutputReservation(host.retention);
-            active.execution.cleanup() catch |cleanup_err| {
-                retainBashCleanup(host, slot, false, false, "Bash output cleanup", cleanup_err);
-                fenceDispatch(host, "Bash result settlement", err);
-                return;
-            };
-            finishCustodyNow(host, token);
-            slot.* = .free;
-            fenceDispatch(host, "Bash result settlement", err);
+            _ = failBash(host, active, "Bash result settlement", err);
             return;
         };
         if (settlement == .session_stop) active.execution.releaseOutputReservation(host.retention);
     } else active.execution.releaseOutputReservation(host.retention);
-    if (host.faults.cleanup_delay_ms != 0) {
-        const started = std.Io.Clock.Timestamp.now(host.io, .awake);
-        host.custody.detach(token) catch unreachable;
-        traceAction(host, "cleanup_started", binding);
-        slot.* = .{ .bash_cleanup = .{
-            .token = token,
-            .execution = active.execution,
-            .publish_output = true,
-            .ready_at = started.addDuration(.{
-                .raw = .fromMilliseconds(host.faults.cleanup_delay_ms),
-                .clock = .awake,
-            }),
-        } };
-        return;
-    }
-    active.execution.releaseOutput(host.retention) catch |err| {
-        retainBashCleanup(host, slot, true, false, "Bash output retention", err);
-        return;
-    };
-    active.execution.cleanup() catch |err| {
-        retainBashCleanup(host, slot, false, false, "Bash execution cleanup", err);
-        return;
-    };
-    finishCustodyNow(host, token);
-    slot.* = .free;
+    closeBashDelivery(host, active);
 }
 
-fn retainBashCleanup(
-    host: *Host,
-    slot: *ExecutionSlot,
-    publish_output: bool,
-    effect_shutdown: bool,
-    phase: []const u8,
-    err: anyerror,
-) void {
-    const active = slot.bash;
+fn failBash(host: *Host, active: *BashSlot, phase: []const u8, err: anyerror) bool {
+    var closed = false;
+    if (active.delivery == .open) {
+        active.execution.releaseOutputReservation(host.retention);
+        closeBashDelivery(host, active);
+        closed = true;
+    }
+    fenceDispatch(host, phase, err);
+    return closed;
+}
+
+fn closeBashDelivery(host: *Host, active: *BashSlot) void {
+    std.debug.assert(active.delivery == .open);
     host.custody.detach(active.token) catch unreachable;
-    slot.* = .{ .bash_cleanup = .{
-        .token = active.token,
-        .execution = active.execution,
-        .publish_output = publish_output,
+    traceAction(host, "cleanup_started", active.binding);
+    const started = std.Io.Clock.Timestamp.now(host.io, .awake);
+    active.delivery = .{ .closed = .{
+        .reclaim_at = started.addDuration(.{
+            .raw = .fromMilliseconds(host.faults.cleanup_delay_ms),
+            .clock = .awake,
+        }),
     } };
-    if (effect_shutdown)
-        fenceDispatch(host, phase, err)
-    else
-        retainDispatchFence(host, phase, err);
 }
 
-fn finishBashCleanup(host: *Host, slot: *ExecutionSlot) void {
-    const retained = &slot.bash_cleanup;
-    if (retained.publish_output) {
-        retained.execution.releaseOutput(host.retention) catch |err| {
-            retained.ready_at = null;
-            retainDispatchFence(host, "Bash output retention", err);
-            return;
-        };
-        retained.publish_output = false;
-    }
-    retained.execution.cleanup() catch |err| {
-        retained.ready_at = null;
-        retainDispatchFence(host, "Bash execution cleanup", err);
-        return;
+fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) bool {
+    const active = &slot.bash;
+    active.execution.reclaim(host.retention) catch |err| {
+        const first_failure = !active.delivery.closed.reclaim_failed;
+        active.delivery.closed.reclaim_failed = true;
+        active.delivery.closed.reclaim_at = now.addDuration(.{
+            .raw = .fromMilliseconds(100),
+            .clock = .awake,
+        });
+        if (first_failure) retainDispatchFence(host, "Bash resource reclamation", err);
+        return first_failure;
     };
-    const token = retained.token;
+    const token = active.token;
+    const binding = active.binding;
     host.custody.cleanupComplete(token) catch unreachable;
+    traceAction(host, "cleanup_completed", binding);
     slot.* = .free;
+    return true;
 }
 
 fn retainBashPreparedCleanup(
@@ -1268,34 +1234,16 @@ fn finishSlotCleanup(host: *Host, slot: *ExecutionSlot) void {
 }
 
 fn shutdownExecution(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) void {
-    var bash_window: [bash.copy_window_bytes]u8 = undefined;
-    while (hasBash(slots)) {
-        _ = advanceBash(host, slots, &bash_window, true);
-        if (hasBash(slots)) _ = host.io.sleep(.fromMilliseconds(10), .awake) catch {};
-    }
     for (slots) |*slot| switch (slot.*) {
         .free => {},
-        .bash => unreachable,
-        .bash_cleanup => |*retained| {
-            if (retained.publish_output) {
-                retained.execution.releaseOutput(host.retention) catch |err| {
-                    std.debug.print("rui: retained Bash output after cleanup failure: {s}\n", .{@errorName(err)});
-                    continue;
-                };
-                retained.publish_output = false;
-            }
-            retained.execution.cleanup() catch |err| {
-                std.debug.print("rui: retained Bash scratch after cleanup failure: {s}\n", .{@errorName(err)});
-                continue;
-            };
-            host.custody.cleanupComplete(retained.token) catch unreachable;
-        },
+        .bash => |*active| active.execution.requestInfrastructureShutdown(),
         .bash_prepared_cleanup => |*retained| {
             retained.cleanup.cleanup() catch |err| {
                 std.debug.print("rui: retained Bash preparation after cleanup failure: {s}\n", .{@errorName(err)});
                 continue;
             };
             host.custody.cleanupComplete(retained.token) catch unreachable;
+            slot.* = .free;
         },
         .provider => |*active| {
             const token = active.owner.token;
@@ -1303,9 +1251,11 @@ fn shutdownExecution(host: *Host, reactor: ?*provider.Reactor, slots: []Executio
             active.transfer.deinit();
             host.custody.detach(token) catch unreachable;
             host.custody.cleanupComplete(token) catch unreachable;
+            slot.* = .free;
         },
         .cleanup => |cleanup| {
             host.custody.cleanupComplete(cleanup.owner.token) catch unreachable;
+            slot.* = .free;
         },
         .retained_scratch => |*retained| {
             retained.scratch.cleanup(host.lease.paths.scratch.slice()) catch |err| {
@@ -1314,6 +1264,7 @@ fn shutdownExecution(host: *Host, reactor: ?*provider.Reactor, slots: []Executio
             };
             host.custody.detach(retained.token) catch unreachable;
             host.custody.cleanupComplete(retained.token) catch unreachable;
+            slot.* = .free;
         },
         .retained_metadata => |*retained| {
             retained.metadata.cleanup(host.lease.paths.scratch.slice()) catch |err| {
@@ -1322,8 +1273,14 @@ fn shutdownExecution(host: *Host, reactor: ?*provider.Reactor, slots: []Executio
             };
             host.custody.detach(retained.token) catch unreachable;
             host.custody.cleanupComplete(retained.token) catch unreachable;
+            slot.* = .free;
         },
     };
+    var bash_window: [bash.copy_window_bytes]u8 = undefined;
+    while (hasOwnedSlots(slots)) {
+        const made_progress = advanceBash(host, slots, &bash_window);
+        if (!made_progress) _ = host.io.sleep(.fromMilliseconds(100), .awake) catch {};
+    }
 }
 
 fn hasTransport(slots: []const ExecutionSlot) bool {
@@ -1336,6 +1293,13 @@ fn hasTransport(slots: []const ExecutionSlot) bool {
 fn hasBash(slots: []const ExecutionSlot) bool {
     for (slots) |slot| {
         if (slot == .bash) return true;
+    }
+    return false;
+}
+
+fn hasOwnedSlots(slots: []const ExecutionSlot) bool {
+    for (slots) |slot| {
+        if (slot != .free) return true;
     }
     return false;
 }

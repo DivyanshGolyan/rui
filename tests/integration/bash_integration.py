@@ -853,7 +853,16 @@ def main():
         )
 
         fixture.stop_host(host)
-        host = fixture.start_host(store, endpoint_url, "--fault", "bash-cleanup")
+        host = fixture.start_host(
+            store,
+            endpoint_url,
+            "--fault",
+            "bash-cleanup",
+            "--fault",
+            "bash-fault-gated",
+        )
+        cleanup_gate = store / "scratch" / "bash-fault-gate"
+        cleanup_gate.write_text("blocked")
         configure(state, store, "cleanup-config", "direct/cleanup")
         fixture.message(state, store, "cleanup-message", "direct/cleanup", "execute")
         cleanup_action = fixture.wait_for(
@@ -870,6 +879,18 @@ def main():
         assert cleanup_report["execution"]["dispatch_fenced"] is True, cleanup_report
         assert int(cleanup_report["execution"]["custody_occupied"]) > 0, cleanup_report
         assert list((store / "scratch").glob("bash-*-*.tmp"))
+        cleanup_gate.unlink()
+        fixture.wait_for(
+            lambda: fixture.command(
+                "inspect-session", "--store", store, "--session", "direct/cleanup"
+            )["execution"]["custody_occupied"]
+            == "0",
+            "cleanup-failure original owner reclamation",
+        )
+        cleanup_attempt = f"{cleanup_action['action']}-1.tmp"
+        assert not (store / "scratch" / f"bash-input-{cleanup_attempt}").exists()
+        assert (store / "scratch" / f"bash-stdout-{cleanup_attempt}").exists()
+        assert (store / "scratch" / f"bash-stderr-{cleanup_attempt}").exists()
         fixture.stop_host(host)
         host = fixture.start_host(store, endpoint_url)
         assert resolution(store, "direct/cleanup") == "succeeded"
