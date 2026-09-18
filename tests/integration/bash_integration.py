@@ -205,6 +205,8 @@ def prove_reused_session(state):
     store = state / "reused-session-store"
     workspace = state / "reused-session-workspace"
     workspace.mkdir()
+    cleanup_gate = workspace / "cleanup-gate"
+    cleanup_gate.write_text("blocked")
     slow_release = workspace / "slow-release"
     settlement_order = workspace / "settlement-order"
     slow_command = (
@@ -253,18 +255,20 @@ def prove_reused_session(state):
     endpoint_thread.start()
     endpoint_url = f"http://127.0.0.1:{endpoint.server_port}/responses"
     host = None
+    milestones = None
     try:
         host = fixture.start_host(
             store,
             endpoint_url,
             "--test-retry-waits-ms",
             "500,500,500",
-            "--test-cleanup-delay-ms",
-            "3000",
+            "--test-bash-cleanup-gate-path",
+            cleanup_gate,
             "--test-phase-trace",
             accelerated_retries=False,
             active_capacity=5,
         )
+        milestones = MilestoneLog(host)
         configure(state, store, "reuse-config", "direct/reuse")
         fixture.message(state, store, "reuse-first", "direct/reuse", "first work")
         actions = fixture.wait_for(
@@ -339,6 +343,10 @@ def prove_reused_session(state):
         assert reverse_rows["0"]["resolution"] is None, reverse_rows
         assert settlement_order.read_text() == "b"
         assert len(endpoint.requests) == 1, endpoint.requests
+        milestones.wait(
+            "cleanup_started",
+            action=str(actions_by_ordinal["2"]["action"]),
+        )
         slow_release.touch()
         first_completed = fixture.wait_for(
             lambda: fixture.completed_observation(store, "reuse-first"),
@@ -373,12 +381,25 @@ def prove_reused_session(state):
             and item["content"][0]["text"] == "queued during permission"
             for item in first_continuation["input"]
         ), first_continuation
+        milestones.wait(
+            "cleanup_started",
+            action=str(actions_by_ordinal["0"]["action"]),
+        )
+        for action in actions_by_ordinal.values():
+            assert milestones.matching(
+                "cleanup_completed",
+                action=str(action["action"]),
+            ) == [], milestones.records
         delayed = fixture.command(
             "inspect-session", "--store", store, "--session", "direct/reuse"
         )["execution"]
         assert int(delayed["custody_occupied"]) >= 1, delayed
         delayed_bash_files = set((store / "scratch").glob("bash-*-*.tmp"))
         assert delayed_bash_files, delayed_bash_files
+        delayed_input_files = {
+            path for path in delayed_bash_files if path.name.startswith("bash-input-")
+        }
+        assert delayed_input_files, delayed_bash_files
 
         fixture.message(
             state,
@@ -399,10 +420,9 @@ def prove_reused_session(state):
         assert set((store / "scratch").glob("bash-*-*.tmp")) == delayed_bash_files
         second_processing = fixture.observe(store, "reuse-second")["processing"]
         retry_failure_release.set()
-        wait_for_phase(
-            host,
+        milestones.wait(
             "cleanup_started",
-            operation=second_processing["operation"],
+            operation=str(second_processing["operation"]),
         )
         retry_wait = fixture.observe(store, "reuse-second")
         retry_execution = fixture.command(
@@ -411,14 +431,19 @@ def prove_reused_session(state):
         assert retry_wait["processing"] == second_processing, retry_wait
         assert retry_wait["processing"]["attempt"] == "1", retry_wait
         assert "result" not in retry_wait, retry_wait
-        assert int(retry_execution["custody_occupied"]) == second_live_custody
+        assert int(retry_execution["custody_occupied"]) >= len(actions_by_ordinal)
+        assert int(retry_execution["scratch_used_bytes"]) > 0
         assert set((store / "scratch").glob("bash-*-*.tmp")) == delayed_bash_files
         assert retry_execution["dispatch_fenced"] is False, retry_execution
         assert second_processing["turn"] != first_processing["turn"], retry_wait
-        wait_for_phase(
-            host,
+        for action in actions_by_ordinal.values():
+            assert milestones.matching(
+                "cleanup_completed",
+                action=str(action["action"]),
+            ) == [], milestones.records
+        milestones.wait(
             "cleanup_completed",
-            operation=second_processing["operation"],
+            operation=str(second_processing["operation"]),
         )
         fixture.wait_for(
             lambda: fixture.completed_observation(store, "reuse-second"),
@@ -454,15 +479,35 @@ def prove_reused_session(state):
         assert replayed_permission["answer"]["action"] == slow_decision["answer"]["action"]
         assert fixture.read_result(store, "reuse-first") == b"first-turn-answer"
         assert fixture.read_result(store, "reuse-second") == b"second-turn-answer"
+        cleanup_gate.unlink()
+        for action in actions_by_ordinal.values():
+            completed = milestones.wait(
+                "cleanup_completed",
+                action=str(action["action"]),
+            )
+            assert len(completed) == 1, completed
         fixture.wait_for(
-            lambda: execution_custody_idle(store, "direct/reuse"),
+            lambda: execution_idle(store, "direct/reuse"),
             "reused-Session delayed cleanup",
             timeout=15,
         )
+        for action in actions_by_ordinal.values():
+            assert len(
+                milestones.matching(
+                    "cleanup_completed",
+                    action=str(action["action"]),
+                )
+            ) == 1, milestones.records
+        assert all(not path.exists() for path in delayed_input_files), delayed_input_files
+        assert fixture.read_result(store, "reuse-first") == b"first-turn-answer"
+        assert fixture.read_result(store, "reuse-second") == b"second-turn-answer"
     finally:
         retry_failure_release.set()
+        cleanup_gate.unlink(missing_ok=True)
         if host is not None:
             fixture.stop_host(host)
+        if milestones is not None:
+            milestones.close()
         endpoint.shutdown()
         endpoint.server_close()
         endpoint_thread.join(timeout=5)
