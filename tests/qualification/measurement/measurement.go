@@ -406,6 +406,60 @@ type Footprint struct {
 	LifetimePeakTolerance uint64 `json:"lifetime_peak_physical_footprint_rounding_tolerance_bytes"`
 }
 
+type FootprintVerdict struct {
+	Status          string `json:"status"`
+	TargetBytes     uint64 `json:"target_bytes"`
+	LowerBoundBytes uint64 `json:"lifetime_peak_lower_bound_bytes"`
+	UpperBoundBytes uint64 `json:"lifetime_peak_upper_bound_bytes"`
+}
+
+func ClassifyFootprint(footprint Footprint, target uint64) FootprintVerdict {
+	lower := uint64(0)
+	if footprint.LifetimePeakBytes > footprint.LifetimePeakTolerance {
+		lower = footprint.LifetimePeakBytes - footprint.LifetimePeakTolerance
+	}
+	upper := ^uint64(0)
+	overflow := footprint.LifetimePeakBytes > upper-footprint.LifetimePeakTolerance
+	if !overflow {
+		upper = footprint.LifetimePeakBytes + footprint.LifetimePeakTolerance
+	}
+	status := "unavailable"
+	if overflow {
+		status = "unavailable"
+	} else if upper <= target {
+		status = "passed"
+	} else if lower > target {
+		status = "target_miss"
+	}
+	return FootprintVerdict{Status: status, TargetBytes: target, LowerBoundBytes: lower, UpperBoundBytes: upper}
+}
+
+type SampleValidity struct {
+	Attempts   uint64 `json:"attempts"`
+	Succeeded  uint64 `json:"succeeded"`
+	Failed     uint64 `json:"failed"`
+	FirstError string `json:"first_error,omitempty"`
+}
+
+func (v *SampleValidity) Record(err error) {
+	v.Attempts++
+	if err == nil {
+		v.Succeeded++
+		return
+	}
+	v.Failed++
+	if v.FirstError == "" {
+		v.FirstError = err.Error()
+	}
+}
+
+func (v SampleValidity) Status() string {
+	if v.Succeeded == 0 || v.Failed != 0 {
+		return "unavailable"
+	}
+	return "diagnostic"
+}
+
 var footprintCounter = regexp.MustCompile(`^\s*(phys_footprint|phys_footprint_peak):\s+([0-9]+(?:\.[0-9]+)?)\s+(B|KB|MB|GB)\s*$`)
 
 func ParseFootprint(report string) (Footprint, error) {
@@ -567,7 +621,9 @@ func SampleProcess(target *process.Process, rawFootprintPath string) (ProcessSam
 		return ProcessSample{}, err
 	}
 	pid := strconv.Itoa(int(target.Pid))
-	footprintCommand := exec.Command("/usr/bin/footprint", "-p", pid)
+	footprintContext, cancelFootprint := context.WithTimeout(context.Background(), TeardownAllowance)
+	defer cancelFootprint()
+	footprintCommand := exec.CommandContext(footprintContext, "/usr/bin/footprint", "-p", pid)
 	report, err := footprintCommand.CombinedOutput()
 	if err != nil {
 		return ProcessSample{}, fmt.Errorf("footprint failed: %w; output=%q", err, report)
@@ -579,7 +635,9 @@ func SampleProcess(target *process.Process, rawFootprintPath string) (ProcessSam
 	if err != nil {
 		return ProcessSample{}, err
 	}
-	lsof, err := exec.Command("/usr/sbin/lsof", "-n", "-P", "-p", pid).Output()
+	lsofContext, cancelLsof := context.WithTimeout(context.Background(), TeardownAllowance)
+	defer cancelLsof()
+	lsof, err := exec.CommandContext(lsofContext, "/usr/sbin/lsof", "-n", "-P", "-p", pid).Output()
 	if err != nil {
 		return ProcessSample{}, fmt.Errorf("lsof failed: %w", err)
 	}

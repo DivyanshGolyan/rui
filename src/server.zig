@@ -272,7 +272,7 @@ const ProviderSlot = struct {
 
 const CleanupSlot = struct {
     owner: AttemptOwner,
-    cleanup_ticks: u32 = 0,
+    cleanup_deadline: std.Io.Clock.Timestamp,
 };
 
 const RetainedScratchSlot = struct {
@@ -839,22 +839,42 @@ fn modelObservationsAgree(body: []const u8, openai: []const u8, x_openai: []cons
 }
 
 fn beginCleanup(host: *Host, slot: *ExecutionSlot, owner: AttemptOwner) void {
+    beginCleanupAt(host, slot, owner, .now(host.io, .awake));
+}
+
+fn beginCleanupAt(
+    host: *Host,
+    slot: *ExecutionSlot,
+    owner: AttemptOwner,
+    now: std.Io.Clock.Timestamp,
+) void {
     host.custody.detach(owner.token) catch unreachable;
     traceOperation(host, "cleanup_started", owner.binding);
     slot.* = .{ .cleanup = .{
         .owner = owner,
-        .cleanup_ticks = @intCast(@divFloor(host.faults.cleanup_delay_ms + 24, 25)),
+        .cleanup_deadline = now.addDuration(.{
+            .raw = .fromMilliseconds(host.faults.cleanup_delay_ms),
+            .clock = .awake,
+        }),
     } };
-    if (slot.cleanup.cleanup_ticks == 0) finishSlotCleanup(host, slot);
+    if (host.faults.cleanup_delay_ms == 0) finishSlotCleanup(host, slot);
 }
 
 fn advanceCleanup(host: *Host, slots: []ExecutionSlot) void {
+    advanceCleanupAt(host, slots, .now(host.io, .awake));
+}
+
+fn advanceCleanupAt(
+    host: *Host,
+    slots: []ExecutionSlot,
+    now: std.Io.Clock.Timestamp,
+) void {
     for (slots) |*slot| {
         switch (slot.*) {
-            .cleanup => |*cleanup| {
-                if (cleanup.cleanup_ticks == 0) continue;
-                cleanup.cleanup_ticks -= 1;
-                if (cleanup.cleanup_ticks == 0) finishSlotCleanup(host, slot);
+            .cleanup => |cleanup| {
+                if (cleanup.cleanup_deadline.compare(.lte, now)) {
+                    finishSlotCleanup(host, slot);
+                }
             },
             else => {},
         }
@@ -2001,6 +2021,68 @@ test "model retry and inactivity defaults match the owning resource contract" {
         store_module.maximum_model_attempts,
         @as(u64, default_retry_waits_ms.len + 1),
     );
+}
+
+test "cleanup delay follows elapsed time and preserves custody reuse" {
+    var records: [1]execution.CustodyRecord = undefined;
+    var host = Host{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .lease = undefined,
+        .store = undefined,
+        .faults = .{ .cleanup_delay_ms = 1_500 },
+        .custody = execution.CustodyPool.initialize(&records),
+    };
+    var slots = [_]ExecutionSlot{.free};
+    const start = std.Io.Timestamp.fromNanoseconds(std.time.ns_per_s).withClock(.awake);
+    const before_deadline = start.addDuration(.{
+        .raw = .fromMilliseconds(1_499),
+        .clock = .awake,
+    });
+    const deadline = start.addDuration(.{
+        .raw = .fromMilliseconds(1_500),
+        .clock = .awake,
+    });
+    const far_after_deadline = start.addDuration(.{
+        .raw = .fromSeconds(10),
+        .clock = .awake,
+    });
+    const Attach = struct {
+        fn run(custody: *execution.CustodyPool, turn: u64) !AttemptOwner {
+            const token = custody.reserve().?;
+            var permit = store_module.DispatchPermit{ .binding = .{
+                .turn_id = turn,
+                .operation_id = turn,
+                .attempt_ordinal = 1,
+            } };
+            return .{ .token = token, .binding = try custody.attach(token, &permit) };
+        }
+    };
+
+    const first = try Attach.run(&host.custody, 1);
+    beginCleanupAt(&host, &slots[0], first, start);
+    try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
+    for (0..100) |_| advanceCleanupAt(&host, &slots, before_deadline);
+    try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
+    advanceCleanupAt(&host, &slots, deadline);
+    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    try std.testing.expect(slots[0] == .free);
+    advanceCleanupAt(&host, &slots, far_after_deadline);
+
+    const second = try Attach.run(&host.custody, 2);
+    try std.testing.expectEqual(first.token.index, second.token.index);
+    try std.testing.expect(first.token.generation != second.token.generation);
+    try std.testing.expectError(error.StaleCustody, host.custody.binding(first.token));
+    beginCleanupAt(&host, &slots[0], second, start);
+    advanceCleanupAt(&host, &slots, far_after_deadline);
+    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    try std.testing.expect(slots[0] == .free);
+
+    host.faults.cleanup_delay_ms = 0;
+    const third = try Attach.run(&host.custody, 3);
+    beginCleanupAt(&host, &slots[0], third, start);
+    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    try std.testing.expect(slots[0] == .free);
 }
 
 test "message observation renders every closed queue state without fabricated rejection state" {
