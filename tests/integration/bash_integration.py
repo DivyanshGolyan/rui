@@ -369,6 +369,8 @@ def main():
     endpoint_thread.start()
     endpoint_url = f"http://127.0.0.1:{endpoint.server_port}/responses"
     store = state / "store"
+    success_cleanup_gate = state / "success-cleanup-gate"
+    success_cleanup_gate.write_text("blocked")
     host = None
     success_milestones = None
     detached_process = None
@@ -378,8 +380,8 @@ def main():
         host = fixture.start_host(
             store,
             endpoint_url,
-            "--test-cleanup-delay-ms",
-            "10000",
+            "--test-bash-cleanup-gate-path",
+            success_cleanup_gate,
             "--test-phase-trace",
             active_capacity=3,
         )
@@ -483,15 +485,6 @@ def main():
             "cleanup_started",
             action=str(success_action["action"]),
         )[-1]
-        # This Action milestone is the drain barrier. Keep answer_report as the
-        # only later Session inspection so its capture is the next matching one.
-        captured_before = len(
-            success_milestones.matching(
-                "inspection_captured",
-                subject_kind="session",
-                subject="direct/success",
-            )
-        )
         fixture.wait_for(
             lambda: fixture.completed_observation(store, "success-message"),
             "successful Bash continuation",
@@ -532,26 +525,15 @@ def main():
             "--profile",
             "full",
         )
-        answer_snapshot = success_milestones.wait(
-            "inspection_captured",
-            count=captured_before + 1,
-            subject_kind="session",
-            subject="direct/success",
-        )[-1]
         success_actions = answer_report["full"]["actions"]
         assert len(success_actions) == 1, answer_report
         assert success_actions[0]["action"] == success_action["action"], answer_report
         assert success_actions[0]["resolution"] == "succeeded", answer_report
         success_resources = answer_report["execution"]
         assert success_resources["custody_occupied"] != "0", success_resources
-        assert int(answer_snapshot["at_ns"]) >= int(bash_cleanup_started["at_ns"])
-        assert [
-            record
-            for record in success_milestones.matching(
-                "cleanup_completed", action=str(success_action["action"])
-            )
-            if int(record["at_ns"]) <= int(answer_snapshot["at_ns"])
-        ] == [], success_milestones.records
+        assert success_milestones.matching(
+            "cleanup_completed", action=str(success_action["action"])
+        ) == [], success_milestones.records
         resource_samples.append(
             {
                 "phase": "retained-output-idle",
@@ -560,6 +542,12 @@ def main():
                 "accounted_scratch_bytes": int(success_resources["scratch_used_bytes"]),
             }
         )
+        success_cleanup_gate.unlink()
+        bash_cleanup_completed = success_milestones.wait(
+            "cleanup_completed",
+            action=str(success_action["action"]),
+        )[-1]
+        assert int(bash_cleanup_completed["at_ns"]) >= int(bash_cleanup_started["at_ns"])
 
         fixture.stop_host(host)
         host = None
