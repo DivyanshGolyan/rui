@@ -341,9 +341,15 @@ const BashPreparedCleanupSlot = struct {
     cleanup: bash.PreparedCleanup,
 };
 
+const BashPreparingSlot = struct {
+    token: execution.CustodyToken,
+    binding: store_module.ActionAttemptBinding,
+};
+
 const ExecutionSlot = union(enum) {
     free,
     provider: ProviderSlot,
+    bash_preparing: BashPreparingSlot,
     bash: BashSlot,
     bash_prepared_cleanup: BashPreparedCleanupSlot,
     cleanup: CleanupSlot,
@@ -368,15 +374,24 @@ fn executionMain(host: *Host) void {
     else
         null;
     defer if (reactor) |*active| active.deinit();
-    defer shutdownExecution(host, if (reactor) |*active| active else null, slots);
+    var bash_preparation: ?bash.Preparation = null;
+    defer shutdownExecution(
+        host,
+        if (reactor) |*active| active else null,
+        slots,
+        &bash_preparation,
+    );
 
     var last_retry_poll: ?std.Io.Clock.Timestamp = null;
+    var retained_cleanup_at = std.Io.Clock.Timestamp.now(host.io, .awake);
     var capacity_was_full = slots.len == 0;
     while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
         var made_progress = false;
         var bash_window: [bash.copy_window_bytes]u8 = undefined;
+        if (advanceBashPreparation(host, slots, &bash_preparation)) made_progress = true;
         if (advanceBash(host, slots, &bash_window)) made_progress = true;
         const now = std.Io.Clock.Timestamp.now(host.io, .awake);
+        if (advanceRetainedCleanup(host, slots, now, &retained_cleanup_at)) made_progress = true;
         var free_slots = countFreeSlots(slots);
         const capacity_released = capacity_was_full and free_slots != 0;
         const retry_poll_due = if (last_retry_poll) |last|
@@ -400,10 +415,10 @@ fn executionMain(host: *Host) void {
                 break;
             };
             if (recovered_action) made_progress = true;
-            if (free_slots != 0) {
+            if (free_slots != 0 and bash_preparation == null) {
                 for (slots) |*slot| {
                     if (!slotIsFree(slot)) continue;
-                    switch (admitBashAttempt(host, slot)) {
+                    switch (admitBashAttempt(host, slot, &bash_preparation)) {
                         .admitted => made_progress = true,
                         .no_work, .retry_later => {},
                     }
@@ -454,7 +469,7 @@ fn executionMain(host: *Host) void {
         }
         if (host.controls_changed.swap(false, .acq_rel)) {
             cancelSupersededTransfers(host, if (reactor) |*active| active else null, slots);
-            stopSupersededBash(host, slots);
+            stopSupersededBash(host, slots, &bash_preparation);
             made_progress = true;
         }
         capacity_was_full = countFreeSlots(slots) == 0;
@@ -495,7 +510,7 @@ fn cancelSupersededTransfers(host: *Host, reactor: ?*provider.Reactor, slots: []
             active.transfer.deinit();
             beginCleanup(host, slot, owner);
         },
-        .free, .bash, .bash_prepared_cleanup, .cleanup, .retained_scratch, .retained_metadata => {},
+        .free, .bash_preparing, .bash, .bash_prepared_cleanup, .cleanup, .retained_scratch, .retained_metadata => {},
     };
 }
 
@@ -520,7 +535,7 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
     for (active.slots) |slot| switch (slot) {
         .provider => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .cleanup => |value| if (value.owner.binding.operation_id == operation_id) return true,
-        .free, .bash, .bash_prepared_cleanup, .retained_scratch, .retained_metadata => {},
+        .free, .bash_preparing, .bash, .bash_prepared_cleanup, .retained_scratch, .retained_metadata => {},
     };
     return false;
 }
@@ -528,6 +543,7 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
 fn activeActionContains(context: *const anyopaque, action_id: u64) bool {
     const active: *const ActiveSlots = @ptrCast(@alignCast(context));
     for (active.slots) |slot| switch (slot) {
+        .bash_preparing => |value| if (value.binding.action_id == action_id) return true,
         .bash => |value| if (value.binding.action_id == action_id) return true,
         else => {},
     };
@@ -560,7 +576,12 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8) bool {
     return made_progress;
 }
 
-fn admitBashAttempt(host: *Host, slot: *ExecutionSlot) AdmissionProgress {
+fn admitBashAttempt(
+    host: *Host,
+    slot: *ExecutionSlot,
+    preparation: *?bash.Preparation,
+) AdmissionProgress {
+    std.debug.assert(preparation.* == null);
     const token = host.custody.reserve() orelse return .no_work;
     var admission = host.store.admitNextActionAttempt(host.bash_timeout_ms, .{
         .attempt_before_commit = host.faults.attempt_before_commit,
@@ -583,19 +604,18 @@ fn admitBashAttempt(host: *Host, slot: *ExecutionSlot) AdmissionProgress {
         if (host.store.isFenced()) fenceDispatch(host, "Bash canonical input", err);
         return .admitted;
     };
-    var arguments = host.store.openContent(input.arguments) catch |err| {
+    const arguments = host.store.openContent(input.arguments) catch |err| {
         settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be opened.");
         finishCustodyNow(host, token);
         fenceDispatch(host, "Bash canonical input", err);
         return .admitted;
     };
-    defer arguments.close();
     var bash_budget = host.retention.sharedBudget();
     bash_budget.limit = @min(bash_budget.limit, host.faults.bash_scratch_limit_bytes);
-    const preparation = bash.prepare(
+    const started = bash.startPreparation(
         host.io,
         host.allocator,
-        &arguments,
+        arguments,
         input.arguments.length,
         input.workspace,
         host.lease.paths.scratch.slice(),
@@ -617,26 +637,84 @@ fn admitBashAttempt(host: *Host, slot: *ExecutionSlot) AdmissionProgress {
             .fault_gated = host.faults.bash_fault_gated,
         },
     );
-    var prepared = switch (preparation) {
-        .prepared => |value| value,
+    switch (started) {
+        .preparing => |value| {
+            preparation.* = value;
+            slot.* = .{ .bash_preparing = .{
+                .token = token,
+                .binding = action_binding,
+            } };
+        },
         .failed => |value| {
             var failure = value;
-            const canonical_failure = failure.cause == error.InvalidCanonicalBashDescriptor or
-                failure.cause == error.ShortCanonicalRead;
-            if (!canonical_failure) {
-                settleActionFailure(host, token, action_binding, .storage_failed, "Bash preparation failed.");
-            }
-            failure.cleanup.cleanup() catch |cleanup_err| {
-                retainBashPreparedCleanup(host, slot, token, failure.cleanup, cleanup_err);
-                return .admitted;
-            };
-            finishCustodyNow(host, token);
-            if (canonical_failure or host.store.isFenced()) {
-                fenceDispatch(host, "Bash canonical preparation", failure.cause);
-            }
-            return .admitted;
+            finishBashPreparationFailure(host, slot, token, action_binding, &failure);
         },
+    }
+    return .admitted;
+}
+
+fn advanceBashPreparation(
+    host: *Host,
+    slots: []ExecutionSlot,
+    preparation: *?bash.Preparation,
+) bool {
+    const active_preparation = if (preparation.*) |*value| value else return false;
+    const slot = for (slots) |*candidate| switch (candidate.*) {
+        .bash_preparing => break candidate,
+        else => {},
+    } else unreachable;
+    const preparing = slot.bash_preparing;
+    switch (active_preparation.advance()) {
+        .pending => return true,
+        .failed => |value| {
+            var failure = value;
+            preparation.* = null;
+            finishBashPreparationFailure(
+                host,
+                slot,
+                preparing.token,
+                preparing.binding,
+                &failure,
+            );
+        },
+        .prepared => |value| {
+            var prepared = value;
+            preparation.* = null;
+            launchPreparedBash(host, slot, preparing.token, preparing.binding, &prepared);
+        },
+    }
+    return true;
+}
+
+fn finishBashPreparationFailure(
+    host: *Host,
+    slot: *ExecutionSlot,
+    token: execution.CustodyToken,
+    binding: store_module.ActionAttemptBinding,
+    failure: *bash.PreparationFailure,
+) void {
+    const canonical_failure = failure.cause == error.InvalidCanonicalBashDescriptor or
+        failure.cause == error.ShortCanonicalRead;
+    if (!canonical_failure) {
+        settleActionFailure(host, token, binding, .storage_failed, "Bash preparation failed.");
+    }
+    failure.cleanup.cleanup() catch |cleanup_err| {
+        retainBashPreparedCleanup(host, slot, token, failure.cleanup, cleanup_err);
+        return;
     };
+    finishCustodyNow(host, token);
+    if (canonical_failure or host.store.isFenced()) {
+        fenceDispatch(host, "Bash canonical preparation", failure.cause);
+    }
+}
+
+fn launchPreparedBash(
+    host: *Host,
+    slot: *ExecutionSlot,
+    token: execution.CustodyToken,
+    action_binding: store_module.ActionAttemptBinding,
+    prepared: *bash.Prepared,
+) void {
     if (host.faults.before_launch_delay_ms != 0) {
         traceAction(host, "prepared_before_handoff", action_binding);
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
@@ -645,15 +723,16 @@ fn admitBashAttempt(host: *Host, slot: *ExecutionSlot) AdmissionProgress {
         prepared.cleanup() catch |cleanup_err| {
             retainBashPreparedCleanup(host, slot, token, prepared.cleanupOwner(), cleanup_err);
             fenceDispatch(host, "Bash launch authority", err);
-            return .admitted;
+            return;
         };
         finishCustodyNow(host, token);
+        slot.* = .free;
         fenceDispatch(host, "Bash launch authority", err);
-        return .admitted;
+        return;
     };
     var launched: ?bash.Execution = null;
     host.store.withActionDispatchHandoff(action_binding, .{
-        .prepared = &prepared,
+        .prepared = prepared,
         .launched = &launched,
     }, struct {
         fn handoff(context: anytype) !void {
@@ -669,10 +748,11 @@ fn admitBashAttempt(host: *Host, slot: *ExecutionSlot) AdmissionProgress {
         }
         prepared.cleanup() catch |cleanup_err| {
             retainBashPreparedCleanup(host, slot, token, prepared.cleanupOwner(), cleanup_err);
-            return .admitted;
+            return;
         };
         finishCustodyNow(host, token);
-        return .admitted;
+        slot.* = .free;
+        return;
     };
     slot.* = .{ .bash = .{
         .token = token,
@@ -680,11 +760,30 @@ fn admitBashAttempt(host: *Host, slot: *ExecutionSlot) AdmissionProgress {
         .execution = launched.?,
     } };
     traceAction(host, "bash_handoff_committed", action_binding);
-    return .admitted;
 }
 
-fn stopSupersededBash(host: *Host, slots: []ExecutionSlot) void {
+fn stopSupersededBash(
+    host: *Host,
+    slots: []ExecutionSlot,
+    preparation: *?bash.Preparation,
+) void {
     for (slots) |*slot| switch (slot.*) {
+        .bash_preparing => |active| {
+            const stopped = host.store.actionSupersededByStop(active.binding) catch |err| {
+                fenceDispatch(host, "Bash stop reconciliation", err);
+                return;
+            };
+            if (!stopped) continue;
+            var cleanup = preparation.*.?.cancel();
+            preparation.* = null;
+            settleActionFailure(host, active.token, active.binding, .cancelled, "Bash was stopped before launch.");
+            cleanup.cleanup() catch |cleanup_err| {
+                retainBashPreparedCleanup(host, slot, active.token, cleanup, cleanup_err);
+                continue;
+            };
+            finishCustodyNow(host, active.token);
+            slot.* = .free;
+        },
         .bash => |*active| {
             const stopped = host.store.actionSupersededByStop(active.binding) catch |err| {
                 fenceDispatch(host, "Bash stop reconciliation", err);
@@ -900,6 +999,7 @@ fn beginAdmittedAttempt(
         &retained_scratch,
     ) catch |err| {
         if (retained_scratch) |retained| {
+            host.custody.detach(token) catch unreachable;
             slot.* = .{ .retained_scratch = .{
                 .token = token,
                 .scratch = retained,
@@ -946,6 +1046,7 @@ fn beginAdmittedAttempt(
     }, host.lease.paths.scratch.slice(), request_budget, &retained_response) catch |err| {
         request.deinit();
         if (retained_response) |retained| {
+            host.custody.detach(token) catch unreachable;
             slot.* = .{ .retained_scratch = .{
                 .token = token,
                 .scratch = retained,
@@ -1039,10 +1140,13 @@ fn completeTransfer(
     if (evidence.disposition == .success) {
         switch (completeSuccessfulTransfer(host, active)) {
             .cleanup => beginCleanup(host, slot, owner),
-            .retained_metadata => |metadata| slot.* = .{ .retained_metadata = .{
-                .token = owner.token,
-                .metadata = metadata,
-            } },
+            .retained_metadata => |metadata| {
+                host.custody.detach(owner.token) catch unreachable;
+                slot.* = .{ .retained_metadata = .{
+                    .token = owner.token,
+                    .metadata = metadata,
+                } };
+            },
         }
         return;
     }
@@ -1233,18 +1337,59 @@ fn finishSlotCleanup(host: *Host, slot: *ExecutionSlot) void {
     slot.* = .free;
 }
 
-fn shutdownExecution(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) void {
+fn advanceRetainedCleanup(
+    host: *Host,
+    slots: []ExecutionSlot,
+    now: std.Io.Clock.Timestamp,
+    retry_at: *std.Io.Clock.Timestamp,
+) bool {
+    if (now.raw.nanoseconds < retry_at.raw.nanoseconds) return false;
+    retry_at.* = now.addDuration(.{ .raw = .fromMilliseconds(100), .clock = .awake });
+    var made_progress = false;
     for (slots) |*slot| switch (slot.*) {
-        .free => {},
-        .bash => |*active| active.execution.requestInfrastructureShutdown(),
         .bash_prepared_cleanup => |*retained| {
-            retained.cleanup.cleanup() catch |err| {
-                std.debug.print("rui: retained Bash preparation after cleanup failure: {s}\n", .{@errorName(err)});
-                continue;
-            };
+            retained.cleanup.cleanup() catch continue;
             host.custody.cleanupComplete(retained.token) catch unreachable;
             slot.* = .free;
+            made_progress = true;
         },
+        .retained_scratch => |*retained| {
+            retained.scratch.cleanup(host.lease.paths.scratch.slice()) catch continue;
+            host.custody.cleanupComplete(retained.token) catch unreachable;
+            slot.* = .free;
+            made_progress = true;
+        },
+        .retained_metadata => |*retained| {
+            retained.metadata.cleanup(host.lease.paths.scratch.slice()) catch continue;
+            host.custody.cleanupComplete(retained.token) catch unreachable;
+            slot.* = .free;
+            made_progress = true;
+        },
+        else => {},
+    };
+    return made_progress;
+}
+
+fn shutdownExecution(
+    host: *Host,
+    reactor: ?*provider.Reactor,
+    slots: []ExecutionSlot,
+    preparation: *?bash.Preparation,
+) void {
+    for (slots) |*slot| switch (slot.*) {
+        .free => {},
+        .bash_preparing => |active| {
+            var cleanup = preparation.*.?.cancel();
+            preparation.* = null;
+            cleanup.cleanup() catch |err| {
+                retainBashPreparedCleanup(host, slot, active.token, cleanup, err);
+                continue;
+            };
+            finishCustodyNow(host, active.token);
+            slot.* = .free;
+        },
+        .bash => |*active| active.execution.requestInfrastructureShutdown(),
+        .bash_prepared_cleanup, .retained_scratch, .retained_metadata => {},
         .provider => |*active| {
             const token = active.owner.token;
             reactor.?.cancel(&active.transfer);
@@ -1257,28 +1402,13 @@ fn shutdownExecution(host: *Host, reactor: ?*provider.Reactor, slots: []Executio
             host.custody.cleanupComplete(cleanup.owner.token) catch unreachable;
             slot.* = .free;
         },
-        .retained_scratch => |*retained| {
-            retained.scratch.cleanup(host.lease.paths.scratch.slice()) catch |err| {
-                std.debug.print("rui: retained named scratch after cleanup failure: {s}\n", .{@errorName(err)});
-                continue;
-            };
-            host.custody.detach(retained.token) catch unreachable;
-            host.custody.cleanupComplete(retained.token) catch unreachable;
-            slot.* = .free;
-        },
-        .retained_metadata => |*retained| {
-            retained.metadata.cleanup(host.lease.paths.scratch.slice()) catch |err| {
-                std.debug.print("rui: retained named response metadata after cleanup failure: {s}\n", .{@errorName(err)});
-                continue;
-            };
-            host.custody.detach(retained.token) catch unreachable;
-            host.custody.cleanupComplete(retained.token) catch unreachable;
-            slot.* = .free;
-        },
     };
     var bash_window: [bash.copy_window_bytes]u8 = undefined;
+    var retained_cleanup_at = std.Io.Clock.Timestamp.now(host.io, .awake);
     while (hasOwnedSlots(slots)) {
-        const made_progress = advanceBash(host, slots, &bash_window);
+        var made_progress = advanceBash(host, slots, &bash_window);
+        const now = std.Io.Clock.Timestamp.now(host.io, .awake);
+        made_progress = advanceRetainedCleanup(host, slots, now, &retained_cleanup_at) or made_progress;
         if (!made_progress) _ = host.io.sleep(.fromMilliseconds(100), .awake) catch {};
     }
 }
@@ -1292,7 +1422,7 @@ fn hasTransport(slots: []const ExecutionSlot) bool {
 
 fn hasBash(slots: []const ExecutionSlot) bool {
     for (slots) |slot| {
-        if (slot == .bash) return true;
+        if (slot == .bash_preparing or slot == .bash) return true;
     }
     return false;
 }

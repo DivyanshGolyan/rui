@@ -927,7 +927,11 @@ def main():
             "bash-preparation-after-script",
             "--fault",
             "bash-cleanup",
+            "--fault",
+            "bash-fault-gated",
         )
+        preparation_cleanup_gate = store / "scratch" / "bash-fault-gate"
+        preparation_cleanup_gate.write_text("blocked")
         configure(state, store, "preparation-cleanup-config", "direct/preparation-cleanup")
         fixture.message(
             state,
@@ -957,10 +961,27 @@ def main():
             )["execution"]["custody_occupied"]
         ) > 0
         assert list((store / "scratch").glob("bash-input-*-1.tmp"))
+        preparation_cleanup_gate.unlink()
+        fixture.wait_for(
+            lambda: not list((store / "scratch").glob("bash-input-*-1.tmp")),
+            "preparation cleanup by original owner",
+        )
+        fixture.wait_for(
+            lambda: int(
+                fixture.command(
+                    "inspect-session",
+                    "--store",
+                    store,
+                    "--session",
+                    "direct/preparation-cleanup",
+                )["execution"]["custody_occupied"]
+            )
+            == 0,
+            "preparation cleanup custody release",
+        )
+        assert host.poll() is None
         fixture.stop_host(host)
-        host = None
         host = fixture.start_host(store, endpoint_url)
-        assert not list((store / "scratch").glob("bash-input-*-1.tmp"))
         fixture.wait_for(
             lambda: fixture.completed_observation(store, "preparation-cleanup-message"),
             "preparation-cleanup continuation",

@@ -273,7 +273,13 @@ pub const PreparationFailure = struct {
     cleanup: PreparedCleanup,
 };
 
-pub const PrepareResult = union(enum) {
+pub const PreparationStart = union(enum) {
+    preparing: Preparation,
+    failed: PreparationFailure,
+};
+
+pub const PreparationProgress = union(enum) {
+    pending,
     prepared: Prepared,
     failed: PreparationFailure,
 };
@@ -840,10 +846,110 @@ pub const Outcome = struct {
     }
 };
 
-pub fn prepare(
+pub const Preparation = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
-    reader: *store.ContentReader,
+    workspace: protocol.Bounded(protocol.max_workspace_bytes),
+    scratch_path: []const u8,
+    bash_path: []const u8,
+    timeout_ms: u64,
+    action_id: u64,
+    attempt_ordinal: u64,
+    faults: Faults,
+    source: ContentSource,
+    parser: tools.BashParser = .{},
+    cleanup: PreparedCleanup,
+    command_buffer: [command_write_window_bytes]u8 = undefined,
+    command_length: usize = 0,
+
+    pub fn advance(self: *Preparation) PreparationProgress {
+        var writer = PreparationWriter{ .owner = self };
+        const progress = self.parser.advance(&self.source, &writer, self.source.buffer.len) catch |err| {
+            return self.fail(if (tools.isBashDescriptorError(err)) error.InvalidCanonicalBashDescriptor else err);
+        };
+        switch (progress) {
+            .pending => return .pending,
+            .invalid => return self.fail(error.InvalidCanonicalBashDescriptor),
+            .complete => {},
+        }
+        self.flushCommand() catch |err| return self.fail(err);
+        self.cleanup.script.?.file.?.sync(self.io) catch |err| return self.fail(err);
+        const cleanup_fault = cleanupFault(self.faults);
+        self.cleanup.stdout_capture = createOwnedFile(
+            self.io,
+            self.scratch_path,
+            self.cleanup.script.?.budget,
+            "bash-stdout",
+            self.action_id,
+            self.attempt_ordinal,
+            cleanup_fault,
+        ) catch |err| return self.fail(err);
+        self.cleanup.stderr_capture = createOwnedFile(
+            self.io,
+            self.scratch_path,
+            self.cleanup.script.?.budget,
+            "bash-stderr",
+            self.action_id,
+            self.attempt_ordinal,
+            cleanup_fault,
+        ) catch |err| return self.fail(err);
+        self.source.reader.close();
+        return .{ .prepared = .{
+            .io = self.io,
+            .allocator = self.allocator,
+            .workspace = self.workspace,
+            .scratch_path = self.scratch_path,
+            .bash_path = self.bash_path,
+            .timeout_ms = self.timeout_ms,
+            .faults = self.faults,
+            .script = self.cleanup.script.?,
+            .stdout_capture = self.cleanup.stdout_capture.?,
+            .stderr_capture = self.cleanup.stderr_capture.?,
+        } };
+    }
+
+    pub fn cancel(self: *Preparation) PreparedCleanup {
+        self.source.reader.close();
+        return self.cleanup;
+    }
+
+    fn fail(self: *Preparation, cause: anyerror) PreparationProgress {
+        self.source.reader.close();
+        return .{ .failed = .{ .cause = cause, .cleanup = self.cleanup } };
+    }
+
+    fn flushCommand(self: *Preparation) !void {
+        if (self.command_length == 0) return;
+        const script = &self.cleanup.script.?;
+        if (!script.budget.reserve(self.command_length)) return error.ScratchCapacityExhausted;
+        script.charged += self.command_length;
+        try script.file.?.writeStreamingAll(self.io, self.command_buffer[0..self.command_length]);
+        self.command_length = 0;
+    }
+};
+
+const PreparationWriter = struct {
+    owner: *Preparation,
+
+    pub fn writeAll(self: *PreparationWriter, bytes: []const u8) !void {
+        var remaining = bytes;
+        while (remaining.len != 0) {
+            const count = @min(remaining.len, self.owner.command_buffer.len - self.owner.command_length);
+            @memcpy(
+                self.owner.command_buffer[self.owner.command_length..][0..count],
+                remaining[0..count],
+            );
+            self.owner.command_length += count;
+            remaining = remaining[count..];
+            if (self.owner.command_length == self.owner.command_buffer.len) try self.owner.flushCommand();
+        }
+    }
+};
+
+pub fn startPreparation(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    reader: store.ContentReader,
     arguments_length: u64,
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
     scratch_path: []const u8,
@@ -853,15 +959,11 @@ pub fn prepare(
     action_id: u64,
     attempt_ordinal: u64,
     faults: Faults,
-) PrepareResult {
+) PreparationStart {
     var cleanup = PreparedCleanup{ .scratch_path = scratch_path };
-    const cleanup_fault: CleanupFault = if (!faults.cleanup)
-        .none
-    else if (faults.fault_gated)
-        .gated
-    else
-        .persistent;
+    var owned_reader = reader;
     if (faults.preparation) {
+        owned_reader.close();
         return .{ .failed = .{ .cause = error.BashPreparationFailed, .cleanup = cleanup } };
     }
     cleanup.script = createOwnedFile(
@@ -871,52 +973,37 @@ pub fn prepare(
         "bash-input",
         action_id,
         attempt_ordinal,
-        cleanup_fault,
-    ) catch |err| return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
+        cleanupFault(faults),
+    ) catch |err| {
+        owned_reader.close();
+        return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
+    };
     if (faults.preparation_after_script) {
+        owned_reader.close();
         return .{ .failed = .{ .cause = error.BashPreparationFailed, .cleanup = cleanup } };
     }
-    var source = ContentSource{ .reader = reader, .length = arguments_length };
-    var destination = CommandWriter{ .file = &cleanup.script.? };
-    const valid = tools.writeBashCommand(&source, &destination) catch |err|
-        return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
-    if (!valid) {
-        return .{ .failed = .{ .cause = error.InvalidCanonicalBashDescriptor, .cleanup = cleanup } };
-    }
-    destination.finish() catch |err|
-        return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
-    cleanup.script.?.file.?.sync(io) catch |err|
-        return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
-    cleanup.stdout_capture = createOwnedFile(
-        io,
-        scratch_path,
-        budget,
-        "bash-stdout",
-        action_id,
-        attempt_ordinal,
-        cleanup_fault,
-    ) catch |err| return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
-    cleanup.stderr_capture = createOwnedFile(
-        io,
-        scratch_path,
-        budget,
-        "bash-stderr",
-        action_id,
-        attempt_ordinal,
-        cleanup_fault,
-    ) catch |err| return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
-    return .{ .prepared = .{
+    return .{ .preparing = .{
         .io = io,
         .allocator = allocator,
         .workspace = workspace,
         .scratch_path = scratch_path,
         .bash_path = bash_path,
         .timeout_ms = timeout_ms,
+        .action_id = action_id,
+        .attempt_ordinal = attempt_ordinal,
         .faults = faults,
-        .script = cleanup.script.?,
-        .stdout_capture = cleanup.stdout_capture.?,
-        .stderr_capture = cleanup.stderr_capture.?,
+        .source = .{ .reader = owned_reader, .length = arguments_length },
+        .cleanup = cleanup,
     } };
+}
+
+fn cleanupFault(faults: Faults) CleanupFault {
+    return if (!faults.cleanup)
+        .none
+    else if (faults.fault_gated)
+        .gated
+    else
+        .persistent;
 }
 
 fn createOwnedFile(
@@ -946,37 +1033,8 @@ fn createOwnedFile(
     };
 }
 
-const CommandWriter = struct {
-    file: *OwnedFile,
-    buffer: [command_write_window_bytes]u8 = undefined,
-    length: usize = 0,
-
-    pub fn writeAll(self: *CommandWriter, bytes: []const u8) !void {
-        var remaining = bytes;
-        while (remaining.len != 0) {
-            const count = @min(remaining.len, self.buffer.len - self.length);
-            @memcpy(self.buffer[self.length .. self.length + count], remaining[0..count]);
-            self.length += count;
-            remaining = remaining[count..];
-            if (self.length == self.buffer.len) try self.flush();
-        }
-    }
-
-    pub fn finish(self: *CommandWriter) !void {
-        try self.flush();
-    }
-
-    fn flush(self: *CommandWriter) !void {
-        if (self.length == 0) return;
-        if (!self.file.budget.reserve(self.length)) return error.ScratchCapacityExhausted;
-        self.file.charged += self.length;
-        try self.file.file.?.writeStreamingAll(self.file.io, self.buffer[0..self.length]);
-        self.length = 0;
-    }
-};
-
 const ContentSource = struct {
-    reader: *store.ContentReader,
+    reader: store.ContentReader,
     length: u64,
     position: u64 = 0,
     buffer_start: u64 = 0,
