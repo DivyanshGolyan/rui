@@ -206,7 +206,7 @@ def main():
         detached_pid_path = state / "detached-pid"
         endpoint, thread, endpoint_url = endpoint_for(
             name,
-            f"setsid sh -c 'echo $$ > {detached_pid_path}; sleep 30' &",
+            bash_fixture.detached_shell(f"echo $$ > {detached_pid_path}; sleep 30") + " &",
         )
         host = None
         detached_pid = None
@@ -242,7 +242,9 @@ def main():
         state = root / name
         state.mkdir(mode=0o700)
         store = state / "store"
-        endpoint, thread, endpoint_url = endpoint_for(name, "setsid sh -c 'sleep 2' &")
+        endpoint, thread, endpoint_url = endpoint_for(
+            name, bash_fixture.detached_shell("sleep 2") + " &"
+        )
         host = None
         try:
             host, session = admit(state, store, endpoint_url, name, "bash-tail-snapshot")

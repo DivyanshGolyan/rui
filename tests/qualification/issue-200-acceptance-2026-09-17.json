@@ -1,5 +1,5 @@
 {
-  "recorded_utc": "2026-09-18T04:49:10Z",
+  "recorded_utc": "2026-09-18T07:56:56Z",
   "tested_base_revision": "cf25fa805ead62d72afebc09b9653811696fd053",
   "working_tree_dirty": true,
   "scope": "Exact source hashes below identify the uncommitted issue #200 implementation, single-owner Bash lifecycle and bounded owner-progress follow-up tested before its local commit.",
@@ -22,17 +22,17 @@
     "src/store.zig": "a5324f53e2a5baa1c16d5f836d587069e3b150e9c394287aa911d1dde7851791",
     "src/tools.zig": "2da4685bdbc9f5571e359d395d448fe7c1ec9f2332971ff2e63fa4afa20f41e5",
     "tests/integration/admission_integration.sh": "4d83ca530443a373a1b2a96ba9b08b1e3d85f17b2ae907b4c6bbe70733384958",
-    "tests/integration/bash_integration.py": "b99251bdefccbbc4e34a612f844c58041570bb0d58def15628eb525b7dcc7a6a",
-    "tests/integration/bash_lifecycle_integration.py": "b5381fdc71778be4e6d28218b28ad8dafad9f3dec2d5012758d92fe06f995c72",
+    "tests/integration/bash_integration.py": "96b7611cb6e501a1441e677ac31bd99c81dff97757e081816e1b69956b81a5a0",
+    "tests/integration/bash_lifecycle_integration.py": "9d836122a1577340bea74c1b28d08ef72568224f770a9ba0afaa94d3f05fe9a6",
     "tests/integration/control_integration.py": "7d2ce3ba197d1470e1eb90d5c4d3ddab5d42871a68d4275cbeccc367929139f5",
-    "tests/integration/dispatch_integration.py": "22ff2e04a786dcf2def6024a3d76b365f2d96c7b64e14a435153dc198033bd0d"
+    "tests/integration/dispatch_integration.py": "4633dd5f43068c9c89a01ff88b07e438ce7b492c02e12ddf0053aa1a983e8836"
   },
   "fixed_resources": {
     "active_capacity": 1000,
     "custody_record_bytes": 72,
-    "execution_slot_bytes": 1264,
-    "preceding_model_queue_slot_bytes": 1216,
-    "incremental_slot_bytes_at_default_capacity": 48000,
+    "execution_slot_bytes": {"linux_x86_64": 1264, "macos_arm64": 1248},
+    "preceding_model_queue_slot_bytes": {"linux_x86_64": 1216, "macos_arm64": 1216},
+    "incremental_slot_bytes_at_default_capacity": {"linux_x86_64": 48000, "macos_arm64": 32000},
     "incremental_custody_bytes_at_default_capacity": 32000,
     "retention_entry_bytes": 136,
     "retention_capacity": 481,
@@ -42,16 +42,16 @@
   "linux_resource_samples": [
     {
       "phase": "cold",
-      "rss_bytes": 7507968,
-      "high_water_bytes": 7507968,
+      "rss_bytes": 7561216,
+      "high_water_bytes": 7561216,
       "descriptors": 7,
       "scratch_files": 0,
       "scratch_logical_bytes": 0
     },
     {
       "phase": "retained-output-idle",
-      "rss_bytes": 9216000,
-      "high_water_bytes": 9580544,
+      "rss_bytes": 9191424,
+      "high_water_bytes": 9555968,
       "descriptors": 12,
       "scratch_files": 2,
       "scratch_logical_bytes": 12014,
@@ -59,8 +59,8 @@
     },
     {
       "phase": "active-descendant-pipes",
-      "rss_bytes": 9195520,
-      "high_water_bytes": 9310208,
+      "rss_bytes": 9187328,
+      "high_water_bytes": 9302016,
       "descriptors": 17,
       "scratch_files": 3,
       "scratch_logical_bytes": 22,
@@ -68,8 +68,8 @@
     },
     {
       "phase": "two-sibling-retained-idle",
-      "rss_bytes": 9244672,
-      "high_water_bytes": 9576448,
+      "rss_bytes": 9269248,
+      "high_water_bytes": 9601024,
       "descriptors": 12,
       "scratch_files": 4,
       "scratch_logical_bytes": 0,
@@ -77,7 +77,7 @@
     }
   ],
   "gates": [
-    {"command": "zig build check", "result": "passed", "native_tests": 139, "owner_progress_proof": ["Bash descriptor decoding resumes across every byte boundary", "one shared preparation workspace leaves the 1264-byte execution slot unchanged", "retained preparation cleanup retries on the original Host and releases custody after the fault gate clears"]},
+    {"command": "zig build check", "result": "passed", "native_tests": 139, "owner_progress_proof": ["Bash descriptor decoding resumes across every byte boundary", "one shared preparation workspace adds no payload-sized state to each execution slot", "retained preparation cleanup retries on the original Host and releases custody after the fault gate clears", "detached-writer fixtures use the same os.setsid primitive on Linux and macOS without assuming a setsid utility"]},
     {"command": "zig build bash-lifecycle-integration", "result": "passed", "faults": ["observe", "reap", "reap-watchdog", "group-probe", "tail-snapshot", "signal", "cleanup-watchdog"], "finite_tail_cases": ["idle detached writer"], "ownership_proof": ["observation fault still reaches TERM-to-KILL, reap and clean retirement", "persistent reap/group/watchdog faults retain the Store lease and custody", "clearing a test fault lets the same owner finish without relaunch", "forced Host death recovers indeterminate without replay"]},
     {"command": "zig build measurement-check", "result": "passed"},
     {"command": "zig build cross-check-linux", "result": "passed", "targets": ["Linux x86-64", "Linux ARM64"]},

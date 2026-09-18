@@ -2963,10 +2963,14 @@ def main():
         # A candidate observed while full cannot survive until release and
         # bypass an older Operation that becomes due in the meantime.
         stale_release = threading.Event()
+        newer_initial_release = threading.Event()
         stale_endpoint = SuccessEndpoint(
             [
-                ResponseSpec(b"older waiting", {}, 503),
-                ResponseSpec(b"newer waiting", {}, 503),
+                ResponseSpec(b"older waiting", {"Retry-After": "3"}, 503),
+                (
+                    ResponseSpec(b"newer waiting", {"Retry-After": "1"}, 503),
+                    newer_initial_release,
+                ),
                 (ResponseSpec(b"capacity owner", {}, 422), stale_release),
                 ResponseSpec(b"selected after release", {}, 422),
                 ResponseSpec(b"remaining retry", {}, 422),
@@ -2979,10 +2983,10 @@ def main():
             stale_store,
             f"http://127.0.0.1:{stale_endpoint.server_port}/responses",
             "--test-retry-waits-ms",
-            "60000,60000,60000",
+            "50,100,150",
         )
         processes.append(stale_host)
-        for name in ("older", "newer", "capacity"):
+        for name in ("older", "newer"):
             expected_requests = len(stale_endpoint.requests) + 1
             configure(
                 state,
@@ -3002,22 +3006,31 @@ def main():
                 lambda expected=expected_requests: len(stale_endpoint.requests) >= expected,
                 f"{name} initial Attempt",
             )
-        database = sqlite3.connect(stale_store / "rui.sqlite3")
-        try:
-            now_ms = time.time_ns() // 1_000_000
-            database.execute(
-                "UPDATE model_operation SET retry_due_at_ms=? WHERE operation_id=1",
-                (now_ms + 3000,),
-            )
-            database.execute(
-                "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=2"
-            )
-            database.commit()
-        finally:
-            database.close()
+        configure(
+            state,
+            stale_store,
+            "stale-capacity-config",
+            "direct/stale-capacity",
+            "model-a",
+        )
+        message(
+            state,
+            stale_store,
+            "stale-capacity-message",
+            "direct/stale-capacity",
+            "stale-capacity",
+        )
+        time.sleep(0.2)
+        assert len(stale_endpoint.requests) == 2
+        newer_initial_release.set()
+        wait_for(lambda: len(stale_endpoint.requests) == 3, "capacity owner initial Attempt")
         time.sleep(3.2)
         stale_release.set()
-        wait_for(lambda: len(stale_endpoint.requests) >= 4, "retry after capacity release")
+        wait_for(
+            lambda: len(stale_endpoint.requests) >= 4,
+            "retry after capacity release",
+            timeout=8,
+        )
         released_request = json.loads(stale_endpoint.requests[3])
         released_user_text = next(
             content["text"]

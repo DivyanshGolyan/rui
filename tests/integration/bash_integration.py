@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+import base64
 import json
 import os
 import pathlib
 import select
+import shlex
 import shutil
 import signal
 import sqlite3
@@ -13,6 +15,18 @@ import threading
 import time
 
 import dispatch_integration as fixture
+
+
+def detached_shell(command):
+    encoded = base64.b64encode(command.encode()).decode()
+    program = (
+        "import base64,os,sys;"
+        "os.setsid();"
+        "os.execl('/bin/sh','sh','-c',base64.b64decode(sys.argv[1]).decode())"
+    )
+    return " ".join(
+        (shlex.quote(sys.executable), "-c", shlex.quote(program), shlex.quote(encoded))
+    )
 
 
 def configure(state, store, key, session, permission="ask"):
@@ -250,7 +264,12 @@ def main():
     add_exchange(
         responses,
         "detached-timeout",
-        f"printf $$ > {detached_bash_pid}; setsid sh -c 'trap \"\" TERM PIPE; echo $$ > {detached_pid}; head -c 32768 /dev/zero; while :; do printf detached; sleep 1; done' &",
+        f"printf $$ > {detached_bash_pid}; "
+        + detached_shell(
+            f"trap '' TERM PIPE; echo $$ > {detached_pid}; "
+            "head -c 32768 /dev/zero; while :; do printf detached; sleep 1; done"
+        )
+        + " &",
         timeout_ms=100,
     )
     same_group_pid = state / "same-group-pid"
