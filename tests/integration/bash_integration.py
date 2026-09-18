@@ -208,6 +208,7 @@ def prove_reused_session(state):
     cleanup_gate = workspace / "cleanup-gate"
     cleanup_gate.write_text("blocked")
     model_cleanup_gate = workspace / "model-cleanup-gate"
+    retry_wait_ms = 500
     slow_release = workspace / "slow-release"
     settlement_order = workspace / "settlement-order"
     slow_command = (
@@ -262,7 +263,7 @@ def prove_reused_session(state):
             store,
             endpoint_url,
             "--test-retry-waits-ms",
-            "500,500,500",
+            f"{retry_wait_ms},{retry_wait_ms},{retry_wait_ms}",
             "--test-bash-cleanup-gate-path",
             cleanup_gate,
             "--test-model-cleanup-gate-path",
@@ -422,6 +423,7 @@ def prove_reused_session(state):
             "cleanup_started",
             operation=str(second_processing["operation"]),
         )
+        time.sleep(retry_wait_ms / 1000 + 0.25)
         retry_wait = fixture.observe(store, "reuse-second")
         retry_execution = fixture.command(
             "inspect-session", "--store", store, "--session", "direct/reuse"
@@ -429,6 +431,7 @@ def prove_reused_session(state):
         assert retry_wait["processing"] == second_processing, retry_wait
         assert retry_wait["processing"]["attempt"] == "1", retry_wait
         assert "result" not in retry_wait, retry_wait
+        assert len(endpoint.requests) == 3, endpoint.requests
         assert int(retry_execution["custody_occupied"]) >= len(actions_by_ordinal) + 1
         assert int(retry_execution["scratch_used_bytes"]) > 0
         assert retry_execution["dispatch_fenced"] is False, retry_execution
