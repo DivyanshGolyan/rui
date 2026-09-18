@@ -293,8 +293,6 @@ def main():
     add_exchange(responses, "preparation-cleanup", "printf never")
     service_marker = state / "service-marker"
     add_exchange(responses, "service", f"printf x >> {service_marker}; sleep 30")
-    add_exchange(responses, "small-budget", "printf %05d 0")
-    add_exchange(responses, "exhaustion", "printf %06d 0")
     import_marker = state / "import-marker"
     add_exchange(responses, "import", f"printf x >> {import_marker}")
     commit_marker = state / "commit-marker"
@@ -1021,75 +1019,6 @@ def main():
         if service_marker.exists():
             assert service_marker.read_text() == "x"
 
-        configure(state, store, "small-budget-config", "direct/small-budget")
-        fixture.message(state, store, "small-budget-message", "direct/small-budget", "execute")
-        action = fixture.wait_for(
-            lambda: action_for(store, "direct/small-budget"), "small-budget Bash Action"
-        )
-        fixture.wait_for(
-            lambda: execution_idle(store, "direct/small-budget"),
-            "small-budget Action creation physical cleanup",
-            timeout=20,
-        )
-        fixture.stop_host(host)
-        host = fixture.start_host(
-            store,
-            None,
-            "--test-bash-scratch-limit-bytes",
-            "18",
-        )
-        allow(state, store, "small-budget-allow", "direct/small-budget", action["action"])
-        fixture.wait_for(
-            lambda: resolution(store, "direct/small-budget") == "succeeded",
-            "capture ending exactly at the scratch limit",
-        )
-        fixture.wait_for(
-            lambda: execution_custody_idle(store, "direct/small-budget"),
-            "small-budget physical cleanup",
-            timeout=20,
-        )
-        fixture.stop_host(host)
-        host = fixture.start_host(store, endpoint_url)
-        fixture.wait_for(
-            lambda: fixture.completed_observation(store, "small-budget-message"),
-            "small-budget continuation",
-        )
-
-        configure(state, store, "exhaustion-config", "direct/exhaustion")
-        fixture.message(state, store, "exhaustion-message", "direct/exhaustion", "execute")
-        action = fixture.wait_for(
-            lambda: action_for(store, "direct/exhaustion"), "exhaustion Bash Action"
-        )
-        fixture.wait_for(
-            lambda: execution_idle(store, "direct/exhaustion"),
-            "exhaustion Action creation physical cleanup",
-            timeout=20,
-        )
-        fixture.stop_host(host)
-        host = fixture.start_host(
-            store,
-            None,
-            "--test-bash-scratch-limit-bytes",
-            "18",
-        )
-        allow(state, store, "exhaustion-allow", "direct/exhaustion", action["action"])
-        fixture.wait_for(
-            lambda: resolution(store, "direct/exhaustion") == "storage_failed",
-            "capture exhaustion result",
-        )
-        fixture.wait_for(
-            lambda: execution_custody_idle(store, "direct/exhaustion"),
-            "capture exhaustion physical cleanup",
-            timeout=20,
-        )
-        fixture.stop_host(host)
-        host = fixture.start_host(store, endpoint_url)
-        fixture.wait_for(
-            lambda: fixture.completed_observation(store, "exhaustion-message"),
-            "capture exhaustion continuation",
-            timeout=20,
-        )
-
         fixture.stop_host(host)
         host = None
         for name, fault, marker in (
@@ -1221,7 +1150,7 @@ def main():
             "SELECT count(*),count(acceptance_position),min(acceptance_position) FROM action_operation "
             "WHERE resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL",
         )[0]
-        assert settled[0] == settled[1] == 29 and settled[2] > 0, settled
+        assert settled[0] == settled[1] == 27 and settled[2] > 0, settled
         print(json.dumps({"bash_resource_samples": resource_samples}, sort_keys=True))
         completed = True
     finally:

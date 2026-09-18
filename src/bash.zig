@@ -386,6 +386,9 @@ pub const Execution = struct {
             } else if (check < 0) {
                 fault = fault orelse error.BashGroupProbeFailed;
             } else if (timestampReached(now, self.process.checking_group.cleanup_deadline)) {
+                self.beginCaptureTails() catch |err| {
+                    fault = fault orelse err;
+                };
                 fault = fault orelse error.BashCleanupUnconfirmed;
             }
         }

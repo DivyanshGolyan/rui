@@ -7,6 +7,7 @@ debug=$2
 
 sh "$directory/admission_integration.sh" "$release_safe"
 python3 "$directory/dispatch_integration.py" "$release_safe"
+python3 "$directory/bash_owner_integration.py" "$release_safe"
 python3 "$directory/bash_integration.py" "$release_safe"
 python3 "$directory/bash_lifecycle_integration.py" "$release_safe"
 python3 "$directory/control_integration.py" "$release_safe"

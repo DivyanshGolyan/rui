@@ -423,6 +423,7 @@ def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacit
 
 
 def stop_host(process):
+    # Fixture disposal is an unclean SIGKILL, not evidence of graceful shutdown.
     stop_process(process)
 
 
@@ -4017,25 +4018,29 @@ def main():
             processes.append(owned_host)
             configure(state, owned_store, f"{fault}-config", f"direct/{fault}", "model-a")
             message(state, owned_store, f"{fault}-message", f"direct/{fault}", "unlink")
-            leftovers = wait_for(
-                lambda store=owned_store, glob=pattern: list((store / "scratch").glob(glob)),
-                f"retained named {fault} scratch",
+            resources = wait_for(
+                lambda store=owned_store, session=f"direct/{fault}": (
+                    report["execution"]
+                    if (report := command(
+                        "inspect-session", "--store", store, "--session", session
+                    ))["execution"]["dispatch_fenced"]
+                    else None
+                ),
+                f"{fault} cleanup ownership",
                 timeout=20,
             )
-            resources = command(
-                "inspect-session", "--store", owned_store, "--session", f"direct/{fault}"
-            )["execution"]
-            assert resources["dispatch_fenced"] is True, resources
             assert resources["custody_occupied"] == "1", resources
             assert len(unlink_endpoint.requests) == (1 if launched else 0)
+            stop_host(owned_host)
+            processes.remove(owned_host)
+            leftovers = list((owned_store / "scratch").glob(pattern))
+            assert len(leftovers) == 1, leftovers
             database = sqlite3.connect(owned_store / "rui.sqlite3")
             assert database.execute(
                 "SELECT uncertain,resolution_code FROM model_operation"
             ).fetchone() == (1, None)
             assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
             database.close()
-            stop_host(owned_host)
-            processes.remove(owned_host)
             assert leftovers[0].exists()
 
             failed_cleanup = subprocess.run(
@@ -4080,20 +4085,24 @@ def main():
         processes.append(host)
         configure(state, unlink_store, "unlink-config", "direct/unlink", "model-a")
         message(state, unlink_store, "unlink-message", "direct/unlink", "unlink")
-        leftovers = wait_for(
-            lambda: list(unlink_store.rglob("request-*")),
-            "retained named request scratch",
+        resources = wait_for(
+            lambda: (
+                report["execution"]
+                if (report := command(
+                    "inspect-session", "--store", unlink_store, "--session", "direct/unlink"
+                ))["execution"]["dispatch_fenced"]
+                else None
+            ),
+            "request-unlink cleanup ownership",
             timeout=20,
         )
-        resources = command(
-            "inspect-session", "--store", unlink_store, "--session", "direct/unlink"
-        )["execution"]
-        assert resources["dispatch_fenced"] is True, resources
         assert resources["custody_occupied"] == "1", resources
         assert resources["scratch_used_bytes"] == "0", resources
         assert endpoint.requests == []
         stop_host(host)
         processes.remove(host)
+        leftovers = list(unlink_store.rglob("request-*"))
+        assert len(leftovers) == 1, leftovers
         assert leftovers[0].exists()
 
         offline = start_host(unlink_store, None)

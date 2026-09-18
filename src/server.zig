@@ -703,6 +703,7 @@ fn finishBashPreparationFailure(
         return;
     };
     finishCustodyNow(host, token);
+    slot.* = .free;
     if (canonical_failure or host.store.isFenced()) {
         fenceDispatch(host, "Bash canonical preparation", failure.cause);
     }

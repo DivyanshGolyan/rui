@@ -55,6 +55,15 @@ pub fn build(b: *std.Build) void {
     );
     bash_integration_step.dependOn(&bash_integration.step);
 
+    const bash_owner_integration = b.addSystemCommand(&.{"python3"});
+    bash_owner_integration.addFileArg(b.path("tests/integration/bash_owner_integration.py"));
+    bash_owner_integration.addArtifactArg(release_safe);
+    const bash_owner_integration_step = b.step(
+        "bash-owner-integration",
+        "Run focused Bash owner transition cases",
+    );
+    bash_owner_integration_step.dependOn(&bash_owner_integration.step);
+
     const bash_lifecycle_integration = b.addSystemCommand(&.{"python3"});
     bash_lifecycle_integration.addFileArg(b.path("tests/integration/bash_lifecycle_integration.py"));
     bash_lifecycle_integration.addArtifactArg(release_safe);

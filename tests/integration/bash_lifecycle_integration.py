@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import signal
 import subprocess
@@ -163,6 +164,108 @@ def main():
                 endpoint.shutdown()
                 endpoint.server_close()
                 thread.join(timeout=5)
+
+        name = "lifecycle-cleanup-watchdog-tail"
+        state = root / name
+        state.mkdir(mode=0o700)
+        store = state / "store"
+        detached_pid_path = state / "detached-pid"
+        writer_ready = state / "writer-ready"
+        writer_outcome = state / "writer-outcome"
+        writer_script = state / "writer.py"
+        writer_script.write_text(
+            """import os
+import pathlib
+import select
+import signal
+import sys
+
+pid_path, ready_path, outcome_path = map(pathlib.Path, sys.argv[1:])
+
+
+def publish(path, value):
+    temporary = path.with_suffix(path.suffix + '.tmp')
+    temporary.write_text(value)
+    os.replace(temporary, path)
+
+
+signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+publish(pid_path, str(os.getpid()))
+poller = select.poll()
+poller.register(1, select.POLLERR | select.POLLHUP)
+publish(ready_path, 'ready')
+events = poller.poll(15000)
+if not events:
+    publish(outcome_path, 'open')
+else:
+    try:
+        os.write(1, b'late-output')
+    except BrokenPipeError:
+        publish(outcome_path, 'closed')
+    else:
+        publish(outcome_path, 'accepted')
+"""
+        )
+        writer_command = " ".join(
+            shlex.quote(str(value))
+            for value in (
+                sys.executable,
+                writer_script,
+                detached_pid_path,
+                writer_ready,
+                writer_outcome,
+            )
+        )
+        endpoint, thread, endpoint_url = endpoint_for(
+            name,
+            bash_fixture.start_detached_shell(writer_command, writer_ready),
+        )
+        host = None
+        detached_pid = None
+        try:
+            host, session = admit(
+                state,
+                store,
+                endpoint_url,
+                name,
+                "bash-cleanup-watchdog",
+                gated=True,
+            )
+            fixture.wait_for(writer_ready.exists, "cleanup-watchdog writer readiness")
+            detached_pid = int(detached_pid_path.read_text())
+            fixture.wait_for(
+                lambda: control_closed_while_host_alive(host, store, session),
+                "cleanup-watchdog tail entered blocked shutdown",
+                timeout=12,
+            )
+            fixture.wait_for(
+                writer_outcome.exists,
+                "cleanup-watchdog finite-tail pipe closure",
+                timeout=12,
+            )
+            assert writer_outcome.read_text() == "closed", writer_outcome.read_text()
+            (store / "scratch" / "bash-fault-gate").unlink()
+            fixture.wait_for(
+                lambda: host.poll() is not None,
+                "cleanup-watchdog tail original owner retirement",
+                timeout=12,
+            )
+            host.communicate(timeout=5)
+            host = None
+            assert bash_fixture.rows(
+                store,
+                "SELECT resolution_code FROM action_operation WHERE session_ref=?",
+                (session,),
+            ) == [(None,)]
+            assert not list((store / "scratch").glob("bash-*.tmp"))
+        finally:
+            if host is not None:
+                fixture.stop_host(host)
+            if detached_pid is not None and bash_fixture.process_exists(detached_pid):
+                os.kill(detached_pid, signal.SIGKILL)
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
 
         name = "lifecycle-forced-reap"
         state = root / name
