@@ -207,6 +207,7 @@ def prove_reused_session(state):
     workspace.mkdir()
     cleanup_gate = workspace / "cleanup-gate"
     cleanup_gate.write_text("blocked")
+    model_cleanup_gate = workspace / "model-cleanup-gate"
     slow_release = workspace / "slow-release"
     settlement_order = workspace / "settlement-order"
     slow_command = (
@@ -264,6 +265,8 @@ def prove_reused_session(state):
             "500,500,500",
             "--test-bash-cleanup-gate-path",
             cleanup_gate,
+            "--test-model-cleanup-gate-path",
+            model_cleanup_gate,
             "--test-phase-trace",
             accelerated_retries=False,
             active_capacity=5,
@@ -413,6 +416,7 @@ def prove_reused_session(state):
         second_live_custody = int(second_live["custody_occupied"])
         assert second_live_custody >= 2, second_live
         second_processing = fixture.observe(store, "reuse-second")["processing"]
+        model_cleanup_gate.write_text("blocked")
         retry_failure_release.set()
         milestones.wait(
             "cleanup_started",
@@ -425,15 +429,20 @@ def prove_reused_session(state):
         assert retry_wait["processing"] == second_processing, retry_wait
         assert retry_wait["processing"]["attempt"] == "1", retry_wait
         assert "result" not in retry_wait, retry_wait
-        assert int(retry_execution["custody_occupied"]) >= len(actions_by_ordinal)
+        assert int(retry_execution["custody_occupied"]) >= len(actions_by_ordinal) + 1
         assert int(retry_execution["scratch_used_bytes"]) > 0
         assert retry_execution["dispatch_fenced"] is False, retry_execution
         assert second_processing["turn"] != first_processing["turn"], retry_wait
+        assert milestones.matching(
+            "cleanup_completed",
+            operation=str(second_processing["operation"]),
+        ) == [], milestones.records
         for action in actions_by_ordinal.values():
             assert milestones.matching(
                 "cleanup_completed",
                 action=str(action["action"]),
             ) == [], milestones.records
+        model_cleanup_gate.unlink()
         milestones.wait(
             "cleanup_completed",
             operation=str(second_processing["operation"]),
@@ -496,6 +505,7 @@ def prove_reused_session(state):
     finally:
         retry_failure_release.set()
         cleanup_gate.unlink(missing_ok=True)
+        model_cleanup_gate.unlink(missing_ok=True)
         if host is not None:
             fixture.stop_host(host)
         if milestones is not None:

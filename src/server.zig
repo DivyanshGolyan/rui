@@ -78,6 +78,7 @@ pub const Faults = struct {
     report_unlink: bool = false,
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
+    model_cleanup_gate_path: ?[]const u8 = null,
     bash_observed_exit_gate_path: ?[]const u8 = null,
     bash_cleanup_gate_path: ?[]const u8 = null,
     control_gate_keys: ?[]const u8 = null,
@@ -1339,7 +1340,7 @@ fn beginCleanupAt(
             .clock = .awake,
         }),
     } };
-    if (host.faults.cleanup_delay_ms == 0) finishSlotCleanup(host, slot);
+    if (host.faults.cleanup_delay_ms == 0) finishSlotCleanupIfReleased(host, slot, now);
 }
 
 fn advanceCleanup(host: *Host, slots: []ExecutionSlot) void {
@@ -1355,12 +1356,29 @@ fn advanceCleanupAt(
         switch (slot.*) {
             .cleanup => |cleanup| {
                 if (cleanup.cleanup_deadline.compare(.lte, now)) {
-                    finishSlotCleanup(host, slot);
+                    finishSlotCleanupIfReleased(host, slot, now);
                 }
             },
             else => {},
         }
     }
+}
+
+fn finishSlotCleanupIfReleased(
+    host: *Host,
+    slot: *ExecutionSlot,
+    now: std.Io.Clock.Timestamp,
+) void {
+    if (host.faults.model_cleanup_gate_path) |path| {
+        if (testGateActive(host, path)) {
+            slot.cleanup.cleanup_deadline = now.addDuration(.{
+                .raw = .fromMilliseconds(100),
+                .clock = .awake,
+            });
+            return;
+        }
+    }
+    finishSlotCleanup(host, slot);
 }
 
 fn finishSlotCleanup(host: *Host, slot: *ExecutionSlot) void {
