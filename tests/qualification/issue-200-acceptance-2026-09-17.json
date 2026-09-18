@@ -1,5 +1,5 @@
 {
-  "recorded_utc": "2026-09-18T10:01:14Z",
+  "recorded_utc": "2026-09-18T10:22:36Z",
   "tested_base_revision": "cf25fa805ead62d72afebc09b9653811696fd053",
   "working_tree_dirty": true,
   "scope": "Exact source hashes below identify the uncommitted issue #200 implementation, single-owner Bash lifecycle and bounded owner-progress follow-up tested before its local commit.",
@@ -13,7 +13,8 @@
     "apple_sdk": "unavailable"
   },
   "source_sha256": {
-    "build.zig": "87fba0b7aaa34da07a48ca2a37a0ed271e96624ca3bf52432fa4d6cdb9718e2a",
+    "VERIFICATION.md": "390c5f959237d3dd7ff32aeb3a641a042a0adeafbcbf9d319dfd5b476c01d1fc",
+    "build.zig": "8c80e53eb805cc0d0e3903c6781c29ba0585c2eeb71e5ca23bba08fbee41a43a",
     "src/bash.zig": "41047ecd709975bb57dc4c587108264c0e9301b5fe6c8f1607c4d940bba63e78",
     "src/bash_platform.c": "0d9586e4b401f67e264eca785aa28580836a23fbbc13559038e7e4e9808a35b7",
     "src/cli.zig": "7acc3c1468c2db3e431c2162bbb56a7dac03c24f02ca1eea9696b3ea69e81e41",
@@ -24,6 +25,7 @@
     "tests/integration/admission_integration.sh": "4d83ca530443a373a1b2a96ba9b08b1e3d85f17b2ae907b4c6bbe70733384958",
     "tests/integration/bash_integration.py": "49c4a250e637fb05ad850cb1a4c4f114cc14674d407dc511aa2067f81ec38e7e",
     "tests/integration/bash_lifecycle_integration.py": "f7ac7d529af74941db79c2d968ea9731f295f03e2b2271d9148ad238cf02ed82",
+    "tests/integration/check.sh": "d754e4761b625dcdb4190e543a373105b5fbbcc74698ca87a21edbf853f549bf",
     "tests/integration/control_integration.py": "7d2ce3ba197d1470e1eb90d5c4d3ddab5d42871a68d4275cbeccc367929139f5",
     "tests/integration/dispatch_integration.py": "4f9475b48b3eefb243c9e1601e8b74ad0f700ff63f72b43ebf3d3ce6624dfad5",
     "tests/integration/host_process_test.py": "59a5c90671b83d3fec6b7cf6c2698e187be4bc157b79ea779486438307994999"
@@ -43,16 +45,16 @@
   "linux_resource_samples": [
     {
       "phase": "cold",
-      "rss_bytes": 7540736,
-      "high_water_bytes": 7540736,
+      "rss_bytes": 7561216,
+      "high_water_bytes": 7561216,
       "descriptors": 7,
       "scratch_files": 0,
       "scratch_logical_bytes": 0
     },
     {
       "phase": "retained-output-idle",
-      "rss_bytes": 9289728,
-      "high_water_bytes": 9654272,
+      "rss_bytes": 9191424,
+      "high_water_bytes": 9555968,
       "descriptors": 12,
       "scratch_files": 2,
       "scratch_logical_bytes": 12014,
@@ -60,8 +62,8 @@
     },
     {
       "phase": "active-descendant-pipes",
-      "rss_bytes": 9068544,
-      "high_water_bytes": 9146368,
+      "rss_bytes": 9105408,
+      "high_water_bytes": 9183232,
       "descriptors": 17,
       "scratch_files": 3,
       "scratch_logical_bytes": 22,
@@ -69,8 +71,8 @@
     },
     {
       "phase": "two-sibling-retained-idle",
-      "rss_bytes": 9265152,
-      "high_water_bytes": 9596928,
+      "rss_bytes": 9269248,
+      "high_water_bytes": 9601024,
       "descriptors": 12,
       "scratch_files": 4,
       "scratch_logical_bytes": 0,
@@ -78,7 +80,7 @@
     }
   ],
   "gates": [
-    {"command": "zig build check", "result": "passed", "native_tests": 139, "owner_progress_proof": ["Bash descriptor decoding resumes across every byte boundary", "one shared preparation workspace adds no payload-sized state to each execution slot", "retained preparation cleanup retries on the original Host and releases custody after the fault gate clears", "detached-writer fixtures use the same os.setsid primitive on Linux and macOS without assuming a setsid utility"]},
+    {"command": "zig build check", "result": "passed", "native_tests": 139, "owner_progress_proof": ["build and unit prerequisites complete before process integrations run serially", "Bash descriptor decoding resumes across every byte boundary", "one shared preparation workspace adds no payload-sized state to each execution slot", "retained preparation cleanup retries on the original Host and releases custody after the fault gate clears", "detached-writer fixtures use the same os.setsid primitive on Linux and macOS without assuming a setsid utility"]},
     {"command": "zig build bash-lifecycle-integration", "result": "passed", "faults": ["observe", "reap", "reap-watchdog", "group-probe", "tail-snapshot", "signal", "cleanup-watchdog"], "finite_tail_cases": ["idle detached writer"], "ownership_proof": ["observation fault still reaches TERM-to-KILL, reap and clean retirement", "persistent reap/group/watchdog faults retain the Store lease and custody", "clearing a test fault lets the same owner finish without relaunch", "forced Host death recovers indeterminate without replay"]},
     {"command": "zig build measurement-check", "result": "passed"},
     {"command": "zig build cross-check-linux", "result": "passed", "targets": ["Linux x86-64", "Linux ARM64"]},

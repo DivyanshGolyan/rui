@@ -95,21 +95,15 @@ pub fn build(b: *std.Build) void {
         b.pathFromRoot("build.zig"),
         b.pathFromRoot("src"),
     });
-    check_step.dependOn(&format.step);
-    check_step.dependOn(&run_tests.step);
-    check_step.dependOn(&integration.step);
-    check_step.dependOn(&dispatch_integration.step);
-    check_step.dependOn(&bash_integration.step);
-    check_step.dependOn(&bash_lifecycle_integration.step);
-    check_step.dependOn(&control_integration.step);
-    check_step.dependOn(&debug_integration.step);
-
-    const host_process_test = b.addSystemCommand(&.{"python3"});
-    host_process_test.addFileArg(b.path("tests/integration/host_process_test.py"));
-    check_step.dependOn(&host_process_test.step);
-
     const release = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
-    check_step.dependOn(&release.step);
+    const process_integrations = b.addSystemCommand(&.{"sh"});
+    process_integrations.addFileArg(b.path("tests/integration/check.sh"));
+    process_integrations.addArtifactArg(release_safe);
+    process_integrations.addArtifactArg(debug);
+    process_integrations.step.dependOn(&format.step);
+    process_integrations.step.dependOn(&run_tests.step);
+    process_integrations.step.dependOn(&release.step);
+    check_step.dependOn(&process_integrations.step);
 
     const measurement_tests = b.addSystemCommand(&.{
         "go", "test", "-mod=readonly", "./...",
