@@ -241,6 +241,7 @@ def main():
         )[0]
     )
     stopped_pipes_child_pid = state / "stopped-pipes-child-pid"
+    stopped_pipes_leader_release = state / "stopped-pipes-leader-release"
     responses.append(
         fixture.sse_tool_calls(
             "stopped-pipes-calls",
@@ -249,7 +250,12 @@ def main():
                 "stopped-pipes-call",
                 json.dumps(
                     {
-                        "cmd": f"(trap '' TERM; sleep 30) & printf $! > {stopped_pipes_child_pid}; wait",
+                        "cmd": (
+                            f"(trap '' TERM; sleep 30) & child=$!; "
+                            f"printf '%s\\n' \"$child\" > {stopped_pipes_child_pid}.tmp; "
+                            f"mv {stopped_pipes_child_pid}.tmp {stopped_pipes_child_pid}; "
+                            f"while [ ! -e {stopped_pipes_leader_release} ]; do sleep 0.01; done"
+                        ),
                         "timeout_ms": None,
                     },
                     separators=(",", ":"),
@@ -705,6 +711,17 @@ def main():
             "natural Bash continuation",
         )
 
+        fixture.stop_host(host)
+        observed_exit_gate = state / "stopped-pipes-observed-exit-gate"
+        os.mkfifo(observed_exit_gate, mode=0o600)
+        observed_exit_gate_keeper = os.open(observed_exit_gate, os.O_RDWR | os.O_NONBLOCK)
+        host = fixture.start_host(
+            store,
+            endpoint_url,
+            "--test-bash-observed-exit-gate-path",
+            observed_exit_gate,
+            "--test-phase-trace",
+        )
         configure(state, store, "stopped-pipes-config", "direct/stopped-pipes")
         fixture.message(state, store, "stopped-pipes-message", "direct/stopped-pipes", "execute")
         stopped_pipes_action = fixture.wait_for(
@@ -723,7 +740,9 @@ def main():
         )
         stopped_child = int(stopped_pipes_child_pid.read_text())
         assert process_exists(stopped_child)
-        fixture.command(
+        stopped_pipes_leader_release.touch()
+        wait_for_phase(host, "bash_leader_observed_with_open_pipes")
+        stopped_pipes_stop = fixture.start_command(
             "stop-session",
             "--store",
             store,
@@ -733,9 +752,15 @@ def main():
             "--session",
             "direct/stopped-pipes",
         )
+        wait_for_phase(host, "control_store_complete")
+        os.write(observed_exit_gate_keeper, b"x")
+        stopped = fixture.finish_command(stopped_pipes_stop)
+        os.close(observed_exit_gate_keeper)
+        observed_exit_gate.unlink()
+        assert stopped["answer"]["status"] == "accepted", stopped
         fixture.wait_for(
             lambda: resolution(store, "direct/stopped-pipes") == "cancelled",
-            "running process-group stop",
+            "stop after observed leader exit with descendant pipes open",
             timeout=20,
         )
         fixture.wait_for(lambda: not process_exists(stopped_child), "stopped Bash descendant cleanup")

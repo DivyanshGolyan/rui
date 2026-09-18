@@ -73,6 +73,7 @@ pub const Faults = struct {
     report_unlink: bool = false,
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
+    bash_observed_exit_gate_path: ?[]const u8 = null,
     control_gate_keys: ?[]const u8 = null,
     control_gate_path: ?[]const u8 = null,
     suppress_first_control_hint: bool = false,
@@ -556,6 +557,10 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8) bool {
         .bash => |*active| {
             const service = active.execution.service(window);
             made_progress = made_progress or service.made_progress;
+            if (service.leader_observed_with_open_pipes) {
+                traceAction(host, "bash_leader_observed_with_open_pipes", active.binding);
+                if (host.faults.bash_observed_exit_gate_path) |path| waitAtTestGate(host, path);
+            }
             if (service.fault) |err| {
                 made_progress = failBash(host, active, "Bash process service", err) or made_progress;
             }
@@ -1556,6 +1561,13 @@ fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttem
     writeTestTrace(host, &trace);
 }
 
+fn waitAtTestGate(host: *Host, path: []const u8) void {
+    var gate = std.Io.Dir.cwd().openFile(host.io, path, .{}) catch return;
+    defer gate.close(host.io);
+    var release: [1]u8 = undefined;
+    _ = gate.readStreaming(host.io, &.{&release}) catch return;
+}
+
 fn appendOptionalUnsigned(
     trace: *protocol.ResponseBuffer,
     name: []const u8,
@@ -1667,7 +1679,10 @@ const ControlTiming = struct {
                 traceSubject(self.host, "control_lock_acquired", "command_key", self.command_key);
                 self.waitAtTestGate();
             },
-            .store_complete => self.store_complete_ns = nowNs(self.host),
+            .store_complete => {
+                self.store_complete_ns = nowNs(self.host);
+                traceSubject(self.host, "control_store_complete", "command_key", self.command_key);
+            },
         }
     }
 

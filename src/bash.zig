@@ -167,7 +167,12 @@ const OwnedFile = struct {
         }
         var scratch = try std.Io.Dir.cwd().openDir(self.io, scratch_path, .{});
         defer scratch.close(self.io);
-        try scratch.deleteFile(self.io, self.name.slice());
+        scratch.deleteFile(self.io, self.name.slice()) catch |err| switch (err) {
+            // The owned descriptor is already closed, so an absent private
+            // name establishes reclamation rather than a cleanup failure.
+            error.FileNotFound => {},
+            else => return err,
+        };
         self.budget.release(self.charged);
         self.charged = 0;
         self.published = true;
@@ -332,6 +337,7 @@ pub const Execution = struct {
     pub const ServiceResult = struct {
         made_progress: bool,
         retired: bool,
+        leader_observed_with_open_pipes: bool,
         fault: ?anyerror,
     };
 
@@ -349,11 +355,12 @@ pub const Execution = struct {
             self.requestTermination(.timed_out);
             made_progress = true;
         }
-        made_progress = (self.observeLeader(now) catch |err| observed: {
+        const leader_observed = self.observeLeader(now) catch |err| observed: {
             fault = fault orelse err;
             self.requestTermination(.infrastructure_shutdown);
             break :observed false;
-        }) or made_progress;
+        };
+        made_progress = leader_observed or made_progress;
         if (self.process == .running and self.process.running.anchor.observed != null) {
             self.beginGrace(now);
             made_progress = true;
@@ -399,6 +406,8 @@ pub const Execution = struct {
         return .{
             .made_progress = made_progress,
             .retired = self.retired(),
+            .leader_observed_with_open_pipes = leader_observed and
+                (!pipeClosed(self.stdout_pipe) or !pipeClosed(self.stderr_pipe)),
             .fault = fault,
         };
     }

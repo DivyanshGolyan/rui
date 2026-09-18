@@ -86,6 +86,8 @@ fn serve(io: std.Io, args: []const []const u8) !void {
             if (faults.client_send_buffer_bytes.? == 0 or faults.client_send_buffer_bytes.? > std.math.maxInt(c_int)) return error.InvalidClientSendBuffer;
         } else if (std.mem.eql(u8, arg, "--test-phase-trace")) {
             faults.test_phase_trace = true;
+        } else if (std.mem.eql(u8, arg, "--test-bash-observed-exit-gate-path")) {
+            faults.bash_observed_exit_gate_path = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--test-control-gate-keys")) {
             faults.control_gate_keys = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--test-control-gate-path")) {

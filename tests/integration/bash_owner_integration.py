@@ -156,6 +156,42 @@ def main():
             endpoint.server_close()
             endpoint_thread.join(timeout=5)
             assert resolution_after_stop(isolated_store, f"direct/{name}") == expected
+
+        name = "self-unlink"
+        isolated_store = root / f"{name}-store"
+        action = stage_action(state, isolated_store, name, 'rm -- "$0"; printf unlinked')
+        endpoint, endpoint_thread, continuations = continuation_endpoint((name,))
+        host = fixture.start_host(
+            isolated_store,
+            f"http://127.0.0.1:{endpoint.server_port}/responses",
+        )
+        bash_fixture.allow(
+            state,
+            isolated_store,
+            f"{name}-allow",
+            f"direct/{name}",
+            action["action"],
+        )
+        fixture.wait_for(
+            lambda: continuations[0].body_finished_at,
+            "self-unlink continuation",
+        )
+        resources = fixture.command(
+            "inspect-session",
+            "--store",
+            isolated_store,
+            "--session",
+            f"direct/{name}",
+        )["execution"]
+        assert resources["dispatch_fenced"] is False, resources
+        assert resources["custody_occupied"] == "0", resources
+        fixture.stop_host(host)
+        host = None
+        endpoint.shutdown()
+        endpoint.server_close()
+        endpoint_thread.join(timeout=5)
+        assert resolution_after_stop(isolated_store, f"direct/{name}") == "succeeded"
+        assert not list((isolated_store / "scratch").glob("bash-script-*.tmp"))
         completed = True
     finally:
         if host is not None:
