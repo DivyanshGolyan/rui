@@ -3188,11 +3188,8 @@ pub const Store = struct {
 
     fn appendInlineContent(self: *Store, content_id: i64, capture: *SessionReportCapture) !void {
         const metadata = try self.readContentMetadata(content_id);
-        const statement = try prepare(self.database, "SELECT payload IS NULL FROM content WHERE content_id=?1");
-        defer _ = c.sqlite3_finalize(statement);
-        try bindI64(statement, 1, content_id);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-        var reader = ContentReader{ .content_id = content_id, .representation = if (c.sqlite3_column_int(statement, 0) == 0) .raw else .{ .projection = .{} }, .store = self, .reference = .{ .length = metadata.length, .digest = metadata.digest } };
+        const raw = try self.contentIsRaw(content_id, metadata.length);
+        var reader = ContentReader{ .content_id = content_id, .representation = if (raw) .raw else .{ .projection = .{} }, .store = self, .reference = .{ .length = metadata.length, .digest = metadata.digest } };
         try capture.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{metadata.length});
         try capture.append(&std.fmt.bytesToHex(metadata.digest, .lower));
         try capture.append("\",\"text\":\"");
@@ -4980,11 +4977,29 @@ pub const Store = struct {
 
     fn openContentIdentityLocked(self: *Store, reference: ContentReference, private: bool) !ContentReader {
         const id = try self.resolveContentReference(reference, private);
-        const statement = try prepare(self.database, "SELECT payload IS NULL FROM content WHERE content_id=?1");
+        const raw = try self.contentIsRaw(id, reference.length);
+        return .{ .store = self, .reference = reference, .content_id = id, .representation = if (raw) .raw else .{ .projection = .{} } };
+    }
+
+    fn contentIsRaw(self: *Store, content_id: i64, length: u64) !bool {
+        var blob: ?*c.sqlite3_blob = null;
+        const opened = c.sqlite3_blob_open(self.database, "main", "content", "payload", content_id, 0, &blob);
+        if (opened == c.SQLITE_OK) {
+            defer _ = c.sqlite3_blob_close(blob);
+            return true;
+        }
+        const statement = try prepare(
+            self.database,
+            "SELECT payload IS NULL,(?2=0 OR EXISTS(SELECT 1 FROM answer_text_projection WHERE answer_content_id=?1)) " ++
+                "FROM content WHERE content_id=?1",
+        );
         defer _ = c.sqlite3_finalize(statement);
-        try bindI64(statement, 1, id);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-        return .{ .store = self, .reference = reference, .content_id = id, .representation = if (c.sqlite3_column_int(statement, 0) == 0) .raw else .{ .projection = .{} } };
+        try bindI64(statement, 1, content_id);
+        try bindU64(statement, 2, length);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW or
+            c.sqlite3_column_int(statement, 0) != 1 or
+            c.sqlite3_column_int(statement, 1) != 1) return error.CorruptStore;
+        return false;
     }
 
     fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !usize {
@@ -9374,6 +9389,32 @@ test "multiwindow content import and deduplication preserve all bytes" {
         offset += count;
     }
     try std.testing.expectEqual(length, offset);
+}
+
+test "large raw content opens without materializing its payload" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("large", "direct/large", workspace, "model-a");
+    const length = 32 * 1024 * 1024 + 10;
+    command.configuration.instructions = try testingContent(&tmp, "large-source", 'q', length);
+    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+    const reference = ContentReference{
+        .length = command.configuration.instructions.length,
+        .digest = command.configuration.instructions.digest,
+    };
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    var reader = try storage.openContent(reference);
+    defer reader.close();
+    var first: [17]u8 = undefined;
+    try std.testing.expectEqual(first.len, try reader.read(0, &first));
+    for (first) |byte| try std.testing.expectEqual(@as(u8, 'q'), byte);
+    var last: [17]u8 = undefined;
+    try std.testing.expectEqual(last.len, try reader.read(length - last.len, &last));
+    for (last) |byte| try std.testing.expectEqual(@as(u8, 'q'), byte);
 }
 
 test "definite rejections retain decisions without retaining payloads" {

@@ -272,7 +272,7 @@ func answerSSE(name, answer string, retained, discarded int) ([]byte, [][]byte) 
 	return out.Bytes(), [][]byte{marshal(reason), marshal(message)}
 }
 func bashSSE() []byte {
-	item := map[string]any{"type": "function_call", "id": "bash-item", "status": "completed", "name": "bash", "call_id": "bash-call", "arguments": `{"cmd":"sleep 30","timeout_ms":null}`}
+	item := map[string]any{"type": "function_call", "id": "bash-item", "status": "completed", "name": "bash", "call_id": "bash-call", "arguments": `{"cmd":"sleep 300","timeout_ms":null}`}
 	var out bytes.Buffer
 	fmt.Fprintf(&out, "data: %s\n\n", marshal(map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item}))
 	fmt.Fprintf(&out, "data: %s\n\n", marshal(map[string]any{"type": "response.completed", "response": map[string]any{"id": "bash-response", "status": "completed", "model": "model-a", "output": []any{item}}}))

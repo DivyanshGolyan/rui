@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -63,10 +64,74 @@ func readEvents(path string, live bool) ([]traceEvent, error) {
 	}
 	return parseTraces(data)
 }
+func readRecentEvents(path string) ([]traceEvent, error) {
+	const window = 4 * 1024 * 1024
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	start := max(int64(0), stat.Size()-window)
+	data := make([]byte, stat.Size()-start)
+	n, err := f.ReadAt(data, start)
+	if err != nil && n != len(data) {
+		return nil, err
+	}
+	if start != 0 {
+		newline := bytes.IndexByte(data, '\n')
+		if newline < 0 {
+			return nil, nil
+		}
+		data = data[newline+1:]
+	}
+	if newline := bytes.LastIndexByte(data, '\n'); newline >= 0 {
+		data = data[:newline+1]
+	} else {
+		return nil, nil
+	}
+	events := []traceEvent{}
+	for _, line := range bytes.Split(data, []byte{'\n'}) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte(`{"rui_test_phase"`)) {
+			continue
+		}
+		var event traceEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			return nil, fmt.Errorf("malformed live trace: %w", err)
+		}
+		if event.TraceLost {
+			return nil, errors.New("producer trace loss")
+		}
+		if event.AtText != "" {
+			event.At, err = uintField(event.AtText, "at_ns")
+			if err != nil {
+				return nil, err
+			}
+		}
+		if event.SequenceText != "" {
+			event.Sequence, err = uintField(event.SequenceText, "sequence")
+			if err != nil {
+				return nil, err
+			}
+		}
+		if event.QueuedAfterText != "" {
+			event.QueuedAfter, err = uintField(event.QueuedAfterText, "queued_after")
+			if err != nil {
+				return nil, err
+			}
+		}
+		events = append(events, event)
+	}
+	return events, nil
+}
 func waitEvent(path string, d measurement.Deadline, predicate func(traceEvent) bool) (traceEvent, error) {
 	var found traceEvent
 	err := measurement.WaitFor(d, time.Millisecond, "owner-visible event", func() (bool, error) {
-		events, e := readEvents(path, true)
+		events, e := readRecentEvents(path)
 		if e != nil {
 			return false, e
 		}
@@ -99,7 +164,7 @@ func observeID(client measurement.Client, key string, tracePath string) (executi
 		if !ok {
 			return false, nil
 		}
-		events, e := readEvents(tracePath, true)
+		events, e := readRecentEvents(tracePath)
 		if e != nil {
 			return false, e
 		}
@@ -139,6 +204,24 @@ func expectCancelled(c measurement.Client, key string) error {
 	state, ok := measurement.StringField(v, "result", "status")
 	if !ok || state != "cancelled" {
 		return fmt.Errorf("%s did not retain its cancelled outcome: %v", key, v)
+	}
+	return nil
+}
+func stopSessionDirect(c measurement.Client, socket, key, session string) error {
+	request := struct {
+		Version string `json:"version"`
+		Kind    string `json:"kind"`
+		Store   string `json:"store"`
+		Key     string `json:"key"`
+		Session string `json:"session"`
+	}{"1", "session_stop", c.Store, key, session}
+	var reply map[string]any
+	if err := measurement.ExchangeUnix(c.Deadline, socket, "/v1/control/session-stop", request, &reply); err != nil {
+		return err
+	}
+	status, ok := measurement.StringField(reply, "answer", "status")
+	if !ok || status != "accepted" {
+		return fmt.Errorf("session stop was not accepted: %v", reply)
 	}
 	return nil
 }
@@ -214,7 +297,7 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	defer ep.close()
 	store := filepath.Join(dir, "store")
 	tracePath := filepath.Join(dir, "host-stderr.log")
-	bashTimeout := "30000"
+	bashTimeout := "600000"
 	if s.Mode == "completion" {
 		// The fixed blocker below finishes before this deadline, leaving the
 		// deadline to become due while the measured completion burst drains.
@@ -396,20 +479,31 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		if err = expectOccupied(c, "execution/stop", s.Capacity-1); err != nil {
 			return row, err
 		}
+		recent, readErr := readRecentEvents(tracePath)
+		if readErr != nil {
+			return row, invalid(readErr)
+		}
+		var beforeSubmit uint64
+		for _, event := range recent {
+			beforeSubmit = max(beforeSubmit, event.Sequence)
+		}
 		if err = submitWork(0); err != nil {
 			return row, err
 		}
-		target, err = observeID(c, workKeys[0], tracePath)
-		if err != nil {
-			return row, invalid(err)
+		started, waitErr := waitEvent(tracePath, d, func(e traceEvent) bool {
+			return e.Sequence > beforeSubmit && e.Phase == "preparation_started"
+		})
+		if waitErr != nil {
+			return row, invalid(waitErr)
+		}
+		target = started.executionID
+		if !target.valid() {
+			return row, invalid(errors.New("preparation started without complete execution identity"))
 		}
 		workIDs = append(workIDs, target)
-		_, err = waitEvent(tracePath, d, func(e traceEvent) bool { return e.executionID == target && e.Phase == "preparation_advance_completed" })
-		if err != nil {
-			return row, invalid(err)
-		}
-		// No fixture sleep or owner freeze: subsequent advances keep running.
-		// If the external control arrives too late, proveOverlap rejects it.
+		// No fixture sleep or owner freeze: the ordinary stop client races with
+		// initialization and subsequent advances, and proveOverlap rejects a
+		// late acceptance.
 	} else {
 		if err = expectOccupied(c, "execution/stop", s.Capacity); err != nil {
 			return row, err
@@ -426,7 +520,7 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 			return row, invalid(err)
 		}
 	}
-	if err = c.StopSession("stop-during-work", "execution/stop"); err != nil {
+	if err = stopSessionDirect(c, host.Ready["socket"], "stop-during-work", "execution/stop"); err != nil {
 		return row, err
 	}
 	if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
@@ -606,9 +700,9 @@ func main() {
 	}
 	const mib = 1024 * 1024
 	scenarios := []scenario{
-		{"history-4m", "preparation", 10, 1, 4 * mib, 1, 64, 64, 64},
+		{"history-8m", "preparation", 10, 1, 8 * mib, 1, 64, 64, 64},
 		{"history-32m", "preparation", 10, 1, 32 * mib, 1, 64, 64, 64},
-		{"history-items", "preparation", 10, 1, 4 * mib, 64, 64, 64, 64},
+		{"history-items", "preparation", 10, 1, 8 * mib, 64, 64, 64, 64},
 		{"retained-4m", "preparation", 10, 1, 1024, 1, 4 * mib, 64, 64},
 		{"retained-32m", "preparation", 10, 1, 1024, 1, 32 * mib, 64, 64},
 		{"discarded-4m", "preparation", 10, 1, 1024, 1, 64, 4 * mib, 64},
