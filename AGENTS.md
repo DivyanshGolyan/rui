@@ -14,15 +14,23 @@ Inspect source before claiming implementation. Distinguish accepted behavior, pr
 
 ## Make changes
 
-Inspect the working-tree diff first; preserve concurrent work. Keep reviews read-only unless fixes are requested. Correct the owning invariant rather than a downstream symptom; retain transaction, effect and lifetime boundaries. Justify added state, layers, queues and allocations by required behavior or demonstrated cost.
+Inspect the working-tree diff first; preserve concurrent work. Keep reviews read-only unless fixes are requested. Complete authorized work within scope without reopening settled choices.
 
 Follow the [Zig 0.16 style guide](https://ziglang.org/documentation/0.16.0/#Style-Guide) and installed standard-library APIs: `TitleCase` for types/type-producing functions and files with top-level instance fields, `camelCase` for other functions, `snake_case` for values and namespace files. Name declarations in their full namespace without redundant prefixes or miscellaneous utility buckets. Keep helpers with their consumer until a shared responsibility warrants extraction.
 
-Keep state, validation and transitions with their owner. Express lifecycle decisions as testable value transitions; keep OS handles, storage, processes and accounting in the thin owner that executes them. Use closed variants for different authority and opaque, pointer-stable handles rather than rows or generic command buses.
+Keep state, validation and transitions with their owner. Express lifecycle decisions as compact value transitions that can be tested without OS effects. Keep handles, storage, processes and accounting in a thin imperative owner that executes those decisions while preserving atomic checks and resource lifetimes. Test transition cases exhaustively through the owner interface, then use focused native integrations to verify adapters and handoffs. Do not copy or abstract resource handles merely to make code functional; expose semantic intent and opaque, pointer-stable handles rather than storage rows, internal lifecycle state or generic command buses. Use closed typed variants for cases with different authority.
 
-Test transitions through the owner interface and native integrations at adapter handoffs. Every allocation needs an owner, multiplier, bound, failure behavior and release point. Stream variable content, account for shared budgets and document borrowed/owned pointers and invalidation. Use [Abseil Performance Hints](https://abseil.io/fast/hints.html) to estimate repeated work, copies and allocation multipliers before adding complexity. Cleanup is an owner transition: distinguish confirmed absence from unconfirmed removal, retain actionable resources after failure and release custody/accounting exactly once after success.
+Before correcting a failure, identify the owner, its invariant and the earliest transition that violated it. Correct that transition or replace the owning model rather than patching a downstream observer. When another corrective patch touches the same lifecycle, stop and redraw its states, authorities, handoffs and release conditions. Prefer deleting or replacing superseded state over adding flags, retry paths, test hooks or timing allowances.
 
-Validate external syntax and consequential meaning. Notifications are hints; committed facts are authority. Assert programmer errors and return typed expected failures. Put non-obvious invariants and exceptions beside their contract or owner.
+Every allocation/resource needs an owner, population multiplier, bound, failure behavior and release point. Stream variable content without duplicating complete payloads. Derive limits from consumers; retain guards until replacement storage is verified. Never silently truncate semantic input. Separate orchestration from workload memory; account for shared budgets and justify independent pools against aggregate demand and isolation needs.
+
+Use [Abseil Performance Hints](https://abseil.io/fast/hints.html) when implementing or reviewing performance: estimate repeated work, copies and allocation multipliers before adding complexity. Keep optimizations behind owning interfaces and measure gains on representative end-to-end workloads. Preserve clarity, required pointer stability, asynchronous lifetimes and the accepted contract.
+
+Make allocator dependencies explicit at allocation sites. Document returned pointers/slices as owned or borrowed, including invalidation. Use `defer`/`errdefer` when scope exit is the release boundary; transferred/asynchronous resources stay owned until cleanup is safe. Treat cleanup as an owner transition: reclamation must be retry-safe, distinguish confirmed absence from unconfirmed removal, retain actionable resources after failure and release custody and accounting exactly once after success.
+
+Respect architectural transaction/effect boundaries. Give each mutable handle one owner. Construct callback state in its final storage before registration; retain its address and custody through safe cleanup. Validate external syntax and consequential meaning. Notifications are hints; committed facts are authority. Trust validated local/SQLite facts within their documented boundary.
+
+Assert programmer errors; return typed expected failures. Handle errors and explain intentionally ignored cleanup failures at their shared wrapper. Comments explain non-obvious invariants. Put exceptions beside their owning code or contract, with consumer, retained guarantee and evidence.
 
 ## Review
 

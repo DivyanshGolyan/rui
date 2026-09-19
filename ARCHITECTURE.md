@@ -95,6 +95,8 @@ Use these qualified terms consistently; do not use a tracing request ID as an id
 
 Clients construct Session references locally, without existence checks, core calls or generated-ID discovery. They unambiguously encode their namespace and local name; core treats the complete reference as opaque, without direct/workflow categories. Equal full references select the same Session across clients. Reuse passes the existing reference unchanged, without another namespace prefix. Workflow `session(name)` scopes names by Workflow identity: replay retains the reference; a fresh Workflow differs. Namespaces separate names, not authority; possessing a reference grants no access.
 
+A complete Session reference may contain at most 128 UTF-8 bytes, including any caller namespace and component encoding. Core validates the complete value before mutation; it does not parse the components or impose separate namespace or local-name limits. Count the value before transport escaping. Reject overflow without truncation or normalization. This bounds reference length, not Session population.
+
 The first complete valid configuration for an unknown Session reference atomically establishes Session, baseline, Workspace, access scope and request answer.
 
 Later configurations apply supplied mutable fields in admission order; omitted fields remain unchanged. Enforce immutable Workspace/access constraints and supported Core values, without initial-baseline equality comparisons. Provider/model compatibility is evaluated for the frozen model Operation rather than at configuration admission.
