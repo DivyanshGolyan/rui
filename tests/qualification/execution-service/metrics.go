@@ -187,11 +187,11 @@ func parseTraces(data []byte) ([]traceEvent, error) {
 			}
 		}
 		switch e.Phase {
-		case "lifecycle_boundary", "provider_completion_removed", "provider_completion_serviced", "control_durable_acceptance":
+		case "lifecycle_boundary", "control_durable_acceptance":
 			if e.At == 0 {
 				return nil, fmt.Errorf("missing event time: %s", e.Phase)
 			}
-		case "preparation_started", "preparation_completed", "preparation_advance_started", "preparation_advance_completed", "preparation_advance_failed", "validation_started", "validation_completed", "validation_failed", "settlement_lock_requested", "settlement_lock_acquired", "settlement_complete", "model_settlement_superseded", "effect_stop_requested", "bash_deadline_established", "bash_deadline_serviced":
+		case "provider_completion_removed", "provider_completion_serviced", "preparation_started", "preparation_completed", "preparation_advance_started", "preparation_advance_completed", "preparation_advance_failed", "validation_started", "validation_completed", "validation_failed", "settlement_lock_requested", "settlement_lock_acquired", "settlement_complete", "model_settlement_superseded", "effect_stop_requested", "bash_deadline_established", "bash_deadline_serviced":
 			if e.At == 0 || !e.executionID.valid() {
 				return nil, fmt.Errorf("incomplete execution identity: %s", e.Phase)
 			}
@@ -212,6 +212,55 @@ type intervalKey struct {
 	Phase string
 }
 
+// validateServiceTurns proves the orchestration contract independently of how
+// quickly the work ran. A boundary closes the interval that began at Start;
+// at most one completion or preparation advance may occupy that interval.
+// Validation/import and settlement are subphases of a completion, not separate
+// work units. This consumes existing owner traces and adds no runtime state.
+func validateServiceTurns(events []traceEvent) error {
+	var active intervalKey
+	var workStart uint64
+	awaitingService := false
+	completed := map[executionID]bool{}
+	for _, e := range events {
+		switch e.Phase {
+		case "provider_completion_removed", "preparation_advance_started":
+			if awaitingService {
+				return errors.New("work_without_lifecycle_service")
+			}
+			if e.Phase == "provider_completion_removed" {
+				if completed[e.executionID] {
+					return errors.New("duplicate_completion")
+				}
+				completed[e.executionID] = true
+			}
+			active = intervalKey{e.executionID, e.Phase}
+			workStart, awaitingService = e.At, true
+		case "provider_completion_serviced", "preparation_advance_completed", "preparation_advance_failed":
+			start := "preparation_advance_started"
+			if e.Phase == "provider_completion_serviced" {
+				start = "provider_completion_removed"
+			}
+			if active != (intervalKey{e.executionID, start}) || e.At < workStart {
+				return errors.New("missing_or_mismatched_work_start")
+			}
+			active = intervalKey{}
+		case "lifecycle_boundary":
+			if active.Phase != "" {
+				return errors.New("boundary_inside_work")
+			}
+			if awaitingService && workStart < e.Start {
+				return errors.New("work_outside_service_interval")
+			}
+			awaitingService = false
+		}
+	}
+	if awaitingService {
+		return errors.New("missing_boundary_after_work")
+	}
+	return nil
+}
+
 func deriveMetrics(events []traceEvent, requireDeadline bool) metrics {
 	m := metrics{Status: "passed", StopToEffectNS: []uint64{}, DeadlineToServiceNS: []uint64{}, Preparation: []interval{}, PreparationLifetime: []interval{}, Validation: []interval{}, Settlement: []interval{}, SettlementQueue: []interval{}, SettlementService: []interval{}, Service: []serviceInterval{}}
 	starts := map[intervalKey]uint64{}
@@ -220,6 +269,9 @@ func deriveMetrics(events []traceEvent, requireDeadline bool) metrics {
 	requestBytes := map[executionID]uint64{}
 	var previousBoundary, maxGap, maxWork uint64
 	invalid := func(s string) { m.Invalid = append(m.Invalid, s) }
+	if err := validateServiceTurns(events); err != nil {
+		invalid("service_turn:" + err.Error())
+	}
 	begin := func(e traceEvent, p string) {
 		k := intervalKey{e.executionID, p}
 		if _, ok := starts[k]; ok {
