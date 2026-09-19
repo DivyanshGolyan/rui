@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -263,5 +267,94 @@ func TestReplayExpectationRemovesOnlyTopLevelCreatedBy(t *testing.T) {
 	}
 	if bytes.Contains(replay[0], []byte(`"created_by"`)) || !bytes.Contains(replay[0], []byte(strings.Repeat("r", 16))) {
 		t.Fatal("wrong replay expectation")
+	}
+}
+
+func TestSummarizeMetricsReplacesIntervalPopulations(t *testing.T) {
+	maximum := uint64(13)
+	value := metrics{
+		Status:                   "passed",
+		MaxLifecycleServiceGapNS: &maximum,
+		Preparation: []interval{
+			{DurationNS: 3},
+			{DurationNS: 7},
+		},
+		Service: []serviceInterval{{}, {}, {}},
+	}
+	summary := summarizeMetrics(value)
+	preparation, ok := summary["preparation_advances"].(map[string]any)
+	if !ok || preparation["count"] != 2 || preparation["total_ns"] != uint64(10) || preparation["maximum_ns"] != uint64(7) {
+		t.Fatalf("wrong interval summary: %#v", summary)
+	}
+	if summary["service_interval_count"] != 3 || summary["max_lifecycle_service_gap_ns"] != &maximum {
+		t.Fatalf("important metrics lost: %#v", summary)
+	}
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("preparation_intervals")) || bytes.Contains(encoded, []byte("service_intervals")) {
+		t.Fatalf("raw intervals leaked into summary: %s", encoded)
+	}
+}
+
+func TestWriteEvidenceProducesReviewableSummaryAndLosslessRawArtifact(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "evidence.json")
+	value := metrics{Status: "passed", Preparation: []interval{{DurationNS: 11}}}
+	rows := []map[string]any{{"status": "passed", "parameters": scenario{Name: "small"}, "metrics": value}}
+	report := map[string]any{
+		"format": "test-format", "status": "passed", "cases": rows,
+		"provenance": map[string]any{"revision": "abc"}, "source_sha256": map[string]string{"source": "def"},
+		"limits": []string{"test limit"},
+	}
+	if err := writeEvidence(path, report, rows); err != nil {
+		t.Fatal(err)
+	}
+	summaryBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summary map[string]any
+	if err = json.Unmarshal(summaryBytes, &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary["status"] != "passed" {
+		t.Fatalf("wrong summary: %#v", summary)
+	}
+	cases := summary["cases"].([]any)
+	metricsSummary := cases[0].(map[string]any)["metrics"].(map[string]any)
+	if _, exists := metricsSummary["preparation_intervals"]; exists {
+		t.Fatal("summary contains raw intervals")
+	}
+	rawMetadata := summary["raw_artifact"].(map[string]any)
+	compressedPath := filepath.Join(directory, rawMetadata["path"].(string))
+	compressed, err := os.ReadFile(compressedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected = append(expected, '\n')
+	if !bytes.Equal(raw, expected) {
+		t.Fatal("compressed artifact does not reproduce the full report")
+	}
+	rawHash := fmt.Sprintf("%x", sha256.Sum256(raw))
+	compressedHash := fmt.Sprintf("%x", sha256.Sum256(compressed))
+	if rawMetadata["uncompressed_sha256"] != rawHash || rawMetadata["compressed_sha256"] != compressedHash {
+		t.Fatalf("artifact hashes do not verify: %#v", rawMetadata)
 	}
 }

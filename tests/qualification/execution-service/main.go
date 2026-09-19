@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -33,6 +34,92 @@ type invalidEvidence struct{ reason string }
 
 func (e invalidEvidence) Error() string { return e.reason }
 func invalid(err error) error           { return invalidEvidence{err.Error()} }
+
+func intervalSummary(values []interval) map[string]any {
+	var total, maximum uint64
+	for _, value := range values {
+		total += value.DurationNS
+		maximum = max(maximum, value.DurationNS)
+	}
+	return map[string]any{"count": len(values), "total_ns": total, "maximum_ns": maximum}
+}
+
+func summarizeMetrics(value metrics) map[string]any {
+	return map[string]any{
+		"status": value.Status, "max_lifecycle_service_gap_ns": value.MaxLifecycleServiceGapNS,
+		"largest_active_service_interval_ns": value.LargestUninterruptedNS,
+		"stop_to_effect_ns":                  value.StopToEffectNS, "deadline_to_service_ns": value.DeadlineToServiceNS,
+		"preparation_advances": intervalSummary(value.Preparation), "preparation_lifetimes": intervalSummary(value.PreparationLifetime),
+		"validation": intervalSummary(value.Validation), "settlement": intervalSummary(value.Settlement),
+		"settlement_queue": intervalSummary(value.SettlementQueue), "settlement_service": intervalSummary(value.SettlementService),
+		"service_interval_count":                      len(value.Service),
+		"max_native_completions_queued_after_removal": value.MaxNativeCompletionsAfter,
+		"invalid_metrics":                             value.Invalid,
+	}
+}
+
+func summarizeRows(rows []map[string]any) []map[string]any {
+	summary := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		selected := map[string]any{}
+		for _, key := range []string{"parameters", "status", "error", "overlap", "resources", "trace_sha256", "trace_events", "trace_commit_sequence", "workload_bindings", "stop_binding", "bash_action", "service_interval_scope"} {
+			if value, ok := row[key]; ok {
+				selected[key] = value
+			}
+		}
+		if value, ok := row["metrics"].(metrics); ok {
+			selected["metrics"] = summarizeMetrics(value)
+		}
+		summary = append(summary, selected)
+	}
+	return summary
+}
+
+func writeEvidence(path string, report map[string]any, rows []map[string]any) error {
+	raw, err := json.Marshal(report)
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	var compressed bytes.Buffer
+	zipper, err := gzip.NewWriterLevel(&compressed, gzip.BestCompression)
+	if err != nil {
+		return err
+	}
+	if _, err = zipper.Write(raw); err != nil {
+		return err
+	}
+	if err = zipper.Close(); err != nil {
+		return err
+	}
+	rawPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".raw.json.gz"
+	if err = os.MkdirAll(filepath.Dir(rawPath), 0o700); err != nil {
+		return err
+	}
+	temporary := rawPath + ".tmp"
+	if err = os.WriteFile(temporary, compressed.Bytes(), 0o600); err != nil {
+		return err
+	}
+	defer os.Remove(temporary)
+	if err = os.Rename(temporary, rawPath); err != nil {
+		return err
+	}
+	rawHash := sha256.Sum256(raw)
+	compressedHash := sha256.Sum256(compressed.Bytes())
+	summary := map[string]any{
+		"format": report["format"], "status": report["status"], "cases": summarizeRows(rows),
+		"provenance": report["provenance"], "source_sha256": report["source_sha256"], "limits": report["limits"],
+		"raw_artifact": map[string]any{
+			"path": filepath.Base(rawPath), "compression": "gzip", "uncompressed_bytes": len(raw),
+			"uncompressed_sha256": hex.EncodeToString(rawHash[:]), "compressed_bytes": compressed.Len(),
+			"compressed_sha256": hex.EncodeToString(compressedHash[:]),
+		},
+	}
+	if value, ok := report["provenance_error"]; ok {
+		summary["provenance_error"] = value
+	}
+	return measurement.WriteJSON(path, summary)
+}
 
 func readEvents(path string, live bool) ([]traceEvent, error) {
 	f, err := os.Open(path)
@@ -786,7 +873,7 @@ func main() {
 	if pErr != nil {
 		report["provenance_error"] = pErr.Error()
 	}
-	if err = measurement.WriteJSON(*output, report); err != nil {
+	if err = writeEvidence(*output, report, rows); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
