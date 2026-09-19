@@ -265,6 +265,21 @@ func awaitDrain(c measurement.Client, session string) error {
 	})
 }
 func scopeService(m *metrics, p overlapProof) {
+	inside := func(values []interval) []interval {
+		selected := values[:0]
+		for _, span := range values {
+			if span.EndNS > p.WorkStartNS && span.StartNS < p.WorkEndNS {
+				selected = append(selected, span)
+			}
+		}
+		return selected
+	}
+	m.Preparation = inside(m.Preparation)
+	m.PreparationLifetime = inside(m.PreparationLifetime)
+	m.Validation = inside(m.Validation)
+	m.Settlement = inside(m.Settlement)
+	m.SettlementQueue = inside(m.SettlementQueue)
+	m.SettlementService = inside(m.SettlementService)
 	selected := []serviceInterval{}
 	var gap, work uint64
 	for _, span := range m.Service {
