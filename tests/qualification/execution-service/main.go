@@ -36,6 +36,7 @@ type traceEvent struct {
 	WorkBytes    string `json:"work_bytes"`
 	WorkItems    string `json:"work_items"`
 	RequestBytes string `json:"request_bytes"`
+	MaximumGap   string `json:"maximum_gap_ns"`
 	at           uint64
 	deadline     uint64
 	accepted     uint64
@@ -43,6 +44,7 @@ type traceEvent struct {
 	workBytes    uint64
 	workItems    uint64
 	requestBytes uint64
+	maximumGap   uint64
 }
 
 type interval struct {
@@ -132,6 +134,13 @@ func parseTraces(data []byte) ([]traceEvent, error) {
 				return nil, err
 			}
 		}
+		if event.Phase == "lifecycle_service_observation" {
+			value, err := uintField(event.MaximumGap, "maximum_gap_ns")
+			if err != nil {
+				return nil, err
+			}
+			event.maximumGap = value
+		}
 		if event.Phase == "control_timing" {
 			queued, err := uintField(event.StoreQueued, "store_queued_at_ns")
 			if err != nil {
@@ -163,7 +172,8 @@ func deriveMetrics(events []traceEvent) metrics {
 	}
 	starts := map[string]start{}
 	accepted := map[string]uint64{}
-	serviceTimes := []uint64{}
+	var serviceObserved bool
+	var maximumServiceGap uint64
 	requestBytes := map[string]uint64{}
 	var maxWork uint64
 	for _, e := range events {
@@ -174,8 +184,9 @@ func deriveMetrics(events []traceEvent) metrics {
 			continue
 		}
 		switch e.Phase {
-		case "lifecycle_service_started":
-			serviceTimes = append(serviceTimes, e.at)
+		case "lifecycle_service_observation":
+			serviceObserved = true
+			maximumServiceGap = max(maximumServiceGap, e.maximumGap)
 		case "provider_completion_removed":
 			if e.queuedAfter > m.MaxNativeCompletionsAfter {
 				m.MaxNativeCompletionsAfter = e.queuedAfter
@@ -239,15 +250,8 @@ func deriveMetrics(events []traceEvent) metrics {
 	for key := range starts {
 		m.Invalid = append(m.Invalid, "missing_end:"+key)
 	}
-	sort.Slice(serviceTimes, func(i, j int) bool { return serviceTimes[i] < serviceTimes[j] })
-	if len(serviceTimes) >= 2 {
-		var gap uint64
-		for i := 1; i < len(serviceTimes); i++ {
-			if d := serviceTimes[i] - serviceTimes[i-1]; d > gap {
-				gap = d
-			}
-		}
-		m.MaxLifecycleServiceGapNS = &gap
+	if serviceObserved {
+		m.MaxLifecycleServiceGapNS = &maximumServiceGap
 	} else {
 		m.Invalid = append(m.Invalid, "max_lifecycle_service_gap")
 	}

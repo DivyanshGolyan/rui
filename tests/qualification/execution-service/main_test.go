@@ -8,7 +8,7 @@ import (
 func TestParseAndDeriveCompleteTrace(t *testing.T) {
 	input := strings.Join([]string{
 		`{"rui_test_phase":"control_durable_acceptance","at_ns":"100","subject":"stop"}`,
-		`{"rui_test_phase":"lifecycle_service_started","at_ns":"105"}`,
+		`{"rui_test_phase":"lifecycle_service_observation","at_ns":"105","maximum_gap_ns":"155"}`,
 		`{"rui_test_phase":"provider_completion_removed","at_ns":"108","queued_after":"7"}`,
 		`{"rui_test_phase":"preparation_advance_started","at_ns":"110","operation":"1"}`,
 		`{"rui_test_phase":"preparation_advance_completed","at_ns":"130","operation":"1","work_bytes":"16384","work_items":"64","request_bytes":"1024"}`,
@@ -18,7 +18,7 @@ func TestParseAndDeriveCompleteTrace(t *testing.T) {
 		`{"rui_test_phase":"settlement_lock_requested","at_ns":"190","operation":"1"}`,
 		`{"rui_test_phase":"settlement_complete","at_ns":"230","operation":"1"}`,
 		`{"rui_test_phase":"bash_deadline_serviced","at_ns":"250","deadline_ns":"200","action":"9"}`,
-		`{"rui_test_phase":"lifecycle_service_started","at_ns":"260"}`,
+		`{"rui_test_phase":"lifecycle_service_observation","at_ns":"260","maximum_gap_ns":"155"}`,
 	}, "\n")
 	events, err := parseTraces([]byte(input))
 	if err != nil {
@@ -60,12 +60,12 @@ func TestMalformedRelevantTraceRejected(t *testing.T) {
 
 func TestPreparationAllowanceAndRequestRegressionInvalidateMetrics(t *testing.T) {
 	input := strings.Join([]string{
-		`{"rui_test_phase":"lifecycle_service_started","at_ns":"1"}`,
+		`{"rui_test_phase":"lifecycle_service_observation","at_ns":"1","maximum_gap_ns":"5"}`,
 		`{"rui_test_phase":"preparation_advance_started","at_ns":"2","operation":"1"}`,
 		`{"rui_test_phase":"preparation_advance_completed","at_ns":"3","operation":"1","work_bytes":"16385","work_items":"1","request_bytes":"100"}`,
 		`{"rui_test_phase":"preparation_advance_started","at_ns":"4","operation":"1"}`,
 		`{"rui_test_phase":"preparation_advance_completed","at_ns":"5","operation":"1","work_bytes":"1","work_items":"65","request_bytes":"99"}`,
-		`{"rui_test_phase":"lifecycle_service_started","at_ns":"6"}`,
+		`{"rui_test_phase":"lifecycle_service_observation","at_ns":"6","maximum_gap_ns":"5"}`,
 	}, "\n")
 	events, err := parseTraces([]byte(input))
 	if err != nil {

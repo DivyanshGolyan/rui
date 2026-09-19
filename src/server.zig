@@ -384,9 +384,13 @@ const AdmissionProgress = enum { no_work, retry_later, admitted };
 const LifecycleService = struct {
     next_control_reconciliation: ?std.Io.Clock.Timestamp = null,
     retained_cleanup_at: ?std.Io.Clock.Timestamp = null,
+    last_service_at: ?std.Io.Clock.Timestamp = null,
+    next_trace_at: ?std.Io.Clock.Timestamp = null,
+    maximum_gap_ns: u64 = 0,
 };
 
 const control_reconciliation_interval_ms = 100;
+const lifecycle_trace_interval_ms = 100;
 
 fn executionMain(host: *Host) void {
     const slots = host.allocator.alloc(ExecutionSlot, host.custody.records.len) catch |err| {
@@ -561,9 +565,22 @@ fn serviceLifecycle(
     bash_window: []u8,
     service: *LifecycleService,
 ) bool {
-    traceSubject(host, "lifecycle_service_started", "owner", "execution");
-    defer traceSubject(host, "lifecycle_service_completed", "owner", "execution");
     const now = std.Io.Clock.Timestamp.now(host.io, .awake);
+    if (service.last_service_at) |last| {
+        service.maximum_gap_ns = @max(
+            service.maximum_gap_ns,
+            @as(u64, @intCast(last.durationTo(now).raw.nanoseconds)),
+        );
+    }
+    service.last_service_at = now;
+    const trace_due = if (service.next_trace_at) |deadline| deadline.compare(.lte, now) else true;
+    if (trace_due) {
+        traceLifecycleService(host, service.maximum_gap_ns);
+        service.next_trace_at = now.addDuration(.{
+            .raw = .fromMilliseconds(lifecycle_trace_interval_ms),
+            .clock = .awake,
+        });
+    }
     var made_progress = false;
     const hint = host.controls_changed.swap(false, .acq_rel);
     const fallback_due = if (service.next_control_reconciliation) |deadline|
@@ -1790,6 +1807,16 @@ fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subjec
     trace.append(",\"subject\":") catch return;
     trace.appendJsonString(subject) catch return;
     trace.append("}") catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceLifecycleService(host: *Host, maximum_gap_ns: u64) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.appendFmt(
+        "{{\"rui_test_phase\":\"lifecycle_service_observation\",\"at_ns\":\"{d}\",\"maximum_gap_ns\":\"{d}\",\"owner\":\"execution\"}}",
+        .{ nowNs(host), maximum_gap_ns },
+    ) catch return;
     writeTestTrace(host, &trace);
 }
 
