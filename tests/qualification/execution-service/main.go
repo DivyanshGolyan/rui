@@ -301,7 +301,10 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	if s.Mode == "completion" {
 		// The fixed blocker below finishes before this deadline, leaving the
 		// deadline to become due while the measured completion burst drains.
-		bashTimeout = "400"
+		bashTimeout = "480"
+		if s.Burst == 2 {
+			bashTimeout = "410"
+		}
 	}
 	host, err := measurement.StartHost(binary, store, ep.URL(), s.Capacity, tracePath, d, "--test-execution-service-boundaries", "--bash-timeout-ms", bashTimeout)
 	if err != nil {
