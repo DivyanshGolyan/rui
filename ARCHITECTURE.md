@@ -426,7 +426,7 @@ After group absence, snapshot each open pipe's queued bytes once, drain exactly 
 
 #### Releasing custody
 
-Release execution custody only after the child is reaped, signaling is retired, group absence and each pipe's honest terminal outcome—EOF or recorded finite-tail incomplete capture—are established, delivery references are gone and scratch is released or transferred. A committed Resolution remains independently usable while local cleanup continues.
+Release execution custody only after the child is reaped, signaling is retired, group absence is established, and each pipe handle is closed with an honest terminal reason recorded—EOF, finite-tail incomplete capture or capture failure. Delivery references must be gone, and scratch must be released or transferred. A committed Resolution remains independently usable while local cleanup continues.
 
 #### When cleanup cannot finish
 
