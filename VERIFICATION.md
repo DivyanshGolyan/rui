@@ -193,7 +193,7 @@ For Bash, split descriptor decoding at every byte boundary, including whitespace
 
 #### Capture cannot be completed
 
-Fail required capture I/O after a known process exit and require the appropriate typed failure when canonical settlement remains possible. Before custody release, require the affected pipe handle to be closed and its terminal reason recorded as capture failure; process exit or a recorded reason alone is insufficient. Separately, an escaped writer's finite tail may produce an honest incomplete-capture warning with the known process outcome, while a failed tail snapshot is `storage_failed`. These cases concern capture evidence, not optional spillover retention or canonical publication.
+Fail required capture I/O after a known process exit and require the appropriate typed failure when canonical settlement remains possible. When a capture failure terminates an open pipe, require actual handle closure and a capture-failure terminal reason. A later capture-file flush or seal failure preserves the pipe's already-recorded terminal reason while reporting the capture failure separately. Process exit or a recorded reason alone is insufficient. Separately, an escaped writer's finite tail may produce an honest incomplete-capture warning with the known process outcome, while a failed tail snapshot is `storage_failed`. These cases concern capture evidence, not optional spillover retention or canonical publication.
 
 #### Evidence ownership and integration routing
 
