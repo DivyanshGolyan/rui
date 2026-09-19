@@ -43,6 +43,8 @@ pub const Faults = struct {
     request_seal: bool = false,
     request_scratch_acquire: bool = false,
     request_scratch_limit_bytes: u64 = scratch_limit_bytes,
+    request_preparation_byte_allowance: usize = provider.preparation_byte_allowance,
+    request_preparation_item_allowance: usize = provider.preparation_item_allowance,
     request_read: bool = false,
     request_unlink: bool = false,
     provider_prepare: bool = false,
@@ -236,12 +238,13 @@ pub fn serve(
         host.drain();
     }
     var ready: protocol.ResponseBuffer = .{};
-    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} custody_record_bytes={d} execution_slot_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
+    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
         lease.paths.store.slice(),
         lease.paths.socket.slice(),
         active_capacity,
         @sizeOf(execution.CustodyRecord),
         @sizeOf(ExecutionSlot),
+        @sizeOf(provider.Preparation),
         scratch_limit_bytes,
         @sizeOf(output_retention.Entry),
         retention_entries.len,
@@ -340,6 +343,7 @@ const BashSlot = struct {
     token: execution.CustodyToken,
     binding: store_module.ActionAttemptBinding,
     execution: bash.Execution,
+    stop_accepted: bool = false,
     delivery: union(enum) {
         open,
         closed: struct {
@@ -359,8 +363,14 @@ const BashPreparingSlot = struct {
     binding: store_module.ActionAttemptBinding,
 };
 
+const ModelPreparingSlot = struct {
+    token: execution.CustodyToken,
+    binding: store_module.AttemptBinding,
+};
+
 const ExecutionSlot = union(enum) {
     free,
+    model_preparing: ModelPreparingSlot,
     provider: ProviderSlot,
     bash_preparing: BashPreparingSlot,
     bash: BashSlot,
@@ -370,6 +380,13 @@ const ExecutionSlot = union(enum) {
 };
 
 const AdmissionProgress = enum { no_work, retry_later, admitted };
+
+const LifecycleService = struct {
+    next_control_reconciliation: ?std.Io.Clock.Timestamp = null,
+    retained_cleanup_at: ?std.Io.Clock.Timestamp = null,
+};
+
+const control_reconciliation_interval_ms = 100;
 
 fn executionMain(host: *Host) void {
     const slots = host.allocator.alloc(ExecutionSlot, host.custody.records.len) catch |err| {
@@ -387,23 +404,33 @@ fn executionMain(host: *Host) void {
         null;
     defer if (reactor) |*active| active.deinit();
     var bash_preparation: ?bash.Preparation = null;
+    var model_preparation: provider.Preparation = undefined;
+    var model_preparation_active = false;
     defer shutdownExecution(
         host,
         if (reactor) |*active| active else null,
         slots,
         &bash_preparation,
+        &model_preparation,
+        &model_preparation_active,
     );
 
     var last_retry_poll: ?std.Io.Clock.Timestamp = null;
-    var retained_cleanup_at = std.Io.Clock.Timestamp.now(host.io, .awake);
+    var lifecycle: LifecycleService = .{};
     var capacity_was_full = slots.len == 0;
     while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
-        var made_progress = false;
         var bash_window: [bash.copy_window_bytes]u8 = undefined;
-        if (advanceBashPreparation(host, slots, &bash_preparation)) made_progress = true;
-        if (advanceBash(host, slots, &bash_window)) made_progress = true;
+        var made_progress = serviceLifecycle(
+            host,
+            if (reactor) |*active| active else null,
+            slots,
+            &bash_preparation,
+            &model_preparation,
+            &model_preparation_active,
+            &bash_window,
+            &lifecycle,
+        );
         const now = std.Io.Clock.Timestamp.now(host.io, .awake);
-        if (advanceRetainedCleanup(host, slots, now, &retained_cleanup_at)) made_progress = true;
         var free_slots = countFreeSlots(slots);
         const capacity_released = capacity_was_full and free_slots != 0;
         const retry_poll_due = if (last_retry_poll) |last|
@@ -451,10 +478,10 @@ fn executionMain(host: *Host) void {
                 } else {
                     last_retry_poll = now;
                 }
-                if (free_slots != 0) {
+                if (free_slots != 0 and !model_preparation_active) {
                     for (slots) |*slot| {
                         if (!slotIsFree(slot)) continue;
-                        switch (admitRetryAttempt(host, &reactor.?, slot, active_filter)) {
+                        switch (admitRetryAttempt(host, slot, active_filter, &model_preparation, &model_preparation_active)) {
                             .admitted => {
                                 made_progress = true;
                                 last_retry_poll = null;
@@ -468,10 +495,10 @@ fn executionMain(host: *Host) void {
                     }
                 }
             }
-            if (host.provider_endpoint != null and may_admit_new) {
+            if (host.provider_endpoint != null and may_admit_new and !model_preparation_active) {
                 for (slots) |*slot| {
                     if (!slotIsFree(slot)) continue;
-                    switch (admitNewAttempt(host, &reactor.?, slot)) {
+                    switch (admitNewAttempt(host, slot, &model_preparation, &model_preparation_active)) {
                         .admitted => made_progress = true,
                         .no_work, .retry_later => {},
                     }
@@ -479,45 +506,130 @@ fn executionMain(host: *Host) void {
                 }
             }
         }
-        if (host.controls_changed.swap(false, .acq_rel)) {
-            cancelSupersededTransfers(host, if (reactor) |*active| active else null, slots);
-            stopSupersededBash(host, slots, &bash_preparation);
-            made_progress = true;
-        }
+        made_progress = serviceLifecycle(
+            host,
+            if (reactor) |*active| active else null,
+            slots,
+            &bash_preparation,
+            &model_preparation,
+            &model_preparation_active,
+            &bash_window,
+            &lifecycle,
+        ) or made_progress;
         capacity_was_full = countFreeSlots(slots) == 0;
         if (hasTransport(slots)) {
             reactor.?.drive(if (made_progress) 0 else 25) catch |err| {
                 fenceDispatch(host, "transport reactor", err);
                 break;
             };
-        } else if (!made_progress) {
+        }
+        made_progress = serviceOneCompletion(
+            host,
+            if (reactor) |*active| active else null,
+            slots,
+        ) or made_progress;
+        made_progress = serviceLifecycle(
+            host,
+            if (reactor) |*active| active else null,
+            slots,
+            &bash_preparation,
+            &model_preparation,
+            &model_preparation_active,
+            &bash_window,
+            &lifecycle,
+        ) or made_progress;
+        made_progress = advanceModelPreparation(
+            host,
+            if (reactor) |*active| active else null,
+            slots,
+            &model_preparation,
+            &model_preparation_active,
+        ) or made_progress;
+        if (!made_progress and !hasTransport(slots)) {
             _ = host.io.sleep(.fromMilliseconds(if (hasBash(slots)) 25 else 100), .awake) catch {};
         }
-        while (true) {
-            const active_transfers = ActiveSlots{ .slots = slots };
-            const active_reactor = if (reactor) |*active| active else break;
-            const completion = active_reactor.nextCompletion(.{
-                .context = &active_transfers,
-                .find_fn = findActiveTransfer,
-            }) catch |err| {
-                fenceDispatch(host, "transport completion", err);
-                return;
-            } orelse break;
-            completeTransfer(host, slots, completion);
-        }
-        advanceCleanup(host, slots);
     }
 }
 
-fn cancelSupersededTransfers(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) void {
+fn serviceLifecycle(
+    host: *Host,
+    reactor: ?*provider.Reactor,
+    slots: []ExecutionSlot,
+    bash_preparation: *?bash.Preparation,
+    model_preparation: *provider.Preparation,
+    model_preparation_active: *bool,
+    bash_window: []u8,
+    service: *LifecycleService,
+) bool {
+    traceSubject(host, "lifecycle_service_started", "owner", "execution");
+    defer traceSubject(host, "lifecycle_service_completed", "owner", "execution");
+    const now = std.Io.Clock.Timestamp.now(host.io, .awake);
+    var made_progress = false;
+    const hint = host.controls_changed.swap(false, .acq_rel);
+    const fallback_due = if (service.next_control_reconciliation) |deadline|
+        deadline.compare(.lte, now)
+    else
+        true;
+    if (hint or fallback_due) {
+        cancelSupersededTransfers(host, reactor, slots, model_preparation, model_preparation_active);
+        stopSupersededBash(host, slots, bash_preparation);
+        service.next_control_reconciliation = now.addDuration(.{
+            .raw = .fromMilliseconds(control_reconciliation_interval_ms),
+            .clock = .awake,
+        });
+        made_progress = hint;
+    }
+    made_progress = advanceBashPreparation(host, slots, bash_preparation) or made_progress;
+    made_progress = advanceBash(host, slots, bash_window) or made_progress;
+    if (advanceCleanupAt(host, slots, now)) made_progress = true;
+    if (service.retained_cleanup_at == null) service.retained_cleanup_at = now;
+    if (advanceRetainedCleanup(host, slots, now, &service.retained_cleanup_at.?)) made_progress = true;
+    return made_progress;
+}
+
+fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) bool {
+    const active_reactor = reactor orelse return false;
+    const active_transfers = ActiveSlots{ .slots = slots };
+    const completion = active_reactor.nextCompletion(.{
+        .context = &active_transfers,
+        .find_fn = findActiveTransfer,
+    }) catch |err| {
+        fenceDispatch(host, "transport completion", err);
+        return false;
+    } orelse return false;
+    traceCompletionQueue(host, completion.queued_after);
+    completeTransfer(host, slots, completion);
+    return true;
+}
+
+fn cancelSupersededTransfers(
+    host: *Host,
+    reactor: ?*provider.Reactor,
+    slots: []ExecutionSlot,
+    preparation: *provider.Preparation,
+    preparation_active: *bool,
+) void {
     for (slots) |*slot| switch (slot.*) {
+        .model_preparing => |active| {
+            const superseded = host.store.operationSupersededByControl(active.binding) catch |err| {
+                fenceDispatch(host, "preparation control reconciliation", err);
+                return;
+            };
+            const control = superseded orelse continue;
+            traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
+            preparation.cancel();
+            preparation_active.* = false;
+            finishCustodyNow(host, active.token);
+            slot.* = .free;
+        },
         .provider => |*active| {
             const superseded = host.store.operationSupersededByControl(active.owner.binding) catch |err| {
                 fenceDispatch(host, "control reconciliation", err);
                 return;
             };
-            if (!superseded) continue;
+            const control = superseded orelse continue;
             const owner = active.owner;
+            traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), owner.binding);
             reactor.?.cancel(&active.transfer);
             active.transfer.deinit();
             beginCleanup(host, slot, owner);
@@ -546,6 +658,7 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
     const active: *const ActiveSlots = @ptrCast(@alignCast(context));
     for (active.slots) |slot| switch (slot) {
         .provider => |value| if (value.owner.binding.operation_id == operation_id) return true,
+        .model_preparing => |value| if (value.binding.operation_id == operation_id) return true,
         .cleanup => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .free, .bash_preparing, .bash, .bash_prepared_cleanup, .named_scratch => {},
     };
@@ -568,6 +681,9 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8) bool {
         .bash => |*active| {
             const service = active.execution.service(window);
             made_progress = made_progress or service.made_progress;
+            if (service.timeout_action) |action| {
+                traceActionDeadline(host, "bash_deadline_serviced", action.deadline_ns, action.signal_failed, active.binding);
+            }
             if (service.leader_observed_with_open_pipes) {
                 traceAction(host, "bash_leader_observed_with_open_pipes", active.binding);
                 if (host.faults.bash_observed_exit_gate_path) |path| waitAtTestGate(host, path);
@@ -777,6 +893,7 @@ fn launchPreparedBash(
         .execution = launched.?,
     } };
     traceAction(host, "bash_handoff_committed", action_binding);
+    traceActionDeadline(host, "bash_deadline_established", slot.bash.execution.deadlineNs(), false, action_binding);
 }
 
 fn stopSupersededBash(
@@ -790,7 +907,8 @@ fn stopSupersededBash(
                 fenceDispatch(host, "Bash stop reconciliation", err);
                 return;
             };
-            if (!stopped) continue;
+            const control = stopped orelse continue;
+            traceActionControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
             var cleanup = preparation.*.?.cancel();
             preparation.* = null;
             settleActionFailure(host, active.token, active.binding, .cancelled, "Bash was stopped before launch.");
@@ -806,7 +924,21 @@ fn stopSupersededBash(
                 fenceDispatch(host, "Bash stop reconciliation", err);
                 return;
             };
-            if (stopped) active.execution.requestStop();
+            if (stopped) |control| {
+                if (!active.stop_accepted) {
+                    active.stop_accepted = true;
+                    traceActionControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
+                    const action = active.execution.requestStop();
+                    traceActionControlOutcome(
+                        host,
+                        "lifecycle_action_attempted",
+                        control.command_key.slice(),
+                        action.attempted,
+                        action.signal_failed,
+                        active.binding,
+                    );
+                }
+            }
         },
         else => {},
     };
@@ -946,8 +1078,9 @@ fn findActiveTransfer(
 
 fn admitNewAttempt(
     host: *Host,
-    reactor: *provider.Reactor,
     slot: *ExecutionSlot,
+    preparation: *provider.Preparation,
+    preparation_active: *bool,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
     var admission = host.store.admitNextModelAttempt(.{
@@ -962,14 +1095,15 @@ fn admitNewAttempt(
         host.custody.releaseUnused(token) catch unreachable;
         return .no_work;
     };
-    return beginAdmittedAttempt(host, reactor, slot, token, &admission.permit);
+    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation, preparation_active);
 }
 
 fn admitRetryAttempt(
     host: *Host,
-    reactor: *provider.Reactor,
     slot: *ExecutionSlot,
     active: store_module.ActiveOperationFilter,
+    preparation: *provider.Preparation,
+    preparation_active: *bool,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
     var admission = host.store.tryAdmitNextModelRetry(
@@ -985,39 +1119,42 @@ fn admitRetryAttempt(
         host.custody.releaseUnused(token) catch unreachable;
         return .no_work;
     };
-    return beginAdmittedAttempt(host, reactor, slot, token, &admission.permit);
+    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation, preparation_active);
 }
 
 fn beginAdmittedAttempt(
     host: *Host,
-    reactor: *provider.Reactor,
     slot: *ExecutionSlot,
     token: execution.CustodyToken,
     permit: *store_module.DispatchPermit,
+    preparation: *provider.Preparation,
+    preparation_active: *bool,
 ) AdmissionProgress {
+    std.debug.assert(!preparation_active.*);
     const binding = host.custody.attach(token, permit) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "custody attachment", err);
         return .admitted;
     };
-
-    var view = host.store.openHistoricalView(binding) catch |err| {
+    slot.* = .{ .model_preparing = .{ .token = token, .binding = binding } };
+    const view = host.store.openHistoricalView(binding) catch |err| {
         if (err == error.SupersededByControl) {
             finishCustodyNow(host, token);
+            slot.* = .free;
             return .admitted;
         }
         fenceDispatch(host, "historical view", err);
         finishCustodyNow(host, token);
+        slot.* = .free;
         return .admitted;
     };
-    defer view.close();
     const request_budget = host.retention.sharedBudget().narrowed(
         if (host.faults.request_scratch_acquire) 0 else host.faults.request_scratch_limit_bytes,
     );
     var retained_scratch: ?named_scratch.Owner = null;
-    var request = provider.materialize(
+    preparation.init(
         host.io,
-        &view,
+        view,
         host.lease.paths.scratch.slice(),
         request_budget,
         .{
@@ -1040,16 +1177,91 @@ fn beginAdmittedAttempt(
         if (host.store.isFenced()) {
             fenceDispatch(host, "canonical request read", err);
             finishCustodyNow(host, token);
+            slot.* = .free;
             return .admitted;
         }
         if (err == error.SupersededByControl) {
             finishCustodyNow(host, token);
+            slot.* = .free;
             return .admitted;
         }
         settleAttemptFailure(host, token, binding, preparationFailureCode(err), .terminal);
         finishCustodyNow(host, token);
+        slot.* = .free;
         return .admitted;
     };
+    preparation_active.* = true;
+    traceOperation(host, "preparation_started", binding);
+    return .admitted;
+}
+
+fn advanceModelPreparation(
+    host: *Host,
+    reactor: ?*provider.Reactor,
+    slots: []ExecutionSlot,
+    preparation: *provider.Preparation,
+    preparation_active: *bool,
+) bool {
+    if (!preparation_active.*) return false;
+    const slot = for (slots) |*candidate| switch (candidate.*) {
+        .model_preparing => break candidate,
+        else => {},
+    } else unreachable;
+    const owner = slot.model_preparing;
+    traceOperation(host, "preparation_advance_started", owner.binding);
+    const progress = preparation.advance(
+        host.faults.request_preparation_byte_allowance,
+        host.faults.request_preparation_item_allowance,
+    );
+    const stats = preparation.advanceStats();
+    switch (progress) {
+        .pending => {
+            tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
+        },
+        .failed => |err| {
+            tracePreparationAdvanceError(host, "preparation_advance_failed", err, stats, owner.binding);
+            preparation.cancel();
+            preparation_active.* = false;
+            finishModelPreparationFailure(host, slot, owner, err);
+        },
+        .prepared => |value| {
+            tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
+            traceOperation(host, "preparation_completed", owner.binding);
+            preparation_active.* = false;
+            var request = value;
+            launchPreparedRequest(host, reactor.?, slot, owner, &request);
+        },
+    }
+    return true;
+}
+
+fn finishModelPreparationFailure(
+    host: *Host,
+    slot: *ExecutionSlot,
+    owner: ModelPreparingSlot,
+    err: anyerror,
+) void {
+    if (host.store.isFenced()) {
+        fenceDispatch(host, "canonical request read", err);
+    } else if (err != error.SupersededByControl) {
+        settleAttemptFailure(host, owner.token, owner.binding, preparationFailureCode(err), .terminal);
+    }
+    finishCustodyNow(host, owner.token);
+    slot.* = .free;
+}
+
+fn launchPreparedRequest(
+    host: *Host,
+    reactor: *provider.Reactor,
+    slot: *ExecutionSlot,
+    owner: ModelPreparingSlot,
+    request: *provider.PreparedRequest,
+) void {
+    const token = owner.token;
+    const binding = owner.binding;
+    const request_budget = host.retention.sharedBudget().narrowed(
+        if (host.faults.request_scratch_acquire) 0 else host.faults.request_scratch_limit_bytes,
+    );
     var retained_response: ?named_scratch.Owner = null;
     if (host.faults.provider_prepare) {
         request.deinit();
@@ -1057,7 +1269,8 @@ fn beginAdmittedAttempt(
             .waits_ms = host.faults.retry_waits_ms,
         } });
         finishCustodyNow(host, token);
-        return .admitted;
+        slot.* = .free;
+        return;
     }
     // Transfer.start gives curl pointers into the Transfer, so construct it in
     // its final slot and keep that union arm active through removal and deinit.
@@ -1066,7 +1279,7 @@ fn beginAdmittedAttempt(
         .transfer = undefined,
     } };
     const active = &slot.provider;
-    active.transfer.start(host.provider_endpoint.?, request, binding, .{
+    active.transfer.start(host.provider_endpoint.?, request.*, binding, .{
         .inactivity_seconds = @intCast(host.faults.provider_inactivity_seconds),
         .request_read_fault = host.faults.request_read,
         .response_acquire_fault = host.faults.response_acquire,
@@ -1082,7 +1295,7 @@ fn beginAdmittedAttempt(
                 .owner = retained,
             } };
             retainDispatchFence(host, "response scratch unlink", err);
-            return .admitted;
+            return;
         }
         std.debug.print("rui: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         if (err == error.ResponseCaptureAcquisitionFailed) {
@@ -1092,7 +1305,7 @@ fn beginAdmittedAttempt(
         }
         finishCustodyNow(host, token);
         slot.* = .free;
-        return .admitted;
+        return;
     };
     if (host.faults.before_launch_delay_ms != 0) {
         traceOperation(host, "prepared_before_handoff", binding);
@@ -1104,7 +1317,7 @@ fn beginAdmittedAttempt(
         fenceDispatch(host, "dispatch handoff", err);
         finishCustodyNow(host, token);
         slot.* = .free;
-        return .admitted;
+        return;
     };
     host.store.withDispatchHandoff(
         binding,
@@ -1120,16 +1333,15 @@ fn beginAdmittedAttempt(
             traceOperation(host, "canonical_handoff_superseded", binding);
             finishCustodyNow(host, token);
             slot.* = .free;
-            return .admitted;
+            return;
         }
         std.debug.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
         finishCustodyNow(host, token);
         slot.* = .free;
-        return .admitted;
+        return;
     };
     traceOperation(host, "transport_handoff_committed", binding);
-    return .admitted;
 }
 
 fn completeTransfer(
@@ -1265,13 +1477,16 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         return .cleanup;
     };
     defer metadata.deinit();
+    traceOperation(host, "validation_started", owner.binding);
     const validated = provider_output.validate(host.io, response.file, response.length, &metadata, .{
         .metadata = host.faults.response_metadata,
     }) catch |err| {
+        traceOperation(host, "validation_failed", owner.binding);
         std.debug.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         settleAttemptFailure(host, owner.token, owner.binding, provider_output.failureCode(err), .terminal);
         return .cleanup;
     };
+    traceOperation(host, "validation_completed", owner.binding);
     if (!modelObservationsAgree(
         validated.evidence.served_model.slice(),
         openai_model.slice(),
@@ -1355,25 +1570,24 @@ fn beginCleanupAt(
     if (host.faults.cleanup_delay_ms == 0) finishSlotCleanupIfReleased(host, slot, now);
 }
 
-fn advanceCleanup(host: *Host, slots: []ExecutionSlot) void {
-    advanceCleanupAt(host, slots, .now(host.io, .awake));
-}
-
 fn advanceCleanupAt(
     host: *Host,
     slots: []ExecutionSlot,
     now: std.Io.Clock.Timestamp,
-) void {
+) bool {
+    var made_progress = false;
     for (slots) |*slot| {
         switch (slot.*) {
             .cleanup => |cleanup| {
                 if (cleanup.cleanup_deadline.compare(.lte, now)) {
                     finishSlotCleanupIfReleased(host, slot, now);
+                    if (slot.* == .free) made_progress = true;
                 }
             },
             else => {},
         }
     }
+    return made_progress;
 }
 
 fn finishSlotCleanupIfReleased(
@@ -1434,9 +1648,18 @@ fn shutdownExecution(
     reactor: ?*provider.Reactor,
     slots: []ExecutionSlot,
     preparation: *?bash.Preparation,
+    model_preparation: *provider.Preparation,
+    model_preparation_active: *bool,
 ) void {
     for (slots) |*slot| switch (slot.*) {
         .free => {},
+        .model_preparing => |active| {
+            std.debug.assert(model_preparation_active.*);
+            model_preparation.cancel();
+            model_preparation_active.* = false;
+            finishCustodyNow(host, active.token);
+            slot.* = .free;
+        },
         .bash_preparing => |active| {
             var cleanup = preparation.*.?.cancel();
             preparation.* = null;
@@ -1584,6 +1807,53 @@ fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptB
     writeTestTrace(host, &trace);
 }
 
+fn tracePreparationAdvance(
+    host: *Host,
+    phase: []const u8,
+    stats: provider.PreparationAdvanceStats,
+    binding: store_module.AttemptBinding,
+) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"rui_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(
+        ",\"at_ns\":\"{d}\",\"work_bytes\":\"{d}\",\"work_items\":\"{d}\",\"request_bytes\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
+        .{ nowNs(host), stats.work_bytes, stats.work_items, stats.request_bytes, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
+    ) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn tracePreparationAdvanceError(
+    host: *Host,
+    phase: []const u8,
+    err: anyerror,
+    stats: provider.PreparationAdvanceStats,
+    binding: store_module.AttemptBinding,
+) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"rui_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"error\":", .{nowNs(host)}) catch return;
+    trace.appendJsonString(@errorName(err)) catch return;
+    trace.appendFmt(
+        ",\"work_bytes\":\"{d}\",\"work_items\":\"{d}\",\"request_bytes\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
+        .{ stats.work_bytes, stats.work_items, stats.request_bytes, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
+    ) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceCompletionQueue(host: *Host, queued_after: usize) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.appendFmt(
+        "{{\"rui_test_phase\":\"provider_completion_removed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\"}}",
+        .{ nowNs(host), queued_after },
+    ) catch return;
+    writeTestTrace(host, &trace);
+}
+
 fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttemptBinding) void {
     if (!host.faults.test_phase_trace) return;
     var trace: protocol.ResponseBuffer = .{};
@@ -1591,6 +1861,95 @@ fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttem
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\",\"attempt\":\"{d}\"}}", .{
         nowNs(host),
+        binding.turn_id,
+        binding.parent_operation_id,
+        binding.action_id,
+        binding.attempt_ordinal,
+    }) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceOperationControl(
+    host: *Host,
+    phase: []const u8,
+    command_key: []const u8,
+    binding: store_module.AttemptBinding,
+) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"rui_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
+    trace.appendJsonString(command_key) catch return;
+    trace.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+        binding.turn_id,
+        binding.operation_id,
+        binding.attempt_ordinal,
+    }) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceActionControl(
+    host: *Host,
+    phase: []const u8,
+    command_key: []const u8,
+    binding: store_module.ActionAttemptBinding,
+) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"rui_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
+    trace.appendJsonString(command_key) catch return;
+    trace.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+        binding.turn_id,
+        binding.parent_operation_id,
+        binding.action_id,
+        binding.attempt_ordinal,
+    }) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceActionControlOutcome(
+    host: *Host,
+    phase: []const u8,
+    command_key: []const u8,
+    attempted: bool,
+    failed: bool,
+    binding: store_module.ActionAttemptBinding,
+) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"rui_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
+    trace.appendJsonString(command_key) catch return;
+    trace.appendFmt(",\"attempted\":{s},\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+        if (attempted) "true" else "false",
+        if (failed) "true" else "false",
+        binding.turn_id,
+        binding.parent_operation_id,
+        binding.action_id,
+        binding.attempt_ordinal,
+    }) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceActionDeadline(
+    host: *Host,
+    phase: []const u8,
+    deadline_ns: u64,
+    failed: bool,
+    binding: store_module.ActionAttemptBinding,
+) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"rui_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"deadline_ns\":\"{d}\",\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+        nowNs(host),
+        deadline_ns,
+        if (failed) "true" else "false",
         binding.turn_id,
         binding.parent_operation_id,
         binding.action_id,
@@ -1729,6 +2088,9 @@ const ControlTiming = struct {
                 traceSubject(self.host, "control_lock_acquired", "command_key", self.command_key);
                 self.waitAtTestGate();
             },
+            .durable_acceptance => {
+                traceSubject(self.host, "control_durable_acceptance", "command_key", self.command_key);
+            },
             .store_complete => {
                 self.store_complete_ns = nowNs(self.host);
                 traceSubject(self.host, "control_store_complete", "command_key", self.command_key);
@@ -1795,6 +2157,7 @@ const SettlementTrace = struct {
     fn markStore(context: *anyopaque, phase: store_module.SettlementTracePhase) void {
         const self: *SettlementTrace = @ptrCast(@alignCast(context));
         traceOperation(self.host, switch (phase) {
+            .lock_requested => "settlement_lock_requested",
             .lock_acquired => "settlement_lock_acquired",
             .settlement_complete => "settlement_complete",
         }, self.binding);
@@ -2674,19 +3037,19 @@ test "cleanup delay follows elapsed time and preserves custody reuse" {
     const first = try Attach.run(&host.custody, 1);
     beginCleanupAt(&host, &slots[0], first, start);
     try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
-    for (0..100) |_| advanceCleanupAt(&host, &slots, before_deadline);
+    for (0..100) |_| _ = advanceCleanupAt(&host, &slots, before_deadline);
     try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
-    advanceCleanupAt(&host, &slots, deadline);
+    _ = advanceCleanupAt(&host, &slots, deadline);
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     try std.testing.expect(slots[0] == .free);
-    advanceCleanupAt(&host, &slots, far_after_deadline);
+    _ = advanceCleanupAt(&host, &slots, far_after_deadline);
 
     const second = try Attach.run(&host.custody, 2);
     try std.testing.expectEqual(first.token.index, second.token.index);
     try std.testing.expect(first.token.generation != second.token.generation);
     try std.testing.expectError(error.StaleCustody, host.custody.binding(first.token));
     beginCleanupAt(&host, &slots[0], second, start);
-    advanceCleanupAt(&host, &slots, far_after_deadline);
+    _ = advanceCleanupAt(&host, &slots, far_after_deadline);
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     try std.testing.expect(slots[0] == .free);
 
@@ -2760,7 +3123,16 @@ test "named scratch retry releases custody through the shutdown owner path" {
             test_slots: []ExecutionSlot,
             test_preparation: *?bash.Preparation,
         ) void {
-            shutdownExecution(test_host, null, test_slots, test_preparation);
+            var model_preparation: provider.Preparation = undefined;
+            var model_preparation_active = false;
+            shutdownExecution(
+                test_host,
+                null,
+                test_slots,
+                test_preparation,
+                &model_preparation,
+                &model_preparation_active,
+            );
         }
     };
     const shutdown = try std.Thread.spawn(

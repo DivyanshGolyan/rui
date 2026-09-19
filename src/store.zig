@@ -84,7 +84,7 @@ pub const Faults = struct {
     settlement_trace: ?SettlementTrace = null,
 };
 
-pub const ControlTracePhase = enum { lock_requested, lock_acquired, store_complete };
+pub const ControlTracePhase = enum { lock_requested, lock_acquired, durable_acceptance, store_complete };
 
 pub const ControlTrace = struct {
     context: *anyopaque,
@@ -95,7 +95,7 @@ pub const ControlTrace = struct {
     }
 };
 
-pub const SettlementTracePhase = enum { lock_acquired, settlement_complete };
+pub const SettlementTracePhase = enum { lock_requested, lock_acquired, settlement_complete };
 
 pub const SettlementTrace = struct {
     context: *anyopaque,
@@ -252,6 +252,10 @@ pub const ActionAttemptBinding = struct {
     parent_operation_id: u64,
     action_id: u64,
     attempt_ordinal: u64,
+};
+
+pub const SupersedingControl = struct {
+    command_key: protocol.Bounded(protocol.max_key_bytes),
 };
 
 pub const ActionAttemptAdmission = struct {
@@ -1859,6 +1863,7 @@ pub const Store = struct {
         const completion = try self.sessionStopCompletion(selection);
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
+        if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
         return .{ .accepted = .{
             .replayed = false,
             .selection = selection,
@@ -2011,6 +2016,7 @@ pub const Store = struct {
         }
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
+        if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
         return .{ .accepted = .{ .replayed = false } };
     }
 
@@ -2191,6 +2197,7 @@ pub const Store = struct {
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
         if (rejection) |code| return .{ .rejected = .{ .replayed = false, .code = code } };
+        if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
         return .{ .accepted = .{ .replayed = false } };
     }
 
@@ -3473,14 +3480,15 @@ pub const Store = struct {
         };
     }
 
-    pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !bool {
+    pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         const statement = prepare(
             self.database,
-            "SELECT EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
+            "SELECT (SELECT stop.command_key FROM session_stop stop JOIN core_command command ON command.command_key=stop.command_key " ++
+                "WHERE stop.selected_turn_id=operation.turn_id ORDER BY command.rowid LIMIT 1) " ++
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
                 "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3",
         ) catch |err| return self.fenceReadFailure(err);
@@ -3490,9 +3498,10 @@ pub const Store = struct {
         bindU64(statement, 3, binding.attempt_ordinal) catch |err| return self.fenceReadFailure(err);
         const step = c.sqlite3_step(statement);
         if (step != c.SQLITE_ROW) return self.fenceReadFailure(if (step == c.SQLITE_DONE) error.CorruptStore else error.ActionReadFailed);
-        const stopped = c.sqlite3_column_int(statement, 0);
-        if (stopped != 0 and stopped != 1) return self.fenceReadFailure(error.CorruptStore);
-        return stopped == 1;
+        if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) return null;
+        var command_key: protocol.Bounded(protocol.max_key_bytes) = .{};
+        readText(statement, 0, &command_key) catch |err| return self.fenceReadFailure(err);
+        return .{ .command_key = command_key };
     }
 
     pub fn withActionDispatchHandoff(
@@ -4236,7 +4245,7 @@ pub const Store = struct {
         return self.fenced.load(.acquire);
     }
 
-    pub fn operationSupersededByControl(self: *Store, binding: AttemptBinding) !bool {
+    pub fn operationSupersededByControl(self: *Store, binding: AttemptBinding) !?SupersedingControl {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -4248,12 +4257,15 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(statement);
         bindU64(statement, 1, binding.operation_id) catch |err| return self.fenceReadFailure(err);
         const step = c.sqlite3_step(statement);
-        if (step == c.SQLITE_DONE) return false;
+        if (step == c.SQLITE_DONE) return null;
         if (step != c.SQLITE_ROW) return self.fenceReadFailure(error.OperationReadFailed);
         if (c.sqlite3_column_int64(statement, 0) != binding.turn_id or
             c.sqlite3_column_int64(statement, 1) != binding.attempt_ordinal)
-            return false;
-        return c.sqlite3_column_type(statement, 2) != c.SQLITE_NULL;
+            return null;
+        if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) return null;
+        var command_key: protocol.Bounded(protocol.max_key_bytes) = .{};
+        readText(statement, 2, &command_key) catch |err| return self.fenceReadFailure(err);
+        return .{ .command_key = command_key };
     }
 
     pub fn withDispatchHandoff(
@@ -4465,6 +4477,7 @@ pub const Store = struct {
         faults: Faults,
     ) !void {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
+        if (faults.settlement_trace) |trace| trace.mark(.lock_requested);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (faults.settlement_trace) |trace| trace.mark(.lock_acquired);

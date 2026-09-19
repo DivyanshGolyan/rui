@@ -91,202 +91,474 @@ const RequestWriter = struct {
         self.budget.release(self.charged);
         self.* = undefined;
     }
+};
 
-    fn jsonString(self: *RequestWriter, value: []const u8) !void {
-        try self.write("\"");
-        try self.jsonBytes(value);
-        try self.write("\"");
-    }
+pub const preparation_byte_allowance = 16 * 1024;
+pub const preparation_item_allowance = 64;
 
-    fn jsonContent(self: *RequestWriter, reader: *store.HistoricalReader) !void {
-        try self.write("\"");
-        var offset: u64 = 0;
-        var buffer: [protocol.content_window_bytes]u8 = undefined;
-        while (offset < reader.reference.length) {
-            const wanted: usize = @intCast(@min(reader.reference.length - offset, buffer.len));
-            const count = try reader.read(offset, buffer[0..wanted]);
-            if (count != wanted) return error.ShortCanonicalRead;
-            try self.jsonBytes(buffer[0..count]);
-            offset += count;
+pub const PreparationProgress = union(enum) {
+    pending,
+    prepared: PreparedRequest,
+    failed: anyerror,
+};
+
+pub const PreparationAdvanceStats = struct {
+    work_bytes: usize,
+    work_items: usize,
+    request_bytes: u64,
+};
+
+pub const Preparation = struct {
+    view: store.HistoricalView,
+    settings: ?store.HistoricalSettings = null,
+    writer: RequestWriter,
+    readonly: std.Io.File,
+    faults: PreparationFaults,
+    phase: Phase = .settings,
+    next_phase: Phase = .settings,
+    emission: Emission = .none,
+    after_position: u64 = 0,
+    input_comma: bool = false,
+    current_entry: ?store.HistoricalEntry = null,
+    current_tool_result: ?store.HistoricalToolResult = null,
+    // Baseline opening happens before its prefix can yield. The reader stays
+    // in final workspace storage rather than a stack frame.
+    emission_baseline_reader: ?store.HistoricalReader = null,
+    active: bool = true,
+    last_advance: PreparationAdvanceStats = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 },
+
+    const Phase = enum {
+        settings,
+        model_prefix,
+        model,
+        envelope,
+        baseline,
+        baseline_content,
+        baseline_suffix,
+        history_next,
+        entry_comma,
+        entry_prefix,
+        entry_content,
+        entry_suffix,
+        tool_result_next,
+        tool_result_prefix,
+        tool_call_id,
+        tool_result_middle,
+        tool_output,
+        tool_result_suffix,
+        tools_prefix,
+        bash_tool,
+        edit_tool,
+        tools_suffix,
+        schema_prefix,
+        schema,
+        schema_suffix,
+        request_suffix,
+        seal,
+        emitting,
+        complete,
+    };
+
+    const JsonEmission = struct {
+        bytes: ?[]const u8 = null,
+        reader: ?store.HistoricalReader = null,
+        offset: u64 = 0,
+        buffer_start: u64 = 0,
+        buffer_length: usize = 0,
+        buffer: [protocol.content_window_bytes]u8 = undefined,
+        encoded: [6]u8 = undefined,
+        encoded_length: u3 = 0,
+        encoded_offset: u3 = 0,
+
+        fn close(self: *JsonEmission) void {
+            if (self.reader) |*reader| reader.close();
+            self.reader = null;
         }
-        try self.write("\"");
-    }
+    };
 
-    fn rawContent(self: *RequestWriter, reader: *store.HistoricalReader) !void {
-        var offset: u64 = 0;
-        var buffer: [protocol.content_window_bytes]u8 = undefined;
-        while (offset < reader.reference.length) {
-            const wanted: usize = @intCast(@min(reader.reference.length - offset, buffer.len));
-            const count = try reader.read(offset, buffer[0..wanted]);
-            if (count != wanted) return error.ShortCanonicalRead;
-            try self.write(buffer[0..count]);
-            offset += count;
+    const RawEmission = struct {
+        reader: store.HistoricalReader,
+        offset: u64 = 0,
+        buffer_length: usize = 0,
+        buffer_offset: usize = 0,
+        buffer: [protocol.content_window_bytes]u8 = undefined,
+    };
+
+    const ReplayEmission = struct {
+        reader: store.HistoricalReader,
+        cursor: provider_output.ReplayCursor = .{},
+    };
+
+    const Emission = union(enum) {
+        none,
+        fixed: struct { bytes: []const u8, offset: usize = 0 },
+        json: JsonEmission,
+        raw: RawEmission,
+        replay: ReplayEmission,
+    };
+
+    pub fn init(
+        self: *Preparation,
+        io: std.Io,
+        view: store.HistoricalView,
+        scratch_path: []const u8,
+        budget: ScratchBudget,
+        faults: PreparationFaults,
+        retained: *?named_scratch.Owner,
+    ) !void {
+        retained.* = null;
+        var owned_view = view;
+        errdefer owned_view.close();
+        if (faults.first_step) return error.InjectedFirstPreparationFailure;
+        var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
+        defer scratch.close(io);
+        var name_buffer: [96]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "request-{d}-{d}.tmp", .{
+            view.binding.operation_id,
+            view.binding.attempt_ordinal,
+        });
+        const file = try scratch.createFile(io, name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+        const readonly = scratch.openFile(io, name, .{}) catch |err| {
+            retained.* = retainedNamedScratch(io, file, null, name, budget, 0, .native);
+            return err;
+        };
+        if (faults.unlink) {
+            retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0, .injected_failure);
+            return error.InjectedRequestUnlinkFailure;
         }
-    }
-
-    fn jsonBytes(self: *RequestWriter, bytes: []const u8) !void {
-        var encoder = JsonSink{ .request = self };
-        std.json.Stringify.encodeJsonStringChars(bytes, .{}, &encoder.writer) catch {
-            return encoder.failure.?;
+        scratch.deleteFile(io, name) catch |err| {
+            retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0, .native);
+            return err;
+        };
+        self.* = .{
+            .view = owned_view,
+            .writer = .{
+                .io = io,
+                .file = file,
+                .budget = budget,
+                .fail_write = faults.write,
+            },
+            .readonly = readonly,
+            .faults = faults,
         };
     }
 
-    // Keep encoded writes under the request's failure and offset accounting.
-    const JsonSink = struct {
-        request: *RequestWriter,
-        failure: ?anyerror = null,
-        writer: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
-
-        fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-            const self: *JsonSink = @fieldParentPtr("writer", writer);
-            var count: usize = 0;
-            for (data, 0..) |bytes, index| {
-                const repeats = if (index == data.len - 1) splat else 1;
-                for (0..repeats) |_| {
-                    self.request.write(bytes) catch |err| {
-                        self.failure = err;
-                        return error.WriteFailed;
-                    };
-                    count += bytes.len;
-                }
+    pub fn advance(self: *Preparation, byte_allowance: usize, item_allowance: usize) PreparationProgress {
+        std.debug.assert(self.active and byte_allowance != 0 and item_allowance != 0);
+        var bytes_left = byte_allowance;
+        var items_left = item_allowance;
+        defer self.last_advance = .{
+            .work_bytes = byte_allowance - bytes_left,
+            .work_items = item_allowance - items_left,
+            .request_bytes = self.writer.offset,
+        };
+        while (bytes_left != 0 and items_left != 0) {
+            if (self.phase == .emitting) {
+                const finished = self.advanceEmission(&bytes_left, &items_left) catch |err| return .{ .failed = err };
+                if (!finished) return .pending;
+                self.phase = self.next_phase;
+                continue;
             }
-            return count;
-        }
-    };
-};
-
-pub fn materialize(
-    io: std.Io,
-    view: *store.HistoricalView,
-    scratch_path: []const u8,
-    budget: ScratchBudget,
-    faults: PreparationFaults,
-    retained: *?named_scratch.Owner,
-) !PreparedRequest {
-    retained.* = null;
-    if (faults.first_step) return error.InjectedFirstPreparationFailure;
-    const settings = try view.settings();
-    var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
-    defer scratch.close(io);
-    var name_buffer: [96]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buffer, "request-{d}-{d}.tmp", .{
-        view.binding.operation_id,
-        view.binding.attempt_ordinal,
-    });
-    const file = try scratch.createFile(io, name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
-    const readonly = scratch.openFile(io, name, .{}) catch |err| {
-        retained.* = retainedNamedScratch(io, file, null, name, budget, 0, .native);
-        return err;
-    };
-    if (faults.unlink) {
-        retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0, .injected_failure);
-        return error.InjectedRequestUnlinkFailure;
-    }
-    scratch.deleteFile(io, name) catch |err| {
-        retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0, .native);
-        return err;
-    };
-
-    var writer = RequestWriter{
-        .io = io,
-        .file = file,
-        .budget = budget,
-        .fail_write = faults.write,
-    };
-    var writer_owned = true;
-    errdefer if (writer_owned) writer.deinit();
-    // Error defers run in reverse order: close the read alias before the
-    // writer owner releases any charged growth.
-    var readonly_owned = true;
-    errdefer if (readonly_owned) readonly.close(io);
-    try writer.write("{\"model\":");
-    try writer.jsonString(settings.model.slice());
-    try writer.write(",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[");
-    var input_comma = false;
-    {
-        try writer.write("{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
-        var baseline = try view.openContent(settings.baseline_instructions);
-        defer baseline.close();
-        try writer.jsonContent(&baseline);
-        try writer.write("}]}");
-    }
-    input_comma = true;
-    var after_position: u64 = 0;
-    while (try view.nextEntry(after_position)) |entry| {
-        if (entry.kind == .tool_results) {
-            while (try view.nextToolResult()) |result| {
-                if (input_comma) try writer.write(",");
-                try writer.write("{\"type\":\"function_call_output\",\"call_id\":");
-                {
-                    var call_id = try view.openContent(result.call_id);
-                    defer call_id.close();
-                    try writer.jsonContent(&call_id);
-                }
-                try writer.write(",\"output\":");
-                {
-                    var output = try view.openContent(result.output);
-                    defer output.close();
-                    try writer.jsonContent(&output);
-                }
-                try writer.write("}");
-                input_comma = true;
-            }
-        } else {
-            if (input_comma) try writer.write(",");
-            {
-                var content = try view.openContent(entry.content.?);
-                defer content.close();
-                if (entry.kind == .provider_output) {
-                    try provider_output.writeReplayItem(&content, &writer);
-                } else {
-                    try writer.write(if (entry.kind == .user)
-                        "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":"
+            items_left -= 1;
+            switch (self.phase) {
+                .settings => {
+                    self.settings = self.view.settings() catch |err| return .{ .failed = err };
+                    self.phase = .model_prefix;
+                },
+                .model_prefix => self.emitFixed("{\"model\":\"", .model),
+                .model => self.emitJsonBytes(self.settings.?.model.slice(), .envelope),
+                .envelope => self.emitFixed("\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[", .baseline),
+                .baseline => {
+                    const reader = self.view.openContent(self.settings.?.baseline_instructions) catch |err| return .{ .failed = err };
+                    self.emitFixed("{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"", .baseline_content);
+                    self.emission_baseline_reader = reader;
+                },
+                .baseline_content => {
+                    const reader = self.takeStagedReader();
+                    self.emitJsonReader(reader, .baseline_suffix);
+                },
+                .baseline_suffix => {
+                    self.input_comma = true;
+                    self.emitFixed("\"}]}", .history_next);
+                },
+                .history_next => {
+                    const entry = self.view.nextEntry(self.after_position) catch |err| return .{ .failed = err };
+                    self.current_entry = entry;
+                    if (entry == null) {
+                        self.phase = .tools_prefix;
+                    } else if (entry.?.kind == .tool_results) {
+                        self.phase = .tool_result_next;
+                    } else self.phase = .entry_comma;
+                },
+                .entry_comma => {
+                    if (self.input_comma) self.emitFixed(",", .entry_prefix) else self.phase = .entry_prefix;
+                },
+                .entry_prefix => {
+                    const entry = self.current_entry.?;
+                    if (entry.kind == .provider_output) {
+                        const reader = self.view.openContent(entry.content.?) catch |err| return .{ .failed = err };
+                        self.emitReplay(reader, .entry_suffix);
+                    } else {
+                        const prefix = if (entry.kind == .user)
+                            "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\""
+                        else
+                            "{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"";
+                        self.emitFixed(prefix, .entry_content);
+                    }
+                },
+                .entry_content => {
+                    const reader = self.view.openContent(self.current_entry.?.content.?) catch |err| return .{ .failed = err };
+                    self.emitJsonReader(reader, .entry_suffix);
+                },
+                .entry_suffix => {
+                    const entry = self.current_entry.?;
+                    self.after_position = entry.position;
+                    self.input_comma = true;
+                    self.current_entry = null;
+                    if (entry.kind == .provider_output) self.phase = .history_next else self.emitFixed("\"}]}", .history_next);
+                },
+                .tool_result_next => {
+                    const result = self.view.nextToolResult() catch |err| return .{ .failed = err };
+                    self.current_tool_result = result;
+                    if (result == null) {
+                        self.after_position = self.current_entry.?.position;
+                        self.current_entry = null;
+                        self.phase = .history_next;
+                    } else self.phase = .tool_result_prefix;
+                },
+                .tool_result_prefix => {
+                    const prefix = if (self.input_comma)
+                        ",{\"type\":\"function_call_output\",\"call_id\":\""
                     else
-                        "{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":");
-                    try writer.jsonContent(&content);
-                    try writer.write("}]}");
-                }
+                        "{\"type\":\"function_call_output\",\"call_id\":\"";
+                    self.emitFixed(prefix, .tool_call_id);
+                },
+                .tool_call_id => {
+                    const reader = self.view.openContent(self.current_tool_result.?.call_id) catch |err| return .{ .failed = err };
+                    self.emitJsonReader(reader, .tool_result_middle);
+                },
+                .tool_result_middle => self.emitFixed("\",\"output\":\"", .tool_output),
+                .tool_output => {
+                    const reader = self.view.openContent(self.current_tool_result.?.output) catch |err| return .{ .failed = err };
+                    self.emitJsonReader(reader, .tool_result_suffix);
+                },
+                .tool_result_suffix => {
+                    self.input_comma = true;
+                    self.current_tool_result = null;
+                    self.emitFixed("\"}", .tool_result_next);
+                },
+                .tools_prefix => self.emitFixed("],\"tools\":[", .bash_tool),
+                .bash_tool => {
+                    if (self.settings.?.tools_mask & 1 != 0) {
+                        self.emitFixed(tools.bash_definition_json, .edit_tool);
+                    } else self.phase = .edit_tool;
+                },
+                .edit_tool => {
+                    if (self.settings.?.tools_mask & 2 != 0) {
+                        self.emitFixed(if (self.settings.?.tools_mask & 1 != 0)
+                            ",{\"type\":\"function\",\"name\":\"edit\",\"description\":\"Edit one file\"}"
+                        else
+                            "{\"type\":\"function\",\"name\":\"edit\",\"description\":\"Edit one file\"}", .tools_suffix);
+                    } else self.phase = .tools_suffix;
+                },
+                .tools_suffix => {
+                    if (self.settings.?.output_schema != null) self.emitFixed("]", .schema_prefix) else self.emitFixed("]", .request_suffix);
+                },
+                .schema_prefix => self.emitFixed(",\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":", .schema),
+                .schema => {
+                    const reader = self.view.openContent(self.settings.?.output_schema.?) catch |err| return .{ .failed = err };
+                    self.emitRawReader(reader, .schema_suffix);
+                },
+                .schema_suffix => self.emitFixed("}}", .request_suffix),
+                .request_suffix => self.emitFixed("}", .seal),
+                .seal => return self.seal() catch |err| .{ .failed = err },
+                .complete => unreachable,
+                .emitting => unreachable,
             }
-            input_comma = true;
         }
-        after_position = entry.position;
+        return .pending;
     }
-    try writer.write("],\"tools\":[");
-    var comma = false;
-    if (settings.tools_mask & 1 != 0) {
-        try writer.write(tools.bash_definition_json);
-        comma = true;
+
+    pub fn advanceStats(self: *const Preparation) PreparationAdvanceStats {
+        return self.last_advance;
     }
-    if (settings.tools_mask & 2 != 0) {
-        if (comma) try writer.write(",");
-        try writer.write("{\"type\":\"function\",\"name\":\"edit\",\"description\":\"Edit one file\"}");
+
+    fn takeStagedReader(self: *Preparation) store.HistoricalReader {
+        const reader = self.emission_baseline_reader.?;
+        self.emission_baseline_reader = null;
+        return reader;
     }
-    try writer.write("]");
-    if (settings.output_schema) |schema_reference| {
-        try writer.write(",\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":");
-        {
-            var schema = try view.openContent(schema_reference);
-            defer schema.close();
-            try writer.rawContent(&schema);
+
+    fn emitFixed(self: *Preparation, bytes: []const u8, next: Phase) void {
+        self.emission = .{ .fixed = .{ .bytes = bytes } };
+        self.next_phase = next;
+        self.phase = .emitting;
+    }
+
+    fn emitJsonBytes(self: *Preparation, bytes: []const u8, next: Phase) void {
+        self.emission = .{ .json = .{ .bytes = bytes } };
+        self.next_phase = next;
+        self.phase = .emitting;
+    }
+
+    fn emitJsonReader(self: *Preparation, reader: store.HistoricalReader, next: Phase) void {
+        self.emission = .{ .json = .{ .reader = reader } };
+        self.next_phase = next;
+        self.phase = .emitting;
+    }
+
+    fn emitRawReader(self: *Preparation, reader: store.HistoricalReader, next: Phase) void {
+        self.emission = .{ .raw = .{ .reader = reader } };
+        self.next_phase = next;
+        self.phase = .emitting;
+    }
+
+    fn emitReplay(self: *Preparation, reader: store.HistoricalReader, next: Phase) void {
+        self.emission = .{ .replay = .{ .reader = reader } };
+        self.next_phase = next;
+        self.phase = .emitting;
+    }
+
+    fn advanceEmission(self: *Preparation, bytes_left: *usize, items_left: *usize) !bool {
+        switch (self.emission) {
+            .none => unreachable,
+            .fixed => |*fixed| {
+                const count = @min(bytes_left.*, fixed.bytes.len - fixed.offset);
+                if (count == 0) return false;
+                try self.writer.write(fixed.bytes[fixed.offset..][0..count]);
+                fixed.offset += count;
+                bytes_left.* -= count;
+                if (fixed.offset != fixed.bytes.len) return false;
+            },
+            .json => |*json| {
+                if (!try self.advanceJson(json, bytes_left)) return false;
+                json.close();
+            },
+            .raw => |*raw| {
+                if (raw.buffer_offset != raw.buffer_length) {
+                    const count = @min(bytes_left.*, raw.buffer_length - raw.buffer_offset);
+                    try self.writer.write(raw.buffer[raw.buffer_offset..][0..count]);
+                    raw.buffer_offset += count;
+                    bytes_left.* -= count;
+                    if (raw.buffer_offset != raw.buffer_length) return false;
+                }
+                if (raw.offset != raw.reader.reference.length) {
+                    const wanted: usize = @intCast(@min(raw.reader.reference.length - raw.offset, @min(raw.buffer.len, bytes_left.*)));
+                    if (wanted == 0) return false;
+                    const count = try raw.reader.read(raw.offset, raw.buffer[0..wanted]);
+                    if (count != wanted) return error.ShortCanonicalRead;
+                    raw.offset += count;
+                    raw.buffer_length = count;
+                    raw.buffer_offset = 0;
+                    bytes_left.* -= count;
+                    return false;
+                }
+                raw.reader.close();
+            },
+            .replay => |*replay| {
+                if (try replay.cursor.advance(&replay.reader, &self.writer, bytes_left, items_left) == .pending) return false;
+                replay.reader.close();
+            },
         }
-        try writer.write("}}");
+        self.emission = .none;
+        return true;
     }
-    try writer.write("}");
-    if (faults.seal) return error.InjectedRequestSealFailure;
-    try writer.file.sync(io);
-    if (try readonly.length(io) != writer.offset) return error.RequestSealFailed;
-    writer.file.close(io);
-    writer_owned = false;
-    readonly_owned = false;
-    return .{
-        .io = io,
-        .file = readonly,
-        .length = writer.offset,
-        .charged = writer.charged,
-        .budget = budget,
-        .structured_output = settings.output_schema != null,
-    };
-}
+
+    fn advanceJson(self: *Preparation, json: *JsonEmission, bytes_left: *usize) !bool {
+        while (bytes_left.* != 0) {
+            if (json.encoded_offset != json.encoded_length) {
+                const count = @min(bytes_left.*, json.encoded_length - json.encoded_offset);
+                try self.writer.write(json.encoded[json.encoded_offset..][0..count]);
+                json.encoded_offset += @intCast(count);
+                bytes_left.* -= count;
+                continue;
+            }
+            const length: u64 = if (json.bytes) |bytes| bytes.len else json.reader.?.reference.length;
+            if (json.offset == length) return true;
+            const byte = if (json.bytes) |bytes|
+                bytes[@intCast(json.offset)]
+            else byte: {
+                if (json.offset < json.buffer_start or json.offset >= json.buffer_start + json.buffer_length) {
+                    json.buffer_start = json.offset;
+                    const wanted: usize = @intCast(@min(length - json.offset, @min(json.buffer.len, bytes_left.*)));
+                    const count = try json.reader.?.read(json.offset, json.buffer[0..wanted]);
+                    if (count != wanted) return error.ShortCanonicalRead;
+                    json.buffer_length = count;
+                }
+                break :byte json.buffer[@intCast(json.offset - json.buffer_start)];
+            };
+            json.offset += 1;
+            bytes_left.* -= 1;
+            const encoded = switch (byte) {
+                '"' => "\\\"",
+                '\\' => "\\\\",
+                0x08 => "\\b",
+                0x0c => "\\f",
+                '\n' => "\\n",
+                '\r' => "\\r",
+                '\t' => "\\t",
+                0...0x07, 0x0b, 0x0e...0x1f => {
+                    const hex = "0123456789abcdef";
+                    json.encoded = .{ '\\', 'u', '0', '0', hex[byte >> 4], hex[byte & 0xf] };
+                    json.encoded_length = 6;
+                    json.encoded_offset = 0;
+                    continue;
+                },
+                else => {
+                    json.encoded[0] = byte;
+                    json.encoded_length = 1;
+                    json.encoded_offset = 0;
+                    continue;
+                },
+            };
+            @memcpy(json.encoded[0..encoded.len], encoded);
+            json.encoded_length = @intCast(encoded.len);
+            json.encoded_offset = 0;
+        }
+        return false;
+    }
+
+    fn seal(self: *Preparation) !PreparationProgress {
+        if (self.faults.seal) return error.InjectedRequestSealFailure;
+        try self.writer.file.sync(self.writer.io);
+        if (try self.readonly.length(self.writer.io) != self.writer.offset) return error.RequestSealFailed;
+        self.closeEmission();
+        self.view.close();
+        self.writer.file.close(self.writer.io);
+        const request = PreparedRequest{
+            .io = self.writer.io,
+            .file = self.readonly,
+            .length = self.writer.offset,
+            .charged = self.writer.charged,
+            .budget = self.writer.budget,
+            .structured_output = self.settings.?.output_schema != null,
+        };
+        self.active = false;
+        self.phase = .complete;
+        return .{ .prepared = request };
+    }
+
+    pub fn cancel(self: *Preparation) void {
+        std.debug.assert(self.active);
+        self.closeEmission();
+        if (self.emission_baseline_reader) |*reader| reader.close();
+        self.emission_baseline_reader = null;
+        self.view.close();
+        self.readonly.close(self.writer.io);
+        self.writer.deinit();
+        self.active = false;
+    }
+
+    fn closeEmission(self: *Preparation) void {
+        switch (self.emission) {
+            .json => |*json| json.close(),
+            .raw => |*raw| raw.reader.close(),
+            .replay => |*replay| replay.reader.close(),
+            .none, .fixed => {},
+        }
+        self.emission = .none;
+    }
+};
 
 pub const TransportDisposition = enum {
     success,
@@ -321,6 +593,7 @@ pub const CompletionOutcome = union(enum) {
 pub const Completion = struct {
     identity: TransferIdentity,
     outcome: CompletionOutcome,
+    queued_after: usize,
 };
 
 pub const TransferMembership = struct {
@@ -401,6 +674,7 @@ pub const Reactor = struct {
             return .{
                 .identity = identity,
                 .outcome = try transfer.completionOutcome(result),
+                .queued_after = @intCast(@max(remaining, 0)),
             };
         }
         return null;
@@ -960,36 +1234,6 @@ test "endpoint validation permits TLS and loopback fixture HTTP only" {
     );
     try std.testing.expectError(error.InvalidProviderEndpoint, validateEndpoint("https://user@example.com/fail"));
     try std.testing.expectError(error.InsecureProviderEndpoint, validateEndpoint("http://[::1]evil:80/fail"));
-}
-
-test "request JSON encoding preserves controls and split UTF-8 with write failures" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const file = try tmp.dir.createFile(std.testing.io, "request", .{ .read = true });
-    var used = std.atomic.Value(u64).init(0);
-    var writer = RequestWriter{
-        .io = std.testing.io,
-        .file = file,
-        .budget = .{ .used = &used, .limit = 1024 },
-        .fail_write = false,
-    };
-    defer writer.deinit();
-    const input = "quote\" slash\\ newline\n\r\t\x00\x08\x0b\x0c\x1f café";
-    try writer.write("\"");
-    // Canonical read windows can divide a multibyte character.
-    try writer.jsonBytes(input[0 .. input.len - 1]);
-    try writer.jsonBytes(input[input.len - 1 ..]);
-    try writer.write("\"");
-    var buffer: [256]u8 = undefined;
-    const count = try file.readPositionalAll(std.testing.io, &buffer, 0);
-    try std.testing.expectEqual(writer.offset, count);
-    const parsed = try std.json.parseFromSlice([]const u8, std.testing.allocator, buffer[0..count], .{});
-    defer parsed.deinit();
-    try std.testing.expectEqualStrings(input, parsed.value);
-    writer.fail_write = true;
-    try std.testing.expectError(error.InjectedRequestWriteFailure, writer.jsonBytes("\x0c"));
-    try std.testing.expectEqual(@as(u64, count), writer.offset);
-    try std.testing.expectEqual(@as(u64, count), try file.length(std.testing.io));
 }
 
 test "Retry-After preserves dates and delays without unchecked arithmetic" {
