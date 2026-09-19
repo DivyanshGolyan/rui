@@ -4,7 +4,9 @@ Rui (रुई, Hindi for cotton) is a local runtime for coding-agent workflows.
 
 ## Status
 
-Rui is in development. Today the direct CLI supports Sessions, queued messages, text-model responses, retries, stops, exact model interruption, ordered Tool Call classification and authorized Bash execution. Valid Bash descriptors become inspectable Actions; unknown tools and invalid descriptors become stable call-local rejections. Keyed permission decisions and admitted work survive restart. If an admitted Bash attempt loses local custody, Rui records an indeterminate result rather than replaying it automatically.
+Rui is in development. Today the direct CLI can configure reusable Sessions, queue messages, receive text-model responses, stop or interrupt work, inspect proposed tools, authorize Bash and read saved results. Keyed requests, permission decisions and admitted work survive restart.
+
+The precise model is documented in [Architecture](ARCHITECTURE.md): valid Bash descriptors become inspectable Actions, unknown tools and invalid descriptors become stable call-local rejections, and a Bash attempt that loses local custody resolves as indeterminate rather than replaying automatically.
 
 JavaScript workflows, Edit, structured answers and provider authentication are not implemented. Bash process-group stopping cannot contain detached descendants. Retained full output is optional: FIFO eviction or restart may remove it without changing the saved result. Codex subscription is the planned first live provider; live-provider, power-loss and complete 1,000-operation mixed qualification remain outstanding.
 
@@ -38,4 +40,4 @@ The fixture starts its own local Host and provider endpoint; it is a development
 - To change Session behavior or verify an implementation slice, find the owning behavior in Architecture and its required evidence in [Verification](VERIFICATION.md).
 - To run or interpret qualification, start with [current qualification](tests/qualification/README.md#current-checks-and-qualification); it records revision-specific observations and their limits.
 - To inspect design evidence or archived experiments, read [Research](research/README.md).
-- Contributors should follow [working rules](AGENTS.md); dependencies and notices live in [THIRD_PARTY_NOTICES.md].
+- Contributors should follow [working rules](AGENTS.md). Dependencies and notices live in [third-party notices](THIRD_PARTY_NOTICES.md).

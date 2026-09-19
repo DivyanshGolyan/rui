@@ -1,6 +1,6 @@
 # Rui architecture
 
-This is the accepted V1 contract, not implementation evidence. [README.md](README.md) owns product/status; [VERIFICATION.md](VERIFICATION.md) owns required evidence.
+This is the accepted V1 contract, not implementation evidence; it includes accepted behavior that is not yet implemented. For runnable behavior and current limitations, see [README Status](README.md#status). [VERIFICATION.md](VERIFICATION.md) owns required evidence.
 
 ## A piece of work from start to finish
 
@@ -94,6 +94,8 @@ Use these qualified terms consistently; do not use a tracing request ID as an id
 ### Naming and configuring a Session
 
 Clients construct Session references locally, without existence checks, core calls or generated-ID discovery. They unambiguously encode their namespace and local name; core treats the complete reference as opaque, without direct/workflow categories. Equal full references select the same Session across clients. Reuse passes the existing reference unchanged, without another namespace prefix. Workflow `session(name)` scopes names by Workflow identity: replay retains the reference; a fresh Workflow differs. Namespaces separate names, not authority; possessing a reference grants no access.
+
+A complete Session reference may contain at most 128 UTF-8 bytes, including any caller namespace and component encoding. Core validates the complete value before mutation; it does not parse the components or impose separate namespace or local-name limits. Count the value before transport escaping. Reject overflow without truncation or normalization. This bounds reference length, not Session population.
 
 The first complete valid configuration for an unknown Session reference atomically establishes Session, baseline, Workspace, access scope and request answer.
 
@@ -325,8 +327,6 @@ Edit owns target/scratch/buffers/offsets/cleanup within one trusted in-process m
 
 Relational constraints enforce identities, parentage, ordering, at-most-once message selection and projection, one active Turn per Session, one terminal Turn outcome, one optional final Resolution per Operation, exact request bindings and content publication with its first durable reference. No ledger/reducer image, permanent Completion, separate Resolution ID, cached lifecycle phase or shadow frontier duplicates authority. Unreleased databases/fixtures are recreated: no migration, compatibility reader, dual-write or alias layer.
 
-The redesign uses a fresh branch without the old production path. Revision `6a9b9b7aa993c853f0ff998533ab5aa3e74fe719` remains in Git for selective extraction, not production fallback. Retain the contract, verification requirements and research evidence; assess extracted build setup, dependencies and tests against this contract. The first slice must complete an ordinary caller flow and its failure/recovery boundaries; code removal alone is not a milestone.
-
 One meaningful mutation owns one cohesive function: bounded syntax/content validation; reserve custody if admitting execution; `BEGIN IMMEDIATE`; bounded current-state checks and guarded writes; verify affected rows; commit; release consequence. State-dependent checks stay inside. Rollback releases unused reservation and grants no dispatch. Private helpers may simplify calculation/query mechanics without a mandatory classifier framework.
 
 ### Admitting an attempt
@@ -406,9 +406,31 @@ Retry temporary connection failures, body inactivity, rate limits and temporary 
 
 ### Bash lifecycle and capture
 
-Bash has one monotone physical lifecycle for preparation, natural exit, timeout, stop, shutdown and capture failure. After Attempt admission, one shared preparation workspace incrementally decodes canonical arguments and writes the command through bounded windows; its lightweight custody slot retains the Action/Attempt binding but no payload-sized state. Each orchestration pass consumes bounded input, so existing process owners, controls and cleanup continue to progress while a large descriptor is prepared. Stop or shutdown cancels this same workspace before launch, and no second Bash preparation starts until it releases or transfers ownership. Observe a launched direct child without reaping; TERM the anchored original process group, wait 100 ms, KILL that group and any still-live direct child, retire nonzero signaling authority, reap the direct child exactly once, then establish original-group absence with read-only probes. The anchored original process group is the cancellation scope; descendants that establish another process group or session are outside it. Terminal child status, signaling authority, group absence, each pipe's terminal reason and semantic Resolution are independent facts. A successful signal, reaped leader or pipe EOF proves none of the others. Permission/capacity waits consume no Bash execution time. Expiry begins this termination lifecycle; `timed_out` is saved only after trustworthy retirement and capture, while custody loss before settlement recovers as indeterminate rather than timeout.
+The lifecycle is monotone across preparation, natural exit, timeout, stop, shutdown and capture failure. Its physical facts remain independent from each other and from semantic settlement: process exit never abbreviates reaping, group absence, pipe capture, custody release or result commit.
 
-After group absence, snapshot each open pipe's queued bytes once, drain exactly that finite tail through the shared scratch budget, then verify EOF or record incomplete capture. If the cleanup watchdog expires before group absence can be confirmed, make the same finite-tail transition independently of child-reap or group-probe progress so an escaped productive writer cannot consume scratch forever, but retain process ownership and custody because capture cutoff is not proof of retirement. Detached writers cannot extend cleanup indefinitely, and the original process group is the portable containment boundary. Release execution custody only after the child is reaped, signaling is retired, group absence and honest pipe closure are established, delivery references are gone and scratch is released or transferred. If retirement cannot be established before the cleanup watchdog, fence Bash admission and retain unreusable custody rather than fabricate physical completion. A committed Resolution remains independently usable while local cleanup continues. Normal execution and shutdown use one shallow owner-progress pass for active Bash and retained Bash/provider cleanup owners. A failed cleanup pass is not progress; retry at low frequency while retaining the Store lease and custody until the same owner establishes release.
+#### Preparing a command
+
+After Attempt admission, one shared preparation workspace incrementally decodes canonical arguments and writes the command through bounded windows. Its lightweight custody slot retains the Action/Attempt binding but no payload-sized state. Each orchestration pass consumes bounded input so existing process owners, controls and cleanup progress while a large descriptor is prepared. Stop or shutdown cancels this workspace before launch. No second Bash preparation starts until it releases or transfers ownership; permission and capacity waits consume no Bash execution time.
+
+#### Facts tracked independently
+
+Terminal child status, signaling authority, original-group absence, each pipe's terminal reason and semantic Resolution are independent facts. A successful signal, reaped leader or pipe EOF proves none of the others. A signaling attempt may fail independently; once read-only observation establishes original-group absence and the remaining release conditions hold, that failure does not retain custody or fence admission. The anchored original process group is the cancellation scope; descendants that establish another process group or session are outside it. Expiry begins retirement, but `timed_out` is saved only after trustworthy retirement and capture. Custody loss before settlement recovers as indeterminate rather than timeout.
+
+#### Retiring the original process group
+
+Observe a launched direct child without reaping; TERM the anchored original process group, wait 100 ms, KILL that group and any still-live direct child, retire nonzero signaling authority, reap the direct child exactly once, then establish original-group absence with read-only probes.
+
+#### Finishing output capture
+
+After group absence, snapshot each open pipe's queued bytes once, drain exactly that finite tail through the shared scratch budget, then verify EOF or record incomplete capture. If the cleanup watchdog expires before group absence can be confirmed, make the same finite-tail transition independently of child-reap or group-probe progress. This prevents an escaped productive writer from consuming scratch forever, but capture cutoff is not proof of retirement. Detached writers cannot extend cleanup indefinitely, and the original process group remains the portable containment boundary.
+
+#### Releasing custody
+
+Release execution custody only after the child is reaped, signaling is retired, group absence is established, and each pipe handle is closed with an honest terminal reason recorded—EOF, finite-tail incomplete capture or capture failure. Delivery references must be gone, and scratch must be released or transferred. A committed Resolution remains independently usable while local cleanup continues.
+
+#### When cleanup cannot finish
+
+If retirement cannot be established before the cleanup watchdog, fence Bash admission and retain unreusable custody rather than fabricate physical completion. Normal execution and shutdown use one shallow owner-progress pass for active Bash and retained Bash cleanup owners. A failed cleanup pass is not progress; retry at low frequency while retaining the Store lease and custody until the same owner establishes release.
 
 Timeout and retry values live in the [resource table](#resources-storage-and-diagnostics).
 
@@ -743,7 +765,7 @@ After transaction error, resolve rollback and confirm autocommit before reuse; u
 
 Derive SQL/row/parameter bounds from actual statements and pinned representation, not workload percentiles or durable-history quotas. Keep guards until replacement storage/traversal is safe. Distinguish invariants, fixed consumer boundaries, adjustable resource budgets and verification targets; only the first three reject work. Startup derives complete simultaneous memory/descriptor/file requirements with checked arithmetic and actual OS limits, including spawn overlap, evaluator input/capture, retained spillover and empty files. No extra descriptor credit pool is selected.
 
-Names, references and idempotency keys preserve exact text without trimming, case folding, Unicode normalization or an arbitrary whitelist. The complete opaque Session reference has a selected maximum of 128 UTF-8 bytes, including any client namespace and component encoding; reject longer references explicitly without truncation. Clients allocate that total between their own components; core imposes no separate namespace or local-name limit and does not parse them. Count the reference value before transport escaping, whose expansion belongs to the derived wire bound. This limits reference length, not Session population. Workflow submission names independently permit 128 UTF-8 bytes within their Workflow-and-Session scope. The independent [core-key allowance](#recovering-a-submission-after-a-lost-reply) matches Workflow creation keys and bounds addressing/recovery consumers; it is a public allocation, not a UUID-derived bound. Derive complete wire/request/acknowledgment/error bounds using the full public allowance and worst-case escaping, without shrinking Session-reference or submission-name allowances. Other keys gain no length quota without an actual consumer requirement. Validate positivity/nonreuse and arithmetic for actual identity/ordinal consumers; SQLite INTEGER requires signed-64 representability where used. Binding/content SHA-256 digests are domain-separated 32-byte values, not authentication. Validate OS/API paths including NUL, complete derived suffixes and socket terminators. Finite selectors preserve supported model/tool names; media/schema/diagnostic types follow their actual consumer. No generic identifier validator or silent truncation.
+Names, references and idempotency keys preserve exact text as specified in [admission terminology](#names-references-ids-and-idempotency-keys) and [Workflow identity](#workflow-identity-and-saved-calls): no trimming, case folding, Unicode normalization or arbitrary whitelist. The representation layer must preserve those distinct scopes rather than treating all keys as one 128-byte class. Derive wire/request/acknowledgment/error bounds from each complete public value and worst-case escaping; other keys gain no length quota without an actual consumer requirement. Validate positivity/nonreuse and arithmetic for actual identity/ordinal consumers; SQLite INTEGER requires signed-64 representability where used. Binding/content SHA-256 digests are domain-separated 32-byte values, not authentication. Validate OS/API paths including NUL, complete derived suffixes and socket terminators. Finite selectors preserve supported model/tool names; media/schema/diagnostic types follow their actual consumer. No generic identifier validator or silent truncation.
 
 ### Diagnostics
 
