@@ -136,6 +136,24 @@ Keep requested model, each available served-model observation, `x-request-id` an
 
 ### Settlement and recovery scenarios
 
+Run this area through `zig build dispatch-integration` and `zig build bash-recovery-integration` when the affected implementation exists. The named cases below require production boundaries and independent observations; a fixture marker may detect duplicate execution but is never recovery authority.
+
+#### Bash launched, but its result was not committed
+
+Run an authorized Bash Action that writes an independently observable marker. Terminate the Host after launch is established but before the Action result commits, then reopen the same Store in a fresh process. The original Action must resolve as indeterminate and its command must not replay; the marker detects duplicate execution. This case establishes crash recovery from committed facts, not power-loss durability or an external proof of authorship.
+
+#### A saved stop is retried after newer work
+
+Commit a Session stop, admit newer work, then retry the stop with its original idempotency key. Require the original selection and acknowledgement, not a new selection of current work; only a fresh key may select it. This establishes saved-control recovery, not exclusive Session ownership or concurrent-writer isolation.
+
+#### One sibling settles while another remains unresolved
+
+Accept a response containing multiple valid Tool Calls and settle one Action while another is unresolved. Inspect the settled outcome immediately, but require no Conversation or continuation Tool Results until complete call coverage exists. This establishes independent sibling settlement without creating a partial group publication rule.
+
+#### Output retention fails after a known successful command
+
+Let Bash exit successfully, then fail capture or result retention before settlement. Require a typed non-success outcome rather than inferred success from exit status or scratch. This establishes honest settlement evidence, not a claim that the command had no external effect.
+
 Terminate before/after reservation, Attempt admission, dispatch, scratch seal, retry settlement, final settlement and observation. Before admission rollback, no new identity, consumed allowance or permit survives. After commit, recover exact current facts and conservative uncertainty without recreating the one-shot Dispatch Permit. Lost scratch/preparation is not durable evidence. Final resolution, required content and consequences commit together. Retry settlement updates current failure/eligibility/accounting while leaving Resolution absent; fresh admission revalidates everything and cannot duplicate a stale due selection.
 
 Exercise the [cross-owner boundaries](ARCHITECTURE.md#commit-boundaries-and-crash-recovery) through direct core calls and Runtime's ordinary core client. At each cut assert the committed answer/Operation facts, who retains permit/custody/source handles, whether that owner remains usable, and which owner makes the next recovery call. Observe launch with an independent fixture counter: rollback launches zero; one permit launches at most once; crash after admission but before launch still makes tools indeterminate. Fail the first post-commit preparation, authentication or spawn step and verify the reserved owner still retains its Attempt binding and cleanup responsibility. Contrast live known preparation failure with death before that failure is saved; neither refunds consumed allowance. Apply existing retry policy rather than retrying every preparation error.
@@ -154,10 +172,26 @@ Provider inactivity defaults to **five minutes** before first body data and betw
 
 | Scenario | Intervention | Required observable evidence |
 | --- | --- | --- |
-| Preparation is cancelled | Stop or shut down while a large descriptor is decoding. | Canonical input closes, no process launches, and cleanup custody remains until reclamation. |
-| Original group does not retire naturally | Run a TERM-ignoring same-group child. | No success or slot reuse precedes TERM, grace, KILL, child reap and observed original-group absence. |
-| Detached writer survives | Leave an idle or productive writer outside the original group. | The owner drains one finite queued tail, reports incomplete capture when appropriate, and retains process custody. |
-| Cleanup facts are unavailable | Stall or fail reap/group probes, signaling, capture or cleanup. | No fabricated completion or early custody release; the owner fences admission and retries cleanup safely. |
+| [Preparation is cancelled](#preparation-is-cancelled) | Stop or shut down while a large descriptor is decoding. | No process launches. |
+| [Original group does not retire naturally](#original-group-does-not-retire-naturally) | Run a TERM-ignoring same-group child. | Retirement facts precede reuse. |
+| [Detached writer survives](#detached-writer-survives) | Leave an idle or productive writer outside the original group. | Capture ends finitely without claiming retirement. |
+| [Cleanup facts are unavailable](#cleanup-facts-are-unavailable) | Stall or fail reap/group probes, signaling, capture or cleanup. | Admission fences while custody remains. |
+
+#### Preparation is cancelled
+
+Start decoding a large descriptor, then stop or shut down before launch. Require canonical input to close, zero launched processes and retained cleanup custody until reclamation. This does not establish a cancellation authority after handoff.
+
+#### Original group does not retire naturally
+
+Run a TERM-ignoring same-group child. Require TERM, grace, KILL, exact-child reap and observed original-group absence before success or slot reuse. A reaped leader alone is insufficient evidence.
+
+#### Detached writer survives
+
+Leave an idle or continuously productive writer outside the original group. Snapshot and drain one queued tail larger than the 16 KiB service window, then report incomplete capture when appropriate. Require retained process custody; finite capture does not establish absence of the detached writer.
+
+#### Cleanup facts are unavailable
+
+Stall or fail reaping, group probes, signaling, capture or cleanup. Require no fabricated completion or early custody release; the owner fences admission and safely retries cleanup at low frequency. This does not establish successful shutdown.
 
 For Bash, split descriptor decoding at every byte boundary, including whitespace, escapes, surrogate pairs, timeout digits/null and malformed endings. Prepare a large descriptor through bounded orchestration turns while an existing Bash owner and accepted stop continue to progress; the single shared preparation workspace must not enlarge every execution slot or permit a second launch/preparation owner. Stop and shutdown during preparation must close canonical input, launch zero processes and retain cleanup custody through successful reclamation. Independently vary leader exit and stdout/stderr EOF order. Include a natural leader exit with a TERM-ignoring same-group child whose output is redirected: no success or slot reuse precedes TERM→grace→KILL, exact-child reap and observed original-group absence. Include a detached idle writer and a detached continuously productive writer; snapshot and drain a queued tail larger than the 16 KiB service window once, then report incomplete capture without waiting indefinitely. When cleanup confirmation times out, combine the escaped writer with stalled/failed reap and failed/stalled group probes; its pipe-hangup acknowledgement must prove phase-independent finite-tail cutoff while process custody remains retained. Elapsed file growth or a sampled process phase is not equivalent evidence. Exercise stop during running, after observed exit with pipes open and after Resolution while cleanup remains occupied. Inject signal, non-consuming observation, final wait, group-probe, queued-byte, read/write and cleanup-watchdog failures; no signal follows signaling retirement, unexpected lost wait ownership is failure, and unconfirmed cleanup retains custody/fences admission. Gate prepared-file, provider scratch and metadata reclamation, then clear each gate during ordinary service and shutdown: the original owner must retry at low frequency, hold the Store lease/custody while blocked and release exactly once without relaunch. For named scratch, independently prove removed, already-absent and retryable-removal observations; only the first two release aliases, accounting and custody. Treat forced fixture termination as unclean custody loss, not successful shutdown. Run these native lifecycle cases on Linux and macOS; cross-compilation alone does not qualify `WNOWAIT`, null group probes or `FIONREAD` behavior.
 
@@ -354,7 +388,9 @@ Verify configurable **128 MiB** retained history, at most **16 files** including
 
 Hold export delivery open across diagnostic rotation and inject partial record/chunk writes. Source handles close between bounded export turns; exported scratch stays charged through its last pending delivery read. Count concurrent exports against ordinary client capacity, including failed construction and rotation overlap. Fail export scratch and log deletion independently: neither changes committed execution, and neither reports incomplete output as complete.
 
-Package under the Rui identity; verify executable/package names, state and credential identifiers, build/distribution references and fixtures without losing existing user data.
+## Release demonstrations
+
+Package under the Rui identity; verify executable/package names, state and credential identifiers, build/distribution references and fixtures. The current unreleased-database recreation policy in [Architecture](ARCHITECTURE.md#canonical-state-and-transactions) does not promise preservation of existing user data; any release migration guarantee requires an explicit accepted contract.
 
 Release demonstrations cover explicit start, no-client progress, restart, direct Sessions, first configuration, cross-Workflow inspected-reference reuse, fan-out/joins, permissions, ordered tools, uncertain Bash/Edit and shared cancellation. Independent native/Cloudflare walkthroughs may expose hidden coupling; they add no embedding/cloud release requirement. Keep evidence attached to the real owners and label remaining gaps before claiming release readiness.
 
