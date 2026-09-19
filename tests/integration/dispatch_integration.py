@@ -3659,6 +3659,174 @@ def main():
             stop_host(host)
             processes.remove(host)
 
+        # A canonical stop committed between resumable preparation advances
+        # cancels that exact live owner before transport sees partial scratch.
+        preparation_stop_endpoint = SuccessEndpoint(
+            [sse_answer("preparation-stop-response", "preparation-stop-r", "preparation-stop-m", "must not launch")[0]]
+        )
+        preparation_stop_thread = threading.Thread(
+            target=preparation_stop_endpoint.serve_forever, daemon=True
+        )
+        preparation_stop_thread.start()
+        preparation_stop_store = state / "preparation-stop-store"
+        preparation_stop_host = start_host(
+            preparation_stop_store,
+            f"http://127.0.0.1:{preparation_stop_endpoint.server_port}/responses",
+            "--test-phase-trace",
+            "--test-request-preparation-advance-delay-ms",
+            "1500",
+        )
+        processes.append(preparation_stop_host)
+        preparation_stop_trace = HostDiagnostics(preparation_stop_host)
+        configure(
+            state,
+            preparation_stop_store,
+            "preparation-stop-config",
+            "direct/preparation-stop",
+            "model-a",
+        )
+        message(
+            state,
+            preparation_stop_store,
+            "preparation-stop-message",
+            "direct/preparation-stop",
+            "p" * (64 * 1024),
+        )
+        preparation_stop_trace.wait("preparation_advance_completed")
+        stopped_preparation = command(
+            "stop-session",
+            "--store",
+            preparation_stop_store,
+            "--record",
+            state / "preparation-stop.json",
+            "--key",
+            "preparation-stop",
+            "--session",
+            "direct/preparation-stop",
+        )
+        assert stopped_preparation["answer"]["status"] == "accepted", stopped_preparation
+        stopped_resources = wait_for(
+            lambda: (lambda value: value if value["execution"]["custody_occupied"] == "0"
+                    and value["execution"]["scratch_used_bytes"] == "0" else None)(
+                command(
+                    "inspect-session",
+                    "--store",
+                    preparation_stop_store,
+                    "--session",
+                    "direct/preparation-stop",
+                )
+            ),
+            "preparation stop cleanup",
+        )
+        assert stopped_resources["execution"]["dispatch_fenced"] is False, stopped_resources
+        with sqlite3.connect(preparation_stop_store / "rui.sqlite3") as database:
+            assert database.execute(
+                "SELECT attempt_ordinal,resolution_code FROM model_operation"
+            ).fetchall() == [(1, "interrupted")]
+            assert database.execute("SELECT outcome_code FROM turn").fetchall() == [("cancelled",)]
+        assert preparation_stop_endpoint.requests == []
+        preparation_stop_host.kill()
+        preparation_stop_host.wait(timeout=10)
+        processes.remove(preparation_stop_host)
+        preparation_stop_trace.close()
+        preparation_stop_host.stdout.close()
+        preparation_stop_host.stderr.close()
+        preparation_stop_endpoint.shutdown()
+        preparation_stop_endpoint.server_close()
+        preparation_stop_thread.join(timeout=5)
+
+        # Infrastructure shutdown owns the same cancellation path. Populate
+        # durable work while execution is unavailable, then make the listener
+        # fail after preparation has yielded. Restart admits Attempt 2 from
+        # canonical uncertainty; the discarded cursor and scratch never launch.
+        preparation_shutdown_sse = sse_answer(
+            "preparation-shutdown-response",
+            "preparation-shutdown-r",
+            "preparation-shutdown-m",
+            "prepared after shutdown",
+        )[0]
+        preparation_shutdown_endpoint = SuccessEndpoint([preparation_shutdown_sse])
+        preparation_shutdown_thread = threading.Thread(
+            target=preparation_shutdown_endpoint.serve_forever, daemon=True
+        )
+        preparation_shutdown_thread.start()
+        preparation_shutdown_store = state / "preparation-shutdown-store"
+        offline_shutdown_host = start_host(preparation_shutdown_store, None)
+        processes.append(offline_shutdown_host)
+        configure(
+            state,
+            preparation_shutdown_store,
+            "preparation-shutdown-config",
+            "direct/preparation-shutdown",
+            "model-a",
+        )
+        message(
+            state,
+            preparation_shutdown_store,
+            "preparation-shutdown-message",
+            "direct/preparation-shutdown",
+            "s" * (64 * 1024),
+        )
+        stop_host(offline_shutdown_host)
+        processes.remove(offline_shutdown_host)
+        preparation_shutdown_host = start_host(
+            preparation_shutdown_store,
+            f"http://127.0.0.1:{preparation_shutdown_endpoint.server_port}/responses",
+            "--fault",
+            "shutdown-after-accept",
+            "--test-phase-trace",
+            "--test-request-preparation-advance-delay-ms",
+            "1500",
+            accelerated_retries=False,
+        )
+        processes.append(preparation_shutdown_host)
+        preparation_shutdown_trace = HostDiagnostics(preparation_shutdown_host)
+        preparation_shutdown_trace.wait("preparation_advance_completed")
+        shutdown_trigger = subprocess.run(
+            [
+                str(RUI),
+                "inspect-session",
+                "--store",
+                str(preparation_shutdown_store),
+                "--session",
+                "direct/preparation-shutdown",
+            ],
+            capture_output=True,
+            timeout=10,
+        )
+        # The already-spawned client may finish while the listener owner is
+        # beginning shutdown; its reply does not determine Host lifecycle.
+        assert shutdown_trigger.returncode in (0, 1), shutdown_trigger
+        assert preparation_shutdown_host.wait(timeout=10) != 0
+        processes.remove(preparation_shutdown_host)
+        preparation_shutdown_trace.close()
+        preparation_shutdown_host.stdout.close()
+        preparation_shutdown_host.stderr.close()
+        assert preparation_shutdown_endpoint.requests == []
+        assert not list((preparation_shutdown_store / "scratch").glob("request-*.tmp"))
+        preparation_shutdown_host = start_host(
+            preparation_shutdown_store,
+            f"http://127.0.0.1:{preparation_shutdown_endpoint.server_port}/responses",
+            accelerated_retries=False,
+        )
+        processes.append(preparation_shutdown_host)
+        recovered_shutdown = wait_for(
+            lambda: completed_observation(
+                preparation_shutdown_store, "preparation-shutdown-message"
+            ),
+            "preparation shutdown recovery",
+        )
+        assert recovered_shutdown["processing"]["attempt"] == "2", recovered_shutdown
+        assert len(preparation_shutdown_endpoint.requests) == 1
+        assert read_result(
+            preparation_shutdown_store, "preparation-shutdown-message"
+        ) == b"prepared after shutdown"
+        stop_host(preparation_shutdown_host)
+        processes.remove(preparation_shutdown_host)
+        preparation_shutdown_endpoint.shutdown()
+        preparation_shutdown_endpoint.server_close()
+        preparation_shutdown_thread.join(timeout=5)
+
         # A canonical save fault rolls back the claimed failure, fences the
         # live dispatch owner, and leaves the admitted Attempt uncertain for
         # the following retry/restart slice rather than recreating its permit.

@@ -127,6 +127,9 @@ fn serve(io: std.Io, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--test-request-preparation-item-allowance")) {
             faults.request_preparation_item_allowance = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
             if (faults.request_preparation_item_allowance == 0) return error.InvalidRequestPreparationAllowance;
+        } else if (std.mem.eql(u8, arg, "--test-request-preparation-advance-delay-ms")) {
+            faults.request_preparation_advance_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
+            if (faults.request_preparation_advance_delay_ms < 0) return error.InvalidRequestPreparationDelay;
         } else return error.UnknownArgument;
         index += 1;
     }

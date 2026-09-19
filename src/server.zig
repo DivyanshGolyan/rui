@@ -45,6 +45,7 @@ pub const Faults = struct {
     request_scratch_limit_bytes: u64 = scratch_limit_bytes,
     request_preparation_byte_allowance: usize = provider.preparation_byte_allowance,
     request_preparation_item_allowance: usize = provider.preparation_item_allowance,
+    request_preparation_advance_delay_ms: i64 = 0,
     request_read: bool = false,
     request_unlink: bool = false,
     provider_prepare: bool = false,
@@ -553,6 +554,14 @@ fn executionMain(host: *Host) void {
             _ = host.io.sleep(.fromMilliseconds(if (hasBash(slots)) 25 else 100), .awake) catch {};
         }
     }
+    const stopped_at = std.Io.Clock.Timestamp.now(host.io, .awake);
+    if (lifecycle.last_service_at) |last| {
+        lifecycle.maximum_gap_ns = @max(
+            lifecycle.maximum_gap_ns,
+            @as(u64, @intCast(last.durationTo(stopped_at).raw.nanoseconds)),
+        );
+    }
+    traceLifecycleService(host, lifecycle.maximum_gap_ns);
 }
 
 fn serviceLifecycle(
@@ -1234,6 +1243,9 @@ fn advanceModelPreparation(
     switch (progress) {
         .pending => {
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
+            if (host.faults.request_preparation_advance_delay_ms != 0) {
+                _ = host.io.sleep(.fromMilliseconds(host.faults.request_preparation_advance_delay_ms), .awake) catch {};
+            }
         },
         .failed => |err| {
             tracePreparationAdvanceError(host, "preparation_advance_failed", err, stats, owner.binding);
