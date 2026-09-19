@@ -108,6 +108,21 @@ pub const PreparationAdvanceStats = struct {
     request_bytes: u64,
 };
 
+// This is an encoding operation, not another payload owner. The caller's
+// borrowed window remains valid until the synchronous write returns.
+fn writePlainJsonRun(writer: anytype, bytes: []const u8, bytes_left: *usize) !usize {
+    const limit = @min(bytes.len, bytes_left.* / 2);
+    var count: usize = 0;
+    while (count < limit) : (count += 1) {
+        const byte = bytes[count];
+        if (byte < 0x20 or byte == '"' or byte == '\\') break;
+    }
+    if (count == 0) return 0;
+    try writer.write(bytes[0..count]);
+    bytes_left.* -= count * 2;
+    return count;
+}
+
 pub const Preparation = struct {
     view: store.HistoricalView,
     settings: ?store.HistoricalSettings = null,
@@ -121,9 +136,6 @@ pub const Preparation = struct {
     input_comma: bool = false,
     current_entry: ?store.HistoricalEntry = null,
     current_tool_result: ?store.HistoricalToolResult = null,
-    // Baseline opening happens before its prefix can yield. The reader stays
-    // in final workspace storage rather than a stack frame.
-    emission_baseline_reader: ?store.HistoricalReader = null,
     active: bool = true,
     last_advance: PreparationAdvanceStats = .{ .work_bytes = 0, .work_items = 0, .request_bytes = 0 },
 
@@ -268,13 +280,9 @@ pub const Preparation = struct {
                 .model_prefix => self.emitFixed("{\"model\":\"", .model),
                 .model => self.emitJsonBytes(self.settings.?.model.slice(), .envelope),
                 .envelope => self.emitFixed("\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[", .baseline),
-                .baseline => {
-                    const reader = self.view.openContent(self.settings.?.baseline_instructions) catch |err| return .{ .failed = err };
-                    self.emitFixed("{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"", .baseline_content);
-                    self.emission_baseline_reader = reader;
-                },
+                .baseline => self.emitFixed("{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"", .baseline_content),
                 .baseline_content => {
-                    const reader = self.takeStagedReader();
+                    const reader = self.view.openContent(self.settings.?.baseline_instructions) catch |err| return .{ .failed = err };
                     self.emitJsonReader(reader, .baseline_suffix);
                 },
                 .baseline_suffix => {
@@ -383,12 +391,6 @@ pub const Preparation = struct {
         return self.last_advance;
     }
 
-    fn takeStagedReader(self: *Preparation) store.HistoricalReader {
-        const reader = self.emission_baseline_reader.?;
-        self.emission_baseline_reader = null;
-        return reader;
-    }
-
     fn emitFixed(self: *Preparation, bytes: []const u8, next: Phase) void {
         self.emission = .{ .fixed = .{ .bytes = bytes } };
         self.next_phase = next;
@@ -475,9 +477,9 @@ pub const Preparation = struct {
             }
             const length: u64 = if (json.bytes) |bytes| bytes.len else json.reader.?.reference.length;
             if (json.offset == length) return true;
-            const byte = if (json.bytes) |bytes|
-                bytes[@intCast(json.offset)]
-            else byte: {
+            const available = if (json.bytes) |bytes|
+                bytes[@intCast(json.offset)..]
+            else available: {
                 if (json.offset < json.buffer_start or json.offset >= json.buffer_start + json.buffer_length) {
                     json.buffer_start = json.offset;
                     const wanted: usize = @intCast(@min(length - json.offset, @min(json.buffer.len, bytes_left.*)));
@@ -485,8 +487,16 @@ pub const Preparation = struct {
                     if (count != wanted) return error.ShortCanonicalRead;
                     json.buffer_length = count;
                 }
-                break :byte json.buffer[@intCast(json.offset - json.buffer_start)];
+                break :available json.buffer[@intCast(json.offset - json.buffer_start)..json.buffer_length];
             };
+            // A source scan and its emitted bytes each consume allowance.
+            // Ordinary text stays a borrowed run, not one OS write per byte.
+            const run = try writePlainJsonRun(&self.writer, available, bytes_left);
+            if (run != 0) {
+                json.offset += run;
+                continue;
+            }
+            const byte = available[0];
             json.offset += 1;
             bytes_left.* -= 1;
             const encoded = switch (byte) {
@@ -505,6 +515,8 @@ pub const Preparation = struct {
                     continue;
                 },
                 else => {
+                    // A one-byte allowance can consume a source byte now
+                    // and emit it on the next advance, without overshoot.
                     json.encoded[0] = byte;
                     json.encoded_length = 1;
                     json.encoded_offset = 0;
@@ -541,8 +553,6 @@ pub const Preparation = struct {
     pub fn cancel(self: *Preparation) void {
         std.debug.assert(self.active);
         self.closeEmission();
-        if (self.emission_baseline_reader) |*reader| reader.close();
-        self.emission_baseline_reader = null;
         self.view.close();
         self.readonly.close(self.writer.io);
         self.writer.deinit();
@@ -649,6 +659,15 @@ pub const Reactor = struct {
                 return error.TransportReactorFailed;
             }
             if (c.curl_multi_perform(self.multi, &running) != c.CURLM_OK) return error.TransportReactorFailed;
+        }
+    }
+
+    // Separate waiting from curl callbacks so service timing never subtracts
+    // callback/capture work as though it were an idle wait.
+    pub fn wait(self: *Reactor, timeout_ms: c_int) !void {
+        var descriptors: c_int = 0;
+        if (c.curl_multi_poll(self.multi, null, 0, timeout_ms, &descriptors) != c.CURLM_OK) {
+            return error.TransportReactorFailed;
         }
     }
 
@@ -1283,4 +1302,36 @@ test "curl disposition retries only temporary connection and explicit inactivity
         TransportDisposition.tls_verification_failure,
         curlFailureDisposition(c.CURLE_PEER_FAILED_VERIFICATION, false),
     );
+}
+
+test "plain JSON runs batch writes and conserve scan plus output allowance" {
+    const Sink = struct {
+        calls: usize = 0,
+        bytes: usize = 0,
+        pub fn write(self: *@This(), value: []const u8) !void {
+            self.calls += 1;
+            self.bytes += value.len;
+        }
+    };
+    const text = "x" ** (256 * 1024);
+    var sink: Sink = .{};
+    var position: usize = 0;
+    while (position != text.len) {
+        var allowance: usize = preparation_byte_allowance;
+        const count = try writePlainJsonRun(&sink, text[position..], &allowance);
+        try std.testing.expect(count != 0);
+        try std.testing.expectEqual(preparation_byte_allowance, allowance + 2 * count);
+        position += count;
+    }
+    try std.testing.expectEqual(text.len, sink.bytes);
+    try std.testing.expectEqual(@as(usize, 32), sink.calls);
+    var one: usize = 1;
+    try std.testing.expectEqual(@as(usize, 0), try writePlainJsonRun(&sink, "x", &one));
+    try std.testing.expectEqual(@as(usize, 1), one);
+    try std.testing.expectEqual(@as(usize, 32), sink.calls);
+    var escaped: usize = 20;
+    try std.testing.expectEqual(@as(usize, 3), try writePlainJsonRun(&sink, "abc\"def", &escaped));
+    try std.testing.expectEqual(@as(usize, 14), escaped);
+    try std.testing.expectEqual(@as(usize, 0), try writePlainJsonRun(&sink, "\n", &escaped));
+    try std.testing.expectEqual(@as(usize, 0), try writePlainJsonRun(&sink, "\\", &escaped));
 }

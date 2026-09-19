@@ -121,6 +121,9 @@ fn serve(io: std.Io, args: []const []const u8) !void {
             if (faults.sqlite_cache_kib == 0 or faults.sqlite_cache_kib > 4096) return error.InvalidSqliteCacheSize;
         } else if (std.mem.eql(u8, arg, "--test-request-scratch-limit")) {
             faults.request_scratch_limit_bytes = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
+        } else if (std.mem.eql(u8, arg, "--test-execution-service-boundaries")) {
+            faults.test_phase_trace = true;
+            faults.test_execution_service_boundaries = true;
         } else if (std.mem.eql(u8, arg, "--test-request-preparation-byte-allowance")) {
             faults.request_preparation_byte_allowance = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
             if (faults.request_preparation_byte_allowance == 0) return error.InvalidRequestPreparationAllowance;

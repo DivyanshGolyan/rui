@@ -1,4 +1,7 @@
 const std = @import("std");
+const trace_native = @cImport({
+    @cInclude("unistd.h");
+});
 const bash = @import("bash.zig");
 const execution = @import("execution.zig");
 const named_scratch = @import("named_scratch.zig");
@@ -81,6 +84,7 @@ pub const Faults = struct {
     report_unlink: bool = false,
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
+    test_execution_service_boundaries: bool = false,
     test_transition: ?TestTransition = null,
     test_transition_gate_path: ?[]const u8 = null,
     model_cleanup_gate_path: ?[]const u8 = null,
@@ -121,7 +125,11 @@ const Host = struct {
     classification_clients: std.atomic.Value(usize) = .init(0),
     ordinary_clients: std.atomic.Value(usize) = .init(0),
     scratch_used: std.atomic.Value(u64) = .init(0),
+    launch_mutex: std.Io.Mutex = .init,
     trace_mutex: std.Io.Mutex = .init,
+    trace_run_ns: u64 = 0,
+    trace_sequence: u64 = 0,
+    trace_lost: bool = false,
     drain_mutex: std.Io.Mutex = .init,
     drain_condition: std.Io.Condition = .init,
 
@@ -202,6 +210,7 @@ pub fn serve(
         .bash_path = bash_path,
         .bash_timeout_ms = bash_timeout_ms,
         .retention = undefined,
+        .trace_run_ns = @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds),
         .custody = execution.CustodyPool.initialize(custody_records),
     };
     var retention = output_retention.Queue.initializeWithRemoval(
@@ -233,7 +242,9 @@ pub fn serve(
             std.debug.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
         socket_owned = false;
+        host.launch_mutex.lockUncancelable(host.io);
         host.execution_shutdown.store(true, .release);
+        host.launch_mutex.unlock(host.io);
         execution_thread.join();
         if (provider_endpoint != null) provider.deinitialize();
         host.drain();
@@ -388,6 +399,7 @@ const LifecycleService = struct {
     last_service_at: ?std.Io.Clock.Timestamp = null,
     next_trace_at: ?std.Io.Clock.Timestamp = null,
     maximum_gap_ns: u64 = 0,
+    wait_since_service_ns: u64 = 0,
 };
 
 const control_reconciliation_interval_ms = 100;
@@ -523,7 +535,7 @@ fn executionMain(host: *Host) void {
         ) or made_progress;
         capacity_was_full = countFreeSlots(slots) == 0;
         if (hasTransport(slots)) {
-            reactor.?.drive(if (made_progress) 0 else 25) catch |err| {
+            reactor.?.drive(0) catch |err| {
                 fenceDispatch(host, "transport reactor", err);
                 break;
             };
@@ -550,12 +562,28 @@ fn executionMain(host: *Host) void {
             &model_preparation,
             &model_preparation_active,
         ) or made_progress;
-        if (!made_progress and !hasTransport(slots)) {
-            _ = host.io.sleep(.fromMilliseconds(if (hasBash(slots)) 25 else 100), .awake) catch {};
+        if (!made_progress) {
+            const wait_started = std.Io.Clock.Timestamp.now(host.io, .awake);
+            if (hasTransport(slots)) {
+                reactor.?.wait(25) catch |err| {
+                    fenceDispatch(host, "transport wait", err);
+                    break;
+                };
+            } else {
+                _ = host.io.sleep(.fromMilliseconds(if (hasBash(slots)) 25 else 100), .awake) catch {};
+            }
+            const wait_finished = std.Io.Clock.Timestamp.now(host.io, .awake);
+            lifecycle.wait_since_service_ns += @intCast(wait_started.durationTo(wait_finished).raw.nanoseconds);
         }
     }
     const stopped_at = std.Io.Clock.Timestamp.now(host.io, .awake);
     if (lifecycle.last_service_at) |last| {
+        traceServiceBoundary(
+            host,
+            @intCast(last.raw.nanoseconds),
+            @intCast(stopped_at.raw.nanoseconds),
+            lifecycle.wait_since_service_ns,
+        );
         lifecycle.maximum_gap_ns = @max(
             lifecycle.maximum_gap_ns,
             @as(u64, @intCast(last.durationTo(stopped_at).raw.nanoseconds)),
@@ -576,12 +604,14 @@ fn serviceLifecycle(
 ) bool {
     const now = std.Io.Clock.Timestamp.now(host.io, .awake);
     if (service.last_service_at) |last| {
+        traceServiceBoundary(host, @intCast(last.raw.nanoseconds), @intCast(now.raw.nanoseconds), service.wait_since_service_ns);
         service.maximum_gap_ns = @max(
             service.maximum_gap_ns,
             @as(u64, @intCast(last.durationTo(now).raw.nanoseconds)),
         );
     }
     service.last_service_at = now;
+    service.wait_since_service_ns = 0;
     const trace_due = if (service.next_trace_at) |deadline| deadline.compare(.lte, now) else true;
     if (trace_due) {
         traceLifecycleService(host, service.maximum_gap_ns);
@@ -623,7 +653,6 @@ fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []Execu
         fenceDispatch(host, "transport completion", err);
         return false;
     } orelse return false;
-    traceCompletionQueue(host, completion.queued_after);
     completeTransfer(host, slots, completion);
     return true;
 }
@@ -1221,6 +1250,14 @@ fn beginAdmittedAttempt(
     return .admitted;
 }
 
+// Canonical permission and process-local permission to launch are independent.
+// Recheck this at preparation disposal and inside the Store-guarded handoff.
+fn modelLaunchAllowed(host: *const Host) bool {
+    return !host.dispatch_fenced.load(.acquire) and
+        !host.execution_shutdown.load(.acquire) and
+        !host.effect_shutdown.load(.acquire);
+}
+
 fn advanceModelPreparation(
     host: *Host,
     reactor: ?*provider.Reactor,
@@ -1234,6 +1271,14 @@ fn advanceModelPreparation(
         else => {},
     } else unreachable;
     const owner = slot.model_preparing;
+    if (!modelLaunchAllowed(host)) {
+        preparation.cancel();
+        preparation_active.* = false;
+        // Infrastructure fencing does not invent a user stop or a Resolution.
+        finishCustodyNow(host, owner.token);
+        slot.* = .free;
+        return true;
+    }
     traceOperation(host, "preparation_advance_started", owner.binding);
     const progress = preparation.advance(
         host.faults.request_preparation_byte_allowance,
@@ -1288,6 +1333,12 @@ fn launchPreparedRequest(
 ) void {
     const token = owner.token;
     const binding = owner.binding;
+    if (!modelLaunchAllowed(host)) {
+        request.deinit();
+        finishCustodyNow(host, token);
+        slot.* = .free;
+        return;
+    }
     const request_budget = host.retention.sharedBudget().narrowed(
         if (host.faults.request_scratch_acquire) 0 else host.faults.request_scratch_limit_bytes,
     );
@@ -1350,14 +1401,22 @@ fn launchPreparedRequest(
     };
     host.store.withDispatchHandoff(
         binding,
-        .{ .reactor = reactor, .transfer = &active.transfer },
+        .{ .host = host, .reactor = reactor, .transfer = &active.transfer },
         struct {
             fn handoff(context: anytype) !void {
+                context.host.launch_mutex.lockUncancelable(context.host.io);
+                defer context.host.launch_mutex.unlock(context.host.io);
+                if (!modelLaunchAllowed(context.host)) return error.HostDispatchSuppressed;
                 try context.reactor.add(context.transfer);
             }
         }.handoff,
     ) catch |err| {
         active.transfer.deinit();
+        if (err == error.HostDispatchSuppressed) {
+            finishCustodyNow(host, token);
+            slot.* = .free;
+            return;
+        }
         if (err == error.SupersededByControl) {
             traceOperation(host, "canonical_handoff_superseded", binding);
             finishCustodyNow(host, token);
@@ -1389,6 +1448,8 @@ fn completeTransfer(
     };
     const active = &slot.provider;
     const owner = active.owner;
+    traceCompletionQueue(host, completion.queued_after, owner.binding);
+    defer traceOperation(host, "provider_completion_serviced", owner.binding);
     const evidence = switch (completion.outcome) {
         .response_capture_failed => |failure| {
             const code = switch (failure) {
@@ -1775,8 +1836,11 @@ fn finishCustodyNow(host: *Host, token: execution.CustodyToken) void {
 }
 
 fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
-    if (host.effect_shutdown.swap(true, .acq_rel)) return;
+    host.launch_mutex.lockUncancelable(host.io);
+    const already_shutting_down = host.effect_shutdown.swap(true, .acq_rel);
     host.dispatch_fenced.store(true, .release);
+    host.launch_mutex.unlock(host.io);
+    if (already_shutting_down) return;
     std.debug.print("rui: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
     // Waking accept transfers shutdown to serve's owner. That owner stops new
     // connections, joins the execution thread (which detaches any active
@@ -1793,7 +1857,9 @@ fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
 }
 
 fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {
+    host.launch_mutex.lockUncancelable(host.io);
     host.dispatch_fenced.store(true, .release);
+    host.launch_mutex.unlock(host.io);
     std.debug.print("rui: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
 }
 
@@ -1803,10 +1869,29 @@ fn nowNs(host: *Host) u64 {
 
 fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer) void {
     if (!host.faults.test_phase_trace) return;
-    trace.append("\n") catch return;
     host.trace_mutex.lockUncancelable(host.io);
     defer host.trace_mutex.unlock(host.io);
-    std.Io.File.stderr().writeStreamingAll(host.io, trace.slice()) catch return;
+    host.trace_sequence += 1;
+    const original = trace.slice();
+    if (original.len == 0 or original[original.len - 1] != '}') {
+        host.trace_lost = true;
+        return;
+    }
+    var complete: protocol.ResponseBuffer = .{};
+    complete.append(original[0 .. original.len - 1]) catch {
+        host.trace_lost = true;
+        return;
+    };
+    complete.appendFmt(
+        ",\"process\":\"{d}\",\"run\":\"{d}\",\"clock\":\"awake_ns\",\"sequence\":\"{d}\",\"trace_lost\":{s}}}\n",
+        .{ trace_native.getpid(), host.trace_run_ns, host.trace_sequence, if (host.trace_lost) "true" else "false" },
+    ) catch {
+        host.trace_lost = true;
+        return;
+    };
+    std.Io.File.stderr().writeStreamingAll(host.io, complete.slice()) catch {
+        host.trace_lost = true;
+    };
 }
 
 fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
@@ -1819,6 +1904,16 @@ fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subjec
     trace.append(",\"subject\":") catch return;
     trace.appendJsonString(subject) catch return;
     trace.append("}") catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceServiceBoundary(host: *Host, start_ns: u64, end_ns: u64, wait_ns: u64) void {
+    if (!host.faults.test_execution_service_boundaries) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.appendFmt(
+        "{{\"rui_test_phase\":\"lifecycle_boundary\",\"at_ns\":\"{d}\",\"start_ns\":\"{d}\",\"wait_ns\":\"{d}\"}}",
+        .{ end_ns, start_ns, wait_ns },
+    ) catch return;
     writeTestTrace(host, &trace);
 }
 
@@ -1883,12 +1978,12 @@ fn tracePreparationAdvanceError(
     writeTestTrace(host, &trace);
 }
 
-fn traceCompletionQueue(host: *Host, queued_after: usize) void {
+fn traceCompletionQueue(host: *Host, queued_after: usize, binding: store_module.AttemptBinding) void {
     if (!host.faults.test_phase_trace) return;
     var trace: protocol.ResponseBuffer = .{};
     trace.appendFmt(
-        "{{\"rui_test_phase\":\"provider_completion_removed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\"}}",
-        .{ nowNs(host), queued_after },
+        "{{\"rui_test_phase\":\"provider_completion_removed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
+        .{ nowNs(host), queued_after, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
     ) catch return;
     writeTestTrace(host, &trace);
 }
@@ -3489,4 +3584,97 @@ test "shutdown drain retains stack-owned Host until active clients finish" {
     host.drain();
     try std.testing.expect(completed.load(.acquire));
     thread.join();
+}
+
+test "Host fences dispose admitted preparation without touching canonical state" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    inline for (.{ "dispatch_fenced", "execution_shutdown", "effect_shutdown" }) |flag| {
+        var records: [1]execution.CustodyRecord = undefined;
+        var host = Host{
+            .io = std.testing.io,
+            .allocator = std.testing.allocator,
+            .lease = undefined,
+            .store = undefined, // The suppression path must not query or settle.
+            .faults = .{},
+            .custody = execution.CustodyPool.initialize(&records),
+        };
+        const token = host.custody.reserve().?;
+        var permit = store_module.DispatchPermit{ .binding = .{
+            .turn_id = 1,
+            .operation_id = 1,
+            .attempt_ordinal = 1,
+        } };
+        const binding = try host.custody.attach(token, &permit);
+        var preparation: provider.Preparation = undefined;
+        var retained: ?named_scratch.Owner = null;
+        try preparation.init(
+            std.testing.io,
+            .{ .store = undefined, .binding = binding },
+            root,
+            .{ .used = &host.scratch_used, .limit = 1024 },
+            .{},
+            &retained,
+        );
+        // Real file aliases and a real reservation are owned before fencing.
+        try preparation.writer.write("partial request");
+        var active = true;
+        var slots = [_]ExecutionSlot{.{ .model_preparing = .{
+            .token = token,
+            .binding = binding,
+        } }};
+        @field(host, flag).store(true, .release);
+        try std.testing.expect(advanceModelPreparation(&host, null, &slots, &preparation, &active));
+        try std.testing.expect(!active and !preparation.active and !preparation.view.active);
+        try std.testing.expect(slots[0] == .free);
+        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    }
+}
+
+test "Host fences dispose a sealed request before native transfer construction" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    inline for (.{ "dispatch_fenced", "execution_shutdown", "effect_shutdown" }) |flag| {
+        var records: [1]execution.CustodyRecord = undefined;
+        var host = Host{
+            .io = std.testing.io,
+            .allocator = std.testing.allocator,
+            .lease = undefined,
+            .store = undefined,
+            .faults = .{},
+            .custody = execution.CustodyPool.initialize(&records),
+        };
+        const token = host.custody.reserve().?;
+        var permit = store_module.DispatchPermit{ .binding = .{
+            .turn_id = 1,
+            .operation_id = 1,
+            .attempt_ordinal = 1,
+        } };
+        const binding = try host.custody.attach(token, &permit);
+        const writer = try tmp.dir.createFile(std.testing.io, "sealed", .{});
+        try writer.writeStreamingAll(std.testing.io, "{}");
+        writer.close(std.testing.io);
+        const reader = try tmp.dir.openFile(std.testing.io, "sealed", .{});
+        try tmp.dir.deleteFile(std.testing.io, "sealed");
+        host.scratch_used.store(2, .release);
+        var request = provider.PreparedRequest{
+            .io = std.testing.io,
+            .file = reader,
+            .length = 2,
+            .charged = 2,
+            .budget = .{ .used = &host.scratch_used, .limit = 2 },
+            .structured_output = false,
+        };
+        const owner = ModelPreparingSlot{ .token = token, .binding = binding };
+        var slot = ExecutionSlot{ .model_preparing = owner };
+        var reactor: provider.Reactor = undefined; // Must never be accessed.
+        @field(host, flag).store(true, .release);
+        launchPreparedRequest(&host, &reactor, &slot, owner, &request);
+        try std.testing.expect(slot == .free);
+        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    }
 }

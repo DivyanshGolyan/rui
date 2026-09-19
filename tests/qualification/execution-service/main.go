@@ -1,643 +1,682 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
-	"sync"
+	"strings"
 	"time"
 
 	"rui.local/qualification/measurement"
 )
 
-type traceEvent struct {
-	Phase        string `json:"rui_test_phase"`
-	At           string `json:"at_ns"`
-	Operation    string `json:"operation"`
-	Action       string `json:"action"`
-	ControlKey   string `json:"control_key"`
-	Subject      string `json:"subject"`
-	Deadline     string `json:"deadline_ns"`
-	StoreQueued  string `json:"store_queued_at_ns"`
-	QueueWait    string `json:"queue_wait_ns"`
-	QueuedAfter  string `json:"queued_after"`
-	WorkBytes    string `json:"work_bytes"`
-	WorkItems    string `json:"work_items"`
-	RequestBytes string `json:"request_bytes"`
-	MaximumGap   string `json:"maximum_gap_ns"`
-	at           uint64
-	deadline     uint64
-	accepted     uint64
-	queuedAfter  uint64
-	workBytes    uint64
-	workItems    uint64
-	requestBytes uint64
-	maximumGap   uint64
-}
-
-type interval struct {
-	Kind       string `json:"kind"`
-	Subject    string `json:"subject"`
-	StartNS    uint64 `json:"start_ns"`
-	EndNS      uint64 `json:"end_ns"`
-	DurationNS uint64 `json:"duration_ns"`
-}
-
-type metrics struct {
-	Status                    string     `json:"status"`
-	MaxLifecycleServiceGapNS  *uint64    `json:"max_lifecycle_service_gap_ns"`
-	LargestUninterruptedNS    *uint64    `json:"largest_uninterrupted_work_interval_ns"`
-	StopToEffectNS            []uint64   `json:"stop_to_effect_ns"`
-	DeadlineToServiceNS       []uint64   `json:"deadline_to_service_ns"`
-	Preparation               []interval `json:"preparation_intervals"`
-	Validation                []interval `json:"validation_intervals"`
-	Settlement                []interval `json:"settlement_intervals"`
-	MaxNativeCompletionsAfter uint64     `json:"max_native_completions_queued_after_removal"`
-	PreparationAdvanceCount   uint64     `json:"preparation_advance_count"`
-	PreparationWorkBytes      uint64     `json:"preparation_work_bytes_total"`
-	PreparationWorkItems      uint64     `json:"preparation_work_items_total"`
-	MaxPreparationWorkBytes   uint64     `json:"max_preparation_work_bytes_per_advance"`
-	MaxPreparationWorkItems   uint64     `json:"max_preparation_work_items_per_advance"`
-	FinalRequestBytes         uint64     `json:"final_request_bytes"`
-	Invalid                   []string   `json:"invalid_metrics,omitempty"`
-}
-
-const preparationByteAllowance = 16 * 1024
-const preparationItemAllowance = 64
-
-func uintField(value, name string) (uint64, error) {
-	if value == "" {
-		return 0, fmt.Errorf("missing %s", name)
-	}
-	n, err := strconv.ParseUint(value, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s: %w", name, err)
-	}
-	return n, nil
-}
-
-func parseTraces(data []byte) ([]traceEvent, error) {
-	var result []traceEvent
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if !bytes.HasPrefix(line, []byte(`{"rui_test_phase"`)) {
-			continue
-		}
-		var event traceEvent
-		if err := json.Unmarshal(line, &event); err != nil {
-			return nil, fmt.Errorf("malformed trace: %w", err)
-		}
-		if event.At != "" {
-			value, err := uintField(event.At, "at_ns")
-			if err != nil {
-				return nil, err
-			}
-			event.at = value
-		}
-		if event.Deadline != "" {
-			value, err := uintField(event.Deadline, "deadline_ns")
-			if err != nil {
-				return nil, err
-			}
-			event.deadline = value
-		}
-		if event.QueuedAfter != "" {
-			value, err := uintField(event.QueuedAfter, "queued_after")
-			if err != nil {
-				return nil, err
-			}
-			event.queuedAfter = value
-		}
-		if event.Phase == "preparation_advance_completed" || event.Phase == "preparation_advance_failed" {
-			var err error
-			if event.workBytes, err = uintField(event.WorkBytes, "work_bytes"); err != nil {
-				return nil, err
-			}
-			if event.workItems, err = uintField(event.WorkItems, "work_items"); err != nil {
-				return nil, err
-			}
-			if event.requestBytes, err = uintField(event.RequestBytes, "request_bytes"); err != nil {
-				return nil, err
-			}
-		}
-		if event.Phase == "lifecycle_service_observation" {
-			value, err := uintField(event.MaximumGap, "maximum_gap_ns")
-			if err != nil {
-				return nil, err
-			}
-			event.maximumGap = value
-		}
-		if event.Phase == "control_timing" {
-			queued, err := uintField(event.StoreQueued, "store_queued_at_ns")
-			if err != nil {
-				return nil, err
-			}
-			wait, err := uintField(event.QueueWait, "queue_wait_ns")
-			if err != nil || wait > queued {
-				return nil, errors.New("invalid control acceptance timestamp")
-			}
-			event.accepted = queued - wait
-		}
-		result = append(result, event)
-	}
-	return result, scanner.Err()
-}
-
-func subject(e traceEvent) string {
-	if e.Action != "" {
-		return "action:" + e.Action
-	}
-	return "operation:" + e.Operation
-}
-
-func deriveMetrics(events []traceEvent, requireDeadline bool) metrics {
-	m := metrics{Status: "passed", StopToEffectNS: []uint64{}, DeadlineToServiceNS: []uint64{}, Preparation: []interval{}, Validation: []interval{}, Settlement: []interval{}}
-	type start struct {
-		at    uint64
-		phase string
-	}
-	starts := map[string]start{}
-	accepted := map[string]uint64{}
-	var serviceObserved bool
-	var maximumServiceGap uint64
-	requestBytes := map[string]uint64{}
-	var maxWork uint64
-	for _, e := range events {
-		if e.Phase == "control_durable_acceptance" && e.Subject != "" && e.at != 0 {
-			accepted[e.Subject] = e.at
-		}
-		if e.at == 0 {
-			continue
-		}
-		switch e.Phase {
-		case "lifecycle_service_observation":
-			serviceObserved = true
-			maximumServiceGap = max(maximumServiceGap, e.maximumGap)
-		case "provider_completion_removed":
-			if e.queuedAfter > m.MaxNativeCompletionsAfter {
-				m.MaxNativeCompletionsAfter = e.queuedAfter
-			}
-		case "effect_stop_requested":
-			at, ok := accepted[e.ControlKey]
-			if !ok || e.at < at {
-				m.Invalid = append(m.Invalid, "stop_to_effect:"+e.ControlKey)
-			} else {
-				m.StopToEffectNS = append(m.StopToEffectNS, e.at-at)
-			}
-		case "bash_deadline_serviced":
-			if e.deadline == 0 || e.at < e.deadline {
-				m.Invalid = append(m.Invalid, "deadline_to_service:"+subject(e))
-			} else {
-				m.DeadlineToServiceNS = append(m.DeadlineToServiceNS, e.at-e.deadline)
-			}
-		case "preparation_advance_started", "validation_started", "settlement_lock_requested":
-			key := subject(e) + ":" + e.Phase
-			if _, exists := starts[key]; exists {
-				m.Invalid = append(m.Invalid, "duplicate_start:"+key)
-			} else {
-				starts[key] = start{e.at, e.Phase}
-			}
-		case "preparation_advance_completed", "preparation_advance_failed", "validation_completed", "validation_failed", "settlement_complete", "model_settlement_superseded":
-			begin := map[string]string{"preparation_advance_completed": "preparation_advance_started", "preparation_advance_failed": "preparation_advance_started", "validation_completed": "validation_started", "validation_failed": "validation_started", "settlement_complete": "settlement_lock_requested", "model_settlement_superseded": "settlement_lock_requested"}[e.Phase]
-			key := subject(e) + ":" + begin
-			s, ok := starts[key]
-			if !ok || e.at < s.at {
-				m.Invalid = append(m.Invalid, "incomplete_interval:"+key)
-				continue
-			}
-			delete(starts, key)
-			row := interval{begin, subject(e), s.at, e.at, e.at - s.at}
-			if row.DurationNS > maxWork {
-				maxWork = row.DurationNS
-			}
-			switch begin {
-			case "preparation_advance_started":
-				m.Preparation = append(m.Preparation, row)
-				m.PreparationAdvanceCount++
-				m.PreparationWorkBytes += e.workBytes
-				m.PreparationWorkItems += e.workItems
-				m.MaxPreparationWorkBytes = max(m.MaxPreparationWorkBytes, e.workBytes)
-				m.MaxPreparationWorkItems = max(m.MaxPreparationWorkItems, e.workItems)
-				m.FinalRequestBytes = max(m.FinalRequestBytes, e.requestBytes)
-				if e.workBytes > preparationByteAllowance || e.workItems > preparationItemAllowance {
-					m.Invalid = append(m.Invalid, "preparation_allowance_exceeded:"+subject(e))
-				}
-				if previous, exists := requestBytes[subject(e)]; exists && e.requestBytes < previous {
-					m.Invalid = append(m.Invalid, "request_bytes_regressed:"+subject(e))
-				}
-				requestBytes[subject(e)] = e.requestBytes
-			case "validation_started":
-				m.Validation = append(m.Validation, row)
-			default:
-				m.Settlement = append(m.Settlement, row)
-			}
-		}
-	}
-	for key := range starts {
-		m.Invalid = append(m.Invalid, "missing_end:"+key)
-	}
-	if serviceObserved {
-		m.MaxLifecycleServiceGapNS = &maximumServiceGap
-	} else {
-		m.Invalid = append(m.Invalid, "max_lifecycle_service_gap")
-	}
-	if len(m.Preparation)+len(m.Validation)+len(m.Settlement) > 0 {
-		m.LargestUninterruptedNS = &maxWork
-	} else {
-		m.Invalid = append(m.Invalid, "largest_uninterrupted_work_interval")
-	}
-	if len(m.Preparation) == 0 || m.PreparationWorkBytes == 0 || m.PreparationWorkItems == 0 || m.FinalRequestBytes == 0 {
-		m.Invalid = append(m.Invalid, "preparation_work_evidence")
-	}
-	if len(m.StopToEffectNS) == 0 {
-		m.Invalid = append(m.Invalid, "stop_to_effect")
-	}
-	if requireDeadline && len(m.DeadlineToServiceNS) == 0 {
-		m.Invalid = append(m.Invalid, "deadline_to_service")
-	}
-	if len(m.Invalid) > 0 {
-		m.Status = "invalid"
-	}
-	sort.Strings(m.Invalid)
-	return m
-}
-
-func finalOperationEvents(events []traceEvent, count int) []traceEvent {
-	identities := map[uint64]struct{}{}
-	for _, event := range events {
-		if event.Operation == "" {
-			continue
-		}
-		identity, err := strconv.ParseUint(event.Operation, 10, 64)
-		if err == nil {
-			identities[identity] = struct{}{}
-		}
-	}
-	ordered := make([]uint64, 0, len(identities))
-	for identity := range identities {
-		ordered = append(ordered, identity)
-	}
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i] > ordered[j] })
-	if len(ordered) > count {
-		ordered = ordered[:count]
-	}
-	selected := map[string]struct{}{}
-	for _, identity := range ordered {
-		selected[strconv.FormatUint(identity, 10)] = struct{}{}
-	}
-	result := make([]traceEvent, 0, len(events))
-	for _, event := range events {
-		_, operationSelected := selected[event.Operation]
-		if operationSelected || event.Operation == "" {
-			result = append(result, event)
-		}
-	}
-	return result
-}
-
-type endpoint struct {
-	listener            net.Listener
-	server              *http.Server
-	mu                  sync.Mutex
-	hold                bool
-	waiting             int
-	release             chan struct{}
-	retained, discarded int
-	bashNext            bool
-}
-
-func newEndpoint() (*endpoint, error) {
-	l, e := net.Listen("tcp4", "127.0.0.1:0")
-	if e != nil {
-		return nil, e
-	}
-	x := &endpoint{listener: l, release: make(chan struct{})}
-	x.server = &http.Server{Handler: http.HandlerFunc(x.serve)}
-	go x.server.Serve(l)
-	return x, nil
-}
-func (e *endpoint) URL() string { return "http://" + e.listener.Addr().String() + "/responses" }
-func (e *endpoint) serve(w http.ResponseWriter, r *http.Request) {
-	_, _ = io.Copy(io.Discard, r.Body)
-	e.mu.Lock()
-	hold := e.hold
-	bash := e.bashNext
-	e.bashNext = false
-	if hold {
-		e.waiting++
-	}
-	retained, discarded := e.retained, e.discarded
-	release := e.release
-	e.mu.Unlock()
-	if hold {
-		<-release
-	}
-	payload := encodeSSE(retained, discarded)
-	if bash {
-		payload = encodeBashSSE()
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
-	_, _ = w.Write(payload)
-}
-func (e *endpoint) setFields(retained, discarded int) {
-	e.mu.Lock()
-	e.retained, e.discarded = retained, discarded
-	e.mu.Unlock()
-}
-func (e *endpoint) arm() {
-	e.mu.Lock()
-	e.hold = true
-	e.waiting = 0
-	e.release = make(chan struct{})
-	e.mu.Unlock()
-}
-func (e *endpoint) armBash() { e.mu.Lock(); e.bashNext = true; e.mu.Unlock() }
-func (e *endpoint) wait(n int, d measurement.Deadline) error {
-	return measurement.WaitFor(d, time.Millisecond, "ready completion burst", func() (bool, error) { e.mu.Lock(); defer e.mu.Unlock(); return e.waiting == n, nil })
-}
-func (e *endpoint) fire() {
-	e.mu.Lock()
-	if e.hold {
-		close(e.release)
-		e.hold = false
-	}
-	e.mu.Unlock()
-}
-func encodeSSE(retained, discarded int) []byte {
-	item := map[string]any{"type": "reasoning", "id": "reasoning", "summary": []any{}, "encrypted_content": string(bytes.Repeat([]byte{'r'}, retained)), "created_by": string(bytes.Repeat([]byte{'d'}, discarded))}
-	message := map[string]any{"type": "message", "id": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "ok", "annotations": []any{}}}}
-	events := []any{map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "reasoning"}}, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item}, map[string]any{"type": "response.output_item.added", "output_index": 1, "item": map[string]any{"type": "message", "id": "message"}}, map[string]any{"type": "response.output_item.done", "output_index": 1, "item": message}, map[string]any{"type": "response.completed", "response": map[string]any{"id": "response", "status": "completed", "model": "model-a", "output": []any{item, message}}}}
-	var out bytes.Buffer
-	for _, v := range events {
-		b, _ := json.Marshal(v)
-		fmt.Fprintf(&out, "data: %s\n\n", b)
-	}
-	out.WriteString("data: [DONE]\n\n")
-	return out.Bytes()
-}
-
-func encodeBashSSE() []byte {
-	item := map[string]any{"type": "function_call", "id": "bash-item", "status": "completed", "name": "bash", "call_id": "bash-call", "arguments": `{"cmd":"sleep 1","timeout_ms":null}`}
-	events := []any{
-		map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "function_call", "id": "bash-item"}},
-		map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item},
-		map[string]any{"type": "response.completed", "response": map[string]any{"id": "bash-response", "status": "completed", "model": "model-a", "output": []any{item}}},
-	}
-	var out bytes.Buffer
-	for _, value := range events {
-		encoded, _ := json.Marshal(value)
-		fmt.Fprintf(&out, "data: %s\n\n", encoded)
-	}
-	out.WriteString("data: [DONE]\n\n")
-	return out.Bytes()
-}
-
-func waitForTrace(path, phase string, deadline measurement.Deadline) error {
-	needle := []byte(`"rui_test_phase":"` + phase + `"`)
-	return measurement.WaitFor(deadline, time.Millisecond, phase, func() (bool, error) {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return false, err
-		}
-		return bytes.Contains(data, needle), nil
-	})
-}
-
 type scenario struct {
 	Name           string `json:"name"`
-	Burst          int    `json:"ready_completion_burst"`
-	HistoryBytes   int    `json:"selected_history_bytes"`
-	HistoryItems   int    `json:"selected_history_items"`
-	RetainedBytes  int    `json:"retained_replay_field_bytes"`
-	DiscardedBytes int    `json:"discarded_replay_field_bytes"`
-	ActiveOwners   int    `json:"active_owner_population"`
-	Bash           bool   `json:"bash_owner"`
+	Mode           string `json:"mode"`
+	Capacity       int    `json:"active_capacity"`
+	Burst          int    `json:"completion_burst"`
+	HistoryBytes   int    `json:"history_bytes"`
+	HistoryTurns   int    `json:"history_turns"`
+	RetainedBytes  int    `json:"retained_field_bytes"`
+	DiscardedBytes int    `json:"discarded_field_bytes"`
+	ResponseBytes  int    `json:"response_retained_field_bytes"`
 }
 
-func runScenario(binary, root string, s scenario) (result map[string]any, err error) {
-	d := measurement.NewDeadline(90 * time.Second)
-	dir := filepath.Join(root, s.Name)
-	if err = os.MkdirAll(dir, 0700); err != nil {
+type invalidEvidence struct{ reason string }
+
+func (e invalidEvidence) Error() string { return e.reason }
+func invalid(err error) error           { return invalidEvidence{err.Error()} }
+
+func readEvents(path string, live bool) ([]traceEvent, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if stat.Size() > maxTraceBytes {
+		return nil, errors.New("trace collection capacity exceeded")
+	}
+	// Read a bounded snapshot, including a concurrently appended tail only up
+	// to the observed size. Live polling can ignore one incomplete final line;
+	// final evidence cannot accept a truncated record.
+	data := make([]byte, stat.Size())
+	n, err := f.ReadAt(data, 0)
+	if err != nil && n != len(data) {
+		return nil, err
+	}
+	if live {
+		if i := bytes.LastIndexByte(data, '\n'); i >= 0 {
+			data = data[:i+1]
+		} else {
+			return nil, nil
+		}
+	}
+	return parseTraces(data)
+}
+func waitEvent(path string, d measurement.Deadline, predicate func(traceEvent) bool) (traceEvent, error) {
+	var found traceEvent
+	err := measurement.WaitFor(d, time.Millisecond, "owner-visible event", func() (bool, error) {
+		events, e := readEvents(path, true)
+		if e != nil {
+			return false, e
+		}
+		for _, event := range events {
+			if predicate(event) {
+				found = event
+				return true, nil
+			}
+		}
+		return false, nil
+	})
+	return found, err
+}
+func observeID(client measurement.Client, key string, tracePath string) (executionID, error) {
+	var id executionID
+	err := measurement.WaitFor(client.Deadline, time.Millisecond, "processing binding", func() (bool, error) {
+		v, e := client.Observe(key)
+		if e != nil {
+			return false, e
+		}
+		op, ok := measurement.StringField(v, "processing", "operation")
+		if !ok {
+			return false, nil
+		}
+		attempt, ok := measurement.StringField(v, "processing", "attempt")
+		if !ok {
+			return false, nil
+		}
+		turn, ok := measurement.StringField(v, "processing", "turn")
+		if !ok {
+			return false, nil
+		}
+		events, e := readEvents(tracePath, true)
+		if e != nil {
+			return false, e
+		}
+		for _, event := range events {
+			if event.Operation == op && event.Attempt == attempt && event.Turn == turn && event.Action == "" {
+				id = event.executionID
+				return id.valid(), nil
+			}
+		}
+		return false, nil
+	})
+	return id, err
+}
+func expectAnswer(c measurement.Client, key, answer string) error {
+	v, e := c.WaitResult(key)
+	if e != nil {
+		return e
+	}
+	state, ok := measurement.StringField(v, "result", "status")
+	if !ok || state != "completed" {
+		return fmt.Errorf("%s did not complete: %v", key, v)
+	}
+	actual, e := measurement.Run(c.Deadline, c.Binary, "read-result", "--store", c.Store, "--key", key)
+	if e != nil {
+		return e
+	}
+	if !bytes.Equal(actual, []byte(answer)) {
+		return fmt.Errorf("wrong answer bytes for %s", key)
+	}
+	return nil
+}
+func expectCancelled(c measurement.Client, key string) error {
+	v, e := c.WaitResult(key)
+	if e != nil {
+		return e
+	}
+	state, ok := measurement.StringField(v, "result", "status")
+	if !ok || state != "cancelled" {
+		return fmt.Errorf("%s did not retain its cancelled outcome: %v", key, v)
+	}
+	return nil
+}
+func waitCount(ep *endpoint, text string, n int, d measurement.Deadline) error {
+	return measurement.WaitFor(d, time.Millisecond, "complete request receipt", func() (bool, error) {
+		count := ep.count(text)
+		if count > n {
+			return false, errors.New("duplicate provider request")
+		}
+		return count == n, nil
+	})
+}
+func waitPrimed(ep *endpoint, text string, d measurement.Deadline) error {
+	return measurement.WaitFor(d, time.Millisecond, "response prefix delivery", func() (bool, error) {
+		return ep.isPrimed(text), nil
+	})
+}
+func expectOccupied(c measurement.Client, session string, n int) error {
+	v, e := c.Inspect(session)
+	if e != nil {
+		return e
+	}
+	occupied, ok := measurement.IntStringField(v, "execution", "custody_occupied")
+	if !ok || occupied != uint64(n) {
+		return invalidEvidence{fmt.Sprintf("required occupied population %d was not observed: %v", n, v)}
+	}
+	return nil
+}
+func awaitDrain(c measurement.Client, session string) error {
+	return measurement.WaitFor(c.Deadline, time.Millisecond, "custody and scratch release", func() (bool, error) {
+		v, e := c.Inspect(session)
+		if e != nil {
+			return false, e
+		}
+		occupied, a := measurement.IntStringField(v, "execution", "custody_occupied")
+		scratch, b := measurement.IntStringField(v, "execution", "scratch_used_bytes")
+		if !a || !b {
+			return false, errors.New("missing resource observation")
+		}
+		return occupied == 0 && scratch == 0, nil
+	})
+}
+func scopeService(m *metrics, p overlapProof) {
+	selected := []serviceInterval{}
+	var gap, work uint64
+	for _, span := range m.Service {
+		if span.EndNS > p.WorkStartNS && span.StartNS < p.WorkEndNS {
+			selected = append(selected, span)
+			gap = max(gap, span.EndNS-span.StartNS)
+			work = max(work, span.WorkNS)
+		}
+	}
+	m.Service = selected
+	if len(selected) == 0 {
+		m.Status = "invalid"
+		m.Invalid = append(m.Invalid, "no_service_interval_intersecting_workload")
 		return
 	}
-	ep, e := newEndpoint()
-	if e != nil {
-		return nil, e
+	m.MaxLifecycleServiceGapNS = &gap
+	m.LargestUninterruptedNS = &work
+}
+
+func runScenario(binary, root string, s scenario) (row map[string]any, err error) {
+	d := measurement.NewDeadline(180 * time.Second)
+	dir := filepath.Join(root, s.Name)
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		return nil, err
 	}
-	defer ep.server.Close()
-	ep.setFields(s.RetainedBytes, s.DiscardedBytes)
+	ep, err := newEndpoint()
+	if err != nil {
+		return nil, err
+	}
+	defer ep.close()
 	store := filepath.Join(dir, "store")
-	stderr := filepath.Join(dir, "host-stderr.log")
-	host, e := measurement.StartHost(binary, store, ep.URL(), s.ActiveOwners, stderr, d, "--test-phase-trace", "--bash-timeout-ms", "50")
-	if e != nil {
-		return nil, e
+	tracePath := filepath.Join(dir, "host-stderr.log")
+	bashTimeout := "30000"
+	if s.Mode == "completion" {
+		// The fixed blocker below finishes before this deadline, leaving the
+		// deadline to become due while the measured completion burst drains.
+		bashTimeout = "400"
 	}
-	hostStopped := false
+	host, err := measurement.StartHost(binary, store, ep.URL(), s.Capacity, tracePath, d, "--test-execution-service-boundaries", "--bash-timeout-ms", bashTimeout)
+	if err != nil {
+		return nil, err
+	}
+	stopped := false
 	defer func() {
-		if !hostStopped {
+		if !stopped {
 			err = errors.Join(err, host.Stop(measurement.TeardownAllowance))
 		}
 	}()
-	client := measurement.Client{Binary: binary, Artifacts: dir, Store: store, Deadline: d}
-	for i := 0; i < s.ActiveOwners; i++ {
-		session := fmt.Sprintf("execution/%d", i)
-		if e = client.Configure(fmt.Sprintf("config-%d", i), session, "--tools", "none"); e != nil {
-			return nil, e
+	c := measurement.Client{Binary: binary, Artifacts: dir, Store: store, Deadline: d}
+	row = map[string]any{"parameters": s, "trace_path": tracePath, "status": "failed"}
+
+	// Every target is configured with no tools. The independent fixture owns
+	// both the complete expected request bytes and the expected saved answer.
+	targetInputs := [][]byte{}
+	if err = c.Configure("target-config", "execution/target", "--tools", "none"); err != nil {
+		return row, err
+	}
+	for i := 0; i < s.HistoryTurns; i++ {
+		text := fmt.Sprintf("history-%d:", i) + strings.Repeat("h", s.HistoryBytes/max(1, s.HistoryTurns))
+		targetInputs = append(targetInputs, userItem(text))
+		retained, discarded := 64, 64
+		if i == s.HistoryTurns-1 {
+			retained, discarded = s.RetainedBytes, s.DiscardedBytes
 		}
-		text := string(bytes.Repeat([]byte{'h'}, max(1, s.HistoryBytes/max(1, s.HistoryItems))))
-		for j := 0; j < s.HistoryItems; j++ {
-			key := fmt.Sprintf("history-%d-%d", i, j)
-			if e = client.Message(key, session, text); e != nil {
-				return nil, e
+		response, replay := answerSSE(fmt.Sprintf("history-%d", i), "history-ok", retained, discarded)
+		ep.add(text, &requestPlan{Expected: wireRequest(targetInputs), Response: response})
+		key := fmt.Sprintf("history-%d", i)
+		if err = c.Message(key, "execution/target", text); err != nil {
+			return row, err
+		}
+		if err = expectAnswer(c, key, "history-ok"); err != nil {
+			return row, err
+		}
+		targetInputs = append(targetInputs, replay...)
+	}
+	if err = awaitDrain(c, "execution/target"); err != nil {
+		return row, err
+	}
+
+	// A separate held stream is the stop target. Workload completion never
+	// depends on killing or reusing the measured preparation's identity.
+	stopText := "stop-target"
+	response, _ := answerSSE(stopText, "must-not-be-read", 64, 64)
+	ep.add(stopText, &requestPlan{Expected: wireRequest([][]byte{userItem(stopText)}), Response: response, Group: "stop"})
+	if err = c.Submit("stop-target", "execution/stop", stopText); err != nil {
+		return row, err
+	}
+	if err = waitCount(ep, stopText, 1, d); err != nil {
+		return row, err
+	}
+	stopID, err := observeID(c, "stop-target", tracePath)
+	if err != nil {
+		return row, err
+	}
+
+	workCount := 1
+	if s.Mode == "completion" {
+		workCount = s.Burst
+	}
+	fixedOwners := 2 // Separate stop and real Bash credits.
+	if s.Mode == "completion" {
+		fixedOwners++ // Atomic-validation blocker used to establish readiness.
+	}
+	fillers := s.Capacity - workCount - fixedOwners
+	if fillers < 0 {
+		return row, errors.New("scenario exceeds active capacity")
+	}
+	for i := 0; i < fillers; i++ {
+		text := fmt.Sprintf("filler-%d", i)
+		payload, _ := answerSSE(text, "filler-ok", 64, 64)
+		ep.add(text, &requestPlan{Expected: wireRequest([][]byte{userItem(text)}), Response: payload, Group: "fillers"})
+		if err = c.Submit(text, "execution/"+text, text); err != nil {
+			return row, err
+		}
+		if err = waitCount(ep, text, 1, d); err != nil {
+			return row, err
+		}
+	}
+
+	workIDs := []executionID{}
+	workKeys := []string{}
+	submitWork := func(i int) error {
+		key := fmt.Sprintf("work-%d", i)
+		session := "execution/target"
+		input := targetInputs
+		if i != 0 {
+			session = "execution/" + key
+			input = nil
+			if e := c.Configure(key, session, "--tools", "none"); e != nil {
+				return e
 			}
-			if _, e = client.WaitResult(key); e != nil {
-				return nil, e
+		}
+		input = append(append([][]byte{}, input...), userItem(key))
+		payload, _ := answerSSE(key, "answer-"+key, s.ResponseBytes, 64)
+		ep.add(key, &requestPlan{Expected: wireRequest(input), Response: payload, Group: "work"})
+		if e := c.Message(key, session, key); e != nil {
+			return e
+		}
+		workKeys = append(workKeys, key)
+		return nil
+	}
+	// Completion requests are held before starting Bash's deadline. No stop
+	// is issued until native completion-queue evidence has actually appeared.
+	if s.Mode == "completion" {
+		for i := 0; i < workCount; i++ {
+			if err = submitWork(i); err != nil {
+				return row, err
+			}
+			if err = waitCount(ep, workKeys[i], 1, d); err != nil {
+				return row, err
+			}
+			id, e := observeID(c, workKeys[i], tracePath)
+			if e != nil {
+				return row, e
+			}
+			workIDs = append(workIDs, id)
+		}
+		for _, key := range workKeys {
+			if err = waitPrimed(ep, key, d); err != nil {
+				return row, err
 			}
 		}
 	}
-	if s.Bash {
-		ep.armBash()
-		if e = client.Configure("bash-config", "execution/bash", "--tools", "bash"); e != nil {
-			return nil, e
-		}
-		if e = client.Message("bash-message", "execution/bash", "run"); e != nil {
-			return nil, e
-		}
-		action, actionErr := client.WaitAction("execution/bash")
-		if actionErr != nil {
-			return nil, actionErr
-		}
-		if e = client.AllowAction("bash-allow", "execution/bash", action); e != nil {
-			return nil, e
-		}
-		if e = waitForTrace(stderr, "bash_handoff_committed", d); e != nil {
-			return nil, e
-		}
+	var blockerID executionID
+
+	ep.add("bash-owner", &requestPlan{Response: bashSSE()})
+	if s.Mode == "completion" {
+		payload, _ := answerSSE("bash-final", "bash-final-ok", 64, 64)
+		ep.add("bash-owner", &requestPlan{Response: payload, BashContinuation: true})
 	}
-	ep.arm()
-	burst := min(s.Burst, s.ActiveOwners)
-	if s.Bash {
-		burst = min(burst, s.ActiveOwners-1)
+	if err = c.Configure("bash-config", "execution/bash", "--tools", "bash"); err != nil {
+		return row, err
 	}
-	for i := 0; i < burst; i++ {
-		if e = client.Message(fmt.Sprintf("burst-%d", i), fmt.Sprintf("execution/%d", i), "burst"); e != nil {
-			return nil, e
-		}
+	if err = c.Message("bash-message", "execution/bash", "bash-owner"); err != nil {
+		return row, err
 	}
-	if s.Bash {
-		if e = waitForTrace(stderr, "bash_deadline_serviced", d); e != nil {
-			return nil, e
-		}
-	}
-	if e = ep.wait(burst, d); e != nil {
-		return nil, e
-	}
-	if burst != 0 {
-		if e = client.StopSession("stop-burst", "execution/0"); e != nil {
-			return nil, e
-		}
-		if e = waitForTrace(stderr, "effect_stop_requested", d); e != nil {
-			return nil, e
-		}
-	}
-	ep.fire()
-	for i := 0; i < burst; i++ {
-		if _, e = client.WaitResult(fmt.Sprintf("burst-%d", i)); e != nil {
-			return nil, e
-		}
-	}
-	e = host.Stop(measurement.TeardownAllowance)
-	hostStopped = true
+	action, e := c.WaitAction("execution/bash")
 	if e != nil {
-		return nil, e
+		return row, e
 	}
-	data, e := os.ReadFile(stderr)
+	if err = c.AllowAction("bash-allow", "execution/bash", action); err != nil {
+		return row, err
+	}
+	bashStart, e := waitEvent(tracePath, d, func(e traceEvent) bool { return e.Phase == "bash_handoff_committed" && e.Action == action })
 	if e != nil {
-		return nil, e
+		return row, invalid(e)
 	}
-	events, e := parseTraces(data)
+	if s.Mode == "completion" {
+		blockerText := "completion-readiness-blocker"
+		payload, _ := answerSSE(blockerText, "blocker-ok", 2*1024*1024, 64)
+		ep.add(blockerText, &requestPlan{Response: payload, Group: "blocker"})
+		if err = c.Submit("completion-blocker", "execution/blocker", blockerText); err != nil {
+			return row, err
+		}
+		if err = waitCount(ep, blockerText, 1, d); err != nil {
+			return row, err
+		}
+		blockerID, err = observeID(c, "completion-blocker", tracePath)
+		if err != nil {
+			return row, invalid(err)
+		}
+		ep.fire("blocker")
+		if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
+			return e.executionID == blockerID && e.Phase == "validation_started"
+		}); err != nil {
+			return row, invalid(err)
+		}
+	}
+
+	var target executionID
+	if s.Mode == "preparation" {
+		if err = expectOccupied(c, "execution/stop", s.Capacity-1); err != nil {
+			return row, err
+		}
+		if err = submitWork(0); err != nil {
+			return row, err
+		}
+		target, err = observeID(c, workKeys[0], tracePath)
+		if err != nil {
+			return row, invalid(err)
+		}
+		workIDs = append(workIDs, target)
+		_, err = waitEvent(tracePath, d, func(e traceEvent) bool { return e.executionID == target && e.Phase == "preparation_advance_completed" })
+		if err != nil {
+			return row, invalid(err)
+		}
+		// No fixture sleep or owner freeze: subsequent advances keep running.
+		// If the external control arrives too late, proveOverlap rejects it.
+	} else {
+		if err = expectOccupied(c, "execution/stop", s.Capacity); err != nil {
+			return row, err
+		}
+		ep.fire("work")
+		selected := map[executionID]bool{}
+		for _, id := range workIDs {
+			selected[id] = true
+		}
+		_, err = waitEvent(tracePath, measurement.NewDeadline(10*time.Second), func(e traceEvent) bool {
+			return selected[e.executionID] && e.Phase == "provider_completion_removed" && e.QueuedAfter > 0
+		})
+		if err != nil {
+			return row, invalid(err)
+		}
+	}
+	if err = c.StopSession("stop-during-work", "execution/stop"); err != nil {
+		return row, err
+	}
+	if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
+		return e.Phase == "effect_stop_requested" && e.ControlKey == "stop-during-work" && e.executionID == stopID
+	}); err != nil {
+		return row, invalid(err)
+	}
+	ep.fire("work")
+	for _, key := range workKeys {
+		if err = expectAnswer(c, key, "answer-"+key); err != nil {
+			return row, err
+		}
+	}
+	if s.Mode == "completion" {
+		if err = expectAnswer(c, "completion-blocker", "blocker-ok"); err != nil {
+			return row, err
+		}
+	}
+	if err = expectCancelled(c, "stop-target"); err != nil {
+		return row, err
+	}
+
+	if s.Mode == "completion" {
+		if err = expectAnswer(c, "bash-message", "bash-final-ok"); err != nil {
+			return row, err
+		}
+	} else {
+		if err = c.StopSession("stop-bash-after-work", "execution/bash"); err != nil {
+			return row, err
+		}
+		if err = expectCancelled(c, "bash-message"); err != nil {
+			return row, err
+		}
+	}
+	ep.fire("fillers")
+	ep.fire("stop")
+	for i := 0; i < fillers; i++ {
+		if err = expectAnswer(c, fmt.Sprintf("filler-%d", i), "filler-ok"); err != nil {
+			return row, err
+		}
+	}
+	if err = awaitDrain(c, "execution/target"); err != nil {
+		return row, err
+	}
+	if err = awaitDrain(c, "execution/bash"); err != nil {
+		return row, err
+	}
+	// Require a service boundary after the last measured preparation or
+	// completion, rather than accepting a stream truncated before that gap.
+	events, e := readEvents(tracePath, true)
 	if e != nil {
-		return nil, e
+		return row, invalid(e)
 	}
-	if !s.Bash {
-		events = finalOperationEvents(events, burst)
+	lastWork := uint64(0)
+	lastEvidence := uint64(0)
+	for _, event := range events {
+		for _, id := range workIDs {
+			if event.executionID == id && (event.Phase == "provider_completion_serviced" || event.Phase == "preparation_completed") {
+				lastWork = max(lastWork, event.At)
+			}
+		}
+		if event.executionID == stopID && event.Phase == "effect_stop_requested" && event.ControlKey == "stop-during-work" {
+			lastEvidence = max(lastEvidence, event.At)
+		}
+		if event.Action == action && (event.Phase == "cleanup_completed" || event.Phase == "bash_deadline_serviced") {
+			lastEvidence = max(lastEvidence, event.At)
+		}
+		// awaitDrain's successful inspection is an owner-visible snapshot that
+		// all execution custody and scratch have reached zero. Commit only after
+		// that snapshot so an automatically admitted Bash continuation cannot
+		// be split across the committed trace prefix.
+		if event.Phase == "inspection_captured" && (event.Subject == "execution/target" || event.Subject == "execution/bash") {
+			lastEvidence = max(lastEvidence, event.At)
+		}
 	}
-	digest := sha256.Sum256(data)
-	m := deriveMetrics(events, s.Bash)
-	slotBytes, slotErr := strconv.Atoi(host.Ready["execution_slot_bytes"])
-	preparationBytes, preparationErr := strconv.Atoi(host.Ready["model_preparation_bytes"])
-	if slotErr != nil || preparationErr != nil {
-		return nil, errors.Join(slotErr, preparationErr)
+	if lastWork == 0 || lastEvidence == 0 {
+		return row, invalid(errors.New("measured work or Bash/control completion evidence is missing"))
 	}
-	const precedingSlotBytes = 1264
-	bashEvidence := map[string]any{"status": "not_present", "reason": "this factorial case isolates another input dimension"}
-	if s.Bash {
-		bashEvidence = map[string]any{"status": "present", "path": "production provider Tool Call, public inspection and permission, native Bash owner, timeout action, and retained cleanup"}
+	lastEvidence = max(lastEvidence, lastWork)
+	traceCommit, commitErr := waitEvent(tracePath, d, func(e traceEvent) bool {
+		return e.Phase == "lifecycle_boundary" && e.At > lastEvidence
+	})
+	if commitErr != nil {
+		return row, invalid(commitErr)
 	}
-	return map[string]any{
-		"parameters": s, "status": m.Status, "metrics": m, "trace_events": len(events),
-		"trace_sha256": hex.EncodeToString(digest[:]),
-		"structural_memory": map[string]any{
-			"execution_slot_bytes": slotBytes, "preceding_execution_slot_bytes": precedingSlotBytes,
-			"slot_change_times_capacity_bytes":   (slotBytes - precedingSlotBytes) * s.ActiveOwners,
-			"shared_preparation_workspace_bytes": preparationBytes,
-			"total_structural_change_bytes":      (slotBytes-precedingSlotBytes)*s.ActiveOwners + preparationBytes,
-		},
-		"unrelated_bash_owner": bashEvidence,
-	}, nil
+	if traceCommit.Sequence == 0 || traceCommit.TraceLost {
+		return row, invalid(errors.New("invalid trace commitment"))
+	}
+	row["trace_commit_sequence"] = traceCommit.Sequence
+	if traceCommit.At <= lastEvidence {
+		return row, invalid(errors.New("trace commitment does not cover measured work"))
+	}
+	if err = ep.audit(); err != nil {
+		return row, err
+	}
+	err = host.Stop(measurement.TeardownAllowance)
+	stopped = true
+	if err != nil {
+		return row, err
+	}
+	events, err = readEvents(tracePath, false)
+	if err != nil {
+		return row, invalid(err)
+	}
+	committed := events[:0]
+	commitFound := false
+	for _, event := range events {
+		if event.Sequence <= traceCommit.Sequence {
+			committed = append(committed, event)
+			commitFound = commitFound || event.Sequence == traceCommit.Sequence
+		}
+	}
+	if !commitFound {
+		return row, invalid(errors.New("trace commitment is absent from final collection"))
+	}
+	events = committed
+	m := deriveMetrics(events, s.Mode == "completion")
+	proof, e := proveOverlap(events, s.Mode, "stop-during-work", target, workIDs, s.Mode == "completion")
+	if e != nil {
+		m.Status = "invalid"
+		m.Invalid = append(m.Invalid, e.Error())
+	} else {
+		scopeService(&m, proof)
+	}
+	// The real Bash owner must predate pressure and its cleanup must follow
+	// it. This is distinct from merely configuring a Bash-capable Session.
+	bashCleanup := uint64(0)
+	for _, event := range events {
+		if event.Action == action && event.Phase == "cleanup_completed" {
+			bashCleanup = event.At
+		}
+	}
+	if bashStart.At > proof.WorkStartNS || bashCleanup == 0 || (s.Mode == "preparation" && bashCleanup < proof.WorkEndNS) {
+		m.Status = "invalid"
+		m.Invalid = append(m.Invalid, "Bash owner did not span the measured pressure")
+	}
+	data, e := os.ReadFile(tracePath)
+	if e != nil {
+		return row, invalid(e)
+	}
+	sum := sha256.Sum256(data)
+	slotBytes, e1 := strconv.Atoi(host.Ready["execution_slot_bytes"])
+	prepBytes, e2 := strconv.Atoi(host.Ready["model_preparation_bytes"])
+	if e1 != nil || e2 != nil {
+		return row, invalid(errors.Join(e1, e2))
+	}
+	row["status"] = m.Status
+	row["metrics"] = m
+	row["overlap"] = proof
+	row["trace_sha256"] = hex.EncodeToString(sum[:])
+	row["trace_events"] = len(events)
+	row["workload_bindings"] = workIDs
+	row["stop_binding"] = stopID
+	row["bash_action"] = action
+	row["resources"] = map[string]any{"custody_and_scratch_drained": true, "execution_slot_bytes": slotBytes, "shared_preparation_bytes": prepBytes, "whole_process_memory": "not measured by this runner"}
+	row["service_interval_scope"] = "complete lifecycle intervals intersecting the proved workload window; crossing intervals conservatively include their whole busy duration"
+	return row, nil
 }
 
 func main() {
-	output := flag.String("output", "execution-service-results.json", "result JSON")
-	selectedCase := flag.String("case", "", "run one named case")
+	output := flag.String("output", "execution-service-results.json", "evidence output")
+	selected := flag.String("case", "", "one named case; unavailable overlap is not retried")
 	flag.Parse()
 	if flag.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: execution-service [flags] RUI_BINARY")
 		os.Exit(2)
 	}
-	binary, _ := filepath.Abs(flag.Arg(0))
+	binary, err := filepath.Abs(flag.Arg(0))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	root, err := os.MkdirTemp("", "rui-execution-service-")
 	if err != nil {
-		panic(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
+	const mib = 1024 * 1024
 	scenarios := []scenario{
-		{"baseline", 1, 1024, 1, 64, 64, 1, false},
-		{"completion-burst", 8, 1024, 1, 64, 64, 8, false},
-		{"history-bytes", 1, 256 * 1024, 1, 64, 64, 1, false},
-		{"history-items", 1, 64 * 1024, 16, 64, 64, 1, false},
-		{"retained-field", 1, 1024, 1, 256 * 1024, 64, 1, false},
-		{"discarded-field", 1, 1024, 1, 64, 256 * 1024, 1, false},
-		{"active-owners", 1, 1024, 1, 64, 64, 8, false},
-		{"mixed-bash", 8, 8 * 1024, 1, 64, 64, 8, true},
+		{"history-4m", "preparation", 10, 1, 4 * mib, 1, 64, 64, 64},
+		{"history-32m", "preparation", 10, 1, 32 * mib, 1, 64, 64, 64},
+		{"history-items", "preparation", 10, 1, 4 * mib, 64, 64, 64, 64},
+		{"retained-4m", "preparation", 10, 1, 1024, 1, 4 * mib, 64, 64},
+		{"retained-32m", "preparation", 10, 1, 1024, 1, 32 * mib, 64, 64},
+		{"discarded-4m", "preparation", 10, 1, 1024, 1, 64, 4 * mib, 64},
+		{"discarded-32m", "preparation", 10, 1, 1024, 1, 64, 32 * mib, 64},
+		{"completion-2", "completion", 11, 2, 1024, 1, 64, 64, 512 * 1024},
+		{"completion-8", "completion", 11, 8, 1024, 1, 64, 64, 512 * 1024},
+		{"active-4", "preparation", 4, 1, 4 * mib, 1, 64, 64, 64},
 	}
 	rows := []map[string]any{}
 	status := "passed"
 	for _, s := range scenarios {
-		if *selectedCase != "" && s.Name != *selectedCase {
+		if *selected != "" && *selected != s.Name {
 			continue
 		}
 		row, e := runScenario(binary, root, s)
+		if row == nil {
+			row = map[string]any{"parameters": s}
+		}
 		if e != nil {
-			row = map[string]any{"parameters": s, "status": "failed", "error": e.Error()}
-			status = "failed"
+			var bad invalidEvidence
+			if errors.As(e, &bad) {
+				row["status"] = "invalid"
+			} else {
+				row["status"] = "failed"
+			}
+			row["error"] = e.Error()
+		}
+		if row["status"] != "passed" {
+			if row["status"] == "failed" {
+				status = "failed"
+			} else if status == "passed" {
+				status = "invalid"
+			}
 		}
 		rows = append(rows, row)
 	}
 	if len(rows) == 0 {
-		fmt.Fprintf(os.Stderr, "unknown case %q\n", *selectedCase)
+		fmt.Fprintln(os.Stderr, "unknown case:", *selected)
 		os.Exit(2)
 	}
 	provenance, pErr := measurement.EnvironmentEvidence(measurement.NewDeadline(20*time.Second), binary, *output)
-	if pErr != nil {
-		status = "failed"
-	}
-	for _, row := range rows {
-		if row["status"] != "passed" && status == "passed" {
-			status = "invalid"
-		}
-	}
-	rootPath, rootErr := measurement.RepositoryRoot()
 	sourceHashes := map[string]string{}
-	for _, name := range []string{
-		"ARCHITECTURE.md", "VERIFICATION.md", "build.zig",
-		"src/bash.zig", "src/cli.zig", "src/provider.zig", "src/provider_output.zig", "src/server.zig", "src/store.zig",
-		"tests/integration/dispatch_integration.py", "tests/qualification/execution-service/main.go", "tests/qualification/execution-service/main_test.go",
-	} {
-		hash, hashErr := measurement.SHA256File(filepath.Join(rootPath, name))
-		if hashErr != nil {
-			rootErr = errors.Join(rootErr, hashErr)
-			continue
+	sourceRoot, sourceErr := measurement.RepositoryRoot()
+	if sourceErr == nil {
+		for _, name := range []string{
+			"src/server.zig", "src/provider.zig", "src/cli.zig",
+			"tests/qualification/execution-service/main.go", "tests/qualification/execution-service/metrics.go",
+			"tests/qualification/execution-service/fixture.go", "tests/qualification/execution-service/main_test.go",
+		} {
+			hash, hashErr := measurement.SHA256File(filepath.Join(sourceRoot, name))
+			if hashErr != nil {
+				sourceErr = errors.Join(sourceErr, hashErr)
+			} else {
+				sourceHashes[name] = hash
+			}
 		}
-		sourceHashes[name] = hash
 	}
-	if rootErr != nil {
-		status = "failed"
+	pErr = errors.Join(pErr, sourceErr)
+	if pErr != nil && status == "passed" {
+		status = "invalid"
 	}
-	provenanceError := any(nil)
-	if joined := errors.Join(pErr, rootErr); joined != nil {
-		provenanceError = joined.Error()
+	report := map[string]any{"format": "rui-execution-service-v2-go", "status": status, "artifacts": root, "cases": rows, "provenance": provenance, "source_sha256": sourceHashes, "limits": []string{"no automatic reruns or timing allowances conceal absent overlap", "source/native validation and platform/resource qualification still require their owning gates", "loopback is not live-provider, TLS, power-loss, or whole-product qualification", "structural sizes are not whole-process footprint"}}
+	if pErr != nil {
+		report["provenance_error"] = pErr.Error()
 	}
-	report := map[string]any{"format": "rui-execution-service-v1-go", "scope": "issues #238/#244/#245 production execution-service qualification", "status": status, "artifacts": root, "cases": rows, "provenance": provenance, "provenance_error": provenanceError, "source_sha256": sourceHashes, "structural_memory": map[string]any{"shared_preparation_owners": 1, "per_active_slot_preparation_window_bytes": 0, "payload_storage": "charged disk-backed scratch; selected history and replay bytes do not create a second resident payload queue", "calculation": "(execution slot size - preceding 1264-byte Linux x86-64 slot) * configured capacity + one readiness-reported shared Preparation workspace"}, "limits": []string{"deterministic loopback HTTP does not qualify a live provider", "unavailable metrics are invalid, never zero or passing", "monotonic Host traces are authority; client scheduling and polling are not", "only the mixed-bash case includes a Bash owner and deadline; factorial cases isolate their named input dimension"}}
-	if e := measurement.WriteJSON(*output, report); e != nil {
-		fmt.Fprintln(os.Stderr, e)
+	if err = measurement.WriteJSON(*output, report); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if status == "failed" {
-		os.Exit(1)
-	}
+	os.Exit(exitCode(status))
 }
