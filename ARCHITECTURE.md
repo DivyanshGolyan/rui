@@ -414,7 +414,7 @@ After Attempt admission, one shared preparation workspace incrementally decodes 
 
 #### Facts tracked independently
 
-Terminal child status, signaling authority, original-group absence, each pipe's terminal reason and semantic Resolution are independent facts. A successful signal, reaped leader or pipe EOF proves none of the others. The anchored original process group is the cancellation scope; descendants that establish another process group or session are outside it. Expiry begins retirement, but `timed_out` is saved only after trustworthy retirement and capture. Custody loss before settlement recovers as indeterminate rather than timeout.
+Terminal child status, signaling authority, original-group absence, each pipe's terminal reason and semantic Resolution are independent facts. A successful signal, reaped leader or pipe EOF proves none of the others. A signaling attempt may fail independently; once read-only observation establishes original-group absence and the remaining release conditions hold, that failure does not retain custody or fence admission. The anchored original process group is the cancellation scope; descendants that establish another process group or session are outside it. Expiry begins retirement, but `timed_out` is saved only after trustworthy retirement and capture. Custody loss before settlement recovers as indeterminate rather than timeout.
 
 #### Retiring the original process group
 
@@ -426,11 +426,11 @@ After group absence, snapshot each open pipe's queued bytes once, drain exactly 
 
 #### Releasing custody
 
-Release execution custody only after the child is reaped, signaling is retired, group absence and honest pipe closure are established, delivery references are gone and scratch is released or transferred. A committed Resolution remains independently usable while local cleanup continues.
+Release execution custody only after the child is reaped, signaling is retired, group absence and each pipe's honest terminal outcome—EOF or recorded finite-tail incomplete capture—are established, delivery references are gone and scratch is released or transferred. A committed Resolution remains independently usable while local cleanup continues.
 
 #### When cleanup cannot finish
 
-If retirement cannot be established before the cleanup watchdog, fence Bash admission and retain unreusable custody rather than fabricate physical completion. Normal execution and shutdown use one shallow owner-progress pass for active Bash and retained Bash/provider cleanup owners. A failed cleanup pass is not progress; retry at low frequency while retaining the Store lease and custody until the same owner establishes release.
+If retirement cannot be established before the cleanup watchdog, fence Bash admission and retain unreusable custody rather than fabricate physical completion. Normal execution and shutdown use one shallow owner-progress pass for active Bash and retained Bash cleanup owners. A failed cleanup pass is not progress; retry at low frequency while retaining the Store lease and custody until the same owner establishes release.
 
 Timeout and retry values live in the [resource table](#resources-storage-and-diagnostics).
 
