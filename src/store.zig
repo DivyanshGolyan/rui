@@ -84,7 +84,7 @@ pub const Faults = struct {
     settlement_trace: ?SettlementTrace = null,
 };
 
-pub const ControlTracePhase = enum { lock_requested, lock_acquired, store_complete };
+pub const ControlTracePhase = enum { lock_requested, lock_acquired, durable_acceptance, store_complete };
 
 pub const ControlTrace = struct {
     context: *anyopaque,
@@ -95,7 +95,7 @@ pub const ControlTrace = struct {
     }
 };
 
-pub const SettlementTracePhase = enum { lock_acquired, settlement_complete };
+pub const SettlementTracePhase = enum { lock_requested, lock_acquired, settlement_complete };
 
 pub const SettlementTrace = struct {
     context: *anyopaque,
@@ -252,6 +252,10 @@ pub const ActionAttemptBinding = struct {
     parent_operation_id: u64,
     action_id: u64,
     attempt_ordinal: u64,
+};
+
+pub const SupersedingControl = struct {
+    command_key: protocol.Bounded(protocol.max_key_bytes),
 };
 
 pub const ActionAttemptAdmission = struct {
@@ -1859,6 +1863,7 @@ pub const Store = struct {
         const completion = try self.sessionStopCompletion(selection);
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
+        if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
         return .{ .accepted = .{
             .replayed = false,
             .selection = selection,
@@ -2011,6 +2016,7 @@ pub const Store = struct {
         }
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
+        if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
         return .{ .accepted = .{ .replayed = false } };
     }
 
@@ -2191,6 +2197,7 @@ pub const Store = struct {
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
         if (rejection) |code| return .{ .rejected = .{ .replayed = false, .code = code } };
+        if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
         return .{ .accepted = .{ .replayed = false } };
     }
 
@@ -3181,11 +3188,8 @@ pub const Store = struct {
 
     fn appendInlineContent(self: *Store, content_id: i64, capture: *SessionReportCapture) !void {
         const metadata = try self.readContentMetadata(content_id);
-        const statement = try prepare(self.database, "SELECT payload IS NULL FROM content WHERE content_id=?1");
-        defer _ = c.sqlite3_finalize(statement);
-        try bindI64(statement, 1, content_id);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-        var reader = ContentReader{ .content_id = content_id, .representation = if (c.sqlite3_column_int(statement, 0) == 0) .raw else .{ .projection = .{} }, .store = self, .reference = .{ .length = metadata.length, .digest = metadata.digest } };
+        const raw = try self.contentIsRaw(content_id, metadata.length);
+        var reader = ContentReader{ .content_id = content_id, .representation = if (raw) .raw else .{ .projection = .{} }, .store = self, .reference = .{ .length = metadata.length, .digest = metadata.digest } };
         try capture.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{metadata.length});
         try capture.append(&std.fmt.bytesToHex(metadata.digest, .lower));
         try capture.append("\",\"text\":\"");
@@ -3473,14 +3477,15 @@ pub const Store = struct {
         };
     }
 
-    pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !bool {
+    pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         const statement = prepare(
             self.database,
-            "SELECT EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
+            "SELECT (SELECT stop.command_key FROM session_stop stop JOIN core_command command ON command.command_key=stop.command_key " ++
+                "WHERE stop.selected_turn_id=operation.turn_id ORDER BY command.rowid LIMIT 1) " ++
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
                 "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3",
         ) catch |err| return self.fenceReadFailure(err);
@@ -3490,9 +3495,10 @@ pub const Store = struct {
         bindU64(statement, 3, binding.attempt_ordinal) catch |err| return self.fenceReadFailure(err);
         const step = c.sqlite3_step(statement);
         if (step != c.SQLITE_ROW) return self.fenceReadFailure(if (step == c.SQLITE_DONE) error.CorruptStore else error.ActionReadFailed);
-        const stopped = c.sqlite3_column_int(statement, 0);
-        if (stopped != 0 and stopped != 1) return self.fenceReadFailure(error.CorruptStore);
-        return stopped == 1;
+        if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) return null;
+        var command_key: protocol.Bounded(protocol.max_key_bytes) = .{};
+        readText(statement, 0, &command_key) catch |err| return self.fenceReadFailure(err);
+        return .{ .command_key = command_key };
     }
 
     pub fn withActionDispatchHandoff(
@@ -4236,7 +4242,7 @@ pub const Store = struct {
         return self.fenced.load(.acquire);
     }
 
-    pub fn operationSupersededByControl(self: *Store, binding: AttemptBinding) !bool {
+    pub fn operationSupersededByControl(self: *Store, binding: AttemptBinding) !?SupersedingControl {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -4248,12 +4254,15 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(statement);
         bindU64(statement, 1, binding.operation_id) catch |err| return self.fenceReadFailure(err);
         const step = c.sqlite3_step(statement);
-        if (step == c.SQLITE_DONE) return false;
+        if (step == c.SQLITE_DONE) return null;
         if (step != c.SQLITE_ROW) return self.fenceReadFailure(error.OperationReadFailed);
         if (c.sqlite3_column_int64(statement, 0) != binding.turn_id or
             c.sqlite3_column_int64(statement, 1) != binding.attempt_ordinal)
-            return false;
-        return c.sqlite3_column_type(statement, 2) != c.SQLITE_NULL;
+            return null;
+        if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) return null;
+        var command_key: protocol.Bounded(protocol.max_key_bytes) = .{};
+        readText(statement, 2, &command_key) catch |err| return self.fenceReadFailure(err);
+        return .{ .command_key = command_key };
     }
 
     pub fn withDispatchHandoff(
@@ -4465,6 +4474,7 @@ pub const Store = struct {
         faults: Faults,
     ) !void {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
+        if (faults.settlement_trace) |trace| trace.mark(.lock_requested);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (faults.settlement_trace) |trace| trace.mark(.lock_acquired);
@@ -4967,11 +4977,29 @@ pub const Store = struct {
 
     fn openContentIdentityLocked(self: *Store, reference: ContentReference, private: bool) !ContentReader {
         const id = try self.resolveContentReference(reference, private);
-        const statement = try prepare(self.database, "SELECT payload IS NULL FROM content WHERE content_id=?1");
+        const raw = try self.contentIsRaw(id, reference.length);
+        return .{ .store = self, .reference = reference, .content_id = id, .representation = if (raw) .raw else .{ .projection = .{} } };
+    }
+
+    fn contentIsRaw(self: *Store, content_id: i64, length: u64) !bool {
+        var blob: ?*c.sqlite3_blob = null;
+        const opened = c.sqlite3_blob_open(self.database, "main", "content", "payload", content_id, 0, &blob);
+        if (opened == c.SQLITE_OK) {
+            defer _ = c.sqlite3_blob_close(blob);
+            return true;
+        }
+        const statement = try prepare(
+            self.database,
+            "SELECT payload IS NULL,(?2=0 OR EXISTS(SELECT 1 FROM answer_text_projection WHERE answer_content_id=?1)) " ++
+                "FROM content WHERE content_id=?1",
+        );
         defer _ = c.sqlite3_finalize(statement);
-        try bindI64(statement, 1, id);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
-        return .{ .store = self, .reference = reference, .content_id = id, .representation = if (c.sqlite3_column_int(statement, 0) == 0) .raw else .{ .projection = .{} } };
+        try bindI64(statement, 1, content_id);
+        try bindU64(statement, 2, length);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW or
+            c.sqlite3_column_int(statement, 0) != 1 or
+            c.sqlite3_column_int(statement, 1) != 1) return error.CorruptStore;
+        return false;
     }
 
     fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !usize {
@@ -9361,6 +9389,32 @@ test "multiwindow content import and deduplication preserve all bytes" {
         offset += count;
     }
     try std.testing.expectEqual(length, offset);
+}
+
+test "large raw content opens without materializing its payload" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("large", "direct/large", workspace, "model-a");
+    const length = 32 * 1024 * 1024 + 10;
+    command.configuration.instructions = try testingContent(&tmp, "large-source", 'q', length);
+    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+    const reference = ContentReference{
+        .length = command.configuration.instructions.length,
+        .digest = command.configuration.instructions.digest,
+    };
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    var reader = try storage.openContent(reference);
+    defer reader.close();
+    var first: [17]u8 = undefined;
+    try std.testing.expectEqual(first.len, try reader.read(0, &first));
+    for (first) |byte| try std.testing.expectEqual(@as(u8, 'q'), byte);
+    var last: [17]u8 = undefined;
+    try std.testing.expectEqual(last.len, try reader.read(length - last.len, &last));
+    for (last) |byte| try std.testing.expectEqual(@as(u8, 'q'), byte);
 }
 
 test "definite rejections retain decisions without retaining payloads" {

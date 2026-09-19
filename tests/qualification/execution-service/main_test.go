@@ -1,0 +1,267 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+)
+
+func event(phase string, at int, extra ...string) map[string]any {
+	m := map[string]any{"rui_test_phase": phase, "at_ns": fmt.Sprint(at), "process": "7", "run": "1000", "clock": "awake_ns", "turn": "1", "operation": "1", "attempt": "1"}
+	for i := 0; i < len(extra); i += 2 {
+		m[extra[i]] = extra[i+1]
+	}
+	return m
+}
+func encodeEvents(rows []map[string]any) []byte {
+	var b bytes.Buffer
+	for i, row := range rows {
+		row["sequence"] = fmt.Sprint(i + 1)
+		// Keep the same prefix as the existing Host trace contract.
+		phase := row["rui_test_phase"]
+		delete(row, "rui_test_phase")
+		encoded, _ := json.Marshal(row)
+		fmt.Fprintf(&b, "{\"rui_test_phase\":%q,%s\n", phase, encoded[1:])
+		row["rui_test_phase"] = phase
+	}
+	return b.Bytes()
+}
+func completeRows() []map[string]any {
+	return []map[string]any{
+		event("lifecycle_boundary", 100, "start_ns", "10", "wait_ns", "0"),
+		event("bash_deadline_established", 105, "operation", "2", "action", "9", "deadline_ns", "300"),
+		event("preparation_started", 110), event("preparation_advance_started", 120),
+		event("preparation_advance_completed", 150, "work_bytes", "20", "work_items", "3", "request_bytes", "10"), event("preparation_completed", 155),
+		event("validation_started", 200), event("control_durable_acceptance", 250, "subject", "stop"), event("validation_completed", 280),
+		event("settlement_lock_requested", 280), event("settlement_lock_acquired", 290), event("settlement_complete", 360),
+		event("effect_stop_requested", 370, "control_key", "stop"),
+		event("bash_deadline_serviced", 380, "operation", "2", "action", "9", "deadline_ns", "300"),
+		event("lifecycle_boundary", 400, "start_ns", "100", "wait_ns", "0"),
+	}
+}
+func TestCompleteMetricIntervals(t *testing.T) {
+	es, err := parseTraces(encodeEvents(completeRows()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := deriveMetrics(es, true)
+	if m.Status != "passed" {
+		t.Fatalf("%+v", m)
+	}
+	if *m.LargestUninterruptedNS != 300 || *m.MaxLifecycleServiceGapNS != 300 {
+		t.Fatalf("sub-phase maximum was used: %+v", m)
+	}
+	if m.SettlementQueue[0].DurationNS != 10 || m.SettlementService[0].DurationNS != 70 || m.Settlement[0].DurationNS != 80 {
+		t.Fatalf("wrong settlement attribution: %+v", m)
+	}
+	if m.StopToEffectNS[0] != 120 || m.DeadlineToServiceNS[0] != 80 {
+		t.Fatalf("wrong owner intervals: %+v", m)
+	}
+}
+func TestUntracedWorkAndIdleWait(t *testing.T) {
+	rows := completeRows()
+	rows[len(rows)-1]["at_ns"] = "900"
+	rows[len(rows)-1]["wait_ns"] = "100"
+	es, err := parseTraces(encodeEvents(rows))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := deriveMetrics(es, true)
+	if m.Status != "passed" || *m.LargestUninterruptedNS != 700 || *m.MaxLifecycleServiceGapNS != 800 {
+		t.Fatalf("untraced work disappeared: %+v", m)
+	}
+}
+func TestMismatchedAttemptDoesNotPair(t *testing.T) {
+	rows := completeRows()
+	rows[4]["attempt"] = "2"
+	es, e := parseTraces(encodeEvents(rows))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if m := deriveMetrics(es, true); m.Status != "invalid" {
+		t.Fatalf("cross-Attempt interval passed: %+v", m)
+	}
+}
+func TestReplacementAttemptHasIndependentRequestBytes(t *testing.T) {
+	rows := completeRows()
+	rows = append(rows, event("preparation_started", 410, "attempt", "2"), event("preparation_advance_started", 420, "attempt", "2"), event("preparation_advance_completed", 430, "attempt", "2", "work_bytes", "10", "work_items", "1", "request_bytes", "5"), event("preparation_completed", 440, "attempt", "2"), event("lifecycle_boundary", 500, "start_ns", "400", "wait_ns", "0"))
+	es, e := parseTraces(encodeEvents(rows))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if m := deriveMetrics(es, true); m.Status != "passed" {
+		t.Fatalf("legitimate retry byte reset rejected: %+v", m)
+	}
+}
+func TestProvenanceAndTraceLossAreRejected(t *testing.T) {
+	for _, field := range []string{"run", "process", "clock", "attempt"} {
+		rows := completeRows()
+		rows[4][field] = ""
+		if _, e := parseTraces(encodeEvents(rows)); e == nil {
+			t.Errorf("missing %s accepted", field)
+		}
+	}
+	for _, field := range []string{"run", "process", "clock"} {
+		rows := completeRows()
+		rows[4][field] = "2222"
+		if _, e := parseTraces(encodeEvents(rows)); e == nil {
+			t.Errorf("mixed %s accepted", field)
+		}
+	}
+	raw := encodeEvents(completeRows())
+	lines := bytes.Split(raw, []byte{'\n'})
+	lines = append(lines[:4], lines[5:]...)
+	if _, e := parseTraces(bytes.Join(lines, []byte{'\n'})); e == nil {
+		t.Error("missing trace record accepted")
+	}
+	if _, e := parseTraces(raw[:len(raw)-1]); e == nil {
+		t.Error("truncated tail accepted")
+	}
+	rows := completeRows()
+	rows[4]["trace_lost"] = true
+	if _, e := parseTraces(encodeEvents(rows)); e == nil {
+		t.Error("producer loss accepted")
+	}
+}
+func TestMissingBoundaryOrDeadlineInvalidatesEvidence(t *testing.T) {
+	rows := completeRows()
+	rows[len(rows)-1]["start_ns"] = "200"
+	es, e := parseTraces(encodeEvents(rows))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if m := deriveMetrics(es, true); m.Status != "invalid" {
+		t.Error("missing service boundary passed")
+	}
+	rows = completeRows()
+	rows[13]["deadline_ns"] = "299"
+	es, e = parseTraces(encodeEvents(rows))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if m := deriveMetrics(es, true); m.Status != "invalid" {
+		t.Error("mismatched deadline passed")
+	}
+}
+func TestAllowanceViolationInvalidatesEvidence(t *testing.T) {
+	rows := completeRows()
+	rows[4]["work_bytes"] = "16385"
+	es, e := parseTraces(encodeEvents(rows))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if m := deriveMetrics(es, true); m.Status != "invalid" {
+		t.Error("allowance violation passed")
+	}
+}
+func TestSupersessionIsNotASecondSettlementEnd(t *testing.T) {
+	rows := completeRows()
+	rows = append(rows, event("model_settlement_superseded", 365))
+	es, e := parseTraces(encodeEvents(rows))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if m := deriveMetrics(es, true); m.Status != "passed" {
+		t.Fatalf("semantic note confused with a second end: %+v", m)
+	}
+}
+func TestInvalidEvidenceHasNonzeroProcessExit(t *testing.T) {
+	if os.Getenv("RUI_METRIC_EXIT_CHILD") == "1" {
+		os.Exit(exitCode(deriveMetrics(nil, true).Status))
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestInvalidEvidenceHasNonzeroProcessExit$")
+	cmd.Env = append(os.Environ(), "RUI_METRIC_EXIT_CHILD=1")
+	err := cmd.Run()
+	exit, ok := err.(*exec.ExitError)
+	if !ok || exit.ExitCode() != 1 {
+		t.Fatalf("invalid evidence exit=%v", err)
+	}
+	for _, status := range []string{"invalid", "failed", "unavailable", "target_miss", "unknown"} {
+		if exitCode(status) == 0 {
+			t.Errorf("%s exits successfully", status)
+		}
+	}
+	if exitCode("passed") != 0 {
+		t.Fatal("passed failed")
+	}
+}
+func TestOverlapCannotUseIdleStopOrUnrelatedCompletion(t *testing.T) {
+	id := executionID{Run: "1", Process: "2", Clock: "awake_ns", Turn: "3", Operation: "4", Attempt: "1"}
+	other := id
+	other.Operation = "5"
+	events := []traceEvent{
+		{executionID: id, Phase: "preparation_started", At: 10},
+		{executionID: id, Phase: "preparation_completed", At: 20},
+		{Phase: "control_durable_acceptance", Subject: "stop", At: 30},
+		{Phase: "effect_stop_requested", ControlKey: "stop", At: 35},
+		{executionID: id, Phase: "provider_completion_removed", At: 11, QueuedAfter: 2},
+		{executionID: id, Phase: "provider_completion_serviced", At: 20},
+		{executionID: other, Phase: "provider_completion_serviced", At: 100},
+	}
+	if _, e := proveOverlap(events, "preparation", "stop", id, nil, false); e == nil {
+		t.Fatal("post-preparation stop accepted")
+	}
+	if _, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, false); e == nil {
+		t.Fatal("unrelated completion extended pressure")
+	}
+	events[2].At = 15
+	events[3].At = 17
+	if _, e := proveOverlap(events, "preparation", "stop", id, nil, false); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, true); e == nil {
+		t.Fatal("missing deadline accepted")
+	}
+}
+func TestProviderAuditRejectsCorruptionAndDuplicateRequests(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		ep, e := newEndpoint()
+		if e != nil {
+			t.Fatal(e)
+		}
+		input := wireRequest([][]byte{userItem("test")})
+		response, _ := answerSSE("test", "ok", 10, 20)
+		ep.add("test", &requestPlan{Expected: input, Response: response})
+		body := input
+		if corrupt {
+			body = bytes.Replace(body, []byte("model-a"), []byte("wrong-model"), 1)
+		}
+		resp, e := http.Post(ep.URL(), "application/json", bytes.NewReader(body))
+		if e != nil {
+			ep.close()
+			t.Fatal(e)
+		}
+		resp.Body.Close()
+		audit := ep.audit()
+		if corrupt && audit == nil {
+			t.Error("corrupt request passed")
+		}
+		if !corrupt && audit != nil {
+			t.Fatal(audit)
+		}
+		resp, e = http.Post(ep.URL(), "application/json", bytes.NewReader(input))
+		if e != nil {
+			ep.close()
+			t.Fatal(e)
+		}
+		resp.Body.Close()
+		if ep.audit() == nil {
+			t.Error("duplicate request passed")
+		}
+		ep.close()
+	}
+}
+func TestReplayExpectationRemovesOnlyTopLevelCreatedBy(t *testing.T) {
+	response, replay := answerSSE("test", "ok", 16, 32)
+	if !bytes.Contains(response, []byte(`"created_by"`)) {
+		t.Fatal("fixture no longer exercises discarded content")
+	}
+	if bytes.Contains(replay[0], []byte(`"created_by"`)) || !bytes.Contains(replay[0], []byte(strings.Repeat("r", 16))) {
+		t.Fatal("wrong replay expectation")
+	}
+}

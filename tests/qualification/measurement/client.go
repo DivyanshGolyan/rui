@@ -2,6 +2,7 @@ package measurement
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -61,6 +62,53 @@ func (c Client) Message(key, session, text string) error {
 	}
 	if nested(answer, "answer", "status") != "accepted" {
 		return fmt.Errorf("message was not accepted: %v", answer)
+	}
+	return nil
+}
+
+func (c Client) StopSession(key, session string) error {
+	var answer map[string]any
+	if err := RunJSON(c.Deadline, &answer, c.Binary,
+		"stop-session", "--store", c.Store, "--record", filepath.Join(c.Artifacts, key+".json"),
+		"--key", key, "--session", session); err != nil {
+		return err
+	}
+	if nested(answer, "answer", "status") != "accepted" {
+		return fmt.Errorf("session stop was not accepted: %v", answer)
+	}
+	return nil
+}
+
+func (c Client) WaitAction(session string) (string, error) {
+	var action string
+	err := WaitFor(c.Deadline, 25*time.Millisecond, "unresolved Action for "+session, func() (bool, error) {
+		report, err := c.Inspect(session)
+		if err != nil {
+			return false, err
+		}
+		actions, ok := nested(report, "actions", "unresolved").([]any)
+		if !ok || len(actions) != 1 {
+			return false, nil
+		}
+		row, ok := actions[0].(map[string]any)
+		if !ok {
+			return false, errors.New("malformed unresolved Action")
+		}
+		action, ok = row["action"].(string)
+		return ok && action != "", nil
+	})
+	return action, err
+}
+
+func (c Client) AllowAction(key, session, action string) error {
+	var answer map[string]any
+	if err := RunJSON(c.Deadline, &answer, c.Binary,
+		"allow-action", "--store", c.Store, "--record", filepath.Join(c.Artifacts, key+".json"),
+		"--key", key, "--session", session, "--action", action); err != nil {
+		return err
+	}
+	if nested(answer, "answer", "status") != "accepted" {
+		return fmt.Errorf("Action allowance was not accepted: %v", answer)
 	}
 	return nil
 }

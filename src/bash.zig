@@ -335,8 +335,20 @@ pub const Execution = struct {
     service_fault_used: bool = false,
     output_reservation: ?output_retention.Pair = null,
 
-    pub fn requestStop(self: *Execution) void {
+    pub const TerminationAttempt = struct {
+        attempted: bool,
+        signal_failed: bool,
+    };
+
+    pub const TimeoutAction = struct {
+        deadline_ns: u64,
+        signal_failed: bool,
+    };
+
+    pub fn requestStop(self: *Execution) TerminationAttempt {
+        const attempted = self.process == .running;
         self.requestTermination(.stopped);
+        return .{ .attempted = attempted, .signal_failed = self.signal_failure };
     }
 
     pub fn requestInfrastructureShutdown(self: *Execution) void {
@@ -347,6 +359,7 @@ pub const Execution = struct {
         made_progress: bool,
         retired: bool,
         leader_observed_with_open_pipes: bool,
+        timeout_action: ?TimeoutAction,
         fault: ?anyerror,
     };
 
@@ -360,8 +373,11 @@ pub const Execution = struct {
         }
         const now = std.Io.Clock.Timestamp.now(self.io, .awake);
         var made_progress = false;
+        var timeout_action: ?TimeoutAction = null;
         if (self.process == .running and timestampReached(now, self.process.running.deadline)) {
+            const deadline_ns: u64 = @intCast(self.process.running.deadline.raw.nanoseconds);
             self.requestTermination(.timed_out);
+            timeout_action = .{ .deadline_ns = deadline_ns, .signal_failed = self.signal_failure };
             made_progress = true;
         }
         const leader_observed = self.observeLeader(now) catch |err| observed: {
@@ -411,7 +427,15 @@ pub const Execution = struct {
             .retired = self.retired(),
             .leader_observed_with_open_pipes = leader_observed and
                 (!pipeClosed(self.stdout_pipe) or !pipeClosed(self.stderr_pipe)),
+            .timeout_action = timeout_action,
             .fault = fault,
+        };
+    }
+
+    pub fn deadlineNs(self: *const Execution) u64 {
+        return switch (self.process) {
+            .running => |value| @intCast(value.deadline.raw.nanoseconds),
+            else => unreachable,
         };
     }
 
