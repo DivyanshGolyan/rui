@@ -12,28 +12,6 @@ For issue-driven work, read the live issue, relevant discussion and dependencies
 
 Inspect source before claiming implementation. Distinguish accepted behavior, prototype evidence, production qualification and remaining uncertainty.
 
-## Agent skills
-
-### Agent-facing documentation
-
-Use the `writing-for-agents` skill when creating or editing skills, `AGENTS.md` or Markdown reached from `AGENTS.md`.
-
-### Pull request descriptions
-
-Use the `visual-pr` skill when creating or updating a pull request description.
-
-### Issue tracker
-
-Issues are tracked in GitHub. See [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
-
-### Triage labels
-
-The default Matt Pocock triage vocabulary is used. See [docs/agents/triage-labels.md](docs/agents/triage-labels.md).
-
-### Domain docs
-
-Rui keeps accepted domain terminology and decisions in its owning contract. See [docs/agents/domain.md](docs/agents/domain.md).
-
 ## Make changes
 
 Inspect the working-tree diff first; preserve concurrent work. Keep reviews read-only unless fixes are requested. Complete authorized work within scope without reopening settled choices.
@@ -54,7 +32,7 @@ Respect architectural transaction/effect boundaries. Give each mutable handle on
 
 Assert programmer errors; return typed expected failures. Handle errors and explain intentionally ignored cleanup failures at their shared wrapper. Comments explain non-obvious invariants. Put exceptions beside their owning code or contract, with consumer, retained guarantee and evidence.
 
-## Code Review Rules
+## Review
 
 Review simplicity alongside correctness in every PR and local review, including Codex reviews, using the [simplicity gate](VERIFICATION.md#product-tenets-at-stage-completion).
 
@@ -67,8 +45,12 @@ For every review, obtain a read-only opinion from an agent independent of implem
 
 Give each independent opinion one programmer's lens: Rich Hickey by default; John Ousterhout, Rob Pike or Joe Armstrong when better suited. Ground likely challenges and recommendations in their published ideas and this code. Label this an interpretation, not their opinion or endorsement; contract and evidence decide.
 
-## Verify and finish
+## Verify and report
 
 Run applicable [verification gates](VERIFICATION.md#canonical-gates); confirm commands in `build.zig`. Test meaningful failures and recovery boundaries with independent expectations. Drive fault injection through production transitions. Unit tests may inspect owner internals; integration and qualification evidence must assert durable owner-boundary outcomes rather than timing, scheduler order, private representation or fixture-only authority. Keep live provider checks opt-in. Broaden/repeat checks only for changes or unresolved concerns.
 
 For documentation, check contract preservation, references and `git diff --check`. Report changes, passed checks and material limits, including pre-existing failures and interrupted/unrun checks. Keep prototype, compile and process-crash evidence distinct from production and power-loss qualification.
+
+## Documentation and repository tools
+
+Use the `writing-for-agents` skill when editing skills, `AGENTS.md` or Markdown reached from `AGENTS.md`; use `visual-pr` for pull request descriptions. Issues are tracked in GitHub; see [issue-tracker guidance](docs/agents/issue-tracker.md) and [triage labels](docs/agents/triage-labels.md). [Domain guidance](docs/agents/domain.md) routes terminology and decision work to its owning contract.

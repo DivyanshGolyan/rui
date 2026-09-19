@@ -55,12 +55,16 @@ def assert_continuation(endpoint, name, result):
     assert len(endpoint.requests) == 2, endpoint.requests
     first, continuation = map(json.loads, endpoint.requests)
     assert [item["content"][0]["text"] for item in first["input"] if item.get("role") == "user"] == ["run"]
+    calls = [item for item in continuation["input"] if item.get("type") == "function_call"]
+    assert len(calls) == 1 and calls[0]["call_id"] == f"{name}-call", calls
     outputs = [item for item in continuation["input"] if item.get("type") == "function_call_output"]
     assert outputs == [{"type": "function_call_output", "call_id": f"{name}-call", "output": result}], outputs
     assert [item["content"][0]["text"] for item in continuation["input"] if item.get("role") == "user"] == ["run"]
 
 
-def finish_case(recovered_host, original_diagnostics, keeper, endpoint, thread):
+def finish_case(original_host, recovered_host, original_diagnostics, keeper, endpoint, thread):
+    if original_host is not None and original_host.poll() is None:
+        fixture.stop_host(original_host)
     if recovered_host is not None:
         fixture.stop_host(recovered_host)
     original_diagnostics.close()
@@ -90,7 +94,7 @@ def prove_lost_bash_permit_becomes_indeterminate(state):
         assert not marker.exists()
         assert_continuation(endpoint, "attempt-before-launch", result)
     finally:
-        finish_case(recovered_host, original_diagnostics, keeper, endpoint, thread)
+        finish_case(original_host, recovered_host, original_diagnostics, keeper, endpoint, thread)
 
 
 def prove_effect_without_result_becomes_indeterminate(state):
@@ -110,7 +114,7 @@ def prove_effect_without_result_becomes_indeterminate(state):
         assert marker.read_text() == "x"
         assert_continuation(endpoint, "effect-before-result", result)
     finally:
-        finish_case(recovered_host, original_diagnostics, keeper, endpoint, thread)
+        finish_case(original_host, recovered_host, original_diagnostics, keeper, endpoint, thread)
 
 
 def prove_committed_bash_result_survives_restart(state):
@@ -120,16 +124,19 @@ def prove_committed_bash_result_survives_restart(state):
     recovered_host = None
     try:
         original_diagnostics.wait("action_result_committed", action="1", attempt="1")
+        original_result = bash.result_text(store, session)
         assert marker.read_text() == "x" and bash.resolution(store, session) == "succeeded"
         crash = fixture.crash_host(original_host, state, "result-after-commit-crash", original_diagnostics)
         assert crash["returncode"] == -signal.SIGKILL, crash
         recovered_host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         fixture.wait_for(lambda: fixture.completed_observation(store, "result-after-commit-message"), "continuation")
         result = bash.result_text(store, session)
+        assert result == original_result
+        assert fixture.read_result(store, "result-after-commit-message") == b"result-after-commit completed"
         assert bash.resolution(store, session) == "succeeded" and marker.read_text() == "x"
         assert_continuation(endpoint, "result-after-commit", result)
     finally:
-        finish_case(recovered_host, original_diagnostics, keeper, endpoint, thread)
+        finish_case(original_host, recovered_host, original_diagnostics, keeper, endpoint, thread)
 
 
 def main():

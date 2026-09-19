@@ -20,21 +20,27 @@ class HostDiagnostics:
         self.condition = threading.Condition()
         self.records = []
         self.stderr_tail = bytearray()
+        self.read_error = None
         self.thread = threading.Thread(target=self._read, daemon=True)
         self.thread.start()
 
     def _read(self):
-        for raw_line in self.process.stderr:
+        try:
+            for raw_line in self.process.stderr:
+                with self.condition:
+                    _tail(self.stderr_tail, raw_line, STDERR_TAIL_LIMIT)
+                try:
+                    record = json.loads(raw_line)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(record, dict) or "rui_test_phase" not in record:
+                    continue
+                with self.condition:
+                    self.records.append(record)
+                    self.condition.notify_all()
+        except Exception as error:
+            self.read_error = error
             with self.condition:
-                _tail(self.stderr_tail, raw_line, STDERR_TAIL_LIMIT)
-            try:
-                record = json.loads(raw_line)
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            if "rui_test_phase" not in record:
-                continue
-            with self.condition:
-                self.records.append(record)
                 self.condition.notify_all()
 
     def matching(self, phase, **fields):
@@ -68,8 +74,9 @@ class HostDiagnostics:
 
     def close(self):
         assert self.process.poll() is not None, "Host diagnostics closed before process exit"
-        self.thread.join()
-        assert not self.thread.is_alive(), "Host stderr reader did not reach EOF"
+        self.thread.join(timeout=3)
+        assert not self.thread.is_alive(), "Host stderr reader did not drain within 3 seconds"
+        assert self.read_error is None, f"Host stderr reader failed: {self.read_error}"
 
     def tail(self):
         with self.condition:
