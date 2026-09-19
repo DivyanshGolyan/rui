@@ -7,15 +7,18 @@ import (
 
 func TestParseAndDeriveCompleteTrace(t *testing.T) {
 	input := strings.Join([]string{
-		`{"rui_test_phase":"control_timing","control_key":"stop","store_queued_at_ns":"120","queue_wait_ns":"20"}`,
+		`{"rui_test_phase":"control_durable_acceptance","at_ns":"100","subject":"stop"}`,
+		`{"rui_test_phase":"lifecycle_service_started","at_ns":"105"}`,
+		`{"rui_test_phase":"provider_completion_removed","at_ns":"108","queued_after":"7"}`,
 		`{"rui_test_phase":"preparation_advance_started","at_ns":"110","operation":"1"}`,
-		`{"rui_test_phase":"preparation_advance_completed","at_ns":"130","operation":"1"}`,
+		`{"rui_test_phase":"preparation_advance_completed","at_ns":"130","operation":"1","work_bytes":"16384","work_items":"64","request_bytes":"1024"}`,
 		`{"rui_test_phase":"effect_stop_requested","at_ns":"140","control_key":"stop","operation":"1"}`,
 		`{"rui_test_phase":"validation_started","at_ns":"150","operation":"1"}`,
 		`{"rui_test_phase":"validation_completed","at_ns":"180","operation":"1"}`,
 		`{"rui_test_phase":"settlement_lock_requested","at_ns":"190","operation":"1"}`,
 		`{"rui_test_phase":"settlement_complete","at_ns":"230","operation":"1"}`,
 		`{"rui_test_phase":"bash_deadline_serviced","at_ns":"250","deadline_ns":"200","action":"9"}`,
+		`{"rui_test_phase":"lifecycle_service_started","at_ns":"260"}`,
 	}, "\n")
 	events, err := parseTraces([]byte(input))
 	if err != nil {
@@ -25,8 +28,14 @@ func TestParseAndDeriveCompleteTrace(t *testing.T) {
 	if m.Status != "passed" || len(m.StopToEffectNS) != 1 || m.StopToEffectNS[0] != 40 || len(m.DeadlineToServiceNS) != 1 || m.DeadlineToServiceNS[0] != 50 {
 		t.Fatalf("metrics = %+v", m)
 	}
-	if m.MaxLifecycleServiceGapNS == nil || *m.MaxLifecycleServiceGapNS != 110 || m.LargestUninterruptedNS == nil || *m.LargestUninterruptedNS != 40 {
+	if m.MaxLifecycleServiceGapNS == nil || *m.MaxLifecycleServiceGapNS != 155 || m.LargestUninterruptedNS == nil || *m.LargestUninterruptedNS != 40 {
 		t.Fatalf("interval metrics = %+v", m)
+	}
+	if m.MaxNativeCompletionsAfter != 7 {
+		t.Fatalf("native completion evidence = %+v", m)
+	}
+	if m.PreparationAdvanceCount != 1 || m.MaxPreparationWorkBytes != preparationByteAllowance || m.MaxPreparationWorkItems != preparationItemAllowance || m.FinalRequestBytes != 1024 {
+		t.Fatalf("preparation work evidence = %+v", m)
 	}
 }
 
@@ -42,10 +51,29 @@ func TestMissingEventsInvalidateAffectedMetrics(t *testing.T) {
 }
 
 func TestMalformedRelevantTraceRejected(t *testing.T) {
-	for _, input := range []string{`{"rui_test_phase":"validation_started","at_ns":"bad"}`, `{"rui_test_phase":"control_timing","control_key":"x","store_queued_at_ns":"1","queue_wait_ns":"2"}`} {
+	for _, input := range []string{`{"rui_test_phase":"validation_started","at_ns":"bad"}`, `{"rui_test_phase":"control_timing","control_key":"x","store_queued_at_ns":"1","queue_wait_ns":"2"}`, `{"rui_test_phase":"preparation_advance_completed","at_ns":"1","operation":"1","work_bytes":"bad","work_items":"1","request_bytes":"1"}`} {
 		if _, err := parseTraces([]byte(input)); err == nil {
 			t.Fatalf("accepted %s", input)
 		}
+	}
+}
+
+func TestPreparationAllowanceAndRequestRegressionInvalidateMetrics(t *testing.T) {
+	input := strings.Join([]string{
+		`{"rui_test_phase":"lifecycle_service_started","at_ns":"1"}`,
+		`{"rui_test_phase":"preparation_advance_started","at_ns":"2","operation":"1"}`,
+		`{"rui_test_phase":"preparation_advance_completed","at_ns":"3","operation":"1","work_bytes":"16385","work_items":"1","request_bytes":"100"}`,
+		`{"rui_test_phase":"preparation_advance_started","at_ns":"4","operation":"1"}`,
+		`{"rui_test_phase":"preparation_advance_completed","at_ns":"5","operation":"1","work_bytes":"1","work_items":"65","request_bytes":"99"}`,
+		`{"rui_test_phase":"lifecycle_service_started","at_ns":"6"}`,
+	}, "\n")
+	events, err := parseTraces([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := deriveMetrics(events)
+	if m.Status != "invalid" || !strings.Contains(strings.Join(m.Invalid, ","), "preparation_allowance_exceeded") || !strings.Contains(strings.Join(m.Invalid, ","), "request_bytes_regressed") {
+		t.Fatalf("invalid preparation work passed: %+v", m)
 	}
 }
 
