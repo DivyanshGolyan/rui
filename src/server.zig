@@ -133,6 +133,22 @@ const Host = struct {
     drain_mutex: std.Io.Mutex = .init,
     drain_condition: std.Io.Condition = .init,
 
+    // Canonical permission belongs to Store; process-local permission belongs
+    // to Host. The Store handoff must enter this gate, in that lock order, for
+    // every effect. A preflight observation alone cannot authorize a launch.
+    fn launchAllowed(self: *const Host) bool {
+        return !self.dispatch_fenced.load(.acquire) and
+            !self.execution_shutdown.load(.acquire) and
+            !self.effect_shutdown.load(.acquire);
+    }
+
+    fn withEffectLaunch(self: *Host, context: anytype, comptime launch: anytype) !void {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        if (!self.launchAllowed()) return error.HostDispatchSuppressed;
+        try launch(context);
+    }
+
     fn clientFinished(self: *Host) void {
         self.drain_mutex.lockUncancelable(self.io);
         const prior = self.active_clients.fetchSub(1, .acq_rel);
@@ -851,6 +867,12 @@ fn advanceBashPreparation(
         else => {},
     } else unreachable;
     const preparing = slot.bash_preparing;
+    if (!host.launchAllowed()) {
+        const cleanup = active_preparation.cancel();
+        preparation.* = null;
+        discardBashResources(host, slot, preparing.token, cleanup);
+        return true;
+    }
     switch (active_preparation.advance()) {
         .pending => return true,
         .failed => |value| {
@@ -896,6 +918,23 @@ fn finishBashPreparationFailure(
     }
 }
 
+// Discarding an unlaunched effect changes only local custody. In particular,
+// infrastructure suppression is not a user stop or a saved Action result.
+fn discardBashResources(
+    host: *Host,
+    slot: *ExecutionSlot,
+    token: execution.CustodyToken,
+    resources: bash.PreparedCleanup,
+) void {
+    var cleanup = resources;
+    cleanup.cleanup() catch |err| {
+        retainBashPreparedCleanup(host, slot, token, cleanup, err);
+        return;
+    };
+    finishCustodyNow(host, token);
+    slot.* = .free;
+}
+
 fn launchPreparedBash(
     host: *Host,
     slot: *ExecutionSlot,
@@ -907,23 +946,26 @@ fn launchPreparedBash(
         traceAction(host, "prepared_before_handoff", action_binding);
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
     }
+    if (!host.launchAllowed()) {
+        discardBashResources(host, slot, token, prepared.takeCleanup());
+        return;
+    }
     host.custody.consumeActionLaunchAuthority(token, action_binding) catch |err| {
-        prepared.cleanup() catch |cleanup_err| {
-            retainBashPreparedCleanup(host, slot, token, prepared.takeCleanup(), cleanup_err);
-            fenceDispatch(host, "Bash launch authority", err);
-            return;
-        };
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        discardBashResources(host, slot, token, prepared.takeCleanup());
         fenceDispatch(host, "Bash launch authority", err);
         return;
     };
     var launched: ?bash.Execution = null;
     host.store.withActionDispatchHandoff(action_binding, .{
+        .host = host,
         .prepared = prepared,
         .launched = &launched,
     }, struct {
         fn handoff(context: anytype) !void {
+            try context.host.withEffectLaunch(context, launch);
+        }
+
+        fn launch(context: anytype) !void {
             context.launched.* = try context.prepared.launch();
         }
     }.handoff) catch |err| {
@@ -931,15 +973,10 @@ fn launchPreparedBash(
             settleActionFailure(host, token, action_binding, .cancelled, "Bash was stopped before launch.");
         } else if (err == error.BashSpawnFailed) {
             settleActionFailure(host, token, action_binding, .spawn_failed, "Bash process creation failed.");
-        } else {
+        } else if (err != error.HostDispatchSuppressed) {
             fenceDispatch(host, "Bash dispatch handoff", err);
         }
-        prepared.cleanup() catch |cleanup_err| {
-            retainBashPreparedCleanup(host, slot, token, prepared.takeCleanup(), cleanup_err);
-            return;
-        };
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        discardBashResources(host, slot, token, prepared.takeCleanup());
         return;
     };
     slot.* = .{ .bash = .{
@@ -1250,14 +1287,6 @@ fn beginAdmittedAttempt(
     return .admitted;
 }
 
-// Canonical permission and process-local permission to launch are independent.
-// Recheck this at preparation disposal and inside the Store-guarded handoff.
-fn modelLaunchAllowed(host: *const Host) bool {
-    return !host.dispatch_fenced.load(.acquire) and
-        !host.execution_shutdown.load(.acquire) and
-        !host.effect_shutdown.load(.acquire);
-}
-
 fn advanceModelPreparation(
     host: *Host,
     reactor: ?*provider.Reactor,
@@ -1271,7 +1300,7 @@ fn advanceModelPreparation(
         else => {},
     } else unreachable;
     const owner = slot.model_preparing;
-    if (!modelLaunchAllowed(host)) {
+    if (!host.launchAllowed()) {
         preparation.cancel();
         preparation_active.* = false;
         // Infrastructure fencing does not invent a user stop or a Resolution.
@@ -1333,7 +1362,7 @@ fn launchPreparedRequest(
 ) void {
     const token = owner.token;
     const binding = owner.binding;
-    if (!modelLaunchAllowed(host)) {
+    if (!host.launchAllowed()) {
         request.deinit();
         finishCustodyNow(host, token);
         slot.* = .free;
@@ -1404,9 +1433,10 @@ fn launchPreparedRequest(
         .{ .host = host, .reactor = reactor, .transfer = &active.transfer },
         struct {
             fn handoff(context: anytype) !void {
-                context.host.launch_mutex.lockUncancelable(context.host.io);
-                defer context.host.launch_mutex.unlock(context.host.io);
-                if (!modelLaunchAllowed(context.host)) return error.HostDispatchSuppressed;
+                try context.host.withEffectLaunch(context, launch);
+            }
+
+            fn launch(context: anytype) !void {
                 try context.reactor.add(context.transfer);
             }
         }.handoff,
@@ -1751,14 +1781,9 @@ fn shutdownExecution(
             slot.* = .free;
         },
         .bash_preparing => |active| {
-            var cleanup = preparation.*.?.cancel();
+            const cleanup = preparation.*.?.cancel();
             preparation.* = null;
-            cleanup.cleanup() catch |err| {
-                retainBashPreparedCleanup(host, slot, active.token, cleanup, err);
-                continue;
-            };
-            finishCustodyNow(host, active.token);
-            slot.* = .free;
+            discardBashResources(host, slot, active.token, cleanup);
         },
         .bash => |*active| active.execution.requestInfrastructureShutdown(),
         .bash_prepared_cleanup, .named_scratch => {},
@@ -2157,8 +2182,7 @@ fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
     appendOptionalUnsigned(&trace, "page_size_bytes", value.page_size_bytes) catch return;
     trace.append(",") catch return;
     appendOptionalSigned(&trace, "cache_size_setting", value.cache_size_setting) catch return;
-    trace.append(",\"cache_size_setting_scope\":\"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages\"") catch return;
-    trace.append(",") catch return;
+    trace.append(",\"cache_size_setting_scope\":\"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages\",") catch return;
     appendOptionalSigned(&trace, "cache_spill_threshold", value.cache_spill_threshold) catch return;
     trace.append(",") catch return;
     appendOptionalUnsigned(&trace, "mmap_size_bytes", value.mmap_size_bytes) catch return;
@@ -3676,5 +3700,146 @@ test "Host fences dispose a sealed request before native transfer construction" 
         try std.testing.expect(slot == .free);
         try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    }
+}
+
+test "effect launch gate rechecks every Host suppression combination" {
+    const Launch = struct {
+        fn run(calls: *usize) !void {
+            calls.* += 1;
+        }
+    };
+    for (0..8) |mask| {
+        var host = Host{
+            .io = std.testing.io,
+            .allocator = std.testing.allocator,
+            .lease = undefined,
+            .store = undefined,
+            .faults = .{},
+        };
+        // The preflight result is deliberately stale before the real gate.
+        try std.testing.expect(host.launchAllowed());
+        host.dispatch_fenced.store(mask & 1 != 0, .release);
+        host.execution_shutdown.store(mask & 2 != 0, .release);
+        host.effect_shutdown.store(mask & 4 != 0, .release);
+        var calls: usize = 0;
+        if (mask == 0) {
+            try host.withEffectLaunch(&calls, Launch.run);
+            try std.testing.expectEqual(@as(usize, 1), calls);
+        } else {
+            try std.testing.expectError(error.HostDispatchSuppressed, host.withEffectLaunch(&calls, Launch.run));
+            try std.testing.expectEqual(@as(usize, 0), calls);
+        }
+    }
+}
+
+test "effect launch gate releases its mutex after native failure" {
+    var host = Host{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .lease = undefined,
+        .store = undefined,
+        .faults = .{},
+    };
+    const Launch = struct {
+        fn fail(calls: *usize) !void {
+            calls.* += 1;
+            return error.TestLaunchFailure;
+        }
+
+        fn succeed(calls: *usize) !void {
+            calls.* += 1;
+        }
+    };
+    var calls: usize = 0;
+    try std.testing.expectError(error.TestLaunchFailure, host.withEffectLaunch(&calls, Launch.fail));
+    try host.withEffectLaunch(&calls, Launch.succeed);
+    try std.testing.expectEqual(@as(usize, 2), calls);
+}
+
+test "Host fences discard prepared Bash without settling and retain failed cleanup" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var paths: platform.Paths = .{};
+    try paths.scratch.set(root);
+    var lease = platform.StoreLease{
+        .io = std.testing.io,
+        .paths = paths,
+        .store_dir = undefined,
+        .lock_file = undefined,
+    };
+    inline for (.{ "dispatch_fenced", "execution_shutdown", "effect_shutdown" }) |flag| {
+        for ([_]bool{ false, true }) |fail_cleanup| {
+            var records: [1]execution.CustodyRecord = undefined;
+            var host = Host{
+                .io = std.testing.io,
+                .allocator = std.testing.allocator,
+                .lease = &lease,
+                .store = undefined, // No canonical query, cancellation, or result.
+                .faults = .{},
+                .custody = execution.CustodyPool.initialize(&records),
+            };
+            const token = host.custody.reserve().?;
+            var permit = store_module.ActionDispatchPermit{ .binding = .{
+                .turn_id = 1,
+                .parent_operation_id = 1,
+                .action_id = 1,
+                .attempt_ordinal = 1,
+            } };
+            const binding = try host.custody.attachAction(token, &permit);
+            const file = try tmp.dir.createFile(std.testing.io, "suppressed-bash", .{});
+            try file.writeStreamingAll(std.testing.io, "exit 0\n");
+            var name: protocol.Bounded(96) = .{};
+            try name.set("suppressed-bash");
+            host.scratch_used.store(7, .release);
+            if (fail_cleanup) {
+                const gate = try tmp.dir.createFile(std.testing.io, bash.fault_gate_name, .{});
+                gate.close(std.testing.io);
+            }
+            var prepared = bash.Prepared{
+                .io = std.testing.io,
+                .allocator = std.testing.allocator,
+                .workspace = .{},
+                .scratch_path = root,
+                .bash_path = undefined, // Native construction must not run.
+                .timeout_ms = 1,
+                .faults = .{},
+                .script = .{
+                    .io = std.testing.io,
+                    .file = file,
+                    .name = name,
+                    .charged = 7,
+                    .budget = .{ .used = &host.scratch_used, .limit = 7 },
+                    .cleanup_fault = if (fail_cleanup) .gated else .none,
+                },
+                .stdout_capture = null,
+                .stderr_capture = null,
+            };
+            var slots = [_]ExecutionSlot{.{ .bash_preparing = .{
+                .token = token,
+                .binding = binding,
+            } }};
+            @field(host, flag).store(true, .release);
+            launchPreparedBash(&host, &slots[0], token, binding, &prepared);
+            try std.testing.expect(prepared.script == null);
+            // A retained cleanup fence must not become an effect shutdown.
+            try std.testing.expectEqual(std.mem.eql(u8, flag, "effect_shutdown"), host.effect_shutdown.load(.acquire));
+            if (fail_cleanup) {
+                try std.testing.expect(slots[0] == .bash_prepared_cleanup);
+                try std.testing.expect(slots[0].bash_prepared_cleanup.cleanup.script.?.file == null);
+                try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
+                try std.testing.expectEqual(@as(u64, 7), host.scratch_used.load(.acquire));
+                try tmp.dir.deleteFile(std.testing.io, bash.fault_gate_name);
+                const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+                var retry_at = now;
+                try std.testing.expect(advanceRetainedCleanup(&host, &slots, now, &retry_at));
+            }
+            try std.testing.expect(slots[0] == .free);
+            try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+            try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+            try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "suppressed-bash", .{}));
+        }
     }
 }
