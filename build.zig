@@ -286,6 +286,19 @@ pub fn build(b: *std.Build) void {
         "Measure production call classification, exact denial, recovery, and population scaling",
     );
     measure_call_classification_step.dependOn(&measure_call_classification.step);
+
+    const measure_execution_service = b.addSystemCommand(&.{
+        "go", "run", "-mod=readonly", "./execution-service",
+    });
+    measure_execution_service.setCwd(b.path("tests/qualification"));
+    measure_execution_service.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    if (b.args) |args| measure_execution_service.addArgs(args);
+    measure_execution_service.addArtifactArg(release);
+    const measure_execution_service_step = b.step(
+        "measure-execution-service",
+        "Measure production execution service across completions, history, replay fields, and owner populations",
+    );
+    measure_execution_service_step.dependOn(&measure_execution_service.step);
 }
 
 fn sameTransportTarget(a: std.Build.ResolvedTarget, b: std.Build.ResolvedTarget) bool {
