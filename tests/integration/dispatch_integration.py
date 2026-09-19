@@ -519,6 +519,7 @@ def message(state, store, key, session, text):
         text_path,
     )
     assert result["answer"]["status"] == "accepted", result
+    return result
 
 
 def message_lost_reply(state, store, key, session, text):

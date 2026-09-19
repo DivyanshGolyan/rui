@@ -58,10 +58,30 @@ def configure(state, store, key, session, permission="ask"):
     assert result["answer"]["status"] == "accepted", result
 
 
-def action_for(store, session):
+def actions_for(store, session, count):
     report = fixture.command("inspect-session", "--store", store, "--session", session)
     unresolved = report["actions"]["unresolved"]
-    return unresolved[0] if len(unresolved) == 1 else None
+    return unresolved if len(unresolved) == count else None
+
+
+def action_for(store, session):
+    actions = actions_for(store, session, 1)
+    return actions[0] if actions is not None else None
+
+
+def action_rows_by_id(store, session):
+    return {
+        action["action"]: action
+        for action in fixture.command(
+            "inspect-session",
+            "--store",
+            store,
+            "--session",
+            session,
+            "--profile",
+            "full",
+        )["full"]["actions"]
+    }
 
 
 def allow(state, store, key, session, action):
@@ -177,8 +197,424 @@ def add_exchange(responses, name, command, answer="continued", timeout_ms=None):
     responses.append(fixture.sse_answer(f"{name}-answer", f"{name}-reasoning", f"{name}-message", answer)[0])
 
 
+def prove_reused_session(state):
+    store = state / "reused-session-store"
+    workspace = state / "reused-session-workspace"
+    workspace.mkdir()
+    cleanup_gate = workspace / "cleanup-gate"
+    cleanup_gate.write_text("blocked")
+    model_cleanup_gate = workspace / "model-cleanup-gate"
+    retry_wait_ms = 500
+    slow_release = workspace / "slow-release"
+    settlement_order = workspace / "settlement-order"
+    slow_command = (
+        f"i=0; while [ ! -e {shlex.quote(str(slow_release))} ] && [ \"$i\" -lt 3000 ]; "
+        f"do sleep 0.01; i=$((i+1)); done; [ -e {shlex.quote(str(slow_release))} ] || exit 124; "
+        f"printf slow >> {shlex.quote(str(settlement_order))}; exit 7"
+    )
+    fast_command = f"printf fast >> {shlex.quote(str(settlement_order))}"
+    retry_failure_release = threading.Event()
+    responses = [
+        fixture.sse_tool_calls(
+            "reuse-calls",
+            [
+                (
+                    "bash",
+                    "reuse-slow-call",
+                    json.dumps({"cmd": slow_command, "timeout_ms": None}, separators=(",", ":")),
+                ),
+                ("missing-tool", "reuse-unknown-call", "{}"),
+                (
+                    "bash",
+                    "reuse-fast-call",
+                    json.dumps({"cmd": fast_command, "timeout_ms": None}, separators=(",", ":")),
+                ),
+                ("bash", "reuse-invalid-call", '{"cmd":7}'),
+            ],
+        ),
+        fixture.sse_answer(
+            "reuse-first-answer",
+            "reuse-first-reasoning",
+            "reuse-first-message",
+            "first-turn-answer",
+        )[0],
+        (
+            fixture.ResponseSpec(b"temporary provider failure", {}, 503),
+            retry_failure_release,
+        ),
+        fixture.sse_answer(
+            "reuse-second-answer",
+            "reuse-second-reasoning",
+            "reuse-second-message",
+            "second-turn-answer",
+        )[0],
+    ]
+    endpoint = fixture.SuccessEndpoint(responses)
+    endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    endpoint_thread.start()
+    endpoint_url = f"http://127.0.0.1:{endpoint.server_port}/responses"
+    host = None
+    milestones = None
+    reuse_submitted = False
+    try:
+        host = fixture.start_host(
+            store,
+            endpoint_url,
+            "--test-retry-waits-ms",
+            f"{retry_wait_ms},{retry_wait_ms},{retry_wait_ms}",
+            "--test-bash-cleanup-gate-path",
+            cleanup_gate,
+            "--test-model-cleanup-gate-path",
+            model_cleanup_gate,
+            "--test-phase-trace",
+            accelerated_retries=False,
+            active_capacity=5,
+        )
+        milestones = MilestoneLog(host)
+        configure(state, store, "reuse-config", "direct/reuse")
+        first_admission = fixture.message(
+            state, store, "reuse-first", "direct/reuse", "first work"
+        )
+        reuse_submitted = True
+        actions = fixture.wait_for(
+            lambda: actions_for(store, "direct/reuse", 2),
+            "two permission-blocked reused-Session Actions",
+        )
+        actions_by_ordinal = {action["call_ordinal"]: action for action in actions}
+        assert set(actions_by_ordinal) == {"0", "2"}, actions
+
+        queued_admission = fixture.message(
+            state,
+            store,
+            "reuse-queued",
+            "direct/reuse",
+            "queued during permission",
+        )
+        queued = fixture.observe(store, "reuse-queued")
+        assert queued["queue"]["status"] == "queued", queued
+        first_processing = fixture.observe(store, "reuse-first")["processing"]
+        report = fixture.command(
+            "inspect-session",
+            "--store",
+            store,
+            "--session",
+            "direct/reuse",
+            "--profile",
+            "full",
+        )
+        rejected = [
+            call for call in report["full"]["tool_calls"] if call["rejection"] is not None
+        ]
+        assert [(call["call_ordinal"], call["rejection"]) for call in rejected] == [
+            ("1", "unknown_tool"),
+            ("3", "invalid_arguments"),
+        ], report
+
+        slow_decision = allow(
+            state,
+            store,
+            "reuse-slow-allow",
+            "direct/reuse",
+            actions_by_ordinal["0"]["action"],
+        )
+        fixture.wait_for(
+            lambda: int(
+                fixture.command(
+                    "inspect-session", "--store", store, "--session", "direct/reuse"
+                )["execution"]["custody_occupied"]
+            )
+            >= 1,
+            "slow reused-Session Bash launch",
+        )
+        allow(
+            state,
+            store,
+            "reuse-fast-allow",
+            "direct/reuse",
+            actions_by_ordinal["2"]["action"],
+        )
+
+        def reverse_settlement():
+            unresolved = actions_for(store, "direct/reuse", 1)
+            return (
+                unresolved
+                if unresolved is not None and unresolved[0]["call_ordinal"] == "0"
+                else None
+            )
+
+        fixture.wait_for(reverse_settlement, "reverse sibling settlement")
+        reverse_rows = action_rows_by_id(store, "direct/reuse")
+        assert reverse_rows[actions_by_ordinal["2"]["action"]]["resolution"] == "succeeded", reverse_rows
+        assert reverse_rows[actions_by_ordinal["0"]["action"]]["resolution"] is None, reverse_rows
+        assert settlement_order.read_text() == "fast"
+        assert len(endpoint.requests) == 1, endpoint.requests
+        milestones.wait(
+            "cleanup_started",
+            action=str(actions_by_ordinal["2"]["action"]),
+        )
+        slow_release.touch()
+        first_completed = fixture.wait_for(
+            lambda: fixture.completed_observation(store, "reuse-first"),
+            "first reused-Session result",
+        )
+        queued_completed = fixture.wait_for(
+            lambda: fixture.completed_observation(store, "reuse-queued"),
+            "queued message progress without another submission",
+        )
+        assert queued_completed["processing"]["turn"] == first_processing["turn"], queued_completed
+        assert fixture.read_result(store, "reuse-first") == b"first-turn-answer"
+        assert fixture.read_result(store, "reuse-queued") == b"first-turn-answer"
+        assert settlement_order.read_text() == "fastslow"
+        settled_rows = action_rows_by_id(store, "direct/reuse")
+        assert int(
+            reverse_rows[actions_by_ordinal["2"]["action"]]["acceptance_position"]
+        ) < int(
+            settled_rows[actions_by_ordinal["0"]["action"]]["acceptance_position"]
+        ), settled_rows
+        first_continuation = json.loads(endpoint.requests[1])
+        continuation_outputs = [
+            item
+            for item in first_continuation["input"]
+            if item.get("type") == "function_call_output"
+        ]
+        output_by_call = {item["call_id"]: item["output"] for item in continuation_outputs}
+        assert list(output_by_call) == [
+            "reuse-slow-call",
+            "reuse-unknown-call",
+            "reuse-fast-call",
+            "reuse-invalid-call",
+        ], continuation_outputs
+        assert output_by_call["reuse-slow-call"].startswith(
+            "Bash failed. Exit code: 7.\n"
+        ), output_by_call
+        assert output_by_call["reuse-unknown-call"] == "Unknown tool: missing-tool."
+        assert output_by_call["reuse-fast-call"].startswith(
+            "Bash succeeded. Exit code: 0.\n"
+        ), output_by_call
+        assert output_by_call["reuse-invalid-call"] == "Invalid arguments for tool 'bash'."
+        first_semantic_input = [
+            ("user", item["content"][0]["text"])
+            if item.get("role") == "user"
+            else ("call", item["call_id"])
+            if item.get("type") == "function_call"
+            else ("output", item["call_id"])
+            for item in first_continuation["input"]
+            if item.get("role") == "user"
+            or item.get("type") in ("function_call", "function_call_output")
+        ]
+        assert first_semantic_input == [
+            ("user", "first work"),
+            ("call", "reuse-slow-call"),
+            ("call", "reuse-unknown-call"),
+            ("call", "reuse-fast-call"),
+            ("call", "reuse-invalid-call"),
+            ("output", "reuse-slow-call"),
+            ("output", "reuse-unknown-call"),
+            ("output", "reuse-fast-call"),
+            ("output", "reuse-invalid-call"),
+            ("user", "queued during permission"),
+        ], first_semantic_input
+        milestones.wait(
+            "cleanup_started",
+            action=str(actions_by_ordinal["0"]["action"]),
+        )
+        for action in actions_by_ordinal.values():
+            assert milestones.matching(
+                "cleanup_completed",
+                action=str(action["action"]),
+            ) == [], milestones.records
+        delayed = fixture.command(
+            "inspect-session", "--store", store, "--session", "direct/reuse"
+        )["execution"]
+        assert int(delayed["custody_occupied"]) >= len(actions_by_ordinal), delayed
+        assert int(delayed["scratch_used_bytes"]) > 0, delayed
+
+        fixture.message(
+            state,
+            store,
+            "reuse-second",
+            "direct/reuse",
+            "second ordinary turn",
+        )
+        fixture.wait_for(
+            lambda: len(endpoint.requests) == 3,
+            "second Turn provider request during delayed cleanup",
+        )
+        second_live = fixture.command(
+            "inspect-session", "--store", store, "--session", "direct/reuse"
+        )["execution"]
+        second_live_custody = int(second_live["custody_occupied"])
+        assert second_live_custody >= 2, second_live
+        second_processing = fixture.observe(store, "reuse-second")["processing"]
+        model_cleanup_gate.write_text("blocked")
+        retry_failure_release.set()
+        milestones.wait(
+            "cleanup_started",
+            operation=str(second_processing["operation"]),
+        )
+        time.sleep(retry_wait_ms / 1000 + 0.25)
+        retry_wait = fixture.observe(store, "reuse-second")
+        retry_execution = fixture.command(
+            "inspect-session", "--store", store, "--session", "direct/reuse"
+        )["execution"]
+        assert retry_wait["processing"] == second_processing, retry_wait
+        assert retry_wait["processing"]["attempt"] == "1", retry_wait
+        assert "result" not in retry_wait, retry_wait
+        assert len(endpoint.requests) == 3, endpoint.requests
+        assert int(retry_execution["custody_occupied"]) >= len(actions_by_ordinal) + 1
+        assert int(retry_execution["scratch_used_bytes"]) > 0
+        assert retry_execution["dispatch_fenced"] is False, retry_execution
+        assert second_processing["turn"] != first_processing["turn"], retry_wait
+        assert milestones.matching(
+            "cleanup_completed",
+            operation=str(second_processing["operation"]),
+            attempt="1",
+        ) == [], milestones.records
+        for action in actions_by_ordinal.values():
+            assert milestones.matching(
+                "cleanup_completed",
+                action=str(action["action"]),
+            ) == [], milestones.records
+        model_cleanup_gate.unlink()
+        model_release = milestones.wait(
+            "cleanup_release_observed",
+            operation=str(second_processing["operation"]),
+            attempt="1",
+        )[0]
+        model_completion = milestones.wait(
+            "cleanup_completed",
+            operation=str(second_processing["operation"]),
+            attempt="1",
+        )[0]
+        assert int(model_release["at_ns"]) <= int(model_completion["at_ns"])
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "reuse-second"),
+            "second reused-Session Turn",
+            timeout=15,
+        )
+        assert fixture.read_result(store, "reuse-second") == b"second-turn-answer"
+        assert len(endpoint.requests) == 4, endpoint.requests
+        initial_request = json.loads(endpoint.requests[0])
+        assert initial_request["input"] == [
+            {"role": "system", "content": [{"type": "input_text", "text": ""}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "first work"}]},
+        ], initial_request
+        second_request = json.loads(endpoint.requests[2])
+        second_semantic_input = [
+            ("user", item["content"][0]["text"])
+            if item.get("role") == "user"
+            else ("assistant", item["content"][0]["text"])
+            if item.get("role") == "assistant"
+            else ("call", item["call_id"])
+            if item.get("type") == "function_call"
+            else ("output", item["call_id"])
+            for item in second_request["input"]
+            if item.get("role") in ("user", "assistant")
+            or item.get("type") in ("function_call", "function_call_output")
+        ]
+        assert second_semantic_input == first_semantic_input + [
+            ("assistant", "first-turn-answer"),
+            ("user", "second ordinary turn"),
+        ], second_semantic_input
+        assert endpoint.requests[2] == endpoint.requests[3]
+
+        replayed_message = fixture.command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            state / "reuse-first.json",
+            "--kind",
+            "message",
+        )
+        expected_first_answer = dict(first_admission["answer"])
+        expected_first_answer["replayed"] = True
+        assert replayed_message["answer"] == expected_first_answer, replayed_message
+        assert fixture.observe(store, "reuse-first") == first_completed
+        replayed_queued = fixture.command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            state / "reuse-queued.json",
+            "--kind",
+            "message",
+        )
+        expected_queued_answer = dict(queued_admission["answer"])
+        expected_queued_answer["replayed"] = True
+        assert replayed_queued["answer"] == expected_queued_answer, replayed_queued
+        replayed_permission = fixture.command(
+            "retry",
+            "--store",
+            store,
+            "--record",
+            state / "reuse-slow-allow.json",
+            "--kind",
+            "permission-decision",
+        )
+        expected_permission_answer = dict(slow_decision["answer"])
+        expected_permission_answer["replayed"] = True
+        assert replayed_permission["answer"] == expected_permission_answer, replayed_permission
+        assert len(endpoint.requests) == 4, endpoint.requests
+        assert fixture.read_result(store, "reuse-first") == b"first-turn-answer"
+        assert fixture.read_result(store, "reuse-second") == b"second-turn-answer"
+        cleanup_gate.unlink()
+        for action in actions_by_ordinal.values():
+            released = milestones.wait(
+                "cleanup_release_observed",
+                action=str(action["action"]),
+                attempt="1",
+            )[0]
+            completed = milestones.wait(
+                "cleanup_completed",
+                action=str(action["action"]),
+                attempt="1",
+            )
+            assert len(completed) == 1, completed
+            assert int(released["at_ns"]) <= int(completed[0]["at_ns"])
+        fixture.wait_for(
+            lambda: execution_idle(store, "direct/reuse"),
+            "reused-Session delayed cleanup",
+            timeout=15,
+        )
+        for action in actions_by_ordinal.values():
+            assert len(
+                milestones.matching(
+                    "cleanup_completed",
+                    action=str(action["action"]),
+                    attempt="1",
+                )
+            ) == 1, milestones.records
+        assert fixture.read_result(store, "reuse-first") == b"first-turn-answer"
+        assert fixture.read_result(store, "reuse-second") == b"second-turn-answer"
+    finally:
+        active_failure = sys.exception()
+        retry_failure_release.set()
+        slow_release.touch(exist_ok=True)
+        cleanup_gate.unlink(missing_ok=True)
+        model_cleanup_gate.unlink(missing_ok=True)
+        if host is not None and reuse_submitted:
+            try:
+                fixture.wait_for(
+                    lambda: execution_idle(store, "direct/reuse"),
+                    "failed reused-Session fixture cleanup",
+                    timeout=5,
+                )
+            except Exception:
+                if active_failure is None:
+                    raise
+        if host is not None:
+            fixture.stop_host(host)
+        if milestones is not None:
+            milestones.close()
+        endpoint.shutdown()
+        endpoint.server_close()
+        endpoint_thread.join(timeout=5)
+
+
 def main():
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-bash."))
+    prove_reused_session(state)
     responses = []
     success_workspace = state / "success-workspace"
     success_workspace.mkdir()
@@ -764,6 +1200,7 @@ def main():
             "direct/stop",
         )
         assert stopped["answer"]["status"] == "accepted", stopped
+        assert stopped["completion"]["status"] == "pending", stopped
         fixture.wait_for(lambda: resolution(store, "direct/stop") == "cancelled", "cancelled Bash")
         fixture.stop_host(host)
         assert rows(store, "SELECT outcome_code FROM turn WHERE session_ref=?", ("direct/stop",)) == [

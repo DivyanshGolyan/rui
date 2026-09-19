@@ -866,6 +866,7 @@ def prove_sealed_interruption_and_cleanup(state):
         milestones.wait(
             "cleanup_completed", operation=processing["operation"], timeout=8
         )
+        assert observe(store, "sealed-message") == semantic
         after_cleanup = inspect_execution(store, "phase/sealed")
         assert after_cleanup["custody_occupied"] == "0", after_cleanup
         assert after_cleanup["dispatch_fenced"] is False, after_cleanup
@@ -1763,12 +1764,22 @@ def main():
             lambda: observe(store, "stop-message").get("processing"),
             "stop target",
         )
+        message(state, store, "stop-later-message", "direct/stop", "later queued input")
+        later_queued = observe(store, "stop-later-message")
+        assert later_queued["queue"]["status"] == "queued", later_queued
         active_stop = stop_session(state, store, "active-stop", "direct/stop")
         assert active_stop["answer"]["status"] == "accepted", active_stop
         assert active_stop["answer"]["selection"]["turn"] == stop_processing["turn"]
         wait_for(lambda: endpoint.counts()[1] >= 2, "stop transport cancellation")
         stopped_message = observe(store, "stop-message")
         assert stopped_message["result"]["status"] == "cancelled", stopped_message
+        excluded_later = observe(store, "stop-later-message")
+        assert excluded_later["queue"]["status"] == "excluded", excluded_later
+        assert excluded_later["result"] == {
+            "status": "cancelled",
+            "code": "session_stopped",
+        }, excluded_later
+        assert endpoint.counts()[0] == 2
 
         configure(state, store, "headroom-config", "direct/headroom")
         lost_stop_record = state / "lost-stop.json"
