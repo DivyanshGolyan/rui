@@ -24,7 +24,7 @@ func TestParseAndDeriveCompleteTrace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := deriveMetrics(events)
+	m := deriveMetrics(events, true)
 	if m.Status != "passed" || len(m.StopToEffectNS) != 1 || m.StopToEffectNS[0] != 40 || len(m.DeadlineToServiceNS) != 1 || m.DeadlineToServiceNS[0] != 50 {
 		t.Fatalf("metrics = %+v", m)
 	}
@@ -44,7 +44,7 @@ func TestMissingEventsInvalidateAffectedMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := deriveMetrics(events)
+	m := deriveMetrics(events, true)
 	if m.Status != "invalid" || len(m.Invalid) < 3 || m.MaxLifecycleServiceGapNS != nil || m.LargestUninterruptedNS != nil {
 		t.Fatalf("missing trace passed: %+v", m)
 	}
@@ -71,7 +71,7 @@ func TestPreparationAllowanceAndRequestRegressionInvalidateMetrics(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := deriveMetrics(events)
+	m := deriveMetrics(events, false)
 	if m.Status != "invalid" || !strings.Contains(strings.Join(m.Invalid, ","), "preparation_allowance_exceeded") || !strings.Contains(strings.Join(m.Invalid, ","), "request_bytes_regressed") {
 		t.Fatalf("invalid preparation work passed: %+v", m)
 	}

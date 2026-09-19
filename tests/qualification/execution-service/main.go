@@ -164,7 +164,7 @@ func subject(e traceEvent) string {
 	return "operation:" + e.Operation
 }
 
-func deriveMetrics(events []traceEvent) metrics {
+func deriveMetrics(events []traceEvent, requireDeadline bool) metrics {
 	m := metrics{Status: "passed", StopToEffectNS: []uint64{}, DeadlineToServiceNS: []uint64{}, Preparation: []interval{}, Validation: []interval{}, Settlement: []interval{}}
 	type start struct {
 		at    uint64
@@ -266,7 +266,7 @@ func deriveMetrics(events []traceEvent) metrics {
 	if len(m.StopToEffectNS) == 0 {
 		m.Invalid = append(m.Invalid, "stop_to_effect")
 	}
-	if len(m.DeadlineToServiceNS) == 0 {
+	if requireDeadline && len(m.DeadlineToServiceNS) == 0 {
 		m.Invalid = append(m.Invalid, "deadline_to_service")
 	}
 	if len(m.Invalid) > 0 {
@@ -538,13 +538,17 @@ func runScenario(binary, root string, s scenario) (result map[string]any, err er
 		events = finalOperationEvents(events, burst)
 	}
 	digest := sha256.Sum256(data)
-	m := deriveMetrics(events)
+	m := deriveMetrics(events, s.Bash)
 	slotBytes, slotErr := strconv.Atoi(host.Ready["execution_slot_bytes"])
 	preparationBytes, preparationErr := strconv.Atoi(host.Ready["model_preparation_bytes"])
 	if slotErr != nil || preparationErr != nil {
 		return nil, errors.Join(slotErr, preparationErr)
 	}
 	const precedingSlotBytes = 1264
+	bashEvidence := map[string]any{"status": "not_present", "reason": "this factorial case isolates another input dimension"}
+	if s.Bash {
+		bashEvidence = map[string]any{"status": "present", "path": "production provider Tool Call, public inspection and permission, native Bash owner, timeout action, and retained cleanup"}
+	}
 	return map[string]any{
 		"parameters": s, "status": m.Status, "metrics": m, "trace_events": len(events),
 		"trace_sha256": hex.EncodeToString(digest[:]),
@@ -554,7 +558,7 @@ func runScenario(binary, root string, s scenario) (result map[string]any, err er
 			"shared_preparation_workspace_bytes": preparationBytes,
 			"total_structural_change_bytes":      (slotBytes-precedingSlotBytes)*s.ActiveOwners + preparationBytes,
 		},
-		"unrelated_bash_owner": map[string]any{"status": "unavailable", "reason": "public CLI cannot independently admit an unrelated Bash Action without first deriving a provider Tool Call; fabricating durable rows would not be production-path authority"},
+		"unrelated_bash_owner": bashEvidence,
 	}, nil
 }
 
@@ -628,7 +632,7 @@ func main() {
 	if joined := errors.Join(pErr, rootErr); joined != nil {
 		provenanceError = joined.Error()
 	}
-	report := map[string]any{"format": "rui-execution-service-v1-go", "scope": "issues #238/#244/#245 production execution-service qualification", "status": status, "artifacts": root, "cases": rows, "provenance": provenance, "provenance_error": provenanceError, "source_sha256": sourceHashes, "structural_memory": map[string]any{"shared_preparation_owners": 1, "per_active_slot_preparation_window_bytes": 0, "payload_storage": "charged disk-backed scratch; selected history and replay bytes do not create a second resident payload queue", "calculation": "(execution slot size - preceding 1264-byte Linux x86-64 slot) * configured capacity + one readiness-reported shared Preparation workspace"}, "limits": []string{"deterministic loopback HTTP does not qualify a live provider", "unavailable metrics are invalid, never zero or passing", "monotonic Host traces are authority; client scheduling and polling are not", "Bash coexistence is explicitly unavailable through the public fixture path"}}
+	report := map[string]any{"format": "rui-execution-service-v1-go", "scope": "issues #238/#244/#245 production execution-service qualification", "status": status, "artifacts": root, "cases": rows, "provenance": provenance, "provenance_error": provenanceError, "source_sha256": sourceHashes, "structural_memory": map[string]any{"shared_preparation_owners": 1, "per_active_slot_preparation_window_bytes": 0, "payload_storage": "charged disk-backed scratch; selected history and replay bytes do not create a second resident payload queue", "calculation": "(execution slot size - preceding 1264-byte Linux x86-64 slot) * configured capacity + one readiness-reported shared Preparation workspace"}, "limits": []string{"deterministic loopback HTTP does not qualify a live provider", "unavailable metrics are invalid, never zero or passing", "monotonic Host traces are authority; client scheduling and polling are not", "only the mixed-bash case includes a Bash owner and deadline; factorial cases isolate their named input dimension"}}
 	if e := measurement.WriteJSON(*output, report); e != nil {
 		fmt.Fprintln(os.Stderr, e)
 		os.Exit(1)
