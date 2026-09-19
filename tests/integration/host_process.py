@@ -12,18 +12,21 @@ READINESS_LIMIT = 16 * 1024
 STDERR_TAIL_LIMIT = 16 * 1024
 
 
-class MilestoneLog:
-    """Collect test-only Host phase records without competing stderr readers."""
+class HostDiagnostics:
+    """Sole stderr owner: retain bounded diagnostics and parse Host milestones."""
 
     def __init__(self, process):
         self.process = process
         self.condition = threading.Condition()
         self.records = []
+        self.stderr_tail = bytearray()
         self.thread = threading.Thread(target=self._read, daemon=True)
         self.thread.start()
 
     def _read(self):
         for raw_line in self.process.stderr:
+            with self.condition:
+                _tail(self.stderr_tail, raw_line, STDERR_TAIL_LIMIT)
             try:
                 record = json.loads(raw_line)
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -64,7 +67,13 @@ class MilestoneLog:
                 self.condition.wait(remaining)
 
     def close(self):
-        self.thread.join(timeout=3)
+        assert self.process.poll() is not None, "Host diagnostics closed before process exit"
+        self.thread.join()
+        assert not self.thread.is_alive(), "Host stderr reader did not reach EOF"
+
+    def tail(self):
+        with self.condition:
+            return bytes(self.stderr_tail)
 
 
 class HostStartError(RuntimeError):

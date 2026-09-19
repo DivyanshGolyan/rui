@@ -73,6 +73,15 @@ pub fn build(b: *std.Build) void {
     );
     bash_lifecycle_integration_step.dependOn(&bash_lifecycle_integration.step);
 
+    const bash_recovery_integration = b.addSystemCommand(&.{"python3"});
+    bash_recovery_integration.addFileArg(b.path("tests/integration/bash_recovery_integration.py"));
+    bash_recovery_integration.addArtifactArg(release_safe);
+    const bash_recovery_integration_step = b.step(
+        "bash-recovery-integration",
+        "Run fresh-Host Bash recovery cuts for admitted and committed Actions",
+    );
+    bash_recovery_integration_step.dependOn(&bash_recovery_integration.step);
+
     const control_integration = b.addSystemCommand(&.{"python3"});
     control_integration.addFileArg(b.path("tests/integration/control_integration.py"));
     control_integration.addArtifactArg(release_safe);

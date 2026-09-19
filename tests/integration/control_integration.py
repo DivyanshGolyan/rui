@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 
-from host_process import MilestoneLog, start_ready_process, stop_process
+from host_process import HostDiagnostics, start_ready_process, stop_process
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -766,7 +766,7 @@ def prove_pre_handoff_stop(state):
             "3000",
             "--test-suppress-first-control-hint",
         )
-        milestones = MilestoneLog(process)
+        milestones = HostDiagnostics(process)
         configure(state, store, "pre-handoff-config", "phase/pre-handoff")
         message(
             state,
@@ -827,7 +827,7 @@ def prove_sealed_interruption_and_cleanup(state):
             "1500",
             "--test-suppress-first-control-hint",
         )
-        milestones = MilestoneLog(process)
+        milestones = HostDiagnostics(process)
         configure(state, store, "sealed-config", "phase/sealed")
         message(state, store, "sealed-message", "phase/sealed", "sealed race")
         wait_for(lambda: endpoint.count() == 1, "sealed provider request")
@@ -921,7 +921,7 @@ def prove_delivery_and_settlement_contention(
         if cleanup_delay_ms:
             extra += ["--test-cleanup-delay-ms", str(cleanup_delay_ms)]
         process, fields = start_host(store, url, *extra, active_capacity=CONTROL_HEADROOM)
-        milestones = MilestoneLog(process)
+        milestones = HostDiagnostics(process)
         resource_samples = {}
         if sample_host is not None:
             resource_samples["idle"] = sample_host(process.pid, "idle")
@@ -1098,7 +1098,7 @@ def prove_real_settlement_contention(
         if cleanup_delay_ms:
             extra += ["--test-cleanup-delay-ms", str(cleanup_delay_ms)]
         process, fields = start_host(store, url, *extra, active_capacity=1)
-        milestones = MilestoneLog(process)
+        milestones = HostDiagnostics(process)
         resource_samples = {}
         if sample_host is not None:
             resource_samples["idle"] = sample_host(process.pid, "idle")
@@ -1534,7 +1534,7 @@ def prove_retry_wait_control(state, kind):
             "--test-phase-trace",
             active_capacity=1,
         )
-        milestones = MilestoneLog(process)
+        milestones = HostDiagnostics(process)
         configure(state, store, f"retry-wait-{kind}-config", session)
         message(state, store, f"retry-wait-{kind}-message", session, "retry then control")
         wait_for(lambda: endpoint.count() == 1, f"{kind} temporary provider response")

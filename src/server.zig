@@ -78,6 +78,8 @@ pub const Faults = struct {
     report_unlink: bool = false,
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
+    test_transition: ?TestTransition = null,
+    test_transition_gate_path: ?[]const u8 = null,
     model_cleanup_gate_path: ?[]const u8 = null,
     bash_observed_exit_gate_path: ?[]const u8 = null,
     bash_cleanup_gate_path: ?[]const u8 = null,
@@ -87,6 +89,12 @@ pub const Faults = struct {
     sqlite_diagnostics: bool = false,
     sqlite_cache_spill: bool = true,
     sqlite_cache_kib: u32 = 4096,
+};
+
+const TestTransition = enum {
+    action_attempt_admitted,
+    action_result_ready,
+    action_result_committed,
 };
 
 const Host = struct {
@@ -606,6 +614,7 @@ fn admitBashAttempt(
         fenceDispatch(host, "Bash custody attachment", err);
         return .admitted;
     };
+    testTransition(host, .action_attempt_admitted, action_binding);
     const input = host.store.readBashExecutionInput(action_binding) catch |err| {
         settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be read.");
         finishCustodyNow(host, token);
@@ -819,6 +828,7 @@ fn completeBash(host: *Host, active: *BashSlot) void {
         traceAction(host, "sealed_before_settlement", binding);
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_result_delay_ms), .awake) catch {};
     }
+    testTransition(host, .action_result_ready, binding);
     if (host.custody.claimTerminalDelivery(token)) {
         const settlement = host.store.settleActionAttempt(binding, outcome.code, outcome.text(), .{
             .content_import = host.faults.content_import,
@@ -828,6 +838,7 @@ fn completeBash(host: *Host, active: *BashSlot) void {
             _ = failBash(host, active, "Bash result settlement", err);
             return;
         };
+        testTransition(host, .action_result_committed, binding);
         if (settlement == .session_stop) active.execution.releaseOutputReservation(host.retention);
     } else active.execution.releaseOutputReservation(host.retention);
     closeBashDelivery(host, active);
@@ -1586,6 +1597,12 @@ fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttem
         binding.attempt_ordinal,
     }) catch return;
     writeTestTrace(host, &trace);
+}
+
+fn testTransition(host: *Host, transition: TestTransition, binding: store_module.ActionAttemptBinding) void {
+    if (host.faults.test_transition != transition) return;
+    traceAction(host, @tagName(transition), binding);
+    waitAtTestGate(host, host.faults.test_transition_gate_path.?);
 }
 
 fn waitAtTestGate(host: *Host, path: []const u8) void {

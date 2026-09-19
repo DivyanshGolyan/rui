@@ -95,6 +95,11 @@ fn serve(io: std.Io, args: []const []const u8) !void {
             if (faults.client_send_buffer_bytes.? == 0 or faults.client_send_buffer_bytes.? > std.math.maxInt(c_int)) return error.InvalidClientSendBuffer;
         } else if (std.mem.eql(u8, arg, "--test-phase-trace")) {
             faults.test_phase_trace = true;
+        } else if (std.mem.eql(u8, arg, "--test-transition")) {
+            const transition = try takeValue(args, &index);
+            if (std.mem.eql(u8, transition, "action-attempt-admitted")) faults.test_transition = .action_attempt_admitted else if (std.mem.eql(u8, transition, "action-result-ready")) faults.test_transition = .action_result_ready else if (std.mem.eql(u8, transition, "action-result-committed")) faults.test_transition = .action_result_committed else return error.UnknownTestTransition;
+        } else if (std.mem.eql(u8, arg, "--test-transition-gate-path")) {
+            faults.test_transition_gate_path = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--test-model-cleanup-gate-path")) {
             faults.model_cleanup_gate_path = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--test-bash-observed-exit-gate-path")) {
@@ -120,6 +125,7 @@ fn serve(io: std.Io, args: []const []const u8) !void {
         index += 1;
     }
     if ((faults.control_gate_keys == null) != (faults.control_gate_path == null)) return error.IncompleteControlGate;
+    if ((faults.test_transition == null) != (faults.test_transition_gate_path == null)) return error.IncompleteTestTransitionGate;
     return server.serve(
         io,
         std.heap.c_allocator,

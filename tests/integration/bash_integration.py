@@ -15,7 +15,7 @@ import threading
 import time
 
 import dispatch_integration as fixture
-from host_process import MilestoneLog
+from host_process import HostDiagnostics
 
 
 def detached_shell(command):
@@ -270,7 +270,7 @@ def prove_reused_session(state):
             accelerated_retries=False,
             active_capacity=5,
         )
-        milestones = MilestoneLog(host)
+        milestones = HostDiagnostics(host)
         configure(state, store, "reuse-config", "direct/reuse")
         first_admission = fixture.message(
             state, store, "reuse-first", "direct/reuse", "first work"
@@ -821,7 +821,7 @@ def main():
             "--test-phase-trace",
             active_capacity=3,
         )
-        success_milestones = MilestoneLog(host)
+        success_milestones = HostDiagnostics(host)
         resource_samples.append({"phase": "cold", **process_resources(host), **scratch_resources(store)})
 
         fixture.configure_lost_reply(
