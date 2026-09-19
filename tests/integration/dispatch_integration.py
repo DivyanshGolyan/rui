@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-from host_process import MilestoneLog, start_ready_process, stop_process
+from host_process import HostDiagnostics, start_ready_process, stop_process
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -427,10 +427,16 @@ def stop_host(process):
     stop_process(process)
 
 
-def crash_host(process, state, label):
+def crash_host(process, state, label, diagnostics=None):
     assert process.poll() is None, process.returncode
     process.kill()
-    stdout, stderr = process.communicate(timeout=10)
+    process.wait(timeout=10)
+    stdout = process.stdout.read()
+    if diagnostics is None:
+        stderr = process.stderr.read()
+    else:
+        diagnostics.close()
+        stderr = diagnostics.tail()
     (state / f"{label}.stdout").write_bytes(stdout)
     (state / f"{label}.stderr").write_bytes(stderr)
     return {
@@ -689,7 +695,7 @@ def main():
             control_gate,
         )
         processes.append(proposal_host)
-        proposal_milestones = MilestoneLog(proposal_host)
+        proposal_milestones = HostDiagnostics(proposal_host)
         replay = command(
             "retry", "--store", proposal_store, "--record", state / "proposal-denial.json",
             "--kind", "permission-decision",
