@@ -1,5 +1,7 @@
 # Third-party notices
 
+This file lists runtime-linked dependencies and measurement-only components distributed or used with Rui. Versions and source hashes are pinned in `build.zig.zon`; measurement-only Go modules are pinned in `tests/qualification/go.mod`.
+
 ## gopsutil v4.26.7
 
 Only the opt-in Go measurement runners use gopsutil, for Host CPU, memory,

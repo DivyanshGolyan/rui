@@ -1,12 +1,12 @@
 # Rui
 
-Rui (रुई, Hindi for cotton) is a local runtime for coding-agent workflows. The goal: compose reusable conversations in JavaScript, let work continue after clients disconnect, and recover after crashes with bounded memory and temporary storage. Zig owns execution and recovery; SQLite stores durable state.
+Rui (रुई, Hindi for cotton) is a local runtime for coding-agent workflows. It keeps reusable conversations working after clients disconnect and recovers durable work after crashes with bounded memory and temporary storage. Zig owns execution and recovery; SQLite stores durable state.
 
 ## Status
 
-In development. The current runtime supports direct CLI Sessions, queued messages, text-model responses, retries, stops, exact model interruption, ordered Tool Call classification and authorized Bash execution. Trustworthy calls retain exact identities and arguments; valid Bash descriptors become inspectable Actions, while unknown tools and invalid descriptors become stable call-local rejections without execution authority. Exact keyed allow-once, saved bypass or denial decisions survive restart. Bash results include bounded combined excerpts and optional retained full-output paths; once every call has an outcome, core derives ordered Tool Results and continues the model Turn without another user message. Admitted Bash whose local custody is lost recovers as indeterminate and is never replayed automatically.
+Rui is in development. Today the direct CLI supports Sessions, queued messages, text-model responses, retries, stops, exact model interruption, ordered Tool Call classification and authorized Bash execution. Valid Bash descriptors become inspectable Actions; unknown tools and invalid descriptors become stable call-local rejections. Keyed permission decisions and admitted work survive restart. If an admitted Bash attempt loses local custody, Rui records an indeterminate result rather than replaying it automatically.
 
-JavaScript workflows, Edit, structured answers and provider authentication are not implemented yet. Bash process-group stopping cannot prove containment of detached descendants, and retained full output is optional spillover that FIFO eviction or restart may remove without changing the saved result. Codex subscription is the planned first live provider; live-provider, power-loss and complete 1,000-operation mixed qualification remain outstanding.
+JavaScript workflows, Edit, structured answers and provider authentication are not implemented. Bash process-group stopping cannot contain detached descendants. Retained full output is optional: FIFO eviction or restart may remove it without changing the saved result. Codex subscription is the planned first live provider; live-provider, power-loss and complete 1,000-operation mixed qualification remain outstanding.
 
 Targets Linux and macOS on x86-64 and ARM64. All four cross-compile. Broad runtime/resource qualification has run on Apple Silicon macOS. The model-queue workload has run on Linux and macOS; its macOS run passed the required physical-footprint target.
 
@@ -22,10 +22,20 @@ zig build check
 
 Model transport is disabled by default. Development testing requires an explicit `--provider-endpoint`: HTTPS or loopback HTTP, with no authentication attached. Run `./zig-out/bin/rui` to print command usage.
 
-## Documentation
+## Try the implemented development path
 
-- [Architecture](ARCHITECTURE.md): accepted behavior, scope and recovery rules.
-- [Verification](VERIFICATION.md): required checks and measurement setup.
-- [Current qualification](tests/qualification/README.md#current-checks-and-qualification): evidence and remaining limits.
-- [Research](research/README.md): design evidence and archived experiments.
-- [Working rules](AGENTS.md) and [dependency notices](THIRD_PARTY_NOTICES.md).
+Use the deterministic integration fixture as the runnable example of the current path: configure a Session, submit a message, inspect an Action, decide it, then observe the result.
+
+```sh
+zig build bash-integration
+```
+
+The fixture starts its own local Host and provider endpoint; it is a development test, not a live-provider quickstart. For direct exploration, use the commands printed by `./zig-out/bin/rui`: `serve`, `configure`, `message`, `inspect-session`, `allow-action` or `deny-action`, and `read-result`.
+
+## Read next
+
+- To explain ordinary work, recovery, ownership or resource policy, read [Architecture](ARCHITECTURE.md).
+- To change Session behavior or verify an implementation slice, find the owning behavior in Architecture and its required evidence in [Verification](VERIFICATION.md).
+- To run or interpret qualification, start with [current qualification](tests/qualification/README.md#current-checks-and-qualification); it records revision-specific observations and their limits.
+- To inspect design evidence or archived experiments, read [Research](research/README.md).
+- Contributors should follow [working rules](AGENTS.md); dependencies and notices live in [THIRD_PARTY_NOTICES.md].
