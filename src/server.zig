@@ -867,6 +867,7 @@ fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) b
             });
             return false;
         }
+        traceAction(host, "cleanup_release_observed", active.binding);
     }
     active.execution.reclaim(host.retention) catch |err| {
         const first_failure = !active.delivery.closed.reclaim_failed;
@@ -1377,6 +1378,7 @@ fn finishSlotCleanupIfReleased(
             });
             return;
         }
+        traceOperation(host, "cleanup_release_observed", slot.cleanup.owner.binding);
     }
     finishSlotCleanup(host, slot);
 }
@@ -1562,10 +1564,11 @@ fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptB
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{
         nowNs(host),
         binding.turn_id,
         binding.operation_id,
+        binding.attempt_ordinal,
     }) catch return;
     writeTestTrace(host, &trace);
 }
@@ -1575,11 +1578,12 @@ fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttem
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
-    trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\",\"attempt\":\"{d}\"}}", .{
         nowNs(host),
         binding.turn_id,
         binding.parent_operation_id,
         binding.action_id,
+        binding.attempt_ordinal,
     }) catch return;
     writeTestTrace(host, &trace);
 }
@@ -2337,7 +2341,10 @@ fn renderSessionStopReply(
         .infrastructure_failure => try response.append(",\"code\":\"canonical_store_failure\""),
     }
     try response.append("},\"completion\":{\"status\":\"");
-    try response.append(if (result == .accepted) "completed" else "unavailable");
+    switch (result) {
+        .accepted => |value| try response.append(@tagName(value.completion)),
+        .rejected, .conflict, .infrastructure_failure => try response.append("unavailable"),
+    }
     try response.append("\"}}");
 }
 
@@ -2934,7 +2941,22 @@ test "control response variants fit exact worst-case JSON bounds" {
             .selected_turn_id = std.math.maxInt(u64),
             .admission_cutoff = std.math.maxInt(u64),
         },
+        .completion = .completed,
     } }, protocol.max_session_stop_accepted_reply_bytes);
+    var pending_response: protocol.ResponseBuffer = .{};
+    try renderSessionStopReply(&pending_response, &stop_command, .{ .accepted = .{
+        .replayed = false,
+        .selection = .{
+            .selected_turn_id = std.math.maxInt(u64),
+            .admission_cutoff = std.math.maxInt(u64),
+        },
+        .completion = .pending,
+    } });
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        pending_response.slice(),
+        "\"completion\":{\"status\":\"pending\"}}",
+    ));
     try Cases.expectStop(&stop_command, .{ .rejected = .{
         .replayed = false,
         .code = .invalid_session_reference,

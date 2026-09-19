@@ -188,9 +188,11 @@ pub const SessionStopSelection = struct {
     admission_cutoff: u64,
 };
 
+pub const SessionStopCompletion = enum { pending, completed };
+
 pub const SessionStopObservation = struct {
     selection: SessionStopSelection,
-    completion: enum { pending, completed },
+    completion: SessionStopCompletion,
 };
 
 pub const ModelInterruptionTarget = struct {
@@ -205,6 +207,7 @@ pub const SessionStopReply = union(enum) {
     accepted: struct {
         replayed: bool,
         selection: SessionStopSelection,
+        completion: SessionStopCompletion,
         interrupted_operation_id: ?u64 = null,
     },
     rejected: struct { replayed: bool, code: SessionStopRejection },
@@ -1752,6 +1755,7 @@ pub const Store = struct {
             return .{ .accepted = .{
                 .replayed = true,
                 .selection = selection,
+                .completion = try self.sessionStopCompletion(selection),
                 .interrupted_operation_id = try self.readInterruptedOperation(command.key.slice()),
             } };
         }
@@ -1848,14 +1852,17 @@ pub const Store = struct {
             try self.updateSession(command.session.slice(), &current);
             try self.completeStoppedTurnIfReady(turn_id);
         }
+        const selection = SessionStopSelection{
+            .selected_turn_id = selected_turn_id,
+            .admission_cutoff = @intCast(cutoff_value),
+        };
+        const completion = try self.sessionStopCompletion(selection);
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
         return .{ .accepted = .{
             .replayed = false,
-            .selection = .{
-                .selected_turn_id = selected_turn_id,
-                .admission_cutoff = @intCast(cutoff_value),
-            },
+            .selection = selection,
+            .completion = completion,
             .interrupted_operation_id = interrupted_operation_id,
         } };
     }
@@ -2221,13 +2228,8 @@ pub const Store = struct {
                 return self.fenceReadFailure(err);
             observation.session_stop = .{
                 .selection = selection,
-                .completion = if (selection.selected_turn_id) |turn_id|
-                    if (self.turnIsComplete(turn_id) catch |err| return self.fenceReadFailure(err))
-                        .completed
-                    else
-                        .pending
-                else
-                    .completed,
+                .completion = self.sessionStopCompletion(selection) catch |err|
+                    return self.fenceReadFailure(err),
             };
         } else if (command.kind == .model_interruption) {
             observation.model_interruption = self.readModelInterruptionTarget(key) catch |err|
@@ -5272,6 +5274,11 @@ pub const Store = struct {
         return c.sqlite3_column_type(statement, 0) != c.SQLITE_NULL;
     }
 
+    fn sessionStopCompletion(self: *Store, selection: SessionStopSelection) !SessionStopCompletion {
+        const turn_id = selection.selected_turn_id orelse return .completed;
+        return if (try self.turnIsComplete(turn_id)) .completed else .pending;
+    }
+
     fn readSession(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
         const statement = try prepare(self.database, "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position FROM session WHERE session_ref=?1");
         defer _ = c.sqlite3_finalize(statement);
@@ -6812,7 +6819,9 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     try expectContent(&storage, try storage.actionArguments("direct/actions", second_action_id), "{\"cmd\":\"two\",\"timeout_ms\":null}");
 
     var stop = try completeSessionStop("action-stop", "direct/actions");
-    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    const action_stop = storage.stopSession(&stop, .{});
+    try std.testing.expect(action_stop == .accepted);
+    try std.testing.expectEqual(SessionStopCompletion.completed, action_stop.accepted.completion);
     var stale: protocol.PermissionDecisionCommand = .{ .action_id = second_action_id };
     try stale.key.set("stale-denial");
     try stale.session.set("direct/actions");
@@ -6894,11 +6903,25 @@ test "Action settlement atomically yields to an earlier Session stop" {
     const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
 
     var stop = try completeSessionStop("settlement-stop", "direct/settlement-stop");
-    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    const pending_stop = storage.stopSession(&stop, .{});
+    try std.testing.expect(pending_stop == .accepted);
+    try std.testing.expectEqual(SessionStopCompletion.pending, pending_stop.accepted.completion);
+    try std.testing.expectEqual(
+        SessionStopCompletion.pending,
+        (try storage.observeCommand("settlement-stop")).session_stop.?.completion,
+    );
     try std.testing.expectEqual(
         ActionSettlement.session_stop,
         try storage.settleActionAttempt(action_binding, .succeeded, "Bash succeeded.", .{}),
     );
+    try std.testing.expectEqual(
+        SessionStopCompletion.completed,
+        (try storage.observeCommand("settlement-stop")).session_stop.?.completion,
+    );
+    const completed_replay = storage.stopSession(&stop, .{});
+    try std.testing.expect(completed_replay == .accepted);
+    try std.testing.expect(completed_replay.accepted.replayed);
+    try std.testing.expectEqual(SessionStopCompletion.completed, completed_replay.accepted.completion);
 
     try std.testing.expectEqual(@as(u64, 1), try queryU64(
         storage.database,
@@ -7905,6 +7928,7 @@ test "Session stop freezes its selection and excludes only the admitted prefix" 
     const accepted = storage.stopSession(&stop, .{});
     try std.testing.expect(accepted == .accepted);
     try std.testing.expect(!accepted.accepted.replayed);
+    try std.testing.expectEqual(SessionStopCompletion.completed, accepted.accepted.completion);
     try std.testing.expectEqual(binding.turn_id, accepted.accepted.selection.selected_turn_id.?);
     try std.testing.expectEqual(@as(u64, 1), accepted.accepted.selection.admission_cutoff);
     try std.testing.expectEqual(binding.operation_id, accepted.accepted.interrupted_operation_id.?);
@@ -7937,6 +7961,7 @@ test "Session stop freezes its selection and excludes only the admitted prefix" 
     const replay = storage.stopSession(&stop, .{});
     try std.testing.expect(replay == .accepted);
     try std.testing.expect(replay.accepted.replayed);
+    try std.testing.expectEqual(SessionStopCompletion.completed, replay.accepted.completion);
     try std.testing.expectEqual(@as(u64, 1), replay.accepted.selection.admission_cutoff);
     try std.testing.expect((try storage.observeCommand("message-b")).message.?.queue.?.state == .queued);
     const later = (try storage.admitNextModelAttempt(.{})).?;
@@ -7962,6 +7987,7 @@ test "later idle stop does not reclassify a completed Message" {
     const accepted = storage.stopSession(&stop, .{});
     try std.testing.expect(accepted == .accepted);
     try std.testing.expect(accepted.accepted.selection.selected_turn_id == null);
+    try std.testing.expectEqual(SessionStopCompletion.completed, accepted.accepted.completion);
     try std.testing.expect((try storage.observeCommand("completed-stop-message")).message.?.queue.?.state == .completed);
 
     const report = try testingSessionReportWithProfile(&storage, &tmp, "direct/completed-stop", 1024 * 1024, .full);
@@ -7987,6 +8013,7 @@ test "idle Session stop excludes queued work but not later admissions" {
     try std.testing.expect(accepted == .accepted);
     try std.testing.expectEqual(@as(?u64, null), accepted.accepted.selection.selected_turn_id);
     try std.testing.expectEqual(@as(u64, 1), accepted.accepted.selection.admission_cutoff);
+    try std.testing.expectEqual(SessionStopCompletion.completed, accepted.accepted.completion);
     const excluded = (try storage.observeCommand("idle-message-a")).message.?.queue.?;
     try std.testing.expect(excluded.state == .excluded);
     try std.testing.expectEqualStrings("session_stopped", excluded.state.excluded.code.slice());
