@@ -621,10 +621,11 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		}
 		return nil
 	}
-	// Preparation keeps a long-lived Bash owner through occupancy. Completion
-	// launches that owner after the backlog is visible, with a 1 ms Action
-	// timeout, so setup cost cannot consume the clock.
-	if s.Mode != "completion" {
+	// Preparation and small-backlog completion keep a long-lived Bash owner
+	// through occupancy. Due-deadline overlap launches that owner after stop
+	// has entered the backlog window, with a 1 ms Action timeout, so setup
+	// cost cannot consume the clock and Bash admission cannot delay the stop.
+	if !s.RequireDeadline {
 		if err = startBash(nil); err != nil {
 			return row, err
 		}
@@ -662,7 +663,7 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		owners = append(owners, workIDs...)
 	}
 	occupied := s.Capacity
-	if s.Mode == "preparation" || s.Mode == "completion" {
+	if s.Mode == "preparation" || s.RequireDeadline {
 		occupied--
 	}
 	if s.Mode == "preparation" {
@@ -709,10 +710,6 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		if err != nil {
 			return row, invalid(err)
 		}
-		timeoutMs := 1
-		if err = startBash(&timeoutMs); err != nil {
-			return row, err
-		}
 	}
 	if err = stopSessionDirect(c, host, host.Ready["socket"], "stop-during-work", "execution/stop"); err != nil {
 		return row, err
@@ -721,6 +718,12 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		return e.Phase == "effect_stop_requested" && e.ControlKey == "stop-during-work" && e.executionID == stopID
 	}); err != nil {
 		return row, invalid(err)
+	}
+	if s.RequireDeadline {
+		timeoutMs := 1
+		if err = startBash(&timeoutMs); err != nil {
+			return row, err
+		}
 	}
 	ep.fire("work")
 	for _, key := range workKeys {
