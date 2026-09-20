@@ -461,16 +461,7 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	defer ep.close()
 	store := filepath.Join(dir, "store")
 	tracePath := filepath.Join(dir, "host-stderr.log")
-	bashTimeout := "600000"
-	if s.Mode == "completion" {
-		// The fixed blocker below finishes before this deadline, leaving the
-		// deadline to become due while the measured completion burst drains.
-		bashTimeout = "540"
-		if s.Burst == 2 {
-			bashTimeout = "470"
-		}
-	}
-	host, err := measurement.StartHost(binary, store, ep.URL(), s.Capacity, tracePath, d, "--test-execution-service-boundaries", "--bash-timeout-ms", bashTimeout)
+	host, err := measurement.StartHost(binary, store, ep.URL(), s.Capacity, tracePath, d, "--test-execution-service-boundaries", "--bash-timeout-ms", "600000")
 	if err != nil {
 		return nil, err
 	}
@@ -602,28 +593,41 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		}
 	}
 	var blockerID executionID
-
-	ep.add("bash-owner", &requestPlan{Response: bashSSE()})
-	if s.Mode == "completion" {
-		payload, _ := answerSSE("bash-final", "bash-final-ok", 64, 64)
-		ep.add("bash-owner", &requestPlan{Response: payload, BashContinuation: true})
-	}
+	var action string
+	var bashStart traceEvent
 	if err = c.Configure("bash-config", "execution/bash", "--tools", "bash"); err != nil {
 		return row, err
 	}
-	if err = c.Message("bash-message", "execution/bash", "bash-owner"); err != nil {
-		return row, err
+	startBash := func(timeoutMs *int) error {
+		ep.add("bash-owner", &requestPlan{Response: bashSSE(timeoutMs)})
+		if s.Mode == "completion" {
+			payload, _ := answerSSE("bash-final", "bash-final-ok", 64, 64)
+			ep.add("bash-owner", &requestPlan{Response: payload, BashContinuation: true})
+		}
+		if e := c.Message("bash-message", "execution/bash", "bash-owner"); e != nil {
+			return e
+		}
+		var waitErr error
+		action, waitErr = c.WaitAction("execution/bash")
+		if waitErr != nil {
+			return waitErr
+		}
+		if e := c.AllowAction("bash-allow", "execution/bash", action); e != nil {
+			return e
+		}
+		bashStart, waitErr = waitEvent(tracePath, d, func(e traceEvent) bool { return e.Phase == "bash_handoff_committed" && e.Action == action })
+		if waitErr != nil {
+			return invalid(waitErr)
+		}
+		return nil
 	}
-	action, e := c.WaitAction("execution/bash")
-	if e != nil {
-		return row, e
-	}
-	if err = c.AllowAction("bash-allow", "execution/bash", action); err != nil {
-		return row, err
-	}
-	bashStart, e := waitEvent(tracePath, d, func(e traceEvent) bool { return e.Phase == "bash_handoff_committed" && e.Action == action })
-	if e != nil {
-		return row, invalid(e)
+	// Preparation keeps a long-lived Bash owner through occupancy. Completion
+	// launches that owner after the backlog is visible, with a 1 ms Action
+	// timeout, so setup cost cannot consume the clock.
+	if s.Mode != "completion" {
+		if err = startBash(nil); err != nil {
+			return row, err
+		}
 	}
 	if s.Mode == "completion" {
 		blockerText := "completion-readiness-blocker"
@@ -648,13 +652,21 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	}
 
 	var target executionID
-	owners := append([]executionID{stopID, bashStart.executionID}, fillerIDs...)
+	owners := []executionID{stopID}
+	if bashStart.executionID.valid() {
+		owners = append(owners, bashStart.executionID)
+	}
+	owners = append(owners, fillerIDs...)
 	if s.Mode == "completion" {
 		owners = append(owners, blockerID)
 		owners = append(owners, workIDs...)
 	}
+	occupied := s.Capacity
+	if s.Mode == "preparation" || s.Mode == "completion" {
+		occupied--
+	}
 	if s.Mode == "preparation" {
-		if err = awaitOccupied(c, s.Capacity-1, owners, tracePath); err != nil {
+		if err = awaitOccupied(c, occupied, owners, tracePath); err != nil {
 			return row, err
 		}
 		recent, readErr := readRecentEvents(tracePath)
@@ -683,7 +695,7 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		// initialization and subsequent advances, and proveOverlap rejects a
 		// late acceptance.
 	} else {
-		if err = awaitOccupied(c, s.Capacity, owners, tracePath); err != nil {
+		if err = awaitOccupied(c, occupied, owners, tracePath); err != nil {
 			return row, err
 		}
 		ep.fire("work")
@@ -691,11 +703,15 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		for _, id := range workIDs {
 			selected[id] = true
 		}
-		_, err = waitEvent(tracePath, measurement.NewDeadline(10*time.Second), func(e traceEvent) bool {
+		_, err = waitEvent(tracePath, d, func(e traceEvent) bool {
 			return selected[e.executionID] && e.Phase == "provider_completion_removed" && e.QueuedAfter > 0
 		})
 		if err != nil {
 			return row, invalid(err)
+		}
+		timeoutMs := 1
+		if err = startBash(&timeoutMs); err != nil {
+			return row, err
 		}
 	}
 	if err = stopSessionDirect(c, host, host.Ready["socket"], "stop-during-work", "execution/stop"); err != nil {
@@ -831,7 +847,15 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 			bashCleanup = event.At
 		}
 	}
-	if bashStart.At > proof.WorkStartNS || bashCleanup == 0 || (s.Mode == "preparation" && bashCleanup < proof.WorkEndNS) {
+	if bashStart.At == 0 || bashCleanup == 0 {
+		m.Status = "invalid"
+		m.Invalid = append(m.Invalid, "Bash owner did not span the measured pressure")
+	} else if s.RequireDeadline {
+		if bashStart.At >= proof.WorkEndNS || bashCleanup <= proof.WorkStartNS {
+			m.Status = "invalid"
+			m.Invalid = append(m.Invalid, "Bash owner did not span the measured pressure")
+		}
+	} else if bashStart.At > proof.WorkStartNS || (s.Mode == "preparation" && bashCleanup < proof.WorkEndNS) {
 		m.Status = "invalid"
 		m.Invalid = append(m.Invalid, "Bash owner did not span the measured pressure")
 	}

@@ -255,6 +255,44 @@ func TestCompletionOverlapWithoutDeadlineIsSchedulingOnly(t *testing.T) {
 	}
 }
 
+func TestDeadlineServicedBeforeBacklogIsNotOverlap(t *testing.T) {
+	id := executionID{Run: "1", Process: "2", Clock: "awake_ns", Turn: "3", Operation: "4", Attempt: "1"}
+	bash := id
+	bash.Operation = "2"
+	events := []traceEvent{
+		{executionID: bash, Phase: "bash_deadline_established", At: 1, Deadline: 5},
+		{executionID: bash, Phase: "bash_deadline_serviced", At: 6, Deadline: 5},
+		{executionID: id, Phase: "provider_completion_removed", At: 10, QueuedAfter: 1},
+		{Phase: "control_durable_acceptance", Subject: "stop", At: 12},
+		{Phase: "effect_stop_requested", ControlKey: "stop", At: 14},
+		{executionID: id, Phase: "provider_completion_serviced", At: 20},
+	}
+	if _, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, true); e == nil {
+		t.Fatal("deadline serviced before backlog accepted as overlap")
+	}
+}
+
+func TestDeadlineDueDuringBacklogIsOverlap(t *testing.T) {
+	id := executionID{Run: "1", Process: "2", Clock: "awake_ns", Turn: "3", Operation: "4", Attempt: "1"}
+	bash := id
+	bash.Operation = "2"
+	events := []traceEvent{
+		{executionID: bash, Phase: "bash_deadline_established", At: 9, Deadline: 15},
+		{executionID: id, Phase: "provider_completion_removed", At: 10, QueuedAfter: 1},
+		{Phase: "control_durable_acceptance", Subject: "stop", At: 12},
+		{Phase: "effect_stop_requested", ControlKey: "stop", At: 14},
+		{executionID: bash, Phase: "bash_deadline_serviced", At: 16, Deadline: 15},
+		{executionID: id, Phase: "provider_completion_serviced", At: 20},
+	}
+	proof, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, true)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if proof.DeadlineDueNS != 15 || proof.DeadlineServicedNS != 16 {
+		t.Fatalf("wrong deadline overlap: %+v", proof)
+	}
+}
+
 func TestOverlapCannotUseIdleStopOrUnrelatedCompletion(t *testing.T) {
 	id := executionID{Run: "1", Process: "2", Clock: "awake_ns", Turn: "3", Operation: "4", Attempt: "1"}
 	other := id
@@ -321,6 +359,16 @@ func TestProviderAuditRejectsCorruptionAndDuplicateRequests(t *testing.T) {
 		ep.close()
 	}
 }
+func TestBashSSEEncodesActionTimeout(t *testing.T) {
+	if !bytes.Contains(bashSSE(nil), []byte(`"arguments":"{\"cmd\":\"sleep 300\",\"timeout_ms\":null}"`)) {
+		t.Fatal("default Bash timeout was not encoded as null")
+	}
+	timeoutMs := 1
+	if !bytes.Contains(bashSSE(&timeoutMs), []byte(`"arguments":"{\"cmd\":\"sleep 300\",\"timeout_ms\":1}"`)) {
+		t.Fatal("Action timeout override was not encoded")
+	}
+}
+
 func TestReplayExpectationRemovesOnlyTopLevelCreatedBy(t *testing.T) {
 	response, replay := answerSSE("test", "ok", 16, 32)
 	if !bytes.Contains(response, []byte(`"created_by"`)) {
