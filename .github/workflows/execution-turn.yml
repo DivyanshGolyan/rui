@@ -1,0 +1,31 @@
+name: Execution turn validation
+on:
+  push:
+    branches: [codex/267-testable-execution-turn]
+permissions:
+  contents: read
+jobs:
+  workspace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned compiler and dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --output=source.tar.gz HEAD
+          curl --fail --location --silent --show-error https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz --output=zig.tar.xz
+          echo '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  zig.tar.xz' | sha256sum --check
+          tar -xJf zig.tar.xz
+          ./zig-x86_64-linux-0.16.0/zig build --global-cache-dir "$PWD/dependency-cache" --fetch=all
+          tar -czf dependencies.tar.gz -C dependency-cache p
+      - uses: actions/upload-artifact@v4
+        with:
+          name: execution-turn-workspace
+          retention-days: 1
+          compression-level: 0
+          path: |
+            source.tar.gz
+            zig.tar.xz
+            dependencies.tar.gz
