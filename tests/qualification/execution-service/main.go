@@ -19,15 +19,16 @@ import (
 )
 
 type scenario struct {
-	Name           string `json:"name"`
-	Mode           string `json:"mode"`
-	Capacity       int    `json:"active_capacity"`
-	Burst          int    `json:"completion_burst"`
-	HistoryBytes   int    `json:"history_bytes"`
-	HistoryTurns   int    `json:"history_turns"`
-	RetainedBytes  int    `json:"retained_field_bytes"`
-	DiscardedBytes int    `json:"discarded_field_bytes"`
-	ResponseBytes  int    `json:"response_retained_field_bytes"`
+	Name            string `json:"name"`
+	Mode            string `json:"mode"`
+	Capacity        int    `json:"active_capacity"`
+	Burst           int    `json:"completion_burst"`
+	HistoryBytes    int    `json:"history_bytes"`
+	HistoryTurns    int    `json:"history_turns"`
+	RetainedBytes   int    `json:"retained_field_bytes"`
+	DiscardedBytes  int    `json:"discarded_field_bytes"`
+	ResponseBytes   int    `json:"response_retained_field_bytes"`
+	RequireDeadline bool   `json:"require_deadline_overlap"`
 }
 
 type invalidEvidence struct{ reason string }
@@ -294,14 +295,25 @@ func expectCancelled(c measurement.Client, key string) error {
 	}
 	return nil
 }
-func stopSessionDirect(c measurement.Client, socket, key, session string) error {
-	request := struct {
-		Version string `json:"version"`
-		Kind    string `json:"kind"`
-		Store   string `json:"store"`
-		Key     string `json:"key"`
-		Session string `json:"session"`
-	}{"1", "session_stop", c.Store, key, session}
+
+type sessionStopUnixRequest struct {
+	Version string `json:"version"`
+	Kind    string `json:"kind"`
+	Store   string `json:"store"`
+	Key     string `json:"key"`
+	Session string `json:"session"`
+}
+
+func sessionStopUnixValue(store, key, session string) sessionStopUnixRequest {
+	return sessionStopUnixRequest{"1", "session_stop", store, key, session}
+}
+
+func stopSessionDirect(c measurement.Client, host *measurement.Host, socket, key, session string) error {
+	store, err := host.CanonicalStore()
+	if err != nil {
+		return err
+	}
+	request := sessionStopUnixValue(store, key, session)
 	var reply map[string]any
 	if err := measurement.ExchangeUnix(c.Deadline, socket, "/v1/control/session-stop", request, &reply); err != nil {
 		return err
@@ -326,14 +338,64 @@ func waitPrimed(ep *endpoint, text string, d measurement.Deadline) error {
 		return ep.isPrimed(text), nil
 	})
 }
-func expectOccupied(c measurement.Client, session string, n int) error {
-	v, e := c.Inspect(session)
-	if e != nil {
-		return e
+func inspectWorkInFlight(v map[string]any) bool {
+	status, ok := measurement.StringField(v, "work", "status")
+	return ok && status == "in_flight"
+}
+
+func ownerStillHeld(events []traceEvent, id executionID) bool {
+	live := false
+	for _, event := range events {
+		if event.executionID != id {
+			continue
+		}
+		switch event.Phase {
+		case "transport_handoff_committed", "bash_handoff_committed":
+			live = true
+		case "cleanup_completed", "provider_completion_serviced":
+			live = false
+		}
 	}
-	occupied, ok := measurement.IntStringField(v, "execution", "custody_occupied")
-	if !ok || occupied != uint64(n) {
-		return invalidEvidence{fmt.Sprintf("required occupied population %d was not observed: %v", n, v)}
+	return live
+}
+
+func awaitOccupied(c measurement.Client, n int, owners []executionID, tracePath string) error {
+	var last map[string]any
+	err := measurement.WaitFor(c.Deadline, time.Millisecond, fmt.Sprintf("occupied population %d", n), func() (bool, error) {
+		v, e := c.Inspect("execution/stop")
+		if e != nil {
+			return false, e
+		}
+		last = v
+		occupied, ok := measurement.IntStringField(v, "execution", "custody_occupied")
+		if !ok {
+			return false, errors.New("missing resource observation")
+		}
+		if occupied != uint64(n) {
+			return false, nil
+		}
+		if !inspectWorkInFlight(v) {
+			return false, invalidEvidence{fmt.Sprintf("occupied %d without live stop-target work: %v", n, v)}
+		}
+		events, e := readRecentEvents(tracePath)
+		if e != nil {
+			return false, e
+		}
+		for _, id := range owners {
+			if !ownerStillHeld(events, id) {
+				return false, invalidEvidence{fmt.Sprintf("occupied %d after controlled owner %v left: %v", n, id, v)}
+			}
+		}
+		return true, nil
+	})
+	if err != nil {
+		if _, ok := err.(invalidEvidence); ok {
+			return err
+		}
+		if last != nil {
+			return invalidEvidence{fmt.Sprintf("required occupied population %d was not observed: %v", n, last)}
+		}
+		return err
 	}
 	return nil
 }
@@ -477,6 +539,7 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	if fillers < 0 {
 		return row, errors.New("scenario exceeds active capacity")
 	}
+	fillerIDs := []executionID{}
 	for i := 0; i < fillers; i++ {
 		text := fmt.Sprintf("filler-%d", i)
 		payload, _ := answerSSE(text, "filler-ok", 64, 64)
@@ -487,6 +550,11 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		if err = waitCount(ep, text, 1, d); err != nil {
 			return row, err
 		}
+		id, e := observeID(c, text, tracePath)
+		if e != nil {
+			return row, e
+		}
+		fillerIDs = append(fillerIDs, id)
 	}
 
 	workIDs := []executionID{}
@@ -580,8 +648,13 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	}
 
 	var target executionID
+	owners := append([]executionID{stopID, bashStart.executionID}, fillerIDs...)
+	if s.Mode == "completion" {
+		owners = append(owners, blockerID)
+		owners = append(owners, workIDs...)
+	}
 	if s.Mode == "preparation" {
-		if err = expectOccupied(c, "execution/stop", s.Capacity-1); err != nil {
+		if err = awaitOccupied(c, s.Capacity-1, owners, tracePath); err != nil {
 			return row, err
 		}
 		recent, readErr := readRecentEvents(tracePath)
@@ -610,7 +683,7 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		// initialization and subsequent advances, and proveOverlap rejects a
 		// late acceptance.
 	} else {
-		if err = expectOccupied(c, "execution/stop", s.Capacity); err != nil {
+		if err = awaitOccupied(c, s.Capacity, owners, tracePath); err != nil {
 			return row, err
 		}
 		ep.fire("work")
@@ -625,7 +698,7 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 			return row, invalid(err)
 		}
 	}
-	if err = stopSessionDirect(c, host.Ready["socket"], "stop-during-work", "execution/stop"); err != nil {
+	if err = stopSessionDirect(c, host, host.Ready["socket"], "stop-during-work", "execution/stop"); err != nil {
 		return row, err
 	}
 	if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
@@ -742,8 +815,8 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		return row, invalid(errors.New("trace commitment is absent from final collection"))
 	}
 	events = committed
-	m := deriveMetrics(events, s.Mode == "completion")
-	proof, e := proveOverlap(events, s.Mode, "stop-during-work", target, workIDs, s.Mode == "completion")
+	m := deriveMetrics(events, s.RequireDeadline)
+	proof, e := proveOverlap(events, s.Mode, "stop-during-work", target, workIDs, s.RequireDeadline)
 	if e != nil {
 		m.Status = "invalid"
 		m.Invalid = append(m.Invalid, e.Error())
@@ -805,16 +878,16 @@ func main() {
 	}
 	const mib = 1024 * 1024
 	scenarios := []scenario{
-		{"history-8m", "preparation", 10, 1, 8 * mib, 1, 64, 64, 64},
-		{"history-32m", "preparation", 10, 1, 32 * mib, 1, 64, 64, 64},
-		{"history-items", "preparation", 10, 1, 8 * mib, 64, 64, 64, 64},
-		{"retained-4m", "preparation", 10, 1, 1024, 1, 4 * mib, 64, 64},
-		{"retained-32m", "preparation", 10, 1, 1024, 1, 32 * mib, 64, 64},
-		{"discarded-4m", "preparation", 10, 1, 1024, 1, 64, 4 * mib, 64},
-		{"discarded-32m", "preparation", 10, 1, 1024, 1, 64, 32 * mib, 64},
-		{"completion-2", "completion", 11, 2, 1024, 1, 64, 64, 512 * 1024},
-		{"completion-8", "completion", 11, 8, 1024, 1, 64, 64, 512 * 1024},
-		{"active-4", "preparation", 4, 1, 4 * mib, 1, 64, 64, 64},
+		{"history-8m", "preparation", 10, 1, 8 * mib, 1, 64, 64, 64, false},
+		{"history-32m", "preparation", 10, 1, 32 * mib, 1, 64, 64, 64, false},
+		{"history-items", "preparation", 10, 1, 8 * mib, 64, 64, 64, 64, false},
+		{"retained-4m", "preparation", 10, 1, 1024, 1, 4 * mib, 64, 64, false},
+		{"retained-32m", "preparation", 10, 1, 1024, 1, 32 * mib, 64, 64, false},
+		{"discarded-4m", "preparation", 10, 1, 1024, 1, 64, 4 * mib, 64, false},
+		{"discarded-32m", "preparation", 10, 1, 1024, 1, 64, 32 * mib, 64, false},
+		{"completion-2", "completion", 11, 2, 1024, 1, 64, 64, 512 * 1024, false},
+		{"completion-8", "completion", 11, 8, 1024, 1, 64, 64, 512 * 1024, true},
+		{"active-4", "preparation", 4, 1, 4 * mib, 1, 64, 64, 64, false},
 	}
 	rows := []map[string]any{}
 	status := "passed"

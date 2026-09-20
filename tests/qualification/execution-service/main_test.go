@@ -13,7 +13,29 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"rui.local/qualification/measurement"
 )
+
+func TestSessionStopUnixValueUsesHostCanonicalStore(t *testing.T) {
+	joined := "/var/folders/x/store"
+	canonical := "/private/var/folders/x/store"
+	host := &measurement.Host{Ready: map[string]string{"store": canonical, "socket": "/tmp/rui.sock"}}
+	store, err := host.CanonicalStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := sessionStopUnixValue(store, "stop-during-work", "execution/stop")
+	if request.Store != canonical {
+		t.Fatalf("store = %q, want Host readiness %q", request.Store, canonical)
+	}
+	if request.Store == joined {
+		t.Fatalf("Unix session-stop used the unresolved join %q", joined)
+	}
+	if request.Kind != "session_stop" || request.Key != "stop-during-work" || request.Session != "execution/stop" {
+		t.Fatalf("unexpected request: %+v", request)
+	}
+}
 
 func event(phase string, at int, extra ...string) map[string]any {
 	m := map[string]any{"rui_test_phase": phase, "at_ns": fmt.Sprint(at), "process": "7", "run": "1000", "clock": "awake_ns", "turn": "1", "operation": "1", "attempt": "1"}
@@ -194,6 +216,45 @@ func TestInvalidEvidenceHasNonzeroProcessExit(t *testing.T) {
 		t.Fatal("passed failed")
 	}
 }
+func TestInspectWorkInFlight(t *testing.T) {
+	if inspectWorkInFlight(map[string]any{"work": map[string]any{"status": "in_flight"}}) != true {
+		t.Fatal("in_flight not recognized")
+	}
+	if inspectWorkInFlight(map[string]any{"work": map[string]any{"status": "idle"}}) {
+		t.Fatal("idle treated as live")
+	}
+}
+
+func TestOwnerStillHeldUsesHandoffAndRelease(t *testing.T) {
+	id := executionID{Run: "1", Process: "2", Clock: "awake_ns", Turn: "3", Operation: "4", Attempt: "1"}
+	events := []traceEvent{
+		{executionID: id, Phase: "transport_handoff_committed"},
+	}
+	if !ownerStillHeld(events, id) {
+		t.Fatal("handoff should keep the owner live")
+	}
+	events = append(events, traceEvent{executionID: id, Phase: "cleanup_completed"})
+	if ownerStillHeld(events, id) {
+		t.Fatal("cleanup should release the owner")
+	}
+}
+
+func TestCompletionOverlapWithoutDeadlineIsSchedulingOnly(t *testing.T) {
+	id := executionID{Run: "1", Process: "2", Clock: "awake_ns", Turn: "3", Operation: "4", Attempt: "1"}
+	events := []traceEvent{
+		{executionID: id, Phase: "provider_completion_removed", At: 10, QueuedAfter: 1},
+		{Phase: "control_durable_acceptance", Subject: "stop", At: 12},
+		{Phase: "effect_stop_requested", ControlKey: "stop", At: 14},
+		{executionID: id, Phase: "provider_completion_serviced", At: 20},
+	}
+	if _, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, false); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, true); e == nil {
+		t.Fatal("missing deadline accepted")
+	}
+}
+
 func TestOverlapCannotUseIdleStopOrUnrelatedCompletion(t *testing.T) {
 	id := executionID{Run: "1", Process: "2", Clock: "awake_ns", Turn: "3", Operation: "4", Attempt: "1"}
 	other := id

@@ -240,6 +240,20 @@ func StartHost(
 	return host, nil
 }
 
+// CanonicalStore is the Host's exclusive Store selector from readiness.
+// Unix JSON must send this exact string; a CLI alias that the OS resolves to
+// the same directory is not identity on the wire.
+func (h *Host) CanonicalStore() (string, error) {
+	if h == nil {
+		return "", errors.New("Host readiness omitted Store")
+	}
+	store, ok := h.Ready["store"]
+	if !ok || store == "" {
+		return "", errors.New("Host readiness omitted Store")
+	}
+	return store, nil
+}
+
 func (h *Host) wait() error {
 	h.waitOnce.Do(func() { h.waitError = h.Cmd.Wait() })
 	return h.waitError
