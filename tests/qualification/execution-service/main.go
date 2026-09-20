@@ -717,6 +717,9 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		for _, event := range recent {
 			beforeSubmit = max(beforeSubmit, event.Sequence)
 		}
+		if err = armSkipGate(preparationGate); err != nil {
+			return row, err
+		}
 		if err = submitWork(0); err != nil {
 			return row, err
 		}
@@ -732,17 +735,28 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		}
 		workIDs = append(workIDs, target)
 		if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
-			return e.executionID == target && e.Phase == "preparation_advance_completed"
-		}); err != nil {
-			return row, invalid(err)
-		}
-		if err = armSkipGate(preparationGate); err != nil {
-			return row, err
-		}
-		if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
+			if e.executionID == target && e.Phase == "preparation_completed" {
+				return true
+			}
 			return e.Phase == "preparation_advance_held"
 		}); err != nil {
 			return row, invalid(err)
+		}
+		heldEvents, readErr := readRecentEvents(tracePath)
+		if readErr != nil {
+			return row, invalid(readErr)
+		}
+		held := false
+		for _, event := range heldEvents {
+			if event.Phase == "preparation_advance_held" {
+				held = true
+			}
+			if event.executionID == target && event.Phase == "preparation_completed" && !held {
+				return row, invalid(errors.New("preparation finished before the next-advance latch"))
+			}
+		}
+		if !held {
+			return row, invalid(errors.New("preparation advance latch was not observed"))
 		}
 	} else {
 		if err = awaitOccupied(c, occupied, owners, tracePath); err != nil {

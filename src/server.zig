@@ -135,6 +135,7 @@ const Host = struct {
     trace_lost: bool = false,
     completion_consumption_held: bool = false,
     preparation_advance_held: bool = false,
+    preparation_advance_seen_pending: bool = false,
     last_unprocessed_completions: ?u64 = null,
     drain_mutex: std.Io.Mutex = .init,
     drain_condition: std.Io.Condition = .init,
@@ -1328,7 +1329,7 @@ fn advanceModelPreparation(
         slot.* = .free;
         return true;
     }
-    if (preparationAdvanceHeld(host)) {
+    if (preparationAdvanceHeld(host) and host.preparation_advance_seen_pending) {
         if (!host.preparation_advance_held) {
             host.preparation_advance_held = true;
             traceSubject(host, "preparation_advance_held", "gate", "preparation");
@@ -1347,6 +1348,7 @@ fn advanceModelPreparation(
     const stats = preparation.advanceStats();
     switch (progress) {
         .pending => {
+            if (preparationAdvanceHeld(host)) host.preparation_advance_seen_pending = true;
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
             if (host.faults.request_preparation_advance_delay_ms != 0) {
                 _ = host.io.sleep(.fromMilliseconds(host.faults.request_preparation_advance_delay_ms), .awake) catch {};
