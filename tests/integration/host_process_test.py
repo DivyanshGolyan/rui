@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Failure-sensitive checks for bounded Host process startup."""
 
+import json
 import os
+import subprocess
 import sys
 import time
 
 from host_process import (
     READINESS_LIMIT,
     STDERR_TAIL_LIMIT,
+    HostDiagnostics,
     HostStartError,
     start_ready_process,
     stop_process,
@@ -79,6 +82,49 @@ def main():
         assert process.poll() is None
     finally:
         stop_process(process)
+    prove_coalesced_phase_records()
+
+
+def prove_coalesced_phase_records():
+    first = {
+        "rui_test_phase": "control_durable_acceptance",
+        "subject_kind": "command_key",
+        "subject": "stopped-pipes-stop",
+    }
+    second = {
+        "rui_test_phase": "control_store_complete",
+        "subject_kind": "command_key",
+        "subject": "stopped-pipes-stop",
+    }
+    payload = json.dumps(first) + "\n" + json.dumps(second) + "\n"
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            "import sys, time; sys.stderr.write(sys.argv[1]); sys.stderr.flush(); time.sleep(10)",
+            payload,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    diagnostics = HostDiagnostics(process)
+    try:
+        matches = diagnostics.wait(
+            "control_store_complete",
+            timeout=2,
+            subject_kind="command_key",
+            subject="stopped-pipes-stop",
+        )
+        assert matches == [second], matches
+        assert diagnostics.matching(
+            "control_durable_acceptance",
+            subject_kind="command_key",
+            subject="stopped-pipes-stop",
+        ) == [first]
+    finally:
+        stop_process(process)
+        diagnostics.close()
 
 
 if __name__ == "__main__":

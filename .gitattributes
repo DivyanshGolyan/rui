@@ -1,2 +1,3 @@
 * linguist-detectable=false
 src/** linguist-detectable=true
+*.json.gz binary

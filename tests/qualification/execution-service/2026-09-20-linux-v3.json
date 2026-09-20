@@ -1,0 +1,1154 @@
+{
+  "cases": [
+    {
+      "bash_action": "",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 10438075,
+        "max_lifecycle_service_gap_ns": 25112682,
+        "max_native_completions_queued_after_removal": 7,
+        "preparation_advances": {
+          "count": 1025,
+          "maximum_ns": 10335582,
+          "total_ns": 1130216872
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 1304650052,
+          "total_ns": 1304650052
+        },
+        "service_interval_count": 3296,
+        "settlement": {
+          "count": 1,
+          "maximum_ns": 3430336,
+          "total_ns": 3430336
+        },
+        "settlement_queue": {
+          "count": 1,
+          "maximum_ns": 2180,
+          "total_ns": 2180
+        },
+        "settlement_service": {
+          "count": 1,
+          "maximum_ns": 3428156,
+          "total_ns": 3428156
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          1131603
+        ],
+        "validation": {
+          "count": 1,
+          "maximum_ns": 763327,
+          "total_ns": 763327
+        }
+      },
+      "overlap": {
+        "mode": "preparation",
+        "stop_accepted_ns": 878998176798,
+        "hint_published_ns": 878998196392,
+        "effect_requested_ns": 878999308401,
+        "native_ready_ns": 0,
+        "native_ready_count": 0,
+        "release_ns": 879024770619,
+        "handoff_released_ns": 0,
+        "work_start_ns": 878948294336,
+        "work_end_ns": 880362700957,
+        "deadline_due_ns": 0,
+        "deadline_serviced_ns": 0,
+        "first_selected_removal_ns": 880356680312,
+        "first_selected_queued_after": 0,
+        "gate_perturbed": true
+      },
+      "parameters": {
+        "name": "history-8m",
+        "mode": "preparation",
+        "active_capacity": 10,
+        "completion_burst": 1,
+        "history_bytes": 8388608,
+        "history_turns": 1,
+        "retained_field_bytes": 64,
+        "discarded_field_bytes": 64,
+        "response_retained_field_bytes": 64,
+        "require_deadline_overlap": false
+      },
+      "resources": {
+        "custody_and_scratch_drained": true,
+        "execution_slot_bytes": 1280,
+        "shared_preparation_bytes": 9480,
+        "whole_process_memory": "not measured by this runner"
+      },
+      "service_interval_scope": "complete lifecycle intervals intersecting the measured workload after one-shot gate release; gated intervals are perturbed and not production latency",
+      "status": "passed",
+      "stop_binding": {
+        "run": "876539148022",
+        "process": "97870",
+        "clock": "awake_ns",
+        "turn": "2",
+        "operation": "2",
+        "action": "1",
+        "attempt": "1"
+      },
+      "trace_commit_sequence": 11046,
+      "trace_events": 11046,
+      "trace_sha256": "42e8ca1057cf939ed4aca8dde6ec21443b6cb8643cdb3aeb8ca0171abce39a81",
+      "workload_bindings": [
+        {
+          "run": "876539148022",
+          "process": "97870",
+          "clock": "awake_ns",
+          "turn": "11",
+          "operation": "11",
+          "attempt": "1"
+        }
+      ]
+    },
+    {
+      "bash_action": "",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 49593839,
+        "max_lifecycle_service_gap_ns": 49593839,
+        "max_native_completions_queued_after_removal": 7,
+        "preparation_advances": {
+          "count": 4097,
+          "maximum_ns": 49411771,
+          "total_ns": 27692193477
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 28938951667,
+          "total_ns": 28938951667
+        },
+        "service_interval_count": 13121,
+        "settlement": {
+          "count": 1,
+          "maximum_ns": 6691124,
+          "total_ns": 6691124
+        },
+        "settlement_queue": {
+          "count": 1,
+          "maximum_ns": 2329,
+          "total_ns": 2329
+        },
+        "settlement_service": {
+          "count": 1,
+          "maximum_ns": 6688795,
+          "total_ns": 6688795
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          414781
+        ],
+        "validation": {
+          "count": 1,
+          "maximum_ns": 824496,
+          "total_ns": 824496
+        }
+      },
+      "overlap": {
+        "mode": "preparation",
+        "stop_accepted_ns": 907779742120,
+        "hint_published_ns": 907779776443,
+        "effect_requested_ns": 907780156901,
+        "native_ready_ns": 0,
+        "native_ready_count": 0,
+        "release_ns": 907885142813,
+        "handoff_released_ns": 0,
+        "work_start_ns": 907574718716,
+        "work_end_ns": 936804079280,
+        "deadline_due_ns": 0,
+        "deadline_serviced_ns": 0,
+        "first_selected_removal_ns": 936790614229,
+        "first_selected_queued_after": 0,
+        "gate_perturbed": true
+      },
+      "parameters": {
+        "name": "history-32m",
+        "mode": "preparation",
+        "active_capacity": 10,
+        "completion_burst": 1,
+        "history_bytes": 33554432,
+        "history_turns": 1,
+        "retained_field_bytes": 64,
+        "discarded_field_bytes": 64,
+        "response_retained_field_bytes": 64,
+        "require_deadline_overlap": false
+      },
+      "resources": {
+        "custody_and_scratch_drained": true,
+        "execution_slot_bytes": 1280,
+        "shared_preparation_bytes": 9480,
+        "whole_process_memory": "not measured by this runner"
+      },
+      "service_interval_scope": "complete lifecycle intervals intersecting the measured workload after one-shot gate release; gated intervals are perturbed and not production latency",
+      "status": "passed",
+      "stop_binding": {
+        "run": "880599539392",
+        "process": "98182",
+        "clock": "awake_ns",
+        "turn": "2",
+        "operation": "2",
+        "action": "1",
+        "attempt": "1"
+      },
+      "trace_commit_sequence": 43559,
+      "trace_events": 43559,
+      "trace_sha256": "c00f43b9294392c2c9c28ef33c9f82a85c091e2740b2acf549bc56a2b3602007",
+      "workload_bindings": [
+        {
+          "run": "880599539392",
+          "process": "98182",
+          "clock": "awake_ns",
+          "turn": "11",
+          "operation": "11",
+          "attempt": "1"
+        }
+      ]
+    },
+    {
+      "bash_action": "",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 6453807,
+        "max_lifecycle_service_gap_ns": 25250923,
+        "max_native_completions_queued_after_removal": 7,
+        "preparation_advances": {
+          "count": 1029,
+          "maximum_ns": 6100591,
+          "total_ns": 116830681
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 580109959,
+          "total_ns": 580109959
+        },
+        "service_interval_count": 3338,
+        "settlement": {
+          "count": 1,
+          "maximum_ns": 3464938,
+          "total_ns": 3464938
+        },
+        "settlement_queue": {
+          "count": 1,
+          "maximum_ns": 3008,
+          "total_ns": 3008
+        },
+        "settlement_service": {
+          "count": 1,
+          "maximum_ns": 3461930,
+          "total_ns": 3461930
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          14424631
+        ],
+        "validation": {
+          "count": 1,
+          "maximum_ns": 930096,
+          "total_ns": 930096
+        }
+      },
+      "overlap": {
+        "mode": "preparation",
+        "stop_accepted_ns": 953073005135,
+        "hint_published_ns": 953073037920,
+        "effect_requested_ns": 953087429766,
+        "native_ready_ns": 0,
+        "native_ready_count": 0,
+        "release_ns": 953219383814,
+        "handoff_released_ns": 0,
+        "work_start_ns": 952883191318,
+        "work_end_ns": 953528075407,
+        "deadline_due_ns": 0,
+        "deadline_serviced_ns": 0,
+        "first_selected_removal_ns": 953521760735,
+        "first_selected_queued_after": 0,
+        "gate_perturbed": true
+      },
+      "parameters": {
+        "name": "history-items",
+        "mode": "preparation",
+        "active_capacity": 10,
+        "completion_burst": 1,
+        "history_bytes": 8388608,
+        "history_turns": 64,
+        "retained_field_bytes": 64,
+        "discarded_field_bytes": 64,
+        "response_retained_field_bytes": 64,
+        "require_deadline_overlap": false
+      },
+      "resources": {
+        "custody_and_scratch_drained": true,
+        "execution_slot_bytes": 1280,
+        "shared_preparation_bytes": 9480,
+        "whole_process_memory": "not measured by this runner"
+      },
+      "service_interval_scope": "complete lifecycle intervals intersecting the measured workload after one-shot gate release; gated intervals are perturbed and not production latency",
+      "status": "passed",
+      "stop_binding": {
+        "run": "937205235088",
+        "process": "101741",
+        "clock": "awake_ns",
+        "turn": "65",
+        "operation": "65",
+        "action": "1",
+        "attempt": "1"
+      },
+      "trace_commit_sequence": 181089,
+      "trace_events": 181089,
+      "trace_sha256": "6c7b44a07fa2b8d0f90e2cfceac993e9f631d1c1d291aeead2447016e12f5253",
+      "workload_bindings": [
+        {
+          "run": "937205235088",
+          "process": "101741",
+          "clock": "awake_ns",
+          "turn": "74",
+          "operation": "74",
+          "attempt": "1"
+        }
+      ]
+    },
+    {
+      "bash_action": "",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 10431114,
+        "max_lifecycle_service_gap_ns": 25113701,
+        "max_native_completions_queued_after_removal": 7,
+        "preparation_advances": {
+          "count": 769,
+          "maximum_ns": 10264451,
+          "total_ns": 195595843
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 305200300,
+          "total_ns": 305200300
+        },
+        "service_interval_count": 2414,
+        "settlement": {
+          "count": 1,
+          "maximum_ns": 4552301,
+          "total_ns": 4552301
+        },
+        "settlement_queue": {
+          "count": 1,
+          "maximum_ns": 3313,
+          "total_ns": 3313
+        },
+        "settlement_service": {
+          "count": 1,
+          "maximum_ns": 4548988,
+          "total_ns": 4548988
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          20223587
+        ],
+        "validation": {
+          "count": 1,
+          "maximum_ns": 1286946,
+          "total_ns": 1286946
+        }
+      },
+      "overlap": {
+        "mode": "preparation",
+        "stop_accepted_ns": 956020446795,
+        "hint_published_ns": 956020465912,
+        "effect_requested_ns": 956040670382,
+        "native_ready_ns": 0,
+        "native_ready_count": 0,
+        "release_ns": 956040838333,
+        "handoff_released_ns": 0,
+        "work_start_ns": 956014248717,
+        "work_end_ns": 956386228227,
+        "deadline_due_ns": 0,
+        "deadline_serviced_ns": 0,
+        "first_selected_removal_ns": 956377862372,
+        "first_selected_queued_after": 0,
+        "gate_perturbed": true
+      },
+      "parameters": {
+        "name": "retained-4m",
+        "mode": "preparation",
+        "active_capacity": 10,
+        "completion_burst": 1,
+        "history_bytes": 1024,
+        "history_turns": 1,
+        "retained_field_bytes": 4194304,
+        "discarded_field_bytes": 64,
+        "response_retained_field_bytes": 64,
+        "require_deadline_overlap": false
+      },
+      "resources": {
+        "custody_and_scratch_drained": true,
+        "execution_slot_bytes": 1280,
+        "shared_preparation_bytes": 9480,
+        "whole_process_memory": "not measured by this runner"
+      },
+      "service_interval_scope": "complete lifecycle intervals intersecting the measured workload after one-shot gate release; gated intervals are perturbed and not production latency",
+      "status": "passed",
+      "stop_binding": {
+        "run": "955021169934",
+        "process": "103202",
+        "clock": "awake_ns",
+        "turn": "2",
+        "operation": "2",
+        "action": "1",
+        "attempt": "1"
+      },
+      "trace_commit_sequence": 4354,
+      "trace_events": 4354,
+      "trace_sha256": "6205ee1fd01955fda4b20623cff59b91bcfa77c5f05adba74f65a0229adc6ae5",
+      "workload_bindings": [
+        {
+          "run": "955021169934",
+          "process": "103202",
+          "clock": "awake_ns",
+          "turn": "11",
+          "operation": "11",
+          "attempt": "1"
+        }
+      ]
+    },
+    {
+      "bash_action": "",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 73278044,
+        "max_lifecycle_service_gap_ns": 73278044,
+        "max_native_completions_queued_after_removal": 7,
+        "preparation_advances": {
+          "count": 6145,
+          "maximum_ns": 73144356,
+          "total_ns": 61909045241
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 63402925184,
+          "total_ns": 63402925184
+        },
+        "service_interval_count": 19241,
+        "settlement": {
+          "count": 1,
+          "maximum_ns": 6683242,
+          "total_ns": 6683242
+        },
+        "settlement_queue": {
+          "count": 1,
+          "maximum_ns": 10815,
+          "total_ns": 10815
+        },
+        "settlement_service": {
+          "count": 1,
+          "maximum_ns": 6672427,
+          "total_ns": 6672427
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          14984870
+        ],
+        "validation": {
+          "count": 1,
+          "maximum_ns": 827466,
+          "total_ns": 827466
+        }
+      },
+      "overlap": {
+        "mode": "preparation",
+        "stop_accepted_ns": 960226164039,
+        "hint_published_ns": 960226183600,
+        "effect_requested_ns": 960241148909,
+        "native_ready_ns": 0,
+        "native_ready_count": 0,
+        "release_ns": 960241273351,
+        "handoff_released_ns": 0,
+        "work_start_ns": 960215097069,
+        "work_end_ns": 1023982133969,
+        "deadline_due_ns": 0,
+        "deadline_serviced_ns": 0,
+        "first_selected_removal_ns": 1023969320276,
+        "first_selected_queued_after": 0,
+        "gate_perturbed": true
+      },
+      "parameters": {
+        "name": "retained-32m",
+        "mode": "preparation",
+        "active_capacity": 10,
+        "completion_burst": 1,
+        "history_bytes": 1024,
+        "history_turns": 1,
+        "retained_field_bytes": 33554432,
+        "discarded_field_bytes": 64,
+        "response_retained_field_bytes": 64,
+        "require_deadline_overlap": false
+      },
+      "resources": {
+        "custody_and_scratch_drained": true,
+        "execution_slot_bytes": 1280,
+        "shared_preparation_bytes": 9480,
+        "whole_process_memory": "not measured by this runner"
+      },
+      "service_interval_scope": "complete lifecycle intervals intersecting the measured workload after one-shot gate release; gated intervals are perturbed and not production latency",
+      "status": "passed",
+      "stop_binding": {
+        "run": "956573177879",
+        "process": "103386",
+        "clock": "awake_ns",
+        "turn": "2",
+        "operation": "2",
+        "action": "1",
+        "attempt": "1"
+      },
+      "trace_commit_sequence": 33014,
+      "trace_events": 33014,
+      "trace_sha256": "94ab572bb3d0af05744f955e57b75971bf7c2db0b0566577967adbeaabd5fecc",
+      "workload_bindings": [
+        {
+          "run": "956573177879",
+          "process": "103386",
+          "clock": "awake_ns",
+          "turn": "11",
+          "operation": "11",
+          "attempt": "1"
+        }
+      ]
+    },
+    {
+      "bash_action": "",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 8116912,
+        "max_lifecycle_service_gap_ns": 25115923,
+        "max_native_completions_queued_after_removal": 7,
+        "preparation_advances": {
+          "count": 257,
+          "maximum_ns": 8018214,
+          "total_ns": 92130212
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 131446074,
+          "total_ns": 131446074
+        },
+        "service_interval_count": 779,
+        "settlement": {
+          "count": 1,
+          "maximum_ns": 2604446,
+          "total_ns": 2604446
+        },
+        "settlement_queue": {
+          "count": 1,
+          "maximum_ns": 2987,
+          "total_ns": 2987
+        },
+        "settlement_service": {
+          "count": 1,
+          "maximum_ns": 2601459,
+          "total_ns": 2601459
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          20623675
+        ],
+        "validation": {
+          "count": 1,
+          "maximum_ns": 803322,
+          "total_ns": 803322
+        }
+      },
+      "overlap": {
+        "mode": "preparation",
+        "stop_accepted_ns": 1025245635196,
+        "hint_published_ns": 1025245652714,
+        "effect_requested_ns": 1025266258871,
+        "native_ready_ns": 0,
+        "native_ready_count": 0,
+        "release_ns": 1025266368166,
+        "handoff_released_ns": 0,
+        "work_start_ns": 1025240265296,
+        "work_end_ns": 1025379659536,
+        "deadline_due_ns": 0,
+        "deadline_serviced_ns": 0,
+        "first_selected_removal_ns": 1025375425465,
+        "first_selected_queued_after": 0,
+        "gate_perturbed": true
+      },
+      "parameters": {
+        "name": "discarded-4m",
+        "mode": "preparation",
+        "active_capacity": 10,
+        "completion_burst": 1,
+        "history_bytes": 1024,
+        "history_turns": 1,
+        "retained_field_bytes": 64,
+        "discarded_field_bytes": 4194304,
+        "response_retained_field_bytes": 64,
+        "require_deadline_overlap": false
+      },
+      "resources": {
+        "custody_and_scratch_drained": true,
+        "execution_slot_bytes": 1280,
+        "shared_preparation_bytes": 9480,
+        "whole_process_memory": "not measured by this runner"
+      },
+      "service_interval_scope": "complete lifecycle intervals intersecting the measured workload after one-shot gate release; gated intervals are perturbed and not production latency",
+      "status": "passed",
+      "stop_binding": {
+        "run": "1024352456317",
+        "process": "107723",
+        "clock": "awake_ns",
+        "turn": "2",
+        "operation": "2",
+        "action": "1",
+        "attempt": "1"
+      },
+      "trace_commit_sequence": 1693,
+      "trace_events": 1693,
+      "trace_sha256": "e36919998ddd27a401aaa3da03c778b775f01f29dcfefca1f2e959d181a51e4e",
+      "workload_bindings": [
+        {
+          "run": "1024352456317",
+          "process": "107723",
+          "clock": "awake_ns",
+          "turn": "11",
+          "operation": "11",
+          "attempt": "1"
+        }
+      ]
+    },
+    {
+      "bash_action": "",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 71611791,
+        "max_lifecycle_service_gap_ns": 71611791,
+        "max_native_completions_queued_after_removal": 7,
+        "preparation_advances": {
+          "count": 2049,
+          "maximum_ns": 71460654,
+          "total_ns": 24258871381
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 24720076802,
+          "total_ns": 24720076802
+        },
+        "service_interval_count": 6155,
+        "settlement": {
+          "count": 1,
+          "maximum_ns": 3327841,
+          "total_ns": 3327841
+        },
+        "settlement_queue": {
+          "count": 1,
+          "maximum_ns": 2200,
+          "total_ns": 2200
+        },
+        "settlement_service": {
+          "count": 1,
+          "maximum_ns": 3325641,
+          "total_ns": 3325641
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          17731149
+        ],
+        "validation": {
+          "count": 1,
+          "maximum_ns": 738100,
+          "total_ns": 738100
+        }
+      },
+      "overlap": {
+        "mode": "preparation",
+        "stop_accepted_ns": 1028874138454,
+        "hint_published_ns": 1028874156675,
+        "effect_requested_ns": 1028891869603,
+        "native_ready_ns": 0,
+        "native_ready_count": 0,
+        "release_ns": 1028892001381,
+        "handoff_released_ns": 0,
+        "work_start_ns": 1028864415414,
+        "work_end_ns": 1053591043027,
+        "deadline_due_ns": 0,
+        "deadline_serviced_ns": 0,
+        "first_selected_removal_ns": 1053586166991,
+        "first_selected_queued_after": 0,
+        "gate_perturbed": true
+      },
+      "parameters": {
+        "name": "discarded-32m",
+        "mode": "preparation",
+        "active_capacity": 10,
+        "completion_burst": 1,
+        "history_bytes": 1024,
+        "history_turns": 1,
+        "retained_field_bytes": 64,
+        "discarded_field_bytes": 33554432,
+        "response_retained_field_bytes": 64,
+        "require_deadline_overlap": false
+      },
+      "resources": {
+        "custody_and_scratch_drained": true,
+        "execution_slot_bytes": 1280,
+        "shared_preparation_bytes": 9480,
+        "whole_process_memory": "not measured by this runner"
+      },
+      "service_interval_scope": "complete lifecycle intervals intersecting the measured workload after one-shot gate release; gated intervals are perturbed and not production latency",
+      "status": "passed",
+      "stop_binding": {
+        "run": "1025539012438",
+        "process": "107886",
+        "clock": "awake_ns",
+        "turn": "2",
+        "operation": "2",
+        "action": "1",
+        "attempt": "1"
+      },
+      "trace_commit_sequence": 11387,
+      "trace_events": 11387,
+      "trace_sha256": "1b354858f812579aadf8f7ba786acd15ac88a739b68b03e405ed020704392c73",
+      "workload_bindings": [
+        {
+          "run": "1025539012438",
+          "process": "107886",
+          "clock": "awake_ns",
+          "turn": "11",
+          "operation": "11",
+          "attempt": "1"
+        }
+      ]
+    },
+    {
+      "bash_action": "",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 56102835,
+        "max_lifecycle_service_gap_ns": 56102835,
+        "max_native_completions_queued_after_removal": 7,
+        "preparation_advances": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "preparation_lifetimes": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "service_interval_count": 7,
+        "settlement": {
+          "count": 2,
+          "maximum_ns": 8402240,
+          "total_ns": 14291071
+        },
+        "settlement_queue": {
+          "count": 2,
+          "maximum_ns": 29440,
+          "total_ns": 31798
+        },
+        "settlement_service": {
+          "count": 2,
+          "maximum_ns": 8372800,
+          "total_ns": 14259273
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          20029006
+        ],
+        "validation": {
+          "count": 2,
+          "maximum_ns": 45155379,
+          "total_ns": 85773245
+        }
+      },
+      "overlap": {
+        "mode": "completion",
+        "stop_accepted_ns": 1054492163937,
+        "hint_published_ns": 1054492186978,
+        "effect_requested_ns": 1054512192943,
+        "native_ready_ns": 1054486783853,
+        "native_ready_count": 2,
+        "release_ns": 1054512336255,
+        "handoff_released_ns": 0,
+        "work_start_ns": 1054486783853,
+        "work_end_ns": 1054618044489,
+        "deadline_due_ns": 0,
+        "deadline_serviced_ns": 0,
+        "first_selected_removal_ns": 1054512343925,
+        "first_selected_queued_after": 1,
+        "gate_perturbed": true
+      },
+      "parameters": {
+        "name": "completion-2",
+        "mode": "completion",
+        "active_capacity": 11,
+        "completion_burst": 2,
+        "history_bytes": 1024,
+        "history_turns": 1,
+        "retained_field_bytes": 64,
+        "discarded_field_bytes": 64,
+        "response_retained_field_bytes": 524288,
+        "require_deadline_overlap": false
+      },
+      "resources": {
+        "custody_and_scratch_drained": true,
+        "execution_slot_bytes": 1280,
+        "shared_preparation_bytes": 9480,
+        "whole_process_memory": "not measured by this runner"
+      },
+      "service_interval_scope": "complete lifecycle intervals intersecting the measured workload after one-shot gate release; gated intervals are perturbed and not production latency",
+      "status": "passed",
+      "stop_binding": {
+        "run": "1053835164284",
+        "process": "109805",
+        "clock": "awake_ns",
+        "turn": "2",
+        "operation": "2",
+        "action": "1",
+        "attempt": "1"
+      },
+      "trace_commit_sequence": 385,
+      "trace_events": 385,
+      "trace_sha256": "eb65c0990222b90f7c4850aff5f5964b4c85f9542d3b9d475c9dff21d9daacf6",
+      "workload_bindings": [
+        {
+          "run": "1053835164284",
+          "process": "109805",
+          "clock": "awake_ns",
+          "turn": "11",
+          "operation": "11",
+          "attempt": "1"
+        },
+        {
+          "run": "1053835164284",
+          "process": "109805",
+          "clock": "awake_ns",
+          "turn": "12",
+          "operation": "12",
+          "attempt": "1"
+        }
+      ]
+    },
+    {
+      "bash_action": "2",
+      "metrics": {
+        "deadline_to_service_ns": [
+          9204098
+        ],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 76453219,
+        "max_lifecycle_service_gap_ns": 76453219,
+        "max_native_completions_queued_after_removal": 7,
+        "preparation_advances": {
+          "count": 1,
+          "maximum_ns": 2094899,
+          "total_ns": 2094899
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 55161114,
+          "total_ns": 55161114
+        },
+        "service_interval_count": 25,
+        "settlement": {
+          "count": 8,
+          "maximum_ns": 10972636,
+          "total_ns": 52731304
+        },
+        "settlement_queue": {
+          "count": 8,
+          "maximum_ns": 3676,
+          "total_ns": 20630
+        },
+        "settlement_service": {
+          "count": 8,
+          "maximum_ns": 10970170,
+          "total_ns": 52710674
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          50288531
+        ],
+        "validation": {
+          "count": 8,
+          "maximum_ns": 68387627,
+          "total_ns": 380982169
+        }
+      },
+      "overlap": {
+        "mode": "completion",
+        "stop_accepted_ns": 1055534576319,
+        "hint_published_ns": 1055534595840,
+        "effect_requested_ns": 1055584864850,
+        "native_ready_ns": 1055497864593,
+        "native_ready_count": 8,
+        "release_ns": 1055537195135,
+        "handoff_released_ns": 1055537071404,
+        "work_start_ns": 1055497864593,
+        "work_end_ns": 1056004933303,
+        "deadline_due_ns": 1055527950326,
+        "deadline_serviced_ns": 1055537154424,
+        "first_selected_removal_ns": 1055537206474,
+        "first_selected_queued_after": 7,
+        "gate_perturbed": true
+      },
+      "parameters": {
+        "name": "completion-8",
+        "mode": "completion",
+        "active_capacity": 11,
+        "completion_burst": 8,
+        "history_bytes": 1024,
+        "history_turns": 1,
+        "retained_field_bytes": 64,
+        "discarded_field_bytes": 64,
+        "response_retained_field_bytes": 524288,
+        "require_deadline_overlap": true
+      },
+      "resources": {
+        "custody_and_scratch_drained": true,
+        "execution_slot_bytes": 1280,
+        "shared_preparation_bytes": 9480,
+        "whole_process_memory": "not measured by this runner"
+      },
+      "service_interval_scope": "complete lifecycle intervals intersecting the measured workload after one-shot gate release; gated intervals are perturbed and not production latency",
+      "status": "passed",
+      "stop_binding": {
+        "run": "1054788468218",
+        "process": "109959",
+        "clock": "awake_ns",
+        "turn": "2",
+        "operation": "2",
+        "action": "1",
+        "attempt": "1"
+      },
+      "trace_commit_sequence": 477,
+      "trace_events": 477,
+      "trace_sha256": "494f4fa6b914837c525aace2b74cf0341a087a809ce67347720ea461b0a63593",
+      "workload_bindings": [
+        {
+          "run": "1054788468218",
+          "process": "109959",
+          "clock": "awake_ns",
+          "turn": "4",
+          "operation": "4",
+          "attempt": "1"
+        },
+        {
+          "run": "1054788468218",
+          "process": "109959",
+          "clock": "awake_ns",
+          "turn": "5",
+          "operation": "5",
+          "attempt": "1"
+        },
+        {
+          "run": "1054788468218",
+          "process": "109959",
+          "clock": "awake_ns",
+          "turn": "6",
+          "operation": "6",
+          "attempt": "1"
+        },
+        {
+          "run": "1054788468218",
+          "process": "109959",
+          "clock": "awake_ns",
+          "turn": "7",
+          "operation": "7",
+          "attempt": "1"
+        },
+        {
+          "run": "1054788468218",
+          "process": "109959",
+          "clock": "awake_ns",
+          "turn": "8",
+          "operation": "8",
+          "attempt": "1"
+        },
+        {
+          "run": "1054788468218",
+          "process": "109959",
+          "clock": "awake_ns",
+          "turn": "9",
+          "operation": "9",
+          "attempt": "1"
+        },
+        {
+          "run": "1054788468218",
+          "process": "109959",
+          "clock": "awake_ns",
+          "turn": "10",
+          "operation": "10",
+          "attempt": "1"
+        },
+        {
+          "run": "1054788468218",
+          "process": "109959",
+          "clock": "awake_ns",
+          "turn": "11",
+          "operation": "11",
+          "attempt": "1"
+        }
+      ]
+    },
+    {
+      "bash_action": "",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 6175043,
+        "max_lifecycle_service_gap_ns": 25125256,
+        "max_native_completions_queued_after_removal": 1,
+        "preparation_advances": {
+          "count": 513,
+          "maximum_ns": 6072065,
+          "total_ns": 68376335
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 144482272,
+          "total_ns": 144482272
+        },
+        "service_interval_count": 1652,
+        "settlement": {
+          "count": 1,
+          "maximum_ns": 3003303,
+          "total_ns": 3003303
+        },
+        "settlement_queue": {
+          "count": 1,
+          "maximum_ns": 2470,
+          "total_ns": 2470
+        },
+        "settlement_service": {
+          "count": 1,
+          "maximum_ns": 3000833,
+          "total_ns": 3000833
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          2537782
+        ],
+        "validation": {
+          "count": 1,
+          "maximum_ns": 840931,
+          "total_ns": 840931
+        }
+      },
+      "overlap": {
+        "mode": "preparation",
+        "stop_accepted_ns": 1056958620876,
+        "hint_published_ns": 1056958639964,
+        "effect_requested_ns": 1056961158658,
+        "native_ready_ns": 0,
+        "native_ready_count": 0,
+        "release_ns": 1056986629293,
+        "handoff_released_ns": 0,
+        "work_start_ns": 1056935259827,
+        "work_end_ns": 1057124150786,
+        "deadline_due_ns": 0,
+        "deadline_serviced_ns": 0,
+        "first_selected_removal_ns": 1057118617899,
+        "first_selected_queued_after": 0,
+        "gate_perturbed": true
+      },
+      "parameters": {
+        "name": "active-4",
+        "mode": "preparation",
+        "active_capacity": 4,
+        "completion_burst": 1,
+        "history_bytes": 4194304,
+        "history_turns": 1,
+        "retained_field_bytes": 64,
+        "discarded_field_bytes": 64,
+        "response_retained_field_bytes": 64,
+        "require_deadline_overlap": false
+      },
+      "resources": {
+        "custody_and_scratch_drained": true,
+        "execution_slot_bytes": 1280,
+        "shared_preparation_bytes": 9480,
+        "whole_process_memory": "not measured by this runner"
+      },
+      "service_interval_scope": "complete lifecycle intervals intersecting the measured workload after one-shot gate release; gated intervals are perturbed and not production latency",
+      "status": "passed",
+      "stop_binding": {
+        "run": "1056142281521",
+        "process": "110140",
+        "clock": "awake_ns",
+        "turn": "2",
+        "operation": "2",
+        "action": "1",
+        "attempt": "1"
+      },
+      "trace_commit_sequence": 5524,
+      "trace_events": 5524,
+      "trace_sha256": "10cc65d92146aa0e809d3c47ff3a679c4191bfab942c27bbccfa5fb208764991",
+      "workload_bindings": [
+        {
+          "run": "1056142281521",
+          "process": "110140",
+          "clock": "awake_ns",
+          "turn": "5",
+          "operation": "5",
+          "attempt": "1"
+        }
+      ]
+    }
+  ],
+  "format": "rui-execution-service-v3-go",
+  "limits": [
+    "no automatic reruns or timing allowances conceal absent readiness",
+    "gated intervals are perturbed and not production latency",
+    "source/native validation and platform/resource qualification still require their owning gates",
+    "loopback is not live-provider, TLS, power-loss, or whole-product qualification",
+    "structural sizes are not whole-process footprint"
+  ],
+  "provenance": {
+    "binary": "/home/user/workspace/repo/.zig-cache/o/9d1e246fd3960f9df0fec40d1a1fcf98/rui-release-small-check",
+    "binary_sha256": "000cbd3cc93b890e62711e1cc8d87b0f2c88a53d973595edd468dbe667ca00ca",
+    "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+    "measurement_runtime": {
+      "go_arch": "amd64",
+      "go_os": "linux",
+      "go_version": "go1.27.1",
+      "gopsutil_version": "v4.26.7",
+      "logical_cpus": 4,
+      "module_path": "rui.local/qualification",
+      "physical_memory_bytes": 8343158784
+    },
+    "platform": "Linux e2b.local 6.1.158+ #1 SMP PREEMPT_DYNAMIC Tue Jul 28 15:38:05 UTC 2026 x86_64 GNU/Linux",
+    "tested_revision": "89370d0c3b7e36ae3310a626127f5f225aa7232e",
+    "working_tree_dirty": false,
+    "zig": "0.16.0"
+  },
+  "raw_artifact": {
+    "compressed_bytes": 902497,
+    "compressed_sha256": "bbbd9d8049db7a3669b9bf237946b876a436ce6e9e57cf48c1511816929dd515",
+    "compression": "gzip",
+    "path": "2026-09-20-linux-v3.raw.json.gz",
+    "uncompressed_bytes": 7398852,
+    "uncompressed_sha256": "fa12839f855004ef82c55ee8f8ba115a9a89349204e5e26a082f0f26d2ae0b49"
+  },
+  "source_sha256": {
+    "src/cli.zig": "c0f82c152dcd053a9b6a5078303231fd3623bcb6b4c884ccbaa7aab3131e9fa3",
+    "src/provider.zig": "317d02d7343ce00fac91ad3e143d2f667426381308e1d3c157e947887d7ab149",
+    "src/server.zig": "881dad23df80690b6b6ad5b44d4487d443a061f9c97472d87eccbdab06ba2376",
+    "tests/qualification/execution-service/fixture.go": "8e93d426dc65ccb5cf7901aa8326c0ffd09171f3ea1ce89326000ba3daed3f22",
+    "tests/qualification/execution-service/main.go": "d734114a10d99cdd538ce7d4a2ef0cf131c988e79b7dae43f4d2050e312d72f2",
+    "tests/qualification/execution-service/main_test.go": "1aa145e5b3c0213f158d9d4a364e620d99bdabcec6043bddbe200b429b77909f",
+    "tests/qualification/execution-service/metrics.go": "404176c15807b2d5c622d726311a4bced82e4e1e5c475d4ea1118d62a4baaa8d"
+  },
+  "status": "passed"
+}

@@ -1,4 +1,7 @@
 const std = @import("std");
+const trace_native = @cImport({
+    @cInclude("unistd.h");
+});
 const bash = @import("bash.zig");
 const execution = @import("execution.zig");
 const named_scratch = @import("named_scratch.zig");
@@ -43,6 +46,9 @@ pub const Faults = struct {
     request_seal: bool = false,
     request_scratch_acquire: bool = false,
     request_scratch_limit_bytes: u64 = scratch_limit_bytes,
+    request_preparation_byte_allowance: usize = provider.preparation_byte_allowance,
+    request_preparation_item_allowance: usize = provider.preparation_item_allowance,
+    request_preparation_advance_delay_ms: i64 = 0,
     request_read: bool = false,
     request_unlink: bool = false,
     provider_prepare: bool = false,
@@ -78,6 +84,10 @@ pub const Faults = struct {
     report_unlink: bool = false,
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
+    test_execution_service_boundaries: bool = false,
+    completion_consumption_gate_path: ?[]const u8 = null,
+    bash_handoff_gate_path: ?[]const u8 = null,
+    preparation_advance_gate_path: ?[]const u8 = null,
     test_transition: ?TestTransition = null,
     test_transition_gate_path: ?[]const u8 = null,
     model_cleanup_gate_path: ?[]const u8 = null,
@@ -118,9 +128,33 @@ const Host = struct {
     classification_clients: std.atomic.Value(usize) = .init(0),
     ordinary_clients: std.atomic.Value(usize) = .init(0),
     scratch_used: std.atomic.Value(u64) = .init(0),
+    launch_mutex: std.Io.Mutex = .init,
     trace_mutex: std.Io.Mutex = .init,
+    trace_run_ns: u64 = 0,
+    trace_sequence: u64 = 0,
+    trace_lost: bool = false,
+    completion_consumption_held: bool = false,
+    preparation_advance_held: bool = false,
+    preparation_advance_seen_pending: bool = false,
+    last_unprocessed_completions: ?u64 = null,
     drain_mutex: std.Io.Mutex = .init,
     drain_condition: std.Io.Condition = .init,
+
+    // Canonical permission belongs to Store; process-local permission belongs
+    // to Host. The Store handoff must enter this gate, in that lock order, for
+    // every effect. A preflight observation alone cannot authorize a launch.
+    fn launchAllowed(self: *const Host) bool {
+        return !self.dispatch_fenced.load(.acquire) and
+            !self.execution_shutdown.load(.acquire) and
+            !self.effect_shutdown.load(.acquire);
+    }
+
+    fn withEffectLaunch(self: *Host, context: anytype, comptime launch: anytype) !void {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        if (!self.launchAllowed()) return error.HostDispatchSuppressed;
+        try launch(context);
+    }
 
     fn clientFinished(self: *Host) void {
         self.drain_mutex.lockUncancelable(self.io);
@@ -199,6 +233,7 @@ pub fn serve(
         .bash_path = bash_path,
         .bash_timeout_ms = bash_timeout_ms,
         .retention = undefined,
+        .trace_run_ns = @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds),
         .custody = execution.CustodyPool.initialize(custody_records),
     };
     var retention = output_retention.Queue.initializeWithRemoval(
@@ -230,18 +265,21 @@ pub fn serve(
             std.debug.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
         socket_owned = false;
+        host.launch_mutex.lockUncancelable(host.io);
         host.execution_shutdown.store(true, .release);
+        host.launch_mutex.unlock(host.io);
         execution_thread.join();
         if (provider_endpoint != null) provider.deinitialize();
         host.drain();
     }
     var ready: protocol.ResponseBuffer = .{};
-    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} custody_record_bytes={d} execution_slot_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
+    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
         lease.paths.store.slice(),
         lease.paths.socket.slice(),
         active_capacity,
         @sizeOf(execution.CustodyRecord),
         @sizeOf(ExecutionSlot),
+        @sizeOf(provider.Preparation),
         scratch_limit_bytes,
         @sizeOf(output_retention.Entry),
         retention_entries.len,
@@ -340,6 +378,7 @@ const BashSlot = struct {
     token: execution.CustodyToken,
     binding: store_module.ActionAttemptBinding,
     execution: bash.Execution,
+    stop_accepted: bool = false,
     delivery: union(enum) {
         open,
         closed: struct {
@@ -359,8 +398,14 @@ const BashPreparingSlot = struct {
     binding: store_module.ActionAttemptBinding,
 };
 
+const ModelPreparingSlot = struct {
+    token: execution.CustodyToken,
+    binding: store_module.AttemptBinding,
+};
+
 const ExecutionSlot = union(enum) {
     free,
+    model_preparing: ModelPreparingSlot,
     provider: ProviderSlot,
     bash_preparing: BashPreparingSlot,
     bash: BashSlot,
@@ -370,6 +415,18 @@ const ExecutionSlot = union(enum) {
 };
 
 const AdmissionProgress = enum { no_work, retry_later, admitted };
+
+const LifecycleService = struct {
+    next_control_reconciliation: ?std.Io.Clock.Timestamp = null,
+    retained_cleanup_at: ?std.Io.Clock.Timestamp = null,
+    last_service_at: ?std.Io.Clock.Timestamp = null,
+    next_trace_at: ?std.Io.Clock.Timestamp = null,
+    maximum_gap_ns: u64 = 0,
+    wait_since_service_ns: u64 = 0,
+};
+
+const control_reconciliation_interval_ms = 100;
+const lifecycle_trace_interval_ms = 100;
 
 fn executionMain(host: *Host) void {
     const slots = host.allocator.alloc(ExecutionSlot, host.custody.records.len) catch |err| {
@@ -387,23 +444,33 @@ fn executionMain(host: *Host) void {
         null;
     defer if (reactor) |*active| active.deinit();
     var bash_preparation: ?bash.Preparation = null;
+    var model_preparation: provider.Preparation = undefined;
+    var model_preparation_active = false;
     defer shutdownExecution(
         host,
         if (reactor) |*active| active else null,
         slots,
         &bash_preparation,
+        &model_preparation,
+        &model_preparation_active,
     );
 
     var last_retry_poll: ?std.Io.Clock.Timestamp = null;
-    var retained_cleanup_at = std.Io.Clock.Timestamp.now(host.io, .awake);
+    var lifecycle: LifecycleService = .{};
     var capacity_was_full = slots.len == 0;
     while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
-        var made_progress = false;
         var bash_window: [bash.copy_window_bytes]u8 = undefined;
-        if (advanceBashPreparation(host, slots, &bash_preparation)) made_progress = true;
-        if (advanceBash(host, slots, &bash_window)) made_progress = true;
+        var made_progress = serviceLifecycle(
+            host,
+            if (reactor) |*active| active else null,
+            slots,
+            &bash_preparation,
+            &model_preparation,
+            &model_preparation_active,
+            &bash_window,
+            &lifecycle,
+        );
         const now = std.Io.Clock.Timestamp.now(host.io, .awake);
-        if (advanceRetainedCleanup(host, slots, now, &retained_cleanup_at)) made_progress = true;
         var free_slots = countFreeSlots(slots);
         const capacity_released = capacity_was_full and free_slots != 0;
         const retry_poll_due = if (last_retry_poll) |last|
@@ -451,10 +518,10 @@ fn executionMain(host: *Host) void {
                 } else {
                     last_retry_poll = now;
                 }
-                if (free_slots != 0) {
+                if (free_slots != 0 and !model_preparation_active) {
                     for (slots) |*slot| {
                         if (!slotIsFree(slot)) continue;
-                        switch (admitRetryAttempt(host, &reactor.?, slot, active_filter)) {
+                        switch (admitRetryAttempt(host, slot, active_filter, &model_preparation, &model_preparation_active)) {
                             .admitted => {
                                 made_progress = true;
                                 last_retry_poll = null;
@@ -468,10 +535,10 @@ fn executionMain(host: *Host) void {
                     }
                 }
             }
-            if (host.provider_endpoint != null and may_admit_new) {
+            if (host.provider_endpoint != null and may_admit_new and !model_preparation_active) {
                 for (slots) |*slot| {
                     if (!slotIsFree(slot)) continue;
-                    switch (admitNewAttempt(host, &reactor.?, slot)) {
+                    switch (admitNewAttempt(host, slot, &model_preparation, &model_preparation_active)) {
                         .admitted => made_progress = true,
                         .no_work, .retry_later => {},
                     }
@@ -479,45 +546,180 @@ fn executionMain(host: *Host) void {
                 }
             }
         }
-        if (host.controls_changed.swap(false, .acq_rel)) {
-            cancelSupersededTransfers(host, if (reactor) |*active| active else null, slots);
-            stopSupersededBash(host, slots, &bash_preparation);
-            made_progress = true;
-        }
+        made_progress = serviceLifecycle(
+            host,
+            if (reactor) |*active| active else null,
+            slots,
+            &bash_preparation,
+            &model_preparation,
+            &model_preparation_active,
+            &bash_window,
+            &lifecycle,
+        ) or made_progress;
         capacity_was_full = countFreeSlots(slots) == 0;
         if (hasTransport(slots)) {
-            reactor.?.drive(if (made_progress) 0 else 25) catch |err| {
+            reactor.?.drive(0) catch |err| {
                 fenceDispatch(host, "transport reactor", err);
                 break;
             };
-        } else if (!made_progress) {
-            _ = host.io.sleep(.fromMilliseconds(if (hasBash(slots)) 25 else 100), .awake) catch {};
+            observeUnprocessedCompletions(host, &reactor.?);
         }
-        while (true) {
-            const active_transfers = ActiveSlots{ .slots = slots };
-            const active_reactor = if (reactor) |*active| active else break;
-            const completion = active_reactor.nextCompletion(.{
-                .context = &active_transfers,
-                .find_fn = findActiveTransfer,
-            }) catch |err| {
-                fenceDispatch(host, "transport completion", err);
-                return;
-            } orelse break;
-            completeTransfer(host, slots, completion);
+        made_progress = serviceOneCompletion(
+            host,
+            if (reactor) |*active| active else null,
+            slots,
+        ) or made_progress;
+        made_progress = serviceLifecycle(
+            host,
+            if (reactor) |*active| active else null,
+            slots,
+            &bash_preparation,
+            &model_preparation,
+            &model_preparation_active,
+            &bash_window,
+            &lifecycle,
+        ) or made_progress;
+        made_progress = advanceModelPreparation(
+            host,
+            if (reactor) |*active| active else null,
+            slots,
+            &model_preparation,
+            &model_preparation_active,
+        ) or made_progress;
+        if (!made_progress) {
+            const wait_started = std.Io.Clock.Timestamp.now(host.io, .awake);
+            if (hasTransport(slots)) {
+                reactor.?.wait(25) catch |err| {
+                    fenceDispatch(host, "transport wait", err);
+                    break;
+                };
+            } else {
+                _ = host.io.sleep(.fromMilliseconds(if (hasBash(slots)) 25 else 100), .awake) catch {};
+            }
+            const wait_finished = std.Io.Clock.Timestamp.now(host.io, .awake);
+            lifecycle.wait_since_service_ns += @intCast(wait_started.durationTo(wait_finished).raw.nanoseconds);
         }
-        advanceCleanup(host, slots);
     }
+    const stopped_at = std.Io.Clock.Timestamp.now(host.io, .awake);
+    if (lifecycle.last_service_at) |last| {
+        traceServiceBoundary(
+            host,
+            @intCast(last.raw.nanoseconds),
+            @intCast(stopped_at.raw.nanoseconds),
+            lifecycle.wait_since_service_ns,
+        );
+        lifecycle.maximum_gap_ns = @max(
+            lifecycle.maximum_gap_ns,
+            @as(u64, @intCast(last.durationTo(stopped_at).raw.nanoseconds)),
+        );
+    }
+    traceLifecycleService(host, lifecycle.maximum_gap_ns);
 }
 
-fn cancelSupersededTransfers(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) void {
+fn serviceLifecycle(
+    host: *Host,
+    reactor: ?*provider.Reactor,
+    slots: []ExecutionSlot,
+    bash_preparation: *?bash.Preparation,
+    model_preparation: *provider.Preparation,
+    model_preparation_active: *bool,
+    bash_window: []u8,
+    service: *LifecycleService,
+) bool {
+    const now = std.Io.Clock.Timestamp.now(host.io, .awake);
+    if (service.last_service_at) |last| {
+        traceServiceBoundary(host, @intCast(last.raw.nanoseconds), @intCast(now.raw.nanoseconds), service.wait_since_service_ns);
+        service.maximum_gap_ns = @max(
+            service.maximum_gap_ns,
+            @as(u64, @intCast(last.durationTo(now).raw.nanoseconds)),
+        );
+    }
+    service.last_service_at = now;
+    service.wait_since_service_ns = 0;
+    const trace_due = if (service.next_trace_at) |deadline| deadline.compare(.lte, now) else true;
+    if (trace_due) {
+        traceLifecycleService(host, service.maximum_gap_ns);
+        service.next_trace_at = now.addDuration(.{
+            .raw = .fromMilliseconds(lifecycle_trace_interval_ms),
+            .clock = .awake,
+        });
+    }
+    var made_progress = false;
+    const hint = host.controls_changed.swap(false, .acq_rel);
+    const fallback_due = if (service.next_control_reconciliation) |deadline|
+        deadline.compare(.lte, now)
+    else
+        true;
+    if (hint or fallback_due) {
+        cancelSupersededTransfers(host, reactor, slots, model_preparation, model_preparation_active);
+        stopSupersededBash(host, slots, bash_preparation);
+        service.next_control_reconciliation = now.addDuration(.{
+            .raw = .fromMilliseconds(control_reconciliation_interval_ms),
+            .clock = .awake,
+        });
+        made_progress = hint;
+    }
+    made_progress = advanceBashPreparation(host, slots, bash_preparation) or made_progress;
+    made_progress = advanceBash(host, slots, bash_window) or made_progress;
+    if (advanceCleanupAt(host, slots, now)) made_progress = true;
+    if (service.retained_cleanup_at == null) service.retained_cleanup_at = now;
+    if (advanceRetainedCleanup(host, slots, now, &service.retained_cleanup_at.?)) made_progress = true;
+    return made_progress;
+}
+
+fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) bool {
+    const active_reactor = reactor orelse return false;
+    if (completionConsumptionHeld(host)) {
+        if (!host.completion_consumption_held) {
+            host.completion_consumption_held = true;
+            traceSubject(host, "completion_consumption_held", "gate", "completion");
+        }
+        return false;
+    }
+    if (host.completion_consumption_held) {
+        host.completion_consumption_held = false;
+        traceSubject(host, "completion_consumption_released", "gate", "completion");
+    }
+    const active_transfers = ActiveSlots{ .slots = slots };
+    const completion = active_reactor.nextCompletion(.{
+        .context = &active_transfers,
+        .find_fn = findActiveTransfer,
+    }) catch |err| {
+        fenceDispatch(host, "transport completion", err);
+        return false;
+    } orelse return false;
+    completeTransfer(host, slots, completion);
+    return true;
+}
+
+fn cancelSupersededTransfers(
+    host: *Host,
+    reactor: ?*provider.Reactor,
+    slots: []ExecutionSlot,
+    preparation: *provider.Preparation,
+    preparation_active: *bool,
+) void {
     for (slots) |*slot| switch (slot.*) {
+        .model_preparing => |active| {
+            const superseded = host.store.operationSupersededByControl(active.binding) catch |err| {
+                fenceDispatch(host, "preparation control reconciliation", err);
+                return;
+            };
+            const control = superseded orelse continue;
+            traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
+            preparation.cancel();
+            preparation_active.* = false;
+            finishCustodyNow(host, active.token);
+            slot.* = .free;
+        },
         .provider => |*active| {
             const superseded = host.store.operationSupersededByControl(active.owner.binding) catch |err| {
                 fenceDispatch(host, "control reconciliation", err);
                 return;
             };
-            if (!superseded) continue;
+            const control = superseded orelse continue;
             const owner = active.owner;
+            traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), owner.binding);
             reactor.?.cancel(&active.transfer);
             active.transfer.deinit();
             beginCleanup(host, slot, owner);
@@ -546,6 +748,7 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
     const active: *const ActiveSlots = @ptrCast(@alignCast(context));
     for (active.slots) |slot| switch (slot) {
         .provider => |value| if (value.owner.binding.operation_id == operation_id) return true,
+        .model_preparing => |value| if (value.binding.operation_id == operation_id) return true,
         .cleanup => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .free, .bash_preparing, .bash, .bash_prepared_cleanup, .named_scratch => {},
     };
@@ -568,6 +771,9 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8) bool {
         .bash => |*active| {
             const service = active.execution.service(window);
             made_progress = made_progress or service.made_progress;
+            if (service.timeout_action) |action| {
+                traceActionDeadline(host, "bash_deadline_serviced", action.deadline_ns, action.signal_failed, active.binding);
+            }
             if (service.leader_observed_with_open_pipes) {
                 traceAction(host, "bash_leader_observed_with_open_pipes", active.binding);
                 if (host.faults.bash_observed_exit_gate_path) |path| waitAtTestGate(host, path);
@@ -680,6 +886,12 @@ fn advanceBashPreparation(
         else => {},
     } else unreachable;
     const preparing = slot.bash_preparing;
+    if (!host.launchAllowed()) {
+        const cleanup = active_preparation.cancel();
+        preparation.* = null;
+        discardBashResources(host, slot, preparing.token, cleanup);
+        return true;
+    }
     switch (active_preparation.advance()) {
         .pending => return true,
         .failed => |value| {
@@ -725,6 +937,23 @@ fn finishBashPreparationFailure(
     }
 }
 
+// Discarding an unlaunched effect changes only local custody. In particular,
+// infrastructure suppression is not a user stop or a saved Action result.
+fn discardBashResources(
+    host: *Host,
+    slot: *ExecutionSlot,
+    token: execution.CustodyToken,
+    resources: bash.PreparedCleanup,
+) void {
+    var cleanup = resources;
+    cleanup.cleanup() catch |err| {
+        retainBashPreparedCleanup(host, slot, token, cleanup, err);
+        return;
+    };
+    finishCustodyNow(host, token);
+    slot.* = .free;
+}
+
 fn launchPreparedBash(
     host: *Host,
     slot: *ExecutionSlot,
@@ -736,23 +965,26 @@ fn launchPreparedBash(
         traceAction(host, "prepared_before_handoff", action_binding);
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
     }
+    if (!host.launchAllowed()) {
+        discardBashResources(host, slot, token, prepared.takeCleanup());
+        return;
+    }
     host.custody.consumeActionLaunchAuthority(token, action_binding) catch |err| {
-        prepared.cleanup() catch |cleanup_err| {
-            retainBashPreparedCleanup(host, slot, token, prepared.takeCleanup(), cleanup_err);
-            fenceDispatch(host, "Bash launch authority", err);
-            return;
-        };
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        discardBashResources(host, slot, token, prepared.takeCleanup());
         fenceDispatch(host, "Bash launch authority", err);
         return;
     };
     var launched: ?bash.Execution = null;
     host.store.withActionDispatchHandoff(action_binding, .{
+        .host = host,
         .prepared = prepared,
         .launched = &launched,
     }, struct {
         fn handoff(context: anytype) !void {
+            try context.host.withEffectLaunch(context, launch);
+        }
+
+        fn launch(context: anytype) !void {
             context.launched.* = try context.prepared.launch();
         }
     }.handoff) catch |err| {
@@ -760,15 +992,10 @@ fn launchPreparedBash(
             settleActionFailure(host, token, action_binding, .cancelled, "Bash was stopped before launch.");
         } else if (err == error.BashSpawnFailed) {
             settleActionFailure(host, token, action_binding, .spawn_failed, "Bash process creation failed.");
-        } else {
+        } else if (err != error.HostDispatchSuppressed) {
             fenceDispatch(host, "Bash dispatch handoff", err);
         }
-        prepared.cleanup() catch |cleanup_err| {
-            retainBashPreparedCleanup(host, slot, token, prepared.takeCleanup(), cleanup_err);
-            return;
-        };
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        discardBashResources(host, slot, token, prepared.takeCleanup());
         return;
     };
     slot.* = .{ .bash = .{
@@ -777,6 +1004,9 @@ fn launchPreparedBash(
         .execution = launched.?,
     } };
     traceAction(host, "bash_handoff_committed", action_binding);
+    const deadline_ns = slot.bash.execution.deadlineNs();
+    traceActionDeadline(host, "bash_deadline_established", deadline_ns, false, action_binding);
+    parkAfterSelectedBashHandoff(host, deadline_ns, action_binding);
 }
 
 fn stopSupersededBash(
@@ -790,7 +1020,8 @@ fn stopSupersededBash(
                 fenceDispatch(host, "Bash stop reconciliation", err);
                 return;
             };
-            if (!stopped) continue;
+            const control = stopped orelse continue;
+            traceActionControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
             var cleanup = preparation.*.?.cancel();
             preparation.* = null;
             settleActionFailure(host, active.token, active.binding, .cancelled, "Bash was stopped before launch.");
@@ -806,7 +1037,21 @@ fn stopSupersededBash(
                 fenceDispatch(host, "Bash stop reconciliation", err);
                 return;
             };
-            if (stopped) active.execution.requestStop();
+            if (stopped) |control| {
+                if (!active.stop_accepted) {
+                    active.stop_accepted = true;
+                    traceActionControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
+                    const action = active.execution.requestStop();
+                    traceActionControlOutcome(
+                        host,
+                        "lifecycle_action_attempted",
+                        control.command_key.slice(),
+                        action.attempted,
+                        action.signal_failed,
+                        active.binding,
+                    );
+                }
+            }
         },
         else => {},
     };
@@ -946,8 +1191,9 @@ fn findActiveTransfer(
 
 fn admitNewAttempt(
     host: *Host,
-    reactor: *provider.Reactor,
     slot: *ExecutionSlot,
+    preparation: *provider.Preparation,
+    preparation_active: *bool,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
     var admission = host.store.admitNextModelAttempt(.{
@@ -962,14 +1208,15 @@ fn admitNewAttempt(
         host.custody.releaseUnused(token) catch unreachable;
         return .no_work;
     };
-    return beginAdmittedAttempt(host, reactor, slot, token, &admission.permit);
+    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation, preparation_active);
 }
 
 fn admitRetryAttempt(
     host: *Host,
-    reactor: *provider.Reactor,
     slot: *ExecutionSlot,
     active: store_module.ActiveOperationFilter,
+    preparation: *provider.Preparation,
+    preparation_active: *bool,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
     var admission = host.store.tryAdmitNextModelRetry(
@@ -985,39 +1232,42 @@ fn admitRetryAttempt(
         host.custody.releaseUnused(token) catch unreachable;
         return .no_work;
     };
-    return beginAdmittedAttempt(host, reactor, slot, token, &admission.permit);
+    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation, preparation_active);
 }
 
 fn beginAdmittedAttempt(
     host: *Host,
-    reactor: *provider.Reactor,
     slot: *ExecutionSlot,
     token: execution.CustodyToken,
     permit: *store_module.DispatchPermit,
+    preparation: *provider.Preparation,
+    preparation_active: *bool,
 ) AdmissionProgress {
+    std.debug.assert(!preparation_active.*);
     const binding = host.custody.attach(token, permit) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "custody attachment", err);
         return .admitted;
     };
-
-    var view = host.store.openHistoricalView(binding) catch |err| {
+    slot.* = .{ .model_preparing = .{ .token = token, .binding = binding } };
+    const view = host.store.openHistoricalView(binding) catch |err| {
         if (err == error.SupersededByControl) {
             finishCustodyNow(host, token);
+            slot.* = .free;
             return .admitted;
         }
         fenceDispatch(host, "historical view", err);
         finishCustodyNow(host, token);
+        slot.* = .free;
         return .admitted;
     };
-    defer view.close();
     const request_budget = host.retention.sharedBudget().narrowed(
         if (host.faults.request_scratch_acquire) 0 else host.faults.request_scratch_limit_bytes,
     );
     var retained_scratch: ?named_scratch.Owner = null;
-    var request = provider.materialize(
+    preparation.init(
         host.io,
-        &view,
+        view,
         host.lease.paths.scratch.slice(),
         request_budget,
         .{
@@ -1040,16 +1290,120 @@ fn beginAdmittedAttempt(
         if (host.store.isFenced()) {
             fenceDispatch(host, "canonical request read", err);
             finishCustodyNow(host, token);
+            slot.* = .free;
             return .admitted;
         }
         if (err == error.SupersededByControl) {
             finishCustodyNow(host, token);
+            slot.* = .free;
             return .admitted;
         }
         settleAttemptFailure(host, token, binding, preparationFailureCode(err), .terminal);
         finishCustodyNow(host, token);
+        slot.* = .free;
         return .admitted;
     };
+    preparation_active.* = true;
+    traceOperation(host, "preparation_started", binding);
+    return .admitted;
+}
+
+fn advanceModelPreparation(
+    host: *Host,
+    reactor: ?*provider.Reactor,
+    slots: []ExecutionSlot,
+    preparation: *provider.Preparation,
+    preparation_active: *bool,
+) bool {
+    if (!preparation_active.*) return false;
+    const slot = for (slots) |*candidate| switch (candidate.*) {
+        .model_preparing => break candidate,
+        else => {},
+    } else unreachable;
+    const owner = slot.model_preparing;
+    if (!host.launchAllowed()) {
+        preparation.cancel();
+        preparation_active.* = false;
+        // Infrastructure fencing does not invent a user stop or a Resolution.
+        finishCustodyNow(host, owner.token);
+        slot.* = .free;
+        return true;
+    }
+    if (preparationAdvanceHeld(host) and host.preparation_advance_seen_pending) {
+        if (!host.preparation_advance_held) {
+            host.preparation_advance_held = true;
+            traceSubject(host, "preparation_advance_held", "gate", "preparation");
+        }
+        return false;
+    }
+    if (host.preparation_advance_held) {
+        host.preparation_advance_held = false;
+        traceSubject(host, "preparation_advance_released", "gate", "preparation");
+    }
+    traceOperation(host, "preparation_advance_started", owner.binding);
+    const progress = preparation.advance(
+        host.faults.request_preparation_byte_allowance,
+        host.faults.request_preparation_item_allowance,
+    );
+    const stats = preparation.advanceStats();
+    switch (progress) {
+        .pending => {
+            if (preparationAdvanceHeld(host)) host.preparation_advance_seen_pending = true;
+            tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
+            if (host.faults.request_preparation_advance_delay_ms != 0) {
+                _ = host.io.sleep(.fromMilliseconds(host.faults.request_preparation_advance_delay_ms), .awake) catch {};
+            }
+        },
+        .failed => |err| {
+            tracePreparationAdvanceError(host, "preparation_advance_failed", err, stats, owner.binding);
+            preparation.cancel();
+            preparation_active.* = false;
+            finishModelPreparationFailure(host, slot, owner, err);
+        },
+        .prepared => |value| {
+            tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
+            traceOperation(host, "preparation_completed", owner.binding);
+            preparation_active.* = false;
+            var request = value;
+            launchPreparedRequest(host, reactor.?, slot, owner, &request);
+        },
+    }
+    return true;
+}
+
+fn finishModelPreparationFailure(
+    host: *Host,
+    slot: *ExecutionSlot,
+    owner: ModelPreparingSlot,
+    err: anyerror,
+) void {
+    if (host.store.isFenced()) {
+        fenceDispatch(host, "canonical request read", err);
+    } else if (err != error.SupersededByControl) {
+        settleAttemptFailure(host, owner.token, owner.binding, preparationFailureCode(err), .terminal);
+    }
+    finishCustodyNow(host, owner.token);
+    slot.* = .free;
+}
+
+fn launchPreparedRequest(
+    host: *Host,
+    reactor: *provider.Reactor,
+    slot: *ExecutionSlot,
+    owner: ModelPreparingSlot,
+    request: *provider.PreparedRequest,
+) void {
+    const token = owner.token;
+    const binding = owner.binding;
+    if (!host.launchAllowed()) {
+        request.deinit();
+        finishCustodyNow(host, token);
+        slot.* = .free;
+        return;
+    }
+    const request_budget = host.retention.sharedBudget().narrowed(
+        if (host.faults.request_scratch_acquire) 0 else host.faults.request_scratch_limit_bytes,
+    );
     var retained_response: ?named_scratch.Owner = null;
     if (host.faults.provider_prepare) {
         request.deinit();
@@ -1057,7 +1411,8 @@ fn beginAdmittedAttempt(
             .waits_ms = host.faults.retry_waits_ms,
         } });
         finishCustodyNow(host, token);
-        return .admitted;
+        slot.* = .free;
+        return;
     }
     // Transfer.start gives curl pointers into the Transfer, so construct it in
     // its final slot and keep that union arm active through removal and deinit.
@@ -1066,7 +1421,7 @@ fn beginAdmittedAttempt(
         .transfer = undefined,
     } };
     const active = &slot.provider;
-    active.transfer.start(host.provider_endpoint.?, request, binding, .{
+    active.transfer.start(host.provider_endpoint.?, request.*, binding, .{
         .inactivity_seconds = @intCast(host.faults.provider_inactivity_seconds),
         .request_read_fault = host.faults.request_read,
         .response_acquire_fault = host.faults.response_acquire,
@@ -1082,7 +1437,7 @@ fn beginAdmittedAttempt(
                 .owner = retained,
             } };
             retainDispatchFence(host, "response scratch unlink", err);
-            return .admitted;
+            return;
         }
         std.debug.print("rui: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         if (err == error.ResponseCaptureAcquisitionFailed) {
@@ -1092,7 +1447,7 @@ fn beginAdmittedAttempt(
         }
         finishCustodyNow(host, token);
         slot.* = .free;
-        return .admitted;
+        return;
     };
     if (host.faults.before_launch_delay_ms != 0) {
         traceOperation(host, "prepared_before_handoff", binding);
@@ -1104,32 +1459,40 @@ fn beginAdmittedAttempt(
         fenceDispatch(host, "dispatch handoff", err);
         finishCustodyNow(host, token);
         slot.* = .free;
-        return .admitted;
+        return;
     };
     host.store.withDispatchHandoff(
         binding,
-        .{ .reactor = reactor, .transfer = &active.transfer },
+        .{ .host = host, .reactor = reactor, .transfer = &active.transfer },
         struct {
             fn handoff(context: anytype) !void {
+                try context.host.withEffectLaunch(context, launch);
+            }
+
+            fn launch(context: anytype) !void {
                 try context.reactor.add(context.transfer);
             }
         }.handoff,
     ) catch |err| {
         active.transfer.deinit();
+        if (err == error.HostDispatchSuppressed) {
+            finishCustodyNow(host, token);
+            slot.* = .free;
+            return;
+        }
         if (err == error.SupersededByControl) {
             traceOperation(host, "canonical_handoff_superseded", binding);
             finishCustodyNow(host, token);
             slot.* = .free;
-            return .admitted;
+            return;
         }
         std.debug.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
         finishCustodyNow(host, token);
         slot.* = .free;
-        return .admitted;
+        return;
     };
     traceOperation(host, "transport_handoff_committed", binding);
-    return .admitted;
 }
 
 fn completeTransfer(
@@ -1148,6 +1511,8 @@ fn completeTransfer(
     };
     const active = &slot.provider;
     const owner = active.owner;
+    traceCompletionQueue(host, completion.queued_after, owner.binding);
+    defer traceOperation(host, "provider_completion_serviced", owner.binding);
     const evidence = switch (completion.outcome) {
         .response_capture_failed => |failure| {
             const code = switch (failure) {
@@ -1265,13 +1630,16 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         return .cleanup;
     };
     defer metadata.deinit();
+    traceOperation(host, "validation_started", owner.binding);
     const validated = provider_output.validate(host.io, response.file, response.length, &metadata, .{
         .metadata = host.faults.response_metadata,
     }) catch |err| {
+        traceOperation(host, "validation_failed", owner.binding);
         std.debug.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         settleAttemptFailure(host, owner.token, owner.binding, provider_output.failureCode(err), .terminal);
         return .cleanup;
     };
+    traceOperation(host, "validation_completed", owner.binding);
     if (!modelObservationsAgree(
         validated.evidence.served_model.slice(),
         openai_model.slice(),
@@ -1355,25 +1723,24 @@ fn beginCleanupAt(
     if (host.faults.cleanup_delay_ms == 0) finishSlotCleanupIfReleased(host, slot, now);
 }
 
-fn advanceCleanup(host: *Host, slots: []ExecutionSlot) void {
-    advanceCleanupAt(host, slots, .now(host.io, .awake));
-}
-
 fn advanceCleanupAt(
     host: *Host,
     slots: []ExecutionSlot,
     now: std.Io.Clock.Timestamp,
-) void {
+) bool {
+    var made_progress = false;
     for (slots) |*slot| {
         switch (slot.*) {
             .cleanup => |cleanup| {
                 if (cleanup.cleanup_deadline.compare(.lte, now)) {
                     finishSlotCleanupIfReleased(host, slot, now);
+                    if (slot.* == .free) made_progress = true;
                 }
             },
             else => {},
         }
     }
+    return made_progress;
 }
 
 fn finishSlotCleanupIfReleased(
@@ -1434,18 +1801,22 @@ fn shutdownExecution(
     reactor: ?*provider.Reactor,
     slots: []ExecutionSlot,
     preparation: *?bash.Preparation,
+    model_preparation: *provider.Preparation,
+    model_preparation_active: *bool,
 ) void {
     for (slots) |*slot| switch (slot.*) {
         .free => {},
-        .bash_preparing => |active| {
-            var cleanup = preparation.*.?.cancel();
-            preparation.* = null;
-            cleanup.cleanup() catch |err| {
-                retainBashPreparedCleanup(host, slot, active.token, cleanup, err);
-                continue;
-            };
+        .model_preparing => |active| {
+            std.debug.assert(model_preparation_active.*);
+            model_preparation.cancel();
+            model_preparation_active.* = false;
             finishCustodyNow(host, active.token);
             slot.* = .free;
+        },
+        .bash_preparing => |active| {
+            const cleanup = preparation.*.?.cancel();
+            preparation.* = null;
+            discardBashResources(host, slot, active.token, cleanup);
         },
         .bash => |*active| active.execution.requestInfrastructureShutdown(),
         .bash_prepared_cleanup, .named_scratch => {},
@@ -1523,8 +1894,11 @@ fn finishCustodyNow(host: *Host, token: execution.CustodyToken) void {
 }
 
 fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
-    if (host.effect_shutdown.swap(true, .acq_rel)) return;
+    host.launch_mutex.lockUncancelable(host.io);
+    const already_shutting_down = host.effect_shutdown.swap(true, .acq_rel);
     host.dispatch_fenced.store(true, .release);
+    host.launch_mutex.unlock(host.io);
+    if (already_shutting_down) return;
     std.debug.print("rui: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
     // Waking accept transfers shutdown to serve's owner. That owner stops new
     // connections, joins the execution thread (which detaches any active
@@ -1541,7 +1915,9 @@ fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
 }
 
 fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {
+    host.launch_mutex.lockUncancelable(host.io);
     host.dispatch_fenced.store(true, .release);
+    host.launch_mutex.unlock(host.io);
     std.debug.print("rui: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
 }
 
@@ -1551,10 +1927,29 @@ fn nowNs(host: *Host) u64 {
 
 fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer) void {
     if (!host.faults.test_phase_trace) return;
-    trace.append("\n") catch return;
     host.trace_mutex.lockUncancelable(host.io);
     defer host.trace_mutex.unlock(host.io);
-    std.Io.File.stderr().writeStreamingAll(host.io, trace.slice()) catch return;
+    host.trace_sequence += 1;
+    const original = trace.slice();
+    if (original.len == 0 or original[original.len - 1] != '}') {
+        host.trace_lost = true;
+        return;
+    }
+    var complete: protocol.ResponseBuffer = .{};
+    complete.append(original[0 .. original.len - 1]) catch {
+        host.trace_lost = true;
+        return;
+    };
+    complete.appendFmt(
+        ",\"process\":\"{d}\",\"run\":\"{d}\",\"clock\":\"awake_ns\",\"sequence\":\"{d}\",\"trace_lost\":{s}}}\n",
+        .{ trace_native.getpid(), host.trace_run_ns, host.trace_sequence, if (host.trace_lost) "true" else "false" },
+    ) catch {
+        host.trace_lost = true;
+        return;
+    };
+    std.Io.File.stderr().writeStreamingAll(host.io, complete.slice()) catch {
+        host.trace_lost = true;
+    };
 }
 
 fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
@@ -1567,6 +1962,26 @@ fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subjec
     trace.append(",\"subject\":") catch return;
     trace.appendJsonString(subject) catch return;
     trace.append("}") catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceServiceBoundary(host: *Host, start_ns: u64, end_ns: u64, wait_ns: u64) void {
+    if (!host.faults.test_execution_service_boundaries) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.appendFmt(
+        "{{\"rui_test_phase\":\"lifecycle_boundary\",\"at_ns\":\"{d}\",\"start_ns\":\"{d}\",\"wait_ns\":\"{d}\"}}",
+        .{ end_ns, start_ns, wait_ns },
+    ) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceLifecycleService(host: *Host, maximum_gap_ns: u64) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.appendFmt(
+        "{{\"rui_test_phase\":\"lifecycle_service_observation\",\"at_ns\":\"{d}\",\"maximum_gap_ns\":\"{d}\",\"owner\":\"execution\"}}",
+        .{ nowNs(host), maximum_gap_ns },
+    ) catch return;
     writeTestTrace(host, &trace);
 }
 
@@ -1584,6 +1999,53 @@ fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptB
     writeTestTrace(host, &trace);
 }
 
+fn tracePreparationAdvance(
+    host: *Host,
+    phase: []const u8,
+    stats: provider.PreparationAdvanceStats,
+    binding: store_module.AttemptBinding,
+) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"rui_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(
+        ",\"at_ns\":\"{d}\",\"work_bytes\":\"{d}\",\"work_items\":\"{d}\",\"request_bytes\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
+        .{ nowNs(host), stats.work_bytes, stats.work_items, stats.request_bytes, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
+    ) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn tracePreparationAdvanceError(
+    host: *Host,
+    phase: []const u8,
+    err: anyerror,
+    stats: provider.PreparationAdvanceStats,
+    binding: store_module.AttemptBinding,
+) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"rui_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"error\":", .{nowNs(host)}) catch return;
+    trace.appendJsonString(@errorName(err)) catch return;
+    trace.appendFmt(
+        ",\"work_bytes\":\"{d}\",\"work_items\":\"{d}\",\"request_bytes\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
+        .{ stats.work_bytes, stats.work_items, stats.request_bytes, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
+    ) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceCompletionQueue(host: *Host, queued_after: usize, binding: store_module.AttemptBinding) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.appendFmt(
+        "{{\"rui_test_phase\":\"provider_completion_removed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
+        .{ nowNs(host), queued_after, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
+    ) catch return;
+    writeTestTrace(host, &trace);
+}
+
 fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttemptBinding) void {
     if (!host.faults.test_phase_trace) return;
     var trace: protocol.ResponseBuffer = .{};
@@ -1591,6 +2053,95 @@ fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttem
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\",\"attempt\":\"{d}\"}}", .{
         nowNs(host),
+        binding.turn_id,
+        binding.parent_operation_id,
+        binding.action_id,
+        binding.attempt_ordinal,
+    }) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceOperationControl(
+    host: *Host,
+    phase: []const u8,
+    command_key: []const u8,
+    binding: store_module.AttemptBinding,
+) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"rui_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
+    trace.appendJsonString(command_key) catch return;
+    trace.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+        binding.turn_id,
+        binding.operation_id,
+        binding.attempt_ordinal,
+    }) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceActionControl(
+    host: *Host,
+    phase: []const u8,
+    command_key: []const u8,
+    binding: store_module.ActionAttemptBinding,
+) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"rui_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
+    trace.appendJsonString(command_key) catch return;
+    trace.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+        binding.turn_id,
+        binding.parent_operation_id,
+        binding.action_id,
+        binding.attempt_ordinal,
+    }) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceActionControlOutcome(
+    host: *Host,
+    phase: []const u8,
+    command_key: []const u8,
+    attempted: bool,
+    failed: bool,
+    binding: store_module.ActionAttemptBinding,
+) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"rui_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
+    trace.appendJsonString(command_key) catch return;
+    trace.appendFmt(",\"attempted\":{s},\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+        if (attempted) "true" else "false",
+        if (failed) "true" else "false",
+        binding.turn_id,
+        binding.parent_operation_id,
+        binding.action_id,
+        binding.attempt_ordinal,
+    }) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceActionDeadline(
+    host: *Host,
+    phase: []const u8,
+    deadline_ns: u64,
+    failed: bool,
+    binding: store_module.ActionAttemptBinding,
+) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"rui_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(",\"at_ns\":\"{d}\",\"deadline_ns\":\"{d}\",\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\",\"attempt\":\"{d}\"}}", .{
+        nowNs(host),
+        deadline_ns,
+        if (failed) "true" else "false",
         binding.turn_id,
         binding.parent_operation_id,
         binding.action_id,
@@ -1616,6 +2167,48 @@ fn testGateActive(host: *Host, path: []const u8) bool {
     const gate = std.Io.Dir.cwd().openFile(host.io, path, .{}) catch return false;
     gate.close(host.io);
     return true;
+}
+
+fn completionConsumptionHeld(host: *Host) bool {
+    const path = host.faults.completion_consumption_gate_path orelse return false;
+    return testGateActive(host, path);
+}
+
+fn preparationAdvanceHeld(host: *Host) bool {
+    const path = host.faults.preparation_advance_gate_path orelse return false;
+    return testGateActive(host, path);
+}
+
+fn observeUnprocessedCompletions(host: *Host, reactor: *provider.Reactor) void {
+    const count = reactor.unprocessedCompletions() catch |err| {
+        fenceDispatch(host, "native completion observation", err);
+        return;
+    };
+    if (host.last_unprocessed_completions) |previous| {
+        if (previous == count) return;
+    }
+    host.last_unprocessed_completions = count;
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.appendFmt(
+        "{{\"rui_test_phase\":\"native_completions_unprocessed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\"}}",
+        .{ nowNs(host), count },
+    ) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn parkAfterSelectedBashHandoff(host: *Host, deadline_ns: u64, binding: store_module.ActionAttemptBinding) void {
+    const path = host.faults.bash_handoff_gate_path orelse return;
+    if (!testGateActive(host, path)) return;
+    traceAction(host, "bash_handoff_parked", binding);
+    waitAtTestGate(host, path);
+    while (nowNs(host) < deadline_ns) {
+        const remaining_ns = deadline_ns - nowNs(host);
+        const remaining_ms = @max(@as(u64, 1), (remaining_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms);
+        const sleep_ms: u64 = @min(remaining_ms, std.math.maxInt(u31));
+        _ = host.io.sleep(.fromMilliseconds(@intCast(sleep_ms)), .awake) catch break;
+    }
+    traceActionDeadline(host, "bash_handoff_released", deadline_ns, false, binding);
 }
 
 fn appendOptionalUnsigned(
@@ -1664,8 +2257,7 @@ fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
     appendOptionalUnsigned(&trace, "page_size_bytes", value.page_size_bytes) catch return;
     trace.append(",") catch return;
     appendOptionalSigned(&trace, "cache_size_setting", value.cache_size_setting) catch return;
-    trace.append(",\"cache_size_setting_scope\":\"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages\"") catch return;
-    trace.append(",") catch return;
+    trace.append(",\"cache_size_setting_scope\":\"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages\",") catch return;
     appendOptionalSigned(&trace, "cache_spill_threshold", value.cache_spill_threshold) catch return;
     trace.append(",") catch return;
     appendOptionalUnsigned(&trace, "mmap_size_bytes", value.mmap_size_bytes) catch return;
@@ -1728,6 +2320,9 @@ const ControlTiming = struct {
                 self.lock_acquired_ns = nowNs(self.host);
                 traceSubject(self.host, "control_lock_acquired", "command_key", self.command_key);
                 self.waitAtTestGate();
+            },
+            .durable_acceptance => {
+                traceSubject(self.host, "control_durable_acceptance", "command_key", self.command_key);
             },
             .store_complete => {
                 self.store_complete_ns = nowNs(self.host);
@@ -1795,6 +2390,7 @@ const SettlementTrace = struct {
     fn markStore(context: *anyopaque, phase: store_module.SettlementTracePhase) void {
         const self: *SettlementTrace = @ptrCast(@alignCast(context));
         traceOperation(self.host, switch (phase) {
+            .lock_requested => "settlement_lock_requested",
             .lock_acquired => "settlement_lock_acquired",
             .settlement_complete => "settlement_complete",
         }, self.binding);
@@ -2674,19 +3270,19 @@ test "cleanup delay follows elapsed time and preserves custody reuse" {
     const first = try Attach.run(&host.custody, 1);
     beginCleanupAt(&host, &slots[0], first, start);
     try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
-    for (0..100) |_| advanceCleanupAt(&host, &slots, before_deadline);
+    for (0..100) |_| _ = advanceCleanupAt(&host, &slots, before_deadline);
     try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
-    advanceCleanupAt(&host, &slots, deadline);
+    _ = advanceCleanupAt(&host, &slots, deadline);
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     try std.testing.expect(slots[0] == .free);
-    advanceCleanupAt(&host, &slots, far_after_deadline);
+    _ = advanceCleanupAt(&host, &slots, far_after_deadline);
 
     const second = try Attach.run(&host.custody, 2);
     try std.testing.expectEqual(first.token.index, second.token.index);
     try std.testing.expect(first.token.generation != second.token.generation);
     try std.testing.expectError(error.StaleCustody, host.custody.binding(first.token));
     beginCleanupAt(&host, &slots[0], second, start);
-    advanceCleanupAt(&host, &slots, far_after_deadline);
+    _ = advanceCleanupAt(&host, &slots, far_after_deadline);
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     try std.testing.expect(slots[0] == .free);
 
@@ -2760,7 +3356,16 @@ test "named scratch retry releases custody through the shutdown owner path" {
             test_slots: []ExecutionSlot,
             test_preparation: *?bash.Preparation,
         ) void {
-            shutdownExecution(test_host, null, test_slots, test_preparation);
+            var model_preparation: provider.Preparation = undefined;
+            var model_preparation_active = false;
+            shutdownExecution(
+                test_host,
+                null,
+                test_slots,
+                test_preparation,
+                &model_preparation,
+                &model_preparation_active,
+            );
         }
     };
     const shutdown = try std.Thread.spawn(
@@ -3078,4 +3683,238 @@ test "shutdown drain retains stack-owned Host until active clients finish" {
     host.drain();
     try std.testing.expect(completed.load(.acquire));
     thread.join();
+}
+
+test "Host fences dispose admitted preparation without touching canonical state" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    inline for (.{ "dispatch_fenced", "execution_shutdown", "effect_shutdown" }) |flag| {
+        var records: [1]execution.CustodyRecord = undefined;
+        var host = Host{
+            .io = std.testing.io,
+            .allocator = std.testing.allocator,
+            .lease = undefined,
+            .store = undefined, // The suppression path must not query or settle.
+            .faults = .{},
+            .custody = execution.CustodyPool.initialize(&records),
+        };
+        const token = host.custody.reserve().?;
+        var permit = store_module.DispatchPermit{ .binding = .{
+            .turn_id = 1,
+            .operation_id = 1,
+            .attempt_ordinal = 1,
+        } };
+        const binding = try host.custody.attach(token, &permit);
+        var preparation: provider.Preparation = undefined;
+        var retained: ?named_scratch.Owner = null;
+        try preparation.init(
+            std.testing.io,
+            .{ .store = undefined, .binding = binding },
+            root,
+            .{ .used = &host.scratch_used, .limit = 1024 },
+            .{},
+            &retained,
+        );
+        // Real file aliases and a real reservation are owned before fencing.
+        try preparation.writer.write("partial request");
+        var active = true;
+        var slots = [_]ExecutionSlot{.{ .model_preparing = .{
+            .token = token,
+            .binding = binding,
+        } }};
+        @field(host, flag).store(true, .release);
+        try std.testing.expect(advanceModelPreparation(&host, null, &slots, &preparation, &active));
+        try std.testing.expect(!active and !preparation.active and !preparation.view.active);
+        try std.testing.expect(slots[0] == .free);
+        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    }
+}
+
+test "Host fences dispose a sealed request before native transfer construction" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    inline for (.{ "dispatch_fenced", "execution_shutdown", "effect_shutdown" }) |flag| {
+        var records: [1]execution.CustodyRecord = undefined;
+        var host = Host{
+            .io = std.testing.io,
+            .allocator = std.testing.allocator,
+            .lease = undefined,
+            .store = undefined,
+            .faults = .{},
+            .custody = execution.CustodyPool.initialize(&records),
+        };
+        const token = host.custody.reserve().?;
+        var permit = store_module.DispatchPermit{ .binding = .{
+            .turn_id = 1,
+            .operation_id = 1,
+            .attempt_ordinal = 1,
+        } };
+        const binding = try host.custody.attach(token, &permit);
+        const writer = try tmp.dir.createFile(std.testing.io, "sealed", .{});
+        try writer.writeStreamingAll(std.testing.io, "{}");
+        writer.close(std.testing.io);
+        const reader = try tmp.dir.openFile(std.testing.io, "sealed", .{});
+        try tmp.dir.deleteFile(std.testing.io, "sealed");
+        host.scratch_used.store(2, .release);
+        var request = provider.PreparedRequest{
+            .io = std.testing.io,
+            .file = reader,
+            .length = 2,
+            .charged = 2,
+            .budget = .{ .used = &host.scratch_used, .limit = 2 },
+            .structured_output = false,
+        };
+        const owner = ModelPreparingSlot{ .token = token, .binding = binding };
+        var slot = ExecutionSlot{ .model_preparing = owner };
+        var reactor: provider.Reactor = undefined; // Must never be accessed.
+        @field(host, flag).store(true, .release);
+        launchPreparedRequest(&host, &reactor, &slot, owner, &request);
+        try std.testing.expect(slot == .free);
+        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    }
+}
+
+test "effect launch gate rechecks every Host suppression combination" {
+    const Launch = struct {
+        fn run(calls: *usize) !void {
+            calls.* += 1;
+        }
+    };
+    for (0..8) |mask| {
+        var host = Host{
+            .io = std.testing.io,
+            .allocator = std.testing.allocator,
+            .lease = undefined,
+            .store = undefined,
+            .faults = .{},
+        };
+        // The preflight result is deliberately stale before the real gate.
+        try std.testing.expect(host.launchAllowed());
+        host.dispatch_fenced.store(mask & 1 != 0, .release);
+        host.execution_shutdown.store(mask & 2 != 0, .release);
+        host.effect_shutdown.store(mask & 4 != 0, .release);
+        var calls: usize = 0;
+        if (mask == 0) {
+            try host.withEffectLaunch(&calls, Launch.run);
+            try std.testing.expectEqual(@as(usize, 1), calls);
+        } else {
+            try std.testing.expectError(error.HostDispatchSuppressed, host.withEffectLaunch(&calls, Launch.run));
+            try std.testing.expectEqual(@as(usize, 0), calls);
+        }
+    }
+}
+
+test "effect launch gate releases its mutex after native failure" {
+    var host = Host{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .lease = undefined,
+        .store = undefined,
+        .faults = .{},
+    };
+    const Launch = struct {
+        fn fail(calls: *usize) !void {
+            calls.* += 1;
+            return error.TestLaunchFailure;
+        }
+
+        fn succeed(calls: *usize) !void {
+            calls.* += 1;
+        }
+    };
+    var calls: usize = 0;
+    try std.testing.expectError(error.TestLaunchFailure, host.withEffectLaunch(&calls, Launch.fail));
+    try host.withEffectLaunch(&calls, Launch.succeed);
+    try std.testing.expectEqual(@as(usize, 2), calls);
+}
+
+test "Host fences discard prepared Bash without settling and retain failed cleanup" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var paths: platform.Paths = .{};
+    try paths.scratch.set(root);
+    var lease = platform.StoreLease{
+        .io = std.testing.io,
+        .paths = paths,
+        .store_dir = undefined,
+        .lock_file = undefined,
+    };
+    inline for (.{ "dispatch_fenced", "execution_shutdown", "effect_shutdown" }) |flag| {
+        for ([_]bool{ false, true }) |fail_cleanup| {
+            var records: [1]execution.CustodyRecord = undefined;
+            var host = Host{
+                .io = std.testing.io,
+                .allocator = std.testing.allocator,
+                .lease = &lease,
+                .store = undefined, // No canonical query, cancellation, or result.
+                .faults = .{},
+                .custody = execution.CustodyPool.initialize(&records),
+            };
+            const token = host.custody.reserve().?;
+            var permit = store_module.ActionDispatchPermit{ .binding = .{
+                .turn_id = 1,
+                .parent_operation_id = 1,
+                .action_id = 1,
+                .attempt_ordinal = 1,
+            } };
+            const binding = try host.custody.attachAction(token, &permit);
+            const file = try tmp.dir.createFile(std.testing.io, "suppressed-bash", .{});
+            try file.writeStreamingAll(std.testing.io, "exit 0\n");
+            var name: protocol.Bounded(96) = .{};
+            try name.set("suppressed-bash");
+            host.scratch_used.store(7, .release);
+            if (fail_cleanup) {
+                const gate = try tmp.dir.createFile(std.testing.io, bash.fault_gate_name, .{});
+                gate.close(std.testing.io);
+            }
+            var prepared = bash.Prepared{
+                .io = std.testing.io,
+                .allocator = std.testing.allocator,
+                .workspace = .{},
+                .scratch_path = root,
+                .bash_path = undefined, // Native construction must not run.
+                .timeout_ms = 1,
+                .faults = .{},
+                .script = .{
+                    .io = std.testing.io,
+                    .file = file,
+                    .name = name,
+                    .charged = 7,
+                    .budget = .{ .used = &host.scratch_used, .limit = 7 },
+                    .cleanup_fault = if (fail_cleanup) .gated else .none,
+                },
+                .stdout_capture = null,
+                .stderr_capture = null,
+            };
+            var slots = [_]ExecutionSlot{.{ .bash_preparing = .{
+                .token = token,
+                .binding = binding,
+            } }};
+            @field(host, flag).store(true, .release);
+            launchPreparedBash(&host, &slots[0], token, binding, &prepared);
+            try std.testing.expect(prepared.script == null);
+            // A retained cleanup fence must not become an effect shutdown.
+            try std.testing.expectEqual(std.mem.eql(u8, flag, "effect_shutdown"), host.effect_shutdown.load(.acquire));
+            if (fail_cleanup) {
+                try std.testing.expect(slots[0] == .bash_prepared_cleanup);
+                try std.testing.expect(slots[0].bash_prepared_cleanup.cleanup.script.?.file == null);
+                try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
+                try std.testing.expectEqual(@as(u64, 7), host.scratch_used.load(.acquire));
+                try tmp.dir.deleteFile(std.testing.io, bash.fault_gate_name);
+                const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+                var retry_at = now;
+                try std.testing.expect(advanceRetainedCleanup(&host, &slots, now, &retry_at));
+            }
+            try std.testing.expect(slots[0] == .free);
+            try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+            try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+            try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "suppressed-bash", .{}));
+        }
+    }
 }

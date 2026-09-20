@@ -232,6 +232,49 @@ func TestProcessSamplePortableProjection(t *testing.T) {
 	}
 }
 
+func TestCanonicalStoreUsesHostReadiness(t *testing.T) {
+	host := &Host{Ready: map[string]string{"store": "/private/var/folders/x/store"}}
+	got, err := host.CanonicalStore()
+	if err != nil || got != "/private/var/folders/x/store" {
+		t.Fatalf("CanonicalStore() = %q, %v", got, err)
+	}
+}
+
+func TestCanonicalStoreRejectsMissingReadiness(t *testing.T) {
+	cases := []*Host{nil, {}, {Ready: map[string]string{}}, {Ready: map[string]string{"store": ""}}}
+	for _, host := range cases {
+		if _, err := host.CanonicalStore(); err == nil {
+			t.Fatalf("CanonicalStore(%+v) succeeded", host)
+		}
+	}
+}
+
+func TestCanonicalStoreDoesNotUseUnresolvedTempDirJoin(t *testing.T) {
+	dir := t.TempDir()
+	joined := filepath.Join(dir, "store")
+	if err := os.Mkdir(joined, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(joined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical == joined {
+		t.Skip("this platform's TempDir is already the canonical Store selector")
+	}
+	host := &Host{Ready: map[string]string{"store": canonical}}
+	got, err := host.CanonicalStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != canonical {
+		t.Fatalf("CanonicalStore() = %q, want Host readiness %q", got, canonical)
+	}
+	if got == joined {
+		t.Fatalf("CanonicalStore() used the unresolved join %q", joined)
+	}
+}
+
 func TestRepositoryRootFromQualificationModule(t *testing.T) {
 	root := t.TempDir()
 	module := filepath.Join(root, "tests", "qualification")

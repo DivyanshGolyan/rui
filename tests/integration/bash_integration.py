@@ -3,7 +3,6 @@ import base64
 import json
 import os
 import pathlib
-import select
 import shlex
 import shutil
 import signal
@@ -151,22 +150,12 @@ def process_exists(pid):
         return False
 
 
-def wait_for_phase(process, phase, timeout=8):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        ready, _, _ = select.select([process.stderr], [], [], deadline - time.monotonic())
-        if not ready:
-            break
-        line = process.stderr.readline()
-        if not line:
-            break
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if event.get("rui_test_phase") == phase:
-            return event
-    raise TimeoutError(f"timed out waiting for phase {phase}")
+def stop_traced_host(host, diagnostics):
+    if host is not None:
+        fixture.stop_host(host)
+    if diagnostics is not None:
+        diagnostics.close()
+    return None, None
 
 
 def resolution(store, session):
@@ -809,7 +798,11 @@ def main():
     success_cleanup_gate.write_text("blocked")
     host = None
     success_milestones = None
+    milestones = None
     detached_process = None
+    observed_exit_gate = None
+    observed_exit_gate_keeper = None
+    stopped_pipes_stop = None
     completed = False
     resource_samples = []
     try:
@@ -1056,6 +1049,7 @@ def main():
             "1000",
             "--test-phase-trace",
         )
+        milestones = HostDiagnostics(host)
         allow(
             state,
             store,
@@ -1063,7 +1057,10 @@ def main():
             "direct/prelaunch-stop",
             prelaunch_stop_action["action"],
         )
-        wait_for_phase(host, "prepared_before_handoff")
+        milestones.wait(
+            "prepared_before_handoff",
+            action=str(prelaunch_stop_action["action"]),
+        )
         fixture.command(
             "stop-session",
             "--store",
@@ -1086,7 +1083,7 @@ def main():
         pending = fixture.wait_for(
             lambda: action_for(store, "direct/before-launch"), "pre-launch Bash Action"
         )
-        fixture.stop_host(host)
+        host, milestones = stop_traced_host(host, milestones)
         host = fixture.start_host(store, endpoint_url, active_capacity=0)
         allow(state, store, "before-launch-allow", "direct/before-launch", pending["action"])
         rejected_allow = fixture.command(
@@ -1124,12 +1121,14 @@ def main():
             "5000",
             "--test-phase-trace",
         )
-        wait_for_phase(host, "prepared_before_handoff")
+        milestones = HostDiagnostics(host)
+        milestones.wait("prepared_before_handoff", action=str(pending["action"]))
         named_first_acquisition = sorted((store / "scratch").glob("bash-*-*.tmp"))
         assert len(named_first_acquisition) >= 3, named_first_acquisition
         assert not before_launch_marker.exists()
-        crash = fixture.crash_host(host, state, "before-launch-crash")
+        crash = fixture.crash_host(host, state, "before-launch-crash", milestones)
         host = None
+        milestones = None
         assert crash["returncode"] == -signal.SIGKILL
         host = fixture.start_host(store, endpoint_url)
         assert not list((store / "scratch").glob("bash-*-*.tmp"))
@@ -1216,6 +1215,7 @@ def main():
             "1000",
             "--test-phase-trace",
         )
+        milestones = HostDiagnostics(host)
         configure(state, store, "settlement-stop-config", "direct/settlement-stop")
         fixture.message(
             state,
@@ -1235,7 +1235,10 @@ def main():
             "direct/settlement-stop",
             settlement_stop_action["action"],
         )
-        wait_for_phase(host, "sealed_before_settlement")
+        milestones.wait(
+            "sealed_before_settlement",
+            action=str(settlement_stop_action["action"]),
+        )
         fixture.command(
             "stop-session",
             "--store",
@@ -1266,7 +1269,7 @@ def main():
             == 0,
             "post-settlement Bash cleanup",
         )
-        fixture.stop_host(host)
+        host, milestones = stop_traced_host(host, milestones)
         host = fixture.start_host(store, endpoint_url)
 
         configure(state, store, "exited-pipes-config", "direct/exited-pipes")
@@ -1303,6 +1306,7 @@ def main():
             observed_exit_gate,
             "--test-phase-trace",
         )
+        milestones = HostDiagnostics(host)
         configure(state, store, "stopped-pipes-config", "direct/stopped-pipes")
         fixture.message(state, store, "stopped-pipes-message", "direct/stopped-pipes", "execute")
         stopped_pipes_action = fixture.wait_for(
@@ -1322,7 +1326,10 @@ def main():
         stopped_child = int(stopped_pipes_child_pid.read_text())
         assert process_exists(stopped_child)
         stopped_pipes_leader_release.touch()
-        wait_for_phase(host, "bash_leader_observed_with_open_pipes")
+        milestones.wait(
+            "bash_leader_observed_with_open_pipes",
+            action=str(stopped_pipes_action["action"]),
+        )
         stopped_pipes_stop = fixture.start_command(
             "stop-session",
             "--store",
@@ -1333,11 +1340,18 @@ def main():
             "--session",
             "direct/stopped-pipes",
         )
-        wait_for_phase(host, "control_store_complete")
+        milestones.wait(
+            "control_store_complete",
+            subject_kind="command_key",
+            subject="stopped-pipes-stop",
+        )
         os.write(observed_exit_gate_keeper, b"x")
         stopped = fixture.finish_command(stopped_pipes_stop)
         os.close(observed_exit_gate_keeper)
         observed_exit_gate.unlink()
+        observed_exit_gate_keeper = None
+        observed_exit_gate = None
+        stopped_pipes_stop = None
         assert stopped["answer"]["status"] == "accepted", stopped
         fixture.wait_for(
             lambda: resolution(store, "direct/stopped-pipes") == "cancelled",
@@ -1346,7 +1360,7 @@ def main():
         )
         fixture.wait_for(lambda: not process_exists(stopped_child), "stopped Bash descendant cleanup")
 
-        fixture.stop_host(host)
+        host, milestones = stop_traced_host(host, milestones)
         host = fixture.start_host(store, endpoint_url, "--bash-timeout-ms", "30000")
         configure(state, store, "timeout-config", "direct/timeout")
         fixture.message(state, store, "timeout-message", "direct/timeout", "execute")
@@ -1760,8 +1774,21 @@ def main():
         print(json.dumps({"bash_resource_samples": resource_samples}, sort_keys=True))
         completed = True
     finally:
+        if stopped_pipes_stop is not None and stopped_pipes_stop.poll() is None:
+            stopped_pipes_stop.kill()
+            stopped_pipes_stop.wait(timeout=10)
+        if observed_exit_gate_keeper is not None:
+            try:
+                os.write(observed_exit_gate_keeper, b"x")
+            except OSError:
+                pass
+            os.close(observed_exit_gate_keeper)
+        if observed_exit_gate is not None:
+            observed_exit_gate.unlink(missing_ok=True)
         if host is not None:
             fixture.stop_host(host)
+        if milestones is not None:
+            milestones.close()
         if success_milestones is not None:
             success_milestones.close()
         if detached_process is not None and process_exists(detached_process):
