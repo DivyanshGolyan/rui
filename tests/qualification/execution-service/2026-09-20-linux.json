@@ -1,15 +1,56 @@
 {
-  "format": "rui-execution-service-v2-go",
-  "status": "passed",
   "cases": [
     {
       "bash_action": "1",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 22537716,
+        "max_lifecycle_service_gap_ns": 22537716,
+        "max_native_completions_queued_after_removal": 6,
+        "preparation_advances": {
+          "count": 1025,
+          "maximum_ns": 22341416,
+          "total_ns": 1282695896
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 1418581401,
+          "total_ns": 1418581401
+        },
+        "service_interval_count": 3075,
+        "settlement": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_queue": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_service": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          4961642,
+          21577062
+        ],
+        "validation": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        }
+      },
       "overlap": {
         "mode": "preparation",
-        "stop_accepted_ns": 21414230362763,
-        "effect_requested_ns": 21414234547651,
-        "work_start_ns": 21414169427479,
-        "work_end_ns": 21415605778605,
+        "stop_accepted_ns": 27736950118295,
+        "effect_requested_ns": 27736955079937,
+        "work_start_ns": 27736896756579,
+        "work_end_ns": 27738315337980,
         "deadline_due_ns": 0,
         "deadline_serviced_ns": 0
       },
@@ -33,78 +74,78 @@
       "service_interval_scope": "complete lifecycle intervals intersecting the proved workload window; crossing intervals conservatively include their whole busy duration",
       "status": "passed",
       "stop_binding": {
-        "run": "21411856475724",
-        "process": "339988",
+        "run": "27734636972651",
+        "process": "440234",
         "clock": "awake_ns",
         "turn": "2",
         "operation": "2",
         "attempt": "1"
       },
-      "trace_commit_sequence": 11018,
-      "trace_events": 11018,
-      "trace_sha256": "bce26faf01096a340cc0a4ec56f267bc46e011121891718531ab7e815f623273",
+      "trace_commit_sequence": 11012,
+      "trace_events": 11012,
+      "trace_sha256": "18cfd6ab477c7c0755390c8f2e0cdb72ff133d5935c7eb95f3712eaa58db50bf",
       "workload_bindings": [
         {
-          "run": "21411856475724",
-          "process": "339988",
+          "run": "27734636972651",
+          "process": "440234",
           "clock": "awake_ns",
           "turn": "11",
           "operation": "11",
           "attempt": "1"
         }
-      ],
-      "metrics": {
-        "status": "passed",
-        "max_lifecycle_service_gap_ns": 16053086,
-        "largest_active_service_interval_ns": 16053086,
-        "stop_to_effect_ns": [
-          4184888,
-          15232088
-        ],
-        "deadline_to_service_ns": [],
-        "preparation_advances": {
-          "count": 1025,
-          "total_ns": 1278361284,
-          "maximum_ns": 15901723
-        },
-        "preparation_lifetimes": {
-          "count": 1,
-          "total_ns": 1436351126,
-          "maximum_ns": 1436351126
-        },
-        "validation": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_queue": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_service": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "service_interval_count": 3075,
-        "max_native_completions_queued_after_removal": 6,
-        "invalid_metrics": null
-      }
+      ]
     },
     {
       "bash_action": "1",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 84822019,
+        "max_lifecycle_service_gap_ns": 84822019,
+        "max_native_completions_queued_after_removal": 6,
+        "preparation_advances": {
+          "count": 4097,
+          "maximum_ns": 84682511,
+          "total_ns": 30989422582
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 31869816192,
+          "total_ns": 31869816192
+        },
+        "service_interval_count": 12291,
+        "settlement": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_queue": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_service": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          7218507,
+          809135
+        ],
+        "validation": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        }
+      },
       "overlap": {
         "mode": "preparation",
-        "stop_accepted_ns": 21447496536451,
-        "effect_requested_ns": 21447503757783,
-        "work_start_ns": 21447325055650,
-        "work_end_ns": 21477444933032,
+        "stop_accepted_ns": 27772530401842,
+        "effect_requested_ns": 27772537620349,
+        "work_start_ns": 27772359010611,
+        "work_end_ns": 27804228826803,
         "deadline_due_ns": 0,
         "deadline_serviced_ns": 0
       },
@@ -128,78 +169,78 @@
       "service_interval_scope": "complete lifecycle intervals intersecting the proved workload window; crossing intervals conservatively include their whole busy duration",
       "status": "passed",
       "stop_binding": {
-        "run": "21416061363872",
-        "process": "340272",
+        "run": "27738792059803",
+        "process": "440519",
         "clock": "awake_ns",
         "turn": "2",
         "operation": "2",
         "attempt": "1"
       },
-      "trace_commit_sequence": 43493,
-      "trace_events": 43493,
-      "trace_sha256": "3377fd3571f454b991033c534664522eb829c61778e198aadebb148f09d88df3",
+      "trace_commit_sequence": 43529,
+      "trace_events": 43529,
+      "trace_sha256": "5dd7a98d2c1b26ea7d10425ad3f07f755b404e8adbfca3222f173e59ebcf7615",
       "workload_bindings": [
         {
-          "run": "21416061363872",
-          "process": "340272",
+          "run": "27738792059803",
+          "process": "440519",
           "clock": "awake_ns",
           "turn": "11",
           "operation": "11",
           "attempt": "1"
         }
-      ],
-      "metrics": {
-        "status": "passed",
-        "max_lifecycle_service_gap_ns": 75356470,
-        "largest_active_service_interval_ns": 75356470,
-        "stop_to_effect_ns": [
-          7221332,
-          16081875
-        ],
-        "deadline_to_service_ns": [],
-        "preparation_advances": {
-          "count": 4097,
-          "total_ns": 29226463300,
-          "maximum_ns": 75342324
-        },
-        "preparation_lifetimes": {
-          "count": 1,
-          "total_ns": 30119877382,
-          "maximum_ns": 30119877382
-        },
-        "validation": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_queue": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_service": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "service_interval_count": 12291,
-        "max_native_completions_queued_after_removal": 6,
-        "invalid_metrics": null
-      }
+      ]
     },
     {
       "bash_action": "1",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 13864161,
+        "max_lifecycle_service_gap_ns": 13864161,
+        "max_native_completions_queued_after_removal": 6,
+        "preparation_advances": {
+          "count": 1029,
+          "maximum_ns": 13731104,
+          "total_ns": 189495218
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 324695569,
+          "total_ns": 324695569
+        },
+        "service_interval_count": 3087,
+        "settlement": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_queue": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_service": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          3757629,
+          15940673
+        ],
+        "validation": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        }
+      },
       "overlap": {
         "mode": "preparation",
-        "stop_accepted_ns": 21494006635484,
-        "effect_requested_ns": 21494012133866,
-        "work_start_ns": 21493833001305,
-        "work_end_ns": 21494144898318,
+        "stop_accepted_ns": 27821166229604,
+        "effect_requested_ns": 27821169987233,
+        "work_start_ns": 27821009439497,
+        "work_end_ns": 27821334135066,
         "deadline_due_ns": 0,
         "deadline_serviced_ns": 0
       },
@@ -223,78 +264,78 @@
       "service_interval_scope": "complete lifecycle intervals intersecting the proved workload window; crossing intervals conservatively include their whole busy duration",
       "status": "passed",
       "stop_binding": {
-        "run": "21478320444336",
-        "process": "343670",
+        "run": "27805161889733",
+        "process": "444115",
         "clock": "awake_ns",
         "turn": "65",
         "operation": "65",
         "attempt": "1"
       },
-      "trace_commit_sequence": 180683,
-      "trace_events": 180683,
-      "trace_sha256": "9a98d7d34edf3be7ec73bcdb7feed6780b2b73d80a090d2aa8a55592a5dbcc0d",
+      "trace_commit_sequence": 180711,
+      "trace_events": 180711,
+      "trace_sha256": "a2c1bda3fd6c5b3519a1fcdb7e22fd4c3a0818b735c1f81eb6c05084927f125f",
       "workload_bindings": [
         {
-          "run": "21478320444336",
-          "process": "343670",
+          "run": "27805161889733",
+          "process": "444115",
           "clock": "awake_ns",
           "turn": "74",
           "operation": "74",
           "attempt": "1"
         }
-      ],
-      "metrics": {
-        "status": "passed",
-        "max_lifecycle_service_gap_ns": 15513493,
-        "largest_active_service_interval_ns": 15513493,
-        "stop_to_effect_ns": [
-          5498382,
-          6646847
-        ],
-        "deadline_to_service_ns": [],
-        "preparation_advances": {
-          "count": 1029,
-          "total_ns": 209308869,
-          "maximum_ns": 15355509
-        },
-        "preparation_lifetimes": {
-          "count": 1,
-          "total_ns": 311897013,
-          "maximum_ns": 311897013
-        },
-        "validation": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_queue": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_service": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "service_interval_count": 3087,
-        "max_native_completions_queued_after_removal": 6,
-        "invalid_metrics": null
-      }
+      ]
     },
     {
       "bash_action": "1",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 14322077,
+        "max_lifecycle_service_gap_ns": 14322077,
+        "max_native_completions_queued_after_removal": 6,
+        "preparation_advances": {
+          "count": 769,
+          "maximum_ns": 14189305,
+          "total_ns": 188250824
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 266322820,
+          "total_ns": 266322820
+        },
+        "service_interval_count": 2307,
+        "settlement": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_queue": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_service": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          1267475,
+          15575370
+        ],
+        "validation": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        }
+      },
       "overlap": {
         "mode": "preparation",
-        "stop_accepted_ns": 21496713405840,
-        "effect_requested_ns": 21496714691168,
-        "work_start_ns": 21496701637420,
-        "work_end_ns": 21496946906111,
+        "stop_accepted_ns": 27823906145280,
+        "effect_requested_ns": 27823907412755,
+        "work_start_ns": 27823894620696,
+        "work_end_ns": 27824160943516,
         "deadline_due_ns": 0,
         "deadline_serviced_ns": 0
       },
@@ -318,8 +359,8 @@
       "service_interval_scope": "complete lifecycle intervals intersecting the proved workload window; crossing intervals conservatively include their whole busy duration",
       "status": "passed",
       "stop_binding": {
-        "run": "21495756704899",
-        "process": "345033",
+        "run": "27822956385926",
+        "process": "445478",
         "clock": "awake_ns",
         "turn": "2",
         "operation": "2",
@@ -327,69 +368,69 @@
       },
       "trace_commit_sequence": 4348,
       "trace_events": 4348,
-      "trace_sha256": "2b45c468feca1501e96aab04acb23c1556e547a69844401ff27c5b86edd97b56",
+      "trace_sha256": "05c72c6ceb47ac65f936e7100b80fe15289f9973cea09dbdbc64847592f5c10f",
       "workload_bindings": [
         {
-          "run": "21495756704899",
-          "process": "345033",
+          "run": "27822956385926",
+          "process": "445478",
           "clock": "awake_ns",
           "turn": "11",
           "operation": "11",
           "attempt": "1"
         }
-      ],
-      "metrics": {
-        "status": "passed",
-        "max_lifecycle_service_gap_ns": 10041243,
-        "largest_active_service_interval_ns": 10041243,
-        "stop_to_effect_ns": [
-          1285328,
-          11405231
-        ],
-        "deadline_to_service_ns": [],
-        "preparation_advances": {
-          "count": 769,
-          "total_ns": 167263475,
-          "maximum_ns": 9935799
-        },
-        "preparation_lifetimes": {
-          "count": 1,
-          "total_ns": 245268691,
-          "maximum_ns": 245268691
-        },
-        "validation": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_queue": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_service": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "service_interval_count": 2307,
-        "max_native_completions_queued_after_removal": 6,
-        "invalid_metrics": null
-      }
+      ]
     },
     {
       "bash_action": "1",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 109354895,
+        "max_lifecycle_service_gap_ns": 109354895,
+        "max_native_completions_queued_after_removal": 6,
+        "preparation_advances": {
+          "count": 6145,
+          "maximum_ns": 109225124,
+          "total_ns": 69151597732
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 70639614705,
+          "total_ns": 70639614705
+        },
+        "service_interval_count": 18435,
+        "settlement": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_queue": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_service": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          2417055,
+          26361281
+        ],
+        "validation": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        }
+      },
       "overlap": {
         "mode": "preparation",
-        "stop_accepted_ns": 21501154047445,
-        "effect_requested_ns": 21501154406353,
-        "work_start_ns": 21501142987764,
-        "work_end_ns": 21576725781146,
+        "stop_accepted_ns": 27828410022687,
+        "effect_requested_ns": 27828412439742,
+        "work_start_ns": 27828394723512,
+        "work_end_ns": 27899034338217,
         "deadline_due_ns": 0,
         "deadline_serviced_ns": 0
       },
@@ -413,78 +454,78 @@
       "service_interval_scope": "complete lifecycle intervals intersecting the proved workload window; crossing intervals conservatively include their whole busy duration",
       "status": "passed",
       "stop_binding": {
-        "run": "21497317577191",
-        "process": "345195",
+        "run": "27824520745165",
+        "process": "445638",
         "clock": "awake_ns",
         "turn": "2",
         "operation": "2",
         "attempt": "1"
       },
-      "trace_commit_sequence": 33090,
-      "trace_events": 33090,
-      "trace_sha256": "5cc71f586c69b3cc64f6f071a8bbc672df3f0e0476b773be2383436b63042190",
+      "trace_commit_sequence": 33061,
+      "trace_events": 33061,
+      "trace_sha256": "2f781486f2ab4fd66968a86ea1290abaf3c03e897f0855b869815248b4c24ad3",
       "workload_bindings": [
         {
-          "run": "21497317577191",
-          "process": "345195",
+          "run": "27824520745165",
+          "process": "445638",
           "clock": "awake_ns",
           "turn": "11",
           "operation": "11",
           "attempt": "1"
         }
-      ],
-      "metrics": {
-        "status": "passed",
-        "max_lifecycle_service_gap_ns": 88355141,
-        "largest_active_service_interval_ns": 88355141,
-        "stop_to_effect_ns": [
-          358908,
-          15925105
-        ],
-        "deadline_to_service_ns": [],
-        "preparation_advances": {
-          "count": 6145,
-          "total_ns": 74020691893,
-          "maximum_ns": 88343279
-        },
-        "preparation_lifetimes": {
-          "count": 1,
-          "total_ns": 75582793382,
-          "maximum_ns": 75582793382
-        },
-        "validation": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_queue": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_service": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "service_interval_count": 18435,
-        "max_native_completions_queued_after_removal": 6,
-        "invalid_metrics": null
-      }
+      ]
     },
     {
       "bash_action": "1",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 7485776,
+        "max_lifecycle_service_gap_ns": 7485776,
+        "max_native_completions_queued_after_removal": 6,
+        "preparation_advances": {
+          "count": 257,
+          "maximum_ns": 7386035,
+          "total_ns": 103083240
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 133786080,
+          "total_ns": 133786080
+        },
+        "service_interval_count": 771,
+        "settlement": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_queue": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_service": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          121298,
+          6231595
+        ],
+        "validation": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        }
+      },
       "overlap": {
         "mode": "preparation",
-        "stop_accepted_ns": 21578406116036,
-        "effect_requested_ns": 21578407338071,
-        "work_start_ns": 21578392963235,
-        "work_end_ns": 21578526853591,
+        "stop_accepted_ns": 27901012636046,
+        "effect_requested_ns": 27901012757344,
+        "work_start_ns": 27901005938157,
+        "work_end_ns": 27901139724237,
         "deadline_due_ns": 0,
         "deadline_serviced_ns": 0
       },
@@ -508,78 +549,78 @@
       "service_interval_scope": "complete lifecycle intervals intersecting the proved workload window; crossing intervals conservatively include their whole busy duration",
       "status": "passed",
       "stop_binding": {
-        "run": "21577535569909",
-        "process": "349551",
+        "run": "27900039681813",
+        "process": "449782",
         "clock": "awake_ns",
         "turn": "2",
         "operation": "2",
         "attempt": "1"
       },
-      "trace_commit_sequence": 1687,
-      "trace_events": 1687,
-      "trace_sha256": "82bfc84ed08c034cc8699d107583bac56c0b55a52ebebaf45db0e633eaa3f648",
+      "trace_commit_sequence": 1684,
+      "trace_events": 1684,
+      "trace_sha256": "66b03b7d78a250a493767179d30fbdef7692fd9deb61dc558752aae71eb4dcc3",
       "workload_bindings": [
         {
-          "run": "21577535569909",
-          "process": "349551",
+          "run": "27900039681813",
+          "process": "449782",
           "clock": "awake_ns",
           "turn": "11",
           "operation": "11",
           "attempt": "1"
         }
-      ],
-      "metrics": {
-        "status": "passed",
-        "max_lifecycle_service_gap_ns": 8077384,
-        "largest_active_service_interval_ns": 8077384,
-        "stop_to_effect_ns": [
-          1222035,
-          1439043
-        ],
-        "deadline_to_service_ns": [],
-        "preparation_advances": {
-          "count": 257,
-          "total_ns": 103601767,
-          "maximum_ns": 7978183
-        },
-        "preparation_lifetimes": {
-          "count": 1,
-          "total_ns": 133890356,
-          "maximum_ns": 133890356
-        },
-        "validation": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_queue": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_service": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "service_interval_count": 771,
-        "max_native_completions_queued_after_removal": 6,
-        "invalid_metrics": null
-      }
+      ]
     },
     {
       "bash_action": "1",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 112723458,
+        "max_lifecycle_service_gap_ns": 112723458,
+        "max_native_completions_queued_after_removal": 6,
+        "preparation_advances": {
+          "count": 2049,
+          "maximum_ns": 112558228,
+          "total_ns": 38307562605
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 38941761645,
+          "total_ns": 38941761645
+        },
+        "service_interval_count": 6147,
+        "settlement": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_queue": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_service": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          512828,
+          15328682
+        ],
+        "validation": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        }
+      },
       "overlap": {
         "mode": "preparation",
-        "stop_accepted_ns": 21582142168142,
-        "effect_requested_ns": 21582144698856,
-        "work_start_ns": 21582128129972,
-        "work_end_ns": 21616861152885,
+        "stop_accepted_ns": 27904778416371,
+        "effect_requested_ns": 27904778929199,
+        "work_start_ns": 27904758703036,
+        "work_end_ns": 27943700464681,
         "deadline_due_ns": 0,
         "deadline_serviced_ns": 0
       },
@@ -603,80 +644,81 @@
       "service_interval_scope": "complete lifecycle intervals intersecting the proved workload window; crossing intervals conservatively include their whole busy duration",
       "status": "passed",
       "stop_binding": {
-        "run": "21578824229940",
-        "process": "349697",
+        "run": "27901432142659",
+        "process": "449932",
         "clock": "awake_ns",
         "turn": "2",
         "operation": "2",
         "attempt": "1"
       },
-      "trace_commit_sequence": 11454,
-      "trace_events": 11454,
-      "trace_sha256": "9c4ba7bdc26cb5013129515a16c0ceafc66f5d509cde7b452c1442d146ff9d46",
+      "trace_commit_sequence": 11486,
+      "trace_events": 11486,
+      "trace_sha256": "f67e98052ac713e699eb10dd2775d1bbeef9a830b8c3dec00acecd91a59a4782",
       "workload_bindings": [
         {
-          "run": "21578824229940",
-          "process": "349697",
+          "run": "27901432142659",
+          "process": "449932",
           "clock": "awake_ns",
           "turn": "11",
           "operation": "11",
           "attempt": "1"
         }
-      ],
-      "metrics": {
-        "status": "passed",
-        "max_lifecycle_service_gap_ns": 94596770,
-        "largest_active_service_interval_ns": 94596770,
-        "stop_to_effect_ns": [
-          2530714,
-          4143271
-        ],
-        "deadline_to_service_ns": [],
-        "preparation_advances": {
-          "count": 2049,
-          "total_ns": 34134405040,
-          "maximum_ns": 94443378
-        },
-        "preparation_lifetimes": {
-          "count": 1,
-          "total_ns": 34733022913,
-          "maximum_ns": 34733022913
-        },
-        "validation": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_queue": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_service": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "service_interval_count": 6147,
-        "max_native_completions_queued_after_removal": 6,
-        "invalid_metrics": null
-      }
+      ]
     },
     {
       "bash_action": "1",
+      "metrics": {
+        "deadline_to_service_ns": [
+          29117757
+        ],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 91232470,
+        "max_lifecycle_service_gap_ns": 91232470,
+        "max_native_completions_queued_after_removal": 5,
+        "preparation_advances": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "preparation_lifetimes": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "service_interval_count": 4,
+        "settlement": {
+          "count": 2,
+          "maximum_ns": 9655666,
+          "total_ns": 16052728
+        },
+        "settlement_queue": {
+          "count": 2,
+          "maximum_ns": 8654,
+          "total_ns": 11067
+        },
+        "settlement_service": {
+          "count": 2,
+          "maximum_ns": 9647012,
+          "total_ns": 16041661
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          79485172
+        ],
+        "validation": {
+          "count": 2,
+          "maximum_ns": 78019712,
+          "total_ns": 126324026
+        }
+      },
       "overlap": {
         "mode": "completion",
-        "stop_accepted_ns": 21618161684121,
-        "effect_requested_ns": 21618228648077,
-        "work_start_ns": 21618151642280,
-        "work_end_ns": 21618284671062,
-        "deadline_due_ns": 21618181528626,
-        "deadline_serviced_ns": 21618231372129
+        "stop_accepted_ns": 27945078906858,
+        "effect_requested_ns": 27945158392030,
+        "work_start_ns": 27945067391271,
+        "work_end_ns": 27945218908080,
+        "deadline_due_ns": 27945132238406,
+        "deadline_serviced_ns": 27945161356163
       },
       "parameters": {
         "name": "completion-2",
@@ -698,89 +740,89 @@
       "service_interval_scope": "complete lifecycle intervals intersecting the proved workload window; crossing intervals conservatively include their whole busy duration",
       "status": "passed",
       "stop_binding": {
-        "run": "21617219814673",
-        "process": "351873",
+        "run": "27944116349399",
+        "process": "452314",
         "clock": "awake_ns",
         "turn": "2",
         "operation": "2",
         "attempt": "1"
       },
-      "trace_commit_sequence": 411,
-      "trace_events": 411,
-      "trace_sha256": "55358125d17ebb87372a9361959b52a4409fa77c5de91ade9a1251054c1b419a",
+      "trace_commit_sequence": 414,
+      "trace_events": 414,
+      "trace_sha256": "175385ebcac2beddc35698771d24f1b82642752d131860c8dd93d06e310c5172",
       "workload_bindings": [
         {
-          "run": "21617219814673",
-          "process": "351873",
+          "run": "27944116349399",
+          "process": "452314",
           "clock": "awake_ns",
           "turn": "9",
           "operation": "9",
           "attempt": "1"
         },
         {
-          "run": "21617219814673",
-          "process": "351873",
+          "run": "27944116349399",
+          "process": "452314",
           "clock": "awake_ns",
           "turn": "10",
           "operation": "10",
           "attempt": "1"
         }
-      ],
-      "metrics": {
-        "status": "passed",
-        "max_lifecycle_service_gap_ns": 77168497,
-        "largest_active_service_interval_ns": 77168497,
-        "stop_to_effect_ns": [
-          66963956
-        ],
-        "deadline_to_service_ns": [
-          49843503
-        ],
-        "preparation_advances": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "preparation_lifetimes": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "validation": {
-          "count": 2,
-          "total_ns": 110761682,
-          "maximum_ns": 67035892
-        },
-        "settlement": {
-          "count": 2,
-          "total_ns": 13092406,
-          "maximum_ns": 7295119
-        },
-        "settlement_queue": {
-          "count": 2,
-          "total_ns": 5629,
-          "maximum_ns": 3169
-        },
-        "settlement_service": {
-          "count": 2,
-          "total_ns": 13086777,
-          "maximum_ns": 7291950
-        },
-        "service_interval_count": 4,
-        "max_native_completions_queued_after_removal": 5,
-        "invalid_metrics": null
-      }
+      ]
     },
     {
       "bash_action": "1",
+      "metrics": {
+        "deadline_to_service_ns": [
+          47462867
+        ],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 84265670,
+        "max_lifecycle_service_gap_ns": 84265670,
+        "max_native_completions_queued_after_removal": 7,
+        "preparation_advances": {
+          "count": 1,
+          "maximum_ns": 1772511,
+          "total_ns": 1772511
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 57748239,
+          "total_ns": 57748239
+        },
+        "service_interval_count": 22,
+        "settlement": {
+          "count": 8,
+          "maximum_ns": 8529157,
+          "total_ns": 47265996
+        },
+        "settlement_queue": {
+          "count": 8,
+          "maximum_ns": 2612,
+          "total_ns": 18640
+        },
+        "settlement_service": {
+          "count": 8,
+          "maximum_ns": 8526907,
+          "total_ns": 47247356
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          71973599
+        ],
+        "validation": {
+          "count": 8,
+          "maximum_ns": 72953685,
+          "total_ns": 414650638
+        }
+      },
       "overlap": {
         "mode": "completion",
-        "stop_accepted_ns": 21619450546133,
-        "effect_requested_ns": 21619541056714,
-        "work_start_ns": 21619441634667,
-        "work_end_ns": 21619938700867,
-        "deadline_due_ns": 21619529269016,
-        "deadline_serviced_ns": 21619541509374
+        "stop_accepted_ns": 27946521751070,
+        "effect_requested_ns": 27946593724669,
+        "work_start_ns": 27946509666436,
+        "work_end_ns": 27947000233814,
+        "deadline_due_ns": 27946601871698,
+        "deadline_serviced_ns": 27946649334565
       },
       "parameters": {
         "name": "completion-8",
@@ -802,135 +844,134 @@
       "service_interval_scope": "complete lifecycle intervals intersecting the proved workload window; crossing intervals conservatively include their whole busy duration",
       "status": "passed",
       "stop_binding": {
-        "run": "21618502645258",
-        "process": "352007",
+        "run": "27945429025436",
+        "process": "452448",
         "clock": "awake_ns",
         "turn": "2",
         "operation": "2",
         "attempt": "1"
       },
-      "trace_commit_sequence": 462,
-      "trace_events": 462,
-      "trace_sha256": "a4fab3c4c8107e2deba03a737a8c5e7c3d99cf97446f8ca033815e9a5352ea38",
+      "trace_commit_sequence": 472,
+      "trace_events": 472,
+      "trace_sha256": "07e3e4ba2c7b52f652ff15546812a0c6f89e964dd50cc5760116bc05f23749f2",
       "workload_bindings": [
         {
-          "run": "21618502645258",
-          "process": "352007",
+          "run": "27945429025436",
+          "process": "452448",
           "clock": "awake_ns",
           "turn": "3",
           "operation": "3",
           "attempt": "1"
         },
         {
-          "run": "21618502645258",
-          "process": "352007",
+          "run": "27945429025436",
+          "process": "452448",
           "clock": "awake_ns",
           "turn": "4",
           "operation": "4",
           "attempt": "1"
         },
         {
-          "run": "21618502645258",
-          "process": "352007",
+          "run": "27945429025436",
+          "process": "452448",
           "clock": "awake_ns",
           "turn": "5",
           "operation": "5",
           "attempt": "1"
         },
         {
-          "run": "21618502645258",
-          "process": "352007",
+          "run": "27945429025436",
+          "process": "452448",
           "clock": "awake_ns",
           "turn": "6",
           "operation": "6",
           "attempt": "1"
         },
         {
-          "run": "21618502645258",
-          "process": "352007",
+          "run": "27945429025436",
+          "process": "452448",
           "clock": "awake_ns",
           "turn": "7",
           "operation": "7",
           "attempt": "1"
         },
         {
-          "run": "21618502645258",
-          "process": "352007",
+          "run": "27945429025436",
+          "process": "452448",
           "clock": "awake_ns",
           "turn": "8",
           "operation": "8",
           "attempt": "1"
         },
         {
-          "run": "21618502645258",
-          "process": "352007",
+          "run": "27945429025436",
+          "process": "452448",
           "clock": "awake_ns",
           "turn": "9",
           "operation": "9",
           "attempt": "1"
         },
         {
-          "run": "21618502645258",
-          "process": "352007",
+          "run": "27945429025436",
+          "process": "452448",
           "clock": "awake_ns",
           "turn": "10",
           "operation": "10",
           "attempt": "1"
         }
-      ],
-      "metrics": {
-        "status": "passed",
-        "max_lifecycle_service_gap_ns": 100738236,
-        "largest_active_service_interval_ns": 100738236,
-        "stop_to_effect_ns": [
-          90510581
-        ],
-        "deadline_to_service_ns": [
-          12240358
-        ],
-        "preparation_advances": {
-          "count": 1,
-          "total_ns": 1781851,
-          "maximum_ns": 1781851
-        },
-        "preparation_lifetimes": {
-          "count": 1,
-          "total_ns": 52510362,
-          "maximum_ns": 52510362
-        },
-        "validation": {
-          "count": 8,
-          "total_ns": 415188016,
-          "maximum_ns": 79945644
-        },
-        "settlement": {
-          "count": 8,
-          "total_ns": 53824360,
-          "maximum_ns": 16934634
-        },
-        "settlement_queue": {
-          "count": 8,
-          "total_ns": 1028358,
-          "maximum_ns": 1010946
-        },
-        "settlement_service": {
-          "count": 8,
-          "total_ns": 52796002,
-          "maximum_ns": 15923688
-        },
-        "service_interval_count": 22,
-        "max_native_completions_queued_after_removal": 7,
-        "invalid_metrics": null
-      }
+      ]
     },
     {
       "bash_action": "1",
+      "metrics": {
+        "deadline_to_service_ns": [],
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 7163296,
+        "max_lifecycle_service_gap_ns": 7163296,
+        "max_native_completions_queued_after_removal": 0,
+        "preparation_advances": {
+          "count": 513,
+          "maximum_ns": 7045703,
+          "total_ns": 94407030
+        },
+        "preparation_lifetimes": {
+          "count": 1,
+          "maximum_ns": 150963460,
+          "total_ns": 150963460
+        },
+        "service_interval_count": 1539,
+        "settlement": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_queue": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "settlement_service": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        },
+        "status": "passed",
+        "stop_to_effect_ns": [
+          3629100,
+          26362485
+        ],
+        "validation": {
+          "count": 0,
+          "maximum_ns": 0,
+          "total_ns": 0
+        }
+      },
       "overlap": {
         "mode": "preparation",
-        "stop_accepted_ns": 21620795740670,
-        "effect_requested_ns": 21620800261271,
-        "work_start_ns": 21620739528603,
-        "work_end_ns": 21620997698395,
+        "stop_accepted_ns": 27947818719422,
+        "effect_requested_ns": 27947822348522,
+        "work_start_ns": 27947769108005,
+        "work_end_ns": 27947920071465,
         "deadline_due_ns": 0,
         "deadline_serviced_ns": 0
       },
@@ -954,74 +995,38 @@
       "service_interval_scope": "complete lifecycle intervals intersecting the proved workload window; crossing intervals conservatively include their whole busy duration",
       "status": "passed",
       "stop_binding": {
-        "run": "21620064278892",
-        "process": "352165",
+        "run": "27947115821418",
+        "process": "452606",
         "clock": "awake_ns",
         "turn": "2",
         "operation": "2",
         "attempt": "1"
       },
-      "trace_commit_sequence": 5524,
-      "trace_events": 5524,
-      "trace_sha256": "e13399b5517deafe2a1c1ce678b95bf4fce0362c929e330c0de7ad4f912e2fb4",
+      "trace_commit_sequence": 5525,
+      "trace_events": 5525,
+      "trace_sha256": "ba108579b5ced4c71c8fd77a229ad3fa978a02b2e920ece37878ed1b77bfe32d",
       "workload_bindings": [
         {
-          "run": "21620064278892",
-          "process": "352165",
+          "run": "27947115821418",
+          "process": "452606",
           "clock": "awake_ns",
           "turn": "5",
           "operation": "5",
           "attempt": "1"
         }
-      ],
-      "metrics": {
-        "status": "passed",
-        "max_lifecycle_service_gap_ns": 16264232,
-        "largest_active_service_interval_ns": 16264232,
-        "stop_to_effect_ns": [
-          4520601,
-          26221717
-        ],
-        "deadline_to_service_ns": [],
-        "preparation_advances": {
-          "count": 513,
-          "total_ns": 161246740,
-          "maximum_ns": 16079649
-        },
-        "preparation_lifetimes": {
-          "count": 1,
-          "total_ns": 258169792,
-          "maximum_ns": 258169792
-        },
-        "validation": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_queue": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "settlement_service": {
-          "count": 0,
-          "total_ns": 0,
-          "maximum_ns": 0
-        },
-        "service_interval_count": 1539,
-        "max_native_completions_queued_after_removal": 0,
-        "invalid_metrics": null
-      }
+      ]
     }
   ],
+  "format": "rui-execution-service-v2-go",
+  "limits": [
+    "no automatic reruns or timing allowances conceal absent overlap",
+    "source/native validation and platform/resource qualification still require their owning gates",
+    "loopback is not live-provider, TLS, power-loss, or whole-product qualification",
+    "structural sizes are not whole-process footprint"
+  ],
   "provenance": {
-    "binary": "/home/user/workspace/repo/.zig-cache/o/a6c7c067641da73f3a3b2a966b1c00f2/rui-release-small-check",
-    "binary_sha256": "0fa015d7c342cd383b24e5ccb8878c398d8a0dcf870ed9b44e9f74cda1ca9b32",
+    "binary": "/home/user/workspace/repo/.zig-cache/o/1d1ce259ace24386efbe33db5ff81c2e/rui-release-small-check",
+    "binary_sha256": "f1d1eaa5fc77b3936fe9c276d62f38d10fe1a1f42b0c1780d82e534e85817bf7",
     "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
     "measurement_runtime": {
       "go_arch": "amd64",
@@ -1033,31 +1038,26 @@
       "physical_memory_bytes": 2079363072
     },
     "platform": "Linux e2b.local 6.1.158+ #1 SMP PREEMPT_DYNAMIC Tue Jul 28 15:38:05 UTC 2026 x86_64 GNU/Linux",
-    "tested_revision": "fb77612e3c95db9772943da091782054f1655964",
+    "tested_revision": "9c317fd0ba8c7c8131121e08796810f14a5c9352",
     "working_tree_dirty": false,
     "zig": "0.16.0"
+  },
+  "raw_artifact": {
+    "compressed_bytes": 868322,
+    "compressed_sha256": "b828c4b0081dbeb2cf28de87447654a13902bcdb29ffc0d5dbba07630b3d5d62",
+    "compression": "gzip",
+    "path": "2026-09-20-linux.raw.json.gz",
+    "uncompressed_bytes": 7456745,
+    "uncompressed_sha256": "1588df5ccc9ebc2a95e26ed4a46af1d8186747e1d2d5c4c25398069d77371e19"
   },
   "source_sha256": {
     "src/cli.zig": "602cb6adabff8367297366d07ab6739d5dee5fbecd7b3bae4394c132a95b5c24",
     "src/provider.zig": "e384dc76e3c6a87564b3ace69a69d16fda2dd13e245b1354bef5ddd0cc1eb171",
-    "src/server.zig": "88c7d250eb4ac46cbb09d393e35d4206897d35c6d14f02cd403fbd57b45171c3",
+    "src/server.zig": "51508493120b16f7f984708796777e16094c82eeea268b816cd360c023abf4dc",
     "tests/qualification/execution-service/fixture.go": "d51393879a4f8da8cbafa1f852f24b8a8cc46ee6cb9d98a2195c684a1e3e06c0",
-    "tests/qualification/execution-service/main.go": "159cdb8bfb3adec4faaa17fee11e7972dbac05cef450954cc792b2efc3674c84",
-    "tests/qualification/execution-service/main_test.go": "87aa53eeebb00033b7e36fc498a1065cfb48b87ffa5e4e0acb65aacb843fdfee",
-    "tests/qualification/execution-service/metrics.go": "79d2093e26901e33728686339bc7e6a0c1ff14649bb06617fa11937130ff68b5"
+    "tests/qualification/execution-service/main.go": "0696df39341eec5e7694eb123e9495c18d3501328db1ed59b983b2564261c0ae",
+    "tests/qualification/execution-service/main_test.go": "92ddac171e99eafd58336c68c62eefd4295e8c2b854e588b35d1e2a28f6b774d",
+    "tests/qualification/execution-service/metrics.go": "ea0f8810969b6fca06fa7054d4128891d0482fb4516ae032e863a827ee446ac2"
   },
-  "limits": [
-    "no automatic reruns or timing allowances conceal absent overlap",
-    "source/native validation and platform/resource qualification still require their owning gates",
-    "loopback is not live-provider, TLS, power-loss, or whole-product qualification",
-    "structural sizes are not whole-process footprint"
-  ],
-  "raw_artifact": {
-    "path": "2026-09-19-review-fixes-linux.raw.json.gz",
-    "compression": "gzip",
-    "uncompressed_bytes": 14385914,
-    "uncompressed_sha256": "07d9c8cdbbce8fa367e9d24a2281a1e8cc829156dd7c26e64a27646e1447b044",
-    "compressed_bytes": 966958,
-    "compressed_sha256": "3cc4753a1b1264bdbc740cbb0abcdbb00d0d620e6ad29086d71a45f597a79854"
-  }
+  "status": "passed"
 }
