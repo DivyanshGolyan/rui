@@ -124,6 +124,15 @@ fn serve(io: std.Io, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--test-execution-service-boundaries")) {
             faults.test_phase_trace = true;
             faults.test_execution_service_boundaries = true;
+        } else if (std.mem.eql(u8, arg, "--test-completion-consumption-gate-path")) {
+            faults.test_phase_trace = true;
+            faults.completion_consumption_gate_path = try takeValue(args, &index);
+        } else if (std.mem.eql(u8, arg, "--test-bash-handoff-gate-path")) {
+            faults.test_phase_trace = true;
+            faults.bash_handoff_gate_path = try takeValue(args, &index);
+        } else if (std.mem.eql(u8, arg, "--test-preparation-advance-gate-path")) {
+            faults.test_phase_trace = true;
+            faults.preparation_advance_gate_path = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--test-request-preparation-byte-allowance")) {
             faults.request_preparation_byte_allowance = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
             if (faults.request_preparation_byte_allowance == 0) return error.InvalidRequestPreparationAllowance;

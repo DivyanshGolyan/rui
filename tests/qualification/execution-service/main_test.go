@@ -239,14 +239,20 @@ func TestOwnerStillHeldUsesHandoffAndRelease(t *testing.T) {
 	}
 }
 
-func TestCompletionOverlapWithoutDeadlineIsSchedulingOnly(t *testing.T) {
-	id := executionID{Run: "1", Process: "2", Clock: "awake_ns", Turn: "3", Operation: "4", Attempt: "1"}
-	events := []traceEvent{
-		{executionID: id, Phase: "provider_completion_removed", At: 10, QueuedAfter: 1},
+func readyCompletionEvents(id executionID) []traceEvent {
+	return []traceEvent{
+		{Phase: "native_completions_unprocessed", At: 8, QueuedAfter: 1},
+		{executionID: id, Phase: "provider_completion_removed", At: 10, QueuedAfter: 0},
 		{Phase: "control_durable_acceptance", Subject: "stop", At: 12},
+		{Phase: "control_hint_published", Subject: "stop", At: 13},
 		{Phase: "effect_stop_requested", ControlKey: "stop", At: 14},
 		{executionID: id, Phase: "provider_completion_serviced", At: 20},
 	}
+}
+
+func TestCompletionReadyStopDoesNotRequireDeadline(t *testing.T) {
+	id := executionID{Run: "1", Process: "2", Clock: "awake_ns", Turn: "3", Operation: "4", Attempt: "1"}
+	events := readyCompletionEvents(id)
 	if _, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, false); e != nil {
 		t.Fatal(e)
 	}
@@ -255,70 +261,90 @@ func TestCompletionOverlapWithoutDeadlineIsSchedulingOnly(t *testing.T) {
 	}
 }
 
-func TestDeadlineServicedBeforeBacklogIsNotOverlap(t *testing.T) {
+func TestDeadlineServiceIsIndependentOfBurstContainment(t *testing.T) {
 	id := executionID{Run: "1", Process: "2", Clock: "awake_ns", Turn: "3", Operation: "4", Attempt: "1"}
 	bash := id
 	bash.Operation = "2"
-	events := []traceEvent{
+	events := readyCompletionEvents(id)
+	events = append([]traceEvent{
 		{executionID: bash, Phase: "bash_deadline_established", At: 1, Deadline: 5},
 		{executionID: bash, Phase: "bash_deadline_serviced", At: 6, Deadline: 5},
-		{executionID: id, Phase: "provider_completion_removed", At: 10, QueuedAfter: 1},
-		{Phase: "control_durable_acceptance", Subject: "stop", At: 12},
-		{Phase: "effect_stop_requested", ControlKey: "stop", At: 14},
-		{executionID: id, Phase: "provider_completion_serviced", At: 20},
+	}, events...)
+	proof, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, true)
+	if e != nil {
+		t.Fatal(e)
 	}
-	if _, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, true); e == nil {
-		t.Fatal("deadline serviced before backlog accepted as overlap")
+	if proof.DeadlineDueNS != 5 || proof.DeadlineServicedNS != 6 {
+		t.Fatalf("wrong deadline service: %+v", proof)
 	}
 }
 
-func TestDeadlineDueDuringBacklogIsOverlap(t *testing.T) {
+func TestDeadlineDueAfterReleaseIsServiced(t *testing.T) {
 	id := executionID{Run: "1", Process: "2", Clock: "awake_ns", Turn: "3", Operation: "4", Attempt: "1"}
 	bash := id
 	bash.Operation = "2"
 	events := []traceEvent{
+		{Phase: "native_completions_unprocessed", At: 8, QueuedAfter: 1},
+		{executionID: bash, Phase: "bash_handoff_parked", At: 9},
 		{executionID: bash, Phase: "bash_deadline_established", At: 9, Deadline: 15},
-		{executionID: id, Phase: "provider_completion_removed", At: 10, QueuedAfter: 1},
 		{Phase: "control_durable_acceptance", Subject: "stop", At: 12},
-		{Phase: "effect_stop_requested", ControlKey: "stop", At: 14},
-		{executionID: bash, Phase: "bash_deadline_serviced", At: 16, Deadline: 15},
+		{Phase: "control_hint_published", Subject: "stop", At: 13},
+		{executionID: bash, Phase: "bash_handoff_released", At: 14, Deadline: 15},
+		{Phase: "effect_stop_requested", ControlKey: "stop", At: 16},
+		{executionID: bash, Phase: "bash_deadline_serviced", At: 17, Deadline: 15},
+		{executionID: id, Phase: "provider_completion_removed", At: 18, QueuedAfter: 0},
 		{executionID: id, Phase: "provider_completion_serviced", At: 20},
 	}
 	proof, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, true)
 	if e != nil {
 		t.Fatal(e)
 	}
-	if proof.DeadlineDueNS != 15 || proof.DeadlineServicedNS != 16 {
-		t.Fatalf("wrong deadline overlap: %+v", proof)
+	if proof.HandoffReleasedNS != 14 || proof.DeadlineServicedNS != 17 {
+		t.Fatalf("wrong gated deadline service: %+v", proof)
 	}
 }
 
-func TestOverlapCannotUseIdleStopOrUnrelatedCompletion(t *testing.T) {
+func TestReadyObligationRejectsMissingHintOrNativeReadiness(t *testing.T) {
+	id := executionID{Run: "1", Process: "2", Clock: "awake_ns", Turn: "3", Operation: "4", Attempt: "1"}
+	events := readyCompletionEvents(id)
+	events[3].Phase = "control_store_complete"
+	if _, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, false); e == nil {
+		t.Fatal("missing hint accepted")
+	}
+	events = readyCompletionEvents(id)
+	events = events[1:]
+	if _, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, false); e == nil {
+		t.Fatal("prefix readiness without native observation accepted")
+	}
+}
+
+func TestReadyObligationRejectsGateLeftArmed(t *testing.T) {
+	id := executionID{Run: "1", Process: "2", Clock: "awake_ns", Turn: "3", Operation: "4", Attempt: "1"}
+	events := readyCompletionEvents(id)
+	events = append([]traceEvent{{Phase: "completion_consumption_held", At: 7}}, events...)
+	if _, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, false); e == nil {
+		t.Fatal("armed gate accepted")
+	}
+}
+
+func TestReadyObligationRejectsUnrelatedCompletionIdentity(t *testing.T) {
 	id := executionID{Run: "1", Process: "2", Clock: "awake_ns", Turn: "3", Operation: "4", Attempt: "1"}
 	other := id
 	other.Operation = "5"
 	events := []traceEvent{
 		{executionID: id, Phase: "preparation_started", At: 10},
 		{executionID: id, Phase: "preparation_completed", At: 20},
-		{Phase: "control_durable_acceptance", Subject: "stop", At: 30},
-		{Phase: "effect_stop_requested", ControlKey: "stop", At: 35},
-		{executionID: id, Phase: "provider_completion_removed", At: 11, QueuedAfter: 2},
-		{executionID: id, Phase: "provider_completion_serviced", At: 20},
-		{executionID: other, Phase: "provider_completion_serviced", At: 100},
+		{Phase: "control_durable_acceptance", Subject: "stop", At: 15},
+		{Phase: "control_hint_published", Subject: "stop", At: 16},
+		{Phase: "effect_stop_requested", ControlKey: "stop", At: 17},
+		{executionID: other, Phase: "provider_completion_removed", At: 11, QueuedAfter: 0},
+		{executionID: other, Phase: "provider_completion_serviced", At: 20},
 	}
-	if _, e := proveOverlap(events, "preparation", "stop", id, nil, false); e == nil {
-		t.Fatal("post-preparation stop accepted")
-	}
-	if _, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, false); e == nil {
-		t.Fatal("unrelated completion extended pressure")
-	}
-	events[2].At = 15
-	events[3].At = 17
 	if _, e := proveOverlap(events, "preparation", "stop", id, nil, false); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, true); e == nil {
-		t.Fatal("missing deadline accepted")
+	if _, e := proveOverlap(events, "completion", "stop", executionID{}, []executionID{id}, false); e == nil {
+		t.Fatal("unrelated completion satisfied selected identities")
 	}
 }
 func TestProviderAuditRejectsCorruptionAndDuplicateRequests(t *testing.T) {
@@ -360,11 +386,11 @@ func TestProviderAuditRejectsCorruptionAndDuplicateRequests(t *testing.T) {
 	}
 }
 func TestBashSSEEncodesActionTimeout(t *testing.T) {
-	if !bytes.Contains(bashSSE(nil), []byte(`"arguments":"{\"cmd\":\"sleep 300\",\"timeout_ms\":null}"`)) {
+	if !bytes.Contains(bashSSE("owner", "cat owner.fifo", nil), []byte(`"arguments":"{\"cmd\":\"cat owner.fifo\",\"timeout_ms\":null}"`)) {
 		t.Fatal("default Bash timeout was not encoded as null")
 	}
 	timeoutMs := 1
-	if !bytes.Contains(bashSSE(&timeoutMs), []byte(`"arguments":"{\"cmd\":\"sleep 300\",\"timeout_ms\":1}"`)) {
+	if !bytes.Contains(bashSSE("deadline", "cat deadline.fifo", &timeoutMs), []byte(`"arguments":"{\"cmd\":\"cat deadline.fifo\",\"timeout_ms\":1}"`)) {
 		t.Fatal("Action timeout override was not encoded")
 	}
 }

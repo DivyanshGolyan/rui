@@ -162,12 +162,12 @@ func parseTraces(data []byte) ([]traceEvent, error) {
 			if err != nil {
 				return nil, err
 			}
-		case "provider_completion_removed":
+		case "provider_completion_removed", "native_completions_unprocessed":
 			e.QueuedAfter, err = uintField(e.QueuedAfterText, "queued_after")
 			if err != nil {
 				return nil, err
 			}
-		case "bash_deadline_established", "bash_deadline_serviced":
+		case "bash_deadline_established", "bash_deadline_serviced", "bash_handoff_released":
 			e.Deadline, err = uintField(e.DeadlineText, "deadline_ns")
 			if err != nil {
 				return nil, err
@@ -187,11 +187,11 @@ func parseTraces(data []byte) ([]traceEvent, error) {
 			}
 		}
 		switch e.Phase {
-		case "lifecycle_boundary", "control_durable_acceptance":
+		case "lifecycle_boundary", "control_durable_acceptance", "control_hint_published", "native_completions_unprocessed", "completion_consumption_held", "completion_consumption_released", "preparation_advance_held", "preparation_advance_released":
 			if e.At == 0 {
 				return nil, fmt.Errorf("missing event time: %s", e.Phase)
 			}
-		case "provider_completion_removed", "provider_completion_serviced", "preparation_started", "preparation_completed", "preparation_advance_started", "preparation_advance_completed", "preparation_advance_failed", "validation_started", "validation_completed", "validation_failed", "settlement_lock_requested", "settlement_lock_acquired", "settlement_complete", "model_settlement_superseded", "effect_stop_requested", "bash_deadline_established", "bash_deadline_serviced":
+		case "provider_completion_removed", "provider_completion_serviced", "preparation_started", "preparation_completed", "preparation_advance_started", "preparation_advance_completed", "preparation_advance_failed", "validation_started", "validation_completed", "validation_failed", "settlement_lock_requested", "settlement_lock_acquired", "settlement_complete", "model_settlement_superseded", "effect_stop_requested", "bash_deadline_established", "bash_deadline_serviced", "bash_handoff_committed", "bash_handoff_parked", "bash_handoff_released":
 			if e.At == 0 || !e.executionID.valid() {
 				return nil, fmt.Errorf("incomplete execution identity: %s", e.Phase)
 			}
@@ -392,26 +392,85 @@ func exitCode(status string) int {
 type overlapProof struct {
 	Mode               string `json:"mode"`
 	StopAcceptedNS     uint64 `json:"stop_accepted_ns"`
+	HintPublishedNS    uint64 `json:"hint_published_ns"`
 	EffectRequestedNS  uint64 `json:"effect_requested_ns"`
+	NativeReadyNS      uint64 `json:"native_ready_ns"`
+	NativeReadyCount   uint64 `json:"native_ready_count"`
+	ReleaseNS          uint64 `json:"release_ns"`
+	HandoffReleasedNS  uint64 `json:"handoff_released_ns"`
 	WorkStartNS        uint64 `json:"work_start_ns"`
 	WorkEndNS          uint64 `json:"work_end_ns"`
 	DeadlineDueNS      uint64 `json:"deadline_due_ns"`
 	DeadlineServicedNS uint64 `json:"deadline_serviced_ns"`
+	FirstRemovalNS     uint64 `json:"first_selected_removal_ns"`
+	FirstQueuedAfter   uint64 `json:"first_selected_queued_after"`
+	Perturbed          bool   `json:"gate_perturbed"`
 }
 
-func proveOverlap(events []traceEvent, mode, stopKey string, target executionID, burst []executionID, requireDeadline bool) (overlapProof, error) {
+func proveReadyObligations(events []traceEvent, mode, stopKey string, target, deadline executionID, burst []executionID, expectedNative uint64, requireDeadline bool) (overlapProof, error) {
 	p := overlapProof{Mode: mode}
-	var finalCompletion, firstBacklog uint64
 	selected := map[executionID]bool{}
 	for _, id := range burst {
 		selected[id] = true
 	}
+	removed := map[executionID]int{}
+	serviced := map[executionID]int{}
+	held := map[string]bool{}
+	released := map[string]bool{}
 	for _, e := range events {
-		if e.Phase == "control_durable_acceptance" && e.Subject == stopKey {
-			p.StopAcceptedNS = e.At
-		}
-		if e.Phase == "effect_stop_requested" && e.ControlKey == stopKey {
-			p.EffectRequestedNS = e.At
+		switch e.Phase {
+		case "control_durable_acceptance":
+			if e.Subject == stopKey {
+				p.StopAcceptedNS = e.At
+			}
+		case "control_hint_published":
+			if e.Subject == stopKey {
+				p.HintPublishedNS = e.At
+			}
+		case "effect_stop_requested":
+			if e.ControlKey == stopKey {
+				p.EffectRequestedNS = e.At
+			}
+		case "native_completions_unprocessed":
+			if expectedNative > 0 && e.QueuedAfter >= expectedNative && p.NativeReadyNS == 0 {
+				p.NativeReadyNS = e.At
+				p.NativeReadyCount = e.QueuedAfter
+			}
+		case "completion_consumption_held":
+			held["completion"] = true
+			p.Perturbed = true
+		case "preparation_advance_held":
+			held["preparation"] = true
+			p.Perturbed = true
+		case "bash_handoff_parked":
+			held["handoff"] = true
+			p.Perturbed = true
+		case "completion_consumption_released":
+			released["completion"] = true
+			p.ReleaseNS = e.At
+			p.Perturbed = true
+		case "preparation_advance_released":
+			released["preparation"] = true
+			p.ReleaseNS = e.At
+			p.Perturbed = true
+		case "bash_handoff_released":
+			released["handoff"] = true
+			p.HandoffReleasedNS = e.At
+			p.ReleaseNS = e.At
+			p.Perturbed = true
+		case "provider_completion_removed":
+			if selected[e.executionID] {
+				removed[e.executionID]++
+				if p.FirstRemovalNS == 0 {
+					p.FirstRemovalNS = e.At
+					p.FirstQueuedAfter = e.QueuedAfter
+				}
+			}
+		case "provider_completion_serviced":
+			if selected[e.executionID] {
+				serviced[e.executionID]++
+				p.WorkEndNS = e.At
+			}
 		}
 		if e.executionID == target {
 			if e.Phase == "preparation_started" {
@@ -421,31 +480,84 @@ func proveOverlap(events []traceEvent, mode, stopKey string, target executionID,
 				p.WorkEndNS = e.At
 			}
 		}
-		if selected[e.executionID] && e.Phase == "provider_completion_removed" && e.QueuedAfter > 0 && firstBacklog == 0 {
-			firstBacklog = e.At
-		}
-		if selected[e.executionID] && e.Phase == "provider_completion_serviced" {
-			finalCompletion = e.At
-		}
 	}
 	if mode == "completion" {
-		p.WorkStartNS, p.WorkEndNS = firstBacklog, finalCompletion
+		p.WorkStartNS = p.NativeReadyNS
+		if p.WorkStartNS == 0 {
+			p.WorkStartNS = p.FirstRemovalNS
+		}
 	}
-	// Both acceptance and effect handling must occur while the pressure is
-	// actually present. A successful idle stop is not overlap evidence.
-	if p.WorkStartNS == 0 || p.WorkEndNS <= p.WorkStartNS || p.StopAcceptedNS < p.WorkStartNS || p.StopAcceptedNS >= p.WorkEndNS || p.EffectRequestedNS < p.StopAcceptedNS || p.EffectRequestedNS >= p.WorkEndNS {
-		return p, errors.New("required stop/work overlap was not observed")
+	for name := range held {
+		if !released[name] {
+			return p, errors.New("setup gate remained active after the release point")
+		}
+	}
+	if p.StopAcceptedNS == 0 || p.HintPublishedNS == 0 {
+		return p, errors.New("stop was not durably accepted and published")
+	}
+	if p.EffectRequestedNS == 0 || p.EffectRequestedNS < p.StopAcceptedNS {
+		return p, errors.New("accepted stop was not acted on")
+	}
+	if mode == "completion" {
+		if expectedNative > 0 && p.NativeReadyNS == 0 {
+			return p, errors.New("native completion readiness was not observed")
+		}
+		if len(burst) == 0 {
+			return p, errors.New("selected completion identities are missing")
+		}
+		for _, id := range burst {
+			if removed[id] != 1 || serviced[id] != 1 {
+				return p, errors.New("selected completions were not removed and serviced exactly once")
+			}
+		}
+		if p.FirstRemovalNS == 0 {
+			return p, errors.New("selected completion removal is missing")
+		}
+		if expectedNative > 1 && p.FirstQueuedAfter < expectedNative-1 {
+			return p, errors.New("first selected removal did not corroborate native backlog")
+		}
+	}
+	if mode == "preparation" {
+		if p.WorkStartNS == 0 || p.WorkEndNS < p.WorkStartNS {
+			return p, errors.New("measured preparation did not complete")
+		}
 	}
 	if requireDeadline {
+		deadlineID := deadline
 		for _, e := range events {
-			if e.Phase == "bash_deadline_serviced" && e.Deadline >= p.WorkStartNS && e.Deadline < p.WorkEndNS && e.At >= e.Deadline && e.At < p.WorkEndNS && !e.Failed {
-				p.DeadlineDueNS, p.DeadlineServicedNS = e.Deadline, e.At
+			if e.Phase != "bash_deadline_established" {
+				continue
+			}
+			if deadlineID.valid() && e.executionID != deadlineID {
+				continue
+			}
+			if !deadlineID.valid() {
+				deadlineID = e.executionID
+			}
+			if e.executionID == deadlineID {
+				p.DeadlineDueNS = e.Deadline
 				break
 			}
 		}
-		if p.DeadlineDueNS == 0 {
-			return p, errors.New("required Bash deadline/work overlap was not observed")
+		for _, e := range events {
+			if e.Phase == "bash_deadline_serviced" && e.executionID == deadlineID && e.Deadline == p.DeadlineDueNS && !e.Failed {
+				p.DeadlineServicedNS = e.At
+			}
+		}
+		if !deadlineID.valid() || p.DeadlineDueNS == 0 || p.DeadlineServicedNS == 0 || p.DeadlineServicedNS < p.DeadlineDueNS {
+			return p, errors.New("due Bash deadline was not serviced")
+		}
+		if p.HandoffReleasedNS != 0 && p.DeadlineServicedNS < p.HandoffReleasedNS {
+			return p, errors.New("deadline was serviced while the handoff gate still held the owner")
 		}
 	}
 	return p, nil
+}
+
+func proveOverlap(events []traceEvent, mode, stopKey string, target executionID, burst []executionID, requireDeadline bool) (overlapProof, error) {
+	expected := uint64(0)
+	if mode == "completion" {
+		expected = uint64(len(burst))
+	}
+	return proveReadyObligations(events, mode, stopKey, target, executionID{}, burst, expected, requireDeadline)
 }

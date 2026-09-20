@@ -85,6 +85,9 @@ pub const Faults = struct {
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
     test_execution_service_boundaries: bool = false,
+    completion_consumption_gate_path: ?[]const u8 = null,
+    bash_handoff_gate_path: ?[]const u8 = null,
+    preparation_advance_gate_path: ?[]const u8 = null,
     test_transition: ?TestTransition = null,
     test_transition_gate_path: ?[]const u8 = null,
     model_cleanup_gate_path: ?[]const u8 = null,
@@ -130,6 +133,9 @@ const Host = struct {
     trace_run_ns: u64 = 0,
     trace_sequence: u64 = 0,
     trace_lost: bool = false,
+    completion_consumption_held: bool = false,
+    preparation_advance_held: bool = false,
+    last_unprocessed_completions: ?u64 = null,
     drain_mutex: std.Io.Mutex = .init,
     drain_condition: std.Io.Condition = .init,
 
@@ -555,6 +561,7 @@ fn executionMain(host: *Host) void {
                 fenceDispatch(host, "transport reactor", err);
                 break;
             };
+            observeUnprocessedCompletions(host, &reactor.?);
         }
         made_progress = serviceOneCompletion(
             host,
@@ -661,6 +668,17 @@ fn serviceLifecycle(
 
 fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) bool {
     const active_reactor = reactor orelse return false;
+    if (completionConsumptionHeld(host)) {
+        if (!host.completion_consumption_held) {
+            host.completion_consumption_held = true;
+            traceSubject(host, "completion_consumption_held", "gate", "completion");
+        }
+        return false;
+    }
+    if (host.completion_consumption_held) {
+        host.completion_consumption_held = false;
+        traceSubject(host, "completion_consumption_released", "gate", "completion");
+    }
     const active_transfers = ActiveSlots{ .slots = slots };
     const completion = active_reactor.nextCompletion(.{
         .context = &active_transfers,
@@ -985,7 +1003,9 @@ fn launchPreparedBash(
         .execution = launched.?,
     } };
     traceAction(host, "bash_handoff_committed", action_binding);
-    traceActionDeadline(host, "bash_deadline_established", slot.bash.execution.deadlineNs(), false, action_binding);
+    const deadline_ns = slot.bash.execution.deadlineNs();
+    traceActionDeadline(host, "bash_deadline_established", deadline_ns, false, action_binding);
+    parkAfterSelectedBashHandoff(host, deadline_ns, action_binding);
 }
 
 fn stopSupersededBash(
@@ -1307,6 +1327,17 @@ fn advanceModelPreparation(
         finishCustodyNow(host, owner.token);
         slot.* = .free;
         return true;
+    }
+    if (preparationAdvanceHeld(host)) {
+        if (!host.preparation_advance_held) {
+            host.preparation_advance_held = true;
+            traceSubject(host, "preparation_advance_held", "gate", "preparation");
+        }
+        return false;
+    }
+    if (host.preparation_advance_held) {
+        host.preparation_advance_held = false;
+        traceSubject(host, "preparation_advance_released", "gate", "preparation");
     }
     traceOperation(host, "preparation_advance_started", owner.binding);
     const progress = preparation.advance(
@@ -2134,6 +2165,48 @@ fn testGateActive(host: *Host, path: []const u8) bool {
     const gate = std.Io.Dir.cwd().openFile(host.io, path, .{}) catch return false;
     gate.close(host.io);
     return true;
+}
+
+fn completionConsumptionHeld(host: *Host) bool {
+    const path = host.faults.completion_consumption_gate_path orelse return false;
+    return testGateActive(host, path);
+}
+
+fn preparationAdvanceHeld(host: *Host) bool {
+    const path = host.faults.preparation_advance_gate_path orelse return false;
+    return testGateActive(host, path);
+}
+
+fn observeUnprocessedCompletions(host: *Host, reactor: *provider.Reactor) void {
+    const count = reactor.unprocessedCompletions() catch |err| {
+        fenceDispatch(host, "native completion observation", err);
+        return;
+    };
+    if (host.last_unprocessed_completions) |previous| {
+        if (previous == count) return;
+    }
+    host.last_unprocessed_completions = count;
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.appendFmt(
+        "{{\"rui_test_phase\":\"native_completions_unprocessed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\"}}",
+        .{ nowNs(host), count },
+    ) catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn parkAfterSelectedBashHandoff(host: *Host, deadline_ns: u64, binding: store_module.ActionAttemptBinding) void {
+    const path = host.faults.bash_handoff_gate_path orelse return;
+    if (!testGateActive(host, path)) return;
+    traceAction(host, "bash_handoff_parked", binding);
+    waitAtTestGate(host, path);
+    while (nowNs(host) < deadline_ns) {
+        const remaining_ns = deadline_ns - nowNs(host);
+        const remaining_ms = @max(@as(u64, 1), (remaining_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms);
+        const sleep_ms: u64 = @min(remaining_ms, std.math.maxInt(u31));
+        _ = host.io.sleep(.fromMilliseconds(@intCast(sleep_ms)), .awake) catch break;
+    }
+    traceActionDeadline(host, "bash_handoff_released", deadline_ns, false, binding);
 }
 
 fn appendOptionalUnsigned(

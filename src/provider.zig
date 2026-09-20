@@ -671,6 +671,18 @@ pub const Reactor = struct {
         }
     }
 
+    // Non-destructive count of finished easy handles whose CURLMSG_DONE has
+    // not been consumed through curl_multi_info_read. This is not a second
+    // completion owner and must not replace identity-checked removal.
+    pub fn unprocessedCompletions(self: *Reactor) !u64 {
+        var value: c.curl_off_t = 0;
+        if (c.curl_multi_get_offt(self.multi, c.CURLMINFO_XFERS_DONE, &value) != c.CURLM_OK) {
+            return error.TransportReactorFailed;
+        }
+        if (value < 0) return error.TransportReactorFailed;
+        return @intCast(value);
+    }
+
     pub fn nextCompletion(self: *Reactor, membership: TransferMembership) !?Completion {
         var remaining: c_int = 0;
         while (c.curl_multi_info_read(self.multi, &remaining)) |message| {
@@ -1279,6 +1291,15 @@ test "duplicate Retry-After headers retain both independent constraints" {
     }
     try std.testing.expectEqual(@as(?u64, 12_000), context.retry_after_ms);
     try std.testing.expectEqual(@as(?i64, 1_700_000_001_000), context.retry_after_deadline_ms);
+}
+
+test "idle reactor reports zero unprocessed completions without consuming messages" {
+    try initialize();
+    defer c.curl_global_cleanup();
+    var reactor = try Reactor.init();
+    defer reactor.deinit();
+    try std.testing.expectEqual(@as(u64, 0), try reactor.unprocessedCompletions());
+    try std.testing.expectEqual(@as(u64, 0), try reactor.unprocessedCompletions());
 }
 
 test "curl disposition retries only temporary connection and explicit inactivity failures" {

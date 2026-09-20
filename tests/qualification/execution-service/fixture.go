@@ -272,15 +272,18 @@ func answerSSE(name, answer string, retained, discarded int) ([]byte, [][]byte) 
 	delete(reason, "created_by")
 	return out.Bytes(), [][]byte{marshal(reason), marshal(message)}
 }
-func bashSSE(timeoutMs *int) []byte {
+func bashSSE(name, cmd string, timeoutMs *int) []byte {
 	timeout := "null"
 	if timeoutMs != nil {
 		timeout = strconv.Itoa(*timeoutMs)
 	}
-	item := map[string]any{"type": "function_call", "id": "bash-item", "status": "completed", "name": "bash", "call_id": "bash-call", "arguments": `{"cmd":"sleep 300","timeout_ms":` + timeout + `}`}
+	item := map[string]any{
+		"type": "function_call", "id": name + "-item", "status": "completed", "name": "bash",
+		"call_id": name + "-call", "arguments": `{"cmd":` + string(marshal(cmd)) + `,"timeout_ms":` + timeout + `}`,
+	}
 	var out bytes.Buffer
 	fmt.Fprintf(&out, "data: %s\n\n", marshal(map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item}))
-	fmt.Fprintf(&out, "data: %s\n\n", marshal(map[string]any{"type": "response.completed", "response": map[string]any{"id": "bash-response", "status": "completed", "model": "model-a", "output": []any{item}}}))
+	fmt.Fprintf(&out, "data: %s\n\n", marshal(map[string]any{"type": "response.completed", "response": map[string]any{"id": name + "-response", "status": "completed", "model": "model-a", "output": []any{item}}}))
 	out.WriteString("data: [DONE]\n\n")
 	return out.Bytes()
 }

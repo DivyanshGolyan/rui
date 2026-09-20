@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"rui.local/qualification/measurement"
@@ -343,6 +344,40 @@ func inspectWorkInFlight(v map[string]any) bool {
 	return ok && status == "in_flight"
 }
 
+func armSkipGate(path string) error {
+	return os.WriteFile(path, nil, 0o600)
+}
+
+func releaseSkipGate(path string) error {
+	err := os.Remove(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func createParkGate(path string) (*os.File, error) {
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_RDWR|syscall.O_NONBLOCK, 0)
+}
+
+func releaseParkGate(keeper *os.File) error {
+	if keeper == nil {
+		return nil
+	}
+	_, err := keeper.Write([]byte{1})
+	return err
+}
+
+func createCommandFIFO(path string) (*os.File, error) {
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_RDWR, 0)
+}
+
 func ownerStillHeld(events []traceEvent, id executionID) bool {
 	live := false
 	for _, event := range events {
@@ -461,10 +496,40 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	defer ep.close()
 	store := filepath.Join(dir, "store")
 	tracePath := filepath.Join(dir, "host-stderr.log")
-	host, err := measurement.StartHost(binary, store, ep.URL(), s.Capacity, tracePath, d, "--test-execution-service-boundaries", "--bash-timeout-ms", "600000")
+	completionGate := filepath.Join(dir, "completion.skip")
+	preparationGate := filepath.Join(dir, "preparation.skip")
+	handoffPath := filepath.Join(dir, "handoff.fifo")
+	stopFifoPath := filepath.Join(dir, "stop.fifo")
+	deadlineFifoPath := filepath.Join(dir, "deadline.fifo")
+	hostArgs := []string{
+		"--test-execution-service-boundaries",
+		"--test-completion-consumption-gate-path", completionGate,
+		"--test-preparation-advance-gate-path", preparationGate,
+		"--test-bash-handoff-gate-path", handoffPath,
+	}
+	if !s.RequireDeadline {
+		hostArgs = append([]string{"--bash-timeout-ms", "600000"}, hostArgs...)
+	}
+	host, err := measurement.StartHost(
+		binary, store, ep.URL(), s.Capacity, tracePath, d,
+		hostArgs...,
+	)
 	if err != nil {
 		return nil, err
 	}
+	var handoffKeeper, stopFifo, deadlineFifo *os.File
+	defer func() {
+		err = errors.Join(err, releaseSkipGate(completionGate), releaseSkipGate(preparationGate), releaseParkGate(handoffKeeper))
+		if handoffKeeper != nil {
+			handoffKeeper.Close()
+		}
+		if stopFifo != nil {
+			stopFifo.Close()
+		}
+		if deadlineFifo != nil {
+			deadlineFifo.Close()
+		}
+	}()
 	stopped := false
 	defer func() {
 		if !stopped {
@@ -502,33 +567,60 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		return row, err
 	}
 
-	// A separate held stream is the stop target. Workload completion never
-	// depends on killing or reusing the measured preparation's identity.
-	stopText := "stop-target"
-	response, _ := answerSSE(stopText, "must-not-be-read", 64, 64)
-	ep.add(stopText, &requestPlan{Expected: wireRequest([][]byte{userItem(stopText)}), Response: response, Group: "stop"})
-	if err = c.Submit("stop-target", "execution/stop", stopText); err != nil {
-		return row, err
-	}
-	if err = waitCount(ep, stopText, 1, d); err != nil {
-		return row, err
-	}
-	stopID, err := observeID(c, "stop-target", tracePath)
-	if err != nil {
-		return row, err
-	}
-
 	workCount := 1
 	if s.Mode == "completion" {
 		workCount = s.Burst
 	}
-	fixedOwners := 2 // Separate stop and real Bash credits.
-	if s.Mode == "completion" {
-		fixedOwners++ // Atomic-validation blocker used to establish readiness.
+	fixedOwners := 1 // Stop target S is a live Bash in its own Session.
+	if s.RequireDeadline {
+		fixedOwners++ // Deadline owner D is independent of S and the selected work.
 	}
 	fillers := s.Capacity - workCount - fixedOwners
 	if fillers < 0 {
 		return row, errors.New("scenario exceeds active capacity")
+	}
+	stopFifo, err = createCommandFIFO(stopFifoPath)
+	if err != nil {
+		return row, err
+	}
+	startBash := func(session, message, name, cmd string, timeoutMs *int, continuation bool) (string, traceEvent, error) {
+		plan := &requestPlan{Response: bashSSE(name, cmd, timeoutMs)}
+		ep.add(message, plan)
+		if continuation {
+			payload, _ := answerSSE(name+"-final", name+"-final-ok", 64, 64)
+			ep.add(message, &requestPlan{Response: payload, BashContinuation: true})
+		}
+		if e := c.Configure(name+"-config", session, "--tools", "bash"); e != nil {
+			return "", traceEvent{}, e
+		}
+		if e := c.Message(name+"-message", session, message); e != nil {
+			return "", traceEvent{}, e
+		}
+		action, waitErr := c.WaitAction(session)
+		if waitErr != nil {
+			return "", traceEvent{}, waitErr
+		}
+		return action, traceEvent{}, nil
+	}
+	launchAllowed := func(session, key, action string) (traceEvent, error) {
+		if e := c.AllowAction(key, session, action); e != nil {
+			return traceEvent{}, e
+		}
+		return waitEvent(tracePath, d, func(e traceEvent) bool {
+			return e.Phase == "bash_handoff_committed" && e.Action == action
+		})
+	}
+	stopAction, _, err := startBash("execution/stop", "stop-owner", "stop", "cat "+stopFifoPath, nil, false)
+	if err != nil {
+		return row, err
+	}
+	stopStart, err := launchAllowed("execution/stop", "stop-allow", stopAction)
+	if err != nil {
+		return row, invalid(err)
+	}
+	stopID := stopStart.executionID
+	if !stopID.valid() {
+		return row, invalid(errors.New("stop target launched without complete execution identity"))
 	}
 	fillerIDs := []executionID{}
 	for i := 0; i < fillers; i++ {
@@ -570,8 +662,6 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		workKeys = append(workKeys, key)
 		return nil
 	}
-	// Completion requests are held before starting Bash's deadline. No stop
-	// is issued until native completion-queue evidence has actually appeared.
 	if s.Mode == "completion" {
 		for i := 0; i < workCount; i++ {
 			if err = submitWork(i); err != nil {
@@ -592,76 +682,25 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 			}
 		}
 	}
-	var blockerID executionID
-	var action string
-	var bashStart traceEvent
-	if err = c.Configure("bash-config", "execution/bash", "--tools", "bash"); err != nil {
-		return row, err
-	}
-	startBash := func(timeoutMs *int) error {
-		ep.add("bash-owner", &requestPlan{Response: bashSSE(timeoutMs)})
-		if s.Mode == "completion" {
-			payload, _ := answerSSE("bash-final", "bash-final-ok", 64, 64)
-			ep.add("bash-owner", &requestPlan{Response: payload, BashContinuation: true})
-		}
-		if e := c.Message("bash-message", "execution/bash", "bash-owner"); e != nil {
-			return e
-		}
-		var waitErr error
-		action, waitErr = c.WaitAction("execution/bash")
-		if waitErr != nil {
-			return waitErr
-		}
-		if e := c.AllowAction("bash-allow", "execution/bash", action); e != nil {
-			return e
-		}
-		bashStart, waitErr = waitEvent(tracePath, d, func(e traceEvent) bool { return e.Phase == "bash_handoff_committed" && e.Action == action })
-		if waitErr != nil {
-			return invalid(waitErr)
-		}
-		return nil
-	}
-	// Preparation and small-backlog completion keep a long-lived Bash owner
-	// through occupancy. Due-deadline overlap launches that owner after stop
-	// has entered the backlog window, with a 1 ms Action timeout, so setup
-	// cost cannot consume the clock and Bash admission cannot delay the stop.
-	if !s.RequireDeadline {
-		if err = startBash(nil); err != nil {
-			return row, err
-		}
-	}
-	if s.Mode == "completion" {
-		blockerText := "completion-readiness-blocker"
-		payload, _ := answerSSE(blockerText, "blocker-ok", 2*1024*1024, 64)
-		ep.add(blockerText, &requestPlan{Response: payload, Group: "blocker"})
-		if err = c.Submit("completion-blocker", "execution/blocker", blockerText); err != nil {
-			return row, err
-		}
-		if err = waitCount(ep, blockerText, 1, d); err != nil {
-			return row, err
-		}
-		blockerID, err = observeID(c, "completion-blocker", tracePath)
+
+	var deadlineAction string
+	var deadlineStart traceEvent
+	if s.RequireDeadline {
+		deadlineFifo, err = createCommandFIFO(deadlineFifoPath)
 		if err != nil {
-			return row, invalid(err)
+			return row, err
 		}
-		ep.fire("blocker")
-		if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
-			return e.executionID == blockerID && e.Phase == "validation_started"
-		}); err != nil {
-			return row, invalid(err)
+		timeoutMs := 1
+		deadlineAction, _, err = startBash("execution/deadline", "deadline-owner", "deadline", "cat "+deadlineFifoPath, &timeoutMs, true)
+		if err != nil {
+			return row, err
 		}
 	}
 
 	var target executionID
 	owners := []executionID{stopID}
-	if bashStart.executionID.valid() {
-		owners = append(owners, bashStart.executionID)
-	}
 	owners = append(owners, fillerIDs...)
-	if s.Mode == "completion" {
-		owners = append(owners, blockerID)
-		owners = append(owners, workIDs...)
-	}
+	owners = append(owners, workIDs...)
 	occupied := s.Capacity
 	if s.Mode == "preparation" || s.RequireDeadline {
 		occupied--
@@ -692,26 +731,81 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 			return row, invalid(errors.New("preparation started without complete execution identity"))
 		}
 		workIDs = append(workIDs, target)
-		// No fixture sleep or owner freeze: the ordinary stop client races with
-		// initialization and subsequent advances, and proveOverlap rejects a
-		// late acceptance.
+		if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
+			return e.executionID == target && e.Phase == "preparation_advance_completed"
+		}); err != nil {
+			return row, invalid(err)
+		}
+		if err = armSkipGate(preparationGate); err != nil {
+			return row, err
+		}
+		if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
+			return e.Phase == "preparation_advance_held"
+		}); err != nil {
+			return row, invalid(err)
+		}
 	} else {
 		if err = awaitOccupied(c, occupied, owners, tracePath); err != nil {
 			return row, err
 		}
-		ep.fire("work")
-		selected := map[executionID]bool{}
-		for _, id := range workIDs {
-			selected[id] = true
+		if err = armSkipGate(completionGate); err != nil {
+			return row, err
 		}
-		_, err = waitEvent(tracePath, d, func(e traceEvent) bool {
-			return selected[e.executionID] && e.Phase == "provider_completion_removed" && e.QueuedAfter > 0
-		})
-		if err != nil {
+		ep.fire("work")
+		if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
+			return e.Phase == "native_completions_unprocessed" && e.QueuedAfter >= uint64(len(workIDs))
+		}); err != nil {
+			return row, invalid(err)
+		}
+		if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
+			return e.Phase == "completion_consumption_held"
+		}); err != nil {
 			return row, invalid(err)
 		}
 	}
+
+	if s.RequireDeadline {
+		handoffKeeper, err = createParkGate(handoffPath)
+		if err != nil {
+			return row, err
+		}
+		deadlineStart, err = launchAllowed("execution/deadline", "deadline-allow", deadlineAction)
+		if err != nil {
+			return row, invalid(err)
+		}
+		if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
+			return e.Phase == "bash_handoff_parked" && e.Action == deadlineAction
+		}); err != nil {
+			return row, invalid(err)
+		}
+		if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
+			return e.Phase == "bash_deadline_established" && e.Action == deadlineAction
+		}); err != nil {
+			return row, invalid(err)
+		}
+	}
+
 	if err = stopSessionDirect(c, host, host.Ready["socket"], "stop-during-work", "execution/stop"); err != nil {
+		return row, err
+	}
+	if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
+		return e.Phase == "control_durable_acceptance" && e.Subject == "stop-during-work"
+	}); err != nil {
+		return row, invalid(err)
+	}
+	if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
+		return e.Phase == "control_hint_published" && e.Subject == "stop-during-work"
+	}); err != nil {
+		return row, invalid(err)
+	}
+
+	if err = releaseParkGate(handoffKeeper); err != nil {
+		return row, err
+	}
+	if err = releaseSkipGate(completionGate); err != nil {
+		return row, err
+	}
+	if err = releaseSkipGate(preparationGate); err != nil {
 		return row, err
 	}
 	if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
@@ -720,9 +814,10 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		return row, invalid(err)
 	}
 	if s.RequireDeadline {
-		timeoutMs := 1
-		if err = startBash(&timeoutMs); err != nil {
-			return row, err
+		if _, err = waitEvent(tracePath, d, func(e traceEvent) bool {
+			return e.Phase == "bash_deadline_serviced" && e.Action == deadlineAction
+		}); err != nil {
+			return row, invalid(err)
 		}
 	}
 	ep.fire("work")
@@ -731,29 +826,15 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 			return row, err
 		}
 	}
-	if s.Mode == "completion" {
-		if err = expectAnswer(c, "completion-blocker", "blocker-ok"); err != nil {
-			return row, err
-		}
-	}
-	if err = expectCancelled(c, "stop-target"); err != nil {
+	if err = expectCancelled(c, "stop-message"); err != nil {
 		return row, err
 	}
-
-	if s.Mode == "completion" {
-		if err = expectAnswer(c, "bash-message", "bash-final-ok"); err != nil {
-			return row, err
-		}
-	} else {
-		if err = c.StopSession("stop-bash-after-work", "execution/bash"); err != nil {
-			return row, err
-		}
-		if err = expectCancelled(c, "bash-message"); err != nil {
+	if s.RequireDeadline {
+		if err = expectAnswer(c, "deadline-message", "deadline-final-ok"); err != nil {
 			return row, err
 		}
 	}
 	ep.fire("fillers")
-	ep.fire("stop")
 	for i := 0; i < fillers; i++ {
 		if err = expectAnswer(c, fmt.Sprintf("filler-%d", i), "filler-ok"); err != nil {
 			return row, err
@@ -762,8 +843,13 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	if err = awaitDrain(c, "execution/target"); err != nil {
 		return row, err
 	}
-	if err = awaitDrain(c, "execution/bash"); err != nil {
+	if err = awaitDrain(c, "execution/stop"); err != nil {
 		return row, err
+	}
+	if s.RequireDeadline {
+		if err = awaitDrain(c, "execution/deadline"); err != nil {
+			return row, err
+		}
 	}
 	// Require a service boundary after the last measured preparation or
 	// completion, rather than accepting a stream truncated before that gap.
@@ -782,14 +868,10 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		if event.executionID == stopID && event.Phase == "effect_stop_requested" && event.ControlKey == "stop-during-work" {
 			lastEvidence = max(lastEvidence, event.At)
 		}
-		if event.Action == action && (event.Phase == "cleanup_completed" || event.Phase == "bash_deadline_serviced") {
+		if event.Action == deadlineAction && (event.Phase == "cleanup_completed" || event.Phase == "bash_deadline_serviced") {
 			lastEvidence = max(lastEvidence, event.At)
 		}
-		// awaitDrain's successful inspection is an owner-visible snapshot that
-		// all execution custody and scratch have reached zero. Commit only after
-		// that snapshot so an automatically admitted Bash continuation cannot
-		// be split across the committed trace prefix.
-		if event.Phase == "inspection_captured" && (event.Subject == "execution/target" || event.Subject == "execution/bash") {
+		if event.Phase == "inspection_captured" && (event.Subject == "execution/target" || event.Subject == "execution/stop" || event.Subject == "execution/deadline") {
 			lastEvidence = max(lastEvidence, event.At)
 		}
 	}
@@ -835,32 +917,20 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	}
 	events = committed
 	m := deriveMetrics(events, s.RequireDeadline)
-	proof, e := proveOverlap(events, s.Mode, "stop-during-work", target, workIDs, s.RequireDeadline)
+	expectedNative := uint64(0)
+	if s.Mode == "completion" {
+		expectedNative = uint64(len(workIDs))
+	}
+	proof, e := proveReadyObligations(events, s.Mode, "stop-during-work", target, deadlineStart.executionID, workIDs, expectedNative, s.RequireDeadline)
 	if e != nil {
 		m.Status = "invalid"
 		m.Invalid = append(m.Invalid, e.Error())
 	} else {
 		scopeService(&m, proof)
 	}
-	// The real Bash owner must predate pressure and its cleanup must follow
-	// it. This is distinct from merely configuring a Bash-capable Session.
-	bashCleanup := uint64(0)
-	for _, event := range events {
-		if event.Action == action && event.Phase == "cleanup_completed" {
-			bashCleanup = event.At
-		}
-	}
-	if bashStart.At == 0 || bashCleanup == 0 {
+	if s.RequireDeadline && !deadlineStart.executionID.valid() {
 		m.Status = "invalid"
-		m.Invalid = append(m.Invalid, "Bash owner did not span the measured pressure")
-	} else if s.RequireDeadline {
-		if bashStart.At >= proof.WorkEndNS || bashCleanup <= proof.WorkStartNS {
-			m.Status = "invalid"
-			m.Invalid = append(m.Invalid, "Bash owner did not span the measured pressure")
-		}
-	} else if bashStart.At > proof.WorkStartNS || (s.Mode == "preparation" && bashCleanup < proof.WorkEndNS) {
-		m.Status = "invalid"
-		m.Invalid = append(m.Invalid, "Bash owner did not span the measured pressure")
+		m.Invalid = append(m.Invalid, "deadline Bash owner was not launched")
 	}
 	data, e := os.ReadFile(tracePath)
 	if e != nil {
@@ -879,9 +949,9 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	row["trace_events"] = len(events)
 	row["workload_bindings"] = workIDs
 	row["stop_binding"] = stopID
-	row["bash_action"] = action
+	row["bash_action"] = deadlineAction
 	row["resources"] = map[string]any{"custody_and_scratch_drained": true, "execution_slot_bytes": slotBytes, "shared_preparation_bytes": prepBytes, "whole_process_memory": "not measured by this runner"}
-	row["service_interval_scope"] = "complete lifecycle intervals intersecting the proved workload window; crossing intervals conservatively include their whole busy duration"
+	row["service_interval_scope"] = "complete lifecycle intervals intersecting the measured workload after one-shot gate release; gated intervals are perturbed and not production latency"
 	return row, nil
 }
 
@@ -969,7 +1039,7 @@ func main() {
 	if pErr != nil && status == "passed" {
 		status = "invalid"
 	}
-	report := map[string]any{"format": "rui-execution-service-v2-go", "status": status, "artifacts": root, "cases": rows, "provenance": provenance, "source_sha256": sourceHashes, "limits": []string{"no automatic reruns or timing allowances conceal absent overlap", "source/native validation and platform/resource qualification still require their owning gates", "loopback is not live-provider, TLS, power-loss, or whole-product qualification", "structural sizes are not whole-process footprint"}}
+	report := map[string]any{"format": "rui-execution-service-v3-go", "status": status, "artifacts": root, "cases": rows, "provenance": provenance, "source_sha256": sourceHashes, "limits": []string{"no automatic reruns or timing allowances conceal absent readiness", "gated intervals are perturbed and not production latency", "source/native validation and platform/resource qualification still require their owning gates", "loopback is not live-provider, TLS, power-loss, or whole-product qualification", "structural sizes are not whole-process footprint"}}
 	if pErr != nil {
 		report["provenance_error"] = pErr.Error()
 	}
