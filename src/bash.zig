@@ -317,6 +317,16 @@ fn cleanupOwnedFiles(
     if (first_error) |err| return err;
 }
 
+/// Shell observations consumed at the service boundary. Production passes
+/// `.live`; deterministic tests substitute explicit outcomes so deadline and
+/// owner-state logic can be verified without elapsed time or syscalls.
+const ObservationSource = union(enum) {
+    live,
+    none,
+    observed: Term,
+    failed,
+};
+
 pub const Execution = struct {
     io: std.Io,
     process: Process,
@@ -372,6 +382,11 @@ pub const Execution = struct {
     };
 
     pub fn service(self: *Execution, window: []u8) ServiceResult {
+        const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+        return self.serviceAt(window, now, .live);
+    }
+
+    fn serviceAt(self: *Execution, window: []u8, now: std.Io.Clock.Timestamp, source: ObservationSource) ServiceResult {
         std.debug.assert(window.len == copy_window_bytes);
         var fault: ?anyerror = null;
         if (self.faults.service and !self.service_fault_used) {
@@ -379,11 +394,10 @@ pub const Execution = struct {
             fault = error.InjectedBashServiceFailure;
             self.requestTermination(.infrastructure_shutdown);
         }
-        const now = std.Io.Clock.Timestamp.now(self.io, .awake);
         var made_progress = false;
         const timeout_action = self.applyDueDeadline(now);
         if (timeout_action != null) made_progress = true;
-        const leader_observed = self.observeLeader(now) catch |err| observed: {
+        const leader_observed = self.observeLeader(now, source) catch |err| observed: {
             fault = fault orelse err;
             self.requestTermination(.infrastructure_shutdown);
             break :observed false;
@@ -657,13 +671,22 @@ pub const Execution = struct {
         return true;
     }
 
-    fn observeLeader(self: *Execution, now: std.Io.Clock.Timestamp) !bool {
+    fn observeLeader(self: *Execution, now: std.Io.Clock.Timestamp, source: ObservationSource) !bool {
         const anchor = switch (self.process) {
             .running => |*value| &value.anchor,
             .grace => |*value| &value.anchor,
             .reaping, .checking_group, .gone => return false,
         };
         if (anchor.observed != null) return false;
+        switch (source) {
+            .none => return false,
+            .observed => |term| {
+                anchor.observed = term;
+                return true;
+            },
+            .failed => return error.BashObserveFailed,
+            .live => {},
+        }
         if (self.lifecycleFaultActive(.observe) and
             timestampReached(now, addMilliseconds(self.started, fault_observation_delay_ms)))
         {
@@ -1138,16 +1161,13 @@ test "a due deadline starts termination from a later service-time observation" {
     try std.testing.expectEqual(StopReason.timed_out, execution.stop_reason);
 }
 
-test "service samples a fresh clock after bounded work passes the deadline" {
-    const io = std.testing.io;
-    const started = std.Io.Clock.Timestamp.now(io, .awake);
-    const deadline = started.addDuration(.{ .raw = .fromMilliseconds(20), .clock = .awake });
-    var execution = Execution{
-        .io = io,
+fn runningWithDeadline(started: std.Io.Clock.Timestamp, deadline: std.Io.Clock.Timestamp) Execution {
+    return .{
+        .io = std.testing.io,
         .process = .{ .running = .{
             .anchor = .{
                 .child = undefined,
-                .pgid = 0x7ffffffe,
+                .pgid = 1,
             },
             .deadline = deadline,
         } },
@@ -1158,27 +1178,49 @@ test "service samples a fresh clock after bounded work passes the deadline" {
         .script = undefined,
         .scratch_path = "",
         .started = started,
+        // Signaling is faulted to a no-op so no real process is signaled.
         .faults = .{ .lifecycle = .signal },
     };
-    // Observe touches only the leader id; point it at a pid that cannot exist
-    // so the production path fails closed instead of reading undefined memory.
-    // Signaling is faulted to a no-op above, so no real process is signaled.
-    execution.process.running.anchor.child.id = 0x7ffffffe;
-    // An earlier observation is not yet due. Production service must not reuse it.
+}
+
+test "service acts on its service-time observation rather than an earlier one" {
+    const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
+    const deadline = started.addDuration(.{ .raw = .fromMilliseconds(20), .clock = .awake });
+    // A pre-work observation is before the deadline: no timeout.
     const before = started.addDuration(.{ .raw = .fromMilliseconds(1), .clock = .awake });
+    var execution = runningWithDeadline(started, deadline);
     try std.testing.expect(execution.applyDueDeadline(before) == null);
     try std.testing.expect(execution.process == .running);
-    // Bounded work moves the real clock from before to after the deadline.
-    var spins: usize = 0;
-    while (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < deadline.raw.nanoseconds) : (spins += 1) {
-        if (spins > 10_000_000) return error.TestUnexpectedResult;
-    }
+    // The service-time observation is after the deadline: the real owner
+    // requests termination through the production service path. No clock is
+    // sampled and no syscall runs; both observations are explicit inputs.
+    const after = started.addDuration(.{ .raw = .fromMilliseconds(21), .clock = .awake });
     var window: [copy_window_bytes]u8 = undefined;
-    const result = execution.service(&window);
+    const result = execution.serviceAt(&window, after, .none);
     const timeout = result.timeout_action orelse return error.TestExpectedResult;
     try std.testing.expectEqual(@as(u64, @intCast(deadline.raw.nanoseconds)), timeout.deadline_ns);
+    try std.testing.expect(result.fault == null);
+    try std.testing.expect(result.made_progress);
+    try std.testing.expect(!result.retired);
     try std.testing.expect(execution.process == .grace);
     try std.testing.expectEqual(StopReason.timed_out, execution.stop_reason);
+    // Substituting the earlier observation performs no timeout.
+    var stale = runningWithDeadline(started, deadline);
+    const idle = stale.serviceAt(&window, before, .none);
+    try std.testing.expect(idle.timeout_action == null);
+    try std.testing.expect(idle.fault == null);
+    try std.testing.expect(stale.process == .running);
+    // A failed observation is reported without a timeout.
+    var unobservable = runningWithDeadline(started, deadline);
+    const failed = unobservable.serviceAt(&window, before, .failed);
+    try std.testing.expect(failed.timeout_action == null);
+    try std.testing.expect(failed.fault.? == error.BashObserveFailed);
+    // An observed leader retires the running state without a deadline.
+    var witnessed = runningWithDeadline(started, deadline);
+    const seen = witnessed.serviceAt(&window, before, .{ .observed = .{ .exited = 0 } });
+    try std.testing.expect(seen.timeout_action == null);
+    try std.testing.expect(seen.fault == null);
+    try std.testing.expect(witnessed.process == .grace);
 }
 
 test "cleanup ownership transfers consume their source" {
