@@ -18,6 +18,7 @@ Requires Zig 0.16.0, Python 3, Perl, a C toolchain and Make. The build pins nati
 
 ```sh
 zig build
+zig build test-logic
 zig build check
 ./zig-out/bin/rui serve --store /absolute/path/to/private-store
 ```

@@ -1,5 +1,5 @@
 const std = @import("std");
-const store = @import("store.zig");
+const attempt = @import("attempt.zig");
 
 pub const CustodyToken = struct {
     index: usize,
@@ -15,8 +15,8 @@ pub const CustodyRecord = struct {
     delivered: std.atomic.Value(bool) = .init(false),
     launch_available: std.atomic.Value(bool) = .init(false),
     binding_kind: BindingKind = .model,
-    binding: store.AttemptBinding = undefined,
-    action_binding: store.ActionAttemptBinding = undefined,
+    binding: attempt.AttemptBinding = undefined,
+    action_binding: attempt.ActionAttemptBinding = undefined,
 };
 
 pub const CustodyPool = struct {
@@ -40,8 +40,8 @@ pub const CustodyPool = struct {
     pub fn attach(
         self: *CustodyPool,
         token: CustodyToken,
-        permit: *store.DispatchPermit,
-    ) !store.AttemptBinding {
+        permit: *attempt.DispatchPermit,
+    ) !attempt.AttemptBinding {
         const record = try self.current(token);
         if (record.state.load(.acquire) != .reserved) return error.InvalidCustodyTransition;
         const attempt_binding = try permit.consume();
@@ -55,8 +55,8 @@ pub const CustodyPool = struct {
     pub fn attachAction(
         self: *CustodyPool,
         token: CustodyToken,
-        permit: *store.ActionDispatchPermit,
-    ) !store.ActionAttemptBinding {
+        permit: *attempt.ActionDispatchPermit,
+    ) !attempt.ActionAttemptBinding {
         const record = try self.current(token);
         if (record.state.load(.acquire) != .reserved) return error.InvalidCustodyTransition;
         const action_binding = try permit.consume();
@@ -70,7 +70,7 @@ pub const CustodyPool = struct {
     pub fn consumeLaunchAuthority(
         self: *CustodyPool,
         token: CustodyToken,
-        attempt_binding: store.AttemptBinding,
+        attempt_binding: attempt.AttemptBinding,
     ) !void {
         const record = try self.current(token);
         if (record.state.load(.acquire) != .attached or record.binding_kind != .model or
@@ -88,7 +88,7 @@ pub const CustodyPool = struct {
     pub fn consumeActionLaunchAuthority(
         self: *CustodyPool,
         token: CustodyToken,
-        action_binding: store.ActionAttemptBinding,
+        action_binding: attempt.ActionAttemptBinding,
     ) !void {
         const record = try self.current(token);
         if (record.state.load(.acquire) != .attached or record.binding_kind != .action or
@@ -103,13 +103,13 @@ pub const CustodyPool = struct {
         }
     }
 
-    pub fn binding(self: *CustodyPool, token: CustodyToken) !store.AttemptBinding {
+    pub fn binding(self: *CustodyPool, token: CustodyToken) !attempt.AttemptBinding {
         const record = try self.current(token);
         if (record.state.load(.acquire) != .attached or record.binding_kind != .model) return error.CustodyDetached;
         return record.binding;
     }
 
-    pub fn actionBinding(self: *CustodyPool, token: CustodyToken) !store.ActionAttemptBinding {
+    pub fn actionBinding(self: *CustodyPool, token: CustodyToken) !attempt.ActionAttemptBinding {
         const record = try self.current(token);
         if (record.state.load(.acquire) != .attached or record.binding_kind != .action) return error.CustodyDetached;
         return record.action_binding;
@@ -162,7 +162,7 @@ test "custody remains occupied through detachment and rejects late delivery afte
     var records: [1]CustodyRecord = undefined;
     var pool = CustodyPool.initialize(&records);
     const first = pool.reserve().?;
-    var first_permit = store.DispatchPermit{ .binding = .{
+    var first_permit = attempt.DispatchPermit{ .binding = .{
         .turn_id = 1,
         .operation_id = 1,
         .attempt_ordinal = 1,
@@ -187,7 +187,7 @@ test "custody remains occupied through detachment and rejects late delivery afte
     const second = pool.reserve().?;
     try std.testing.expectEqual(first.index, second.index);
     try std.testing.expect(first.generation != second.generation);
-    var second_permit = store.DispatchPermit{ .binding = .{
+    var second_permit = attempt.DispatchPermit{ .binding = .{
         .turn_id = 2,
         .operation_id = 2,
         .attempt_ordinal = 1,
@@ -205,7 +205,7 @@ test "custody attach consumes one permit only after validating its reservation" 
     var pool = CustodyPool.initialize(&records);
     const first = pool.reserve().?;
     const second = pool.reserve().?;
-    var permit = store.DispatchPermit{ .binding = .{
+    var permit = attempt.DispatchPermit{ .binding = .{
         .turn_id = 1,
         .operation_id = 1,
         .attempt_ordinal = 1,
@@ -214,7 +214,7 @@ test "custody attach consumes one permit only after validating its reservation" 
     try std.testing.expectError(error.DispatchPermitConsumed, pool.attach(second, &permit));
     try pool.releaseUnused(second);
 
-    var next_permit = store.DispatchPermit{ .binding = .{
+    var next_permit = attempt.DispatchPermit{ .binding = .{
         .turn_id = 2,
         .operation_id = 2,
         .attempt_ordinal = 1,
@@ -245,7 +245,7 @@ test "model and Action Attempt bindings cannot cross custody paths" {
     var records: [2]CustodyRecord = undefined;
     var pool = CustodyPool.initialize(&records);
     const model_token = pool.reserve().?;
-    var model_permit = store.DispatchPermit{ .binding = .{
+    var model_permit = attempt.DispatchPermit{ .binding = .{
         .turn_id = 1,
         .operation_id = 2,
         .attempt_ordinal = 3,
@@ -254,7 +254,7 @@ test "model and Action Attempt bindings cannot cross custody paths" {
     try std.testing.expectError(error.CustodyDetached, pool.actionBinding(model_token));
 
     const action_token = pool.reserve().?;
-    var action_permit = store.ActionDispatchPermit{ .binding = .{
+    var action_permit = attempt.ActionDispatchPermit{ .binding = .{
         .turn_id = 1,
         .parent_operation_id = 2,
         .action_id = 4,
@@ -275,4 +275,47 @@ test "model and Action Attempt bindings cannot cross custody paths" {
     try pool.cleanupComplete(model_token);
     try pool.detach(action_token);
     try pool.cleanupComplete(action_token);
+}
+
+test "failed reclamation keeps custody occupied until the same owner succeeds" {
+    const named_scratch = @import("named_scratch.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const primary = try tmp.dir.createFile(std.testing.io, "owned", .{ .read = true });
+    var used: std.atomic.Value(u64) = .init(4);
+    var gate: std.atomic.Value(bool) = .init(true);
+    var records: [1]CustodyRecord = undefined;
+    var pool = CustodyPool.initialize(&records);
+    const token = pool.reserve().?;
+    var permit = attempt.DispatchPermit{ .binding = .{
+        .turn_id = 1,
+        .operation_id = 1,
+        .attempt_ordinal = 1,
+    } };
+    _ = try pool.attach(token, &permit);
+    try pool.detach(token);
+    var owner = named_scratch.Owner.init(
+        std.testing.io,
+        primary,
+        null,
+        "owned",
+        .{ .used = &used, .limit = 4 },
+        4,
+        .{ .gated = &gate },
+    );
+    var root_buffer: [4096]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+
+    try std.testing.expectError(
+        error.InjectedScratchRemovalFailure,
+        owner.reclaim(root_buffer[0..root_length]),
+    );
+    try std.testing.expectEqual(@as(usize, 1), pool.occupied());
+    try std.testing.expectEqual(@as(u64, 4), used.load(.acquire));
+
+    gate.store(false, .release);
+    try std.testing.expectEqual(named_scratch.Reclamation.removed, try owner.reclaim(root_buffer[0..root_length]));
+    try pool.cleanupComplete(token);
+    try std.testing.expectEqual(@as(usize, 0), pool.occupied());
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }

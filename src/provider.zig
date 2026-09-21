@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const named_scratch = @import("named_scratch.zig");
+const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const provider_output = @import("provider_output.zig");
 const store = @import("store.zig");
@@ -1323,6 +1324,85 @@ test "curl disposition retries only temporary connection and explicit inactivity
         TransportDisposition.tls_verification_failure,
         curlFailureDisposition(c.CURLE_PEER_FAILED_VERIFICATION, false),
     );
+}
+
+test "real preparation consumes the configured allowance across multiple advances" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    var storage = try store.Store.open(std.testing.io, database, root);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
+    defer directory.close(std.testing.io);
+    const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
+    var configuration: protocol.ConfigureCommand = .{};
+    try configuration.key.set("prep-config");
+    try configuration.session.set("direct/prep");
+    configuration.configuration.workspace.state = .value;
+    try configuration.configuration.workspace.value.set(workspace);
+    configuration.configuration.model.state = .value;
+    try configuration.configuration.model.value.set("model-a");
+    try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+
+    const text = "x" ** 80;
+    const file = try tmp.dir.createFile(std.testing.io, "prep-file", .{ .read = true });
+    try file.writeStreamingAll(std.testing.io, text);
+    try file.sync(std.testing.io);
+    var message: protocol.MessageCommand = .{};
+    try message.key.set("prep-message");
+    try message.session.set("direct/prep");
+    message.text = .{
+        .state = .value,
+        .file = file,
+        .length = text.len,
+        .digest = protocol.contentDigest(text),
+    };
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
+
+    var admitted = (try storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    const view = try storage.openHistoricalView(binding);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(
+        std.testing.io,
+        view,
+        root,
+        .{ .used = &used, .limit = 4096 },
+        .{},
+        &retained,
+    );
+    defer if (preparation.active) preparation.cancel();
+    var advances: usize = 0;
+    var last_request: u64 = 0;
+    while (true) {
+        advances += 1;
+        try std.testing.expect(advances < 64);
+        var progress = preparation.advance(16, 2);
+        const stats = preparation.advanceStats();
+        try std.testing.expect(stats.work_bytes <= 16);
+        try std.testing.expect(stats.work_items <= 2);
+        try std.testing.expect(stats.request_bytes >= last_request);
+        last_request = stats.request_bytes;
+        switch (progress) {
+            .pending => {},
+            .prepared => |*request| {
+                try std.testing.expect(advances > 1);
+                try std.testing.expect(request.length > 0);
+                request.deinit();
+                return;
+            },
+            .failed => |err| return err,
+        }
+    }
 }
 
 test "plain JSON runs batch writes and conserve scan plus output allowance" {

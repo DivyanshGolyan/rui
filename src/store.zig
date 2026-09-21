@@ -1,4 +1,5 @@
 const std = @import("std");
+const attempt = @import("attempt.zig");
 const named_scratch = @import("named_scratch.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
@@ -247,12 +248,7 @@ pub const PermissionDecisionReply = union(enum) {
     infrastructure_failure,
 };
 
-pub const ActionAttemptBinding = struct {
-    turn_id: u64,
-    parent_operation_id: u64,
-    action_id: u64,
-    attempt_ordinal: u64,
-};
+pub const ActionAttemptBinding = attempt.ActionAttemptBinding;
 
 pub const SupersedingControl = struct {
     command_key: protocol.Bounded(protocol.max_key_bytes),
@@ -278,16 +274,7 @@ const max_permission_decision_bytes = maxEnumTagBytes(protocol.PermissionDecisio
 
 pub const ActionSettlement = enum { effect, session_stop };
 
-pub const ActionDispatchPermit = struct {
-    binding: ActionAttemptBinding,
-    available: bool = true,
-
-    pub fn consume(self: *ActionDispatchPermit) !ActionAttemptBinding {
-        if (!self.available) return error.DispatchPermitConsumed;
-        self.available = false;
-        return self.binding;
-    }
-};
+pub const ActionDispatchPermit = attempt.ActionDispatchPermit;
 
 pub const BashExecutionInput = struct {
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
@@ -328,22 +315,8 @@ pub const AcceptedMessageQueue = struct {
     };
 };
 
-pub const AttemptBinding = struct {
-    turn_id: u64,
-    operation_id: u64,
-    attempt_ordinal: u64,
-};
-
-pub const DispatchPermit = struct {
-    binding: AttemptBinding,
-    available: bool = true,
-
-    pub fn consume(self: *DispatchPermit) !AttemptBinding {
-        if (!self.available) return error.DispatchPermitConsumed;
-        self.available = false;
-        return self.binding;
-    }
-};
+pub const AttemptBinding = attempt.AttemptBinding;
+pub const DispatchPermit = attempt.DispatchPermit;
 
 pub const AttemptAdmission = struct {
     permit: DispatchPermit,
@@ -8147,6 +8120,48 @@ test "model interruption removes a scheduled retry from admission" {
     try std.testing.expect((try admitRetryForTesting(&storage)) == null);
 }
 
+test "accepted stop remains discoverable without a control hint" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "hintless-config", "direct/hintless");
+    try submitTestMessage(&storage, &tmp, "hintless-file", "hintless-message", "direct/hintless", "work");
+    var admitted = (try storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    try std.testing.expect((try storage.operationSupersededByControl(binding)) == null);
+
+    var stop = try completeSessionStop("hintless-stop", "direct/hintless");
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    const control = (try storage.operationSupersededByControl(binding)).?;
+    try std.testing.expectEqualStrings("hintless-stop", control.command_key.slice());
+}
+
+test "dispatch handoff refuses a stopped Attempt without invoking the launch callback" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "handoff-config", "direct/handoff");
+    try submitTestMessage(&storage, &tmp, "handoff-file", "handoff-message", "direct/handoff", "work");
+    var admitted = (try storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+
+    const Launch = struct {
+        fn run(calls: *usize) !void {
+            calls.* += 1;
+        }
+    };
+    var calls: usize = 0;
+    try storage.withDispatchHandoff(binding, &calls, Launch.run);
+    try std.testing.expectEqual(@as(usize, 1), calls);
+
+    var stop = try completeSessionStop("handoff-stop", "direct/handoff");
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    try std.testing.expectError(error.SupersededByControl, storage.withDispatchHandoff(binding, &calls, Launch.run));
+    try std.testing.expectEqual(@as(usize, 1), calls);
+}
+
 test "failed control commit saves no answer after reopening" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -10044,8 +10059,8 @@ test "canonical historical read failure fences dispatch without a fabricated out
     var message = try completeMessage("historical-message", "direct/historical-corrupt", file, "message");
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
     try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
-    var attempt = (try storage.admitNextModelAttempt(.{})).?;
-    const binding = try attempt.permit.consume();
+    var admitted_attempt = (try storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted_attempt.permit.consume();
 
     try exec(storage.database, "PRAGMA foreign_keys=OFF");
     try exec(storage.database, "UPDATE session_revision SET instructions_content_id=9223372036854775807 WHERE session_ref='direct/historical-corrupt'");

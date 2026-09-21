@@ -1,0 +1,137 @@
+{
+  "cases": [
+    {
+      "metrics": {
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 19836500,
+        "max_lifecycle_service_gap_ns": 105057334,
+        "preparation_advances": {
+          "count": 2,
+          "maximum_ns": 1248292,
+          "total_ns": 1938375
+        },
+        "preparation_lifetimes": {
+          "count": 2,
+          "maximum_ns": 1300791,
+          "total_ns": 2034583
+        },
+        "service_interval_count": 32,
+        "settlement": {
+          "count": 2,
+          "maximum_ns": 17891250,
+          "total_ns": 33422750
+        },
+        "status": "passed",
+        "validation": {
+          "count": 2,
+          "maximum_ns": 614167,
+          "total_ns": 1112626
+        }
+      },
+      "parameters": {
+        "name": "history-1k",
+        "active_capacity": 2,
+        "history_bytes": 1024,
+        "history_turns": 1
+      },
+      "resources": {
+        "custody_and_scratch_drained": true,
+        "execution_slot_bytes": 1248,
+        "shared_preparation_bytes": 9480,
+        "whole_process_memory": "not measured by this runner"
+      },
+      "status": "passed",
+      "trace_events": 70,
+      "trace_sha256": "c5d1a957a750e57065a85dac9daefa5c0d61e4783af5274fb9452c7764e46372"
+    },
+    {
+      "metrics": {
+        "invalid_metrics": null,
+        "largest_active_service_interval_ns": 16489208,
+        "max_lifecycle_service_gap_ns": 104449666,
+        "preparation_advances": {
+          "count": 21,
+          "maximum_ns": 1794416,
+          "total_ns": 19968957
+        },
+        "preparation_lifetimes": {
+          "count": 9,
+          "maximum_ns": 4164667,
+          "total_ns": 21184793
+        },
+        "service_interval_count": 173,
+        "settlement": {
+          "count": 9,
+          "maximum_ns": 15738125,
+          "total_ns": 128883667
+        },
+        "status": "passed",
+        "validation": {
+          "count": 9,
+          "maximum_ns": 207292,
+          "total_ns": 1609625
+        }
+      },
+      "parameters": {
+        "name": "history-items",
+        "active_capacity": 2,
+        "history_bytes": 1024,
+        "history_turns": 8
+      },
+      "resources": {
+        "custody_and_scratch_drained": true,
+        "execution_slot_bytes": 1248,
+        "shared_preparation_bytes": 9480,
+        "whole_process_memory": "not measured by this runner"
+      },
+      "status": "passed",
+      "trace_events": 361,
+      "trace_sha256": "5833ea46dda6e4bb1a6684a3bfa71da7c9680a7f5262ecff4dcb613fd22ff5e4"
+    }
+  ],
+  "format": "rui-execution-service-v4-go",
+  "limits": [
+    "ungated empirical service gaps only; turn ordering is proved by zig build test-logic",
+    "exact request bytes remain fixture-audited, not a schedule-independence matrix",
+    "source/native validation and platform/resource qualification still require their owning gates",
+    "loopback is not live-provider, TLS, power-loss, or whole-product qualification",
+    "structural sizes are not whole-process footprint"
+  ],
+  "provenance": {
+    "binary": "/Users/divyanshgolyan/code/personal/rui/.zig-cache/o/f3ca4a5b67817b4584fa8e20d2447b84/rui-release-small-check",
+    "binary_sha256": "3708adf0b0b4527184af7695c7f6a86b4d374cbe5619901264b488c813d88ad4",
+    "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+    "measurement_runtime": {
+      "go_arch": "arm64",
+      "go_os": "darwin",
+      "go_version": "go1.27.1",
+      "gopsutil_version": "v4.26.7",
+      "logical_cpus": 10,
+      "module_path": "rui.local/qualification",
+      "physical_memory_bytes": 17179869184
+    },
+    "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
+    "tested_revision": "f62cd5a0f6289268e5406cd788d880cee055781b",
+    "working_tree_dirty": false,
+    "zig": "0.16.0"
+  },
+  "raw_artifact": {
+    "compressed_bytes": 5759,
+    "compressed_sha256": "d171ce5e9d06cab8f129ad275bbf59ea11b8fd3825d399fbaed2b977008a5004",
+    "compression": "gzip",
+    "path": "2026-09-21-macos-v4.raw.json.gz",
+    "uncompressed_bytes": 32999,
+    "uncompressed_sha256": "f832f330a7623d7c796e25b97367bbcb3e80296eaf1884499297f01ade0a3443"
+  },
+  "source_sha256": {
+    "src/bash.zig": "22b40d3f57f701017187d3609ba06299b8c57c1efa3162cc0dc1f7e2b75ce7aa",
+    "src/cli.zig": "8349fc9ddab547293884e9ef73b185453f6aac4695ca984b5a3543325dad7c35",
+    "src/execution_turn.zig": "7203d7f9983cbb1816d67a1405c9569c8ad1f94977ce34c8da04f880ea30b5a6",
+    "src/provider.zig": "3a52b51da7915828cdd939b79464d28bd2b5fe6dc0a0770b809ee73eb0e3fd1c",
+    "src/server.zig": "028abb69aa4cfe1f18a86ad318001f7290ccb457e68164fd54a5232d9dc3b191",
+    "tests/qualification/execution-service/fixture.go": "8e93d426dc65ccb5cf7901aa8326c0ffd09171f3ea1ce89326000ba3daed3f22",
+    "tests/qualification/execution-service/main.go": "3af36f69a53b7c8d08982afcfcac3c48f058e9c7bbd3a465501d25b9cc1ac65d",
+    "tests/qualification/execution-service/metrics.go": "d91e9cbc67ffc4119556207f70fc97e3d4d2fa4a11bcf9135a86ae3059f2ae49"
+  },
+  "status": "passed"
+}
