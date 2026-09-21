@@ -1441,37 +1441,16 @@ fn drainPreparation(
     item_allowance: usize,
     step_bound: usize,
 ) !DrainedRequest {
-    var steps: usize = 0;
-    var last_request: u64 = 0;
-    while (true) {
-        steps += 1;
-        try std.testing.expect(steps <= step_bound);
-        var progress = preparation.advance(byte_allowance, item_allowance);
-        const stats = preparation.advanceStats();
-        try std.testing.expect(stats.work_bytes <= byte_allowance);
-        try std.testing.expect(stats.work_items <= item_allowance);
-        try std.testing.expect(stats.request_bytes >= last_request);
-        last_request = stats.request_bytes;
-        switch (progress) {
-            .pending => {
-                try std.testing.expect(preparation.active);
-            },
-            .prepared => |*request| {
-                try std.testing.expect(!preparation.active);
-                const length: usize = @intCast(request.length);
-                const bytes = try std.testing.allocator.alloc(u8, length);
-                errdefer std.testing.allocator.free(bytes);
-                const actual = try request.file.readPositionalAll(request.io, bytes, 0);
-                try std.testing.expectEqual(length, actual);
-                try std.testing.expectEqual(request.length, try request.file.length(request.io));
-                const digest = protocol.contentDigest(bytes);
-                const drained: DrainedRequest = .{ .bytes = bytes, .length = request.length, .digest = digest };
-                request.deinit();
-                return drained;
-            },
-            .failed => |err| return err,
-        }
-    }
+    var request = try drainLivePreparation(preparation, byte_allowance, item_allowance, step_bound);
+    defer request.deinit();
+    const length: usize = @intCast(request.length);
+    const bytes = try std.testing.allocator.alloc(u8, length);
+    errdefer std.testing.allocator.free(bytes);
+    const actual = try request.file.readPositionalAll(request.io, bytes, 0);
+    try std.testing.expectEqual(length, actual);
+    try std.testing.expectEqual(request.length, try request.file.length(request.io));
+    const digest = protocol.contentDigest(bytes);
+    return .{ .bytes = bytes, .length = request.length, .digest = digest };
 }
 
 /// Drain to a live PreparedRequest the caller owns across later Store
@@ -1940,6 +1919,10 @@ test "request preparation cancellation and failure release ownership" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        var active = true;
+        defer {
+            if (active) preparation.cancel();
+        }
         var probe: Preparation = undefined;
         {
             const probe_view = try setup.storage.openHistoricalView(binding);
@@ -1953,6 +1936,7 @@ test "request preparation cancellation and failure release ownership" {
         }
         try std.testing.expect(used.load(.acquire) > baseline);
         preparation.cancel();
+        active = false;
         try std.testing.expect(!preparation.active);
         try std.testing.expectEqual(baseline, used.load(.acquire));
         try std.testing.expect(retained == null);
@@ -2011,10 +1995,18 @@ test "request preparation cancellation and failure release ownership" {
         try std.testing.expectError(error.InjectedRequestUnlinkFailure, preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{ .unlink = true, .unlink_removal = &gate }, &retained));
         try std.testing.expect(retained != null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        var reclaimed = false;
+        defer {
+            if (!reclaimed) {
+                gate.store(false, .release);
+                _ = retained.?.reclaim(setup.root) catch .removed;
+            }
+        }
         try std.testing.expectError(error.InjectedScratchRemovalFailure, retained.?.reclaim(setup.root));
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         gate.store(false, .release);
         try std.testing.expectEqual(named_scratch.Reclamation.removed, try retained.?.reclaim(setup.root));
+        reclaimed = true;
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         var name_buffer: [96]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buffer, "request-{d}-{d}.tmp", .{ binding.operation_id, binding.attempt_ordinal });
@@ -2038,6 +2030,10 @@ test "request preparation completed request is fenced by later stop before hando
     // The sealed request stays owned and readable across the stop and the
     // refused handoff; only its release returns the charge.
     var request = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
+    var released = false;
+    defer {
+        if (!released) request.deinit();
+    }
     try std.testing.expect(request.length > 0);
     const readable = try request.file.length(request.io);
     try std.testing.expectEqual(request.length, readable);
@@ -2058,6 +2054,7 @@ test "request preparation completed request is fenced by later stop before hando
     try std.testing.expectEqual(@as(usize, 0), calls);
     try std.testing.expectEqual(request.length, try request.file.length(request.io));
     request.deinit();
+    released = true;
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
@@ -2082,21 +2079,10 @@ test "request preparation composes replay tool results and schema" {
 }
 
 test "request preparation cancels inside schema and replay emissions" {
-    // Learn the composed layout from an identical history first.
-    var learn: PreparationTestSetup = undefined;
-    try learn.init();
-    defer learn.close();
-    const learn_binding = try establishComposedHistory(&learn, "direct/prep-cancel-spans");
-    const learn_view = try learn.storage.openHistoricalView(learn_binding);
-    var learn_used: std.atomic.Value(u64) = .init(0);
-    var learn_retained: ?named_scratch.Owner = null;
-    var learn_preparation: Preparation = undefined;
-    try learn_preparation.init(std.testing.io, learn_view, learn.root, .{ .used = &learn_used, .limit = 8 * 1024 * 1024 }, .{}, &learn_retained);
-    const learned = try drainPreparation(&learn_preparation, 16, 2, 16384);
-    defer std.testing.allocator.free(learned.bytes);
-    try std.testing.expectEqualStrings(composed_expected, learned.bytes);
-    const schema_target = std.mem.indexOf(u8, learned.bytes, "{\"type\":\"object\"}").? + 2;
-    const replay_target = std.mem.indexOf(u8, learned.bytes, composed_replayed).? + composed_replayed.len / 2;
+    // Checkpoint offsets come straight from the independently authored
+    // composed golden the dedicated test already verifies byte-for-byte.
+    const schema_target = std.mem.indexOf(u8, composed_expected, "{\"type\":\"object\"}").? + 2;
+    const replay_target = std.mem.indexOf(u8, composed_expected, composed_replayed).? + composed_replayed.len / 2;
 
     // Each target lies strictly inside its emission's output span, so the
     // corresponding raw or replay reader is necessarily still open with a
@@ -2112,9 +2098,14 @@ test "request preparation cancels inside schema and replay emissions" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        var active = true;
+        defer {
+            if (active) preparation.cancel();
+        }
         try stepPreparationToOffset(&preparation, target, 16384);
         try std.testing.expect(used.load(.acquire) > baseline);
         preparation.cancel();
+        active = false;
         try std.testing.expect(!preparation.active);
         try std.testing.expectEqual(baseline, used.load(.acquire));
         try std.testing.expect(retained == null);

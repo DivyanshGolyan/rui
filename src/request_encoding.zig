@@ -777,16 +777,17 @@ fn runReplayCase(case: []const u8, input: []const u8, boundaries: []const u64, b
 }
 
 fn runReplaySchedules(case: []const u8, input: []const u8, expect: ReplayExpect) !void {
-    // Every single split position under constant, alternating and sawtooth
-    // byte/item sequences, varied independently of each other.
+    // Every single split position under all byte/item sequence pairings.
     const byte_seqs = [_][]const usize{ &.{1}, &.{2}, &.{3}, &.{7}, &.{ 1, 7 }, &.{ 5, 2, 9 } };
     const item_seqs = [_][]const usize{ &.{1}, &.{2}, &.{64}, &.{ 2, 1 }, &.{ 3, 64, 1 } };
     var i: usize = 0;
     while (i <= input.len) : (i += 1) {
         var boundary_storage: [1]u64 = .{@intCast(i)};
         const boundaries: []const u64 = if (i == input.len) &.{} else boundary_storage[0..];
-        for (byte_seqs, 0..) |byte_seq, k| {
-            try runReplayCase(case, input, boundaries, byte_seq, item_seqs[k % item_seqs.len], expect);
+        for (byte_seqs) |byte_seq| {
+            for (item_seqs) |item_seq| {
+                try runReplayCase(case, input, boundaries, byte_seq, item_seq, expect);
+            }
         }
     }
 }
