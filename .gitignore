@@ -3,6 +3,7 @@ zig-out/
 zig-pkg/
 snapshots/
 consults/
+.humanlayer/
 .amp/portals/*
 
 # Installed by .agents/setup from the latest upstream revisions
