@@ -102,16 +102,24 @@ test "owner retains every resource after retryable removal failure" {
     );
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root = root_buffer[0..root_length];
     var missing_buffer: [protocol.max_store_bytes]u8 = undefined;
     const missing = try std.fmt.bufPrint(
         &missing_buffer,
         "{s}/missing",
-        .{root_buffer[0..root_length]},
+        .{root},
     );
+    var reclaimed = false;
+    errdefer if (!reclaimed) {
+        _ = owner.reclaim(root) catch {};
+    };
 
     try std.testing.expectError(error.FileNotFound, owner.reclaim(missing));
+    try std.testing.expect(owner.resources != null);
     try std.testing.expectEqual(@as(u64, 7), used.load(.acquire));
-    try std.testing.expectEqual(Reclamation.removed, try owner.reclaim(root_buffer[0..root_length]));
+    try std.testing.expectEqual(Reclamation.removed, try owner.reclaim(root));
+    reclaimed = true;
+    try std.testing.expect(owner.resources == null);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "owned", .{}));
 }
@@ -134,12 +142,22 @@ test "an already absent name reclaims handles and accounting" {
     );
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var reclaimed = false;
+    errdefer if (!reclaimed) {
+        _ = owner.reclaim(root) catch {};
+    };
 
+    // Path absence alone is not completed cleanup: reclaim must still
+    // close both owned aliases and release the reservation exactly once.
     try std.testing.expectEqual(
         Reclamation.already_absent,
-        try owner.reclaim(root_buffer[0..root_length]),
+        try owner.reclaim(root),
     );
+    reclaimed = true;
+    try std.testing.expect(owner.resources == null);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "owned", .{}));
 }
 
 test "injected removal failure retains ownership until the same owner can retry" {
@@ -159,13 +177,23 @@ test "injected removal failure retains ownership until the same owner can retry"
     );
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var reclaimed = false;
+    errdefer if (!reclaimed) {
+        gate.store(false, .release);
+        _ = owner.reclaim(root) catch {};
+    };
 
     try std.testing.expectError(
         error.InjectedScratchRemovalFailure,
-        owner.reclaim(root_buffer[0..root_length]),
+        owner.reclaim(root),
     );
+    // The same owner retains its resources and full outstanding charge.
+    try std.testing.expect(owner.resources != null);
     try std.testing.expectEqual(@as(u64, 5), used.load(.acquire));
     gate.store(false, .release);
-    try std.testing.expectEqual(Reclamation.removed, try owner.reclaim(root_buffer[0..root_length]));
+    try std.testing.expectEqual(Reclamation.removed, try owner.reclaim(root));
+    reclaimed = true;
+    try std.testing.expect(owner.resources == null);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }

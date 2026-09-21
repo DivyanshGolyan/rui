@@ -410,3 +410,96 @@ test "reserved output is not evictable before producer aliases close and publica
     try std.testing.expectEqual(@as(usize, 1), queue.occupied());
     queue.sharedBudget().release(1);
 }
+
+test "cancelling a reserved pair releases entry capacity without refunding producer scratch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    // Baseline B = 41 of unrelated usage stays stable; the producer owns
+    // 2 more bytes while its pair reservation is outstanding.
+    var used = std.atomic.Value(u64).init(41);
+    const budget = ScratchBudget{ .used = &used, .limit = 50 };
+    var entries: [2]Entry = undefined;
+    var queue = Queue.initialize(std.testing.io, root, budget, &entries);
+    defer queue.cleanupAll();
+
+    try std.testing.expect(budget.reserve(2));
+    try std.testing.expectEqual(@as(u64, 43), used.load(.acquire));
+    const pair = (try queue.reservePair("stdout", 1, "stderr", 1)).?;
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+    // reservePair creates protected entry reservations but acquires no
+    // second scratch charge.
+    try std.testing.expectEqual(@as(u64, 43), used.load(.acquire));
+    queue.releaseReservation(pair.stdout);
+    queue.releaseReservation(pair.stderr);
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    // Releasing entry capacity does not release the producer's charge.
+    try std.testing.expectEqual(@as(u64, 43), used.load(.acquire));
+    budget.release(2);
+    try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
+}
+
+test "zero-byte retained files occupy entries without occupying scratch bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 2 };
+    var entries: [2]Entry = undefined;
+    var queue = Queue.initialize(std.testing.io, root, budget, &entries);
+    defer queue.cleanupAll();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty-out", .data = "" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty-err", .data = "" });
+    try std.testing.expect(try queue.retainPair("empty-out", 0, "empty-err", 0));
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+    // Fill the byte budget with unrelated usage, then require eviction:
+    // evicting zero-byte entries frees entry capacity but no bytes, so the
+    // reservation still fails while occupancy drops.
+    try std.testing.expect(budget.reserve(2));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    const shared = queue.sharedBudget();
+    try std.testing.expect(!shared.reserve(1));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    shared.release(2);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "failed eviction retains its charge until the same queue retries successfully" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 4 };
+    var entries: [2]Entry = undefined;
+    var gate: std.atomic.Value(bool) = .init(true);
+    var queue = Queue.initializeWithRemoval(std.testing.io, root, budget, &entries, .{ .gated = &gate });
+    defer queue.cleanupAll();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stdout", .data = "a" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stderr", .data = "b" });
+    try std.testing.expect(budget.reserve(2));
+    try std.testing.expect(try queue.retainPair("stdout", 1, "stderr", 1));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+
+    // New retention cannot evict through the blocked removal: the oldest
+    // entry fails, retains its charge, and the queue stays occupied.
+    try std.testing.expectEqual(
+        @as(?Pair, null),
+        try queue.reservePair("new-out", 0, "new-err", 0),
+    );
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+
+    // Clearing the fault lets the same queue complete the retained cleanup
+    // and release the charge exactly once.
+    gate.store(false, .release);
+    queue.cleanupAll();
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}

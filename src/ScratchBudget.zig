@@ -91,4 +91,30 @@ test "narrowing a scratch budget cannot widen its authority" {
     const budget = ScratchBudget{ .used = &used, .limit = 10 };
     try std.testing.expectEqual(@as(u64, 10), budget.narrowed(11).limit);
     try std.testing.expectEqual(@as(u64, 9), budget.narrowed(9).limit);
+    // A narrowed view limits only its own admission: unrelated usage may
+    // already exceed the narrowed limit, so no invariant requires
+    // used <= narrowed.limit.
+    used.store(10, .release);
+    try std.testing.expectEqual(@as(u64, 10), used.load(.acquire));
+    try std.testing.expect(!budget.narrowed(9).reserve(1));
+    try std.testing.expectEqual(@as(u64, 10), used.load(.acquire));
+}
+
+test "shared usage is baseline-relative and failed growth reserves nothing" {
+    // Unrelated reservation B = 41 stays unchanged through the lifecycle.
+    // A writer reserves 5 bytes successfully, then reserves 7 more bytes
+    // for a write that fails after charging: the outstanding contribution
+    // is 12 reserved bytes, not 5 written bytes.
+    var used = std.atomic.Value(u64).init(41);
+    const budget = ScratchBudget{ .used = &used, .limit = 100 };
+    try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
+    try std.testing.expect(budget.reserve(5));
+    try std.testing.expectEqual(@as(u64, 46), used.load(.acquire));
+    try std.testing.expect(budget.reserve(7));
+    try std.testing.expectEqual(@as(u64, 53), used.load(.acquire));
+    // Rejected growth changes neither usage nor ownership.
+    try std.testing.expect(!budget.reserve(48));
+    try std.testing.expectEqual(@as(u64, 53), used.load(.acquire));
+    budget.release(12);
+    try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
 }
