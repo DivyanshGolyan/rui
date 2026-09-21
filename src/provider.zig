@@ -1525,7 +1525,10 @@ fn drainPreparation(
 }
 
 /// Drain to a live PreparedRequest the caller owns across later Store
-/// changes. The request stays readable until the caller releases it.
+/// changes. The request stays readable until the caller releases it. The
+/// step bound limits completed advances, not attempted ones: a trip on the
+/// sealing advance still acquires its request first, so the terminal-result
+/// guard below must release it before the bound error escapes.
 fn drainLivePreparation(
     preparation: *Preparation,
     byte_allowance: usize,
@@ -1536,12 +1539,12 @@ fn drainLivePreparation(
     var last_request: u64 = 0;
     while (true) {
         steps += 1;
-        try std.testing.expect(steps <= step_bound);
         var progress = preparation.advance(byte_allowance, item_allowance);
         // Guard an owning terminal result adjacent to acquisition, before
         // any fallible assertion below can drop it.
         switch (progress) {
             .pending => {
+                try std.testing.expect(steps <= step_bound);
                 const stats = preparation.advanceStats();
                 try std.testing.expect(stats.work_bytes <= byte_allowance);
                 try std.testing.expect(stats.work_items <= item_allowance);
@@ -1552,6 +1555,7 @@ fn drainLivePreparation(
             .prepared => |*request| {
                 var transferred = false;
                 errdefer if (!transferred) request.deinit();
+                try std.testing.expect(steps <= step_bound);
                 const stats = preparation.advanceStats();
                 try std.testing.expect(stats.work_bytes <= byte_allowance);
                 try std.testing.expect(stats.work_items <= item_allowance);
@@ -1561,6 +1565,7 @@ fn drainLivePreparation(
                 return request.*;
             },
             .failed => |err| {
+                try std.testing.expect(steps <= step_bound);
                 const stats = preparation.advanceStats();
                 try std.testing.expect(stats.work_bytes <= byte_allowance);
                 try std.testing.expect(stats.work_items <= item_allowance);
@@ -2247,60 +2252,86 @@ test "request preparation completed request is fenced by later stop before hando
     try std.testing.expectEqual(baseline, used.load(.acquire));
 }
 
-test "a failed assertion after sealing still releases the owned request" {
+test "a bound trip releases ownership whether or not the sealing advance fired" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();
     defer setup.close();
-    try setup.configure("prep-seal-guard-config", "direct/prep-seal-guard");
-    try setup.submit("prep-seal-guard-file", "prep-seal-guard-message", "direct/prep-seal-guard", "work");
+    try setup.configure("prep-bound-config", "direct/prep-bound");
+    try setup.submit("prep-bound-file", "prep-bound-message", "direct/prep-bound", "work");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
-    const view = try setup.storage.openHistoricalView(binding);
-    var used: std.atomic.Value(u64) = .init(13);
-    const baseline = used.load(.acquire);
-    var retained: ?named_scratch.Owner = null;
-    var preparation: Preparation = undefined;
-    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
-    defer if (preparation.active) preparation.cancel();
 
-    // Drive the real preparation to a sealed request without using the
-    // shared drain helper, then guard the owning result adjacent to
-    // acquisition before any fallible observation.
-    const sealed_request: PreparedRequest = blk: {
-        var steps: usize = 0;
-        while (steps < 4096) : (steps += 1) {
-            var progress = preparation.advance(preparation_byte_allowance, preparation_item_allowance);
+    // Small allowances force many advances, so the probe count supports
+    // both a trip while pending and a trip on the sealing advance.
+    // Deterministic content keeps the count stable across the probe and
+    // the guarded drains below.
+    const probe_allowance = [_]usize{ 16, 2 };
+    const seal_steps = blk: {
+        const probe_view = try setup.storage.openHistoricalView(binding);
+        var probe_used: std.atomic.Value(u64) = .init(0);
+        var probe_retained: ?named_scratch.Owner = null;
+        var probe: Preparation = undefined;
+        try probe.init(std.testing.io, probe_view, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .{}, &probe_retained);
+        defer if (probe.active) probe.cancel();
+        var count: usize = 0;
+        while (count < 4096) {
+            count += 1;
+            var progress = probe.advance(probe_allowance[0], probe_allowance[1]);
             switch (progress) {
                 .pending => {},
-                .prepared => |*sealed| break :blk sealed.*,
+                // The probe owns this terminal result with no fallible
+                // step before release, so a single scope holds cleanup.
+                .prepared => |*sealed| {
+                    sealed.deinit();
+                    break :blk count;
+                },
                 .failed => |err| return err,
             }
         }
         return error.TestExpectedResult;
     };
-    var request_owned = sealed_request;
-    var request_released = false;
-    defer if (!request_released) request_owned.deinit();
-    try std.testing.expect(!preparation.active);
-    // A failed post-seal observation must return the intended error with
-    // the budget exactly restored and no secondary cancellation: the
-    // preparation is already inactive, so the deferred guard is inert.
-    // Ownership transfers into the failing scope; its errdefer releases
-    // exactly once before the intended error escapes. The passing
-    // observation plus explicit error return stand in for a failed
-    // assertion without printing through the test runner IPC channel.
-    const FailingObservation = struct {
-        fn run(held: *PreparedRequest) !void {
-            errdefer held.deinit();
-            try std.testing.expect(held.length > 0);
-            return error.TestSealGuardFailure;
-        }
-    };
-    try std.testing.expectError(error.TestSealGuardFailure, FailingObservation.run(&request_owned));
-    request_released = true;
-    try std.testing.expect(!preparation.active);
-    try std.testing.expectEqual(baseline, used.load(.acquire));
-    try std.testing.expect(retained == null);
+    // Both sub-cases below must trip their bound; a degenerate single-step
+    // seal would silently test nothing.
+    try std.testing.expect(seal_steps > 2);
+
+    // A trip while preparation is still pending leaves it active with an
+    // outstanding charge: the caller's preparation guard cancels and the
+    // baseline is restored. The same tripwire error fires here and below;
+    // budget and preparation state are the load-bearing assertions.
+    {
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(13);
+        const baseline = used.load(.acquire);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        defer if (preparation.active) preparation.cancel();
+        try std.testing.expectError(error.TestUnexpectedResult, drainLivePreparation(&preparation, probe_allowance[0], probe_allowance[1], 1));
+        try std.testing.expect(preparation.active);
+        try std.testing.expect(used.load(.acquire) > baseline);
+        preparation.cancel();
+        try std.testing.expect(!preparation.active);
+        try std.testing.expectEqual(baseline, used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+
+    // A trip on the sealing advance acquires the terminal request inside
+    // the helper before the bound fails: the helper's guard must release
+    // it before the error escapes. The preparation is already inactive,
+    // so the caller's guard stays inert and no second owner exists.
+    {
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(13);
+        const baseline = used.load(.acquire);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        defer if (preparation.active) preparation.cancel();
+        try std.testing.expectError(error.TestUnexpectedResult, drainLivePreparation(&preparation, probe_allowance[0], probe_allowance[1], seal_steps - 1));
+        try std.testing.expect(!preparation.active);
+        try std.testing.expectEqual(baseline, used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
 }
 
 test "request preparation composes replay tool results and schema" {
