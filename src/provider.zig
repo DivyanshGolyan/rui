@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const named_scratch = @import("named_scratch.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
-const provider_output = @import("provider_output.zig");
+const request_encoding = @import("request_encoding.zig");
 const store = @import("store.zig");
 const tools = @import("tools.zig");
 const transport_options = @import("transport_options");
@@ -23,6 +23,10 @@ pub const PreparationFaults = struct {
     write: bool = false,
     seal: bool = false,
     unlink: bool = false,
+    // Test-owned removal gate for the retained unlink-failure owner. When
+    // set alongside unlink, the retained owner uses this gate so the test
+    // can complete reclamation through the production path.
+    unlink_removal: ?*const std.atomic.Value(bool) = null,
 };
 
 pub const TransportOptions = struct {
@@ -109,20 +113,27 @@ pub const PreparationAdvanceStats = struct {
     request_bytes: u64,
 };
 
-// This is an encoding operation, not another payload owner. The caller's
-// borrowed window remains valid until the synchronous write returns.
-fn writePlainJsonRun(writer: anytype, bytes: []const u8, bytes_left: *usize) !usize {
-    const limit = @min(bytes.len, bytes_left.* / 2);
-    var count: usize = 0;
-    while (count < limit) : (count += 1) {
-        const byte = bytes[count];
-        if (byte < 0x20 or byte == '"' or byte == '\\') break;
+const writePlainJsonRun = request_encoding.writePlainJsonRun;
+
+// The native source adapter preserves the exact-read contract: the cursor
+// selects a bounded refill size first, and any short canonical read fails.
+const HistoricalSource = struct {
+    reader: *store.HistoricalReader,
+
+    pub fn contentLength(self: HistoricalSource) u64 {
+        return self.reader.reference.length;
     }
-    if (count == 0) return 0;
-    try writer.write(bytes[0..count]);
-    bytes_left.* -= count * 2;
-    return count;
-}
+
+    pub fn readContent(self: HistoricalSource, offset: u64, destination: []u8) !usize {
+        return self.reader.read(offset, destination);
+    }
+
+    pub fn maxWindow(self: HistoricalSource, offset: u64, wanted: usize) usize {
+        _ = self;
+        _ = offset;
+        return wanted;
+    }
+};
 
 pub const Preparation = struct {
     view: store.HistoricalView,
@@ -175,13 +186,7 @@ pub const Preparation = struct {
     const JsonEmission = struct {
         bytes: ?[]const u8 = null,
         reader: ?store.HistoricalReader = null,
-        offset: u64 = 0,
-        buffer_start: u64 = 0,
-        buffer_length: usize = 0,
-        buffer: [protocol.content_window_bytes]u8 = undefined,
-        encoded: [6]u8 = undefined,
-        encoded_length: u3 = 0,
-        encoded_offset: u3 = 0,
+        cursor: request_encoding.JsonCursor = .{},
 
         fn close(self: *JsonEmission) void {
             if (self.reader) |*reader| reader.close();
@@ -191,20 +196,17 @@ pub const Preparation = struct {
 
     const RawEmission = struct {
         reader: store.HistoricalReader,
-        offset: u64 = 0,
-        buffer_length: usize = 0,
-        buffer_offset: usize = 0,
-        buffer: [protocol.content_window_bytes]u8 = undefined,
+        cursor: request_encoding.RawCursor = .{},
     };
 
     const ReplayEmission = struct {
         reader: store.HistoricalReader,
-        cursor: provider_output.ReplayCursor = .{},
+        cursor: request_encoding.ReplayCursor = .{},
     };
 
     const Emission = union(enum) {
         none,
-        fixed: struct { bytes: []const u8, offset: usize = 0 },
+        fixed: struct { bytes: []const u8, cursor: request_encoding.FixedCursor = .{} },
         json: JsonEmission,
         raw: RawEmission,
         replay: ReplayEmission,
@@ -236,7 +238,8 @@ pub const Preparation = struct {
             return err;
         };
         if (faults.unlink) {
-            retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0, .injected_failure);
+            const removal: named_scratch.Removal = if (faults.unlink_removal) |gate| .{ .gated = gate } else .injected_failure;
+            retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0, removal);
             return error.InjectedRequestUnlinkFailure;
         }
         scratch.deleteFile(io, name) catch |err| {
@@ -426,40 +429,20 @@ pub const Preparation = struct {
         switch (self.emission) {
             .none => unreachable,
             .fixed => |*fixed| {
-                const count = @min(bytes_left.*, fixed.bytes.len - fixed.offset);
-                if (count == 0) return false;
-                try self.writer.write(fixed.bytes[fixed.offset..][0..count]);
-                fixed.offset += count;
-                bytes_left.* -= count;
-                if (fixed.offset != fixed.bytes.len) return false;
+                if (!try fixed.cursor.advance(fixed.bytes, &self.writer, bytes_left)) return false;
             },
             .json => |*json| {
                 if (!try self.advanceJson(json, bytes_left)) return false;
                 json.close();
             },
             .raw => |*raw| {
-                if (raw.buffer_offset != raw.buffer_length) {
-                    const count = @min(bytes_left.*, raw.buffer_length - raw.buffer_offset);
-                    try self.writer.write(raw.buffer[raw.buffer_offset..][0..count]);
-                    raw.buffer_offset += count;
-                    bytes_left.* -= count;
-                    if (raw.buffer_offset != raw.buffer_length) return false;
-                }
-                if (raw.offset != raw.reader.reference.length) {
-                    const wanted: usize = @intCast(@min(raw.reader.reference.length - raw.offset, @min(raw.buffer.len, bytes_left.*)));
-                    if (wanted == 0) return false;
-                    const count = try raw.reader.read(raw.offset, raw.buffer[0..wanted]);
-                    if (count != wanted) return error.ShortCanonicalRead;
-                    raw.offset += count;
-                    raw.buffer_length = count;
-                    raw.buffer_offset = 0;
-                    bytes_left.* -= count;
-                    return false;
-                }
+                const source = HistoricalSource{ .reader = &raw.reader };
+                if (!try raw.cursor.advance(source, &self.writer, bytes_left)) return false;
                 raw.reader.close();
             },
             .replay => |*replay| {
-                if (try replay.cursor.advance(&replay.reader, &self.writer, bytes_left, items_left) == .pending) return false;
+                const source = HistoricalSource{ .reader = &replay.reader };
+                if (try replay.cursor.advance(source, &self.writer, bytes_left, items_left) == .pending) return false;
                 replay.reader.close();
             },
         }
@@ -468,67 +451,12 @@ pub const Preparation = struct {
     }
 
     fn advanceJson(self: *Preparation, json: *JsonEmission, bytes_left: *usize) !bool {
-        while (bytes_left.* != 0) {
-            if (json.encoded_offset != json.encoded_length) {
-                const count = @min(bytes_left.*, json.encoded_length - json.encoded_offset);
-                try self.writer.write(json.encoded[json.encoded_offset..][0..count]);
-                json.encoded_offset += @intCast(count);
-                bytes_left.* -= count;
-                continue;
-            }
-            const length: u64 = if (json.bytes) |bytes| bytes.len else json.reader.?.reference.length;
-            if (json.offset == length) return true;
-            const available = if (json.bytes) |bytes|
-                bytes[@intCast(json.offset)..]
-            else available: {
-                if (json.offset < json.buffer_start or json.offset >= json.buffer_start + json.buffer_length) {
-                    json.buffer_start = json.offset;
-                    const wanted: usize = @intCast(@min(length - json.offset, @min(json.buffer.len, bytes_left.*)));
-                    const count = try json.reader.?.read(json.offset, json.buffer[0..wanted]);
-                    if (count != wanted) return error.ShortCanonicalRead;
-                    json.buffer_length = count;
-                }
-                break :available json.buffer[@intCast(json.offset - json.buffer_start)..json.buffer_length];
-            };
-            // A source scan and its emitted bytes each consume allowance.
-            // Ordinary text stays a borrowed run, not one OS write per byte.
-            const run = try writePlainJsonRun(&self.writer, available, bytes_left);
-            if (run != 0) {
-                json.offset += run;
-                continue;
-            }
-            const byte = available[0];
-            json.offset += 1;
-            bytes_left.* -= 1;
-            const encoded = switch (byte) {
-                '"' => "\\\"",
-                '\\' => "\\\\",
-                0x08 => "\\b",
-                0x0c => "\\f",
-                '\n' => "\\n",
-                '\r' => "\\r",
-                '\t' => "\\t",
-                0...0x07, 0x0b, 0x0e...0x1f => {
-                    const hex = "0123456789abcdef";
-                    json.encoded = .{ '\\', 'u', '0', '0', hex[byte >> 4], hex[byte & 0xf] };
-                    json.encoded_length = 6;
-                    json.encoded_offset = 0;
-                    continue;
-                },
-                else => {
-                    // A one-byte allowance can consume a source byte now
-                    // and emit it on the next advance, without overshoot.
-                    json.encoded[0] = byte;
-                    json.encoded_length = 1;
-                    json.encoded_offset = 0;
-                    continue;
-                },
-            };
-            @memcpy(json.encoded[0..encoded.len], encoded);
-            json.encoded_length = @intCast(encoded.len);
-            json.encoded_offset = 0;
+        if (json.bytes) |bytes| {
+            const source = request_encoding.MemorySource{ .bytes = bytes };
+            return json.cursor.advance(source, &self.writer, bytes_left);
         }
-        return false;
+        const source = HistoricalSource{ .reader = &json.reader.? };
+        return json.cursor.advance(source, &self.writer, bytes_left);
     }
 
     fn seal(self: *Preparation) !PreparationProgress {
@@ -1435,4 +1363,751 @@ test "plain JSON runs batch writes and conserve scan plus output allowance" {
     try std.testing.expectEqual(@as(usize, 14), escaped);
     try std.testing.expectEqual(@as(usize, 0), try writePlainJsonRun(&sink, "\n", &escaped));
     try std.testing.expectEqual(@as(usize, 0), try writePlainJsonRun(&sink, "\\", &escaped));
+}
+
+const PreparationTestSetup = struct {
+    tmp: std.testing.TmpDir,
+    storage: store.Store,
+    root: []const u8,
+    root_buffer: [protocol.max_store_bytes]u8,
+    workspace_buffer: [protocol.max_workspace_bytes]u8,
+    workspace: []const u8,
+
+    fn init(self: *PreparationTestSetup) !void {
+        self.* = .{
+            .tmp = std.testing.tmpDir(.{}),
+            .storage = undefined,
+            .root = undefined,
+            .root_buffer = undefined,
+            .workspace_buffer = undefined,
+            .workspace = undefined,
+        };
+        errdefer self.tmp.cleanup();
+        const root_length = try self.tmp.dir.realPath(std.testing.io, &self.root_buffer);
+        self.root = self.root_buffer[0..root_length];
+        var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{self.root});
+        self.storage = try store.Store.open(std.testing.io, database, self.root);
+        errdefer self.storage.close() catch unreachable;
+        var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
+        defer directory.close(std.testing.io);
+        self.workspace = self.workspace_buffer[0..try directory.realPath(std.testing.io, &self.workspace_buffer)];
+    }
+
+    fn close(self: *PreparationTestSetup) void {
+        self.storage.close() catch unreachable;
+        self.tmp.cleanup();
+    }
+
+    fn configure(self: *PreparationTestSetup, key: []const u8, session: []const u8) !void {
+        var command: protocol.ConfigureCommand = .{};
+        try command.key.set(key);
+        try command.session.set(session);
+        command.configuration.workspace.state = .value;
+        try command.configuration.workspace.value.set(self.workspace);
+        command.configuration.model.state = .value;
+        try command.configuration.model.value.set("model-a");
+        try std.testing.expect(self.storage.configure(&command, .{}) == .accepted);
+    }
+
+    fn submit(self: *PreparationTestSetup, file_name: []const u8, key: []const u8, session: []const u8, text: []const u8) !void {
+        const file = try self.tmp.dir.createFile(std.testing.io, file_name, .{ .read = true });
+        try file.writeStreamingAll(std.testing.io, text);
+        try file.sync(std.testing.io);
+        var command: protocol.MessageCommand = .{};
+        try command.key.set(key);
+        try command.session.set(session);
+        command.text = .{
+            .state = .value,
+            .file = file,
+            .length = text.len,
+            .digest = protocol.contentDigest(text),
+        };
+        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+        try std.testing.expect(self.storage.submitMessage(&command, .{}) == .accepted);
+    }
+};
+
+const DrainedRequest = struct { bytes: []u8, length: u64, digest: [32]u8 };
+
+// Independently authored tool definitions for full-request goldens. These
+// literals must match the provider's frozen tool catalog, not reference it.
+const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"Run Bash\",\"strict\":true,\"parameters\":{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":[\"integer\",\"null\"],\"minimum\":1,\"maximum\":9223372036854775807}},\"required\":[\"cmd\",\"timeout_ms\"],\"additionalProperties\":false}}";
+const edit_tool_json = "{\"type\":\"function\",\"name\":\"edit\",\"description\":\"Edit one file\"}";
+
+fn drainPreparation(
+    preparation: *Preparation,
+    byte_allowance: usize,
+    item_allowance: usize,
+    step_bound: usize,
+) !DrainedRequest {
+    var request = try drainLivePreparation(preparation, byte_allowance, item_allowance, step_bound);
+    defer request.deinit();
+    const length: usize = @intCast(request.length);
+    const bytes = try std.testing.allocator.alloc(u8, length);
+    errdefer std.testing.allocator.free(bytes);
+    const actual = try request.file.readPositionalAll(request.io, bytes, 0);
+    try std.testing.expectEqual(length, actual);
+    try std.testing.expectEqual(request.length, try request.file.length(request.io));
+    const digest = protocol.contentDigest(bytes);
+    return .{ .bytes = bytes, .length = request.length, .digest = digest };
+}
+
+/// Drain to a live PreparedRequest the caller owns across later Store
+/// changes. The request stays readable until the caller releases it.
+fn drainLivePreparation(
+    preparation: *Preparation,
+    byte_allowance: usize,
+    item_allowance: usize,
+    step_bound: usize,
+) !PreparedRequest {
+    var steps: usize = 0;
+    var last_request: u64 = 0;
+    while (true) {
+        steps += 1;
+        try std.testing.expect(steps <= step_bound);
+        var progress = preparation.advance(byte_allowance, item_allowance);
+        const stats = preparation.advanceStats();
+        try std.testing.expect(stats.work_bytes <= byte_allowance);
+        try std.testing.expect(stats.work_items <= item_allowance);
+        try std.testing.expect(stats.request_bytes >= last_request);
+        last_request = stats.request_bytes;
+        switch (progress) {
+            .pending => {
+                try std.testing.expect(preparation.active);
+            },
+            .prepared => |*request| {
+                try std.testing.expect(!preparation.active);
+                return request.*;
+            },
+            .failed => |err| return err,
+        }
+    }
+}
+
+/// Step a fresh preparation with (1, 1) allowances until exactly `target`
+/// request bytes exist, then return with the emission still in progress.
+/// The writer only appends, so a target strictly inside a known emission
+/// span guarantees that emission's content reader is still open.
+fn stepPreparationToOffset(preparation: *Preparation, target: u64, step_bound: usize) !void {
+    var steps: usize = 0;
+    while (true) {
+        steps += 1;
+        try std.testing.expect(steps <= step_bound);
+        const progress = preparation.advance(1, 1);
+        try std.testing.expect(progress == .pending);
+        const written = preparation.advanceStats().request_bytes;
+        if (written == target) return;
+        try std.testing.expect(written < target);
+    }
+}
+
+const ComposedCall = struct {
+    item_id: []const u8,
+    call_id: []const u8,
+};
+
+/// Settle one reasoning item plus valid Bash calls in a single model
+/// success, so the successor's historical view holds replay input and a
+/// complete Tool Result group from ordinary Store transitions. Call items
+/// are stored as complete item JSON exactly like provider validation
+/// stores them, so replay copies them verbatim.
+fn settleComposedForTesting(
+    setup: *PreparationTestSetup,
+    binding: store.AttemptBinding,
+    file_prefix: []const u8,
+    reasoning_json: []const u8,
+    calls: []const ComposedCall,
+) !void {
+    const decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}";
+    const encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}";
+    var source_buffer: [64 * 1024]u8 = undefined;
+    var source_writer = std.Io.Writer.fixed(&source_buffer);
+    try source_writer.writeAll(reasoning_json);
+    var metadata_used: std.atomic.Value(u64) = .init(0);
+    var retained_metadata: ?named_scratch.Owner = null;
+    var metadata = try store.OutputMetadataWriter.init(
+        std.testing.io,
+        setup.root,
+        file_prefix,
+        .{ .used = &metadata_used, .limit = (1 + 5 * calls.len) * 104 },
+        false,
+        &retained_metadata,
+    );
+    defer metadata.deinit();
+    try metadata.append(.{
+        .tag = .item,
+        .kind = .reasoning,
+        .ordinal = 0,
+        .start = 0,
+        .length = reasoning_json.len,
+        .content_digest = protocol.contentDigest(reasoning_json),
+    });
+    var offset: u64 = reasoning_json.len;
+    for (calls, 0..) |call, index| {
+        const ordinal = index + 1;
+        const item_start: usize = @intCast(offset);
+        // Full item JSON; string ranges address inner bytes (no quotes)
+        // with digests over the decoded values.
+        try source_writer.writeAll("{\"type\":\"function_call\",\"id\":\"");
+        const id_start: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
+        try source_writer.writeAll(call.item_id);
+        const id_end: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
+        try source_writer.writeAll("\",\"status\":\"completed\",\"name\":\"");
+        const name_start: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
+        try source_writer.writeAll("bash");
+        const name_end: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
+        try source_writer.writeAll("\",\"call_id\":\"");
+        const call_start: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
+        try source_writer.writeAll(call.call_id);
+        const call_end: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
+        try source_writer.writeAll("\",\"arguments\":\"");
+        const args_start: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
+        try source_writer.writeAll(encoded_arguments);
+        const args_end: u64 = offset + @as(u64, @intCast(source_writer.buffered().len - item_start));
+        try source_writer.writeAll("\"}");
+        offset += @as(u64, @intCast(source_writer.buffered().len - item_start));
+        const item_bytes = source_writer.buffered()[item_start..];
+        try metadata.append(.{
+            .tag = .item_id,
+            .kind = .function_call,
+            .ordinal = ordinal,
+            .start = id_start,
+            .length = id_end - id_start,
+            .decoded_length = call.item_id.len,
+            .content_digest = protocol.contentDigest(call.item_id),
+        });
+        try metadata.append(.{
+            .tag = .name,
+            .kind = .function_call,
+            .ordinal = ordinal,
+            .start = name_start,
+            .length = name_end - name_start,
+            .decoded_length = "bash".len,
+            .content_digest = protocol.contentDigest("bash"),
+        });
+        try metadata.append(.{
+            .tag = .call_id,
+            .kind = .function_call,
+            .ordinal = ordinal,
+            .start = call_start,
+            .length = call_end - call_start,
+            .decoded_length = call.call_id.len,
+            .content_digest = protocol.contentDigest(call.call_id),
+        });
+        try metadata.append(.{
+            .tag = .arguments,
+            .kind = .function_call,
+            .ordinal = ordinal,
+            .start = args_start,
+            .length = args_end - args_start,
+            .decoded_length = decoded_arguments.len,
+            .content_digest = protocol.contentDigest(decoded_arguments),
+        });
+        try metadata.append(.{
+            .tag = .item,
+            .kind = .function_call,
+            .ordinal = ordinal,
+            .start = item_start,
+            .length = item_bytes.len,
+            .id_digest = protocol.contentDigest(call.item_id),
+            .content_digest = protocol.contentDigest(item_bytes),
+        });
+    }
+    try metadata.sealForRead();
+    const source_bytes = source_writer.buffered();
+    var source_name: [64]u8 = undefined;
+    const source = try setup.tmp.dir.createFile(std.testing.io, try std.fmt.bufPrint(&source_name, "{s}-source", .{file_prefix}), .{ .read = true });
+    defer source.close(std.testing.io);
+    try source.writeStreamingAll(std.testing.io, source_bytes);
+    try source.sync(std.testing.io);
+    try setup.storage.settleModelSuccess(binding, &.{
+        .source = source,
+        .source_length = source_bytes.len,
+        .metadata = metadata.file,
+        .item_count = 1 + calls.len,
+        .call_count = calls.len,
+        .answer_length = 0,
+        .answer_digest = protocol.contentDigest(""),
+        .response_id = .{},
+        .body_model = .{},
+        .openai_model = .{},
+        .x_openai_model = .{},
+        .request_id = .{},
+    }, .{});
+}
+
+/// Build one reasoning item plus two valid Bash calls, deny both Actions
+/// in reverse call order, and admit the successor whose historical view
+/// must derive Tool Results in original call order.
+fn establishComposedHistory(setup: *PreparationTestSetup, session: []const u8) !store.AttemptBinding {
+    const schema_json = "{\"type\":\"object\"}";
+    {
+        const file = try setup.tmp.dir.createFile(std.testing.io, "composed-schema", .{ .read = true });
+        try file.writeStreamingAll(std.testing.io, schema_json);
+        try file.sync(std.testing.io);
+        var command: protocol.ConfigureCommand = .{};
+        try command.key.set("composed-config");
+        try command.session.set(session);
+        command.configuration.workspace.state = .value;
+        try command.configuration.workspace.value.set(setup.workspace);
+        command.configuration.model.state = .value;
+        try command.configuration.model.value.set("model-a");
+        command.configuration.output_schema = .{
+            .state = .value,
+            .file = file,
+            .length = schema_json.len,
+            .digest = protocol.contentDigest(schema_json),
+        };
+        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+        try std.testing.expect(setup.storage.configure(&command, .{}) == .accepted);
+    }
+    try setup.submit("composed-message-file", "composed-message", session, "do work");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const source_binding = try admitted.permit.consume();
+    const reasoning_json = "{\"type\":\"reasoning\",\"id\":\"r1\",\"created_by\":\"drop-me\",\"encrypted_content\":\"opaque\"}";
+    const calls = [_]ComposedCall{
+        .{ .item_id = "order-item-a", .call_id = "order-call-a" },
+        .{ .item_id = "order-item-b", .call_id = "order-call-b" },
+    };
+    try settleComposedForTesting(setup, source_binding, "composed-metadata", reasoning_json, &calls);
+    var second_deny: protocol.PermissionDecisionCommand = .{ .action_id = 2 };
+    try second_deny.key.set("composed-deny-second");
+    try second_deny.session.set(session);
+    try std.testing.expect(setup.storage.denyPermission(&second_deny, .{}) == .accepted);
+    var first_deny: protocol.PermissionDecisionCommand = .{ .action_id = 1 };
+    try first_deny.key.set("composed-deny-first");
+    try first_deny.session.set(session);
+    try std.testing.expect(setup.storage.denyPermission(&first_deny, .{}) == .accepted);
+    var successor = (try setup.storage.admitNextModelAttempt(.{})) orelse return error.ExpectedSuccessorAdmission;
+    return successor.permit.consume();
+}
+
+const composed_replayed = "{\"type\":\"reasoning\",\"id\":\"r1\",\"encrypted_content\":\"opaque\"}";
+
+// Replayed call items appear verbatim: they carry no top-level
+// response-only fields. Written separately from the settle helper so the
+// golden does not share its construction.
+const composed_replayed_call_a = "{\"type\":\"function_call\",\"id\":\"order-item-a\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"order-call-a\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}\"}";
+const composed_replayed_call_b = "{\"type\":\"function_call\",\"id\":\"order-item-b\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"order-call-b\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}\"}";
+
+const composed_expected =
+    "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[" ++
+    "{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"\"}]}," ++
+    "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"do work\"}]}," ++
+    composed_replayed ++ "," ++
+    composed_replayed_call_a ++ "," ++
+    composed_replayed_call_b ++ "," ++
+    "{\"type\":\"function_call_output\",\"call_id\":\"order-call-a\",\"output\":\"Permission denied.\"}," ++
+    "{\"type\":\"function_call_output\",\"call_id\":\"order-call-b\",\"output\":\"Permission denied.\"}]," ++
+    "\"tools\":[" ++ bash_tool_json ++ "," ++ edit_tool_json ++ "]," ++
+    "\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":{\"type\":\"object\"}}}}";
+
+test "request preparation minimal golden is exact across schedules" {
+    const expected = "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}]";
+    const full_expected = expected ++ ",\"tools\":[]}";
+    const schedules = [_][2]usize{ .{ 16, 2 }, .{ 1, 1 }, .{ 16384, 64 }, .{ 7, 3 } };
+    var first_bytes: ?[]u8 = null;
+    defer if (first_bytes) |bytes| std.testing.allocator.free(bytes);
+    for (schedules, 0..) |schedule, index| {
+        // Each schedule prepares identical logical content through an
+        // independent Store so later admissions cannot observe earlier ones.
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        try setup.configure("prep-golden-config", "direct/prep-golden");
+        // Explicit empty tool list selects no tools for an exact small envelope.
+        {
+            var update: protocol.ConfigureCommand = .{};
+            try update.key.set("prep-golden-tools");
+            try update.session.set("direct/prep-golden");
+            update.configuration.tools.state = .value;
+            update.configuration.tools.count = 0;
+            try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+        }
+        var file_name: [32]u8 = undefined;
+        const file = try std.fmt.bufPrint(&file_name, "prep-golden-file-{d}", .{index});
+        var key: [32]u8 = undefined;
+        const message_key = try std.fmt.bufPrint(&key, "prep-golden-message-{d}", .{index});
+        try setup.submit(file, message_key, "direct/prep-golden", "hi");
+        var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+        const binding = try admitted.permit.consume();
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        try std.testing.expect(retained == null);
+        const result = try drainPreparation(&preparation, schedule[0], schedule[1], 4096);
+        defer std.testing.allocator.free(result.bytes);
+        try std.testing.expectEqualStrings(full_expected, result.bytes);
+        try std.testing.expectEqual(@as(u64, full_expected.len), result.length);
+        try std.testing.expectEqual(protocol.contentDigest(full_expected), result.digest);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        if (first_bytes == null) {
+            first_bytes = try std.testing.allocator.dupe(u8, result.bytes);
+        } else {
+            try std.testing.expectEqualStrings(first_bytes.?, result.bytes);
+        }
+    }
+}
+
+test "request preparation escapes instructions and user content" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const instructions_text = "a\"b\\c\n\x01d";
+    const user_text = "u\"v\\w\x7fé";
+    {
+        const file = try setup.tmp.dir.createFile(std.testing.io, "prep-escape-instructions", .{ .read = true });
+        try file.writeStreamingAll(std.testing.io, instructions_text);
+        try file.sync(std.testing.io);
+        var command: protocol.ConfigureCommand = .{};
+        try command.key.set("prep-escape-config");
+        try command.session.set("direct/prep-escape");
+        command.configuration.workspace.state = .value;
+        try command.configuration.workspace.value.set(setup.workspace);
+        command.configuration.model.state = .value;
+        try command.configuration.model.value.set("model-a");
+        command.configuration.instructions = .{
+            .state = .value,
+            .file = file,
+            .length = instructions_text.len,
+            .digest = protocol.contentDigest(instructions_text),
+        };
+        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+        try std.testing.expect(setup.storage.configure(&command, .{}) == .accepted);
+    }
+    try setup.submit("prep-escape-file", "prep-escape-message", "direct/prep-escape", user_text);
+
+    var admission = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admission.permit.consume();
+    const view = try setup.storage.openHistoricalView(binding);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    const first = try drainPreparation(&preparation, 2, 2, 4096);
+    defer std.testing.allocator.free(first.bytes);
+    try setup.storage.settleModelAttemptFailure(binding, "prep_escape_release", .terminal, .{});
+
+    // Independent escape expectations: quotes, backslashes, newline and
+    // control bytes use short or \u00xx forms; UTF-8 bytes pass through.
+    try std.testing.expect(std.mem.indexOf(u8, first.bytes, "a\\\"b\\\\c\\n\\u0001d") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.bytes, "u\\\"v\\\\w\x7fé") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.bytes, instructions_text) == null);
+
+    _ = (try setup.storage.admitNextModelAttempt(.{}));
+    // The terminal settlement above leaves no resumable work; re-establish a
+    // second session carrying the same bytes to check schedule equality.
+    var setup_two: PreparationTestSetup = undefined;
+    try setup_two.init();
+    defer setup_two.close();
+    {
+        const file = try setup_two.tmp.dir.createFile(std.testing.io, "prep-escape2-instructions", .{ .read = true });
+        try file.writeStreamingAll(std.testing.io, instructions_text);
+        try file.sync(std.testing.io);
+        var command: protocol.ConfigureCommand = .{};
+        try command.key.set("prep-escape2-config");
+        try command.session.set("direct/prep-escape2");
+        command.configuration.workspace.state = .value;
+        try command.configuration.workspace.value.set(setup_two.workspace);
+        command.configuration.model.state = .value;
+        try command.configuration.model.value.set("model-a");
+        command.configuration.instructions = .{
+            .state = .value,
+            .file = file,
+            .length = instructions_text.len,
+            .digest = protocol.contentDigest(instructions_text),
+        };
+        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+        try std.testing.expect(setup_two.storage.configure(&command, .{}) == .accepted);
+    }
+    try setup_two.submit("prep-escape2-file", "prep-escape2-message", "direct/prep-escape2", user_text);
+    var admitted_two = (try setup_two.storage.admitNextModelAttempt(.{})).?;
+    const binding_two = try admitted_two.permit.consume();
+    const view_two = try setup_two.storage.openHistoricalView(binding_two);
+    var used_two: std.atomic.Value(u64) = .init(0);
+    var retained_two: ?named_scratch.Owner = null;
+    var preparation_two: Preparation = undefined;
+    try preparation_two.init(std.testing.io, view_two, setup_two.root, .{ .used = &used_two, .limit = 8 * 1024 * 1024 }, .{}, &retained_two);
+    const second = try drainPreparation(&preparation_two, 1, 1, 8192);
+    defer std.testing.allocator.free(second.bytes);
+    try std.testing.expectEqualStrings(first.bytes, second.bytes);
+}
+
+test "request preparation frozen selection excludes later messages" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    try setup.configure("prep-frozen-config", "direct/prep-frozen");
+    try setup.submit("prep-frozen-first-file", "prep-frozen-first", "direct/prep-frozen", "first");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    const view = try setup.storage.openHistoricalView(binding);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    // Advance partially, then submit a later message while the admitted
+    // historical view stays frozen.
+    var partial: usize = 0;
+    while (partial < 2) : (partial += 1) {
+        const progress = preparation.advance(16, 2);
+        try std.testing.expect(progress == .pending);
+    }
+    try setup.submit("prep-frozen-second-file", "prep-frozen-second", "direct/prep-frozen", "second");
+    const result = try drainPreparation(&preparation, 16, 2, 4096);
+    defer std.testing.allocator.free(result.bytes);
+    try std.testing.expect(std.mem.indexOf(u8, result.bytes, "first") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.bytes, "second") == null);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "request preparation freezes settings at admission" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    try setup.configure("prep-settings-config", "direct/prep-settings");
+    try setup.submit("prep-settings-file", "prep-settings-message", "direct/prep-settings", "hi");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    // A legal observable change after admission but before preparation
+    // first reads settings: the admitted view must keep the original
+    // Bash/Edit catalog, not the current empty tool list.
+    {
+        var update: protocol.ConfigureCommand = .{};
+        try update.key.set("prep-settings-tools");
+        try update.session.set("direct/prep-settings");
+        update.configuration.tools.state = .value;
+        update.configuration.tools.count = 0;
+        try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+    }
+    const view = try setup.storage.openHistoricalView(binding);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    const result = try drainPreparation(&preparation, 3, 2, 8192);
+    defer std.testing.allocator.free(result.bytes);
+    const expected = "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}],\"tools\":[" ++
+        bash_tool_json ++ "," ++ edit_tool_json ++ "]}";
+    try std.testing.expectEqualStrings(expected, result.bytes);
+    try std.testing.expectEqual(@as(u64, expected.len), result.length);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "request preparation cancellation and failure release ownership" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    try setup.configure("prep-owner-config", "direct/prep-owner");
+    const text = "x" ** 512;
+    try setup.submit("prep-owner-file", "prep-owner-message", "direct/prep-owner", text);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+
+    // Cancel inside the user-content JSON emission: the target lies
+    // strictly inside the written user bytes, so the content reader is
+    // necessarily still open and a partial charge is outstanding. Reader
+    // closure before view closure is enforced by the close-path asserts;
+    // cancellation must return usage to the starting baseline.
+    {
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(7);
+        const baseline = used.load(.acquire);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        var active = true;
+        defer {
+            if (active) preparation.cancel();
+        }
+        var probe: Preparation = undefined;
+        {
+            const probe_view = try setup.storage.openHistoricalView(binding);
+            var probe_used: std.atomic.Value(u64) = .init(0);
+            var probe_retained: ?named_scratch.Owner = null;
+            try probe.init(std.testing.io, probe_view, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .{}, &probe_retained);
+            const probe_result = try drainPreparation(&probe, 16, 2, 16384);
+            defer std.testing.allocator.free(probe_result.bytes);
+            const content_start = std.mem.indexOf(u8, probe_result.bytes, text).?;
+            try stepPreparationToOffset(&preparation, content_start + 100, 16384);
+        }
+        try std.testing.expect(used.load(.acquire) > baseline);
+        preparation.cancel();
+        active = false;
+        try std.testing.expect(!preparation.active);
+        try std.testing.expectEqual(baseline, used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+
+    // First-step initialization failure owns nothing.
+    {
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try std.testing.expectError(error.InjectedFirstPreparationFailure, preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{ .first_step = true }, &retained));
+        try std.testing.expect(retained == null);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
+
+    // Write and seal faults surface through advance and release on cancel.
+    for ([_]PreparationFaults{ .{ .write = true }, .{ .seal = true } }) |faults| {
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, faults, &retained);
+        var seen_failure: ?anyerror = null;
+        var steps: usize = 0;
+        while (steps < 4096) : (steps += 1) {
+            var progress = preparation.advance(64, 8);
+            switch (progress) {
+                .pending => {},
+                .prepared => |*request| {
+                    request.deinit();
+                    break;
+                },
+                .failed => |err| {
+                    seen_failure = err;
+                    break;
+                },
+            }
+        }
+        try std.testing.expect(seen_failure != null);
+        // Failed writes retain the complete reservation, which may exceed the
+        // successfully written prefix; cancellation still releases it once.
+        preparation.cancel();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
+
+    // Unlink faults retain actionable custody until reclamation is
+    // confirmed; clearing the test-owned gate completes the same
+    // production reclamation path without leaking the descriptors.
+    {
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(0);
+        var gate: std.atomic.Value(bool) = .init(true);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try std.testing.expectError(error.InjectedRequestUnlinkFailure, preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{ .unlink = true, .unlink_removal = &gate }, &retained));
+        try std.testing.expect(retained != null);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        var reclaimed = false;
+        defer {
+            if (!reclaimed) {
+                gate.store(false, .release);
+                _ = retained.?.reclaim(setup.root) catch .removed;
+            }
+        }
+        try std.testing.expectError(error.InjectedScratchRemovalFailure, retained.?.reclaim(setup.root));
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        gate.store(false, .release);
+        try std.testing.expectEqual(named_scratch.Reclamation.removed, try retained.?.reclaim(setup.root));
+        reclaimed = true;
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        var name_buffer: [96]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "request-{d}-{d}.tmp", .{ binding.operation_id, binding.attempt_ordinal });
+        try std.testing.expectError(error.FileNotFound, setup.tmp.dir.statFile(std.testing.io, name, .{}));
+    }
+}
+
+test "request preparation completed request is fenced by later stop before handoff" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    try setup.configure("prep-fence-config", "direct/prep-fence");
+    try setup.submit("prep-fence-file", "prep-fence-message", "direct/prep-fence", "work");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    const view = try setup.storage.openHistoricalView(binding);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    // The sealed request stays owned and readable across the stop and the
+    // refused handoff; only its release returns the charge.
+    var request = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
+    var released = false;
+    defer {
+        if (!released) request.deinit();
+    }
+    try std.testing.expect(request.length > 0);
+    const readable = try request.file.length(request.io);
+    try std.testing.expectEqual(request.length, readable);
+
+    // A sealed request is not dispatch permission: a stop accepted after
+    // preparation but before handoff refuses the launch callback.
+    var stop: protocol.SessionStopCommand = .{};
+    try stop.key.set("prep-fence-stop");
+    try stop.session.set("direct/prep-fence");
+    try std.testing.expect(setup.storage.stopSession(&stop, .{}) == .accepted);
+    const Launcher = struct {
+        fn run(calls: *usize) !void {
+            calls.* += 1;
+        }
+    };
+    var calls: usize = 0;
+    try std.testing.expectError(error.SupersededByControl, setup.storage.withDispatchHandoff(binding, &calls, Launcher.run));
+    try std.testing.expectEqual(@as(usize, 0), calls);
+    try std.testing.expectEqual(request.length, try request.file.length(request.io));
+    request.deinit();
+    released = true;
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "request preparation composes replay tool results and schema" {
+    for ([_][2]usize{ .{ 16, 2 }, .{ 1, 1 }, .{ 16384, 64 } }) |schedule| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const binding = try establishComposedHistory(&setup, "direct/prep-composed");
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        const result = try drainPreparation(&preparation, schedule[0], schedule[1], 16384);
+        defer std.testing.allocator.free(result.bytes);
+        try std.testing.expectEqualStrings(composed_expected, result.bytes);
+        try std.testing.expectEqual(@as(u64, composed_expected.len), result.length);
+        try std.testing.expectEqual(protocol.contentDigest(composed_expected), result.digest);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
+}
+
+test "request preparation cancels inside schema and replay emissions" {
+    // Checkpoint offsets come straight from the independently authored
+    // composed golden the dedicated test already verifies byte-for-byte.
+    const schema_target = std.mem.indexOf(u8, composed_expected, "{\"type\":\"object\"}").? + 2;
+    const replay_target = std.mem.indexOf(u8, composed_expected, composed_replayed).? + composed_replayed.len / 2;
+
+    // Each target lies strictly inside its emission's output span, so the
+    // corresponding raw or replay reader is necessarily still open with a
+    // partial charge outstanding when preparation is cancelled.
+    for ([_]u64{ schema_target, replay_target }) |target| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const binding = try establishComposedHistory(&setup, "direct/prep-cancel-spans");
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(0);
+        const baseline = used.load(.acquire);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        var active = true;
+        defer {
+            if (active) preparation.cancel();
+        }
+        try stepPreparationToOffset(&preparation, target, 16384);
+        try std.testing.expect(used.load(.acquire) > baseline);
+        preparation.cancel();
+        active = false;
+        try std.testing.expect(!preparation.active);
+        try std.testing.expectEqual(baseline, used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
 }
