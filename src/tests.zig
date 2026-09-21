@@ -1,4 +1,6 @@
 test {
+    _ = @import("attempt.zig");
+    _ = @import("execution_turn.zig");
     _ = @import("protocol.zig");
     _ = @import("platform.zig");
     _ = @import("store.zig");

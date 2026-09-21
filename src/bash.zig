@@ -355,6 +355,14 @@ pub const Execution = struct {
         self.requestTermination(.infrastructure_shutdown);
     }
 
+    pub fn applyDueDeadline(self: *Execution, now: std.Io.Clock.Timestamp) ?TimeoutAction {
+        if (self.process != .running or !timestampReached(now, self.process.running.deadline)) return null;
+        const deadline_ns: u64 = @intCast(self.process.running.deadline.raw.nanoseconds);
+        if (self.stop_reason == .none) self.stop_reason = .timed_out;
+        self.beginGrace(now);
+        return .{ .deadline_ns = deadline_ns, .signal_failed = self.signal_failure };
+    }
+
     pub const ServiceResult = struct {
         made_progress: bool,
         retired: bool,
@@ -373,13 +381,8 @@ pub const Execution = struct {
         }
         const now = std.Io.Clock.Timestamp.now(self.io, .awake);
         var made_progress = false;
-        var timeout_action: ?TimeoutAction = null;
-        if (self.process == .running and timestampReached(now, self.process.running.deadline)) {
-            const deadline_ns: u64 = @intCast(self.process.running.deadline.raw.nanoseconds);
-            self.requestTermination(.timed_out);
-            timeout_action = .{ .deadline_ns = deadline_ns, .signal_failed = self.signal_failure };
-            made_progress = true;
-        }
+        const timeout_action = self.applyDueDeadline(now);
+        if (timeout_action != null) made_progress = true;
         const leader_observed = self.observeLeader(now) catch |err| observed: {
             fault = fault orelse err;
             self.requestTermination(.infrastructure_shutdown);
@@ -1101,6 +1104,38 @@ fn createOwnedFile(
         .budget = budget,
         .cleanup_fault = cleanup_fault,
     };
+}
+
+test "a due deadline starts termination from a later service-time observation" {
+    const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
+    const deadline = started.addDuration(.{ .raw = .fromMilliseconds(100), .clock = .awake });
+    var execution = Execution{
+        .io = std.testing.io,
+        .process = .{ .running = .{
+            .anchor = .{
+                .child = undefined,
+                .pgid = 1,
+            },
+            .deadline = deadline,
+        } },
+        .stdout_pipe = .{ .closed = .eof },
+        .stderr_pipe = .{ .closed = .eof },
+        .stdout_capture = undefined,
+        .stderr_capture = undefined,
+        .script = undefined,
+        .scratch_path = "",
+        .started = started,
+        .faults = .{ .lifecycle = .signal },
+    };
+    const before = started.addDuration(.{ .raw = .fromMilliseconds(99), .clock = .awake });
+    try std.testing.expect(execution.applyDueDeadline(before) == null);
+    try std.testing.expect(execution.process == .running);
+    const after = started.addDuration(.{ .raw = .fromMilliseconds(101), .clock = .awake });
+    const action = execution.applyDueDeadline(after).?;
+    try std.testing.expectEqual(@as(u64, 100 * std.time.ns_per_ms), action.deadline_ns);
+    try std.testing.expect(action.signal_failed);
+    try std.testing.expect(execution.process == .grace);
+    try std.testing.expectEqual(StopReason.timed_out, execution.stop_reason);
 }
 
 test "cleanup ownership transfers consume their source" {

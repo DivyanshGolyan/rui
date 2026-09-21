@@ -27,6 +27,21 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit, Store, and protocol tests");
     test_step.dependOn(&run_tests.step);
 
+    const logic_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/logic_tests.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+        .filters = if (test_filter) |filter| &.{filter} else &.{},
+    });
+    const run_logic_tests = b.addRunArtifact(logic_tests);
+    const logic_test_step = b.step(
+        "test-logic",
+        "Run the shared execution turn and portable owner tests without Host, Bash, or transport fixtures",
+    );
+    logic_test_step.dependOn(&run_logic_tests.step);
+
     const release_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
     const integration = b.addSystemCommand(&.{"sh"});
     integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
