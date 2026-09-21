@@ -1311,11 +1311,23 @@ test "prepared cleanup reclaims partially and retries through the same owner" {
     var used: std.atomic.Value(u64) = .init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 6 };
     try std.testing.expect(budget.reserve(6));
-    var cleanup = PreparedCleanup{
-        .scratch_path = root,
-        .script = try createOwnedFile(std.testing.io, root, budget, "script", 1, 1, .none),
-        .stdout_capture = try createOwnedFile(std.testing.io, root, budget, "stdout", 1, 1, .persistent),
-        .stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", 1, 1, .none),
+    // Acquire each file before installing the aggregate guard: a later
+    // acquisition failure must not leave earlier files unguarded. The
+    // per-file guards live in this block so a successful break transfers
+    // sole ownership into the aggregate cleanup owner.
+    var cleanup: PreparedCleanup = blk: {
+        var script = try createOwnedFile(std.testing.io, root, budget, "script", 1, 1, .none);
+        errdefer script.cleanup(root) catch {};
+        var stdout_capture = try createOwnedFile(std.testing.io, root, budget, "stdout", 1, 1, .persistent);
+        errdefer stdout_capture.cleanup(root) catch {};
+        var stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", 1, 1, .none);
+        errdefer stderr_capture.cleanup(root) catch {};
+        break :blk .{
+            .scratch_path = root,
+            .script = script,
+            .stdout_capture = stdout_capture,
+            .stderr_capture = stderr_capture,
+        };
     };
     cleanup.script.?.charged = 1;
     cleanup.stdout_capture.?.charged = 2;

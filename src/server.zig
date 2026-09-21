@@ -439,13 +439,15 @@ fn checkSlotCustodyAgreement(slots: []const ExecutionSlot, custody: *execution.C
             .bash_preparing => |*active| try custody.checkAttachedAction(active.token, active.binding),
             // Delivery closure detaches custody while the .bash payload is
             // retained for reclamation: open delivery requires attachment,
-            // closed delivery requires detachment.
+            // closed delivery requires detachment plus the retained typed
+            // identity. Token-only retained owners (prepared cleanup,
+            // named scratch) keep the token-only detached check.
             .bash => |*active| switch (active.delivery) {
                 .open => try custody.checkAttachedAction(active.token, active.binding),
-                .closed => try custody.checkDetached(active.token),
+                .closed => try custody.checkDetachedAction(active.token, active.binding),
             },
             .bash_prepared_cleanup => |*retained| try custody.checkDetached(retained.token),
-            .cleanup => |*cleanup| try custody.checkDetached(cleanup.owner.token),
+            .cleanup => |*cleanup| try custody.checkDetachedModel(cleanup.owner.token, cleanup.owner.binding),
             .named_scratch => |*retained| try custody.checkDetached(retained.token),
         }
         const token = slotToken(slot) orelse continue;
@@ -3612,9 +3614,11 @@ test "closed Bash delivery retains its payload with detached custody" {
     // the .bash payload for reclamation: the checker must accept it.
     closeBashDelivery(&host, &slots[0].bash);
     try std.testing.expect(slots[0].bash.delivery == .closed);
-    try host.custody.checkDetached(token);
+    try host.custody.checkDetachedAction(token, binding);
     try checkSlotCustodyAgreement(&slots, &host.custody);
-    // A failed reclamation attempt keeps the same legal state.
+    // The flagged failed-reclamation state is accepted by the checker. This
+    // covers the flag value only: no failing reclaimer runs here and no Bash
+    // resources are retained through retry.
     slots[0].bash.delivery.closed.reclaim_failed = true;
     try checkSlotCustodyAgreement(&slots, &host.custody);
 
@@ -3649,6 +3653,99 @@ test "closed Bash delivery retains its payload with detached custody" {
     try host.custody.cleanupComplete(token);
     slots[0] = .free;
     try checkSlotCustodyAgreement(&slots, &host.custody);
+}
+
+test "detached payloads keep their typed binding identity" {
+    var records: [2]execution.CustodyRecord = undefined;
+    var custody = execution.CustodyPool.initialize(&records);
+    const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+
+    var first_permit = store_module.DispatchPermit{ .binding = .{
+        .turn_id = 1,
+        .operation_id = 1,
+        .attempt_ordinal = 1,
+    } };
+    const first_token = custody.reserve().?;
+    const first_binding = try custody.attach(first_token, &first_permit);
+    var second_permit = store_module.DispatchPermit{ .binding = .{
+        .turn_id = 2,
+        .operation_id = 2,
+        .attempt_ordinal = 1,
+    } };
+    const second_token = custody.reserve().?;
+    const second_binding = try custody.attach(second_token, &second_permit);
+    try custody.detach(first_token);
+    try custody.detach(second_token);
+
+    var slots = [_]ExecutionSlot{
+        .{ .cleanup = .{ .owner = .{ .token = first_token, .binding = first_binding }, .cleanup_deadline = now } },
+        .{ .cleanup = .{ .owner = .{ .token = second_token, .binding = second_binding }, .cleanup_deadline = now } },
+    };
+    try checkSlotCustodyAgreement(&slots, &custody);
+
+    // Swap only the scalar tokens while leaving bindings unchanged. Both
+    // tokens are current, both records are detached, tokens stay unique,
+    // and the represented count still equals occupied custody: only the
+    // retained typed identity can reject this arrangement.
+    slots[0].cleanup.owner.token = second_token;
+    slots[1].cleanup.owner.token = first_token;
+    try std.testing.expectError(error.ForeignLaunchAuthority, checkSlotCustodyAgreement(&slots, &custody));
+    // Restore before cleanup so the same owners release exactly once.
+    slots[0].cleanup.owner.token = first_token;
+    slots[1].cleanup.owner.token = second_token;
+    try checkSlotCustodyAgreement(&slots, &custody);
+    try custody.cleanupComplete(first_token);
+    try custody.cleanupComplete(second_token);
+}
+
+test "closed Bash payloads keep their typed binding identity" {
+    var records: [2]execution.CustodyRecord = undefined;
+    var custody = execution.CustodyPool.initialize(&records);
+    const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+
+    var first_permit = store_module.ActionDispatchPermit{ .binding = .{
+        .turn_id = 1,
+        .parent_operation_id = 1,
+        .action_id = 1,
+        .attempt_ordinal = 1,
+    } };
+    const first_token = custody.reserve().?;
+    const first_binding = try custody.attachAction(first_token, &first_permit);
+    var second_permit = store_module.ActionDispatchPermit{ .binding = .{
+        .turn_id = 2,
+        .parent_operation_id = 2,
+        .action_id = 2,
+        .attempt_ordinal = 1,
+    } };
+    const second_token = custody.reserve().?;
+    const second_binding = try custody.attachAction(second_token, &second_permit);
+    try custody.detach(first_token);
+    try custody.detach(second_token);
+
+    var slots = [_]ExecutionSlot{
+        .{ .bash = .{
+            .token = first_token,
+            .binding = first_binding,
+            .execution = undefined,
+            .delivery = .{ .closed = .{ .reclaim_at = now } },
+        } },
+        .{ .bash = .{
+            .token = second_token,
+            .binding = second_binding,
+            .execution = undefined,
+            .delivery = .{ .closed = .{ .reclaim_at = now } },
+        } },
+    };
+    try checkSlotCustodyAgreement(&slots, &custody);
+
+    slots[0].bash.token = second_token;
+    slots[1].bash.token = first_token;
+    try std.testing.expectError(error.ForeignLaunchAuthority, checkSlotCustodyAgreement(&slots, &custody));
+    slots[0].bash.token = first_token;
+    slots[1].bash.token = second_token;
+    try checkSlotCustodyAgreement(&slots, &custody);
+    try custody.cleanupComplete(first_token);
+    try custody.cleanupComplete(second_token);
 }
 
 test "preparing slots belong to their live preparations" {

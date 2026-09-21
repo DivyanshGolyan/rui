@@ -1538,20 +1538,35 @@ fn drainLivePreparation(
         steps += 1;
         try std.testing.expect(steps <= step_bound);
         var progress = preparation.advance(byte_allowance, item_allowance);
-        const stats = preparation.advanceStats();
-        try std.testing.expect(stats.work_bytes <= byte_allowance);
-        try std.testing.expect(stats.work_items <= item_allowance);
-        try std.testing.expect(stats.request_bytes >= last_request);
-        last_request = stats.request_bytes;
+        // Guard an owning terminal result adjacent to acquisition, before
+        // any fallible assertion below can drop it.
         switch (progress) {
             .pending => {
+                const stats = preparation.advanceStats();
+                try std.testing.expect(stats.work_bytes <= byte_allowance);
+                try std.testing.expect(stats.work_items <= item_allowance);
+                try std.testing.expect(stats.request_bytes >= last_request);
+                last_request = stats.request_bytes;
                 try std.testing.expect(preparation.active);
             },
             .prepared => |*request| {
+                var transferred = false;
+                errdefer if (!transferred) request.deinit();
+                const stats = preparation.advanceStats();
+                try std.testing.expect(stats.work_bytes <= byte_allowance);
+                try std.testing.expect(stats.work_items <= item_allowance);
+                try std.testing.expect(stats.request_bytes >= last_request);
                 try std.testing.expect(!preparation.active);
+                transferred = true;
                 return request.*;
             },
-            .failed => |err| return err,
+            .failed => |err| {
+                const stats = preparation.advanceStats();
+                try std.testing.expect(stats.work_bytes <= byte_allowance);
+                try std.testing.expect(stats.work_items <= item_allowance);
+                try std.testing.expect(stats.request_bytes >= last_request);
+                return err;
+            },
         }
     }
 }
@@ -1565,8 +1580,20 @@ fn stepPreparationToOffset(preparation: *Preparation, target: u64, step_bound: u
     while (true) {
         steps += 1;
         try std.testing.expect(steps <= step_bound);
-        const progress = preparation.advance(1, 1);
-        try std.testing.expect(progress == .pending);
+        var progress = preparation.advance(1, 1);
+        switch (progress) {
+            .pending => {},
+            // An unexpectedly sealed request is owned here: release it
+            // before reporting the failed expectation so a statistics or
+            // offset regression cannot leak the descriptor. The preparation
+            // is inactive after sealing, so callers must not cancel it.
+            .prepared => |*request| {
+                request.deinit();
+                try std.testing.expect(false);
+                unreachable;
+            },
+            .failed => |err| return err,
+        }
         const written = preparation.advanceStats().request_bytes;
         if (written == target) return;
         try std.testing.expect(written < target);
@@ -1984,10 +2011,10 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
-    var active = true;
-    defer {
-        if (active) preparation.cancel();
-    }
+    // Guard the active preparation separately from any sealed request: a
+    // sealed preparation is inactive, so this guard never cancels a
+    // transferred owner.
+    defer if (preparation.active) preparation.cancel();
     // Fresh preparation: active view, admitted binding, no open readers.
     try preparation.checkIntegrity(binding);
     try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
@@ -2033,7 +2060,6 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
 
     try std.testing.expect(used.load(.acquire) > baseline);
     preparation.cancel();
-    active = false;
     try std.testing.expect(!preparation.active);
     try std.testing.expectError(error.PreparationInactive, preparation.checkIntegrity(binding));
     try std.testing.expectEqual(baseline, used.load(.acquire));
@@ -2062,10 +2088,7 @@ test "request preparation cancellation and failure release ownership" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
-        var active = true;
-        defer {
-            if (active) preparation.cancel();
-        }
+        defer if (preparation.active) preparation.cancel();
         var probe: Preparation = undefined;
         {
             const probe_view = try setup.storage.openHistoricalView(binding);
@@ -2084,7 +2107,6 @@ test "request preparation cancellation and failure release ownership" {
         try std.testing.expectEqual(@as(usize, 1), preparation.view.outstandingReaders());
         try std.testing.expect(used.load(.acquire) > baseline);
         preparation.cancel();
-        active = false;
         try std.testing.expect(!preparation.active);
         try std.testing.expectEqual(baseline, used.load(.acquire));
         try std.testing.expect(retained == null);
@@ -2153,8 +2175,11 @@ test "request preparation cancellation and failure release ownership" {
         try std.testing.expectError(error.InjectedScratchRemovalFailure, retained.?.reclaim(setup.root));
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         gate.store(false, .release);
-        try std.testing.expectEqual(named_scratch.Reclamation.removed, try retained.?.reclaim(setup.root));
+        // Record consuming reclamation before asserting the observation, so
+        // a failed expectation cannot retry an already-consumed owner.
+        const reclamation = try retained.?.reclaim(setup.root);
         reclaimed = true;
+        try std.testing.expectEqual(named_scratch.Reclamation.removed, reclamation);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         var name_buffer: [96]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buffer, "request-{d}-{d}.tmp", .{ binding.operation_id, binding.attempt_ordinal });
@@ -2178,6 +2203,10 @@ test "request preparation completed request is fenced by later stop before hando
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    // Guard the active preparation before any fallible observation: an
+    // error before the request reaches the caller must still cancel it.
+    // After sealing the preparation is inactive and this guard is inert.
+    defer if (preparation.active) preparation.cancel();
     try preparation.checkIntegrity(binding);
     // The sealed request stays owned and readable across the stop and the
     // refused handoff; only its release returns the charge.
@@ -2216,6 +2245,62 @@ test "request preparation completed request is fenced by later stop before hando
     request.deinit();
     released = true;
     try std.testing.expectEqual(baseline, used.load(.acquire));
+}
+
+test "a failed assertion after sealing still releases the owned request" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    try setup.configure("prep-seal-guard-config", "direct/prep-seal-guard");
+    try setup.submit("prep-seal-guard-file", "prep-seal-guard-message", "direct/prep-seal-guard", "work");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    const view = try setup.storage.openHistoricalView(binding);
+    var used: std.atomic.Value(u64) = .init(13);
+    const baseline = used.load(.acquire);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    defer if (preparation.active) preparation.cancel();
+
+    // Drive the real preparation to a sealed request without using the
+    // shared drain helper, then guard the owning result adjacent to
+    // acquisition before any fallible observation.
+    const sealed_request: PreparedRequest = blk: {
+        var steps: usize = 0;
+        while (steps < 4096) : (steps += 1) {
+            var progress = preparation.advance(preparation_byte_allowance, preparation_item_allowance);
+            switch (progress) {
+                .pending => {},
+                .prepared => |*sealed| break :blk sealed.*,
+                .failed => |err| return err,
+            }
+        }
+        return error.TestExpectedResult;
+    };
+    var request_owned = sealed_request;
+    var request_released = false;
+    defer if (!request_released) request_owned.deinit();
+    try std.testing.expect(!preparation.active);
+    // A failed post-seal observation must return the intended error with
+    // the budget exactly restored and no secondary cancellation: the
+    // preparation is already inactive, so the deferred guard is inert.
+    // Ownership transfers into the failing scope; its errdefer releases
+    // exactly once before the intended error escapes. The passing
+    // observation plus explicit error return stand in for a failed
+    // assertion without printing through the test runner IPC channel.
+    const FailingObservation = struct {
+        fn run(held: *PreparedRequest) !void {
+            errdefer held.deinit();
+            try std.testing.expect(held.length > 0);
+            return error.TestSealGuardFailure;
+        }
+    };
+    try std.testing.expectError(error.TestSealGuardFailure, FailingObservation.run(&request_owned));
+    request_released = true;
+    try std.testing.expect(!preparation.active);
+    try std.testing.expectEqual(baseline, used.load(.acquire));
+    try std.testing.expect(retained == null);
 }
 
 test "request preparation composes replay tool results and schema" {
@@ -2258,10 +2343,7 @@ test "request preparation cancels inside schema and replay emissions" {
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
         try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
-        var active = true;
-        defer {
-            if (active) preparation.cancel();
-        }
+        defer if (preparation.active) preparation.cancel();
         try stepPreparationToOffset(&preparation, target, 16384);
         // Direct owner prerequisite for each emission family: the intended
         // reader is active with a reservation outstanding.
@@ -2269,7 +2351,6 @@ test "request preparation cancels inside schema and replay emissions" {
         try std.testing.expectEqual(@as(usize, 1), preparation.view.outstandingReaders());
         try std.testing.expect(used.load(.acquire) > baseline);
         preparation.cancel();
-        active = false;
         try std.testing.expect(!preparation.active);
         try std.testing.expectEqual(baseline, used.load(.acquire));
         try std.testing.expect(retained == null);

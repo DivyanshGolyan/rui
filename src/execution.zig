@@ -192,6 +192,39 @@ pub const CustodyPool = struct {
         if (record.state.load(.acquire) != .detached) return error.InvalidCustodyTransition;
     }
 
+    pub fn checkDetachedModel(
+        self: *CustodyPool,
+        token: CustodyToken,
+        expected: attempt.AttemptBinding,
+    ) !void {
+        const record = try self.current(token);
+        if (record.state.load(.acquire) != .detached) return error.InvalidCustodyTransition;
+        if (record.binding_kind != .model) return error.CustodyDetached;
+        if (record.binding.turn_id != expected.turn_id or
+            record.binding.operation_id != expected.operation_id or
+            record.binding.attempt_ordinal != expected.attempt_ordinal)
+        {
+            return error.ForeignLaunchAuthority;
+        }
+    }
+
+    pub fn checkDetachedAction(
+        self: *CustodyPool,
+        token: CustodyToken,
+        expected: attempt.ActionAttemptBinding,
+    ) !void {
+        const record = try self.current(token);
+        if (record.state.load(.acquire) != .detached) return error.InvalidCustodyTransition;
+        if (record.binding_kind != .action) return error.CustodyDetached;
+        if (record.action_binding.turn_id != expected.turn_id or
+            record.action_binding.action_id != expected.action_id or
+            record.action_binding.parent_operation_id != expected.parent_operation_id or
+            record.action_binding.attempt_ordinal != expected.attempt_ordinal)
+        {
+            return error.ForeignLaunchAuthority;
+        }
+    }
+
     pub fn checkFree(self: *CustodyPool, token: CustodyToken) !void {
         const record = try self.current(token);
         if (record.state.load(.acquire) != .free) return error.InvalidCustodyTransition;
@@ -408,10 +441,16 @@ test "model and Action Attempt bindings cannot cross custody paths" {
 
     try pool.detach(model_token);
     try pool.checkDetached(model_token);
+    try pool.checkDetachedModel(model_token, model_binding);
+    try std.testing.expectError(
+        error.CustodyDetached,
+        pool.checkDetachedAction(model_token, action_binding),
+    );
     try pool.cleanupComplete(model_token);
     try pool.checkFree(model_token);
     try pool.detach(action_token);
     try pool.checkDetached(action_token);
+    try pool.checkDetachedAction(action_token, action_binding);
     try pool.cleanupComplete(action_token);
     try pool.checkFree(action_token);
 }
@@ -472,6 +511,22 @@ test "action launch authority requires every identity field including turn" {
     try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeActionLaunchAuthority(token, binding));
     try pool.checkAttachedAction(token, binding);
     try pool.detach(token);
+    try pool.checkDetached(token);
+    try pool.checkDetachedAction(token, binding);
+    try std.testing.expectError(
+        error.ForeignLaunchAuthority,
+        pool.checkDetachedAction(token, .{
+            .turn_id = 7,
+            .parent_operation_id = 8,
+            .action_id = 90,
+            .attempt_ordinal = 10,
+        }),
+    );
+    try std.testing.expectError(
+        error.CustodyDetached,
+        pool.checkDetachedModel(token, .{ .turn_id = 7, .operation_id = 8, .attempt_ordinal = 10 }),
+    );
+    try pool.checkDetachedAction(token, binding);
     try pool.cleanupComplete(token);
 }
 
