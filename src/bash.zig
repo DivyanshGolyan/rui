@@ -522,19 +522,14 @@ pub const Execution = struct {
     pub fn reclaim(self: *Execution, retention: *output_retention.Queue) !void {
         std.debug.assert(self.retired());
         var first_error: ?anyerror = null;
-        if (self.output_reservation) |pair| {
+        if (self.output_reservation != null) {
             // Reserved entries are protected from eviction. Relinquish the
             // producer aliases before publication makes the names reclaimable.
             self.stdout_capture.close();
             self.stderr_capture.close();
-            retention.publishPair(pair) catch |err| {
+            self.publishReservedOutput(retention) catch |err| {
                 first_error = err;
             };
-            if (first_error == null) {
-                self.output_reservation = null;
-                self.stdout_capture.published = true;
-                self.stderr_capture.published = true;
-            }
         } else {
             self.stdout_capture.cleanup(self.scratch_path) catch |err| {
                 first_error = err;
@@ -547,6 +542,22 @@ pub const Execution = struct {
             if (first_error == null) first_error = err;
         };
         if (first_error) |err| return err;
+    }
+
+    /// Publishes a reserved output pair after the producer aliases are
+    /// relinquished. The boundary is executable: publishing with an open
+    /// alias fails instead of making output evictable while the producer
+    /// can still write. Production reclaim closes the aliases first, then
+    /// calls this; tests exercise the boundary directly.
+    pub fn publishReservedOutput(self: *Execution, retention: *output_retention.Queue) !void {
+        const pair = self.output_reservation orelse return error.NoOutputReservation;
+        if (self.stdout_capture.file != null or self.stderr_capture.file != null) {
+            return error.ProducerAliasesOpen;
+        }
+        try retention.publishPair(pair);
+        self.output_reservation = null;
+        self.stdout_capture.published = true;
+        self.stderr_capture.published = true;
     }
 
     fn servicePipe(
@@ -1403,18 +1414,29 @@ test "output publication closes producer aliases before making output evictable"
     defer retention.cleanupAll();
     try std.testing.expect(budget.reserve(6));
     const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
-    var execution = Execution{
-        .io = std.testing.io,
-        .process = .{ .gone = .{ .exited = 0 } },
-        .stdout_pipe = .{ .closed = .eof },
-        .stderr_pipe = .{ .closed = .eof },
-        .stdout_capture = try createOwnedFile(std.testing.io, root, budget, "stdout", 1, 1, .none),
-        .stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", 1, 1, .none),
-        .script = try createOwnedFile(std.testing.io, root, budget, "script", 1, 1, .none),
-        .scratch_path = root,
-        .started = started,
-        .faults = .{},
-    };
+    // Acquire each file before installing the execution guard: a later
+    // acquisition failure must not leave earlier files unguarded.
+    var execution: Execution = undefined;
+    {
+        var stdout_capture = try createOwnedFile(std.testing.io, root, budget, "stdout", 1, 1, .none);
+        errdefer stdout_capture.cleanup(root) catch {};
+        var stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", 1, 1, .none);
+        errdefer stderr_capture.cleanup(root) catch {};
+        var script = try createOwnedFile(std.testing.io, root, budget, "script", 1, 1, .none);
+        errdefer script.cleanup(root) catch {};
+        execution = .{
+            .io = std.testing.io,
+            .process = .{ .gone = .{ .exited = 0 } },
+            .stdout_pipe = .{ .closed = .eof },
+            .stderr_pipe = .{ .closed = .eof },
+            .stdout_capture = stdout_capture,
+            .stderr_capture = stderr_capture,
+            .script = script,
+            .scratch_path = root,
+            .started = started,
+            .faults = .{},
+        };
+    }
     execution.stdout_capture.charged = 2;
     execution.stderr_capture.charged = 2;
     execution.script.charged = 2;
@@ -1430,6 +1452,15 @@ test "output publication closes producer aliases before making output evictable"
     try std.testing.expect(try execution.reserveOutput(&retention));
     try std.testing.expect(execution.output_reservation != null);
     try std.testing.expectEqual(@as(u64, 6), used.load(.acquire));
+    // The ordering boundary is executable, not just a postcondition:
+    // publishing with open producer aliases fails and retains the
+    // reservation instead of making output evictable while writable.
+    try std.testing.expectError(error.ProducerAliasesOpen, execution.publishReservedOutput(&retention));
+    try std.testing.expect(execution.output_reservation != null);
+    try std.testing.expect(!execution.stdout_capture.published);
+    try std.testing.expect(!execution.stderr_capture.published);
+    // The reservation holds both entries while the aliases are open.
+    try std.testing.expectEqual(@as(usize, 2), retention.occupied());
     // Reclaim closes producer aliases first, then publishes: the names
     // become reclaimable only after the aliases close.
     try execution.reclaim(&retention);

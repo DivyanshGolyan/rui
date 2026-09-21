@@ -117,8 +117,9 @@ test "owner retains every resource after retryable removal failure" {
     try std.testing.expectError(error.FileNotFound, owner.reclaim(missing));
     try std.testing.expect(owner.resources != null);
     try std.testing.expectEqual(@as(u64, 7), used.load(.acquire));
-    try std.testing.expectEqual(Reclamation.removed, try owner.reclaim(root));
+    const removed = try owner.reclaim(root);
     reclaimed = true;
+    try std.testing.expectEqual(Reclamation.removed, removed);
     try std.testing.expect(owner.resources == null);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "owned", .{}));
@@ -150,11 +151,9 @@ test "an already absent name reclaims handles and accounting" {
 
     // Path absence alone is not completed cleanup: reclaim must still
     // close both owned aliases and release the reservation exactly once.
-    try std.testing.expectEqual(
-        Reclamation.already_absent,
-        try owner.reclaim(root),
-    );
+    const absent = try owner.reclaim(root);
     reclaimed = true;
+    try std.testing.expectEqual(Reclamation.already_absent, absent);
     try std.testing.expect(owner.resources == null);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "owned", .{}));
@@ -192,8 +191,9 @@ test "injected removal failure retains ownership until the same owner can retry"
     try std.testing.expect(owner.resources != null);
     try std.testing.expectEqual(@as(u64, 5), used.load(.acquire));
     gate.store(false, .release);
-    try std.testing.expectEqual(Reclamation.removed, try owner.reclaim(root));
+    const retried = try owner.reclaim(root);
     reclaimed = true;
+    try std.testing.expectEqual(Reclamation.removed, retried);
     try std.testing.expect(owner.resources == null);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }

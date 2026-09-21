@@ -1216,6 +1216,41 @@ test "request writer charges exact growth and seals through a readonly descripto
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
+test "request writer failure retains the full reservation until the owner releases" {
+    // The budget arithmetic test covers reserve/release totals; this drives
+    // the real RequestWriter failure seam with independently chosen input
+    // lengths on a nonzero unrelated baseline.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var used = std.atomic.Value(u64).init(41);
+    const budget = ScratchBudget{ .used = &used, .limit = 100 };
+    const file = try tmp.dir.createFile(std.testing.io, "request-failure", .{ .exclusive = true });
+    var writer = RequestWriter{
+        .io = std.testing.io,
+        .file = file,
+        .budget = budget,
+        .fail_write = true,
+    };
+    var writer_owned = true;
+    defer if (writer_owned) writer.deinit();
+    try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
+    // Five bytes submit successfully from a zero offset.
+    try writer.write("hello");
+    try std.testing.expectEqual(@as(u64, 5), writer.offset);
+    try std.testing.expectEqual(@as(u64, 5), writer.charged);
+    try std.testing.expectEqual(@as(u64, 46), used.load(.acquire));
+    // Seven more bytes reserve the full slice, then fail after charging:
+    // the outstanding contribution is 12 reserved bytes, the successful
+    // offset stays 5, and only the owning cleanup path releases it.
+    try std.testing.expectError(error.InjectedRequestWriteFailure, writer.write("bye-bye"));
+    try std.testing.expectEqual(@as(u64, 5), writer.offset);
+    try std.testing.expectEqual(@as(u64, 12), writer.charged);
+    try std.testing.expectEqual(@as(u64, 53), used.load(.acquire));
+    writer.deinit();
+    writer_owned = false;
+    try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
+}
+
 test "endpoint validation permits TLS and loopback fixture HTTP only" {
     try validateEndpoint("https://chatgpt.com/backend-api/codex/responses");
     try validateEndpoint("http://127.0.0.1:9876/fail");
@@ -1966,6 +2001,7 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
         var probe_used: std.atomic.Value(u64) = .init(0);
         var probe_retained: ?named_scratch.Owner = null;
         try probe.init(std.testing.io, probe_view, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .{}, &probe_retained);
+        defer if (probe.active) probe.cancel();
         const probe_result = try drainPreparation(&probe, 16, 2, 16384);
         defer std.testing.allocator.free(probe_result.bytes);
         const content_start = std.mem.indexOf(u8, probe_result.bytes, text).?;
@@ -1986,9 +2022,13 @@ test "preparation integrity follows live readers and rejects a foreign binding" 
     try preparation.checkIntegrity(binding);
 
     // An extra outstanding reader breaks the count the emission accounts for.
-    var extra = try preparation.view.openContent(preparation.settings.?.baseline_instructions);
-    try std.testing.expectError(error.PreparationReaderCountMismatch, preparation.checkIntegrity(binding));
-    extra.close();
+    // The reader lives in a nested scope so it closes before preparation
+    // cancellation on both success and error paths.
+    {
+        var extra = try preparation.view.openContent(preparation.settings.?.baseline_instructions);
+        defer extra.close();
+        try std.testing.expectError(error.PreparationReaderCountMismatch, preparation.checkIntegrity(binding));
+    }
     try preparation.checkIntegrity(binding);
 
     try std.testing.expect(used.load(.acquire) > baseline);
@@ -2032,6 +2072,7 @@ test "request preparation cancellation and failure release ownership" {
             var probe_used: std.atomic.Value(u64) = .init(0);
             var probe_retained: ?named_scratch.Owner = null;
             try probe.init(std.testing.io, probe_view, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .{}, &probe_retained);
+            defer if (probe.active) probe.cancel();
             const probe_result = try drainPreparation(&probe, 16, 2, 16384);
             defer std.testing.allocator.free(probe_result.bytes);
             const content_start = std.mem.indexOf(u8, probe_result.bytes, text).?;

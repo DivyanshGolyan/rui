@@ -101,6 +101,10 @@ test "narrowing a scratch budget cannot widen its authority" {
 }
 
 test "shared usage is baseline-relative and failed growth reserves nothing" {
+    // Budget arithmetic only: reserve/release totals on an unrelated
+    // baseline. The reserve-before-failed-write obligation is established
+    // beside the real RequestWriter (see "request writer failure retains
+    // the full reservation until the owner releases").
     // Unrelated reservation B = 41 stays unchanged through the lifecycle.
     // A writer reserves 5 bytes successfully, then reserves 7 more bytes
     // for a write that fails after charging: the outstanding contribution
