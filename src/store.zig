@@ -1299,7 +1299,11 @@ pub const Store = struct {
             if (database) |db| _ = c.sqlite3_close(db);
             return error.StoreOpenFailed;
         }
-        errdefer _ = c.sqlite3_close(database.?);
+        // The handle may still be null on later failure paths; never unwrap
+        // it while unwinding an open failure.
+        errdefer {
+            if (database) |db| _ = c.sqlite3_close(db);
+        }
 
         try setLimit(database.?, c.SQLITE_LIMIT_LENGTH, @intCast(protocol.max_sqlite_content_bytes + 4096));
         try setLimit(database.?, c.SQLITE_LIMIT_SQL_LENGTH, 16 * 1024);
@@ -6163,6 +6167,18 @@ fn testingStore(tmp: *std.testing.TmpDir, io: std.Io) !Store {
         std.debug.print("testing Store open failed: {s}\n", .{@errorName(err)});
         return err;
     };
+}
+
+test "Store open failures return typed errors without unwinding panics" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    // A database path below a missing directory cannot be created; the open
+    // must fail as a typed error rather than unwrapping a null handle.
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/missing-dir/store.sqlite3", .{root});
+    try std.testing.expectError(error.StoreOpenFailed, Store.open(std.testing.io, database, root));
 }
 
 fn createMaximumCanonicalStore(tmp: *std.testing.TmpDir, path_buffer: []u8) ![]const u8 {
