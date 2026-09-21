@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const named_scratch = @import("named_scratch.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
-const provider_output = @import("provider_output.zig");
+const request_encoding = @import("request_encoding.zig");
 const store = @import("store.zig");
 const tools = @import("tools.zig");
 const transport_options = @import("transport_options");
@@ -109,20 +109,27 @@ pub const PreparationAdvanceStats = struct {
     request_bytes: u64,
 };
 
-// This is an encoding operation, not another payload owner. The caller's
-// borrowed window remains valid until the synchronous write returns.
-fn writePlainJsonRun(writer: anytype, bytes: []const u8, bytes_left: *usize) !usize {
-    const limit = @min(bytes.len, bytes_left.* / 2);
-    var count: usize = 0;
-    while (count < limit) : (count += 1) {
-        const byte = bytes[count];
-        if (byte < 0x20 or byte == '"' or byte == '\\') break;
+const writePlainJsonRun = request_encoding.writePlainJsonRun;
+
+// The native source adapter preserves the exact-read contract: the cursor
+// selects a bounded refill size first, and any short canonical read fails.
+const HistoricalSource = struct {
+    reader: *store.HistoricalReader,
+
+    pub fn contentLength(self: HistoricalSource) u64 {
+        return self.reader.reference.length;
     }
-    if (count == 0) return 0;
-    try writer.write(bytes[0..count]);
-    bytes_left.* -= count * 2;
-    return count;
-}
+
+    pub fn readContent(self: HistoricalSource, offset: u64, destination: []u8) !usize {
+        return self.reader.read(offset, destination);
+    }
+
+    pub fn maxWindow(self: HistoricalSource, offset: u64, wanted: usize) usize {
+        _ = self;
+        _ = offset;
+        return wanted;
+    }
+};
 
 pub const Preparation = struct {
     view: store.HistoricalView,
@@ -175,13 +182,7 @@ pub const Preparation = struct {
     const JsonEmission = struct {
         bytes: ?[]const u8 = null,
         reader: ?store.HistoricalReader = null,
-        offset: u64 = 0,
-        buffer_start: u64 = 0,
-        buffer_length: usize = 0,
-        buffer: [protocol.content_window_bytes]u8 = undefined,
-        encoded: [6]u8 = undefined,
-        encoded_length: u3 = 0,
-        encoded_offset: u3 = 0,
+        cursor: request_encoding.JsonCursor = .{},
 
         fn close(self: *JsonEmission) void {
             if (self.reader) |*reader| reader.close();
@@ -191,20 +192,17 @@ pub const Preparation = struct {
 
     const RawEmission = struct {
         reader: store.HistoricalReader,
-        offset: u64 = 0,
-        buffer_length: usize = 0,
-        buffer_offset: usize = 0,
-        buffer: [protocol.content_window_bytes]u8 = undefined,
+        cursor: request_encoding.RawCursor = .{},
     };
 
     const ReplayEmission = struct {
         reader: store.HistoricalReader,
-        cursor: provider_output.ReplayCursor = .{},
+        cursor: request_encoding.ReplayCursor = .{},
     };
 
     const Emission = union(enum) {
         none,
-        fixed: struct { bytes: []const u8, offset: usize = 0 },
+        fixed: struct { bytes: []const u8, cursor: request_encoding.FixedCursor = .{} },
         json: JsonEmission,
         raw: RawEmission,
         replay: ReplayEmission,
@@ -426,40 +424,20 @@ pub const Preparation = struct {
         switch (self.emission) {
             .none => unreachable,
             .fixed => |*fixed| {
-                const count = @min(bytes_left.*, fixed.bytes.len - fixed.offset);
-                if (count == 0) return false;
-                try self.writer.write(fixed.bytes[fixed.offset..][0..count]);
-                fixed.offset += count;
-                bytes_left.* -= count;
-                if (fixed.offset != fixed.bytes.len) return false;
+                if (!try fixed.cursor.advance(fixed.bytes, &self.writer, bytes_left)) return false;
             },
             .json => |*json| {
                 if (!try self.advanceJson(json, bytes_left)) return false;
                 json.close();
             },
             .raw => |*raw| {
-                if (raw.buffer_offset != raw.buffer_length) {
-                    const count = @min(bytes_left.*, raw.buffer_length - raw.buffer_offset);
-                    try self.writer.write(raw.buffer[raw.buffer_offset..][0..count]);
-                    raw.buffer_offset += count;
-                    bytes_left.* -= count;
-                    if (raw.buffer_offset != raw.buffer_length) return false;
-                }
-                if (raw.offset != raw.reader.reference.length) {
-                    const wanted: usize = @intCast(@min(raw.reader.reference.length - raw.offset, @min(raw.buffer.len, bytes_left.*)));
-                    if (wanted == 0) return false;
-                    const count = try raw.reader.read(raw.offset, raw.buffer[0..wanted]);
-                    if (count != wanted) return error.ShortCanonicalRead;
-                    raw.offset += count;
-                    raw.buffer_length = count;
-                    raw.buffer_offset = 0;
-                    bytes_left.* -= count;
-                    return false;
-                }
+                const source = HistoricalSource{ .reader = &raw.reader };
+                if (!try raw.cursor.advance(source, &self.writer, bytes_left)) return false;
                 raw.reader.close();
             },
             .replay => |*replay| {
-                if (try replay.cursor.advance(&replay.reader, &self.writer, bytes_left, items_left) == .pending) return false;
+                const source = HistoricalSource{ .reader = &replay.reader };
+                if (try replay.cursor.advance(source, &self.writer, bytes_left, items_left) == .pending) return false;
                 replay.reader.close();
             },
         }
@@ -468,67 +446,12 @@ pub const Preparation = struct {
     }
 
     fn advanceJson(self: *Preparation, json: *JsonEmission, bytes_left: *usize) !bool {
-        while (bytes_left.* != 0) {
-            if (json.encoded_offset != json.encoded_length) {
-                const count = @min(bytes_left.*, json.encoded_length - json.encoded_offset);
-                try self.writer.write(json.encoded[json.encoded_offset..][0..count]);
-                json.encoded_offset += @intCast(count);
-                bytes_left.* -= count;
-                continue;
-            }
-            const length: u64 = if (json.bytes) |bytes| bytes.len else json.reader.?.reference.length;
-            if (json.offset == length) return true;
-            const available = if (json.bytes) |bytes|
-                bytes[@intCast(json.offset)..]
-            else available: {
-                if (json.offset < json.buffer_start or json.offset >= json.buffer_start + json.buffer_length) {
-                    json.buffer_start = json.offset;
-                    const wanted: usize = @intCast(@min(length - json.offset, @min(json.buffer.len, bytes_left.*)));
-                    const count = try json.reader.?.read(json.offset, json.buffer[0..wanted]);
-                    if (count != wanted) return error.ShortCanonicalRead;
-                    json.buffer_length = count;
-                }
-                break :available json.buffer[@intCast(json.offset - json.buffer_start)..json.buffer_length];
-            };
-            // A source scan and its emitted bytes each consume allowance.
-            // Ordinary text stays a borrowed run, not one OS write per byte.
-            const run = try writePlainJsonRun(&self.writer, available, bytes_left);
-            if (run != 0) {
-                json.offset += run;
-                continue;
-            }
-            const byte = available[0];
-            json.offset += 1;
-            bytes_left.* -= 1;
-            const encoded = switch (byte) {
-                '"' => "\\\"",
-                '\\' => "\\\\",
-                0x08 => "\\b",
-                0x0c => "\\f",
-                '\n' => "\\n",
-                '\r' => "\\r",
-                '\t' => "\\t",
-                0...0x07, 0x0b, 0x0e...0x1f => {
-                    const hex = "0123456789abcdef";
-                    json.encoded = .{ '\\', 'u', '0', '0', hex[byte >> 4], hex[byte & 0xf] };
-                    json.encoded_length = 6;
-                    json.encoded_offset = 0;
-                    continue;
-                },
-                else => {
-                    // A one-byte allowance can consume a source byte now
-                    // and emit it on the next advance, without overshoot.
-                    json.encoded[0] = byte;
-                    json.encoded_length = 1;
-                    json.encoded_offset = 0;
-                    continue;
-                },
-            };
-            @memcpy(json.encoded[0..encoded.len], encoded);
-            json.encoded_length = @intCast(encoded.len);
-            json.encoded_offset = 0;
+        if (json.bytes) |bytes| {
+            const source = request_encoding.MemorySource{ .bytes = bytes };
+            return json.cursor.advance(source, &self.writer, bytes_left);
         }
-        return false;
+        const source = HistoricalSource{ .reader = &json.reader.? };
+        return json.cursor.advance(source, &self.writer, bytes_left);
     }
 
     fn seal(self: *Preparation) !PreparationProgress {

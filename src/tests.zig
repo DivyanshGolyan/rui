@@ -12,6 +12,7 @@ test {
     _ = @import("output_retention.zig");
     _ = @import("provider.zig");
     _ = @import("provider_output.zig");
+    _ = @import("request_encoding.zig");
     _ = @import("tools.zig");
     _ = @import("client.zig");
     _ = @import("cli.zig");
