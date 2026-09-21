@@ -138,6 +138,21 @@ Keep requested model, each available served-model observation, `x-request-id` an
 
 Run `zig build check` for the implemented integration coverage in this area. It runs dispatch, Bash-owner, Bash journey, Bash lifecycle, Bash recovery and control integrations after formatting, native tests and production builds. The named scenarios below also specify requirements that may not yet be implemented; passing the current gate does not establish those future requirements. Use a fixture marker only to detect duplicate execution, never as recovery authority.
 
+#### Owner invariant checks
+
+Small structural checks live beside the owners that hold the facts; tests invoke them at legal stable checkpoints under each owner's existing synchronization. They add no state, locks, allocation, or hot-path I/O. Every check has a passing real-owner case, a precise negative case requiring the intended error, and guarded cleanup; accounting tests assert independently expected outstanding contributions with exact baseline restoration.
+
+| Owner | Check | Legal checkpoint |
+| --- | --- | --- |
+| `CustodyPool` (`src/execution.zig`) | Generation, state, binding kind and full typed identity, one-shot launch and delivery | After a complete custody operation |
+| Execution slots (`src/server.zig`) | Occupied payloads hold current tokens, no duplicate token ownership, custody agrees with payload lifecycle, active preparations have exactly their admitted owners | After a complete admission, preparation, completion, or cleanup transition; never mid-transition |
+| Model preparation (`src/provider.zig`, predicates in `src/store.zig`) | Active preparation and view, admitted binding match, frozen settings owned by the view, reader count agrees with the emission-owned reader | Between synchronous advances, while preparation remains in final storage |
+| Named scratch (`src/named_scratch.zig`) | Removed and already-absent close aliases and release once; unconfirmed removal retains the owner and charge for same-owner retry | Before and after the actual `reclaim` call |
+| Bash (`src/bash.zig`) | Retirement independent of reclamation, partial cleanup residuals, descriptor closure before removal results, publication before evictability | After actual owner operations on the active tagged variants |
+| Retention queue (`src/output_retention.zig`) | Entry state, publication, eviction failure, and charge responsibility without double-counting producer charges | Under the queue mutex; aggregate accounting only in a controlled scope |
+
+Temporary mutations demonstrating the oracles (omitted binding field, freed custody despite retained failure, swallowed cleanup error, removed duplicate detection, refunded producer charge, lenient reader count) are recorded in the implementing commits; no mutation framework or production bypass remains. Reuse: #246 can use the custody, binding, launch/delivery, and settlement-versus-cleanup checks; #247 the scratch, retention, and removal checks with real filesystem and SQLite failure evidence; #248 the retained-owner and reclamation checks with real Store-lease, shutdown, and restart witnesses. No fixture-only assertion was removed whose responsibility had not moved inward; #270's preparation-delay handoff witnesses remain for the physical dispatch boundary.
+
 #### Shared settlement boundaries
 
 Terminate before/after reservation, Attempt admission, dispatch, scratch seal, retry settlement, final settlement and observation. Before admission rollback, no new identity, consumed allowance or permit survives. After commit, recover exact current facts and conservative uncertainty without recreating the one-shot Dispatch Permit. Lost scratch/preparation is not durable evidence. Final resolution, required content and consequences commit together. Retry settlement updates current failure/eligibility/accounting while leaving Resolution absent; fresh admission revalidates everything and cannot duplicate a stale due selection.
