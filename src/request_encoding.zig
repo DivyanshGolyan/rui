@@ -573,97 +573,220 @@ const TestSink = struct {
     }
 };
 
-fn runJsonCase(input: []const u8, boundaries: []const u64, byte_allowance: usize, expected: []const u8) !void {
+fn failCtx(case: []const u8, input_len: usize, boundaries: []const u64, byte_seq: []const usize, item_seq: []const usize, step: usize) void {
+    std.debug.print("request encoding failure: case={s} input_len={d} boundaries={any} byte_seq={any} item_seq={any} step={d}\n", .{ case, input_len, boundaries, byte_seq, item_seq, step });
+}
+
+/// Deterministic partition boundaries from an independent seed. Partitions
+/// and allowance sequences must use different seeds so the two dimensions
+/// cannot accidentally correlate.
+fn seededBoundaries(seed: u64, length: usize, buf: []u64) []u64 {
+    if (length < 2 or buf.len == 0) return &.{};
+    var state = seed | 1;
+    var n: usize = 0;
+    var guard: usize = 0;
+    while (n < buf.len and guard < buf.len * 16 + 64) : (guard += 1) {
+        state = state *% 6364136223846793005 +% 1442695040888963407;
+        const candidate: u64 = @intCast(1 + (state >> 33) % @as(u64, @intCast(length)));
+        var dup = false;
+        for (buf[0..n]) |b| if (b == candidate) {
+            dup = true;
+            break;
+        };
+        if (dup) continue;
+        var at = n;
+        while (at > 0 and buf[at - 1] > candidate) : (at -= 1) buf[at] = buf[at - 1];
+        buf[at] = candidate;
+        n += 1;
+    }
+    return buf[0..n];
+}
+
+fn seededAllowances(seed: u64, buf: []usize, max: usize) []usize {
+    std.debug.assert(max >= 1);
+    var state = seed | 1;
+    for (buf) |*slot| {
+        state = state *% 6364136223846793005 +% 1442695040888963407;
+        slot.* = 1 + (state >> 33) % max;
+    }
+    return buf;
+}
+
+fn runJsonCase(case: []const u8, input: []const u8, boundaries: []const u64, byte_seq: []const usize, expected: []const u8, expected_work: usize) !void {
     var cursor = JsonCursor{};
     const source = PartitionedSource{ .bytes = input, .boundaries = boundaries };
     var sink = TestSink.init(std.testing.allocator);
     defer sink.deinit();
     var steps: usize = 0;
+    var total: usize = 0;
     const bound = input.len + expected.len + 64;
     while (true) {
         steps += 1;
-        try std.testing.expect(steps <= bound + 16);
-        var left = byte_allowance;
-        try std.testing.expect(left != 0);
+        if (steps > bound + 16) {
+            failCtx(case, input.len, boundaries, byte_seq, &.{}, steps);
+            return error.TooManySteps;
+        }
+        const allowance = byte_seq[(steps - 1) % byte_seq.len];
+        try std.testing.expect(allowance != 0);
+        var left = allowance;
         const done = try cursor.advance(source, &sink, &left);
-        try std.testing.expect(left <= byte_allowance);
+        total += allowance - left;
+        if (!done and left == allowance) {
+            failCtx(case, input.len, boundaries, byte_seq, &.{}, steps);
+            std.debug.print("zero-progress stall at offset={d}\n", .{cursor.offset});
+            return error.ZeroProgressStall;
+        }
         if (done) break;
-        try std.testing.expect(left == 0 or steps <= bound + 16);
-        if (steps > bound + 16) return error.TooManySteps;
     }
-    try std.testing.expectEqualStrings(expected, sink.output.items);
+    if (!std.mem.eql(u8, expected, sink.output.items) or total != expected_work) {
+        failCtx(case, input.len, boundaries, byte_seq, &.{}, steps);
+        std.debug.print("offset={d} encoded={d}/{d} emitted={d}/{d} work={d}/{d} first_diff=", .{
+            cursor.offset,
+            cursor.encoded_offset,
+            cursor.encoded_length,
+            sink.output.items.len,
+            expected.len,
+            total,
+            expected_work,
+        });
+        const common = @min(sink.output.items.len, expected.len);
+        var diff: usize = 0;
+        while (diff < common and sink.output.items[diff] == expected[diff]) : (diff += 1) {}
+        std.debug.print("{d}\n", .{diff});
+        try std.testing.expectEqualStrings(expected, sink.output.items);
+        try std.testing.expectEqual(expected_work, total);
+    }
 }
 
-fn runJsonSchedules(input: []const u8, expected: []const u8) !void {
-    // Every single split position plus unsplit and one-byte windows.
+fn runJsonSchedules(case: []const u8, input: []const u8, expected: []const u8, expected_work: usize) !void {
+    // Every single split position plus unsplit input, each under constant,
+    // alternating and sawtooth allowance sequences.
+    const seqs = [_][]const usize{ &.{1}, &.{2}, &.{3}, &.{5}, &.{6}, &.{7}, &.{ 1, 7 }, &.{ 3, 1, 2 } };
     var i: usize = 0;
     while (i <= input.len) : (i += 1) {
         var boundary_storage: [1]u64 = .{@intCast(i)};
         const boundaries: []const u64 = if (i == input.len) &.{} else boundary_storage[0..];
-        for ([_]usize{ 1, 2, 3, 5, 6, 7 }) |allowance| {
-            try runJsonCase(input, boundaries, allowance, expected);
-        }
+        for (seqs) |seq| try runJsonCase(case, input, boundaries, seq, expected, expected_work);
     }
     // One-byte windows over the whole input.
     var all: [256]u64 = undefined;
     const n: usize = @min(input.len, all.len);
     for (0..n) |index| all[index] = @intCast(index + 1);
-    for ([_]usize{ 1, 2, 64 }) |allowance| {
-        try runJsonCase(input, all[0..n], allowance, expected);
-    }
+    for ([_][]const usize{ &.{1}, &.{ 2, 64 } }) |seq| try runJsonCase(case, input, all[0..n], seq, expected, expected_work);
 }
 
-fn runRawCase(input: []const u8, boundaries: []const u64, byte_allowance: usize) !void {
+fn runRawCase(case: []const u8, input: []const u8, boundaries: []const u64, byte_seq: []const usize) !void {
     var cursor = RawCursor{};
     const source = PartitionedSource{ .bytes = input, .boundaries = boundaries };
     var sink = TestSink.init(std.testing.allocator);
     defer sink.deinit();
     var steps: usize = 0;
+    var total: usize = 0;
     const bound = 2 * input.len + 16;
     while (true) {
         steps += 1;
-        try std.testing.expect(steps <= bound);
-        var left = byte_allowance;
+        if (steps > bound) {
+            failCtx(case, input.len, boundaries, byte_seq, &.{}, steps);
+            return error.TooManySteps;
+        }
+        const allowance = byte_seq[(steps - 1) % byte_seq.len];
+        try std.testing.expect(allowance != 0);
+        var left = allowance;
         const done = try cursor.advance(source, &sink, &left);
-        try std.testing.expect(left <= byte_allowance);
+        total += allowance - left;
+        if (!done and left == allowance) {
+            failCtx(case, input.len, boundaries, byte_seq, &.{}, steps);
+            std.debug.print("zero-progress stall at offset={d}\n", .{cursor.offset});
+            return error.ZeroProgressStall;
+        }
         if (done) break;
     }
-    try std.testing.expectEqualStrings(input, sink.output.items);
+    if (!std.mem.eql(u8, input, sink.output.items) or total != 2 * input.len) {
+        failCtx(case, input.len, boundaries, byte_seq, &.{}, steps);
+        std.debug.print("offset={d} emitted={d}/{d} work={d}/{d}\n", .{ cursor.offset, sink.output.items.len, input.len, total, 2 * input.len });
+        try std.testing.expectEqualStrings(input, sink.output.items);
+        // Every source byte is read once and emitted once.
+        try std.testing.expectEqual(2 * input.len, total);
+    }
 }
 
-fn runReplayCase(input: []const u8, boundaries: []const u64, byte_allowance: usize, item_allowance: usize, expected: []const u8) !void {
+const ReplayExpect = struct {
+    expected: []const u8,
+    // Independently authored retained top-level field bytes. The byte
+    // oracle is input length (one scan debit per source byte) plus twice
+    // the retained bytes (copy read plus copy emit) plus framing.
+    retained_bytes: usize,
+    retained_count: usize,
+    // Top-level input fields; each consumes exactly one item allowance.
+    input_fields: usize,
+};
+
+fn replayWork(input_len: usize, expect: ReplayExpect) usize {
+    const commas: usize = if (expect.retained_count == 0) 0 else expect.retained_count - 1;
+    return input_len + 2 * expect.retained_bytes + 2 + commas;
+}
+
+fn runReplayCase(case: []const u8, input: []const u8, boundaries: []const u64, byte_seq: []const usize, item_seq: []const usize, expect: ReplayExpect) !void {
     var cursor = ReplayCursor{};
     const source = PartitionedSource{ .bytes = input, .boundaries = boundaries };
     var sink = TestSink.init(std.testing.allocator);
     defer sink.deinit();
     var steps: usize = 0;
-    const bound = 4 * (input.len + expected.len) + 64;
-    var total_work: usize = 0;
+    const bound = 4 * (input.len + expect.expected.len) + 64;
+    var total_bytes: usize = 0;
+    var total_items: usize = 0;
     while (true) {
         steps += 1;
-        try std.testing.expect(steps <= bound);
+        if (steps > bound) {
+            failCtx(case, input.len, boundaries, byte_seq, item_seq, steps);
+            return error.TooManySteps;
+        }
+        const byte_allowance = byte_seq[(steps - 1) % byte_seq.len];
+        const item_allowance = item_seq[(steps - 1) % item_seq.len];
+        try std.testing.expect(byte_allowance != 0 and item_allowance != 0);
         var bytes_left = byte_allowance;
         var items_left = item_allowance;
         const progress = try cursor.advance(source, &sink, &bytes_left, &items_left);
-        try std.testing.expect(bytes_left <= byte_allowance);
-        try std.testing.expect(items_left <= item_allowance);
-        total_work += (byte_allowance - bytes_left) + (item_allowance - items_left);
-        try std.testing.expect(sink.output.items.len <= expected.len + 16);
+        total_bytes += byte_allowance - bytes_left;
+        total_items += item_allowance - items_left;
+        try std.testing.expect(sink.output.items.len <= expect.expected.len + 16);
+        if (progress == .pending and bytes_left == byte_allowance) {
+            failCtx(case, input.len, boundaries, byte_seq, item_seq, steps);
+            std.debug.print("zero-progress stall phase={s} position={d}\n", .{ @tagName(cursor.phase), cursor.position });
+            return error.ZeroProgressStall;
+        }
         if (progress == .done) break;
     }
-    try std.testing.expectEqualStrings(expected, sink.output.items);
-    try std.testing.expect(total_work > 0 or expected.len == 2);
+    const expected_work = replayWork(input.len, expect);
+    if (!std.mem.eql(u8, expect.expected, sink.output.items) or total_bytes != expected_work or total_items != expect.input_fields) {
+        failCtx(case, input.len, boundaries, byte_seq, item_seq, steps);
+        std.debug.print("phase={s} position={d} emitted={d}/{d} work={d}/{d} items={d}/{d}\n", .{
+            @tagName(cursor.phase),
+            cursor.position,
+            sink.output.items.len,
+            expect.expected.len,
+            total_bytes,
+            expected_work,
+            total_items,
+            expect.input_fields,
+        });
+        try std.testing.expectEqualStrings(expect.expected, sink.output.items);
+        try std.testing.expectEqual(expected_work, total_bytes);
+        try std.testing.expectEqual(expect.input_fields, total_items);
+    }
 }
 
-fn runReplaySchedules(input: []const u8, expected: []const u8) !void {
+fn runReplaySchedules(case: []const u8, input: []const u8, expect: ReplayExpect) !void {
+    // Every single split position under constant, alternating and sawtooth
+    // byte/item sequences, varied independently of each other.
+    const byte_seqs = [_][]const usize{ &.{1}, &.{2}, &.{3}, &.{7}, &.{ 1, 7 }, &.{ 5, 2, 9 } };
+    const item_seqs = [_][]const usize{ &.{1}, &.{2}, &.{64}, &.{ 2, 1 }, &.{ 3, 64, 1 } };
     var i: usize = 0;
     while (i <= input.len) : (i += 1) {
         var boundary_storage: [1]u64 = .{@intCast(i)};
         const boundaries: []const u64 = if (i == input.len) &.{} else boundary_storage[0..];
-        for ([_]usize{ 1, 2, 3, 7 }) |byte_allowance| {
-            for ([_]usize{ 1, 2, 64 }) |item_allowance| {
-                try runReplayCase(input, boundaries, byte_allowance, item_allowance, expected);
-            }
+        for (byte_seqs, 0..) |byte_seq, k| {
+            try runReplayCase(case, input, boundaries, byte_seq, item_seqs[k % item_seqs.len], expect);
         }
     }
 }
@@ -689,16 +812,18 @@ test "request encoding fixed bytes respect one-byte allowances" {
 }
 
 test "request encoding json escapes across partitions and allowances" {
-    try runJsonSchedules("", "");
-    try runJsonSchedules("abc", "abc");
-    try runJsonSchedules("a\"b\\c", "a\\\"b\\\\c");
-    try runJsonSchedules("\x08\x0c\n\r\t", "\\b\\f\\n\\r\\t");
-    try runJsonSchedules("\x01\x0b\x1f", "\\u0001\\u000b\\u001f");
+    // Work oracle: each source byte costs one scan debit plus its emitted
+    // length (plain 1, short escape 2, \u00xx escape 6).
+    try runJsonSchedules("json empty", "", "", 0);
+    try runJsonSchedules("json plain", "abc", "abc", 6);
+    try runJsonSchedules("json escapes", "a\"b\\c", "a\\\"b\\\\c", 12);
+    try runJsonSchedules("json short escapes", "\x08\x0c\n\r\t", "\\b\\f\\n\\r\\t", 15);
+    try runJsonSchedules("json control escapes", "\x01\x0b\x1f", "\\u0001\\u000b\\u001f", 21);
     // Plain run ending immediately before an escape.
-    try runJsonSchedules("abc\"def", "abc\\\"def");
+    try runJsonSchedules("json run before escape", "abc\"def", "abc\\\"def", 15);
     // Two-, three- and four-byte UTF-8 sequences are preserved byte-wise.
-    try runJsonSchedules("é☃𝄞", "é☃𝄞");
-    try runJsonSchedules("xé\"y", "xé\\\"y");
+    try runJsonSchedules("json utf8", "é☃𝄞", "é☃𝄞", 18);
+    try runJsonSchedules("json utf8 escape", "xé\"y", "xé\\\"y", 11);
 }
 
 test "request encoding json pending escape emits under one-byte allowance" {
@@ -743,12 +868,21 @@ test "request encoding json window boundaries preserve bytes" {
     while (count < window_bytes - 1) : (count += 1) try stream.writeByte('a');
     try stream.writeAll("\\\"b\\\\");
     const expected = stream.buffered();
+    // (W-1) plain bytes at 2 each plus escapings of `"`, `b`, `\\`.
+    const expected_work: usize = 2 * (window_bytes - 1) + 3 + 2 + 3;
+    const seqs = [_][]const usize{ &.{1}, &.{ 2, 6 }, &.{7}, &.{4096}, &.{16384}, &.{ 1, 7000 }, &.{ 3, 2, 1 } };
     for ([_]usize{ window_bytes - 1, window_bytes, window_bytes + 1 }) |split| {
         const boundary = [_]u64{@intCast(split)};
-        for ([_]usize{ 1, 2, 6, 7, 4096, 16384 }) |allowance| {
-            try runJsonCase(&input, &boundary, allowance, expected);
-        }
+        for (seqs) |seq| try runJsonCase("json window split", &input, &boundary, seq, expected, expected_work);
     }
+    // Independently seeded multi-boundary partitions and allowance
+    // sequences around the window size and production allowance.
+    var seed_buf: [8]u64 = undefined;
+    const seeded = seededBoundaries(0x1ec0de01, input.len, &seed_buf);
+    var allowance_buf: [6]usize = undefined;
+    const seeded_seq = seededAllowances(0xb1e5502, &allowance_buf, 16384);
+    try runJsonCase("json window seeded", &input, seeded, seeded_seq, expected, expected_work);
+    try runJsonCase("json window seeded small", &input, seeded, &.{ 2, 1 }, expected, expected_work);
     // Multiple windows with a large deterministic payload.
     var big: [window_bytes * 2 + 17]u8 = undefined;
     for (&big, 0..) |*byte, index| byte.* = @intCast(0x61 + (index % 26));
@@ -763,30 +897,38 @@ test "request encoding json window boundaries preserve bytes" {
     for (big[window_bytes + 1 ..]) |byte| try big_stream.writeByte(byte);
     const big_expected = big_stream.buffered();
     const cuts = [_]u64{ 3, 8, 15, window_bytes - 1, window_bytes, window_bytes + 1, big.len };
-    for ([_]usize{ 1, 5, 64, 16384 }) |allowance| {
-        try runJsonCase(&big, &cuts, allowance, big_expected);
-    }
+    // Two escapings among otherwise plain bytes.
+    const big_work: usize = 2 * (big.len - 2) + 3 + 3;
+    const big_seqs = [_][]const usize{ &.{1}, &.{5}, &.{64}, &.{16384}, &.{ 7, 1 }, &.{ 4, 2, 9 } };
+    for (big_seqs) |seq| try runJsonCase("json big cuts", &big, &cuts, seq, big_expected, big_work);
+    var big_seed_buf: [10]u64 = undefined;
+    const big_seeded = seededBoundaries(0x9e3779b9, big.len, &big_seed_buf);
+    var big_allowance_buf: [5]usize = undefined;
+    const big_seeded_seq = seededAllowances(0x85ebca6b, &big_allowance_buf, 16384);
+    try runJsonCase("json big seeded", &big, big_seeded, big_seeded_seq, big_expected, big_work);
 }
 
 test "request encoding raw copies nested schema exactly" {
     const schema = "{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}},\"nested\":[1,{\"a\":\"b\\\"c\"}]}";
-    try runRawCase("", &.{}, 1);
-    try runRawCase(schema, &.{}, 1);
-    try runRawCase(schema, &.{}, 7);
+    const raw_seqs = [_][]const usize{ &.{1}, &.{7}, &.{ 1, 9 }, &.{ 3, 1, 4 } };
+    try runRawCase("raw empty", "", &.{}, &.{1});
+    for (raw_seqs) |seq| try runRawCase("raw schema unsplit", schema, &.{}, seq);
     var i: usize = 0;
     while (i <= schema.len) : (i += 1) {
         var boundary_storage: [1]u64 = .{@intCast(i)};
         const boundaries: []const u64 = if (i == schema.len) &.{} else boundary_storage[0..];
-        try runRawCase(schema, boundaries, 1);
-        try runRawCase(schema, boundaries, 2);
+        for (raw_seqs) |seq| try runRawCase("raw schema split", schema, boundaries, seq);
     }
     var window_input: [window_bytes + 1]u8 = undefined;
     @memset(&window_input, 'x');
     for ([_]usize{ window_bytes - 1, window_bytes, window_bytes + 1 }) |split| {
         const boundary = [_]u64{@intCast(split)};
-        try runRawCase(&window_input, &boundary, 1);
-        try runRawCase(&window_input, &boundary, 4096);
+        for (raw_seqs) |seq| try runRawCase("raw window split", &window_input, &boundary, seq);
     }
+    var raw_seed_buf: [6]u64 = undefined;
+    const raw_seeded = seededBoundaries(0x27d4eb2f, window_input.len, &raw_seed_buf);
+    var raw_allowance_buf: [4]usize = undefined;
+    try runRawCase("raw window seeded", &window_input, raw_seeded, seededAllowances(0x165667b1, &raw_allowance_buf, 16384));
     var cursor = RawCursor{};
     const source = ShortReadSource{ .bytes = "abcdef" };
     var sink = TestSink.init(std.testing.allocator);
@@ -820,72 +962,113 @@ test "request encoding plain runs batch writes and conserve allowance" {
 }
 
 test "request encoding replay omits only top-level created_by" {
-    try runReplaySchedules(
-        "{\"type\":\"reasoning\",\"encrypted_content\":\"opaque\",\"created_by\":\"drop\",\"extension\":{\"created_by\":\"keep\"}}",
-        "{\"type\":\"reasoning\",\"encrypted_content\":\"opaque\",\"extension\":{\"created_by\":\"keep\"}}",
-    );
-    try runReplaySchedules(
-        "{\"created_by\":\"drop\",\"type\":\"reasoning\"}",
-        "{\"type\":\"reasoning\"}",
-    );
-    try runReplaySchedules(
-        "{\"type\":\"reasoning\",\"created_by\":\"drop\"}",
-        "{\"type\":\"reasoning\"}",
-    );
-    try runReplaySchedules(
-        "{\"created_by\":\"only\"}",
-        "{}",
-    );
-    try runReplaySchedules(
-        "{\"type\":\"reasoning\",\"extension\":{\"created_by\":\"keep\"}}",
-        "{\"type\":\"reasoning\",\"extension\":{\"created_by\":\"keep\"}}",
-    );
+    // Retained byte counts name each kept field; the run will confirm them.
+    try runReplaySchedules("replay golden", "{\"type\":\"reasoning\",\"encrypted_content\":\"opaque\",\"created_by\":\"drop\",\"extension\":{\"created_by\":\"keep\"}}", .{
+        .expected = "{\"type\":\"reasoning\",\"encrypted_content\":\"opaque\",\"extension\":{\"created_by\":\"keep\"}}",
+        .retained_bytes = 18 + 28 + 33,
+        .retained_count = 3,
+        .input_fields = 4,
+    });
+    try runReplaySchedules("replay created_by first", "{\"created_by\":\"drop\",\"type\":\"reasoning\"}", .{
+        .expected = "{\"type\":\"reasoning\"}",
+        .retained_bytes = 18,
+        .retained_count = 1,
+        .input_fields = 2,
+    });
+    try runReplaySchedules("replay created_by last", "{\"type\":\"reasoning\",\"created_by\":\"drop\"}", .{
+        .expected = "{\"type\":\"reasoning\"}",
+        .retained_bytes = 18,
+        .retained_count = 1,
+        .input_fields = 2,
+    });
+    try runReplaySchedules("replay only created_by", "{\"created_by\":\"only\"}", .{
+        .expected = "{}",
+        .retained_bytes = 0,
+        .retained_count = 0,
+        .input_fields = 1,
+    });
+    try runReplaySchedules("replay nested keep", "{\"type\":\"reasoning\",\"extension\":{\"created_by\":\"keep\"}}", .{
+        .expected = "{\"type\":\"reasoning\",\"extension\":{\"created_by\":\"keep\"}}",
+        .retained_bytes = 18 + 33,
+        .retained_count = 2,
+        .input_fields = 2,
+    });
     // Escaped spelling of the key still omits the field.
-    try runReplaySchedules(
-        "{\"type\":\"reasoning\",\"cre\\u0061ted_by\":\"drop\",\"id\":\"keep\"}",
-        "{\"type\":\"reasoning\",\"id\":\"keep\"}",
-    );
+    try runReplaySchedules("replay escaped key", "{\"type\":\"reasoning\",\"cre\\u0061ted_by\":\"drop\",\"id\":\"keep\"}", .{
+        .expected = "{\"type\":\"reasoning\",\"id\":\"keep\"}",
+        .retained_bytes = 18 + 11,
+        .retained_count = 2,
+        .input_fields = 3,
+    });
     // Similar nonmatching names remain.
-    try runReplaySchedules(
-        "{\"type\":\"reasoning\",\"created_byx\":\"keep\",\"created_b\":\"keep\"}",
-        "{\"type\":\"reasoning\",\"created_byx\":\"keep\",\"created_b\":\"keep\"}",
-    );
+    try runReplaySchedules("replay similar names", "{\"type\":\"reasoning\",\"created_byx\":\"keep\",\"created_b\":\"keep\"}", .{
+        .expected = "{\"type\":\"reasoning\",\"created_byx\":\"keep\",\"created_b\":\"keep\"}",
+        .retained_bytes = 18 + 20 + 18,
+        .retained_count = 3,
+        .input_fields = 3,
+    });
 }
 
 test "request encoding replay preserves nested values and escapes" {
-    try runReplaySchedules(
-        "{\"type\":\"reasoning\",\"nested\":{\"a\":[1,2,{\"b\":null}]},\"created_by\":\"drop\"}",
-        "{\"type\":\"reasoning\",\"nested\":{\"a\":[1,2,{\"b\":null}]}}",
-    );
-    try runReplaySchedules(
-        "{\"type\":\"reasoning\",\"text\":\"a\\\"b\\\\c\",\"created_by\":\"drop\"}",
-        "{\"type\":\"reasoning\",\"text\":\"a\\\"b\\\\c\"}",
-    );
-    try runReplaySchedules(
-        "{\"type\":\"reasoning\",\"text\":\"a\\u00e9\\uD83D\\uDE00\",\"created_by\":\"drop\"}",
-        "{\"type\":\"reasoning\",\"text\":\"a\\u00e9\\uD83D\\uDE00\"}",
-    );
-    try runReplaySchedules(
-        " { \"type\" : \"reasoning\" , \"created_by\" : \"drop\" , \"id\" : 1 } ",
-        "{\"type\" : \"reasoning\",\"id\" : 1}",
-    );
-    try runReplaySchedules(
-        "{\"type\":\"reasoning\",\"a\":1}",
-        "{\"type\":\"reasoning\",\"a\":1}",
-    );
+    try runReplaySchedules("replay nested", "{\"type\":\"reasoning\",\"nested\":{\"a\":[1,2,{\"b\":null}]},\"created_by\":\"drop\"}", .{
+        .expected = "{\"type\":\"reasoning\",\"nested\":{\"a\":[1,2,{\"b\":null}]}}",
+        .retained_bytes = 18 + 31,
+        .retained_count = 2,
+        .input_fields = 3,
+    });
+    try runReplaySchedules("replay escapes", "{\"type\":\"reasoning\",\"text\":\"a\\\"b\\\\c\",\"created_by\":\"drop\"}", .{
+        .expected = "{\"type\":\"reasoning\",\"text\":\"a\\\"b\\\\c\"}",
+        .retained_bytes = 18 + 16,
+        .retained_count = 2,
+        .input_fields = 3,
+    });
+    try runReplaySchedules("replay unicode", "{\"type\":\"reasoning\",\"text\":\"a\\u00e9\\uD83D\\uDE00\",\"created_by\":\"drop\"}", .{
+        .expected = "{\"type\":\"reasoning\",\"text\":\"a\\u00e9\\uD83D\\uDE00\"}",
+        .retained_bytes = 18 + 28,
+        .retained_count = 2,
+        .input_fields = 3,
+    });
+    try runReplaySchedules("replay whitespace", " { \"type\" : \"reasoning\" , \"created_by\" : \"drop\" , \"id\" : 1 } ", .{
+        .expected = "{\"type\" : \"reasoning\",\"id\" : 1}",
+        .retained_bytes = 20 + 8,
+        .retained_count = 2,
+        .input_fields = 3,
+    });
+    try runReplaySchedules("replay primitives", "{\"type\":\"reasoning\",\"a\":1}", .{
+        .expected = "{\"type\":\"reasoning\",\"a\":1}",
+        .retained_bytes = 18 + 5,
+        .retained_count = 2,
+        .input_fields = 2,
+    });
 }
 
 test "request encoding replay invalidates scan window after retained copy" {
     // Multiple retained fields force scan-ahead, copy through the shared
     // buffer, then resume scanning from the saved source cursor.
     const input = "{\"id\":\"first-retained\",\"created_by\":\"drop\",\"second\":\"kept-value\",\"third\":{\"nested\":[1,2,3]}}";
-    const expected = "{\"id\":\"first-retained\",\"second\":\"kept-value\",\"third\":{\"nested\":[1,2,3]}}";
+    const expect: ReplayExpect = .{
+        .expected = "{\"id\":\"first-retained\",\"second\":\"kept-value\",\"third\":{\"nested\":[1,2,3]}}",
+        .retained_bytes = 21 + 21 + 26,
+        .retained_count = 3,
+        .input_fields = 4,
+    };
     const cuts = [_]u64{ 3, 8, 15, 31, 63 };
-    for ([_]usize{ 1, 2, 3, 7 }) |byte_allowance| {
-        for ([_]usize{ 1, 2, 64 }) |item_allowance| {
-            try runReplayCase(input, &cuts, byte_allowance, item_allowance, expected);
-        }
+    const cut_byte_seqs = [_][]const usize{ &.{1}, &.{ 2, 3 }, &.{7}, &.{ 4, 1 } };
+    const cut_item_seqs = [_][]const usize{ &.{1}, &.{2}, &.{64}, &.{ 3, 1 } };
+    for (cut_byte_seqs, 0..) |byte_seq, k| {
+        try runReplayCase("replay invalidation cuts", input, &cuts, byte_seq, cut_item_seqs[k % cut_item_seqs.len], expect);
     }
+    var seed_buf: [7]u64 = undefined;
+    const seeded = seededBoundaries(0x51ed2701, input.len, &seed_buf);
+    var allowance_buf: [4]usize = undefined;
+    try runReplayCase(
+        "replay invalidation seeded",
+        input,
+        seeded,
+        seededAllowances(0x0ddc0ffe, &allowance_buf, 64),
+        &.{3},
+        expect,
+    );
     var retained: [8192]u8 = undefined;
     @memset(&retained, 'r');
     var discarded: [8192]u8 = undefined;
@@ -904,41 +1087,114 @@ test "request encoding replay invalidates scan window after retained copy" {
     try expected_stream.writeAll(&retained);
     try expected_stream.writeAll("\"}");
     const large_expected = expected_stream.buffered();
+    const large_expect: ReplayExpect = .{
+        .expected = large_expected,
+        // `"type":"reasoning"` plus `"kept":"<8192 retained bytes>"`.
+        .retained_bytes = 18 + 7 + 1 + 8192 + 1,
+        .retained_count = 2,
+        .input_fields = 3,
+    };
     const large_cuts = [_]u64{ 1, 4095, 4096, 4097, 8192 };
-    for ([_]usize{ 1, 7, 4096, 16384 }) |byte_allowance| {
-        try runReplayCase(large_input, &large_cuts, byte_allowance, 64, large_expected);
+    const large_byte_seqs = [_][]const usize{ &.{1}, &.{7}, &.{4096}, &.{16384}, &.{ 100, 7 }, &.{ 3, 5000, 1 } };
+    for (large_byte_seqs) |byte_seq| {
+        try runReplayCase("replay large cuts", large_input, &large_cuts, byte_seq, &.{64}, large_expect);
     }
+    var large_seed_buf: [9]u64 = undefined;
+    const large_seeded = seededBoundaries(0x2eedb207, large_input.len, &large_seed_buf);
+    var large_allowance_buf: [5]usize = undefined;
+    // A large discarded field must charge its scan debits: removing them
+    // changes the byte oracle without changing the output bytes.
+    try runReplayCase(
+        "replay large seeded",
+        large_input,
+        large_seeded,
+        seededAllowances(0x6d79616c, &large_allowance_buf, 16384),
+        &.{ 7, 64 },
+        large_expect,
+    );
 }
 
+/// Serves full reads while scanning forward but short reads when the
+/// cursor rereads retained bytes during the copy pass.
+const ShortCopySource = struct {
+    bytes: []const u8,
+    high: u64 = 0,
+
+    pub fn contentLength(self: *ShortCopySource) u64 {
+        return self.bytes.len;
+    }
+
+    pub fn maxWindow(self: *ShortCopySource, offset: u64, wanted: usize) usize {
+        _ = self;
+        _ = offset;
+        return wanted;
+    }
+
+    pub fn readContent(self: *ShortCopySource, offset: u64, destination: []u8) !usize {
+        const start: usize = @intCast(offset);
+        if (start + destination.len > self.bytes.len) return error.RangeOutOfBounds;
+        if (offset < self.high) {
+            const short = destination.len -| 1;
+            @memcpy(destination[0..short], self.bytes[start..][0..short]);
+            return short;
+        }
+        @memcpy(destination, self.bytes[start..][0..destination.len]);
+        self.high = @max(self.high, offset + destination.len);
+        return destination.len;
+    }
+};
+
 test "request encoding replay short reads fail" {
-    var cursor = ReplayCursor{};
-    const source = ShortReadSource{ .bytes = "{\"type\":\"reasoning\"}" };
-    var sink = TestSink.init(std.testing.allocator);
-    defer sink.deinit();
-    var bytes_left: usize = 64;
-    var items_left: usize = 64;
-    const result = cursor.advance(source, &sink, &bytes_left, &items_left);
-    if (result) |_| {} else |err| {
-        try std.testing.expect(err == error.ShortCanonicalRead or err == error.UnexpectedJsonEnd);
+    // A short scan refill must fail at the exact-read boundary.
+    {
+        var cursor = ReplayCursor{};
+        const source = ShortReadSource{ .bytes = "{\"type\":\"reasoning\"}" };
+        var sink = TestSink.init(std.testing.allocator);
+        defer sink.deinit();
+        var bytes_left: usize = 64;
+        var items_left: usize = 64;
+        try std.testing.expectError(error.ShortCanonicalRead, cursor.advance(source, &sink, &bytes_left, &items_left));
+    }
+    // A short reread during the retained-field copy pass must fail there
+    // too; failing the first refill does not exercise the later read site.
+    {
+        var cursor = ReplayCursor{};
+        var source = ShortCopySource{ .bytes = "{\"type\":\"reasoning\",\"id\":\"keep\"}" };
+        var sink = TestSink.init(std.testing.allocator);
+        defer sink.deinit();
+        var bytes_left: usize = 16384;
+        var items_left: usize = 64;
+        try std.testing.expectError(error.ShortCanonicalRead, cursor.advance(&source, &sink, &bytes_left, &items_left));
     }
 }
 
 test "request encoding replay item allowance forces yields" {
     const input = "{\"a\":1,\"b\":2,\"c\":3}";
-    const expected = "{\"a\":1,\"b\":2,\"c\":3}";
+    const expect: ReplayExpect = .{
+        .expected = "{\"a\":1,\"b\":2,\"c\":3}",
+        .retained_bytes = 5 + 5 + 5,
+        .retained_count = 3,
+        .input_fields = 3,
+    };
     var cursor = ReplayCursor{};
     const source = MemorySource{ .bytes = input };
     var sink = TestSink.init(std.testing.allocator);
     defer sink.deinit();
     var yields: usize = 0;
+    var total_bytes: usize = 0;
+    var total_items: usize = 0;
     while (true) {
         var bytes_left: usize = 16384;
         var items_left: usize = 1;
         const progress = try cursor.advance(source, &sink, &bytes_left, &items_left);
+        total_bytes += 16384 - bytes_left;
+        total_items += 1 - items_left;
         if (progress == .done) break;
         yields += 1;
         try std.testing.expect(yields < 16);
     }
-    try std.testing.expectEqualStrings(expected, sink.output.items);
+    try std.testing.expectEqualStrings(expect.expected, sink.output.items);
     try std.testing.expect(yields >= 3);
+    try std.testing.expectEqual(replayWork(input.len, expect), total_bytes);
+    try std.testing.expectEqual(expect.input_fields, total_items);
 }
