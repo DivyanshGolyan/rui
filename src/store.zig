@@ -439,6 +439,46 @@ pub const HistoricalView = struct {
         std.debug.assert(self.active and self.readers == 0);
         self.active = false;
     }
+
+    /// Test/slow-check aid: outstanding borrowed readers owned by this view.
+    /// Legal checkpoint is between synchronous preparation advances, while
+    /// the preparation owner remains in final storage under the existing
+    /// single-owner discipline. No new state is maintained.
+    pub fn outstandingReaders(self: *const HistoricalView) usize {
+        return self.readers;
+    }
+
+    /// Test/slow-check aid: the view has not been closed. Reader closure
+    /// before view closure is enforced by the close-path asserts; this
+    /// exposes the committed fact for integrity checks.
+    pub fn isActive(self: *const HistoricalView) bool {
+        return self.active;
+    }
+
+    /// Test/slow-check aid: borrowed content belongs to this live view.
+    /// References are validated at open; this re-checks the committed fact
+    /// without treating notifications or hints as authority.
+    pub fn ownsContent(self: *HistoricalView, content: HistoricalContent) bool {
+        return content.belongsTo(self);
+    }
+
+    /// Test/slow-check aid: this view owns the admitted Attempt binding.
+    /// Lets preparation checks verify owner correspondence without exposing
+    /// storage rows or a generic query language.
+    pub fn bindingMatches(self: *const HistoricalView, expected: AttemptBinding) bool {
+        return self.binding.turn_id == expected.turn_id and
+            self.binding.operation_id == expected.operation_id and
+            self.binding.attempt_ordinal == expected.attempt_ordinal;
+    }
+
+    /// Test/slow-check aid: frozen settings references belong to this view.
+    pub fn ownsSettings(self: *HistoricalView, frozen: HistoricalSettings) bool {
+        if (!self.ownsContent(frozen.baseline_instructions)) return false;
+        if (frozen.output_schema) |schema| {
+            if (!self.ownsContent(schema)) return false;
+        }
+        return true;
+    }
 };
 
 pub const HistoricalReader = struct {
@@ -449,6 +489,13 @@ pub const HistoricalReader = struct {
 
     fn usable(self: *const HistoricalReader) bool {
         return self.active and self.reference.belongsTo(self.view);
+    }
+
+    /// Test/slow-check aid: this live reader is owned by the given view.
+    /// Reuses the same active/borrowed-view facts as the production read
+    /// path; introduces no registry or additional state.
+    pub fn ownedBy(self: *const HistoricalReader, view: *HistoricalView) bool {
+        return self.view == view and self.usable();
     }
 
     pub fn read(self: *HistoricalReader, start: u64, destination: []u8) !usize {

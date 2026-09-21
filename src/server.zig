@@ -408,6 +408,103 @@ const ExecutionSlot = union(enum) {
     named_scratch: NamedScratchSlot,
 };
 
+/// Execution-owned consistency checks beside ExecutionSlot. Each inspects
+/// current slot and custody facts without mutating them. The legal
+/// checkpoint is after a complete admission, preparation, completion, or
+/// cleanup transition on the execution owner, when no admission
+/// temporaries are outstanding. Payloads match by custody token, never by
+/// array index. Aggregate reconciliation runs only here, not midway
+/// through beginAdmittedAttempt or launchPreparedRequest where partially
+/// established local ownership is legitimate.
+fn slotToken(slot: *const ExecutionSlot) ?execution.CustodyToken {
+    return switch (slot.*) {
+        .free => null,
+        .model_preparing => |*active| active.token,
+        .provider => |*active| active.owner.token,
+        .bash_preparing => |*active| active.token,
+        .bash => |*active| active.token,
+        .bash_prepared_cleanup => |*retained| retained.token,
+        .cleanup => |*cleanup| cleanup.owner.token,
+        .named_scratch => |*retained| retained.token,
+    };
+}
+
+fn checkSlotCustodyAgreement(slots: []const ExecutionSlot, custody: *execution.CustodyPool) !void {
+    var represented: usize = 0;
+    for (slots, 0..) |*slot, i| {
+        switch (slot.*) {
+            .free => {},
+            .model_preparing => |*active| try custody.checkAttachedModel(active.token, active.binding),
+            .provider => |*active| try custody.checkAttachedModel(active.owner.token, active.owner.binding),
+            .bash_preparing => |*active| try custody.checkAttachedAction(active.token, active.binding),
+            // Delivery closure detaches custody while the .bash payload is
+            // retained for reclamation: open delivery requires attachment,
+            // closed delivery requires detachment plus the retained typed
+            // identity. Token-only retained owners (prepared cleanup,
+            // named scratch) keep the token-only detached check.
+            .bash => |*active| switch (active.delivery) {
+                .open => try custody.checkAttachedAction(active.token, active.binding),
+                .closed => try custody.checkDetachedAction(active.token, active.binding),
+            },
+            .bash_prepared_cleanup => |*retained| try custody.checkDetached(retained.token),
+            .cleanup => |*cleanup| try custody.checkDetachedModel(cleanup.owner.token, cleanup.owner.binding),
+            .named_scratch => |*retained| try custody.checkDetached(retained.token),
+        }
+        const token = slotToken(slot) orelse continue;
+        represented += 1;
+        for (slots[i + 1 ..]) |*later| {
+            const other = slotToken(later) orelse continue;
+            if (other.index == token.index and other.generation == token.generation) return error.DuplicateExecutionToken;
+        }
+    }
+    // Reverse reconciliation: every occupied custody record must have its
+    // owning slot in the checked population. A missing payload with live
+    // custody is capacity that can neither progress nor clean up.
+    if (represented != custody.occupied()) return error.OrphanedExecutionCustody;
+}
+
+/// Execution-owned preparation correspondence. The live preparations stay
+/// in their final storage under the existing single-owner discipline; this
+/// establishes that the preparing slots belong to those live objects, not
+/// merely that the counts agree. A null preparation must have no matching
+/// slot. For Bash only the facts its preparation owns (action identity)
+/// are compared; no second stored identity is introduced.
+fn checkSharedPreparation(
+    slots: []const ExecutionSlot,
+    model_preparation: ?*provider.Preparation,
+    bash_preparation: ?*const bash.Preparation,
+) !void {
+    var model_slot: ?store_module.AttemptBinding = null;
+    var bash_slot: ?store_module.ActionAttemptBinding = null;
+    for (slots) |*slot| switch (slot.*) {
+        .model_preparing => |*active| {
+            if (model_slot != null) return error.PreparationOwnershipMismatch;
+            model_slot = active.binding;
+        },
+        .bash_preparing => |*active| {
+            if (bash_slot != null) return error.PreparationOwnershipMismatch;
+            bash_slot = active.binding;
+        },
+        else => {},
+    };
+    if (model_preparation) |preparation| {
+        const binding = model_slot orelse return error.PreparationOwnershipMismatch;
+        try preparation.checkIntegrity(binding);
+    } else if (model_slot != null) {
+        return error.PreparationOwnershipMismatch;
+    }
+    if (bash_preparation) |preparation| {
+        const slot_binding = bash_slot orelse return error.PreparationOwnershipMismatch;
+        if (preparation.action_id != slot_binding.action_id or
+            preparation.attempt_ordinal != slot_binding.attempt_ordinal)
+        {
+            return error.PreparationOwnershipMismatch;
+        }
+    } else if (bash_slot != null) {
+        return error.PreparationOwnershipMismatch;
+    }
+}
+
 const AdmissionProgress = enum { no_work, retry_later, admitted };
 
 const LifecycleMeasurement = struct {
@@ -3383,6 +3480,482 @@ test "named scratch retry releases custody through the shutdown owner path" {
         scratch.statFile(std.testing.io, "named-owner.tmp", .{}),
     );
     try std.testing.expect(!advanceRetainedCleanup(&host, &slots, now, &retry_at));
+}
+
+test "execution slots agree with custody across the complete population" {
+    var records: [2]execution.CustodyRecord = undefined;
+    var custody = execution.CustodyPool.initialize(&records);
+
+    var model_permit = store_module.DispatchPermit{ .binding = .{
+        .turn_id = 1,
+        .operation_id = 1,
+        .attempt_ordinal = 1,
+    } };
+    const model_token = custody.reserve().?;
+    const model_binding = try custody.attach(model_token, &model_permit);
+    var action_permit = store_module.ActionDispatchPermit{ .binding = .{
+        .turn_id = 1,
+        .parent_operation_id = 1,
+        .action_id = 2,
+        .attempt_ordinal = 1,
+    } };
+    const action_token = custody.reserve().?;
+    const action_binding = try custody.attachAction(action_token, &action_permit);
+
+    var slots = [_]ExecutionSlot{
+        .{ .provider = .{ .owner = .{ .token = model_token, .binding = model_binding } } },
+        .{ .bash = .{
+            .token = action_token,
+            .binding = action_binding,
+            .execution = undefined,
+        } },
+    };
+    try checkSlotCustodyAgreement(&slots, &custody);
+
+    // A foreign binding in one payload is rejected while the other still agrees.
+    slots[0] = .{ .provider = .{ .owner = .{
+        .token = model_token,
+        .binding = .{ .turn_id = 9, .operation_id = 9, .attempt_ordinal = 9 },
+    } } };
+    try std.testing.expectError(error.ForeignLaunchAuthority, checkSlotCustodyAgreement(&slots, &custody));
+    slots[0] = .{ .provider = .{ .owner = .{ .token = model_token, .binding = model_binding } } };
+    try checkSlotCustodyAgreement(&slots, &custody);
+
+    // An occupied custody record with no owning slot is orphaned capacity:
+    // attached or detached, it must fail the whole-execution check.
+    var orphan = [_]ExecutionSlot{
+        .{ .provider = .{ .owner = .{ .token = model_token, .binding = model_binding } } },
+        .free,
+    };
+    try std.testing.expectError(error.OrphanedExecutionCustody, checkSlotCustodyAgreement(&orphan, &custody));
+    try custody.detach(action_token);
+    try std.testing.expectError(error.OrphanedExecutionCustody, checkSlotCustodyAgreement(&orphan, &custody));
+    var empty = [_]ExecutionSlot{ .free, .free };
+    try std.testing.expectError(error.OrphanedExecutionCustody, checkSlotCustodyAgreement(&empty, &custody));
+    try custody.cleanupComplete(action_token);
+    try std.testing.expectError(error.OrphanedExecutionCustody, checkSlotCustodyAgreement(&empty, &custody));
+    try custody.detach(model_token);
+    try std.testing.expectError(error.OrphanedExecutionCustody, checkSlotCustodyAgreement(&empty, &custody));
+    try custody.cleanupComplete(model_token);
+    try checkSlotCustodyAgreement(&empty, &custody);
+
+    // Two cleanup payloads on one detached token collide instead of sharing it.
+    const retoken = custody.reserve().?;
+    var repermit = store_module.DispatchPermit{ .binding = .{
+        .turn_id = 3,
+        .operation_id = 3,
+        .attempt_ordinal = 1,
+    } };
+    const rebinding = try custody.attach(retoken, &repermit);
+    try custody.detach(retoken);
+    const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+    var retained = [_]ExecutionSlot{
+        .{ .cleanup = .{ .owner = .{ .token = retoken, .binding = rebinding }, .cleanup_deadline = now } },
+        .{ .cleanup = .{ .owner = .{ .token = retoken, .binding = rebinding }, .cleanup_deadline = now } },
+    };
+    try std.testing.expectError(error.DuplicateExecutionToken, checkSlotCustodyAgreement(&retained, &custody));
+
+    // A stale payload after reuse leaves the new owner unchanged.
+    try custody.cleanupComplete(retoken);
+    const reused = custody.reserve().?;
+    var reused_permit = store_module.DispatchPermit{ .binding = .{
+        .turn_id = 2,
+        .operation_id = 2,
+        .attempt_ordinal = 1,
+    } };
+    const reused_binding = try custody.attach(reused, &reused_permit);
+    var stale = [_]ExecutionSlot{
+        .{ .provider = .{ .owner = .{ .token = retoken, .binding = rebinding } } },
+    };
+    try std.testing.expectError(error.StaleCustody, checkSlotCustodyAgreement(&stale, &custody));
+    // The complete population names the current owner: no orphan remains.
+    var current = [_]ExecutionSlot{
+        .{ .provider = .{ .owner = .{ .token = reused, .binding = reused_binding } } },
+    };
+    try checkSlotCustodyAgreement(&current, &custody);
+    try custody.detach(reused);
+    try custody.cleanupComplete(reused);
+}
+
+test "closed Bash delivery retains its payload with detached custody" {
+    var records: [2]execution.CustodyRecord = undefined;
+    var lease = platform.StoreLease{
+        .io = std.testing.io,
+        .paths = .{},
+        .store_dir = undefined,
+        .lock_file = undefined,
+    };
+    var host = Host{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .lease = &lease,
+        .store = undefined,
+        .faults = .{},
+        .custody = execution.CustodyPool.initialize(&records),
+    };
+    const token = host.custody.reserve().?;
+    var permit = store_module.ActionDispatchPermit{ .binding = .{
+        .turn_id = 1,
+        .parent_operation_id = 1,
+        .action_id = 2,
+        .attempt_ordinal = 1,
+    } };
+    const binding = try host.custody.attachAction(token, &permit);
+    var slots = [_]ExecutionSlot{
+        .{ .bash = .{
+            .token = token,
+            .binding = binding,
+            .execution = undefined,
+        } },
+    };
+    try checkSlotCustodyAgreement(&slots, &host.custody);
+
+    // The real delivery-close transition detaches custody while retaining
+    // the .bash payload for reclamation: the checker must accept it.
+    closeBashDelivery(&host, &slots[0].bash);
+    try std.testing.expect(slots[0].bash.delivery == .closed);
+    try host.custody.checkDetachedAction(token, binding);
+    try checkSlotCustodyAgreement(&slots, &host.custody);
+    // The flagged failed-reclamation state is accepted by the checker. This
+    // covers the flag value only: no failing reclaimer runs here and no Bash
+    // resources are retained through retry.
+    slots[0].bash.delivery.closed.reclaim_failed = true;
+    try checkSlotCustodyAgreement(&slots, &host.custody);
+
+    // Closed delivery with still-attached custody is the invalid shape:
+    // it must fail rather than pass as a retained payload.
+    const second = host.custody.reserve().?;
+    var second_permit = store_module.ActionDispatchPermit{ .binding = .{
+        .turn_id = 4,
+        .parent_operation_id = 4,
+        .action_id = 5,
+        .attempt_ordinal = 1,
+    } };
+    const second_binding = try host.custody.attachAction(second, &second_permit);
+    const bad = [_]ExecutionSlot{
+        .{ .bash = .{
+            .token = second,
+            .binding = second_binding,
+            .execution = undefined,
+            .delivery = .{ .closed = .{
+                .reclaim_at = std.Io.Clock.Timestamp.now(std.testing.io, .awake),
+            } },
+        } },
+        .free,
+    };
+    // Complete population: the first slot's detached token plus the bad
+    // slot's attached token account for both occupied records, so the
+    // failure below is the custody-state mismatch, not an orphan.
+    var both = [_]ExecutionSlot{ slots[0], bad[0] };
+    try std.testing.expectError(error.InvalidCustodyTransition, checkSlotCustodyAgreement(&both, &host.custody));
+    try host.custody.detach(second);
+    try host.custody.cleanupComplete(second);
+    try host.custody.cleanupComplete(token);
+    slots[0] = .free;
+    try checkSlotCustodyAgreement(&slots, &host.custody);
+}
+
+test "detached payloads keep their typed binding identity" {
+    var records: [2]execution.CustodyRecord = undefined;
+    var custody = execution.CustodyPool.initialize(&records);
+    const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+
+    var first_permit = store_module.DispatchPermit{ .binding = .{
+        .turn_id = 1,
+        .operation_id = 1,
+        .attempt_ordinal = 1,
+    } };
+    const first_token = custody.reserve().?;
+    const first_binding = try custody.attach(first_token, &first_permit);
+    var second_permit = store_module.DispatchPermit{ .binding = .{
+        .turn_id = 2,
+        .operation_id = 2,
+        .attempt_ordinal = 1,
+    } };
+    const second_token = custody.reserve().?;
+    const second_binding = try custody.attach(second_token, &second_permit);
+    try custody.detach(first_token);
+    try custody.detach(second_token);
+
+    var slots = [_]ExecutionSlot{
+        .{ .cleanup = .{ .owner = .{ .token = first_token, .binding = first_binding }, .cleanup_deadline = now } },
+        .{ .cleanup = .{ .owner = .{ .token = second_token, .binding = second_binding }, .cleanup_deadline = now } },
+    };
+    try checkSlotCustodyAgreement(&slots, &custody);
+
+    // Swap only the scalar tokens while leaving bindings unchanged. Both
+    // tokens are current, both records are detached, tokens stay unique,
+    // and the represented count still equals occupied custody: only the
+    // retained typed identity can reject this arrangement.
+    slots[0].cleanup.owner.token = second_token;
+    slots[1].cleanup.owner.token = first_token;
+    try std.testing.expectError(error.ForeignLaunchAuthority, checkSlotCustodyAgreement(&slots, &custody));
+    // Restore before cleanup so the same owners release exactly once.
+    slots[0].cleanup.owner.token = first_token;
+    slots[1].cleanup.owner.token = second_token;
+    try checkSlotCustodyAgreement(&slots, &custody);
+    try custody.cleanupComplete(first_token);
+    try custody.cleanupComplete(second_token);
+}
+
+test "closed Bash payloads keep their typed binding identity" {
+    var records: [2]execution.CustodyRecord = undefined;
+    var custody = execution.CustodyPool.initialize(&records);
+    const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+
+    var first_permit = store_module.ActionDispatchPermit{ .binding = .{
+        .turn_id = 1,
+        .parent_operation_id = 1,
+        .action_id = 1,
+        .attempt_ordinal = 1,
+    } };
+    const first_token = custody.reserve().?;
+    const first_binding = try custody.attachAction(first_token, &first_permit);
+    var second_permit = store_module.ActionDispatchPermit{ .binding = .{
+        .turn_id = 2,
+        .parent_operation_id = 2,
+        .action_id = 2,
+        .attempt_ordinal = 1,
+    } };
+    const second_token = custody.reserve().?;
+    const second_binding = try custody.attachAction(second_token, &second_permit);
+    try custody.detach(first_token);
+    try custody.detach(second_token);
+
+    var slots = [_]ExecutionSlot{
+        .{ .bash = .{
+            .token = first_token,
+            .binding = first_binding,
+            .execution = undefined,
+            .delivery = .{ .closed = .{ .reclaim_at = now } },
+        } },
+        .{ .bash = .{
+            .token = second_token,
+            .binding = second_binding,
+            .execution = undefined,
+            .delivery = .{ .closed = .{ .reclaim_at = now } },
+        } },
+    };
+    try checkSlotCustodyAgreement(&slots, &custody);
+
+    slots[0].bash.token = second_token;
+    slots[1].bash.token = first_token;
+    try std.testing.expectError(error.ForeignLaunchAuthority, checkSlotCustodyAgreement(&slots, &custody));
+    slots[0].bash.token = first_token;
+    slots[1].bash.token = second_token;
+    try checkSlotCustodyAgreement(&slots, &custody);
+    try custody.cleanupComplete(first_token);
+    try custody.cleanupComplete(second_token);
+}
+
+test "preparing slots belong to their live preparations" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    var storage = try store_module.Store.open(std.testing.io, database, root);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
+    defer directory.close(std.testing.io);
+    const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
+    var command: protocol.ConfigureCommand = .{};
+    try command.key.set("prep-belong-config");
+    try command.session.set("direct/prep-belong");
+    command.configuration.workspace.state = .value;
+    try command.configuration.workspace.value.set(workspace);
+    command.configuration.model.state = .value;
+    try command.configuration.model.value.set("model-a");
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    const file = try tmp.dir.createFile(std.testing.io, "prep-belong-message", .{ .read = true });
+    try file.writeStreamingAll(std.testing.io, "hello");
+    try file.sync(std.testing.io);
+    var message: protocol.MessageCommand = .{};
+    try message.key.set("prep-belong-key");
+    try message.session.set("direct/prep-belong");
+    message.text = .{
+        .state = .value,
+        .file = file,
+        .length = 5,
+        .digest = protocol.contentDigest("hello"),
+    };
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
+    var admitted = (try storage.admitNextModelAttempt(.{})).?;
+    const binding_a = try admitted.permit.consume();
+
+    // A live preparation for Attempt A, held in final storage under test
+    // ownership with a guard beside the acquisition.
+    const view = try storage.openHistoricalView(binding_a);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: provider.Preparation = undefined;
+    try preparation.init(std.testing.io, view, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    var preparation_active = true;
+    defer if (preparation_active) preparation.cancel();
+
+    var records: [1]execution.CustodyRecord = undefined;
+    var custody = execution.CustodyPool.initialize(&records);
+    // A valid slot/custody binding for a different Attempt B: internally
+    // consistent, but it does not belong to the live preparation.
+    const token = custody.reserve().?;
+    var permit_b = store_module.DispatchPermit{ .binding = .{
+        .turn_id = binding_a.turn_id + 100,
+        .operation_id = binding_a.operation_id + 100,
+        .attempt_ordinal = binding_a.attempt_ordinal,
+    } };
+    const binding_b = try custody.attach(token, &permit_b);
+    var mismatched = [_]ExecutionSlot{
+        .{ .model_preparing = .{ .token = token, .binding = binding_b } },
+    };
+    try checkSlotCustodyAgreement(&mismatched, &custody);
+    try std.testing.expectError(error.PreparationBindingMismatch, checkSharedPreparation(&mismatched, &preparation, null));
+
+    // The slot naming Attempt A belongs together with the live preparation.
+    var matched = [_]ExecutionSlot{
+        .{ .model_preparing = .{ .token = token, .binding = binding_a } },
+    };
+    // Re-anchor custody to A so each layer agrees before composing them.
+    try custody.detach(token);
+    try custody.cleanupComplete(token);
+    const retoken = custody.reserve().?;
+    var permit_a = store_module.DispatchPermit{ .binding = binding_a };
+    const attached_a = try custody.attach(retoken, &permit_a);
+    matched[0] = .{ .model_preparing = .{ .token = retoken, .binding = attached_a } };
+    try checkSlotCustodyAgreement(&matched, &custody);
+    try checkSharedPreparation(&matched, &preparation, null);
+
+    // No live preparation with a preparing slot, and vice versa.
+    var empty = [_]ExecutionSlot{.free};
+    try std.testing.expectError(error.PreparationOwnershipMismatch, checkSharedPreparation(&empty, &preparation, null));
+    try std.testing.expectError(error.PreparationOwnershipMismatch, checkSharedPreparation(&matched, null, null));
+    try checkSharedPreparation(&empty, null, null);
+
+    // Bash correspondence uses only the facts its preparation owns.
+    var bash_preparation = bash.Preparation{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .workspace = .{},
+        .scratch_path = root,
+        .bash_path = default_bash_path,
+        .timeout_ms = 1,
+        .action_id = 7,
+        .attempt_ordinal = 1,
+        .faults = .{},
+        .source = undefined,
+        .cleanup = .{ .scratch_path = root },
+    };
+    var bash_matched = [_]ExecutionSlot{
+        .{ .bash_preparing = .{ .token = retoken, .binding = .{
+            .turn_id = 1,
+            .parent_operation_id = 1,
+            .action_id = 7,
+            .attempt_ordinal = 1,
+        } } },
+    };
+    // Note: retoken is model-attached above, so slot/custody agreement is
+    // not asserted for this slice; only preparation correspondence is.
+    try checkSharedPreparation(&bash_matched, null, &bash_preparation);
+    bash_matched[0].bash_preparing.binding.action_id = 8;
+    try std.testing.expectError(error.PreparationOwnershipMismatch, checkSharedPreparation(&bash_matched, null, &bash_preparation));
+
+    try custody.detach(retoken);
+    try custody.cleanupComplete(retoken);
+    preparation.cancel();
+    preparation_active = false;
+}
+
+test "retained named scratch blocks its slot until the same owner reclaims" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var scratch_path_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const scratch_path_length = try tmp.dir.realPath(std.testing.io, &scratch_path_buffer);
+    var paths: platform.Paths = .{};
+    try paths.scratch.set(scratch_path_buffer[0..scratch_path_length]);
+    var lease = platform.StoreLease{
+        .io = std.testing.io,
+        .paths = paths,
+        .store_dir = undefined,
+        .lock_file = undefined,
+    };
+    var scratch = try std.Io.Dir.cwd().openDir(std.testing.io, lease.paths.scratch.slice(), .{});
+    defer scratch.close(std.testing.io);
+    const primary = try scratch.createFile(std.testing.io, "named-direct.tmp", .{ .read = true });
+    const secondary = try scratch.openFile(std.testing.io, "named-direct.tmp", .{});
+    var scratch_used: std.atomic.Value(u64) = .init(9);
+    var removal_gate: std.atomic.Value(bool) = .init(true);
+    var records: [1]execution.CustodyRecord = undefined;
+    var host = Host{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .lease = &lease,
+        .store = undefined,
+        .faults = .{},
+        .custody = execution.CustodyPool.initialize(&records),
+    };
+    const token = host.custody.reserve().?;
+    var permit = store_module.DispatchPermit{ .binding = .{
+        .turn_id = 1,
+        .operation_id = 1,
+        .attempt_ordinal = 1,
+    } };
+    const binding = try host.custody.attach(token, &permit);
+    try std.testing.expectEqual(@as(u64, 1), binding.operation_id);
+    try host.custody.detach(token);
+    var slots = [_]ExecutionSlot{.{ .named_scratch = .{
+        .token = token,
+        .owner = .init(
+            std.testing.io,
+            primary,
+            secondary,
+            "named-direct.tmp",
+            .{ .used = &scratch_used, .limit = 9 },
+            9,
+            .{ .gated = &removal_gate },
+        ),
+    } }};
+
+    // Removal blocked: the actual release caller retains the slot, the
+    // detached custody, the reservation, and the pathname. No admission
+    // can reuse that capacity.
+    const start = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+    var retry_at = start;
+    var reclaimed = false;
+    errdefer if (!reclaimed) {
+        removal_gate.store(false, .release);
+        var retry = retry_at;
+        _ = advanceRetainedCleanup(&host, &slots, retry, &retry);
+    };
+    try std.testing.expect(!advanceRetainedCleanup(&host, &slots, start, &retry_at));
+    try host.custody.checkDetached(token);
+    try checkSlotCustodyAgreement(&slots, &host.custody);
+    try checkSharedPreparation(&slots, null, null);
+    try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
+    try std.testing.expectEqual(@as(usize, 0), countFreeSlots(&slots));
+    try std.testing.expectEqual(@as(u64, 9), scratch_used.load(.acquire));
+    _ = try scratch.statFile(std.testing.io, "named-direct.tmp", .{});
+
+    // The same instant is too early for the low-frequency retry.
+    try std.testing.expect(!advanceRetainedCleanup(&host, &slots, start, &retry_at));
+
+    // After the fault clears, the same production path reclaims the owner
+    // before completing custody, and the slot becomes reusable.
+    removal_gate.store(false, .release);
+    try std.testing.expect(advanceRetainedCleanup(&host, &slots, retry_at, &retry_at));
+    reclaimed = true;
+    try host.custody.checkFree(token);
+    try checkSlotCustodyAgreement(&slots, &host.custody);
+    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    try std.testing.expectEqual(@as(usize, 1), countFreeSlots(&slots));
+    try std.testing.expectEqual(@as(u64, 0), scratch_used.load(.acquire));
+    try std.testing.expect(slots[0] == .free);
+    try std.testing.expectError(
+        error.FileNotFound,
+        scratch.statFile(std.testing.io, "named-direct.tmp", .{}),
+    );
+    try std.testing.expect(!advanceRetainedCleanup(&host, &slots, retry_at, &retry_at));
 }
 
 test "provider metadata uses shared scratch reclamation without widening its limit" {
