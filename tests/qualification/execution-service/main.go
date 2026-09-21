@@ -294,7 +294,7 @@ func main() {
 	sourceRoot, sourceErr := measurement.RepositoryRoot()
 	if sourceErr == nil {
 		for _, name := range []string{
-			"src/server.zig", "src/execution_turn.zig", "src/provider.zig", "src/cli.zig",
+			"src/server.zig", "src/execution_turn.zig", "src/bash.zig", "src/provider.zig", "src/cli.zig",
 			"tests/qualification/execution-service/main.go", "tests/qualification/execution-service/metrics.go",
 			"tests/qualification/execution-service/fixture.go",
 		} {

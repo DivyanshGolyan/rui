@@ -392,14 +392,14 @@ pub const Execution = struct {
         if (self.faults.service and !self.service_fault_used) {
             self.service_fault_used = true;
             fault = error.InjectedBashServiceFailure;
-            self.requestTermination(.infrastructure_shutdown);
+            self.requestTerminationAt(.infrastructure_shutdown, now);
         }
         var made_progress = false;
         const timeout_action = self.applyDueDeadline(now);
         if (timeout_action != null) made_progress = true;
         const leader_observed = self.observeLeader(now, source) catch |err| observed: {
             fault = fault orelse err;
-            self.requestTermination(.infrastructure_shutdown);
+            self.requestTerminationAt(.infrastructure_shutdown, now);
             break :observed false;
         };
         made_progress = leader_observed or made_progress;
@@ -551,8 +551,12 @@ pub const Execution = struct {
     }
 
     fn requestTermination(self: *Execution, reason: StopReason) void {
+        self.requestTerminationAt(reason, std.Io.Clock.Timestamp.now(self.io, .awake));
+    }
+
+    fn requestTerminationAt(self: *Execution, reason: StopReason, now: std.Io.Clock.Timestamp) void {
         if (self.stop_reason == .none) self.stop_reason = reason;
-        if (self.process == .running) self.beginGrace(std.Io.Clock.Timestamp.now(self.io, .awake));
+        if (self.process == .running) self.beginGrace(now);
     }
 
     fn beginGrace(self: *Execution, now: std.Io.Clock.Timestamp) void {
@@ -1210,11 +1214,22 @@ test "service acts on its service-time observation rather than an earlier one" {
     try std.testing.expect(idle.timeout_action == null);
     try std.testing.expect(idle.fault == null);
     try std.testing.expect(stale.process == .running);
-    // A failed observation is reported without a timeout.
+    // A failed observation is reported without a timeout, and the grace
+    // deadlines derive from the supplied service-time observation.
     var unobservable = runningWithDeadline(started, deadline);
     const failed = unobservable.serviceAt(&window, before, .failed);
     try std.testing.expect(failed.timeout_action == null);
     try std.testing.expect(failed.fault.? == error.BashObserveFailed);
+    try std.testing.expectEqual(StopReason.infrastructure_shutdown, unobservable.stop_reason);
+    const grace = unobservable.process.grace;
+    try std.testing.expectEqual(
+        before.raw.nanoseconds + termination_grace_ms * std.time.ns_per_ms,
+        grace.kill_at.raw.nanoseconds,
+    );
+    try std.testing.expectEqual(
+        before.raw.nanoseconds + cleanup_observation_ms * std.time.ns_per_ms,
+        grace.cleanup_deadline.raw.nanoseconds,
+    );
     // An observed leader retires the running state without a deadline.
     var witnessed = runningWithDeadline(started, deadline);
     const seen = witnessed.serviceAt(&window, before, .{ .observed = .{ .exited = 0 } });
