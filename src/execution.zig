@@ -507,6 +507,95 @@ test "detached custody rejects reuse until cleanup completes" {
     try std.testing.expectEqual(@as(usize, 0), pool.occupied());
 }
 
+test "bounded custody sequences preserve invariants after every operation" {
+    // Success on one record: every completed operation re-checks.
+    {
+        var records: [1]CustodyRecord = undefined;
+        var pool = CustodyPool.initialize(&records);
+        const token = pool.reserve().?;
+        try pool.checkReserved(token);
+        var permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 } };
+        const binding = try pool.attach(token, &permit);
+        try pool.checkAttachedModel(token, binding);
+        try std.testing.expect(pool.canClaimTerminalDelivery(token));
+        try pool.consumeLaunchAuthority(token, binding);
+        try pool.checkAttachedModel(token, binding);
+        try std.testing.expect(pool.claimTerminalDelivery(token));
+        try std.testing.expect(!pool.canClaimTerminalDelivery(token));
+        try pool.detach(token);
+        try pool.checkDetached(token);
+        try std.testing.expectEqual(@as(usize, 1), pool.occupied());
+        try pool.cleanupComplete(token);
+        try pool.checkFree(token);
+        try std.testing.expectEqual(@as(usize, 0), pool.occupied());
+    }
+    // Cancellation before attachment: the freed record rejects attachment
+    // without consuming the fresh permit.
+    {
+        var records: [1]CustodyRecord = undefined;
+        var pool = CustodyPool.initialize(&records);
+        const token = pool.reserve().?;
+        try pool.checkReserved(token);
+        try pool.releaseUnused(token);
+        try pool.checkFree(token);
+        var permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 2, .operation_id = 2, .attempt_ordinal = 2 } };
+        try std.testing.expectError(error.InvalidCustodyTransition, pool.attach(token, &permit));
+        try std.testing.expect(permit.available);
+        try pool.checkFree(token);
+    }
+    // Double claims then reuse: one-shot authority and delivery hold, and a
+    // stale attach after reuse leaves the new reservation untouched.
+    {
+        var records: [1]CustodyRecord = undefined;
+        var pool = CustodyPool.initialize(&records);
+        const first = pool.reserve().?;
+        var first_permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 3, .operation_id = 3, .attempt_ordinal = 3 } };
+        const first_binding = try pool.attach(first, &first_permit);
+        try pool.consumeLaunchAuthority(first, first_binding);
+        try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(first, first_binding));
+        try pool.checkAttachedModel(first, first_binding);
+        try std.testing.expect(pool.claimTerminalDelivery(first));
+        try std.testing.expect(!pool.claimTerminalDelivery(first));
+        try pool.detach(first);
+        try pool.cleanupComplete(first);
+        const second = pool.reserve().?;
+        try std.testing.expectEqual(first.index, second.index);
+        try std.testing.expectError(error.StaleCustody, pool.attach(first, &first_permit));
+        try pool.checkReserved(second);
+        var second_permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 4, .operation_id = 4, .attempt_ordinal = 4 } };
+        const second_binding = try pool.attach(second, &second_permit);
+        try pool.checkAttachedModel(second, second_binding);
+        try pool.detach(second);
+        try pool.cleanupComplete(second);
+    }
+    // Two-record interference: a consumed permit cannot attach the sibling,
+    // and detaching one record leaves the other attached.
+    {
+        var records: [2]CustodyRecord = undefined;
+        var pool = CustodyPool.initialize(&records);
+        const first = pool.reserve().?;
+        const second = pool.reserve().?;
+        var first_permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 5, .operation_id = 5, .attempt_ordinal = 5 } };
+        const first_binding = try pool.attach(first, &first_permit);
+        try std.testing.expectError(error.DispatchPermitConsumed, pool.attach(second, &first_permit));
+        try pool.checkReserved(second);
+        var second_permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 6, .operation_id = 6, .attempt_ordinal = 6 } };
+        const second_binding = try pool.attach(second, &second_permit);
+        try pool.checkAttachedModel(first, first_binding);
+        try pool.checkAttachedModel(second, second_binding);
+        try pool.detach(first);
+        try pool.checkDetached(first);
+        try std.testing.expectError(error.ForeignLaunchAuthority, pool.consumeLaunchAuthority(first, first_binding));
+        try pool.checkAttachedModel(second, second_binding);
+        try pool.cleanupComplete(first);
+        try pool.checkFree(first);
+        try pool.checkAttachedModel(second, second_binding);
+        try pool.detach(second);
+        try pool.cleanupComplete(second);
+        try std.testing.expectEqual(@as(usize, 0), pool.occupied());
+    }
+}
+
 test "stale tokens after reuse leave the new owner unchanged" {
     var records: [1]CustodyRecord = undefined;
     var pool = CustodyPool.initialize(&records);
