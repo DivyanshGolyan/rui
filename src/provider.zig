@@ -488,6 +488,42 @@ pub const Preparation = struct {
         self.active = false;
     }
 
+    /// Preparation-local integrity check. Inspects the current production
+    /// preparation without mutating it. The legal checkpoint is a stable
+    /// point between synchronous advances, while the preparation remains
+    /// in its final storage under the existing single-owner discipline.
+    /// Must not be called after cancellation or sealing: the writer is
+    /// consumed and an inactive preparation owns no request resources.
+    /// Reuses the view's reader count, borrowed-reference ownership, and
+    /// reader-active facts; no outstanding-reader registry is added.
+    pub fn checkIntegrity(self: *Preparation, expected: store.AttemptBinding) !void {
+        if (!self.active) return error.PreparationInactive;
+        if (!self.view.isActive()) return error.HistoricalViewInactive;
+        if (!self.view.bindingMatches(expected)) return error.PreparationBindingMismatch;
+        if (self.settings) |frozen| {
+            if (!self.view.ownsSettings(frozen)) return error.PreparationForeignContent;
+        }
+        var expected_readers: usize = 0;
+        switch (self.emission) {
+            .none, .fixed => {},
+            .json => |*json| {
+                if (json.reader) |*reader| {
+                    expected_readers = 1;
+                    if (!reader.ownedBy(&self.view)) return error.PreparationForeignReader;
+                }
+            },
+            .raw => |*raw| {
+                expected_readers = 1;
+                if (!raw.reader.ownedBy(&self.view)) return error.PreparationForeignReader;
+            },
+            .replay => |*replay| {
+                expected_readers = 1;
+                if (!replay.reader.ownedBy(&self.view)) return error.PreparationForeignReader;
+            },
+        }
+        if (self.view.outstandingReaders() != expected_readers) return error.PreparationReaderCountMismatch;
+    }
+
     fn closeEmission(self: *Preparation) void {
         switch (self.emission) {
             .json => |*json| json.close(),
@@ -1897,6 +1933,73 @@ test "request preparation freezes settings at admission" {
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
+test "preparation integrity follows live readers and rejects a foreign binding" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    try setup.configure("prep-integrity-config", "direct/prep-integrity");
+    const text = "y" ** 512;
+    try setup.submit("prep-integrity-file", "prep-integrity-message", "direct/prep-integrity", text);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+
+    const view = try setup.storage.openHistoricalView(binding);
+    var used: std.atomic.Value(u64) = .init(41);
+    const baseline = used.load(.acquire);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    var active = true;
+    defer {
+        if (active) preparation.cancel();
+    }
+    // Fresh preparation: active view, admitted binding, no open readers.
+    try preparation.checkIntegrity(binding);
+    try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+    const address_before = @intFromPtr(&preparation);
+
+    // Step inside the user-content emission with the same probe pattern the
+    // cancellation test uses, so the content reader is necessarily open.
+    var probe: Preparation = undefined;
+    {
+        const probe_view = try setup.storage.openHistoricalView(binding);
+        var probe_used: std.atomic.Value(u64) = .init(0);
+        var probe_retained: ?named_scratch.Owner = null;
+        try probe.init(std.testing.io, probe_view, setup.root, .{ .used = &probe_used, .limit = 8 * 1024 * 1024 }, .{}, &probe_retained);
+        const probe_result = try drainPreparation(&probe, 16, 2, 16384);
+        defer std.testing.allocator.free(probe_result.bytes);
+        const content_start = std.mem.indexOf(u8, probe_result.bytes, text).?;
+        try stepPreparationToOffset(&preparation, content_start + 100, 16384);
+    }
+    // The owner stayed at its address while borrowed; one live reader.
+    try std.testing.expectEqual(address_before, @intFromPtr(&preparation));
+    try std.testing.expectEqual(@as(usize, 1), preparation.view.outstandingReaders());
+    try preparation.checkIntegrity(binding);
+
+    // A foreign binding is rejected without disturbing the live owner.
+    const foreign = store.AttemptBinding{
+        .turn_id = binding.turn_id,
+        .operation_id = binding.operation_id + 1,
+        .attempt_ordinal = binding.attempt_ordinal,
+    };
+    try std.testing.expectError(error.PreparationBindingMismatch, preparation.checkIntegrity(foreign));
+    try preparation.checkIntegrity(binding);
+
+    // An extra outstanding reader breaks the count the emission accounts for.
+    var extra = try preparation.view.openContent(preparation.settings.?.baseline_instructions);
+    try std.testing.expectError(error.PreparationReaderCountMismatch, preparation.checkIntegrity(binding));
+    extra.close();
+    try preparation.checkIntegrity(binding);
+
+    try std.testing.expect(used.load(.acquire) > baseline);
+    preparation.cancel();
+    active = false;
+    try std.testing.expect(!preparation.active);
+    try std.testing.expectError(error.PreparationInactive, preparation.checkIntegrity(binding));
+    try std.testing.expectEqual(baseline, used.load(.acquire));
+    try std.testing.expect(retained == null);
+}
+
 test "request preparation cancellation and failure release ownership" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();
@@ -1934,6 +2037,10 @@ test "request preparation cancellation and failure release ownership" {
             const content_start = std.mem.indexOf(u8, probe_result.bytes, text).?;
             try stepPreparationToOffset(&preparation, content_start + 100, 16384);
         }
+        // Direct owner prerequisites, not just the target offset: the
+        // intended reader is active and a reservation is outstanding.
+        try preparation.checkIntegrity(binding);
+        try std.testing.expectEqual(@as(usize, 1), preparation.view.outstandingReaders());
         try std.testing.expect(used.load(.acquire) > baseline);
         preparation.cancel();
         active = false;
@@ -2023,10 +2130,14 @@ test "request preparation completed request is fenced by later stop before hando
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
     const view = try setup.storage.openHistoricalView(binding);
-    var used: std.atomic.Value(u64) = .init(0);
+    // Nonzero unrelated baseline stays stable; the sealed request owns its
+    // reservation until its recipient releases it.
+    var used: std.atomic.Value(u64) = .init(41);
+    const baseline = used.load(.acquire);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
     try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    try preparation.checkIntegrity(binding);
     // The sealed request stays owned and readable across the stop and the
     // refused handoff; only its release returns the charge.
     var request = try drainLivePreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
@@ -2035,6 +2146,11 @@ test "request preparation completed request is fenced by later stop before hando
         if (!released) request.deinit();
     }
     try std.testing.expect(request.length > 0);
+    // Sealing transfers the writer reservation to the request recipient: the
+    // total is unchanged, only the responsible owner changes, and a
+    // successful seal charges exactly the sealed bytes.
+    try std.testing.expectEqual(request.length, request.charged);
+    try std.testing.expectEqual(baseline + request.charged, used.load(.acquire));
     const readable = try request.file.length(request.io);
     try std.testing.expectEqual(request.length, readable);
 
@@ -2053,9 +2169,12 @@ test "request preparation completed request is fenced by later stop before hando
     try std.testing.expectError(error.SupersededByControl, setup.storage.withDispatchHandoff(binding, &calls, Launcher.run));
     try std.testing.expectEqual(@as(usize, 0), calls);
     try std.testing.expectEqual(request.length, try request.file.length(request.io));
+    // The refused handoff releases nothing: the live request stays readable
+    // and charged until its recipient releases it.
+    try std.testing.expectEqual(baseline + request.charged, used.load(.acquire));
     request.deinit();
     released = true;
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectEqual(baseline, used.load(.acquire));
 }
 
 test "request preparation composes replay tool results and schema" {
@@ -2103,6 +2222,10 @@ test "request preparation cancels inside schema and replay emissions" {
             if (active) preparation.cancel();
         }
         try stepPreparationToOffset(&preparation, target, 16384);
+        // Direct owner prerequisite for each emission family: the intended
+        // reader is active with a reservation outstanding.
+        try preparation.checkIntegrity(binding);
+        try std.testing.expectEqual(@as(usize, 1), preparation.view.outstandingReaders());
         try std.testing.expect(used.load(.acquire) > baseline);
         preparation.cancel();
         active = false;
