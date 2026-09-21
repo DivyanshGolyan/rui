@@ -1092,8 +1092,11 @@ def main():
             "reasoning-1",
             "message-1",
             first_answer.decode(),
-            encrypted_content="r" * 8192,
-            created_by="d" * 8192,
+            # Small retained/discarded fields keep the native replay witness
+            # (response-only `created_by` omission in the follow-up request).
+            # Large-field boundaries now live in the portable cursor corpus.
+            encrypted_content="r" * 64,
+            created_by="d" * 64,
         )
         second_sse, second_reasoning, second_message_item = sse_answer(
             "response-2", "reasoning-2", "message-2", second_answer.decode()
@@ -1158,14 +1161,12 @@ def main():
 
         # A fresh Host and client recover the original admission and answer,
         # then the same Session completes another Turn from the historical
-        # provider view.
+        # provider view. One-byte encoding and replay progress are covered by
+        # the portable cursor corpus and real-Store preparation cases, so this
+        # restart uses production allowances and witnesses recovery/handoff.
         success_host = start_host(
             success_store,
             success_url,
-            "--test-request-preparation-byte-allowance",
-            "1",
-            "--test-request-preparation-item-allowance",
-            "1",
         )
         processes.append(success_host)
         recovered_first = command(
@@ -1280,7 +1281,7 @@ def main():
             raw_reasoning = database.execute(
                 "SELECT CAST(c.payload AS TEXT) FROM model_output_item item JOIN content c ON c.content_id=item.content_id ORDER BY item.operation_id,item.item_ordinal LIMIT 1"
             ).fetchone()[0]
-            assert json.loads(raw_reasoning)["created_by"] == "d" * 8192
+            assert json.loads(raw_reasoning)["created_by"] == "d" * 64
             assert database.execute(
                 "SELECT response_id,body_model,openai_model,x_openai_model,request_id,resolution_code,usage_content_id IS NOT NULL FROM model_operation ORDER BY operation_id"
             ).fetchall() == [
@@ -2408,17 +2409,15 @@ def main():
 
         # A committed permit launches exactly one complete frozen request. The
         # endpoint holds the response so later settings and input arrive while
-        # the admitted request is demonstrably in flight.
+        # the admitted request is demonstrably in flight. Byte/item
+        # scheduling stress lives in the portable cursor corpus; this journey
+        # keeps production allowances and witnesses the frozen composition.
         store = state / "frozen-store"
         host = start_host(
             store,
             url,
             "--test-cleanup-delay-ms",
             "3000",
-            "--test-request-preparation-byte-allowance",
-            "1",
-            "--test-request-preparation-item-allowance",
-            "1",
         )
         processes.append(host)
         output_schema = {
