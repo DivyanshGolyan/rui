@@ -162,6 +162,19 @@ func parseTraces(data []byte) ([]traceEvent, error) {
 				return nil, err
 			}
 		}
+		switch e.Phase {
+		case "lifecycle_boundary":
+			if e.At == 0 {
+				return nil, fmt.Errorf("missing event time: %s", e.Phase)
+			}
+		case "preparation_started", "preparation_completed", "preparation_advance_started",
+			"preparation_advance_completed", "preparation_advance_failed",
+			"validation_started", "validation_completed", "validation_failed",
+			"settlement_lock_requested", "settlement_complete":
+			if e.At == 0 || !e.executionID.valid() {
+				return nil, fmt.Errorf("incomplete execution identity: %s", e.Phase)
+			}
+		}
 		events = append(events, e)
 	}
 	if err := scanner.Err(); err != nil {
@@ -237,6 +250,9 @@ func deriveMetrics(events []traceEvent) metrics {
 	} else {
 		m.MaxLifecycleServiceGapNS = &maxGap
 		m.LargestUninterruptedNS = &maxWork
+	}
+	if len(m.Preparation) == 0 || len(m.PreparationLifetime) == 0 {
+		invalid("preparation_work_evidence")
 	}
 	if len(m.Invalid) > 0 {
 		m.Status = "invalid"

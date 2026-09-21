@@ -1138,6 +1138,49 @@ test "a due deadline starts termination from a later service-time observation" {
     try std.testing.expectEqual(StopReason.timed_out, execution.stop_reason);
 }
 
+test "service samples a fresh clock after bounded work passes the deadline" {
+    const io = std.testing.io;
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    const deadline = started.addDuration(.{ .raw = .fromMilliseconds(20), .clock = .awake });
+    var execution = Execution{
+        .io = io,
+        .process = .{ .running = .{
+            .anchor = .{
+                .child = undefined,
+                .pgid = 0x7ffffffe,
+            },
+            .deadline = deadline,
+        } },
+        .stdout_pipe = .{ .closed = .eof },
+        .stderr_pipe = .{ .closed = .eof },
+        .stdout_capture = undefined,
+        .stderr_capture = undefined,
+        .script = undefined,
+        .scratch_path = "",
+        .started = started,
+        .faults = .{ .lifecycle = .signal },
+    };
+    // Observe touches only the leader id; point it at a pid that cannot exist
+    // so the production path fails closed instead of reading undefined memory.
+    // Signaling is faulted to a no-op above, so no real process is signaled.
+    execution.process.running.anchor.child.id = 0x7ffffffe;
+    // An earlier observation is not yet due. Production service must not reuse it.
+    const before = started.addDuration(.{ .raw = .fromMilliseconds(1), .clock = .awake });
+    try std.testing.expect(execution.applyDueDeadline(before) == null);
+    try std.testing.expect(execution.process == .running);
+    // Bounded work moves the real clock from before to after the deadline.
+    var spins: usize = 0;
+    while (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < deadline.raw.nanoseconds) : (spins += 1) {
+        if (spins > 10_000_000) return error.TestUnexpectedResult;
+    }
+    var window: [copy_window_bytes]u8 = undefined;
+    const result = execution.service(&window);
+    const timeout = result.timeout_action orelse return error.TestExpectedResult;
+    try std.testing.expectEqual(@as(u64, @intCast(deadline.raw.nanoseconds)), timeout.deadline_ns);
+    try std.testing.expect(execution.process == .grace);
+    try std.testing.expectEqual(StopReason.timed_out, execution.stop_reason);
+}
+
 test "cleanup ownership transfers consume their source" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
