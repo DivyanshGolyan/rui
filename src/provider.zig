@@ -1359,3 +1359,392 @@ test "plain JSON runs batch writes and conserve scan plus output allowance" {
     try std.testing.expectEqual(@as(usize, 0), try writePlainJsonRun(&sink, "\n", &escaped));
     try std.testing.expectEqual(@as(usize, 0), try writePlainJsonRun(&sink, "\\", &escaped));
 }
+
+const PreparationTestSetup = struct {
+    tmp: std.testing.TmpDir,
+    storage: store.Store,
+    root: []const u8,
+    root_buffer: [protocol.max_store_bytes]u8,
+    workspace_buffer: [protocol.max_workspace_bytes]u8,
+    workspace: []const u8,
+
+    fn init(self: *PreparationTestSetup) !void {
+        self.* = .{
+            .tmp = std.testing.tmpDir(.{}),
+            .storage = undefined,
+            .root = undefined,
+            .root_buffer = undefined,
+            .workspace_buffer = undefined,
+            .workspace = undefined,
+        };
+        errdefer self.tmp.cleanup();
+        const root_length = try self.tmp.dir.realPath(std.testing.io, &self.root_buffer);
+        self.root = self.root_buffer[0..root_length];
+        var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{self.root});
+        self.storage = try store.Store.open(std.testing.io, database, self.root);
+        errdefer self.storage.close() catch unreachable;
+        var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
+        defer directory.close(std.testing.io);
+        self.workspace = self.workspace_buffer[0..try directory.realPath(std.testing.io, &self.workspace_buffer)];
+    }
+
+    fn close(self: *PreparationTestSetup) void {
+        self.storage.close() catch unreachable;
+        self.tmp.cleanup();
+    }
+
+    fn configure(self: *PreparationTestSetup, key: []const u8, session: []const u8) !void {
+        var command: protocol.ConfigureCommand = .{};
+        try command.key.set(key);
+        try command.session.set(session);
+        command.configuration.workspace.state = .value;
+        try command.configuration.workspace.value.set(self.workspace);
+        command.configuration.model.state = .value;
+        try command.configuration.model.value.set("model-a");
+        try std.testing.expect(self.storage.configure(&command, .{}) == .accepted);
+    }
+
+    fn submit(self: *PreparationTestSetup, file_name: []const u8, key: []const u8, session: []const u8, text: []const u8) !void {
+        const file = try self.tmp.dir.createFile(std.testing.io, file_name, .{ .read = true });
+        try file.writeStreamingAll(std.testing.io, text);
+        try file.sync(std.testing.io);
+        var command: protocol.MessageCommand = .{};
+        try command.key.set(key);
+        try command.session.set(session);
+        command.text = .{
+            .state = .value,
+            .file = file,
+            .length = text.len,
+            .digest = protocol.contentDigest(text),
+        };
+        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+        try std.testing.expect(self.storage.submitMessage(&command, .{}) == .accepted);
+    }
+};
+
+const DrainedRequest = struct { bytes: []u8, length: u64, digest: [32]u8 };
+
+fn drainPreparation(
+    preparation: *Preparation,
+    byte_allowance: usize,
+    item_allowance: usize,
+    step_bound: usize,
+) !DrainedRequest {
+    var steps: usize = 0;
+    var last_request: u64 = 0;
+    while (true) {
+        steps += 1;
+        try std.testing.expect(steps <= step_bound);
+        var progress = preparation.advance(byte_allowance, item_allowance);
+        const stats = preparation.advanceStats();
+        try std.testing.expect(stats.work_bytes <= byte_allowance);
+        try std.testing.expect(stats.work_items <= item_allowance);
+        try std.testing.expect(stats.request_bytes >= last_request);
+        last_request = stats.request_bytes;
+        switch (progress) {
+            .pending => {
+                try std.testing.expect(preparation.active);
+            },
+            .prepared => |*request| {
+                try std.testing.expect(!preparation.active);
+                const length: usize = @intCast(request.length);
+                const bytes = try std.testing.allocator.alloc(u8, length);
+                errdefer std.testing.allocator.free(bytes);
+                const actual = try request.file.readPositionalAll(request.io, bytes, 0);
+                try std.testing.expectEqual(length, actual);
+                try std.testing.expectEqual(request.length, try request.file.length(request.io));
+                const digest = protocol.contentDigest(bytes);
+                const drained: DrainedRequest = .{ .bytes = bytes, .length = request.length, .digest = digest };
+                request.deinit();
+                return drained;
+            },
+            .failed => |err| return err,
+        }
+    }
+}
+
+test "request preparation minimal golden is exact across schedules" {
+    const expected = "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}]";
+    const full_expected = expected ++ ",\"tools\":[]}";
+    const schedules = [_][2]usize{ .{ 16, 2 }, .{ 1, 1 }, .{ 16384, 64 }, .{ 7, 3 } };
+    var first_bytes: ?[]u8 = null;
+    defer if (first_bytes) |bytes| std.testing.allocator.free(bytes);
+    for (schedules, 0..) |schedule, index| {
+        // Each schedule prepares identical logical content through an
+        // independent Store so later admissions cannot observe earlier ones.
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        try setup.configure("prep-golden-config", "direct/prep-golden");
+        // Explicit empty tool list selects no tools for an exact small envelope.
+        {
+            var update: protocol.ConfigureCommand = .{};
+            try update.key.set("prep-golden-tools");
+            try update.session.set("direct/prep-golden");
+            update.configuration.tools.state = .value;
+            update.configuration.tools.count = 0;
+            try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+        }
+        var file_name: [32]u8 = undefined;
+        const file = try std.fmt.bufPrint(&file_name, "prep-golden-file-{d}", .{index});
+        var key: [32]u8 = undefined;
+        const message_key = try std.fmt.bufPrint(&key, "prep-golden-message-{d}", .{index});
+        try setup.submit(file, message_key, "direct/prep-golden", "hi");
+        var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+        const binding = try admitted.permit.consume();
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        try std.testing.expect(retained == null);
+        const result = try drainPreparation(&preparation, schedule[0], schedule[1], 4096);
+        defer std.testing.allocator.free(result.bytes);
+        try std.testing.expectEqualStrings(full_expected, result.bytes);
+        try std.testing.expectEqual(@as(u64, full_expected.len), result.length);
+        try std.testing.expectEqual(protocol.contentDigest(full_expected), result.digest);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        if (first_bytes == null) {
+            first_bytes = try std.testing.allocator.dupe(u8, result.bytes);
+        } else {
+            try std.testing.expectEqualStrings(first_bytes.?, result.bytes);
+        }
+    }
+}
+
+test "request preparation escapes instructions and user content" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const instructions_text = "a\"b\\c\n\x01d";
+    const user_text = "u\"v\\w\x7fé";
+    {
+        const file = try setup.tmp.dir.createFile(std.testing.io, "prep-escape-instructions", .{ .read = true });
+        try file.writeStreamingAll(std.testing.io, instructions_text);
+        try file.sync(std.testing.io);
+        var command: protocol.ConfigureCommand = .{};
+        try command.key.set("prep-escape-config");
+        try command.session.set("direct/prep-escape");
+        command.configuration.workspace.state = .value;
+        try command.configuration.workspace.value.set(setup.workspace);
+        command.configuration.model.state = .value;
+        try command.configuration.model.value.set("model-a");
+        command.configuration.instructions = .{
+            .state = .value,
+            .file = file,
+            .length = instructions_text.len,
+            .digest = protocol.contentDigest(instructions_text),
+        };
+        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+        try std.testing.expect(setup.storage.configure(&command, .{}) == .accepted);
+    }
+    try setup.submit("prep-escape-file", "prep-escape-message", "direct/prep-escape", user_text);
+
+    var admission = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admission.permit.consume();
+    const view = try setup.storage.openHistoricalView(binding);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    const first = try drainPreparation(&preparation, 2, 2, 4096);
+    defer std.testing.allocator.free(first.bytes);
+    try setup.storage.settleModelAttemptFailure(binding, "prep_escape_release", .terminal, .{});
+
+    // Independent escape expectations: quotes, backslashes, newline and
+    // control bytes use short or \u00xx forms; UTF-8 bytes pass through.
+    try std.testing.expect(std.mem.indexOf(u8, first.bytes, "a\\\"b\\\\c\\n\\u0001d") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.bytes, "u\\\"v\\\\w\x7fé") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.bytes, instructions_text) == null);
+
+    _ = (try setup.storage.admitNextModelAttempt(.{}));
+    // The terminal settlement above leaves no resumable work; re-establish a
+    // second session carrying the same bytes to check schedule equality.
+    var setup_two: PreparationTestSetup = undefined;
+    try setup_two.init();
+    defer setup_two.close();
+    {
+        const file = try setup_two.tmp.dir.createFile(std.testing.io, "prep-escape2-instructions", .{ .read = true });
+        try file.writeStreamingAll(std.testing.io, instructions_text);
+        try file.sync(std.testing.io);
+        var command: protocol.ConfigureCommand = .{};
+        try command.key.set("prep-escape2-config");
+        try command.session.set("direct/prep-escape2");
+        command.configuration.workspace.state = .value;
+        try command.configuration.workspace.value.set(setup_two.workspace);
+        command.configuration.model.state = .value;
+        try command.configuration.model.value.set("model-a");
+        command.configuration.instructions = .{
+            .state = .value,
+            .file = file,
+            .length = instructions_text.len,
+            .digest = protocol.contentDigest(instructions_text),
+        };
+        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+        try std.testing.expect(setup_two.storage.configure(&command, .{}) == .accepted);
+    }
+    try setup_two.submit("prep-escape2-file", "prep-escape2-message", "direct/prep-escape2", user_text);
+    var admitted_two = (try setup_two.storage.admitNextModelAttempt(.{})).?;
+    const binding_two = try admitted_two.permit.consume();
+    const view_two = try setup_two.storage.openHistoricalView(binding_two);
+    var used_two: std.atomic.Value(u64) = .init(0);
+    var retained_two: ?named_scratch.Owner = null;
+    var preparation_two: Preparation = undefined;
+    try preparation_two.init(std.testing.io, view_two, setup_two.root, .{ .used = &used_two, .limit = 8 * 1024 * 1024 }, .{}, &retained_two);
+    const second = try drainPreparation(&preparation_two, 1, 1, 8192);
+    defer std.testing.allocator.free(second.bytes);
+    try std.testing.expectEqualStrings(first.bytes, second.bytes);
+}
+
+test "request preparation frozen selection excludes later messages" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    try setup.configure("prep-frozen-config", "direct/prep-frozen");
+    try setup.submit("prep-frozen-first-file", "prep-frozen-first", "direct/prep-frozen", "first");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    const view = try setup.storage.openHistoricalView(binding);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    // Advance partially, then apply legal later Store changes while the
+    // admitted historical view stays frozen.
+    var partial: usize = 0;
+    while (partial < 2) : (partial += 1) {
+        const progress = preparation.advance(16, 2);
+        try std.testing.expect(progress == .pending);
+    }
+    try setup.submit("prep-frozen-second-file", "prep-frozen-second", "direct/prep-frozen", "second");
+    {
+        var update: protocol.ConfigureCommand = .{};
+        try update.key.set("prep-frozen-reconfig");
+        try update.session.set("direct/prep-frozen");
+        update.configuration.model.state = .value;
+        try update.configuration.model.value.set("model-a");
+        try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+    }
+    const result = try drainPreparation(&preparation, 16, 2, 4096);
+    defer std.testing.allocator.free(result.bytes);
+    try std.testing.expect(std.mem.indexOf(u8, result.bytes, "first") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.bytes, "second") == null);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "request preparation cancellation and failure release ownership" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    try setup.configure("prep-owner-config", "direct/prep-owner");
+    const text = "x" ** 512;
+    try setup.submit("prep-owner-file", "prep-owner-message", "direct/prep-owner", text);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+
+    // Cancellation mid-preparation closes readers before the view and
+    // returns this preparation's charges to the starting baseline.
+    {
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(7);
+        const baseline = used.load(.acquire);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        try std.testing.expect(preparation.advance(16, 2) == .pending);
+        try std.testing.expect(used.load(.acquire) >= baseline);
+        preparation.cancel();
+        try std.testing.expect(!preparation.active);
+        try std.testing.expectEqual(baseline, used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+
+    // First-step initialization failure owns nothing.
+    {
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try std.testing.expectError(error.InjectedFirstPreparationFailure, preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{ .first_step = true }, &retained));
+        try std.testing.expect(retained == null);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
+
+    // Write and seal faults surface through advance and release on cancel.
+    for ([_]PreparationFaults{ .{ .write = true }, .{ .seal = true } }) |faults| {
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, faults, &retained);
+        var seen_failure: ?anyerror = null;
+        var steps: usize = 0;
+        while (steps < 4096) : (steps += 1) {
+            var progress = preparation.advance(64, 8);
+            switch (progress) {
+                .pending => {},
+                .prepared => |*request| {
+                    request.deinit();
+                    break;
+                },
+                .failed => |err| {
+                    seen_failure = err;
+                    break;
+                },
+            }
+        }
+        try std.testing.expect(seen_failure != null);
+        // Failed writes retain the complete reservation, which may exceed the
+        // successfully written prefix; cancellation still releases it once.
+        preparation.cancel();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
+
+    // Unlink faults retain actionable custody until reclamation is confirmed.
+    {
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try std.testing.expectError(error.InjectedRequestUnlinkFailure, preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{ .unlink = true }, &retained));
+        try std.testing.expect(retained != null);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        // Unconfirmed removal retains custody; the injected gate keeps
+        // reclamation retryable rather than releasing handles here.
+        try std.testing.expectError(error.InjectedScratchRemovalFailure, retained.?.reclaim(setup.root));
+    }
+}
+
+test "request preparation completed request is fenced by later stop before handoff" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    try setup.configure("prep-fence-config", "direct/prep-fence");
+    try setup.submit("prep-fence-file", "prep-fence-message", "direct/prep-fence", "work");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    const view = try setup.storage.openHistoricalView(binding);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+    const result = try drainPreparation(&preparation, preparation_byte_allowance, preparation_item_allowance, 4096);
+    defer std.testing.allocator.free(result.bytes);
+    try std.testing.expect(result.bytes.len > 0);
+
+    // A sealed request is not dispatch permission: a stop accepted after
+    // preparation but before handoff refuses the launch callback.
+    var stop: protocol.SessionStopCommand = .{};
+    try stop.key.set("prep-fence-stop");
+    try stop.session.set("direct/prep-fence");
+    try std.testing.expect(setup.storage.stopSession(&stop, .{}) == .accepted);
+    const Launcher = struct {
+        fn run(calls: *usize) !void {
+            calls.* += 1;
+        }
+    };
+    var calls: usize = 0;
+    try std.testing.expectError(error.SupersededByControl, setup.storage.withDispatchHandoff(binding, &calls, Launcher.run));
+    try std.testing.expectEqual(@as(usize, 0), calls);
+}
