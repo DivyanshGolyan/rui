@@ -280,6 +280,13 @@ pub const PreparedCleanup = struct {
             &self.stderr_capture,
         );
     }
+
+    /// Test/slow-check aid: no file in this cleanup remains unreclaimed.
+    /// Partial success nulls reclaimed slots and retains the rest with
+    /// their residual charges; only a complete pass satisfies this.
+    pub fn isComplete(self: *const PreparedCleanup) bool {
+        return self.script == null and self.stdout_capture == null and self.stderr_capture == null;
+    }
 };
 
 pub const PreparationFailure = struct {
@@ -458,6 +465,14 @@ pub const Execution = struct {
 
     pub fn retired(self: *const Execution) bool {
         return self.process == .gone and pipeClosed(self.stdout_pipe) and pipeClosed(self.stderr_pipe);
+    }
+
+    /// Test/slow-check aid: the process is gone and both pipes are closed.
+    /// Capture and script cleanup may still remain outstanding; retirement
+    /// never claims reclamation. Lets tests verify the precondition
+    /// without tripping the reclaim assertion.
+    pub fn checkRetired(self: *const Execution) !void {
+        if (!self.retired()) return error.BashNotRetired;
     }
 
     pub fn reserveOutput(self: *Execution, retention: *output_retention.Queue) !bool {
@@ -1274,6 +1289,160 @@ test "cleanup ownership transfers consume their source" {
     try std.testing.expect(cleanup.script == null);
     try std.testing.expect(cleanup.stdout_capture == null);
     try std.testing.expect(cleanup.stderr_capture == null);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "prepared cleanup reclaims partially and retries through the same owner" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 6 };
+    try std.testing.expect(budget.reserve(6));
+    var cleanup = PreparedCleanup{
+        .scratch_path = root,
+        .script = try createOwnedFile(std.testing.io, root, budget, "script", 1, 1, .none),
+        .stdout_capture = try createOwnedFile(std.testing.io, root, budget, "stdout", 1, 1, .persistent),
+        .stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", 1, 1, .none),
+    };
+    cleanup.script.?.charged = 1;
+    cleanup.stdout_capture.?.charged = 2;
+    cleanup.stderr_capture.?.charged = 3;
+    var complete = false;
+    errdefer if (!complete) {
+        if (cleanup.stdout_capture) |*file| file.cleanup_fault = .none;
+        cleanup.cleanup() catch {};
+    };
+    // One file fails while the others reclaim: only the residual charge
+    // stays with the same owner. Bash removal failure does not retain the
+    // same descriptor set as named-scratch failure: the failed descriptor
+    // is already closed here.
+    try std.testing.expectError(error.InjectedBashCleanupFailure, cleanup.cleanup());
+    try std.testing.expect(cleanup.script == null);
+    try std.testing.expect(cleanup.stdout_capture != null);
+    try std.testing.expect(cleanup.stdout_capture.?.file == null);
+    try std.testing.expect(cleanup.stderr_capture == null);
+    try std.testing.expect(!cleanup.isComplete());
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    // Retry through the same owner releases the residual exactly once.
+    cleanup.stdout_capture.?.cleanup_fault = .none;
+    try cleanup.cleanup();
+    complete = true;
+    try std.testing.expect(cleanup.isComplete());
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "an owned file closes its descriptor before reporting removal failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 2 };
+    try std.testing.expect(budget.reserve(2));
+    var file = try createOwnedFile(std.testing.io, root, budget, "owned", 1, 1, .persistent);
+    file.charged = 2;
+    // The fault strikes after the descriptor closes: the handle is gone
+    // while the charge and the pathname stay with the owner.
+    try std.testing.expectError(error.InjectedBashCleanupFailure, file.cleanup(root));
+    try std.testing.expect(file.file == null);
+    try std.testing.expect(!file.published);
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    // An absent private name establishes reclamation once the fault clears:
+    // descriptor closure and pathname removal are distinct facts.
+    file.cleanup_fault = .none;
+    var scratch = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{});
+    defer scratch.close(std.testing.io);
+    try scratch.deleteFile(std.testing.io, file.name.slice());
+    try file.cleanup(root);
+    try std.testing.expect(file.published);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "retired execution is independent of outstanding capture reclamation" {
+    const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
+    var execution = Execution{
+        .io = std.testing.io,
+        .process = .{ .gone = .{ .exited = 0 } },
+        .stdout_pipe = .{ .closed = .eof },
+        .stderr_pipe = .{ .closed = .eof },
+        .stdout_capture = undefined,
+        .stderr_capture = undefined,
+        .script = undefined,
+        .scratch_path = "",
+        .started = started,
+        .faults = .{},
+    };
+    // Gone with both pipes closed retires even though capture and script
+    // cleanup remain outstanding.
+    try std.testing.expect(execution.retired());
+    try execution.checkRetired();
+    // A running process is not retired regardless of closed pipes, and
+    // delivery state never substitutes for this ownership fact.
+    execution.process = .{ .running = .{
+        .anchor = .{
+            .child = undefined,
+            .pgid = 1,
+        },
+        .deadline = started,
+    } };
+    try std.testing.expect(!execution.retired());
+    try std.testing.expectError(error.BashNotRetired, execution.checkRetired());
+}
+
+test "output publication closes producer aliases before making output evictable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 6 };
+    var entries: [2]output_retention.Entry = undefined;
+    var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
+    defer retention.cleanupAll();
+    try std.testing.expect(budget.reserve(6));
+    const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
+    var execution = Execution{
+        .io = std.testing.io,
+        .process = .{ .gone = .{ .exited = 0 } },
+        .stdout_pipe = .{ .closed = .eof },
+        .stderr_pipe = .{ .closed = .eof },
+        .stdout_capture = try createOwnedFile(std.testing.io, root, budget, "stdout", 1, 1, .none),
+        .stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", 1, 1, .none),
+        .script = try createOwnedFile(std.testing.io, root, budget, "script", 1, 1, .none),
+        .scratch_path = root,
+        .started = started,
+        .faults = .{},
+    };
+    execution.stdout_capture.charged = 2;
+    execution.stderr_capture.charged = 2;
+    execution.script.charged = 2;
+    var done = false;
+    errdefer if (!done) {
+        execution.releaseOutputReservation(&retention);
+        execution.stdout_capture.cleanup(root) catch {};
+        execution.stderr_capture.cleanup(root) catch {};
+        execution.script.cleanup(root) catch {};
+    };
+    try execution.checkRetired();
+    // Reserving output records entry charges without touching scratch bytes.
+    try std.testing.expect(try execution.reserveOutput(&retention));
+    try std.testing.expect(execution.output_reservation != null);
+    try std.testing.expectEqual(@as(u64, 6), used.load(.acquire));
+    // Reclaim closes producer aliases first, then publishes: the names
+    // become reclaimable only after the aliases close.
+    try execution.reclaim(&retention);
+    done = true;
+    try std.testing.expect(execution.stdout_capture.file == null);
+    try std.testing.expect(execution.stderr_capture.file == null);
+    try std.testing.expect(execution.stdout_capture.published);
+    try std.testing.expect(execution.stderr_capture.published);
+    try std.testing.expectEqual(@as(u64, 4), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), retention.occupied());
+    // The published output is evictable through the ordinary queue path.
+    retention.cleanupAll();
+    try std.testing.expectEqual(@as(usize, 0), retention.occupied());
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
