@@ -1313,8 +1313,9 @@ test "cleanup ownership transfers consume their source" {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
     const root = root_buffer[0..root_length];
-    var used: std.atomic.Value(u64) = .init(0);
-    const budget = ScratchBudget{ .used = &used, .limit = 6 };
+    const baseline: u64 = 41;
+    var used: std.atomic.Value(u64) = .init(baseline);
+    const budget = ScratchBudget{ .used = &used, .limit = baseline + 6 };
     try std.testing.expect(budget.reserve(6));
     var prepared = Prepared{
         .io = std.testing.io,
@@ -1337,13 +1338,13 @@ test "cleanup ownership transfers consume their source" {
     try std.testing.expect(prepared.stdout_capture == null);
     try std.testing.expect(prepared.stderr_capture == null);
     try prepared.cleanup();
-    try std.testing.expectEqual(@as(u64, 6), used.load(.acquire));
+    try std.testing.expectEqual(baseline + 6, used.load(.acquire));
 
     try cleanup.cleanup();
     try std.testing.expect(cleanup.script == null);
     try std.testing.expect(cleanup.stdout_capture == null);
     try std.testing.expect(cleanup.stderr_capture == null);
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectEqual(baseline, used.load(.acquire));
 }
 
 test "prepared cleanup reclaims partially and retries through the same owner" {
@@ -1351,8 +1352,9 @@ test "prepared cleanup reclaims partially and retries through the same owner" {
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var used: std.atomic.Value(u64) = .init(0);
-    const budget = ScratchBudget{ .used = &used, .limit = 6 };
+    const baseline: u64 = 41;
+    var used: std.atomic.Value(u64) = .init(baseline);
+    const budget = ScratchBudget{ .used = &used, .limit = baseline + 6 };
     try std.testing.expect(budget.reserve(6));
     // Acquire each file before installing the aggregate guard: a later
     // acquisition failure must not leave earlier files unguarded. The
@@ -1390,13 +1392,13 @@ test "prepared cleanup reclaims partially and retries through the same owner" {
     try std.testing.expect(cleanup.stdout_capture.?.file == null);
     try std.testing.expect(cleanup.stderr_capture == null);
     try std.testing.expect(!cleanup.isComplete());
-    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(baseline + 2, used.load(.acquire));
     // Retry through the same owner releases the residual exactly once.
     cleanup.stdout_capture.?.cleanup_fault = .none;
     try cleanup.cleanup();
     complete = true;
     try std.testing.expect(cleanup.isComplete());
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectEqual(baseline, used.load(.acquire));
 }
 
 test "an owned file closes its descriptor before reporting removal failure" {

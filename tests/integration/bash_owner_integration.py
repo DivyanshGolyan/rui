@@ -255,6 +255,17 @@ def main():
         )
         assert "stdout tail:\ncurrent" in second_result, second_result
         assert "Full output was not retained." in second_result, second_result
+        # Optional retention failure occurs after canonical settlement. Both
+        # saved answers must remain byte-identical when read again; neither
+        # the failed eviction nor the unavailable new paths may rewrite them.
+        assert (
+            bash_fixture.result_text(retention_store, "direct/retention-first")
+            == first_result
+        )
+        assert (
+            bash_fixture.result_text(retention_store, "direct/retention-second")
+            == second_result
+        )
         after = fixture.wait_for(
             lambda: bash_fixture.execution_custody_idle(
                 retention_store, "direct/retention-second"

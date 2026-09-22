@@ -5504,7 +5504,9 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(insert);
         try bindBlob(insert, 1, &content.digest);
         try bindU64(insert, 2, content.length);
-        try expectDone(insert);
+        const insert_result = c.sqlite3_step(insert);
+        if (insert_result == c.SQLITE_FULL) return error.CanonicalStorageFull;
+        if (insert_result != c.SQLITE_DONE) return error.StatementFailed;
         const content_id = c.sqlite3_last_insert_rowid(self.database);
         if (content_id <= 0) return error.ContentWriteFailed;
 
@@ -8850,6 +8852,121 @@ test "failed commit saves neither answer nor partial Session" {
     }
 }
 
+test "real SQLite busy saves no answer and fences the connection" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+    const database = try std.fmt.bufPrintZ(&database_buffer, "{s}/store.sqlite3", .{root});
+    var storage = try Store.open(std.testing.io, database, root);
+    var storage_open = true;
+    defer if (storage_open) storage.close() catch unreachable;
+
+    var blocker: ?*c.sqlite3 = null;
+    try std.testing.expectEqual(
+        @as(c_int, c.SQLITE_OK),
+        c.sqlite3_open_v2(
+            database.ptr,
+            &blocker,
+            c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_NOMUTEX,
+            null,
+        ),
+    );
+    var blocker_open = true;
+    defer if (blocker_open) {
+        _ = c.sqlite3_close(blocker);
+    };
+    try std.testing.expectEqual(
+        @as(c_int, c.SQLITE_OK),
+        c.sqlite3_exec(blocker, "BEGIN IMMEDIATE", null, null, null),
+    );
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration(
+        "busy-save",
+        "direct/busy-save",
+        workspace,
+        "model-a",
+    );
+    try std.testing.expect(storage.configure(&command, .{}) == .infrastructure_failure);
+    try std.testing.expectEqual(
+        @as(c_int, c.SQLITE_BUSY),
+        c.sqlite3_extended_errcode(storage.database),
+    );
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectError(error.StoreFenced, storage.observeCommand("busy-save"));
+
+    try std.testing.expectEqual(
+        @as(c_int, c.SQLITE_OK),
+        c.sqlite3_exec(blocker, "ROLLBACK", null, null, null),
+    );
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_close(blocker));
+    blocker_open = false;
+    try storage.close();
+    storage_open = false;
+
+    var reopened = try Store.open(std.testing.io, database, root);
+    defer reopened.close() catch unreachable;
+    try std.testing.expect((try reopened.observeCommand("busy-save")).status == .absent);
+    try std.testing.expect(!(try reopened.inspectSession("direct/busy-save")).found);
+}
+
+test "real SQLite full during import publishes no canonical prefix" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    var storage_open = true;
+    defer if (storage_open) storage.close() catch unreachable;
+
+    const page_count = try pragmaInt(storage.database, "PRAGMA page_count");
+    var limit_buffer: [64:0]u8 = undefined;
+    const limit = try std.fmt.bufPrintZ(&limit_buffer, "PRAGMA max_page_count={d}", .{page_count});
+    try exec(storage.database, limit);
+    try std.testing.expectEqual(page_count, try pragmaInt(storage.database, "PRAGMA max_page_count"));
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration(
+        "full-import",
+        "direct/full-import",
+        workspace,
+        "model-a",
+    );
+    command.configuration.instructions = try testingContent(
+        &tmp,
+        "full-import-content",
+        'x',
+        128 * 1024,
+    );
+    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+
+    // Drive the production transaction body directly so the test observes
+    // the exact import-step result before the public wrapper maps it. SQLite
+    // automatically rolls this FULL transaction back; then apply the wrapper's
+    // failure transition and verify its fence/reopen consequences below.
+    try std.testing.expectError(
+        error.CanonicalStorageFull,
+        storage.configureLocked(&command, .{}),
+    );
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+    storage.finishTransactionFailure(.{});
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectError(error.StoreFenced, storage.observeCommand("full-import"));
+    try storage.close();
+    storage_open = false;
+
+    var reopened = try testingStore(&tmp, std.testing.io);
+    defer reopened.close() catch unreachable;
+    try std.testing.expect((try reopened.observeCommand("full-import")).status == .absent);
+    try std.testing.expect(!(try reopened.inspectSession("direct/full-import")).found);
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(
+        reopened.database,
+        "SELECT count(*) FROM content WHERE byte_length=131072",
+    ));
+}
+
 test "message admissions remain queued in order and retain bounded canonical content" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -9253,6 +9370,12 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expect(diagnostic.process_memory_highwater_bytes != null);
     try std.testing.expect(diagnostic.cache_used_bytes != null);
     try std.testing.expect(diagnostic.cache_spills != null);
+    // Readback alone would only prove configuration. A single SQLite-owned
+    // allocation larger than the process-global hard ceiling must be denied
+    // by the pinned library while this Store owns the configured limit.
+    const over_limit = c.sqlite3_malloc64(sqlite_heap_bytes + 1);
+    defer c.sqlite3_free(over_limit);
+    try std.testing.expect(over_limit == null);
 }
 
 test "maximum canonical Store path completes a journaled transaction" {

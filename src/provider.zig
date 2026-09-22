@@ -1246,6 +1246,14 @@ test "request writer failure retains the full reservation until the owner releas
     try std.testing.expectEqual(@as(u64, 5), writer.offset);
     try std.testing.expectEqual(@as(u64, 12), writer.charged);
     try std.testing.expectEqual(@as(u64, 53), used.load(.acquire));
+    // Crossing the remaining shared limit is rejected before either the
+    // injected write seam or the real file sees the slice. The successful
+    // offset, submitted reservation, and file length all stay unchanged.
+    try std.testing.expectError(error.RequestScratchExhausted, writer.write("x" ** 48));
+    try std.testing.expectEqual(@as(u64, 5), writer.offset);
+    try std.testing.expectEqual(@as(u64, 12), writer.charged);
+    try std.testing.expectEqual(@as(u64, 53), used.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 5), try writer.file.length(std.testing.io));
     writer.deinit();
     writer_owned = false;
     try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));

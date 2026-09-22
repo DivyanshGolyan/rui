@@ -469,6 +469,36 @@ test "zero-byte retained files occupy entries without occupying scratch bytes" {
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
+test "entry capacity evicts zero-byte output while byte capacity remains spare" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 10 };
+    var entries: [2]Entry = undefined;
+    var queue = Queue.initialize(std.testing.io, root, budget, &entries);
+    defer queue.cleanupAll();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty-out", .data = "" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty-err", .data = "" });
+    try std.testing.expect(try queue.retainPair("empty-out", 0, "empty-err", 0));
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+
+    // A second protected pair needs entries, not bytes. It evicts both old
+    // zero-byte names even though all ten scratch bytes remain available.
+    const replacement = (try queue.reservePair("new-out", 0, "new-err", 0)).?;
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "empty-out", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "empty-err", .{}));
+    queue.releaseReservation(replacement.stdout);
+    queue.releaseReservation(replacement.stderr);
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
 test "failed eviction retains its charge until the same queue retries successfully" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -502,4 +532,56 @@ test "failed eviction retains its charge until the same queue retries successful
     queue.cleanupAll();
     try std.testing.expectEqual(@as(usize, 0), queue.occupied());
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "partial retained cleanup keeps only the exact residual owner and charge" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    const baseline: u64 = 41;
+    const blocked_charge: u64 = 3;
+    const removable_charge: u64 = 5;
+    var used = std.atomic.Value(u64).init(baseline);
+    const budget = ScratchBudget{ .used = &used, .limit = 64 };
+    var entries: [2]Entry = undefined;
+    var queue = Queue.initialize(std.testing.io, root, budget, &entries);
+    defer queue.cleanupAll();
+
+    // A directory at one retained pathname makes that removal unconfirmed,
+    // while the sibling is an ordinary file that can be reclaimed.
+    try tmp.dir.createDir(std.testing.io, "blocked", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "removable", .data = "value" });
+    try std.testing.expect(budget.reserve(blocked_charge + removable_charge));
+    try std.testing.expect(try queue.retainPair(
+        "blocked",
+        blocked_charge,
+        "removable",
+        removable_charge,
+    ));
+    try std.testing.expectEqual(
+        baseline + blocked_charge + removable_charge,
+        used.load(.acquire),
+    );
+
+    queue.cleanupAll();
+    try std.testing.expectEqual(@as(usize, 1), queue.occupied());
+    try std.testing.expectEqual(baseline + blocked_charge, used.load(.acquire));
+    try std.testing.expectEqual(State.failed, entries[0].state);
+    try std.testing.expectEqualStrings("blocked", entries[0].name.slice());
+    try std.testing.expectEqual(blocked_charge, entries[0].charged);
+    try std.testing.expectEqual(State.free, entries[1].state);
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, "removable", .{}),
+    );
+
+    // Clearing the obstruction lets the same queue observe absence and
+    // release its one residual entry and charge exactly once.
+    try tmp.dir.deleteDir(std.testing.io, "blocked");
+    queue.cleanupAll();
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    try std.testing.expectEqual(baseline, used.load(.acquire));
+    queue.cleanupAll();
+    try std.testing.expectEqual(baseline, used.load(.acquire));
 }
