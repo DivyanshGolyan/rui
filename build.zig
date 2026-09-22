@@ -116,6 +116,15 @@ pub fn build(b: *std.Build) void {
     );
     control_integration_step.dependOn(&control_integration.step);
 
+    const descriptor_capacity_integration = b.addSystemCommand(&.{"python3"});
+    descriptor_capacity_integration.addFileArg(b.path("tests/integration/descriptor_capacity_integration.py"));
+    descriptor_capacity_integration.addArtifactArg(release_safe);
+    const descriptor_capacity_integration_step = b.step(
+        "descriptor-capacity-integration",
+        "Run reduced-limit startup rejection and adequate-limit fill/drain cases",
+    );
+    descriptor_capacity_integration_step.dependOn(&descriptor_capacity_integration.step);
+
     const debug = addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
     const debug_integration = b.addSystemCommand(&.{"sh"});
     debug_integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
