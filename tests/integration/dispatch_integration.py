@@ -399,7 +399,7 @@ def finish_command(process):
     return json.loads(stdout)
 
 
-def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacity=1):
+def host_arguments(store, endpoint, *extra, accelerated_retries=True, active_capacity=1):
     args = [
         str(RUI),
         "serve",
@@ -413,6 +413,17 @@ def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacit
         if accelerated_retries:
             args += ["--test-retry-waits-ms", "50,100,150"]
     args += extra
+    return args
+
+
+def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacity=1):
+    args = host_arguments(
+        store,
+        endpoint,
+        *extra,
+        accelerated_retries=accelerated_retries,
+        active_capacity=active_capacity,
+    )
     process, _ = start_ready_process(
         args,
         required_fields=(

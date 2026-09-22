@@ -70,6 +70,16 @@ pub fn build(b: *std.Build) void {
     );
     bash_integration_step.dependOn(&bash_integration.step);
 
+    const bash_walkthrough = b.addSystemCommand(&.{"python3"});
+    bash_walkthrough.addFileArg(b.path("tests/integration/bash_integration.py"));
+    bash_walkthrough.addArtifactArg(release_safe);
+    bash_walkthrough.addArg("--walkthrough");
+    const bash_walkthrough_step = b.step(
+        "bash-walkthrough",
+        "Run the narrated public Bash approve-and-recover journey",
+    );
+    bash_walkthrough_step.dependOn(&bash_walkthrough.step);
+
     const bash_owner_integration = b.addSystemCommand(&.{"python3"});
     bash_owner_integration.addFileArg(b.path("tests/integration/bash_owner_integration.py"));
     bash_owner_integration.addArtifactArg(release_safe);

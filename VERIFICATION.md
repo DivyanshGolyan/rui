@@ -138,6 +138,19 @@ Keep requested model, each available served-model observation, `x-request-id` an
 
 Run `zig build check` for the implemented integration coverage in this area. It runs dispatch, Bash-owner, Bash journey, Bash lifecycle, Bash recovery and control integrations after formatting, native tests and production builds. The named scenarios below also specify requirements that may not yet be implemented; passing the current gate does not establish those future requirements. Use a fixture marker only to detect duplicate execution, never as recovery authority.
 
+#### Runnable Bash caller acceptance audit
+
+Issue [#260](https://github.com/DivyanshGolyan/rui/issues/260) assembles existing production paths into `zig build bash-walkthrough`; it changes no production contract.
+
+| Audit class | Finding |
+| --- | --- |
+| Already evidenced | The maintained deterministic Bash fixture already uses the public CLI, provider/SSE interpreter, Host, ask-mode permission, keyed records, saved results and fresh-Host recovery. Focused Bash recovery cases own uncertain in-flight cuts. |
+| Missing evidence at audit | No short unattended mode showed the public commands, an explicit temporary Workspace, exact Action inspection, zero pre-approval effects, one approved effect and recovery of the original caller record after a process crash. The walkthrough is the acceptance check for this presentation gap. |
+| Demonstrated defect | None. The assembled journey required no runtime or schema correction. |
+| Deferred qualification | The local deterministic journey does not qualify a live provider, power loss, a crash during an active Bash Attempt, detached-descendant containment or the broad work in #231/#249. |
+
+The walkthrough crashes the Host only after the answer and effect cleanup are saved, then retries the retained exact message record against a fresh Host. Recovery must report a replay of the original submission, preserve its Action/result binding and answer, and leave both the independent file counter and provider-request count unchanged. Its marker detects duplicate execution; canonical Store facts remain authority.
+
 #### Owner invariant checks
 
 Small structural checks live beside the owners that hold the facts; tests invoke them at legal stable checkpoints under each owner's existing synchronization. They add no state, locks, allocation, or hot-path I/O. Positive cases run through real production transitions where the owner is reachable in-test (Store-backed preparation advance and seal, the real delivery-close and retained-cleanup paths, actual reclaim calls); custody/slot negative cases use hand-built bindings against the real pool, which is sufficient because the pool validates every field it owns. Each acquisition installs its guard before the next fallible step, and consuming operations are recorded before result assertions; accounting tests assert independently expected outstanding contributions with exact baseline restoration.
