@@ -1333,7 +1333,9 @@ fn admitNewAttempt(
         .attempt_before_commit = host.faults.attempt_before_commit,
     }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
-        if (err != error.InjectedAttemptCommitFailure) {
+        if (err == error.InjectedAttemptCommitFailure) {
+            traceSubject(host, "attempt_admission_rolled_back", "attempt_kind", "model");
+        } else {
             fenceDispatch(host, "Attempt admission", err);
         }
         return .retry_later;

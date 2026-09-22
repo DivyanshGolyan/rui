@@ -1858,26 +1858,38 @@ pub const Store = struct {
                 };
                 interrupted_operation_id = current_operation_id;
             }
-            var current = try self.readSession(command.session.slice()) orelse return error.CorruptStore;
-            const cancellation_content_id = try self.importBytesContent("Cancelled by Session stop.", false, faults.content_import);
-            const cancel_actions = try prepare(
+            const unresolved_actions = try prepare(
                 self.database,
-                "WITH cancelled(action_id,acceptance_position) AS MATERIALIZED (" ++
-                    "SELECT action_id,?3+row_number() OVER (ORDER BY call_ordinal)-1 FROM action_operation " ++
-                    "WHERE parent_operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=0) " ++
-                    "UPDATE action_operation SET resolution_code='cancelled',resolution_content_id=?2," ++
-                    "acceptance_position=(SELECT acceptance_position FROM cancelled WHERE cancelled.action_id=action_operation.action_id) " ++
-                    "WHERE action_id IN (SELECT action_id FROM cancelled)",
+                "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 " ++
+                    "AND resolution_code IS NULL AND attempt_ordinal=0",
             );
-            defer _ = c.sqlite3_finalize(cancel_actions);
-            try bindU64(cancel_actions, 1, current_operation_id.?);
-            try bindI64(cancel_actions, 2, cancellation_content_id);
-            try bindU64(cancel_actions, 3, current.next_position);
-            try expectDone(cancel_actions);
-            const cancelled_count = c.sqlite3_changes(self.database);
-            if (cancelled_count < 0) return error.CorruptStore;
-            current.next_position = try std.math.add(u64, current.next_position, @intCast(cancelled_count));
-            try self.updateSession(command.session.slice(), &current);
+            defer _ = c.sqlite3_finalize(unresolved_actions);
+            try bindU64(unresolved_actions, 1, current_operation_id.?);
+            if (c.sqlite3_step(unresolved_actions) != c.SQLITE_ROW) return error.ActionReadFailed;
+            const unresolved_count = c.sqlite3_column_int64(unresolved_actions, 0);
+            if (unresolved_count < 0) return error.CorruptStore;
+            if (unresolved_count != 0) {
+                var current = try self.readSession(command.session.slice()) orelse return error.CorruptStore;
+                const cancellation_content_id = try self.importBytesContent("Cancelled by Session stop.", false, faults.content_import);
+                const cancel_actions = try prepare(
+                    self.database,
+                    "WITH cancelled(action_id,acceptance_position) AS MATERIALIZED (" ++
+                        "SELECT action_id,?3+row_number() OVER (ORDER BY call_ordinal)-1 FROM action_operation " ++
+                        "WHERE parent_operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=0) " ++
+                        "UPDATE action_operation SET resolution_code='cancelled',resolution_content_id=?2," ++
+                        "acceptance_position=(SELECT acceptance_position FROM cancelled WHERE cancelled.action_id=action_operation.action_id) " ++
+                        "WHERE action_id IN (SELECT action_id FROM cancelled)",
+                );
+                defer _ = c.sqlite3_finalize(cancel_actions);
+                try bindU64(cancel_actions, 1, current_operation_id.?);
+                try bindI64(cancel_actions, 2, cancellation_content_id);
+                try bindU64(cancel_actions, 3, current.next_position);
+                try expectDone(cancel_actions);
+                const cancelled_count = c.sqlite3_changes(self.database);
+                if (cancelled_count != unresolved_count) return error.StopSelectionChanged;
+                current.next_position = try std.math.add(u64, current.next_position, @intCast(cancelled_count));
+                try self.updateSession(command.session.slice(), &current);
+            }
             try self.completeStoppedTurnIfReady(turn_id);
         }
         const selection = SessionStopSelection{
@@ -7006,6 +7018,103 @@ test "Action settlement atomically yields to an earlier Session stop" {
     ));
 }
 
+test "earlier Action settlement remains authoritative after Session stop" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try configureTestSession(&storage, "settlement-first-config", "direct/settlement-first");
+    try submitTestMessage(
+        &storage,
+        &tmp,
+        "settlement-first-message",
+        "settlement-first-message",
+        "direct/settlement-first",
+        "execute",
+    );
+    const model_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{.{
+        .item_id = "settlement-first-item",
+        .name = "bash",
+        .encoded_call_id = "settlement-first-call",
+        .decoded_call_id = "settlement-first-call",
+        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+    }};
+    try settleCallsForTesting(&storage, &tmp, model_binding, "settlement-first-metadata", &calls);
+    const action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation");
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
+    try allow.key.set("settlement-first-allow");
+    try allow.session.set("direct/settlement-first");
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+
+    try std.testing.expectEqual(
+        ActionSettlement.effect,
+        try storage.settleActionAttempt(action_binding, .succeeded, "Original Bash result.", .{}),
+    );
+    const original_content_id = try queryU64(
+        storage.database,
+        "SELECT resolution_content_id FROM action_operation",
+    );
+    const original_content_count = try queryU64(storage.database, "SELECT count(*) FROM content");
+    try std.testing.expectError(
+        error.StaleActionAttemptBinding,
+        storage.settleActionAttempt(action_binding, .failed, "Late replacement.", .{}),
+    );
+    try std.testing.expectEqual(
+        original_content_count,
+        try queryU64(storage.database, "SELECT count(*) FROM content"),
+    );
+
+    var stop = try completeSessionStop("settlement-first-stop", "direct/settlement-first");
+    const accepted = storage.stopSession(&stop, .{});
+    try std.testing.expect(accepted == .accepted);
+    try std.testing.expectEqual(model_binding.turn_id, accepted.accepted.selection.selected_turn_id.?);
+    try std.testing.expectEqual(SessionStopCompletion.completed, accepted.accepted.completion);
+    try std.testing.expectEqual(original_content_id, try queryU64(
+        storage.database,
+        "SELECT resolution_content_id FROM action_operation",
+    ));
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(
+        storage.database,
+        "SELECT count(*) FROM action_operation WHERE resolution_code='succeeded'",
+    ));
+    const result_metadata = try storage.readContentMetadata(@intCast(original_content_id));
+    try expectContent(&storage, .{
+        .length = result_metadata.length,
+        .digest = result_metadata.digest,
+    }, "Original Bash result.");
+    try std.testing.expectError(
+        error.StaleActionAttemptBinding,
+        storage.settleActionAttempt(action_binding, .cancelled, "Late stop result.", .{}),
+    );
+    try std.testing.expectEqual(
+        original_content_count,
+        try queryU64(storage.database, "SELECT count(*) FROM content"),
+    );
+    try submitTestMessage(
+        &storage,
+        &tmp,
+        "settlement-first-later",
+        "settlement-first-later",
+        "direct/settlement-first",
+        "later",
+    );
+    const stop_replay = storage.stopSession(&stop, .{});
+    try std.testing.expect(stop_replay == .accepted);
+    try std.testing.expect(stop_replay.accepted.replayed);
+    try std.testing.expectEqual(accepted.accepted.selection, stop_replay.accepted.selection);
+    try std.testing.expect(
+        (try storage.observeCommand("settlement-first-later")).message.?.queue.?.state == .queued,
+    );
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(
+        storage.database,
+        "SELECT count(*) FROM turn WHERE session_ref='direct/settlement-first' AND outcome_code='cancelled'",
+    ));
+}
+
 test "Full reports every closed Action resolution without fencing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -8118,6 +8227,38 @@ test "exact model interruption continues only with applicable pending input" {
     const observation = try storage.observeCommand("interrupt");
     try std.testing.expectEqual(binding.turn_id, observation.model_interruption.?.turn_id);
     try std.testing.expectEqual(binding.operation_id, observation.model_interruption.?.operation_id);
+
+    try std.testing.expectError(
+        error.SupersededByControl,
+        storage.settleModelAttemptFailure(binding, "late_old_failure", .terminal, .{}),
+    );
+    const successor_observation = (try storage.observeCommand("interrupt-message-b")).message.?.queue.?;
+    const observed_successor = switch (successor_observation.state) {
+        .processing => |value| value,
+        else => return error.ExpectedProcessingObservation,
+    };
+    try std.testing.expectEqual(successor.permit.binding, observed_successor);
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(
+        storage.database,
+        "SELECT count(*) FROM model_operation WHERE resolution_code='interrupted' " ++
+            "AND interrupted_by_command_key='interrupt'",
+    ));
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(
+        storage.database,
+        "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL",
+    ));
+    const replay = storage.interruptModel(&interrupt, .{});
+    try std.testing.expect(replay == .accepted);
+    try std.testing.expect(replay.accepted.replayed);
+    try storage.settleModelAttemptFailure(successor.permit.binding, "successor_failure", .terminal, .{});
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(
+        storage.database,
+        "SELECT count(*) FROM model_operation WHERE resolution_code='successor_failure'",
+    ));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(
+        storage.database,
+        "SELECT count(*) FROM model_operation WHERE resolution_code='late_old_failure'",
+    ));
 }
 
 test "exact model interruption rejects stale targets and replays before applicability" {
