@@ -47,10 +47,13 @@ pub fn calculate(
     };
     fixed_host = try add(fixed_host, transport_wake);
 
-    // Ordinary connections can each retain a socket, both configure content
-    // files, and one transient scratch-directory handle. Control places
-    // retain only their sockets. The server supplies both capacities.
-    const ordinary_client = try add(1, try add(2, 1));
+    // While sealing the second configure content value, an ordinary
+    // connection can retain its socket, the first sealed file, and both the
+    // second value's writer and read-only custody handles. Absolute POSIX
+    // opens use AT_FDCWD directly and acquire no directory descriptor.
+    // Control places retain only their sockets. The server supplies both
+    // capacities.
+    const ordinary_client = try add(1, 3);
     const ordinary_clients = try multiply(ordinary_client_capacity, ordinary_client);
     const clients = try add(ordinary_clients, control_client_capacity);
 
