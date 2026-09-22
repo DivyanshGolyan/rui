@@ -12,6 +12,14 @@ For issue-driven work, read the live issue, relevant discussion and dependencies
 
 Inspect source before claiming implementation. Distinguish accepted behavior, prototype evidence, production qualification and remaining uncertainty.
 
+## Deliver usable slices
+
+[Issue #164](https://github.com/DivyanshGolyan/rui/issues/164) owns implementation order. Its [direct-core development-readiness checkpoint](https://github.com/DivyanshGolyan/rui/issues/168) is not full stage completion: a runnable caller path, essential failure/recovery evidence and a representative resource/control baseline can unblock dependent capabilities while [full qualification](https://github.com/DivyanshGolyan/rui/issues/231) remains open. The behavior, complete-stage checks and numerical qualification targets in Architecture and Verification are unchanged. Do not claim readiness merely because an issue was narrowed or an administrative ticket was closed.
+
+Build one complete usable slice within its declared scope, with essential authorization, identity, recovery, containment and resource-owner tests. Keep known consequential defects, missing enforced bounds and native evidence needed for current safety on the critical path. Unsupported surfaces must fail or report unavailable explicitly; no credential fallback, discarded context or simulated durability to make a thin path work.
+
+Use sufficient existing production tests and effective negative evidence before adding another proof. New or materially changed critical guards need targeted failure evidence; unchanged oracles do not require a repeated mutation campaign. Delete machinery actually superseded by the change, but do not make a repository-wide test migration or a speculative prefactor a new feature prerequisite. Refactors and optimizations need a concrete responsibility or attributed cost to remove.
+
 ## Make changes
 
 Inspect the working-tree diff first; preserve concurrent work. Keep reviews read-only unless fixes are requested. Complete authorized work within scope without reopening settled choices.
@@ -43,11 +51,15 @@ Review simplicity alongside correctness in every PR and local review, including 
 
 For every review, obtain a read-only opinion from an agent independent of implementer and reviewer before implementing findings. Validate findings against the contract and owning state/control flow. Recommend the smallest complete correction, what can be removed, and how to verify memory and behavior. Prioritize simplicity, explainability and memory efficiency over implementation speed; require evidence before adding machinery.
 
+Keep independent review, but bound its stopping rule. Block for a supported consequential defect, a violated resource/authority invariant or an essential missing test of introduced dangerous behavior. A request for broader proof must name the failure existing evidence could miss and why it blocks this slice; a new measurement must name the decision or support claim that needs it now. Defer unrelated redesign, speculative workload dimensions and repeated proof of unchanged behavior.
+
 Give each independent opinion one programmer's lens: Rich Hickey by default; John Ousterhout, Rob Pike or Joe Armstrong when better suited. Ground likely challenges and recommendations in their published ideas and this code. Label this an interpretation, not their opinion or endorsement; contract and evidence decide.
 
 ## Verify and report
 
 Run applicable [verification gates](VERIFICATION.md#canonical-gates); confirm commands in `build.zig`. Test meaningful failures and recovery boundaries with independent expectations. Drive fault injection through production transitions. Unit tests may inspect owner internals; integration and qualification evidence must assert durable owner-boundary outcomes rather than timing, scheduler order, private representation or fixture-only authority. Keep live provider checks opt-in. Broaden/repeat checks only for changes or unresolved concerns.
+
+Explain each introduced resource's owner, multiplier, bound and release with implementation. Measure representative changed-owner peak and retained behavior at useful integration checkpoints and investigate unexplained growth. Run the full required populations, platform cases and provenance/validator checks before making the corresponding support, performance or release claims. Small development baselines do not qualify larger populations. Keep deferred evidence explicitly pending with its qualification owner; unavailable or historical evidence is never promoted to a current pass.
 
 For documentation, check contract preservation, references and `git diff --check`. Report changes, passed checks and material limits, including pre-existing failures and interrupted/unrun checks. Keep prototype, compile and process-crash evidence distinct from production and power-loss qualification.
 
