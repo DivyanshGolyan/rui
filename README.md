@@ -35,6 +35,12 @@ zig build bash-integration
 
 The fixture starts its own local Host and provider endpoint; it is a development test, not a live-provider quickstart. For direct exploration, use the commands printed by `./zig-out/bin/rui`: `serve`, `configure`, `message`, `inspect-session`, `allow-action` or `deny-action`, and `read-result`.
 
+## Development direction
+
+The [delivery plan](https://github.com/DivyanshGolyan/rui/issues/164) separates [direct-core development readiness](https://github.com/DivyanshGolyan/rui/issues/168) from [full qualification](https://github.com/DivyanshGolyan/rui/issues/231). Essential safety evidence stays with each capability; broad qualification does not block independent feature development after the readiness checkpoint. Full stage, support, performance and release claims still require their evidence.
+
+Next are a [runnable approve-and-recover walkthrough](https://github.com/DivyanshGolyan/rui/issues/260) and critical safety closeout, followed by a [thin live Codex path](https://github.com/DivyanshGolyan/rui/issues/272) and a [minimal durable workflow](https://github.com/DivyanshGolyan/rui/issues/273). This is priority order, not a workflow dependency on credentials or live-provider access. These are planned capabilities, not additions to the implemented surface above.
+
 ## Read next
 
 - To explain ordinary work, recovery, ownership or resource policy, read [Architecture](ARCHITECTURE.md).
