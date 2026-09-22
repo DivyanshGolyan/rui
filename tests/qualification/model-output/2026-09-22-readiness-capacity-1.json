@@ -1,0 +1,1052 @@
+{
+  "active_capacity_growth": [
+    {
+      "active_capacity": 1,
+      "events_per_second_per_stream": 30,
+      "process_identity": {
+        "all_distinct": true,
+        "controller_pid": 93081,
+        "host_pid": 93084,
+        "provider_pid": 93083
+      },
+      "rounds": [
+        {
+          "active_capacity": 1,
+          "all_results_audited": true,
+          "audit_rows": [
+            {
+              "key": "capacity-1-round-1-0",
+              "session": "measure/capacity-1/1/0",
+              "input_text": "capacity-1-round-1-0",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-1/1/0",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-1-round-1-0",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-1-round-1-0",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            }
+          ],
+          "capture_before_terminal": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "1",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "468252",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "reference": "measure/capacity-1/1/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui-readiness-168-baseline"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "1",
+              "status": "in_flight",
+              "turn": "1"
+            }
+          },
+          "capture_observation_complete": true,
+          "cleanup_observation_complete": true,
+          "completion_inspection": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "0",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "0",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "reference": "measure/capacity-1/1/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui-readiness-168-baseline"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": {
+                "code": "completed",
+                "content": {
+                  "bytes": "36",
+                  "sha256": "e82a7659f8a461cea007d3550eb2ffef627517198586abcfdce59cde272135b8"
+                }
+              },
+              "operation": "1",
+              "status": "completed",
+              "turn": "1"
+            }
+          },
+          "cpu": {
+            "at_most_2_average_cores": true,
+            "average_cores_conservative": 0.01682059399949119,
+            "bracket_valid": true,
+            "complete_work_at_most_120_cpu_seconds": true,
+            "complete_work_cpu_seconds": 1.0407683749999999,
+            "cpu_seconds": 0.6728545416666666,
+            "earliest_stream_final_completion_unix_ns": 1790080166069990000,
+            "first_query": {
+              "finish_unix_ns": 1790080116099060000,
+              "host_cpu_seconds": 0.19787579166666666,
+              "start_unix_ns": 1790080116098565000
+            },
+            "maximum_sample_window_seconds": 40.002836833,
+            "minimum_sample_window_seconds": 40.00183,
+            "provider_offer_qualified": true,
+            "second_query": {
+              "finish_unix_ns": 1790080156101576000,
+              "host_cpu_seconds": 0.8707303333333333,
+              "start_unix_ns": 1790080156101064000
+            },
+            "status": "passed"
+          },
+          "durable_audit_prerequisite_met": true,
+          "events_per_second_per_stream": 30,
+          "expected_provider_work": {
+            "batches": 1800,
+            "events": 1800,
+            "bytes": 468000
+          },
+          "expected_response_scratch_delta_bytes": 468000,
+          "expected_retained_scratch_bytes": 468252,
+          "fixture_completion": {
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 1,
+            "ready_streams": 1,
+            "offer_finished_streams": 1,
+            "terminal_finished_streams": 1,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 1,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 1800,
+            "completed_events": 1800,
+            "offer_bytes": 468000,
+            "expected_batches": 1800,
+            "expected_events": 1800,
+            "expected_offer_bytes": 468000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 2,
+            "completion_gap_violations": 7,
+            "burst_window_violations": 0,
+            "worst_late_completion": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 167,
+              "violation_ns": 19367916
+            },
+            "worst_completion_gap": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 136,
+              "violation_ns": 35594957
+            },
+            "maximum_completion_delay": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 167,
+              "observed_ns": 86034584
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 136,
+              "observed_ns": 102261625
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 125,
+              "observed_ns": 33898459
+            },
+            "latest_final_completion_unix_ns": 1790080166069990000,
+            "earliest_final_completion_unix_ns": 1790080166069990000,
+            "terminal_bytes": 821,
+            "request_bytes": 252,
+            "request_set_sha256": "34ecbe735b6ef531bc50b00688e8d907956cd29dddc815956b7d71f7f38fafa7",
+            "start_unix_ns": 1790080106097242000,
+            "offer_horizon_unix_ns": 1790080166130575334,
+            "hard_deadline_unix_ns": 1790080226097242000,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "fixture_ready": {
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 1,
+            "ready_streams": 1,
+            "offer_finished_streams": 0,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 0,
+            "maximum_completed_batches": 0,
+            "completed_batches": 0,
+            "completed_events": 0,
+            "offer_bytes": 0,
+            "expected_batches": 1800,
+            "expected_events": 1800,
+            "expected_offer_bytes": 468000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "terminal_bytes": 0,
+            "request_bytes": 252,
+            "request_set_sha256": "34ecbe735b6ef531bc50b00688e8d907956cd29dddc815956b7d71f7f38fafa7",
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "host_dimensions": {
+            "capture": "passed",
+            "cleanup": "passed",
+            "durable_audit": "passed",
+            "request_integrity": "passed",
+            "result_delivery": "passed"
+          },
+          "initial": {
+            "host": {
+              "rss_bytes": 10289152,
+              "virtual_bytes": 421150097408,
+              "cpu_user_seconds": 0.010425791666666667,
+              "cpu_system_seconds": 0.016771291666666667,
+              "threads": 4,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 15,
+              "open_descriptors": 11,
+              "disk_read_bytes": 4685824,
+              "disk_write_bytes": 229376,
+              "footprint": {
+                "physical_footprint_bytes": 5751808,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 5751808,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            },
+            "whole_rui": {
+              "aggregate_equals_host": true,
+              "descendant_processes": 0,
+              "host_processes": 1,
+              "lifetime_peak_physical_footprint_bytes": 5751808,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 5752320,
+              "measurement_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+              "physical_footprint_bytes": 5751808,
+              "rss_bytes": 10289152,
+              "status": "complete"
+            }
+          },
+          "observed_offer": {
+            "events_per_second": 30.013632191741486,
+            "seconds": 59.972748,
+            "status": "observed"
+          },
+          "offer_seconds": 60,
+          "offline_audit_after_host_reaped": true,
+          "paced_offer": {
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 1,
+            "ready_streams": 1,
+            "offer_finished_streams": 1,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 1,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 1800,
+            "completed_events": 1800,
+            "offer_bytes": 468000,
+            "expected_batches": 1800,
+            "expected_events": 1800,
+            "expected_offer_bytes": 468000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 2,
+            "completion_gap_violations": 7,
+            "burst_window_violations": 0,
+            "worst_late_completion": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 167,
+              "violation_ns": 19367916
+            },
+            "worst_completion_gap": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 136,
+              "violation_ns": 35594957
+            },
+            "maximum_completion_delay": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 167,
+              "observed_ns": 86034584
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 136,
+              "observed_ns": 102261625
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 125,
+              "observed_ns": 33898459
+            },
+            "latest_final_completion_unix_ns": 1790080166069990000,
+            "earliest_final_completion_unix_ns": 1790080166069990000,
+            "terminal_bytes": 0,
+            "request_bytes": 252,
+            "request_set_sha256": "34ecbe735b6ef531bc50b00688e8d907956cd29dddc815956b7d71f7f38fafa7",
+            "start_unix_ns": 1790080106097242000,
+            "offer_horizon_unix_ns": 1790080166130575334,
+            "hard_deadline_unix_ns": 1790080226097242000,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "provider_process": {
+            "initial": {
+              "rss_bytes": 9486336,
+              "virtual_bytes": 421785747456,
+              "cpu_user_seconds": 0.003094833333333333,
+              "cpu_system_seconds": 0.003288583333333333,
+              "threads": 6,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 9,
+              "open_descriptors": 6,
+              "disk_read_bytes": 0,
+              "disk_write_bytes": 4096,
+              "footprint": {
+                "physical_footprint_bytes": 4719616,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 4719616,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            },
+            "pid": 93083,
+            "retained": {
+              "rss_bytes": 8503296,
+              "virtual_bytes": 421785747456,
+              "cpu_user_seconds": 0.13536129166666666,
+              "cpu_system_seconds": 0.2195315833333333,
+              "threads": 6,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 10,
+              "open_descriptors": 7,
+              "disk_read_bytes": 4096,
+              "disk_write_bytes": 45056,
+              "footprint": {
+                "physical_footprint_bytes": 5653504,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 5653504,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            }
+          },
+          "request_integrity": {
+            "expected_bytes": 252,
+            "expected_set_sha256": "34ecbe735b6ef531bc50b00688e8d907956cd29dddc815956b7d71f7f38fafa7",
+            "observed_bytes": 252,
+            "observed_set_sha256": "34ecbe735b6ef531bc50b00688e8d907956cd29dddc815956b7d71f7f38fafa7",
+            "status": "passed"
+          },
+          "result_delivery_complete": true,
+          "retained": {
+            "host": {
+              "rss_bytes": 9846784,
+              "virtual_bytes": 421312086016,
+              "cpu_user_seconds": 0.5213229166666666,
+              "cpu_system_seconds": 0.548340375,
+              "threads": 3,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 15,
+              "open_descriptors": 11,
+              "disk_read_bytes": 5373952,
+              "disk_write_bytes": 1105920,
+              "footprint": {
+                "physical_footprint_bytes": 8538112,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 8718336,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            },
+            "whole_rui": {
+              "aggregate_equals_host": true,
+              "descendant_processes": 0,
+              "host_processes": 1,
+              "lifetime_peak_physical_footprint_bytes": 8718336,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 8718848,
+              "measurement_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+              "physical_footprint_bytes": 8538112,
+              "rss_bytes": 9846784,
+              "status": "complete"
+            }
+          },
+          "retained_request_baseline": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "1",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "252",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "reference": "measure/capacity-1/1/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui-readiness-168-baseline"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "1",
+              "status": "in_flight",
+              "turn": "1"
+            }
+          },
+          "retained_request_scratch_bytes": 252,
+          "round": 1,
+          "status": "passed"
+        },
+        {
+          "active_capacity": 1,
+          "all_results_audited": true,
+          "audit_rows": [
+            {
+              "key": "capacity-1-round-2-0",
+              "session": "measure/capacity-1/2/0",
+              "input_text": "capacity-1-round-2-0",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-1/2/0",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-1-round-2-0",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-1-round-2-0",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            }
+          ],
+          "capture_before_terminal": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "1",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "468252",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "reference": "measure/capacity-1/2/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui-readiness-168-baseline"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "2",
+              "status": "in_flight",
+              "turn": "2"
+            }
+          },
+          "capture_observation_complete": true,
+          "cleanup_observation_complete": true,
+          "completion_inspection": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "0",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "0",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "reference": "measure/capacity-1/2/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui-readiness-168-baseline"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": {
+                "code": "completed",
+                "content": {
+                  "bytes": "36",
+                  "sha256": "61c0e60c128a41a48bed93e8eec165c05f5eaa3c4c615908912ce89e4568d27d"
+                }
+              },
+              "operation": "2",
+              "status": "completed",
+              "turn": "2"
+            }
+          },
+          "cpu": {
+            "at_most_2_average_cores": true,
+            "average_cores_conservative": 0.017875766717612634,
+            "bracket_valid": true,
+            "complete_work_at_most_120_cpu_seconds": true,
+            "complete_work_cpu_seconds": 1.0909163333333334,
+            "cpu_seconds": 0.7150537083333335,
+            "earliest_stream_final_completion_unix_ns": 1790080228311237000,
+            "first_query": {
+              "finish_unix_ns": 1790080178346508000,
+              "host_cpu_seconds": 1.2442474166666666,
+              "start_unix_ns": 1790080178345818000
+            },
+            "maximum_sample_window_seconds": 40.002115375,
+            "minimum_sample_window_seconds": 40.001288875,
+            "provider_offer_qualified": true,
+            "second_query": {
+              "finish_unix_ns": 1790080218348108000,
+              "host_cpu_seconds": 1.959301125,
+              "start_unix_ns": 1790080218347971000
+            },
+            "status": "passed"
+          },
+          "durable_audit_prerequisite_met": true,
+          "events_per_second_per_stream": 30,
+          "expected_provider_work": {
+            "batches": 1800,
+            "events": 1800,
+            "bytes": 468000
+          },
+          "expected_response_scratch_delta_bytes": 468000,
+          "expected_retained_scratch_bytes": 468252,
+          "fixture_completion": {
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 1,
+            "ready_streams": 1,
+            "offer_finished_streams": 1,
+            "terminal_finished_streams": 1,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 1,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 1800,
+            "completed_events": 1800,
+            "offer_bytes": 468000,
+            "expected_batches": 1800,
+            "expected_events": 1800,
+            "expected_offer_bytes": 468000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 4,
+            "completion_gap_violations": 17,
+            "burst_window_violations": 0,
+            "worst_late_completion": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 14,
+              "violation_ns": 38605000
+            },
+            "worst_completion_gap": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 14,
+              "violation_ns": 70524249
+            },
+            "maximum_completion_delay": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 14,
+              "observed_ns": 105271668
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 14,
+              "observed_ns": 137190917
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 338,
+              "observed_ns": 33627500
+            },
+            "latest_final_completion_unix_ns": 1790080228311237000,
+            "earliest_final_completion_unix_ns": 1790080228311237000,
+            "terminal_bytes": 821,
+            "request_bytes": 252,
+            "request_set_sha256": "162aa4284e355ce3a9c5d0597570e176138a6143ba2cdd89a20d3d4ee78d6bf8",
+            "start_unix_ns": 1790080168343073000,
+            "offer_horizon_unix_ns": 1790080228376406334,
+            "hard_deadline_unix_ns": 1790080288343073000,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "fixture_ready": {
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 1,
+            "ready_streams": 1,
+            "offer_finished_streams": 0,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 0,
+            "maximum_completed_batches": 0,
+            "completed_batches": 0,
+            "completed_events": 0,
+            "offer_bytes": 0,
+            "expected_batches": 1800,
+            "expected_events": 1800,
+            "expected_offer_bytes": 468000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "terminal_bytes": 0,
+            "request_bytes": 252,
+            "request_set_sha256": "162aa4284e355ce3a9c5d0597570e176138a6143ba2cdd89a20d3d4ee78d6bf8",
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "host_dimensions": {
+            "capture": "passed",
+            "cleanup": "passed",
+            "durable_audit": "passed",
+            "request_integrity": "passed",
+            "result_delivery": "passed"
+          },
+          "initial": {
+            "host": {
+              "rss_bytes": 10256384,
+              "virtual_bytes": 421312086016,
+              "cpu_user_seconds": 0.52298875,
+              "cpu_system_seconds": 0.5489537916666666,
+              "threads": 3,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 15,
+              "open_descriptors": 11,
+              "disk_read_bytes": 5373952,
+              "disk_write_bytes": 1105920,
+              "footprint": {
+                "physical_footprint_bytes": 8783872,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 8783872,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            },
+            "whole_rui": {
+              "aggregate_equals_host": true,
+              "descendant_processes": 0,
+              "host_processes": 1,
+              "lifetime_peak_physical_footprint_bytes": 8783872,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 8784384,
+              "measurement_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+              "physical_footprint_bytes": 8783872,
+              "rss_bytes": 10256384,
+              "status": "complete"
+            }
+          },
+          "observed_offer": {
+            "events_per_second": 30.015926450574675,
+            "seconds": 59.968164,
+            "status": "observed"
+          },
+          "offer_seconds": 60,
+          "offline_audit_after_host_reaped": true,
+          "paced_offer": {
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 1,
+            "ready_streams": 1,
+            "offer_finished_streams": 1,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 1,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 1800,
+            "completed_events": 1800,
+            "offer_bytes": 468000,
+            "expected_batches": 1800,
+            "expected_events": 1800,
+            "expected_offer_bytes": 468000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 4,
+            "completion_gap_violations": 17,
+            "burst_window_violations": 0,
+            "worst_late_completion": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 14,
+              "violation_ns": 38605000
+            },
+            "worst_completion_gap": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 14,
+              "violation_ns": 70524249
+            },
+            "maximum_completion_delay": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 14,
+              "observed_ns": 105271668
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 14,
+              "observed_ns": 137190917
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 338,
+              "observed_ns": 33627500
+            },
+            "latest_final_completion_unix_ns": 1790080228311237000,
+            "earliest_final_completion_unix_ns": 1790080228311237000,
+            "terminal_bytes": 0,
+            "request_bytes": 252,
+            "request_set_sha256": "162aa4284e355ce3a9c5d0597570e176138a6143ba2cdd89a20d3d4ee78d6bf8",
+            "start_unix_ns": 1790080168343073000,
+            "offer_horizon_unix_ns": 1790080228376406334,
+            "hard_deadline_unix_ns": 1790080288343073000,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "provider_process": {
+            "initial": {
+              "rss_bytes": 8601600,
+              "virtual_bytes": 421785747456,
+              "cpu_user_seconds": 0.13551670833333332,
+              "cpu_system_seconds": 0.2200538333333333,
+              "threads": 6,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 10,
+              "open_descriptors": 7,
+              "disk_read_bytes": 4096,
+              "disk_write_bytes": 49152,
+              "footprint": {
+                "physical_footprint_bytes": 5653504,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 5653504,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            },
+            "pid": 93083,
+            "retained": {
+              "rss_bytes": 8585216,
+              "virtual_bytes": 421785747456,
+              "cpu_user_seconds": 0.27121633333333334,
+              "cpu_system_seconds": 0.446326875,
+              "threads": 6,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 10,
+              "open_descriptors": 7,
+              "disk_read_bytes": 8192,
+              "disk_write_bytes": 90112,
+              "footprint": {
+                "physical_footprint_bytes": 6079488,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 6079488,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            }
+          },
+          "request_integrity": {
+            "expected_bytes": 252,
+            "expected_set_sha256": "162aa4284e355ce3a9c5d0597570e176138a6143ba2cdd89a20d3d4ee78d6bf8",
+            "observed_bytes": 252,
+            "observed_set_sha256": "162aa4284e355ce3a9c5d0597570e176138a6143ba2cdd89a20d3d4ee78d6bf8",
+            "status": "passed"
+          },
+          "result_delivery_complete": true,
+          "retained": {
+            "host": {
+              "rss_bytes": 8617984,
+              "virtual_bytes": 421580521472,
+              "cpu_user_seconds": 1.0654188333333332,
+              "cpu_system_seconds": 1.1010499166666665,
+              "threads": 3,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 15,
+              "open_descriptors": 11,
+              "disk_read_bytes": 6111232,
+              "disk_write_bytes": 2023424,
+              "footprint": {
+                "physical_footprint_bytes": 9406464,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 9586688,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            },
+            "whole_rui": {
+              "aggregate_equals_host": true,
+              "descendant_processes": 0,
+              "host_processes": 1,
+              "lifetime_peak_physical_footprint_bytes": 9586688,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 9587200,
+              "measurement_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+              "physical_footprint_bytes": 9406464,
+              "rss_bytes": 8617984,
+              "status": "complete"
+            }
+          },
+          "retained_request_baseline": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "1",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "252",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "reference": "measure/capacity-1/2/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui-readiness-168-baseline"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "2",
+              "status": "in_flight",
+              "turn": "2"
+            }
+          },
+          "retained_request_scratch_bytes": 252,
+          "round": 2,
+          "status": "passed"
+        }
+      ],
+      "same_host_rounds": 2,
+      "second_retained_delta_from_first": {
+        "open_descriptor_rows": 0,
+        "physical_footprint_bytes": 868352,
+        "rss_bytes": -1228800,
+        "status": "observed",
+        "virtual_bytes": 268435456
+      },
+      "status": "passed"
+    }
+  ],
+  "answer_byte_growth": [],
+  "artifacts": "/private/tmp/rui-output-measure-976519199",
+  "binary": "/private/tmp/rui-168-e347d77.3vSb88/install/bin/rui",
+  "binary_sha256": "708b44df6e1cb9612e9d3994a04420a4bdd4764a7076ff2c76eb9e4c28f04c6f",
+  "elapsed_seconds": 123.826731083,
+  "format": "rui-model-output-v7-go",
+  "item_count_growth": [],
+  "limits": [
+    "macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only",
+    "deterministic loopback HTTP qualifies no live-provider behavior",
+    "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second",
+    "rational target scheduling aims at 60 seconds and emits exactly 1,800 or 6,000 events per stream; per-event pacing is diagnostic, collection stops at 120 seconds, and measured rate is not maximum sustainable throughput",
+    "Host CPU uses conservative query brackets spanning at least 40 seconds wholly inside simultaneous complete offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds",
+    "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after both rounds and confirmed Host stop/reap",
+    "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 4 MiB cache"
+  ],
+  "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+  "measurement_runtime": {
+    "go_arch": "arm64",
+    "go_os": "darwin",
+    "go_version": "go1.27.1",
+    "gopsutil_version": "v4.26.7",
+    "logical_cpus": 10,
+    "module_path": "rui.local/qualification",
+    "physical_memory_bytes": 17179869184
+  },
+  "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
+  "scope": "issue-176 assembled model-path capacity, capture, import and retained-idle qualification",
+  "sqlite_cache_spill_comparison": null,
+  "status": "passed",
+  "tested_revision": "e347d778f5696fe735954b4f208651f0a4ca5cb5",
+  "working_tree_dirty": false,
+  "zig": "0.16.0"
+}

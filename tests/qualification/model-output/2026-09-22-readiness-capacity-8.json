@@ -1,0 +1,1318 @@
+{
+  "active_capacity_growth": [
+    {
+      "active_capacity": 8,
+      "events_per_second_per_stream": 30,
+      "process_identity": {
+        "all_distinct": true,
+        "controller_pid": 94053,
+        "host_pid": 94055,
+        "provider_pid": 94054
+      },
+      "rounds": [
+        {
+          "active_capacity": 8,
+          "all_results_audited": true,
+          "audit_rows": [
+            {
+              "key": "capacity-8-round-1-0",
+              "session": "measure/capacity-8/1/0",
+              "input_text": "capacity-8-round-1-0",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/1/0",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-1-0",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-1-0",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-8-round-1-1",
+              "session": "measure/capacity-8/1/1",
+              "input_text": "capacity-8-round-1-1",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/1/1",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-1-1",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-1-1",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-8-round-1-2",
+              "session": "measure/capacity-8/1/2",
+              "input_text": "capacity-8-round-1-2",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/1/2",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-1-2",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-1-2",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-8-round-1-3",
+              "session": "measure/capacity-8/1/3",
+              "input_text": "capacity-8-round-1-3",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/1/3",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-1-3",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-1-3",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-8-round-1-4",
+              "session": "measure/capacity-8/1/4",
+              "input_text": "capacity-8-round-1-4",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/1/4",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-1-4",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-1-4",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-8-round-1-5",
+              "session": "measure/capacity-8/1/5",
+              "input_text": "capacity-8-round-1-5",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/1/5",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-1-5",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-1-5",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-8-round-1-6",
+              "session": "measure/capacity-8/1/6",
+              "input_text": "capacity-8-round-1-6",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/1/6",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-1-6",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-1-6",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-8-round-1-7",
+              "session": "measure/capacity-8/1/7",
+              "input_text": "capacity-8-round-1-7",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/1/7",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-1-7",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-1-7",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            }
+          ],
+          "capture_before_terminal": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "8",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "3746016",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "reference": "measure/capacity-8/1/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui-readiness-168-baseline"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "1",
+              "status": "in_flight",
+              "turn": "1"
+            }
+          },
+          "capture_observation_complete": true,
+          "cleanup_observation_complete": true,
+          "completion_inspection": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "0",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "0",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "reference": "measure/capacity-8/1/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui-readiness-168-baseline"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": {
+                "code": "completed",
+                "content": {
+                  "bytes": "36",
+                  "sha256": "86b662a226f5d8d1325321560836e084145b7f61eeb1571cf1eccaae7cd0f8bd"
+                }
+              },
+              "operation": "1",
+              "status": "completed",
+              "turn": "1"
+            }
+          },
+          "cpu": {
+            "at_most_2_average_cores": true,
+            "average_cores_conservative": 0.03205958811817589,
+            "bracket_valid": true,
+            "complete_work_at_most_120_cpu_seconds": true,
+            "complete_work_cpu_seconds": 2.181749208333333,
+            "cpu_seconds": 1.2824200833333332,
+            "earliest_stream_final_completion_unix_ns": 1790080340371695000,
+            "first_query": {
+              "finish_unix_ns": 1790080290404765000,
+              "host_cpu_seconds": 0.41688333333333333,
+              "start_unix_ns": 1790080290404615000
+            },
+            "maximum_sample_window_seconds": 40.00148025,
+            "minimum_sample_window_seconds": 40.001140333,
+            "provider_offer_qualified": true,
+            "second_query": {
+              "finish_unix_ns": 1790080330406270000,
+              "host_cpu_seconds": 1.6993034166666665,
+              "start_unix_ns": 1790080330406079000
+            },
+            "status": "passed"
+          },
+          "durable_audit_prerequisite_met": true,
+          "events_per_second_per_stream": 30,
+          "expected_provider_work": {
+            "batches": 14400,
+            "events": 14400,
+            "bytes": 3744000
+          },
+          "expected_response_scratch_delta_bytes": 3744000,
+          "expected_retained_scratch_bytes": 3746016,
+          "fixture_completion": {
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 8,
+            "ready_streams": 8,
+            "offer_finished_streams": 8,
+            "terminal_finished_streams": 8,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 8,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 14400,
+            "completed_events": 14400,
+            "offer_bytes": 3744000,
+            "expected_batches": 14400,
+            "expected_events": 14400,
+            "expected_offer_bytes": 3744000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 4,
+            "completion_gap_violations": 99,
+            "burst_window_violations": 0,
+            "worst_late_completion": {
+              "id": "capacity-8-round-1-7",
+              "ordinal": 496,
+              "violation_ns": 4428082
+            },
+            "worst_completion_gap": {
+              "id": "capacity-8-round-1-2",
+              "ordinal": 496,
+              "violation_ns": 36057665
+            },
+            "maximum_completion_delay": {
+              "id": "capacity-8-round-1-7",
+              "ordinal": 496,
+              "observed_ns": 71094750
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-8-round-1-2",
+              "ordinal": 496,
+              "observed_ns": 102724333
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-8-round-1-5",
+              "ordinal": 926,
+              "observed_ns": 33364542
+            },
+            "latest_final_completion_unix_ns": 1790080340372694000,
+            "earliest_final_completion_unix_ns": 1790080340371695000,
+            "terminal_bytes": 6568,
+            "request_bytes": 2016,
+            "request_set_sha256": "e9c0b498c73e2c32f7e0eeaaa4f55088015b28c7c65d48fc213937f4ed971afc",
+            "start_unix_ns": 1790080280403367000,
+            "offer_horizon_unix_ns": 1790080340436700334,
+            "hard_deadline_unix_ns": 1790080400403367000,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "fixture_ready": {
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 8,
+            "ready_streams": 8,
+            "offer_finished_streams": 0,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 0,
+            "maximum_completed_batches": 0,
+            "completed_batches": 0,
+            "completed_events": 0,
+            "offer_bytes": 0,
+            "expected_batches": 14400,
+            "expected_events": 14400,
+            "expected_offer_bytes": 3744000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "terminal_bytes": 0,
+            "request_bytes": 2016,
+            "request_set_sha256": "e9c0b498c73e2c32f7e0eeaaa4f55088015b28c7c65d48fc213937f4ed971afc",
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "host_dimensions": {
+            "capture": "passed",
+            "cleanup": "passed",
+            "durable_audit": "passed",
+            "request_integrity": "passed",
+            "result_delivery": "passed"
+          },
+          "initial": {
+            "host": {
+              "rss_bytes": 9977856,
+              "virtual_bytes": 421140660224,
+              "cpu_user_seconds": 0.006697708333333333,
+              "cpu_system_seconds": 0.011763208333333332,
+              "threads": 4,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 15,
+              "open_descriptors": 11,
+              "disk_read_bytes": 3747840,
+              "disk_write_bytes": 229376,
+              "footprint": {
+                "physical_footprint_bytes": 5456896,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 5456896,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            },
+            "whole_rui": {
+              "aggregate_equals_host": true,
+              "descendant_processes": 0,
+              "host_processes": 1,
+              "lifetime_peak_physical_footprint_bytes": 5456896,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 5457408,
+              "measurement_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+              "physical_footprint_bytes": 5456896,
+              "rss_bytes": 9977856,
+              "status": "complete"
+            }
+          },
+          "observed_offer": {
+            "events_per_second": 240.1227547542763,
+            "seconds": 59.969327,
+            "status": "observed"
+          },
+          "offer_seconds": 60,
+          "offline_audit_after_host_reaped": true,
+          "paced_offer": {
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 8,
+            "ready_streams": 8,
+            "offer_finished_streams": 8,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 8,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 14400,
+            "completed_events": 14400,
+            "offer_bytes": 3744000,
+            "expected_batches": 14400,
+            "expected_events": 14400,
+            "expected_offer_bytes": 3744000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 4,
+            "completion_gap_violations": 99,
+            "burst_window_violations": 0,
+            "worst_late_completion": {
+              "id": "capacity-8-round-1-7",
+              "ordinal": 496,
+              "violation_ns": 4428082
+            },
+            "worst_completion_gap": {
+              "id": "capacity-8-round-1-2",
+              "ordinal": 496,
+              "violation_ns": 36057665
+            },
+            "maximum_completion_delay": {
+              "id": "capacity-8-round-1-7",
+              "ordinal": 496,
+              "observed_ns": 71094750
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-8-round-1-2",
+              "ordinal": 496,
+              "observed_ns": 102724333
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-8-round-1-5",
+              "ordinal": 926,
+              "observed_ns": 33364542
+            },
+            "latest_final_completion_unix_ns": 1790080340372694000,
+            "earliest_final_completion_unix_ns": 1790080340371695000,
+            "terminal_bytes": 0,
+            "request_bytes": 2016,
+            "request_set_sha256": "e9c0b498c73e2c32f7e0eeaaa4f55088015b28c7c65d48fc213937f4ed971afc",
+            "start_unix_ns": 1790080280403367000,
+            "offer_horizon_unix_ns": 1790080340436700334,
+            "hard_deadline_unix_ns": 1790080400403367000,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "provider_process": {
+            "initial": {
+              "rss_bytes": 9617408,
+              "virtual_bytes": 421794922496,
+              "cpu_user_seconds": 0.007448291666666666,
+              "cpu_system_seconds": 0.007020333333333333,
+              "threads": 6,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 9,
+              "open_descriptors": 6,
+              "disk_read_bytes": 0,
+              "disk_write_bytes": 4096,
+              "footprint": {
+                "physical_footprint_bytes": 4850688,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 4850688,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            },
+            "pid": 94054,
+            "retained": {
+              "rss_bytes": 10584064,
+              "virtual_bytes": 421829722112,
+              "cpu_user_seconds": 0.3160647916666666,
+              "cpu_system_seconds": 0.5366974583333333,
+              "threads": 10,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 10,
+              "open_descriptors": 7,
+              "disk_read_bytes": 4096,
+              "disk_write_bytes": 69632,
+              "footprint": {
+                "physical_footprint_bytes": 7504896,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 7504896,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            }
+          },
+          "request_integrity": {
+            "expected_bytes": 2016,
+            "expected_set_sha256": "e9c0b498c73e2c32f7e0eeaaa4f55088015b28c7c65d48fc213937f4ed971afc",
+            "observed_bytes": 2016,
+            "observed_set_sha256": "e9c0b498c73e2c32f7e0eeaaa4f55088015b28c7c65d48fc213937f4ed971afc",
+            "status": "passed"
+          },
+          "result_delivery_complete": true,
+          "retained": {
+            "host": {
+              "rss_bytes": 11501568,
+              "virtual_bytes": 421580521472,
+              "cpu_user_seconds": 0.8549814166666666,
+              "cpu_system_seconds": 1.356291,
+              "threads": 3,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 15,
+              "open_descriptors": 11,
+              "disk_read_bytes": 8429568,
+              "disk_write_bytes": 6967296,
+              "footprint": {
+                "physical_footprint_bytes": 11534336,
+                "physical_footprint_rounding_tolerance_bytes": 524288,
+                "lifetime_peak_physical_footprint_bytes": 11534336,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
+              }
+            },
+            "whole_rui": {
+              "aggregate_equals_host": true,
+              "descendant_processes": 0,
+              "host_processes": 1,
+              "lifetime_peak_physical_footprint_bytes": 11534336,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 12058624,
+              "measurement_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+              "physical_footprint_bytes": 11534336,
+              "rss_bytes": 11501568,
+              "status": "complete"
+            }
+          },
+          "retained_request_baseline": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "8",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "2016",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "reference": "measure/capacity-8/1/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui-readiness-168-baseline"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "1",
+              "status": "in_flight",
+              "turn": "1"
+            }
+          },
+          "retained_request_scratch_bytes": 2016,
+          "round": 1,
+          "status": "passed"
+        },
+        {
+          "active_capacity": 8,
+          "all_results_audited": true,
+          "audit_rows": [
+            {
+              "key": "capacity-8-round-2-0",
+              "session": "measure/capacity-8/2/0",
+              "input_text": "capacity-8-round-2-0",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/2/0",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-2-0",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-2-0",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-8-round-2-1",
+              "session": "measure/capacity-8/2/1",
+              "input_text": "capacity-8-round-2-1",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/2/1",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-2-1",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-2-1",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-8-round-2-2",
+              "session": "measure/capacity-8/2/2",
+              "input_text": "capacity-8-round-2-2",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/2/2",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-2-2",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-2-2",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-8-round-2-3",
+              "session": "measure/capacity-8/2/3",
+              "input_text": "capacity-8-round-2-3",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/2/3",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-2-3",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-2-3",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-8-round-2-4",
+              "session": "measure/capacity-8/2/4",
+              "input_text": "capacity-8-round-2-4",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/2/4",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-2-4",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-2-4",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-8-round-2-5",
+              "session": "measure/capacity-8/2/5",
+              "input_text": "capacity-8-round-2-5",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/2/5",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-2-5",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-2-5",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-8-round-2-6",
+              "session": "measure/capacity-8/2/6",
+              "input_text": "capacity-8-round-2-6",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/2/6",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-2-6",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-2-6",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-8-round-2-7",
+              "session": "measure/capacity-8/2/7",
+              "input_text": "capacity-8-round-2-7",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-8/2/7",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-8-round-2-7",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-8-round-2-7",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            }
+          ],
+          "capture_before_terminal": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "8",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "3746016",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "reference": "measure/capacity-8/2/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui-readiness-168-baseline"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "9",
+              "status": "in_flight",
+              "turn": "9"
+            }
+          },
+          "capture_observation_complete": true,
+          "cleanup_observation_complete": true,
+          "completion_inspection": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "0",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "0",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "reference": "measure/capacity-8/2/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui-readiness-168-baseline"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": {
+                "code": "completed",
+                "content": {
+                  "bytes": "36",
+                  "sha256": "a1f39627ce89460da2d895226f9d9c18601d550c333d55c87e78d7ecf3ff5713"
+                }
+              },
+              "operation": "9",
+              "status": "completed",
+              "turn": "9"
+            }
+          },
+          "cpu": {
+            "at_most_2_average_cores": true,
+            "average_cores_conservative": 0.03605689540863635,
+            "bracket_valid": true,
+            "complete_work_at_most_120_cpu_seconds": true,
+            "complete_work_cpu_seconds": 2.332828708333333,
+            "cpu_seconds": 1.4423823750000002,
+            "earliest_stream_final_completion_unix_ns": 1790080402471071000,
+            "first_query": {
+              "finish_unix_ns": 1790080352376463000,
+              "host_cpu_seconds": 2.6448077916666666,
+              "start_unix_ns": 1790080352376308000
+            },
+            "maximum_sample_window_seconds": 40.003553875,
+            "minimum_sample_window_seconds": 40.002955292,
+            "provider_offer_qualified": true,
+            "second_query": {
+              "finish_unix_ns": 1790080392380036000,
+              "host_cpu_seconds": 4.087190166666667,
+              "start_unix_ns": 1790080392379592000
+            },
+            "status": "passed"
+          },
+          "durable_audit_prerequisite_met": true,
+          "events_per_second_per_stream": 30,
+          "expected_provider_work": {
+            "batches": 14400,
+            "events": 14400,
+            "bytes": 3744000
+          },
+          "expected_response_scratch_delta_bytes": 3744000,
+          "expected_retained_scratch_bytes": 3746016,
+          "fixture_completion": {
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 8,
+            "ready_streams": 8,
+            "offer_finished_streams": 8,
+            "terminal_finished_streams": 8,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 8,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 14400,
+            "completed_events": 14400,
+            "offer_bytes": 3744000,
+            "expected_batches": 14400,
+            "expected_events": 14400,
+            "expected_offer_bytes": 3744000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 341,
+            "completion_gap_violations": 168,
+            "burst_window_violations": 0,
+            "worst_late_completion": {
+              "id": "capacity-8-round-2-7",
+              "ordinal": 1769,
+              "violation_ns": 264445083
+            },
+            "worst_completion_gap": {
+              "id": "capacity-8-round-2-7",
+              "ordinal": 1769,
+              "violation_ns": 292786332
+            },
+            "maximum_completion_delay": {
+              "id": "capacity-8-round-2-7",
+              "ordinal": 1769,
+              "observed_ns": 331111751
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-8-round-2-7",
+              "ordinal": 1769,
+              "observed_ns": 359453000
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-8-round-2-0",
+              "ordinal": 1003,
+              "observed_ns": 33364375
+            },
+            "latest_final_completion_unix_ns": 1790080402506760000,
+            "earliest_final_completion_unix_ns": 1790080402471071000,
+            "terminal_bytes": 6568,
+            "request_bytes": 2016,
+            "request_set_sha256": "16d0f3e5f795f2e53654a7df240e6829f7cf16c643442a3e2ec78ba487d52922",
+            "start_unix_ns": 1790080342368060000,
+            "offer_horizon_unix_ns": 1790080402401393334,
+            "hard_deadline_unix_ns": 1790080462368060000,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "fixture_ready": {
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 8,
+            "ready_streams": 8,
+            "offer_finished_streams": 0,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 0,
+            "maximum_completed_batches": 0,
+            "completed_batches": 0,
+            "completed_events": 0,
+            "offer_bytes": 0,
+            "expected_batches": 14400,
+            "expected_events": 14400,
+            "expected_offer_bytes": 3744000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "terminal_bytes": 0,
+            "request_bytes": 2016,
+            "request_set_sha256": "16d0f3e5f795f2e53654a7df240e6829f7cf16c643442a3e2ec78ba487d52922",
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "host_dimensions": {
+            "capture": "passed",
+            "cleanup": "passed",
+            "durable_audit": "passed",
+            "request_integrity": "passed",
+            "result_delivery": "passed"
+          },
+          "initial": {
+            "host": {
+              "rss_bytes": 11517952,
+              "virtual_bytes": 421580521472,
+              "cpu_user_seconds": 0.8555037083333332,
+              "cpu_system_seconds": 1.3563794583333333,
+              "threads": 3,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 15,
+              "open_descriptors": 11,
+              "disk_read_bytes": 8429568,
+              "disk_write_bytes": 6967296,
+              "footprint": {
+                "physical_footprint_bytes": 11534336,
+                "physical_footprint_rounding_tolerance_bytes": 524288,
+                "lifetime_peak_physical_footprint_bytes": 11534336,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
+              }
+            },
+            "whole_rui": {
+              "aggregate_equals_host": true,
+              "descendant_processes": 0,
+              "host_processes": 1,
+              "lifetime_peak_physical_footprint_bytes": 11534336,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 12058624,
+              "measurement_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+              "physical_footprint_bytes": 11534336,
+              "rss_bytes": 11517952,
+              "status": "complete"
+            }
+          },
+          "observed_offer": {
+            "events_per_second": 239.44647955476256,
+            "seconds": 60.1387,
+            "status": "observed"
+          },
+          "offer_seconds": 60,
+          "offline_audit_after_host_reaped": true,
+          "paced_offer": {
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 8,
+            "ready_streams": 8,
+            "offer_finished_streams": 8,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 8,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 14400,
+            "completed_events": 14400,
+            "offer_bytes": 3744000,
+            "expected_batches": 14400,
+            "expected_events": 14400,
+            "expected_offer_bytes": 3744000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 341,
+            "completion_gap_violations": 168,
+            "burst_window_violations": 0,
+            "worst_late_completion": {
+              "id": "capacity-8-round-2-7",
+              "ordinal": 1769,
+              "violation_ns": 264445083
+            },
+            "worst_completion_gap": {
+              "id": "capacity-8-round-2-7",
+              "ordinal": 1769,
+              "violation_ns": 292786332
+            },
+            "maximum_completion_delay": {
+              "id": "capacity-8-round-2-7",
+              "ordinal": 1769,
+              "observed_ns": 331111751
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-8-round-2-7",
+              "ordinal": 1769,
+              "observed_ns": 359453000
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-8-round-2-0",
+              "ordinal": 1003,
+              "observed_ns": 33364375
+            },
+            "latest_final_completion_unix_ns": 1790080402506760000,
+            "earliest_final_completion_unix_ns": 1790080402471071000,
+            "terminal_bytes": 0,
+            "request_bytes": 2016,
+            "request_set_sha256": "16d0f3e5f795f2e53654a7df240e6829f7cf16c643442a3e2ec78ba487d52922",
+            "start_unix_ns": 1790080342368060000,
+            "offer_horizon_unix_ns": 1790080402401393334,
+            "hard_deadline_unix_ns": 1790080462368060000,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "provider_process": {
+            "initial": {
+              "rss_bytes": 10829824,
+              "virtual_bytes": 421829722112,
+              "cpu_user_seconds": 0.3162525,
+              "cpu_system_seconds": 0.5371586666666667,
+              "threads": 10,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 10,
+              "open_descriptors": 7,
+              "disk_read_bytes": 4096,
+              "disk_write_bytes": 73728,
+              "footprint": {
+                "physical_footprint_bytes": 7701504,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 7701504,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            },
+            "pid": 94054,
+            "retained": {
+              "rss_bytes": 10698752,
+              "virtual_bytes": 421829984256,
+              "cpu_user_seconds": 0.6531228333333332,
+              "cpu_system_seconds": 1.0991105416666664,
+              "threads": 10,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 10,
+              "open_descriptors": 7,
+              "disk_read_bytes": 8192,
+              "disk_write_bytes": 135168,
+              "footprint": {
+                "physical_footprint_bytes": 8520704,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 8520704,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            }
+          },
+          "request_integrity": {
+            "expected_bytes": 2016,
+            "expected_set_sha256": "16d0f3e5f795f2e53654a7df240e6829f7cf16c643442a3e2ec78ba487d52922",
+            "observed_bytes": 2016,
+            "observed_set_sha256": "16d0f3e5f795f2e53654a7df240e6829f7cf16c643442a3e2ec78ba487d52922",
+            "status": "passed"
+          },
+          "result_delivery_complete": true,
+          "retained": {
+            "host": {
+              "rss_bytes": 13418496,
+              "virtual_bytes": 421580521472,
+              "cpu_user_seconds": 1.7815505416666666,
+              "cpu_system_seconds": 2.7731290416666665,
+              "threads": 3,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 15,
+              "open_descriptors": 11,
+              "disk_read_bytes": 12988416,
+              "disk_write_bytes": 13877248,
+              "footprint": {
+                "physical_footprint_bytes": 12582912,
+                "physical_footprint_rounding_tolerance_bytes": 524288,
+                "lifetime_peak_physical_footprint_bytes": 12582912,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
+              }
+            },
+            "whole_rui": {
+              "aggregate_equals_host": true,
+              "descendant_processes": 0,
+              "host_processes": 1,
+              "lifetime_peak_physical_footprint_bytes": 12582912,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 13107200,
+              "measurement_basis": "conservative upper bound of cumulative lifetime physical-footprint peak",
+              "physical_footprint_bytes": 12582912,
+              "rss_bytes": 13418496,
+              "status": "complete"
+            }
+          },
+          "retained_request_baseline": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "8",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "2016",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "reference": "measure/capacity-8/2/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui-readiness-168-baseline"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "9",
+              "status": "in_flight",
+              "turn": "9"
+            }
+          },
+          "retained_request_scratch_bytes": 2016,
+          "round": 2,
+          "status": "passed"
+        }
+      ],
+      "same_host_rounds": 2,
+      "second_retained_delta_from_first": {
+        "open_descriptor_rows": 0,
+        "physical_footprint_bytes": 1048576,
+        "rss_bytes": 1916928,
+        "status": "observed",
+        "virtual_bytes": 0
+      },
+      "status": "passed"
+    }
+  ],
+  "answer_byte_growth": [],
+  "artifacts": "/private/tmp/rui-output-measure-4199277436",
+  "binary": "/private/tmp/rui-168-e347d77.3vSb88/install/bin/rui",
+  "binary_sha256": "708b44df6e1cb9612e9d3994a04420a4bdd4764a7076ff2c76eb9e4c28f04c6f",
+  "elapsed_seconds": 124.2880165,
+  "format": "rui-model-output-v7-go",
+  "item_count_growth": [],
+  "limits": [
+    "macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only",
+    "deterministic loopback HTTP qualifies no live-provider behavior",
+    "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second",
+    "rational target scheduling aims at 60 seconds and emits exactly 1,800 or 6,000 events per stream; per-event pacing is diagnostic, collection stops at 120 seconds, and measured rate is not maximum sustainable throughput",
+    "Host CPU uses conservative query brackets spanning at least 40 seconds wholly inside simultaneous complete offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds",
+    "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after both rounds and confirmed Host stop/reap",
+    "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 4 MiB cache"
+  ],
+  "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+  "measurement_runtime": {
+    "go_arch": "arm64",
+    "go_os": "darwin",
+    "go_version": "go1.27.1",
+    "gopsutil_version": "v4.26.7",
+    "logical_cpus": 10,
+    "module_path": "rui.local/qualification",
+    "physical_memory_bytes": 17179869184
+  },
+  "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
+  "scope": "issue-176 assembled model-path capacity, capture, import and retained-idle qualification",
+  "sqlite_cache_spill_comparison": null,
+  "status": "passed",
+  "tested_revision": "e347d778f5696fe735954b4f208651f0a4ca5cb5",
+  "working_tree_dirty": false,
+  "zig": "0.16.0"
+}
