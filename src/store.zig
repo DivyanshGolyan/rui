@@ -96,7 +96,12 @@ pub const ControlTrace = struct {
     }
 };
 
-pub const SettlementTracePhase = enum { lock_requested, lock_acquired, settlement_complete };
+pub const SettlementTracePhase = enum {
+    lock_requested,
+    lock_acquired,
+    transaction_active,
+    settlement_complete,
+};
 
 pub const SettlementTrace = struct {
     context: *anyopaque,
@@ -1858,26 +1863,38 @@ pub const Store = struct {
                 };
                 interrupted_operation_id = current_operation_id;
             }
-            var current = try self.readSession(command.session.slice()) orelse return error.CorruptStore;
-            const cancellation_content_id = try self.importBytesContent("Cancelled by Session stop.", false, faults.content_import);
-            const cancel_actions = try prepare(
+            const unresolved_actions = try prepare(
                 self.database,
-                "WITH cancelled(action_id,acceptance_position) AS MATERIALIZED (" ++
-                    "SELECT action_id,?3+row_number() OVER (ORDER BY call_ordinal)-1 FROM action_operation " ++
-                    "WHERE parent_operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=0) " ++
-                    "UPDATE action_operation SET resolution_code='cancelled',resolution_content_id=?2," ++
-                    "acceptance_position=(SELECT acceptance_position FROM cancelled WHERE cancelled.action_id=action_operation.action_id) " ++
-                    "WHERE action_id IN (SELECT action_id FROM cancelled)",
+                "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 " ++
+                    "AND resolution_code IS NULL AND attempt_ordinal=0",
             );
-            defer _ = c.sqlite3_finalize(cancel_actions);
-            try bindU64(cancel_actions, 1, current_operation_id.?);
-            try bindI64(cancel_actions, 2, cancellation_content_id);
-            try bindU64(cancel_actions, 3, current.next_position);
-            try expectDone(cancel_actions);
-            const cancelled_count = c.sqlite3_changes(self.database);
-            if (cancelled_count < 0) return error.CorruptStore;
-            current.next_position = try std.math.add(u64, current.next_position, @intCast(cancelled_count));
-            try self.updateSession(command.session.slice(), &current);
+            defer _ = c.sqlite3_finalize(unresolved_actions);
+            try bindU64(unresolved_actions, 1, current_operation_id.?);
+            if (c.sqlite3_step(unresolved_actions) != c.SQLITE_ROW) return error.ActionReadFailed;
+            const unresolved_count = c.sqlite3_column_int64(unresolved_actions, 0);
+            if (unresolved_count < 0) return error.CorruptStore;
+            if (unresolved_count != 0) {
+                var current = try self.readSession(command.session.slice()) orelse return error.CorruptStore;
+                const cancellation_content_id = try self.importBytesContent("Cancelled by Session stop.", false, faults.content_import);
+                const cancel_actions = try prepare(
+                    self.database,
+                    "WITH cancelled(action_id,acceptance_position) AS MATERIALIZED (" ++
+                        "SELECT action_id,?3+row_number() OVER (ORDER BY call_ordinal)-1 FROM action_operation " ++
+                        "WHERE parent_operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=0) " ++
+                        "UPDATE action_operation SET resolution_code='cancelled',resolution_content_id=?2," ++
+                        "acceptance_position=(SELECT acceptance_position FROM cancelled WHERE cancelled.action_id=action_operation.action_id) " ++
+                        "WHERE action_id IN (SELECT action_id FROM cancelled)",
+                );
+                defer _ = c.sqlite3_finalize(cancel_actions);
+                try bindU64(cancel_actions, 1, current_operation_id.?);
+                try bindI64(cancel_actions, 2, cancellation_content_id);
+                try bindU64(cancel_actions, 3, current.next_position);
+                try expectDone(cancel_actions);
+                const cancelled_count = c.sqlite3_changes(self.database);
+                if (cancelled_count != unresolved_count) return error.StopSelectionChanged;
+                current.next_position = try std.math.add(u64, current.next_position, @intCast(cancelled_count));
+                try self.updateSession(command.session.slice(), &current);
+            }
             try self.completeStoppedTurnIfReady(turn_id);
         }
         const selection = SessionStopSelection{
@@ -4523,6 +4540,10 @@ pub const Store = struct {
         faults: Faults,
     ) !void {
         try exec(self.database, "BEGIN IMMEDIATE");
+        if (faults.settlement_trace) |trace| {
+            std.debug.assert(c.sqlite3_txn_state(self.database, "main") == c.SQLITE_TXN_WRITE);
+            trace.mark(.transaction_active);
+        }
         try self.validateCurrentAttempt(binding);
         const operation = try prepare(
             self.database,
@@ -5492,7 +5513,9 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(insert);
         try bindBlob(insert, 1, &content.digest);
         try bindU64(insert, 2, content.length);
-        try expectDone(insert);
+        const insert_result = c.sqlite3_step(insert);
+        if (insert_result == c.SQLITE_FULL) return error.CanonicalStorageFull;
+        if (insert_result != c.SQLITE_DONE) return error.StatementFailed;
         const content_id = c.sqlite3_last_insert_rowid(self.database);
         if (content_id <= 0) return error.ContentWriteFailed;
 
@@ -6400,6 +6423,17 @@ fn settleCallsForTesting(
     file_prefix: []const u8,
     calls: []const TestingCall,
 ) !void {
+    return settleCallsForTestingWithFaults(storage, tmp, binding, file_prefix, calls, .{});
+}
+
+fn settleCallsForTestingWithFaults(
+    storage: *Store,
+    tmp: *std.testing.TmpDir,
+    binding: AttemptBinding,
+    file_prefix: []const u8,
+    calls: []const TestingCall,
+    faults: Faults,
+) !void {
     var source_buffer: [64 * 1024]u8 = undefined;
     var source_writer = std.Io.Writer.fixed(&source_buffer);
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -6495,7 +6529,7 @@ fn settleCallsForTesting(
         .openai_model = .{},
         .x_openai_model = .{},
         .request_id = .{},
-    }, .{});
+    }, faults);
 }
 
 fn settleTwoActionsForTesting(
@@ -7003,6 +7037,103 @@ test "Action settlement atomically yields to an earlier Session stop" {
     try std.testing.expectEqual(@as(u64, 1), try queryU64(
         storage.database,
         "SELECT count(*) FROM turn WHERE session_ref='direct/settlement-stop' AND outcome_code='cancelled'",
+    ));
+}
+
+test "earlier Action settlement remains authoritative after Session stop" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try configureTestSession(&storage, "settlement-first-config", "direct/settlement-first");
+    try submitTestMessage(
+        &storage,
+        &tmp,
+        "settlement-first-message",
+        "settlement-first-message",
+        "direct/settlement-first",
+        "execute",
+    );
+    const model_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{.{
+        .item_id = "settlement-first-item",
+        .name = "bash",
+        .encoded_call_id = "settlement-first-call",
+        .decoded_call_id = "settlement-first-call",
+        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+    }};
+    try settleCallsForTesting(&storage, &tmp, model_binding, "settlement-first-metadata", &calls);
+    const action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation");
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
+    try allow.key.set("settlement-first-allow");
+    try allow.session.set("direct/settlement-first");
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+
+    try std.testing.expectEqual(
+        ActionSettlement.effect,
+        try storage.settleActionAttempt(action_binding, .succeeded, "Original Bash result.", .{}),
+    );
+    const original_content_id = try queryU64(
+        storage.database,
+        "SELECT resolution_content_id FROM action_operation",
+    );
+    const original_content_count = try queryU64(storage.database, "SELECT count(*) FROM content");
+    try std.testing.expectError(
+        error.StaleActionAttemptBinding,
+        storage.settleActionAttempt(action_binding, .failed, "Late replacement.", .{}),
+    );
+    try std.testing.expectEqual(
+        original_content_count,
+        try queryU64(storage.database, "SELECT count(*) FROM content"),
+    );
+
+    var stop = try completeSessionStop("settlement-first-stop", "direct/settlement-first");
+    const accepted = storage.stopSession(&stop, .{});
+    try std.testing.expect(accepted == .accepted);
+    try std.testing.expectEqual(model_binding.turn_id, accepted.accepted.selection.selected_turn_id.?);
+    try std.testing.expectEqual(SessionStopCompletion.completed, accepted.accepted.completion);
+    try std.testing.expectEqual(original_content_id, try queryU64(
+        storage.database,
+        "SELECT resolution_content_id FROM action_operation",
+    ));
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(
+        storage.database,
+        "SELECT count(*) FROM action_operation WHERE resolution_code='succeeded'",
+    ));
+    const result_metadata = try storage.readContentMetadata(@intCast(original_content_id));
+    try expectContent(&storage, .{
+        .length = result_metadata.length,
+        .digest = result_metadata.digest,
+    }, "Original Bash result.");
+    try std.testing.expectError(
+        error.StaleActionAttemptBinding,
+        storage.settleActionAttempt(action_binding, .cancelled, "Late stop result.", .{}),
+    );
+    try std.testing.expectEqual(
+        original_content_count,
+        try queryU64(storage.database, "SELECT count(*) FROM content"),
+    );
+    try submitTestMessage(
+        &storage,
+        &tmp,
+        "settlement-first-later",
+        "settlement-first-later",
+        "direct/settlement-first",
+        "later",
+    );
+    const stop_replay = storage.stopSession(&stop, .{});
+    try std.testing.expect(stop_replay == .accepted);
+    try std.testing.expect(stop_replay.accepted.replayed);
+    try std.testing.expectEqual(accepted.accepted.selection, stop_replay.accepted.selection);
+    try std.testing.expect(
+        (try storage.observeCommand("settlement-first-later")).message.?.queue.?.state == .queued,
+    );
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(
+        storage.database,
+        "SELECT count(*) FROM turn WHERE session_ref='direct/settlement-first' AND outcome_code='cancelled'",
     ));
 }
 
@@ -8118,6 +8249,38 @@ test "exact model interruption continues only with applicable pending input" {
     const observation = try storage.observeCommand("interrupt");
     try std.testing.expectEqual(binding.turn_id, observation.model_interruption.?.turn_id);
     try std.testing.expectEqual(binding.operation_id, observation.model_interruption.?.operation_id);
+
+    try std.testing.expectError(
+        error.SupersededByControl,
+        storage.settleModelAttemptFailure(binding, "late_old_failure", .terminal, .{}),
+    );
+    const successor_observation = (try storage.observeCommand("interrupt-message-b")).message.?.queue.?;
+    const observed_successor = switch (successor_observation.state) {
+        .processing => |value| value,
+        else => return error.ExpectedProcessingObservation,
+    };
+    try std.testing.expectEqual(successor.permit.binding, observed_successor);
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(
+        storage.database,
+        "SELECT count(*) FROM model_operation WHERE resolution_code='interrupted' " ++
+            "AND interrupted_by_command_key='interrupt'",
+    ));
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(
+        storage.database,
+        "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL",
+    ));
+    const replay = storage.interruptModel(&interrupt, .{});
+    try std.testing.expect(replay == .accepted);
+    try std.testing.expect(replay.accepted.replayed);
+    try storage.settleModelAttemptFailure(successor.permit.binding, "successor_failure", .terminal, .{});
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(
+        storage.database,
+        "SELECT count(*) FROM model_operation WHERE resolution_code='successor_failure'",
+    ));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(
+        storage.database,
+        "SELECT count(*) FROM model_operation WHERE resolution_code='late_old_failure'",
+    ));
 }
 
 test "exact model interruption rejects stale targets and replays before applicability" {
@@ -8159,6 +8322,247 @@ test "exact model interruption rejects stale targets and replays before applicab
     const resolved = storage.interruptModel(&after, .{});
     try std.testing.expect(resolved == .rejected);
     try std.testing.expectEqual(ModelInterruptionRejection.operation_resolved, resolved.rejected.code);
+}
+
+test "controls wait behind an active model settlement transaction" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try configureTestSession(&storage, "transaction-race-config", "direct/transaction-race");
+    try submitTestMessage(
+        &storage,
+        &tmp,
+        "transaction-race-message",
+        "transaction-race-message",
+        "direct/transaction-race",
+        "execute",
+    );
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{.{
+        .item_id = "transaction-race-item",
+        .name = "bash",
+        .encoded_call_id = "transaction-race-call",
+        .decoded_call_id = "transaction-race-call",
+        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+    }};
+
+    const SettlementCheckpoint = enum(u8) { waiting, transaction_active, worker_finished };
+    const Shared = struct {
+        io: std.Io,
+        order: std.atomic.Value(u64) = .init(0),
+        checkpoint_ready: std.Io.Semaphore = .{},
+        settlement_release: std.Io.Semaphore = .{},
+        controls_requested: std.Io.Semaphore = .{},
+        checkpoint: std.atomic.Value(SettlementCheckpoint) = .init(.waiting),
+        transaction_active_order: std.atomic.Value(u64) = .init(0),
+        settlement_complete_order: std.atomic.Value(u64) = .init(0),
+
+        fn next(self: *@This()) u64 {
+            return self.order.fetchAdd(1, .seq_cst) + 1;
+        }
+
+        fn settlementTrace(context: *anyopaque, phase: SettlementTracePhase) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (phase) {
+                .transaction_active => {
+                    self.transaction_active_order.store(self.next(), .seq_cst);
+                    std.debug.assert(
+                        self.checkpoint.cmpxchgStrong(
+                            .waiting,
+                            .transaction_active,
+                            .acq_rel,
+                            .acquire,
+                        ) == null,
+                    );
+                    self.checkpoint_ready.post(self.io);
+                    self.settlement_release.waitUncancelable(self.io);
+                },
+                .settlement_complete => self.settlement_complete_order.store(self.next(), .seq_cst),
+                else => {},
+            }
+        }
+
+        fn workerFinished(self: *@This()) void {
+            if (self.checkpoint.swap(.worker_finished, .acq_rel) != .worker_finished) {
+                self.checkpoint_ready.post(self.io);
+            }
+        }
+    };
+    const ControlProbe = struct {
+        shared: *Shared,
+        lock_acquired_order: std.atomic.Value(u64) = .init(0),
+
+        fn mark(context: *anyopaque, phase: ControlTracePhase) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (phase) {
+                .lock_requested => self.shared.controls_requested.post(self.shared.io),
+                .lock_acquired => self.lock_acquired_order.store(self.shared.next(), .seq_cst),
+                else => {},
+            }
+        }
+    };
+    const SettlementContext = struct {
+        storage: *Store,
+        tmp: *std.testing.TmpDir,
+        binding: AttemptBinding,
+        calls: []const TestingCall,
+        shared: *Shared,
+        failure_before_settlement: ?anyerror = null,
+        result: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            defer self.shared.workerFinished();
+            if (self.failure_before_settlement) |err| {
+                self.result = err;
+                return;
+            }
+            settleCallsForTestingWithFaults(
+                self.storage,
+                self.tmp,
+                self.binding,
+                "transaction-race-metadata",
+                self.calls,
+                .{ .settlement_trace = .{ .context = self.shared, .mark_fn = Shared.settlementTrace } },
+            ) catch |err| {
+                self.result = err;
+            };
+        }
+    };
+    const StopContext = struct {
+        storage: *Store,
+        command: *const protocol.SessionStopCommand,
+        probe: ControlProbe,
+        reply: ?SessionStopReply = null,
+        finished: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            self.reply = self.storage.stopSession(self.command, .{
+                .control_trace = .{ .context = &self.probe, .mark_fn = ControlProbe.mark },
+            });
+            self.finished.store(true, .seq_cst);
+        }
+    };
+    const InterruptContext = struct {
+        storage: *Store,
+        command: *const protocol.ModelInterruptionCommand,
+        probe: ControlProbe,
+        reply: ?ModelInterruptionReply = null,
+        finished: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            self.reply = self.storage.interruptModel(self.command, .{
+                .control_trace = .{ .context = &self.probe, .mark_fn = ControlProbe.mark },
+            });
+            self.finished.store(true, .seq_cst);
+        }
+    };
+
+    var early_shared: Shared = .{ .io = std.testing.io };
+    var early: SettlementContext = .{
+        .storage = &storage,
+        .tmp = &tmp,
+        .binding = binding,
+        .calls = &calls,
+        .shared = &early_shared,
+        .failure_before_settlement = error.InjectedSettlementCheckpointFailure,
+    };
+    const early_thread = try std.Thread.spawn(.{}, SettlementContext.run, .{&early});
+    early_shared.checkpoint_ready.waitUncancelable(std.testing.io);
+    early_thread.join();
+    try std.testing.expectEqual(SettlementCheckpoint.worker_finished, early_shared.checkpoint.load(.acquire));
+    try std.testing.expectEqual(error.InjectedSettlementCheckpointFailure, early.result.?);
+
+    var shared: Shared = .{ .io = std.testing.io };
+    var settlement_thread: ?std.Thread = null;
+    var stop_thread: ?std.Thread = null;
+    var interrupt_thread: ?std.Thread = null;
+    var settlement_released = false;
+    defer {
+        if (!settlement_released) shared.settlement_release.post(std.testing.io);
+        if (settlement_thread) |thread| thread.join();
+        if (stop_thread) |thread| thread.join();
+        if (interrupt_thread) |thread| thread.join();
+    }
+    var settlement: SettlementContext = .{
+        .storage = &storage,
+        .tmp = &tmp,
+        .binding = binding,
+        .calls = &calls,
+        .shared = &shared,
+    };
+    settlement_thread = try std.Thread.spawn(.{}, SettlementContext.run, .{&settlement});
+    shared.checkpoint_ready.waitUncancelable(std.testing.io);
+    if (shared.checkpoint.load(.acquire) == .worker_finished) {
+        settlement_thread.?.join();
+        settlement_thread = null;
+        if (settlement.result) |err| return err;
+        return error.SettlementCheckpointMissing;
+    }
+    try std.testing.expectEqual(SettlementCheckpoint.transaction_active, shared.checkpoint.load(.acquire));
+
+    var stop = try completeSessionStop("transaction-race-stop", "direct/transaction-race");
+    var interrupt = try completeModelInterruption(
+        "transaction-race-interrupt",
+        "direct/transaction-race",
+        binding,
+    );
+    var stop_context: StopContext = .{
+        .storage = &storage,
+        .command = &stop,
+        .probe = .{ .shared = &shared },
+    };
+    var interrupt_context: InterruptContext = .{
+        .storage = &storage,
+        .command = &interrupt,
+        .probe = .{ .shared = &shared },
+    };
+    stop_thread = try std.Thread.spawn(.{}, StopContext.run, .{&stop_context});
+    interrupt_thread = try std.Thread.spawn(.{}, InterruptContext.run, .{&interrupt_context});
+    shared.controls_requested.waitUncancelable(std.testing.io);
+    shared.controls_requested.waitUncancelable(std.testing.io);
+    try std.testing.expectEqual(@as(u64, 0), stop_context.probe.lock_acquired_order.load(.seq_cst));
+    try std.testing.expectEqual(@as(u64, 0), interrupt_context.probe.lock_acquired_order.load(.seq_cst));
+    try std.testing.expect(!stop_context.finished.load(.seq_cst));
+    try std.testing.expect(!interrupt_context.finished.load(.seq_cst));
+
+    shared.settlement_release.post(std.testing.io);
+    settlement_released = true;
+    settlement_thread.?.join();
+    settlement_thread = null;
+    stop_thread.?.join();
+    stop_thread = null;
+    interrupt_thread.?.join();
+    interrupt_thread = null;
+    if (settlement.result) |err| return err;
+
+    const settlement_complete_order = shared.settlement_complete_order.load(.seq_cst);
+    try std.testing.expect(shared.transaction_active_order.load(.seq_cst) < settlement_complete_order);
+    try std.testing.expect(settlement_complete_order < stop_context.probe.lock_acquired_order.load(.seq_cst));
+    try std.testing.expect(settlement_complete_order < interrupt_context.probe.lock_acquired_order.load(.seq_cst));
+    try std.testing.expectEqual(c.SQLITE_TXN_NONE, c.sqlite3_txn_state(storage.database, "main"));
+
+    const stop_reply = stop_context.reply.?;
+    try std.testing.expect(stop_reply == .accepted);
+    try std.testing.expectEqual(binding.turn_id, stop_reply.accepted.selection.selected_turn_id.?);
+    try std.testing.expectEqual(SessionStopCompletion.completed, stop_reply.accepted.completion);
+    const interrupt_reply = interrupt_context.reply.?;
+    try std.testing.expect(interrupt_reply == .rejected);
+    try std.testing.expectEqual(ModelInterruptionRejection.operation_resolved, interrupt_reply.rejected.code);
+
+    const action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation");
+    try expectContent(
+        &storage,
+        try storage.actionCallId("direct/transaction-race", action_id),
+        "transaction-race-call",
+    );
+    try expectContent(
+        &storage,
+        try storage.actionArguments("direct/transaction-race", action_id),
+        "{\"cmd\":\"true\",\"timeout_ms\":null}",
+    );
 }
 
 test "model interruption removes a scheduled retry from admission" {
@@ -8709,6 +9113,121 @@ test "failed commit saves neither answer nor partial Session" {
     }
 }
 
+test "real SQLite busy saves no answer and fences the connection" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+    const database = try std.fmt.bufPrintZ(&database_buffer, "{s}/store.sqlite3", .{root});
+    var storage = try Store.open(std.testing.io, database, root);
+    var storage_open = true;
+    defer if (storage_open) storage.close() catch unreachable;
+
+    var blocker: ?*c.sqlite3 = null;
+    try std.testing.expectEqual(
+        @as(c_int, c.SQLITE_OK),
+        c.sqlite3_open_v2(
+            database.ptr,
+            &blocker,
+            c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_NOMUTEX,
+            null,
+        ),
+    );
+    var blocker_open = true;
+    defer if (blocker_open) {
+        _ = c.sqlite3_close(blocker);
+    };
+    try std.testing.expectEqual(
+        @as(c_int, c.SQLITE_OK),
+        c.sqlite3_exec(blocker, "BEGIN IMMEDIATE", null, null, null),
+    );
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration(
+        "busy-save",
+        "direct/busy-save",
+        workspace,
+        "model-a",
+    );
+    try std.testing.expect(storage.configure(&command, .{}) == .infrastructure_failure);
+    try std.testing.expectEqual(
+        @as(c_int, c.SQLITE_BUSY),
+        c.sqlite3_extended_errcode(storage.database),
+    );
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectError(error.StoreFenced, storage.observeCommand("busy-save"));
+
+    try std.testing.expectEqual(
+        @as(c_int, c.SQLITE_OK),
+        c.sqlite3_exec(blocker, "ROLLBACK", null, null, null),
+    );
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_close(blocker));
+    blocker_open = false;
+    try storage.close();
+    storage_open = false;
+
+    var reopened = try Store.open(std.testing.io, database, root);
+    defer reopened.close() catch unreachable;
+    try std.testing.expect((try reopened.observeCommand("busy-save")).status == .absent);
+    try std.testing.expect(!(try reopened.inspectSession("direct/busy-save")).found);
+}
+
+test "real SQLite full during import publishes no canonical prefix" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    var storage_open = true;
+    defer if (storage_open) storage.close() catch unreachable;
+
+    const page_count = try pragmaInt(storage.database, "PRAGMA page_count");
+    var limit_buffer: [64:0]u8 = undefined;
+    const limit = try std.fmt.bufPrintZ(&limit_buffer, "PRAGMA max_page_count={d}", .{page_count});
+    try exec(storage.database, limit);
+    try std.testing.expectEqual(page_count, try pragmaInt(storage.database, "PRAGMA max_page_count"));
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration(
+        "full-import",
+        "direct/full-import",
+        workspace,
+        "model-a",
+    );
+    command.configuration.instructions = try testingContent(
+        &tmp,
+        "full-import-content",
+        'x',
+        128 * 1024,
+    );
+    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+
+    // Drive the production transaction body directly so the test observes
+    // the exact import-step result before the public wrapper maps it. SQLite
+    // automatically rolls this FULL transaction back; then apply the wrapper's
+    // failure transition and verify its fence/reopen consequences below.
+    try std.testing.expectError(
+        error.CanonicalStorageFull,
+        storage.configureLocked(&command, .{}),
+    );
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+    storage.finishTransactionFailure(.{});
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectError(error.StoreFenced, storage.observeCommand("full-import"));
+    try storage.close();
+    storage_open = false;
+
+    var reopened = try testingStore(&tmp, std.testing.io);
+    defer reopened.close() catch unreachable;
+    try std.testing.expect((try reopened.observeCommand("full-import")).status == .absent);
+    try std.testing.expect(!(try reopened.inspectSession("direct/full-import")).found);
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(
+        reopened.database,
+        "SELECT count(*) FROM content WHERE byte_length=131072",
+    ));
+}
+
 test "message admissions remain queued in order and retain bounded canonical content" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -9112,6 +9631,12 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expect(diagnostic.process_memory_highwater_bytes != null);
     try std.testing.expect(diagnostic.cache_used_bytes != null);
     try std.testing.expect(diagnostic.cache_spills != null);
+    // Readback alone would only prove configuration. A single SQLite-owned
+    // allocation larger than the process-global hard ceiling must be denied
+    // by the pinned library while this Store owns the configured limit.
+    const over_limit = c.sqlite3_malloc64(sqlite_heap_bytes + 1);
+    defer c.sqlite3_free(over_limit);
+    try std.testing.expect(over_limit == null);
 }
 
 test "maximum canonical Store path completes a journaled transaction" {

@@ -1141,6 +1141,92 @@ test "captured content cleanup closes sealed custody" {
     try std.testing.expect(!content.hasFile());
 }
 
+test "configuration content sealing peaks at four descriptors with its socket" {
+    const Probe = struct {
+        var live_files: usize = 0;
+        var maximum_live_files: usize = 0;
+        var directory_opens: usize = 0;
+
+        fn createFile(
+            userdata: ?*anyopaque,
+            dir: std.Io.Dir,
+            path: []const u8,
+            options: std.Io.Dir.CreateFileOptions,
+        ) std.Io.File.OpenError!std.Io.File {
+            const file = try std.testing.io.vtable.dirCreateFile(userdata, dir, path, options);
+            live_files += 1;
+            maximum_live_files = @max(maximum_live_files, live_files);
+            return file;
+        }
+
+        fn openFile(
+            userdata: ?*anyopaque,
+            dir: std.Io.Dir,
+            path: []const u8,
+            options: std.Io.Dir.OpenFileOptions,
+        ) std.Io.File.OpenError!std.Io.File {
+            const file = try std.testing.io.vtable.dirOpenFile(userdata, dir, path, options);
+            live_files += 1;
+            maximum_live_files = @max(maximum_live_files, live_files);
+            return file;
+        }
+
+        fn closeFiles(userdata: ?*anyopaque, files: []const std.Io.File) void {
+            std.debug.assert(live_files >= files.len);
+            live_files -= files.len;
+            std.testing.io.vtable.fileClose(userdata, files);
+        }
+
+        fn openDir(
+            userdata: ?*anyopaque,
+            dir: std.Io.Dir,
+            path: []const u8,
+            options: std.Io.Dir.OpenOptions,
+        ) std.Io.Dir.OpenError!std.Io.Dir {
+            directory_opens += 1;
+            return std.testing.io.vtable.dirOpenDir(userdata, dir, path, options);
+        }
+    };
+    Probe.live_files = 0;
+    Probe.maximum_live_files = 0;
+    Probe.directory_opens = 0;
+
+    var vtable = std.testing.io.vtable.*;
+    vtable.dirCreateFile = Probe.createFile;
+    vtable.dirOpenFile = Probe.openFile;
+    vtable.fileClose = Probe.closeFiles;
+    vtable.dirOpenDir = Probe.openDir;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root);
+    var cleanup_failed = false;
+    const json = "\"instructions\"\"schema\"";
+    var source = SocketBody.init(-1, 0);
+    @memcpy(source.buffer[0..json.len], json);
+    source.end = json.len;
+    var parser = Parser{ .source = &source, .options = .{
+        .io = io,
+        .fd = -1,
+        .content_length = json.len,
+        .scratch_path = root[0..root_len],
+        .request_number = 1,
+        .cleanup_failed = &cleanup_failed,
+    } };
+    var instructions = ContentField{};
+    errdefer removeContent(&instructions, io) catch unreachable;
+    var output_schema = ContentField{};
+    errdefer removeContent(&output_schema, io) catch unreachable;
+    try parser.readContentString(&instructions);
+    try parser.readContentString(&output_schema);
+    try std.testing.expectEqual(@as(usize, 4), 1 + Probe.maximum_live_files);
+    try std.testing.expectEqual(@as(usize, 0), Probe.directory_opens);
+    try removeContent(&output_schema, io);
+    try removeContent(&instructions, io);
+    try std.testing.expectEqual(@as(usize, 0), Probe.live_files);
+}
+
 test "content sink enforces the decoded consumer boundary before retention" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

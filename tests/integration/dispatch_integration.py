@@ -399,7 +399,7 @@ def finish_command(process):
     return json.loads(stdout)
 
 
-def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacity=1):
+def host_arguments(store, endpoint, *extra, accelerated_retries=True, active_capacity=1):
     args = [
         str(RUI),
         "serve",
@@ -413,6 +413,17 @@ def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacit
         if accelerated_retries:
             args += ["--test-retry-waits-ms", "50,100,150"]
     args += extra
+    return args
+
+
+def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacity=1):
+    args = host_arguments(
+        store,
+        endpoint,
+        *extra,
+        accelerated_retries=accelerated_retries,
+        active_capacity=active_capacity,
+    )
     process, _ = start_ready_process(
         args,
         required_fields=(
@@ -557,6 +568,18 @@ def message_lost_reply(state, store, key, session, text):
     assert completed.returncode != 0, completed
 
 
+def retry_message(state, store, key):
+    return command(
+        "retry",
+        "--store",
+        store,
+        "--record",
+        state / f"{key}.json",
+        "--kind",
+        "message",
+    )
+
+
 def observe(store, key):
     return command("observe-command", "--store", store, "--key", key)["observation"]
 
@@ -619,6 +642,7 @@ def main():
     continuation_thread = None
     proposal_milestones = None
     proposal_gate_keeper = None
+    rollback_milestones = None
     completed = False
     try:
         forbidden_effect = state / "proposal-must-not-launch"
@@ -3598,18 +3622,93 @@ def main():
         endpoint.release.clear()
         endpoint.requests.clear()
         rollback_store = state / "rollback-store"
-        host = start_host(rollback_store, url, "--fault", "attempt-before-commit")
+        host = start_host(
+            rollback_store,
+            url,
+            "--fault",
+            "attempt-before-commit",
+            "--test-phase-trace",
+        )
         processes.append(host)
+        rollback_milestones = HostDiagnostics(host)
         configure(state, rollback_store, "rollback-config", "direct/rollback", "model-a")
         message(state, rollback_store, "rollback-message", "direct/rollback", "rollback")
-        time.sleep(0.35)
+        rollback_milestones.wait(
+            "attempt_admission_rolled_back",
+            subject_kind="attempt_kind",
+            subject="model",
+        )
         assert endpoint.requests == []
-        assert observe(rollback_store, "rollback-message")["queue"]["status"] == "queued"
+        rollback_queued = observe(rollback_store, "rollback-message")
+        assert rollback_queued["queue"]["status"] == "queued", rollback_queued
+        assert "processing" not in rollback_queued, rollback_queued
+        rollback_execution = command(
+            "inspect-session",
+            "--store",
+            rollback_store,
+            "--session",
+            "direct/rollback",
+        )["execution"]
+        assert rollback_execution["custody_occupied"] == "0", rollback_execution
         stop_host(host)
         processes.remove(host)
+        rollback_milestones.close()
+        rollback_milestones = None
+        with sqlite3.connect(rollback_store / "rui.sqlite3") as database:
+            assert database.execute(
+                "SELECT count(*),count(turn_id) FROM message_admission "
+                "WHERE command_key='rollback-message'"
+            ).fetchone() == (1, 0)
+            assert database.execute(
+                "SELECT count(*) FROM turn WHERE session_ref='direct/rollback'"
+            ).fetchone() == (0,)
+            assert database.execute(
+                "SELECT count(*) FROM model_operation WHERE session_ref='direct/rollback'"
+            ).fetchone() == (0,)
+            assert database.execute(
+                "SELECT count(*) FROM conversation_entry WHERE session_ref='direct/rollback'"
+            ).fetchone() == (0,)
+
+        # Retrying the original caller record after rollback recovers the one
+        # queued admission. Only its later successful admission may dispatch.
+        endpoint.release.set()
+        host = start_host(rollback_store, url)
+        processes.append(host)
+        rollback_replay = retry_message(state, rollback_store, "rollback-message")
+        assert rollback_replay["answer"]["status"] == "accepted", rollback_replay
+        assert rollback_replay["answer"]["replayed"] is True, rollback_replay
+        wait_for(lambda: len(endpoint.requests) == 1, "rollback retry dispatch")
+        rollback_failed = wait_for(
+            lambda: (value := observe(rollback_store, "rollback-message")).get("result")
+            and value,
+            "rollback retry result",
+        )
+        assert rollback_failed["processing"]["attempt"] == "1", rollback_failed
+        assert rollback_failed["result"]["code"] == "provider_http_422", rollback_failed
+        stop_host(host)
+        processes.remove(host)
+        with sqlite3.connect(rollback_store / "rui.sqlite3") as database:
+            assert database.execute(
+                "SELECT count(*),count(turn_id) FROM message_admission "
+                "WHERE command_key='rollback-message'"
+            ).fetchone() == (1, 1)
+            assert database.execute(
+                "SELECT count(*) FROM turn WHERE session_ref='direct/rollback'"
+            ).fetchone() == (1,)
+            assert database.execute(
+                "SELECT count(*) FROM model_operation WHERE session_ref='direct/rollback'"
+            ).fetchone() == (1,)
+            assert database.execute(
+                "SELECT count(*) FROM conversation_entry WHERE session_ref='direct/rollback' "
+                "AND entry_kind=1"
+            ).fetchone() == (1,)
+        endpoint.requests.clear()
+        endpoint.received.clear()
+        endpoint.release.clear()
 
         # The first fallible post-commit step consumes Attempt 1, saves a typed
-        # failure, releases custody, and never reaches HTTP.
+        # failure, releases custody, and never reaches HTTP. Original request
+        # retries stay bound to that result after the Session advances.
         first_store = state / "first-step-store"
         host = start_host(first_store, url, "--fault", "request-first-step")
         processes.append(host)
@@ -3623,8 +3722,46 @@ def main():
         )
         assert failed["processing"]["attempt"] == "1", failed
         assert endpoint.requests == []
+        first_processing = failed["processing"]
+        first_replay = retry_message(state, first_store, "first-message")
+        assert first_replay["answer"]["status"] == "accepted", first_replay
+        assert first_replay["answer"]["replayed"] is True, first_replay
+        assert observe(first_store, "first-message") == failed
+
+        message(
+            state,
+            first_store,
+            "first-later-message",
+            "direct/first",
+            "later input",
+        )
+        later_failed = wait_for(
+            lambda: (value := observe(first_store, "first-later-message")).get("result", {}).get("code")
+            == "request_preparation_failed"
+            and value,
+            "later saved first-step preparation failure",
+        )
+        assert later_failed["processing"]["attempt"] == "1", later_failed
+        assert later_failed["processing"]["operation"] != first_processing["operation"], later_failed
+        original_after_later = retry_message(state, first_store, "first-message")
+        assert original_after_later["answer"]["status"] == "accepted", original_after_later
+        assert original_after_later["answer"]["replayed"] is True, original_after_later
+        assert observe(first_store, "first-message") == failed
+        assert endpoint.requests == []
         stop_host(host)
         processes.remove(host)
+        with sqlite3.connect(first_store / "rui.sqlite3") as database:
+            assert database.execute(
+                "SELECT count(*),count(DISTINCT turn_id) FROM message_admission "
+                "WHERE command_key IN ('first-message','first-later-message')"
+            ).fetchone() == (2, 2)
+            assert database.execute(
+                "SELECT resolution_code FROM model_operation "
+                "WHERE session_ref='direct/first' ORDER BY operation_id"
+            ).fetchall() == [
+                ("request_preparation_failed",),
+                ("request_preparation_failed",),
+            ]
 
         for fault, expected_code in (
             ("request-scratch-acquire", "request_scratch_exhausted"),
@@ -4342,6 +4479,8 @@ def main():
             continuation_thread.join(timeout=5)
         if proposal_milestones is not None:
             proposal_milestones.close()
+        if rollback_milestones is not None:
+            rollback_milestones.close()
         if proposal_gate_keeper is not None:
             os.close(proposal_gate_keeper)
         if completed:

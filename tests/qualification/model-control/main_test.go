@@ -71,7 +71,7 @@ func TestControlTimingEvidenceRejectsMissingWrongMalformedAndDuplicateRecords(t 
 	}
 }
 
-func TestSettlementQualificationRequiresObservedOverlap(t *testing.T) {
+func TestSettlementContentionLatencyIsUnavailableWithoutOverlap(t *testing.T) {
 	timings, err := parseControlTimings(
 		[]map[string]any{timingRecord("stop", "session_stop", "210", "220", "230", "235", "10", "10", "10", "5", "35")},
 		[]expectedControlTiming{{key: "stop", kind: "session_stop"}},
@@ -79,18 +79,52 @@ func TestSettlementQualificationRequiresObservedOverlap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	overlapped, err := settlementOverlap(100, 200, timings)
+	status, samples, err := settlementContentionLatencyStatus(1000, 100, 200, timings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if overlapped {
-		t.Fatal("nonoverlapping timing qualified")
+	if status != "unavailable" || len(samples) != 0 {
+		t.Fatalf("nonoverlapping contention status = %q, samples = %v", status, samples)
 	}
-	if got := settlementQualificationStatus(overlapped, 1000, 10, 20); got != "incomplete" {
-		t.Fatalf("nonoverlap status = %s", got)
+	if got := latencyStatus(1000, 10, 20); got != "passed" {
+		t.Fatalf("representative latency status = %s", got)
 	}
-	if got := controlStatus(map[string]any{"status": "passed"}, map[string]any{"status": "incomplete"}); got != "incomplete" {
-		t.Fatalf("top-level nonoverlap status = %s", got)
+}
+
+func TestSettlementContentionLatencyUsesOnlyControlsThatWaited(t *testing.T) {
+	timings, err := parseControlTimings(
+		[]map[string]any{
+			timingRecord("waited", "session_stop", "150", "250", "260", "265", "10", "100", "10", "5", "125"),
+			timingRecord("later", "session_stop", "210", "220", "230", "5000000230", "10", "10", "10", "5000000000", "5000000030"),
+		},
+		[]expectedControlTiming{{key: "waited", kind: "session_stop"}, {key: "later", kind: "session_stop"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, samples, err := settlementContentionLatencyStatus(1000, 100, 200, timings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != "passed" || len(samples) != 1 || samples[0] != 0.000125 {
+		t.Fatalf("contention status = %q, samples = %v", status, samples)
+	}
+}
+
+func TestSettlementContentionLatencyReportsTargetMiss(t *testing.T) {
+	timings, err := parseControlTimings(
+		[]map[string]any{timingRecord("waited", "session_stop", "150", "1200000150", "1200000160", "1200000165", "10", "1200000000", "10", "5", "1200000025")},
+		[]expectedControlTiming{{key: "waited", kind: "session_stop"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, _, err := settlementContentionLatencyStatus(1000, 100, 200, timings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != "target_miss" {
+		t.Fatalf("contention status = %q", status)
 	}
 }
 

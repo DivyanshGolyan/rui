@@ -20,20 +20,30 @@ Requires Zig 0.16.0, Python 3, Perl, a C toolchain and Make. The build pins nati
 zig build
 zig build test-logic
 zig build check
-./zig-out/bin/rui serve --store /absolute/path/to/private-store
+./zig-out/bin/rui serve \
+  --store /absolute/path/to/private-store \
+  --active-capacity 8
 ```
 
-Model transport is disabled by default. Development testing requires an explicit `--provider-endpoint`: HTTPS or loopback HTTP, with no authentication attached. Run `./zig-out/bin/rui` to print command usage.
+The production default Active Capacity remains 1,000. Startup rejects a requested population when the process descriptor limit cannot support it, so this development command selects a smaller population that fits ordinary finite limits. Model transport is disabled by default. Development testing requires an explicit `--provider-endpoint`: HTTPS or loopback HTTP, with no authentication attached. Run `./zig-out/bin/rui` to print command usage.
 
 ## Try the implemented development path
 
-Use the deterministic integration fixture as the runnable example of the current path: configure a Session, submit a message, inspect an Action, decide it, then observe the result.
+Run the narrated public-caller journey from issue [#260](https://github.com/DivyanshGolyan/rui/issues/260): configure an ask-mode Session, submit a message, inspect and approve one exact Bash Action, read its saved answer, crash the Host, then recover the original submission without repeating the effect.
 
 ```sh
-zig build bash-integration
+zig build bash-walkthrough
 ```
 
-The fixture starts its own local Host and provider endpoint; it is a development test, not a live-provider quickstart. For direct exploration, use the commands printed by `./zig-out/bin/rui`: `serve`, `configure`, `message`, `inspect-session`, `allow-action` or `deny-action`, and `read-result`.
+The prerequisites are the same as [Build](#build). The walkthrough prints the actual `configure`, `message`, `inspect-session`, Action-read, `allow-action`, `read-result` and `retry` commands with their observations. It creates an explicit temporary Workspace and Store, starts only its own local Host and deterministic provider endpoint, and removes those owned resources on success. The Workspace is a working directory, not a sandbox. Acceptance is not completion, and approval authorizes only the inspected Action.
+
+This development smoke check is not a live-provider quickstart or power-loss test. Its process crash occurs after the result and effect cleanup are committed; the fresh Host proves recovery of those saved facts without another Bash or provider effect. See the [acceptance audit and limits](VERIFICATION.md#runnable-bash-caller-acceptance-audit). Run `zig build bash-integration` for the full maintained Bash journey.
+
+## Development direction
+
+The [delivery plan](https://github.com/DivyanshGolyan/rui/issues/164) separates [direct-core development readiness](https://github.com/DivyanshGolyan/rui/issues/168) from [full qualification](https://github.com/DivyanshGolyan/rui/issues/231). Essential safety evidence stays with each capability; broad qualification does not block independent feature development after the readiness checkpoint. Full stage, support, performance and release claims still require their evidence.
+
+The runnable #260 slice is implemented above. After critical safety closeout, planned independent feature slices include a [thin live Codex path](https://github.com/DivyanshGolyan/rui/issues/272) and a [minimal durable workflow](https://github.com/DivyanshGolyan/rui/issues/273). This is priority order, not a workflow dependency on credentials or live-provider access; these links do not add to the implemented surface described in [Status](#status).
 
 ## Read next
 

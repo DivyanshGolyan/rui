@@ -5,6 +5,7 @@ import pathlib
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -59,6 +60,42 @@ def competing_host_is_rejected(store):
     )
     assert completed.returncode != 0, completed.stdout
     assert "StoreAlreadyOwned" in completed.stderr, completed.stderr
+
+
+def hold_incomplete_connection(host, store):
+    canonical = str(store.resolve())
+    socket_path = host.rui_ready_fields["socket"]
+    request = {
+        "version": "1",
+        "kind": "configure",
+        "store": canonical,
+        "key": "shutdown-drain",
+        "session": "direct/shutdown-drain",
+        "configuration": {
+            "workspace": {"state": "omitted"},
+            "model": {"state": "omitted"},
+        },
+    }
+    body = (
+        json.dumps(request)[:-2]
+        + ',"instructions":{"state":"value","value":"'
+    ).encode() + b"x" * 32768
+    connection = socket.socket(socket.AF_UNIX)
+    connection.settimeout(5)
+    connection.connect(socket_path)
+    connection.sendall(
+        b"POST /v1/configure HTTP/1.1\r\n"
+        b"Host: local\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: 1000000\r\n"
+        b"X-Rui-Wire-Version: 1\r\n\r\n"
+        + body
+    )
+    fixture.wait_for(
+        lambda: list((store / "scratch").glob("request-*-*.tmp")),
+        "shutdown drain transferred connection custody",
+    )
+    return connection
 
 
 def prove_faulted_cleanup_cuts_off_pipe(root, fault):
@@ -208,6 +245,84 @@ def main():
                 "observe fault recovery continuation",
             )
         finally:
+            if host is not None:
+                fixture.stop_host(host)
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
+
+        # One real lifecycle owner, connection handler, Store and lease share
+        # the production shutdown boundary. Neither completed semantics nor a
+        # closed listener can release the lease while either owner remains.
+        name = "lifecycle-store-lease-drain"
+        state = root / name
+        state.mkdir(mode=0o700)
+        store = state / "store"
+        bash_pid_path = state / "bash-pid"
+        command_release = state / "command-release"
+        endpoint, thread, endpoint_url = endpoint_for(
+            name,
+            f"printf $$ > {bash_pid_path}; "
+            f"while [ ! -e {command_release} ]; do sleep 0.01; done",
+        )
+        host = None
+        draining = None
+        try:
+            host, session = admit(
+                state,
+                store,
+                endpoint_url,
+                name,
+                "bash-reap",
+                gated=True,
+            )
+            fixture.wait_for(bash_pid_path.exists, "lease witness Bash identity")
+            bash_pid = int(bash_pid_path.read_text())
+            draining = hold_incomplete_connection(host, store)
+            command_release.touch()
+            fixture.wait_for(
+                lambda: control_closed_while_host_alive(host, store, session),
+                "lease witness entered effect-aware shutdown",
+                timeout=12,
+            )
+            assert host.poll() is None
+            competing_host_is_rejected(store)
+
+            (store / "scratch" / "bash-fault-gate").unlink()
+            fixture.wait_for(
+                lambda: not bash_fixture.process_exists(bash_pid),
+                "lease witness process retirement",
+                timeout=12,
+            )
+            fixture.wait_for(
+                lambda: not list((store / "scratch").glob("bash-*.tmp")),
+                "lease witness production cleanup",
+                timeout=12,
+            )
+            assert host.poll() is None, "Host skipped connection drain"
+            competing_host_is_rejected(store)
+
+            draining.close()
+            draining = None
+            fixture.wait_for(
+                lambda: host.poll() is not None,
+                "lease witness orderly shutdown after connection drain",
+                timeout=12,
+            )
+            _, stderr = host.communicate(timeout=5)
+            assert host.returncode != 0
+            assert b"EffectAwareShutdown" in stderr, stderr
+            host = None
+
+            host = fixture.start_host(store, endpoint_url)
+            fixture.wait_for(
+                lambda: bash_fixture.resolution(store, session) == "indeterminate",
+                "lease witness fresh Host acquisition and recovery",
+                interval=0.5,
+            )
+        finally:
+            if draining is not None:
+                draining.close()
             if host is not None:
                 fixture.stop_host(host)
             endpoint.shutdown()

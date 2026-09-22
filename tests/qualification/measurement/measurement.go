@@ -60,19 +60,29 @@ func (d Deadline) Context() (context.Context, context.CancelFunc, error) {
 }
 
 func (d Deadline) SleepUntil(when time.Time) error {
-	delay := time.Until(when)
-	if delay <= 0 {
-		return nil
+	return sleepUntil(when, time.Now, time.Sleep, d.Remaining)
+}
+
+func sleepUntil(
+	when time.Time,
+	now func() time.Time,
+	sleep func(time.Duration),
+	remaining func() (time.Duration, error),
+) error {
+	for {
+		delay := when.Sub(now())
+		if delay <= 0 {
+			return nil
+		}
+		budget, err := remaining()
+		if err != nil {
+			return err
+		}
+		if delay > budget {
+			return errors.New("scheduled observation exceeds run-wide deadline")
+		}
+		sleep(delay)
 	}
-	remaining, err := d.Remaining()
-	if err != nil {
-		return err
-	}
-	if delay > remaining {
-		return errors.New("scheduled observation exceeds run-wide deadline")
-	}
-	time.Sleep(delay)
-	return nil
 }
 
 type FactLog struct {

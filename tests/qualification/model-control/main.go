@@ -133,13 +133,6 @@ func latencyStatus(limitMS float64, values ...float64) string {
 	return "passed"
 }
 
-func settlementQualificationStatus(overlapped bool, limitMS float64, values ...float64) string {
-	if !overlapped {
-		return "incomplete"
-	}
-	return latencyStatus(limitMS, values...)
-}
-
 func requireAcceptedIdleStop(reply map[string]any) error {
 	status, ok := measurement.StringField(reply, "answer", "status")
 	if !ok || status != "accepted" {
@@ -200,6 +193,7 @@ type controlTimingEvidence struct {
 	lockAcquired      uint64
 	storeComplete     uint64
 	replyComplete     uint64
+	hostTotal         uint64
 }
 
 func parseUintString(record map[string]any, field string) (string, uint64, error) {
@@ -251,7 +245,7 @@ func parseControlTiming(record map[string]any) (controlTimingEvidence, error) {
 		CommandKey: commandKey, Kind: kind,
 		StoreQueuedAtNS: values[0], LockAcquiredAtNS: values[1], StoreCompleteAtNS: values[2], ReplyCompleteAtNS: values[3],
 		QueueWaitNS: values[4], StoreLockWaitNS: values[5], StoreServiceNS: values[6], PostCommitReplyNS: values[7], HostTotalNS: values[8],
-		storeQueued: queued, lockAcquired: locked, storeComplete: complete, replyComplete: reply,
+		storeQueued: queued, lockAcquired: locked, storeComplete: complete, replyComplete: reply, hostTotal: numbers[8],
 	}, nil
 }
 
@@ -285,20 +279,36 @@ func parseControlTimings(records []map[string]any, expected []expectedControlTim
 	return result, nil
 }
 
-func settlementOverlap(lockAcquiredAt, completeAt uint64, timings []controlTimingEvidence) (bool, error) {
+func settlementContentionLatencies(lockAcquiredAt, completeAt uint64, timings []controlTimingEvidence) ([]float64, error) {
 	if lockAcquiredAt == 0 || completeAt < lockAcquiredAt {
-		return false, fmt.Errorf("invalid settlement interval %d..%d", lockAcquiredAt, completeAt)
+		return nil, fmt.Errorf("invalid settlement interval %d..%d", lockAcquiredAt, completeAt)
 	}
-	overlapped := false
+	latencies := make([]float64, 0, len(timings))
 	for _, timing := range timings {
 		if timing.storeQueued < lockAcquiredAt {
-			return false, fmt.Errorf("control %q queued before settlement lock acquisition", timing.CommandKey)
+			return nil, fmt.Errorf("control %q queued before settlement lock acquisition", timing.CommandKey)
 		}
 		if timing.storeQueued < completeAt && completeAt < timing.lockAcquired {
-			overlapped = true
+			latencies = append(latencies, float64(timing.hostTotal)/1_000_000)
 		}
 	}
-	return overlapped, nil
+	return latencies, nil
+}
+
+func settlementOverlap(lockAcquiredAt, completeAt uint64, timings []controlTimingEvidence) (bool, error) {
+	latencies, err := settlementContentionLatencies(lockAcquiredAt, completeAt, timings)
+	return len(latencies) != 0, err
+}
+
+func settlementContentionLatencyStatus(limitMS float64, lockAcquiredAt, completeAt uint64, timings []controlTimingEvidence) (string, []float64, error) {
+	latencies, err := settlementContentionLatencies(lockAcquiredAt, completeAt, timings)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(latencies) == 0 {
+		return "unavailable", nil, nil
+	}
+	return latencyStatus(limitMS, latencies...), latencies, nil
 }
 
 func operationPhaseTimestamp(records []map[string]any, phase, operation string) (uint64, error) {
@@ -1265,10 +1275,11 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	if err != nil {
 		return nil, err
 	}
-	overlapped, err := settlementOverlap(settlementLockAt, settlementCompleteAt, controlTimings)
+	contentionStatus, contentionLatencies, err := settlementContentionLatencyStatus(1000, settlementLockAt, settlementCompleteAt, controlTimings)
 	if err != nil {
 		return nil, err
 	}
+	overlapped := len(contentionLatencies) != 0
 	if err := drainResponses(inspections, 30*time.Second); err != nil {
 		return nil, err
 	}
@@ -1356,13 +1367,14 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 		latencySamples[expectedTimings[control.index].key] = control.latencyMS
 	}
 	p95MS := p95(latencies)
+	observedWorkloadStatus := latencyStatus(1000, p95MS, controlMS)
 	return map[string]any{
 		"scope":  "10 fully captured reports held during real Store import of one streamed 100,000-byte answer, two later controls, then 10 result deliveries blocked by a 4 KiB test-only socket send buffer",
-		"status": settlementQualificationStatus(overlapped, 1000, p95MS, controlMS), "ordinary_connections": ordinaryClients, "active_model_responses": 1, "concurrent_control_commands": controlHeadroom, "qualification_limit_ms": 1000,
+		"status": observedWorkloadStatus, "observed_workload_latency_status": observedWorkloadStatus, "ordinary_connections": ordinaryClients, "active_model_responses": 1, "concurrent_control_commands": controlHeadroom, "qualification_limit_ms": 1000,
 		"large_answer_bytes": large, "test_client_send_buffer_bytes": 4096, "large_answer_sha256": digestText, "blocked_result_clients": ordinaryClients, "blocked_result_delivery_observed": true,
 		"blocked_result_control_acknowledgment_ms": controlMS, "blocked_result_clean_reread": true, "post_disconnect_dispatch_fenced": fenced,
 		"settlement_lock_acquired_at_ns": strconv.FormatUint(settlementLockAt, 10), "settlement_complete_at_ns": strconv.FormatUint(settlementCompleteAt, 10),
-		"settlement_control_overlap_observed": overlapped, "host_control_timing": controlTimings,
+		"settlement_control_overlap_observed": overlapped, "settlement_contention_latency_status": contentionStatus, "settlement_contention_latency_samples_ms": contentionLatencies, "host_control_timing": controlTimings,
 		"physical_cleanup_completed_at_ns": strconv.FormatUint(cleanupCompleteAt, 10), "physical_cleanup_after_settlement_ms": float64(cleanupCompleteAt-settlementCompleteAt) / 1_000_000,
 		"idle_stop_selection_turns": idleStopSelectionTurns,
 		"total_durable_acknowledgment": map[string]any{
@@ -1411,7 +1423,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	result := map[string]any{"format": "rui-model-control-v4-go", "scope": "issue-175 production Session stop and exact model interruption", "status": controlStatus(headroomResult, activeResult, controlFirstResult, realSettlementResult), "artifacts": root, "configurations": map[string]any{"stalled_incomplete_ingress_diagnostic": headroomResult, "live_model_cancellation": activeResult, "control_first_settlement_race": controlFirstResult, "real_settlement_import_contention_qualification": realSettlementResult}, "elapsed_seconds": time.Since(started).Seconds()}
+	result := map[string]any{"format": "rui-model-control-v5-go", "scope": "issue-175 production Session stop and exact model interruption", "status": controlStatus(headroomResult, activeResult, controlFirstResult, realSettlementResult), "artifacts": root, "configurations": map[string]any{"stalled_incomplete_ingress_diagnostic": headroomResult, "live_model_cancellation": activeResult, "control_first_settlement_race": controlFirstResult, "real_settlement_import_workload": realSettlementResult}, "elapsed_seconds": time.Since(started).Seconds()}
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
 	if err != nil {
 		panic(err)

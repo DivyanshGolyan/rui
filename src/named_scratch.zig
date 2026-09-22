@@ -90,14 +90,16 @@ test "owner retains every resource after retryable removal failure" {
     defer tmp.cleanup();
     const primary = try tmp.dir.createFile(std.testing.io, "owned", .{ .read = true });
     const secondary = try tmp.dir.openFile(std.testing.io, "owned", .{});
-    var used: std.atomic.Value(u64) = .init(7);
+    const baseline: u64 = 41;
+    const charge: u64 = 7;
+    var used: std.atomic.Value(u64) = .init(baseline + charge);
     var owner = Owner.init(
         std.testing.io,
         primary,
         secondary,
         "owned",
-        .{ .used = &used, .limit = 7 },
-        7,
+        .{ .used = &used, .limit = baseline + charge },
+        charge,
         .native,
     );
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -116,12 +118,14 @@ test "owner retains every resource after retryable removal failure" {
 
     try std.testing.expectError(error.FileNotFound, owner.reclaim(missing));
     try std.testing.expect(owner.resources != null);
-    try std.testing.expectEqual(@as(u64, 7), used.load(.acquire));
+    try std.testing.expect(owner.resources.?.secondary != null);
+    try std.testing.expectEqualStrings("owned", owner.resources.?.name.slice());
+    try std.testing.expectEqual(baseline + charge, used.load(.acquire));
     const removed = try owner.reclaim(root);
     reclaimed = true;
     try std.testing.expectEqual(Reclamation.removed, removed);
     try std.testing.expect(owner.resources == null);
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectEqual(baseline, used.load(.acquire));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "owned", .{}));
 }
 
@@ -131,14 +135,16 @@ test "an already absent name reclaims handles and accounting" {
     const primary = try tmp.dir.createFile(std.testing.io, "owned", .{ .read = true });
     const secondary = try tmp.dir.openFile(std.testing.io, "owned", .{});
     try tmp.dir.deleteFile(std.testing.io, "owned");
-    var used: std.atomic.Value(u64) = .init(11);
+    const baseline: u64 = 41;
+    const charge: u64 = 11;
+    var used: std.atomic.Value(u64) = .init(baseline + charge);
     var owner = Owner.init(
         std.testing.io,
         primary,
         secondary,
         "owned",
-        .{ .used = &used, .limit = 11 },
-        11,
+        .{ .used = &used, .limit = baseline + charge },
+        charge,
         .native,
     );
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -155,7 +161,7 @@ test "an already absent name reclaims handles and accounting" {
     reclaimed = true;
     try std.testing.expectEqual(Reclamation.already_absent, absent);
     try std.testing.expect(owner.resources == null);
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectEqual(baseline, used.load(.acquire));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "owned", .{}));
 }
 
@@ -163,15 +169,17 @@ test "injected removal failure retains ownership until the same owner can retry"
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const primary = try tmp.dir.createFile(std.testing.io, "owned", .{ .read = true });
-    var used: std.atomic.Value(u64) = .init(5);
+    const baseline: u64 = 41;
+    const charge: u64 = 5;
+    var used: std.atomic.Value(u64) = .init(baseline + charge);
     var gate: std.atomic.Value(bool) = .init(true);
     var owner = Owner.init(
         std.testing.io,
         primary,
         null,
         "owned",
-        .{ .used = &used, .limit = 5 },
-        5,
+        .{ .used = &used, .limit = baseline + charge },
+        charge,
         .{ .gated = &gate },
     );
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -189,11 +197,12 @@ test "injected removal failure retains ownership until the same owner can retry"
     );
     // The same owner retains its resources and full outstanding charge.
     try std.testing.expect(owner.resources != null);
-    try std.testing.expectEqual(@as(u64, 5), used.load(.acquire));
+    try std.testing.expectEqualStrings("owned", owner.resources.?.name.slice());
+    try std.testing.expectEqual(baseline + charge, used.load(.acquire));
     gate.store(false, .release);
     const retried = try owner.reclaim(root);
     reclaimed = true;
     try std.testing.expectEqual(Reclamation.removed, retried);
     try std.testing.expect(owner.resources == null);
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectEqual(baseline, used.load(.acquire));
 }

@@ -369,17 +369,116 @@ test "startup cleanup recognizes only owned ingress names" {
     try std.testing.expect(!isOwnedIngressName("canonical.sqlite3"));
 }
 
-test "startup cleanup removes the first zero-numbered report" {
+test "startup cleanup removes owned files and preserves lookalikes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const report = try tmp.dir.createFile(std.testing.io, "report-0-1.tmp", .{});
-    report.close(std.testing.io);
-    const unrelated = try tmp.dir.createFile(std.testing.io, "canonical.sqlite3", .{});
-    unrelated.close(std.testing.io);
+    const owned = [_][]const u8{
+        "request-0-1.tmp",
+        "response-1-1.tmp",
+        "response-metadata-2-1.tmp",
+        "bash-input-3-1.tmp",
+        "bash-stdout-3-1.tmp",
+        "bash-stderr-3-1.tmp",
+        "report-0-1.tmp",
+    };
+    const preserved = [_][]const u8{
+        "request-00-1.tmp",
+        "request-1-0.tmp",
+        "request-1-1.tmp.extra",
+        "request-1-1",
+        "request-x-1.tmp",
+        "request-1-1-1.tmp",
+        "diagnostic.log",
+        "canonical.sqlite3",
+    };
+    for (owned ++ preserved) |name| {
+        const file = try tmp.dir.createFile(std.testing.io, name, .{});
+        file.close(std.testing.io);
+    }
 
     var root = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer root.close(std.testing.io);
     try cleanupOwnedIngress(&root, std.testing.io, false);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "report-0-1.tmp", .{}));
-    try std.testing.expectEqual(std.Io.File.Kind.file, (try tmp.dir.statFile(std.testing.io, "canonical.sqlite3", .{})).kind);
+    for (owned) |name| {
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, name, .{}));
+    }
+    for (preserved) |name| {
+        try std.testing.expectEqual(std.Io.File.Kind.file, (try tmp.dir.statFile(std.testing.io, name, .{})).kind);
+    }
+}
+
+test "startup cleanup refuses an owned name with the wrong type" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "request-1-1.tmp", .default_dir);
+    var root = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer root.close(std.testing.io);
+    try std.testing.expectError(
+        error.UnexpectedIngressLeftover,
+        cleanupOwnedIngress(&root, std.testing.io, false),
+    );
+    try std.testing.expectEqual(
+        std.Io.File.Kind.directory,
+        (try tmp.dir.statFile(std.testing.io, "request-1-1.tmp", .{})).kind,
+    );
+}
+
+test "startup cleanup refuses owned symlink and socket names" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const target = try tmp.dir.createFile(std.testing.io, "target", .{});
+    target.close(std.testing.io);
+    try tmp.dir.symLink(std.testing.io, "target", "request-1-1.tmp", .{});
+    var root = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer root.close(std.testing.io);
+    try std.testing.expectError(
+        error.UnexpectedIngressLeftover,
+        cleanupOwnedIngress(&root, std.testing.io, false),
+    );
+    try std.testing.expectEqual(
+        std.Io.File.Kind.sym_link,
+        (try tmp.dir.statFile(std.testing.io, "request-1-1.tmp", .{ .follow_symlinks = false })).kind,
+    );
+    try tmp.dir.deleteFile(std.testing.io, "request-1-1.tmp");
+
+    var root_path_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_path = root_path_buffer[0..try tmp.dir.realPath(std.testing.io, &root_path_buffer)];
+    var socket_path_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const socket_path = try std.fmt.bufPrint(&socket_path_buffer, "{s}/response-1-1.tmp", .{root_path});
+    const address = try std.Io.net.UnixAddress.init(socket_path);
+    var listener = try address.listen(std.testing.io, .{});
+    defer listener.deinit(std.testing.io);
+    try std.testing.expectError(
+        error.UnexpectedIngressLeftover,
+        cleanupOwnedIngress(&root, std.testing.io, false),
+    );
+    try std.testing.expectEqual(
+        std.Io.File.Kind.unix_domain_socket,
+        (try tmp.dir.statFile(std.testing.io, "response-1-1.tmp", .{ .follow_symlinks = false })).kind,
+    );
+}
+
+test "startup reclaims only a stale Unix socket" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var socket_path_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const socket_path = try std.fmt.bufPrint(&socket_path_buffer, "{s}/stale.sock", .{root});
+    const address = try std.Io.net.UnixAddress.init(socket_path);
+    var listener = try address.listen(std.testing.io, .{});
+    try reclaimStaleSocket(std.testing.io, socket_path);
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.cwd().statFile(std.testing.io, socket_path, .{ .follow_symlinks = false }),
+    );
+    listener.deinit(std.testing.io);
+
+    const lookalike = try tmp.dir.createFile(std.testing.io, "stale.sock", .{});
+    lookalike.close(std.testing.io);
+    try std.testing.expectError(error.UnexpectedSocketPath, reclaimStaleSocket(std.testing.io, socket_path));
+    try std.testing.expectEqual(
+        std.Io.File.Kind.file,
+        (try tmp.dir.statFile(std.testing.io, "stale.sock", .{ .follow_symlinks = false })).kind,
+    );
 }

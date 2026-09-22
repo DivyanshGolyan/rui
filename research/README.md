@@ -8,6 +8,8 @@ Maintained executable checks and recorded qualification live in [tests/qualifica
 
 [Proportionate testing evidence](testing-practices-sources.md) compares primary-source guidance on product goals, failure checks, noisy measurements and explicit assumptions; recommendations only, with no qualification-contract change.
 
+[Measurement synchronization](measurement-synchronization.md) derives a postcondition-rechecking wall wait and separate deterministic Store-transaction exclusion versus ungated latency evidence for two issue #168 measurement defects; primary-source recommendations only, with no runner or contract change.
+
 [Resource profiling sources](resource-profiling-sources.md) evaluates reusable CPU, memory, waiting and I/O evidence, platform tools and measurement validity; recommendations only, with no runtime or qualification change.
 
 [Permission ownership prior art](permission-prior-art.md) compares Pi, DeepSeek Harness, OpenCode v2 and Codex CLI approval ownership, grant lifetimes and client reconnect versus process restart; pinned source evidence only, with no accepted contract change.

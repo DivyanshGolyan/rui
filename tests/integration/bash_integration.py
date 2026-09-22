@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import pathlib
+import platform
 import shlex
 import shutil
 import signal
@@ -599,6 +600,252 @@ def prove_reused_session(state):
         endpoint.shutdown()
         endpoint.server_close()
         endpoint_thread.join(timeout=5)
+
+
+def show_command(*args):
+    print("$ rui " + " ".join(shlex.quote(str(arg)) for arg in args), flush=True)
+
+
+def show_observation(message):
+    print(f"  -> {message}", flush=True)
+
+
+def source_revision():
+    try:
+        result = subprocess.run(
+            ["git", "describe", "--always", "--dirty"],
+            cwd=fixture.ROOT,
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unavailable-source-export"
+    return result.stdout.strip() if result.returncode == 0 else "unavailable-source-export"
+
+
+def walkthrough():
+    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-bash-walkthrough."))
+    store = state / "store"
+    workspace = state / "workspace"
+    workspace.mkdir()
+    session = "walkthrough/bash"
+    message_key = "walkthrough-message"
+    message_record = state / f"{message_key}.json"
+    counter = workspace / "effect-count"
+    arguments = json.dumps(
+        {"cmd": "printf x >> effect-count", "timeout_ms": None}, separators=(",", ":")
+    )
+    responses = [
+        fixture.sse_tool_calls(
+            "walkthrough-calls",
+            [("bash", "walkthrough-call", arguments)],
+        ),
+        fixture.sse_answer(
+            "walkthrough-answer",
+            "walkthrough-reasoning",
+            "walkthrough-message-result",
+            "walkthrough complete",
+        )[0],
+    ]
+    endpoint = fixture.SuccessEndpoint(responses)
+    endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    endpoint_thread.start()
+    endpoint_url = f"http://127.0.0.1:{endpoint.server_port}/responses"
+    host = None
+    completed = False
+    try:
+        print("Rui Bash approve-and-recover walkthrough")
+        show_observation(
+            f"exercise revision: {source_revision()}; platform: {platform.system()} "
+            f"{platform.release()} {platform.machine()}"
+        )
+        show_observation(f"temporary Store: {store}")
+        show_observation(f"temporary Workspace (working directory, not a sandbox): {workspace}")
+        host_args = fixture.host_arguments(store, endpoint_url)
+        show_command(*host_args[1:])
+        host = fixture.start_host(store, endpoint_url)
+        show_observation("Host started with the deterministic local provider fixture")
+
+        configure_args = (
+            "configure",
+            "--store",
+            store,
+            "--record",
+            state / "walkthrough-config.json",
+            "--key",
+            "walkthrough-config",
+            "--session",
+            session,
+            "--workspace",
+            workspace,
+            "--model",
+            "model-a",
+            "--tools",
+            "bash",
+            "--permission-mode",
+            "ask",
+        )
+        show_command(*configure_args)
+        configured = fixture.command(*configure_args)
+        assert configured["answer"]["status"] == "accepted", configured
+        show_observation("configuration accepted; ask mode requires an exact Action decision")
+
+        text_path = state / "walkthrough-message.txt"
+        text_path.write_text("make one independently counted file effect")
+        message_args = (
+            "message",
+            "--store",
+            store,
+            "--record",
+            message_record,
+            "--key",
+            message_key,
+            "--session",
+            session,
+            "--text",
+            text_path,
+        )
+        show_command(*message_args)
+        submitted = fixture.command(*message_args)
+        assert submitted["answer"]["status"] == "accepted", submitted
+        captured_bytes = message_record.read_bytes()
+        captured = json.loads(captured_bytes)
+        assert captured["key"] == message_key, captured
+        assert captured["session"] == session, captured
+        assert captured["text"] == {
+            "state": "value",
+            "value": "make one independently counted file effect",
+        }, captured
+        show_observation(f"message accepted and exact retry record retained at {message_record}")
+
+        action = fixture.wait_for(lambda: action_for(store, session), "walkthrough Bash Action")
+        inspect_args = ("inspect-session", "--store", store, "--session", session, "--profile", "full")
+        show_command(*inspect_args)
+        report = fixture.command(*inspect_args)
+        assert report["actions"]["unresolved"] == [action], report
+        assert action["authorization"] == "pending", action
+        show_observation(
+            f"Action {action['action']} is pending approval for call ordinal {action['call_ordinal']}"
+        )
+
+        call_id_args = (
+            "read-action-call-id",
+            "--store",
+            store,
+            "--session",
+            session,
+            "--action",
+            action["action"],
+        )
+        arguments_args = (
+            "read-action-arguments",
+            "--store",
+            store,
+            "--session",
+            session,
+            "--action",
+            action["action"],
+        )
+        show_command(*call_id_args)
+        assert fixture.read_action(store, session, action["action"], "call-id") == b"walkthrough-call"
+        show_observation("exact call ID: walkthrough-call")
+        show_command(*arguments_args)
+        assert fixture.read_action(store, session, action["action"], "arguments") == arguments.encode()
+        show_observation(f"exact arguments: {arguments}")
+        assert not counter.exists()
+        assert len(endpoint.requests) == 1, endpoint.requests
+        show_observation("zero file effects and no continuation request before approval")
+
+        allow_args = (
+            "allow-action",
+            "--store",
+            store,
+            "--record",
+            state / "walkthrough-allow.json",
+            "--key",
+            "walkthrough-allow",
+            "--session",
+            session,
+            "--action",
+            action["action"],
+        )
+        show_command(*allow_args)
+        allowed = fixture.command(*allow_args)
+        assert allowed["answer"]["status"] == "accepted", allowed
+        assert allowed["answer"]["replayed"] is False, allowed
+        show_observation(f"keyed allow-once decision accepted for Action {action['action']}")
+
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, message_key),
+            "walkthrough saved answer",
+        )
+        fixture.wait_for(lambda: execution_idle(store, session), "walkthrough owned cleanup")
+        assert counter.read_text() == "x"
+        assert len(endpoint.requests) == 2, endpoint.requests
+        result_args = ("read-result", "--store", store, "--key", message_key)
+        show_command(*result_args)
+        assert fixture.read_result(store, message_key) == b"walkthrough complete"
+        show_observation("saved answer: walkthrough complete; independent effect count: 1")
+        settled_action = action_rows_by_id(store, session)[action["action"]]
+        assert settled_action["resolution"] == "succeeded", settled_action
+
+        print(f"$ kill -9 {host.pid}", flush=True)
+        crash = fixture.crash_host(host, state, "walkthrough-crash")
+        host = None
+        assert crash["returncode"] == -signal.SIGKILL, crash
+        show_observation(
+            "Host process crashed after the result and cleanup were committed; this is not power-loss evidence"
+        )
+        show_command(*host_args[1:])
+        host = fixture.start_host(store, endpoint_url)
+        show_observation("fresh Host reopened the same Store")
+
+        retry_args = (
+            "retry",
+            "--store",
+            store,
+            "--record",
+            message_record,
+            "--kind",
+            "message",
+        )
+        show_command(*retry_args)
+        recovered = fixture.command(*retry_args)
+        assert recovered["answer"]["status"] == "accepted", recovered
+        assert recovered["answer"]["replayed"] is True, recovered
+        assert message_record.read_bytes() == captured_bytes
+        show_command(*result_args)
+        assert fixture.read_result(store, message_key) == b"walkthrough complete"
+        show_observation("recovered saved answer: walkthrough complete")
+        recovered_report = fixture.command(*inspect_args)
+        recovered_actions = recovered_report["full"]["actions"]
+        assert len(recovered_actions) == 1, recovered_report
+        assert recovered_actions[0] == settled_action, recovered_report
+        assert fixture.read_action(
+            store, session, action["action"], "call-id"
+        ) == b"walkthrough-call"
+        assert fixture.read_action(
+            store, session, action["action"], "arguments"
+        ) == arguments.encode()
+        assert counter.read_text() == "x"
+        assert len(endpoint.requests) == 2, endpoint.requests
+        show_observation(
+            "original submission/result binding recovered; Action unchanged; Bash effects=1; provider requests=2"
+        )
+        completed = True
+    finally:
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        endpoint_thread.join(timeout=5)
+        assert not endpoint_thread.is_alive(), "walkthrough provider fixture did not stop"
+        if completed:
+            shutil.rmtree(state)
+            show_observation("owned Host, provider, Store, Workspace, and caller records cleaned up")
+        else:
+            print(f"retained Bash walkthrough failure state: {state}", file=sys.stderr)
 
 
 def main():
@@ -1803,4 +2050,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[2:] == ["--walkthrough"]:
+        walkthrough()
+    elif sys.argv[2:]:
+        raise SystemExit("usage: bash_integration.py RUI [--walkthrough]")
+    else:
+        main()

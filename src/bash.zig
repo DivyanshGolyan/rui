@@ -94,6 +94,23 @@ const Process = union(enum) {
 const PipeClose = enum { eof, incomplete, failed };
 const CleanupFault = enum { none, persistent, gated };
 
+const PipeService = struct {
+    made_progress: bool,
+    termination_requested: bool = false,
+};
+
+const ServiceTime = union(enum) {
+    live: std.Io,
+    supplied: std.Io.Clock.Timestamp,
+
+    fn observe(self: ServiceTime) std.Io.Clock.Timestamp {
+        return switch (self) {
+            .live => |io| .now(io, .awake),
+            .supplied => |now| now,
+        };
+    }
+};
+
 const Pipe = union(enum) {
     reading: std.Io.File,
     tail: struct {
@@ -362,14 +379,14 @@ pub const Execution = struct {
         signal_failed: bool,
     };
 
-    pub fn requestStop(self: *Execution) TerminationAttempt {
+    pub fn requestStop(self: *Execution, now: std.Io.Clock.Timestamp) TerminationAttempt {
         const attempted = self.process == .running;
-        self.requestTermination(.stopped);
+        self.requestTerminationAt(.stopped, now);
         return .{ .attempted = attempted, .signal_failed = self.signal_failure };
     }
 
-    pub fn requestInfrastructureShutdown(self: *Execution) void {
-        self.requestTermination(.infrastructure_shutdown);
+    pub fn requestInfrastructureShutdown(self: *Execution, now: std.Io.Clock.Timestamp) void {
+        self.requestTerminationAt(.infrastructure_shutdown, now);
     }
 
     pub fn applyDueDeadline(self: *Execution, now: std.Io.Clock.Timestamp) ?TimeoutAction {
@@ -389,12 +406,16 @@ pub const Execution = struct {
     };
 
     pub fn service(self: *Execution, window: []u8) ServiceResult {
-        const now = std.Io.Clock.Timestamp.now(self.io, .awake);
-        return self.serviceAt(window, now, .live);
+        return self.serviceWithTime(window, .{ .live = self.io }, .live);
     }
 
     fn serviceAt(self: *Execution, window: []u8, now: std.Io.Clock.Timestamp, source: ObservationSource) ServiceResult {
+        return self.serviceWithTime(window, .{ .supplied = now }, source);
+    }
+
+    fn serviceWithTime(self: *Execution, window: []u8, time: ServiceTime, source: ObservationSource) ServiceResult {
         std.debug.assert(window.len == copy_window_bytes);
+        var now = time.observe();
         var fault: ?anyerror = null;
         if (self.faults.service and !self.service_fault_used) {
             self.service_fault_used = true;
@@ -415,12 +436,15 @@ pub const Execution = struct {
             made_progress = true;
         }
         made_progress = self.freezeCaptureIfRequired(now, &fault) or made_progress;
-        made_progress = self.servicePipe(&self.stdout_pipe, &self.stdout_capture, window, &fault) or made_progress;
-        made_progress = self.servicePipe(&self.stderr_pipe, &self.stderr_capture, window, &fault) or made_progress;
-        if (self.process == .grace and timestampReached(now, self.process.grace.kill_at)) {
-            self.finishSignaling();
-            made_progress = true;
-        }
+        const stdout_service = self.servicePipe(&self.stdout_pipe, &self.stdout_capture, window, &fault);
+        now = time.observe();
+        if (stdout_service.termination_requested) self.requestTerminationAt(.capture_failed, now);
+        made_progress = stdout_service.made_progress or made_progress;
+        const stderr_service = self.servicePipe(&self.stderr_pipe, &self.stderr_capture, window, &fault);
+        now = time.observe();
+        if (stderr_service.termination_requested) self.requestTerminationAt(.capture_failed, now);
+        made_progress = stderr_service.made_progress or made_progress;
+        made_progress = self.applyGraceDeadline(now) or made_progress;
         made_progress = (self.reapLeader(now) catch |err| reaped: {
             fault = fault orelse err;
             break :reaped false;
@@ -443,8 +467,14 @@ pub const Execution = struct {
         }
         made_progress = self.freezeCaptureIfRequired(now, &fault) or made_progress;
         if (self.process == .gone) {
-            made_progress = self.servicePipe(&self.stdout_pipe, &self.stdout_capture, window, &fault) or made_progress;
-            made_progress = self.servicePipe(&self.stderr_pipe, &self.stderr_capture, window, &fault) or made_progress;
+            const stdout_tail = self.servicePipe(&self.stdout_pipe, &self.stdout_capture, window, &fault);
+            now = time.observe();
+            if (stdout_tail.termination_requested) self.requestTerminationAt(.capture_failed, now);
+            made_progress = stdout_tail.made_progress or made_progress;
+            const stderr_tail = self.servicePipe(&self.stderr_pipe, &self.stderr_capture, window, &fault);
+            now = time.observe();
+            if (stderr_tail.termination_requested) self.requestTerminationAt(.capture_failed, now);
+            made_progress = stderr_tail.made_progress or made_progress;
         }
         return .{
             .made_progress = made_progress,
@@ -566,18 +596,13 @@ pub const Execution = struct {
         destination: *OwnedFile,
         window: []u8,
         fault: *?anyerror,
-    ) bool {
+    ) PipeService {
         return self.readPipe(pipe_slot, destination, window) catch |err| {
             fault.* = fault.* orelse err;
             self.capture_failure = .read;
-            self.requestTermination(.capture_failed);
             self.closePipe(pipe_slot, .failed);
-            return true;
+            return .{ .made_progress = true, .termination_requested = true };
         };
-    }
-
-    fn requestTermination(self: *Execution, reason: StopReason) void {
-        self.requestTerminationAt(reason, std.Io.Clock.Timestamp.now(self.io, .awake));
     }
 
     fn requestTerminationAt(self: *Execution, reason: StopReason, now: std.Io.Clock.Timestamp) void {
@@ -593,6 +618,12 @@ pub const Execution = struct {
             .kill_at = addMilliseconds(now, termination_grace_ms),
             .cleanup_deadline = addMilliseconds(now, cleanup_observation_ms),
         } };
+    }
+
+    fn applyGraceDeadline(self: *Execution, now: std.Io.Clock.Timestamp) bool {
+        if (self.process != .grace or !timestampReached(now, self.process.grace.kill_at)) return false;
+        self.finishSignaling();
+        return true;
     }
 
     fn finishSignaling(self: *Execution) void {
@@ -636,69 +667,64 @@ pub const Execution = struct {
         pipe_slot: *Pipe,
         destination: *OwnedFile,
         window: []u8,
-    ) !bool {
-        if (pipe_slot.* == .closed) return false;
-        if (pipe_slot.* == .tail) return self.readTail(pipe_slot, destination, window);
+    ) !PipeService {
+        if (pipe_slot.* == .closed) return .{ .made_progress = false };
+        if (pipe_slot.* == .tail) return .{ .made_progress = try self.readTail(pipe_slot, destination, window) };
         const pipe = pipe_slot.reading;
         var descriptor = [_]std.posix.pollfd{.{
             .fd = pipe.handle,
             .events = std.posix.POLL.IN,
             .revents = 0,
         }};
-        if (try std.posix.poll(&descriptor, 0) == 0) return false;
+        if (try std.posix.poll(&descriptor, 0) == 0) return .{ .made_progress = false };
         const reserved: usize = @intCast(destination.budget.reserveUpTo(window.len));
         if (reserved == 0) {
             var probe: [1]u8 = undefined;
             const count = std.posix.read(pipe.handle, &probe) catch |err| {
-                if (err == error.WouldBlock) return false;
+                if (err == error.WouldBlock) return .{ .made_progress = false };
                 self.capture_failure = .read;
-                self.requestTermination(.capture_failed);
                 self.closePipe(pipe_slot, .failed);
-                return true;
+                return .{ .made_progress = true, .termination_requested = true };
             };
             if (count == 0) {
                 self.closePipe(pipe_slot, .eof);
-                return true;
+                return .{ .made_progress = true };
             }
             self.capture_failure = .exhausted;
-            self.requestTermination(.capture_failed);
             self.closePipe(pipe_slot, .failed);
-            return true;
+            return .{ .made_progress = true, .termination_requested = true };
         }
         const count = std.posix.read(pipe.handle, window[0..reserved]) catch |err| {
             destination.budget.release(reserved);
-            if (err == error.WouldBlock) return false;
+            if (err == error.WouldBlock) return .{ .made_progress = false };
             self.capture_failure = .read;
-            self.requestTermination(.capture_failed);
             self.closePipe(pipe_slot, .failed);
-            return true;
+            return .{ .made_progress = true, .termination_requested = true };
         };
         if (count < reserved) destination.budget.release(reserved - count);
         if (count == 0) {
             self.closePipe(pipe_slot, .eof);
-            return true;
+            return .{ .made_progress = true };
         }
         if (self.faults.capture_read and !self.read_fault_used) {
             self.read_fault_used = true;
             destination.budget.release(count);
             self.capture_failure = .read;
-            self.requestTermination(.capture_failed);
             self.closePipe(pipe_slot, .failed);
-            return true;
+            return .{ .made_progress = true, .termination_requested = true };
         }
         destination.charged += count;
         if (self.faults.capture_write) {
             self.capture_failure = .write;
-            self.requestTermination(.capture_failed);
             self.closePipe(pipe_slot, .failed);
-            return true;
+            return .{ .made_progress = true, .termination_requested = true };
         }
         destination.file.?.writeStreamingAll(self.io, window[0..count]) catch {
             self.capture_failure = .write;
-            self.requestTermination(.capture_failed);
             self.closePipe(pipe_slot, .failed);
+            return .{ .made_progress = true, .termination_requested = true };
         };
-        return true;
+        return .{ .made_progress = true };
     }
 
     fn observeLeader(self: *Execution, now: std.Io.Clock.Timestamp, source: ObservationSource) !bool {
@@ -1256,6 +1282,23 @@ test "service acts on its service-time observation rather than an earlier one" {
         before.raw.nanoseconds + cleanup_observation_ms * std.time.ns_per_ms,
         grace.cleanup_deadline.raw.nanoseconds,
     );
+    const later = before.addDuration(.{ .raw = .fromMilliseconds(50), .clock = .awake });
+    unobservable.requestTerminationAt(.stopped, later);
+    try std.testing.expectEqual(StopReason.infrastructure_shutdown, unobservable.stop_reason);
+    try std.testing.expectEqual(grace.kill_at.raw.nanoseconds, unobservable.process.grace.kill_at.raw.nanoseconds);
+    try std.testing.expectEqual(
+        grace.cleanup_deadline.raw.nanoseconds,
+        unobservable.process.grace.cleanup_deadline.raw.nanoseconds,
+    );
+    unobservable.process.grace.anchor.observed = .{ .exited = 0 };
+    const just_before_grace = before.addDuration(.{
+        .raw = .fromMilliseconds(termination_grace_ms - 1),
+        .clock = .awake,
+    });
+    try std.testing.expect(!unobservable.applyGraceDeadline(just_before_grace));
+    try std.testing.expect(unobservable.process == .grace);
+    try std.testing.expect(unobservable.applyGraceDeadline(grace.kill_at));
+    try std.testing.expect(unobservable.process == .reaping);
     // An observed leader retires the running state without a deadline.
     var witnessed = runningWithDeadline(started, deadline);
     const seen = witnessed.serviceAt(&window, before, .{ .observed = .{ .exited = 0 } });
@@ -1270,8 +1313,9 @@ test "cleanup ownership transfers consume their source" {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
     const root = root_buffer[0..root_length];
-    var used: std.atomic.Value(u64) = .init(0);
-    const budget = ScratchBudget{ .used = &used, .limit = 6 };
+    const baseline: u64 = 41;
+    var used: std.atomic.Value(u64) = .init(baseline);
+    const budget = ScratchBudget{ .used = &used, .limit = baseline + 6 };
     try std.testing.expect(budget.reserve(6));
     var prepared = Prepared{
         .io = std.testing.io,
@@ -1294,13 +1338,13 @@ test "cleanup ownership transfers consume their source" {
     try std.testing.expect(prepared.stdout_capture == null);
     try std.testing.expect(prepared.stderr_capture == null);
     try prepared.cleanup();
-    try std.testing.expectEqual(@as(u64, 6), used.load(.acquire));
+    try std.testing.expectEqual(baseline + 6, used.load(.acquire));
 
     try cleanup.cleanup();
     try std.testing.expect(cleanup.script == null);
     try std.testing.expect(cleanup.stdout_capture == null);
     try std.testing.expect(cleanup.stderr_capture == null);
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectEqual(baseline, used.load(.acquire));
 }
 
 test "prepared cleanup reclaims partially and retries through the same owner" {
@@ -1308,8 +1352,9 @@ test "prepared cleanup reclaims partially and retries through the same owner" {
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var used: std.atomic.Value(u64) = .init(0);
-    const budget = ScratchBudget{ .used = &used, .limit = 6 };
+    const baseline: u64 = 41;
+    var used: std.atomic.Value(u64) = .init(baseline);
+    const budget = ScratchBudget{ .used = &used, .limit = baseline + 6 };
     try std.testing.expect(budget.reserve(6));
     // Acquire each file before installing the aggregate guard: a later
     // acquisition failure must not leave earlier files unguarded. The
@@ -1347,13 +1392,13 @@ test "prepared cleanup reclaims partially and retries through the same owner" {
     try std.testing.expect(cleanup.stdout_capture.?.file == null);
     try std.testing.expect(cleanup.stderr_capture == null);
     try std.testing.expect(!cleanup.isComplete());
-    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(baseline + 2, used.load(.acquire));
     // Retry through the same owner releases the residual exactly once.
     cleanup.stdout_capture.?.cleanup_fault = .none;
     try cleanup.cleanup();
     complete = true;
     try std.testing.expect(cleanup.isComplete());
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectEqual(baseline, used.load(.acquire));
 }
 
 test "an owned file closes its descriptor before reporting removal failure" {
@@ -1401,6 +1446,15 @@ test "retired execution is independent of outstanding capture reclamation" {
     // cleanup remain outstanding.
     try std.testing.expect(execution.retired());
     try execution.checkRetired();
+    // A closed capture cannot release custody while process/group cleanup is
+    // still unconfirmed.
+    execution.process = .{ .checking_group = .{
+        .pgid = 1,
+        .term = .{ .exited = 0 },
+        .cleanup_deadline = started,
+    } };
+    try std.testing.expect(!execution.retired());
+    try std.testing.expectError(error.BashNotRetired, execution.checkRetired());
     // A running process is not retired regardless of closed pipes, and
     // delivery state never substitutes for this ownership fact.
     execution.process = .{ .running = .{

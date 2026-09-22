@@ -181,6 +181,7 @@ def start_ready_process(args, *, timeout=10, required_fields=None):
                         )
                 os.set_blocking(process.stdout.fileno(), True)
                 os.set_blocking(process.stderr.fileno(), True)
+                process.rui_ready_fields = fields
                 return process, fields
             if process.poll() is not None:
                 raise _start_error(

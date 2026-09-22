@@ -686,6 +686,8 @@ test -f "$store/scratch/request-0-1.tmp"
 # Failed owned-leftover cleanup refuses startup and retains the accounting
 # evidence; an ordinary restart then removes only that owned temporary.
 printf unrelated >"$store/scratch/request-00-1.tmp"
+printf diagnostic >"$store/scratch/diagnostic.log"
+printf unrelated >"$store/scratch/unrelated.data"
 if "$rui" serve --store "$store" --fault startup-cleanup >"$state/startup.out" 2>"$state/startup.err"; then
     echo "Host admitted after failed startup cleanup" >&2
     exit 1
@@ -694,8 +696,29 @@ test -f "$store/scratch/request-0-1.tmp"
 start_host
 test ! -e "$store/scratch/request-0-1.tmp"
 test -f "$store/scratch/request-00-1.tmp"
+test -f "$store/scratch/diagnostic.log"
+test -f "$store/scratch/unrelated.data"
+test -f "$store/rui.sqlite3"
 recovered=$($rui configure --store "$store" --record "$records/first-recovered.json" --key first-recovered --session direct/first-recovered --workspace "$root" --model model-a --instructions "$state/fault-content.txt")
 contains "$recovered" '"status":"accepted"'
+
+# A canonical owned name with the wrong filesystem type is neither deleted nor
+# ignored. Startup refuses while holding the lease, then a later clean startup
+# can acquire it after the operator-visible obstruction is removed.
+stop_host
+mkdir "$store/scratch/request-1-1.tmp"
+if "$rui" serve --store "$store" >"$state/startup-type.out" 2>"$state/startup-type.err"; then
+    echo "Host admitted an owned temporary name with the wrong type" >&2
+    exit 1
+fi
+contains "$(cat "$state/startup-type.err")" "UnexpectedIngressLeftover"
+test -d "$store/scratch/request-1-1.tmp"
+rmdir "$store/scratch/request-1-1.tmp"
+start_host
+test -f "$store/scratch/request-00-1.tmp"
+test -f "$store/scratch/diagnostic.log"
+test -f "$store/scratch/unrelated.data"
+test -f "$store/rui.sqlite3"
 
 # Exact public identity bounds are independent and count decoded UTF-8 bytes.
 key128=$(python3 -c 'print("k" * 128)')

@@ -1,8 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const trace_native = @cImport({
     @cInclude("unistd.h");
 });
 const bash = @import("bash.zig");
+const descriptor_capacity = @import("descriptor_capacity.zig");
+const descriptor_limit = @import("descriptor_limit.zig");
 const execution = @import("execution.zig");
 const execution_turn = @import("execution_turn.zig");
 const named_scratch = @import("named_scratch.zig");
@@ -183,6 +186,36 @@ pub fn serve(
     bash_path: []const u8,
     bash_timeout_ms: u64,
 ) !void {
+    const descriptor_observation = try descriptor_limit.observe(io);
+    const descriptor_requirement = try descriptor_capacity.calculate(
+        descriptor_observation.open_descriptors,
+        active_capacity,
+        max_ordinary_clients,
+        control_headroom,
+        provider_endpoint != null,
+        builtin.os.tag,
+    );
+    descriptor_capacity.validate(
+        descriptor_requirement.total,
+        descriptor_observation.soft_limit,
+    ) catch |err| {
+        if (err == error.DescriptorCapacityInsufficient) {
+            std.debug.print(
+                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} self_wake={d}\n",
+                .{
+                    active_capacity,
+                    descriptor_requirement.total,
+                    descriptor_observation.soft_limit.?,
+                    descriptor_requirement.inherited,
+                    descriptor_requirement.fixed_host,
+                    descriptor_requirement.clients,
+                    descriptor_requirement.execution,
+                    descriptor_requirement.self_wake,
+                },
+            );
+        }
+        return err;
+    };
     var lease = try platform.StoreLease.acquire(io, store_path);
     defer lease.release();
     var storage = try store_module.Store.openWithOptions(
@@ -267,10 +300,17 @@ pub fn serve(
         host.drain();
     }
     var ready: protocol.ResponseBuffer = .{};
-    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
+    var descriptor_limit_buffer: [32]u8 = undefined;
+    const descriptor_limit_text = if (descriptor_observation.soft_limit) |limit|
+        try std.fmt.bufPrint(&descriptor_limit_buffer, "{d}", .{limit})
+    else
+        "unlimited";
+    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} descriptor_requirement={d} descriptor_limit={s} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
         lease.paths.store.slice(),
         lease.paths.socket.slice(),
         active_capacity,
+        descriptor_requirement.total,
+        descriptor_limit_text,
         @sizeOf(execution.CustodyRecord),
         @sizeOf(ExecutionSlot),
         @sizeOf(provider.Preparation),
@@ -1174,7 +1214,7 @@ fn stopSupersededBash(
                 if (!active.stop_accepted) {
                     active.stop_accepted = true;
                     traceActionControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
-                    const action = active.execution.requestStop();
+                    const action = active.execution.requestStop(.now(host.io, .awake));
                     traceActionControlOutcome(
                         host,
                         "lifecycle_action_attempted",
@@ -1333,7 +1373,9 @@ fn admitNewAttempt(
         .attempt_before_commit = host.faults.attempt_before_commit,
     }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
-        if (err != error.InjectedAttemptCommitFailure) {
+        if (err == error.InjectedAttemptCommitFailure) {
+            traceSubject(host, "attempt_admission_rolled_back", "attempt_kind", "model");
+        } else {
             fenceDispatch(host, "Attempt admission", err);
         }
         return .retry_later;
@@ -1938,7 +1980,7 @@ fn shutdownExecution(
             preparation.* = null;
             discardBashResources(host, slot, active.token, cleanup);
         },
-        .bash => |*active| active.execution.requestInfrastructureShutdown(),
+        .bash => |*active| active.execution.requestInfrastructureShutdown(.now(host.io, .awake)),
         .bash_prepared_cleanup, .named_scratch => {},
         .provider => |*active| {
             const token = active.owner.token;
@@ -2488,6 +2530,7 @@ const SettlementTrace = struct {
         traceOperation(self.host, switch (phase) {
             .lock_requested => "settlement_lock_requested",
             .lock_acquired => "settlement_lock_acquired",
+            .transaction_active => "settlement_transaction_active",
             .settlement_complete => "settlement_complete",
         }, self.binding);
     }
