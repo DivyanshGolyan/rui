@@ -179,6 +179,45 @@ func TestSleepUntilRechecksSerializedWallPostcondition(t *testing.T) {
 	}
 }
 
+func TestSleepUntilBoundsRepeatedBackwardWallMovementByDeadline(t *testing.T) {
+	base := time.Unix(0, 0)
+	readings := []time.Time{
+		base.Add(90 * time.Second),
+		base.Add(85 * time.Second),
+		base.Add(80 * time.Second),
+	}
+	readIndex := 0
+	budgets := []time.Duration{30 * time.Second, 20 * time.Second, 10 * time.Second}
+	budgetIndex := 0
+	var sleeps []time.Duration
+	err := sleepUntil(
+		base.Add(100*time.Second),
+		func() time.Time {
+			value := readings[readIndex]
+			readIndex++
+			return value
+		},
+		func(delay time.Duration) { sleeps = append(sleeps, delay) },
+		func() (time.Duration, error) {
+			value := budgets[budgetIndex]
+			budgetIndex++
+			return value, nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "scheduled observation exceeds run-wide deadline") {
+		t.Fatalf("error = %v", err)
+	}
+	want := []time.Duration{10 * time.Second, 15 * time.Second}
+	if len(sleeps) != len(want) {
+		t.Fatalf("sleep requests = %v, want %v", sleeps, want)
+	}
+	for index := range want {
+		if sleeps[index] != want[index] {
+			t.Fatalf("sleep request %d = %v, want %v", index, sleeps[index], want[index])
+		}
+	}
+}
+
 func TestSleepUntilHandlesAlreadyReachedForwardJumpAndDeadline(t *testing.T) {
 	base := time.Unix(0, 0)
 	tests := []struct {
