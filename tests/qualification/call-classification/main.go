@@ -1010,7 +1010,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		if err != nil {
 			return result, err
 		}
-		if err := measure("cli-configuration", "configuration", []string{"configure", "--store", store, "--record", filepath.Join(directory, value.Name+"-configure.json"), "--key", value.Name + "-configure", "--session", session, "--workspace", workspace, "--model", "model-a", "--tools", "bash"}, accepted); err != nil {
+		if err := measure("cli-configuration", "configuration", []string{"configure", "--store", store, "--record", filepath.Join(directory, value.Name+"-configure.json"), "--key", value.Name + "-configure", "--session", session, "--workspace", workspace, "--provider", "codex", "--model", "model-a", "--tools", "bash"}, accepted); err != nil {
 			return result, err
 		}
 	} else if err := client.Configure(value.Name, session, "--tools", "bash"); err != nil {

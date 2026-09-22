@@ -473,6 +473,8 @@ def configure(state, store, key, session, model, schema=None, instructions=None)
         session,
         "--workspace",
         ROOT,
+        "--provider",
+        "codex",
         "--model",
         model,
     ]
@@ -504,6 +506,8 @@ def configure_lost_reply(
         session,
         "--workspace",
         str(workspace),
+        "--provider",
+        "codex",
         "--model",
         model,
     ]
@@ -1220,10 +1224,12 @@ def main():
             "direct/success",
             "--model",
             "model-b",
+            "--tools",
+            "bash",
         )
         incompatible = command(*incompatible_args)
         assert incompatible["answer"]["status"] == "rejected", incompatible
-        assert incompatible["answer"]["code"] == "continuation_model_incompatible", incompatible
+        assert incompatible["answer"]["code"] == "model_is_immutable", incompatible
         replayed_incompatible = command(
             "retry",
             "--store",
@@ -2469,9 +2475,16 @@ def main():
             "direct/main",
             "--model",
             "model-b",
+            "--tools",
+            "none",
         )
         assert active_model_change["answer"]["status"] == "rejected", active_model_change
-        assert active_model_change["answer"]["code"] == "continuation_model_incompatible"
+        assert active_model_change["answer"]["code"] == "model_is_immutable"
+        active_settings = command(
+            "inspect-session", "--store", store, "--session", "direct/main"
+        )["session"]
+        assert active_settings["model"] == "model-a", active_settings
+        assert active_settings["tools"] == ["bash", "edit"], active_settings
         message(state, store, "message-b", "direct/main", "later message")
         assert len(endpoint.requests) == 1
         resources = command(
@@ -2487,7 +2500,38 @@ def main():
         )
         assert failed["queue"]["status"] == "failed", failed
         assert failed["processing"]["attempt"] == "1", failed
-        configure(state, store, "config-b-after-failure", "direct/main", "model-b")
+        post_failure_model_change = command(
+            "configure",
+            "--store",
+            store,
+            "--record",
+            state / "post-failure-model.json",
+            "--key",
+            "post-failure-model",
+            "--session",
+            "direct/main",
+            "--model",
+            "model-b",
+            "--permission-mode",
+            "bypass",
+        )
+        assert post_failure_model_change["answer"]["status"] == "rejected"
+        assert post_failure_model_change["answer"]["code"] == "model_is_immutable"
+        mutable_update = command(
+            "configure",
+            "--store",
+            store,
+            "--record",
+            state / "mutable-after-failure.json",
+            "--key",
+            "mutable-after-failure",
+            "--session",
+            "direct/main",
+            "--tools",
+            "none",
+            "--text-output",
+        )
+        assert mutable_update["answer"]["status"] == "accepted", mutable_update
         later = observe(store, "message-b")
         assert later["queue"]["status"] == "queued", later
         assert len(endpoint.requests) == 1, "a permit launched more than once"
@@ -2562,7 +2606,9 @@ def main():
         assert successor["input"] == expected["input"] + [
             {"role": "user", "content": [{"type": "input_text", "text": "later message"}]}
         ], successor
-        assert successor["model"] == "model-b", successor
+        assert successor["model"] == "model-a", successor
+        assert successor["tools"] == [], successor
+        assert "text" not in successor, successor
         wait_for(lambda: observe(store, "message-b").get("result", {}).get("code") == "provider_http_422", "successor failure")
         stop_host(host)
         processes.remove(host)

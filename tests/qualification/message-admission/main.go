@@ -20,6 +20,7 @@ type optionalField struct {
 }
 type configurationFields struct {
 	Workspace      optionalField `json:"workspace"`
+	Provider       optionalField `json:"provider"`
 	Model          optionalField `json:"model"`
 	Instructions   optionalField `json:"instructions"`
 	Tools          optionalField `json:"tools"`
@@ -69,8 +70,9 @@ func field(value map[string]any, names ...string) any {
 
 func configure(deadline measurement.Deadline, socket, store, workspace, session string) error {
 	omitted := optionalField{State: "omitted"}
+	provider := "codex"
 	model := "measurement-model"
-	value := configurationCommand{Version: "1", Kind: "configure", Store: store, Key: "configure-" + session, Session: session, Configuration: configurationFields{Workspace: optionalField{State: "value", Value: &workspace}, Model: optionalField{State: "value", Value: &model}, Instructions: omitted, Tools: omitted, PermissionMode: omitted, OutputSchema: omitted}}
+	value := configurationCommand{Version: "1", Kind: "configure", Store: store, Key: "configure-" + session, Session: session, Configuration: configurationFields{Workspace: optionalField{State: "value", Value: &workspace}, Provider: optionalField{State: "value", Value: &provider}, Model: optionalField{State: "value", Value: &model}, Instructions: omitted, Tools: omitted, PermissionMode: omitted, OutputSchema: omitted}}
 	var response map[string]any
 	if err := measurement.ExchangeUnix(deadline, socket, "/v1/configure", value, &response); err != nil {
 		return err

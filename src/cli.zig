@@ -173,6 +173,8 @@ fn configure(io: std.Io, args: []const []const u8) !void {
         if (std.mem.eql(u8, arg, "--store")) input.store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
             input.key = try takeValue(args, &index);
             key_seen = true;
+        } else if (std.mem.eql(u8, arg, "--provider")) {
+            input.provider = .{ .present = true, .value = try takeValue(args, &index) };
         } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--workspace")) input.workspace = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--model")) input.model = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--instructions")) input.instructions = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--tools")) input.tools = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--permission-mode")) input.permission_mode = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--output-schema")) input.output_schema = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--text-output")) input.output_schema = .{ .state = .explicit_null } else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
@@ -431,6 +433,7 @@ fn usage() error{InvalidArguments} {
         \\usage:
         \\  rui serve --store PATH [--active-capacity N] [--provider-endpoint URL] [--fault NAME]
         \\  rui configure --store PATH --record FILE --key KEY --session REF [settings]
+        \\    First configuration requires --workspace PATH --provider codex --model MODEL.
         \\  rui message --store PATH --record FILE --key KEY --session REF --text FILE|-
         \\  rui stop-session --store PATH --record FILE --key KEY --session REF
         \\  rui interrupt-model --store PATH --record FILE --key KEY --session REF --turn ID --operation ID

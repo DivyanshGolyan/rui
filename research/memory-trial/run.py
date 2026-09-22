@@ -43,7 +43,7 @@ try:
    if trace.poll() is not None or time.monotonic()>deadline:raise RuntimeError((out/'instruments.log').read_text())
    time.sleep(.25)
  snapshot('startup-idle')
- cli('configure','--session','direct/memory','--workspace',str(out),'--model','fixture-model','--key','config','--record',str(records/'config.json'))
+ cli('configure','--session','direct/memory','--workspace',str(out),'--provider','codex','--model','fixture-model','--key','config','--record',str(records/'config.json'))
  (out/'input.txt').write_text('memory trial')
  cli('message','--session','direct/memory','--text',str(out/'input.txt'),'--key','message','--record',str(records/'message.json'))
  if not received.wait(20):raise RuntimeError('provider not reached')

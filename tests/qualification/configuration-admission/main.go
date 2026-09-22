@@ -40,6 +40,7 @@ type optionalField struct {
 }
 type configurationFields struct {
 	Workspace      optionalField `json:"workspace"`
+	Provider       optionalField `json:"provider"`
 	Model          optionalField `json:"model"`
 	Instructions   optionalField `json:"instructions"`
 	Tools          optionalField `json:"tools"`
@@ -57,8 +58,9 @@ type configurationCommand struct {
 
 func configuration(store, workspace, identity string) configurationCommand {
 	omitted := optionalField{State: "omitted"}
+	provider := "codex"
 	model := "measurement-model"
-	return configurationCommand{Version: "1", Kind: "configure", Store: store, Key: identity, Session: identity, Configuration: configurationFields{Workspace: optionalField{State: "value", Value: &workspace}, Model: optionalField{State: "value", Value: &model}, Instructions: omitted, Tools: omitted, PermissionMode: omitted, OutputSchema: omitted}}
+	return configurationCommand{Version: "1", Kind: "configure", Store: store, Key: identity, Session: identity, Configuration: configurationFields{Workspace: optionalField{State: "value", Value: &workspace}, Provider: optionalField{State: "value", Value: &provider}, Model: optionalField{State: "value", Value: &model}, Instructions: omitted, Tools: omitted, PermissionMode: omitted, OutputSchema: omitted}}
 }
 
 func run(binary string) (result map[string]any, resultError error) {
