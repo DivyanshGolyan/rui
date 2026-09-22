@@ -107,7 +107,7 @@ func configure(deadline measurement.Deadline, binary, parent, store, key, sessio
 	var answer map[string]any
 	err = runJSON(deadline, binary, &answer,
 		"configure", "--store", store, "--record", filepath.Join(parent, key+".json"),
-		"--key", key, "--session", session, "--workspace", workspace, "--model", "model-a")
+		"--key", key, "--session", session, "--workspace", workspace, "--provider", "codex", "--model", "model-a")
 	if err != nil {
 		return err
 	}

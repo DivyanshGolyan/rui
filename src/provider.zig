@@ -279,7 +279,9 @@ pub const Preparation = struct {
             switch (self.phase) {
                 .settings => {
                     self.settings = self.view.settings() catch |err| return .{ .failed = err };
-                    self.phase = .model_prefix;
+                    self.phase = switch (self.settings.?.provider) {
+                        .codex => .model_prefix,
+                    };
                 },
                 .model_prefix => self.emitFixed("{\"model\":\"", .model),
                 .model => self.emitJsonBytes(self.settings.?.model.slice(), .envelope),
@@ -1353,6 +1355,8 @@ test "real preparation consumes the configured allowance across multiple advance
     try configuration.session.set("direct/prep");
     configuration.configuration.workspace.state = .value;
     try configuration.configuration.workspace.value.set(workspace);
+    configuration.configuration.provider.state = .value;
+    try configuration.configuration.provider.value.set("codex");
     configuration.configuration.model.state = .value;
     try configuration.configuration.model.value.set("model-a");
     try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
@@ -1484,6 +1488,8 @@ const PreparationTestSetup = struct {
         try command.session.set(session);
         command.configuration.workspace.state = .value;
         try command.configuration.workspace.value.set(self.workspace);
+        command.configuration.provider.state = .value;
+        try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
         try std.testing.expect(self.storage.configure(&command, .{}) == .accepted);
@@ -1762,6 +1768,8 @@ fn establishComposedHistory(setup: *PreparationTestSetup, session: []const u8) !
         try command.session.set(session);
         command.configuration.workspace.state = .value;
         try command.configuration.workspace.value.set(setup.workspace);
+        command.configuration.provider.state = .value;
+        try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
         command.configuration.output_schema = .{
@@ -1878,6 +1886,8 @@ test "request preparation escapes instructions and user content" {
         try command.session.set("direct/prep-escape");
         command.configuration.workspace.state = .value;
         try command.configuration.workspace.value.set(setup.workspace);
+        command.configuration.provider.state = .value;
+        try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
         command.configuration.instructions = .{
@@ -1923,6 +1933,8 @@ test "request preparation escapes instructions and user content" {
         try command.session.set("direct/prep-escape2");
         command.configuration.workspace.state = .value;
         try command.configuration.workspace.value.set(setup_two.workspace);
+        command.configuration.provider.state = .value;
+        try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
         command.configuration.instructions = .{

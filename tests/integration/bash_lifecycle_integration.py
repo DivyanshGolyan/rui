@@ -73,6 +73,7 @@ def hold_incomplete_connection(host, store):
         "session": "direct/shutdown-drain",
         "configuration": {
             "workspace": {"state": "omitted"},
+            "provider": {"state": "omitted"},
             "model": {"state": "omitted"},
         },
     }

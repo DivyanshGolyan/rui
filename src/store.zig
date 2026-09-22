@@ -10,7 +10,7 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 15;
+pub const schema_version: u32 = 16;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 const complete_tool_results_sql =
@@ -59,10 +59,6 @@ const tool_continuation_selection_sql =
     "FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     "JOIN session s ON s.session_ref=active.session_ref WHERE active.outcome_code IS NULL AND " ++
     complete_tool_results_sql ++ " ORDER BY current.operation_id LIMIT 1";
-const continuation_risk_sql =
-    "SELECT 1 FROM model_output_item WHERE session_ref=?1 UNION ALL " ++
-    "SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
-    "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND current.resolution_code IS NULL LIMIT 1";
 const session_stop_cutoff_sql =
     "SELECT admission_cutoff FROM session_stop WHERE session_ref=?1 ORDER BY admission_cutoff DESC LIMIT 1";
 const pending_message_count_sql =
@@ -121,12 +117,14 @@ pub const AcceptedConfiguration = struct {
 pub const ConfigurationRejection = enum {
     invalid_session_reference,
     unsupported_permission_mode,
+    unsupported_provider,
     invalid_model,
     invalid_output_schema,
     incomplete_initial_configuration,
     invalid_workspace,
     workspace_is_immutable,
-    continuation_model_incompatible,
+    provider_is_immutable,
+    model_is_immutable,
     revision_exhausted,
 };
 
@@ -380,6 +378,7 @@ fn containsNoActiveOperation(_: *const anyopaque, _: u64) bool {
 }
 
 pub const HistoricalSettings = struct {
+    provider: protocol.Provider,
     model: protocol.Bounded(protocol.max_model_bytes),
     baseline_instructions: HistoricalContent,
     output_schema: ?HistoricalContent,
@@ -909,6 +908,7 @@ pub const SessionObservation = struct {
     found: bool = false,
     session: protocol.Bounded(protocol.max_session_bytes) = .{},
     workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
+    provider: ?protocol.Provider = null,
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
     revision: u64 = 0,
     tools_mask: u8 = 0,
@@ -1167,6 +1167,7 @@ pub const ContentReader = struct {
 
 const CurrentConfiguration = struct {
     workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
+    provider: protocol.Provider = undefined,
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
     instructions_id: ?i64 = null,
     tools_mask: u8 = 3,
@@ -1215,19 +1216,24 @@ const ConfigurationUpdatePlan = union(enum) {
 fn configurationBeforeWorkspace(
     current: ?*const CurrentConfiguration,
     requested: *const protocol.Configuration,
-    continuation_risk: bool,
 ) ?ConfigurationRejection {
+    const provider = if (requested.provider.state == .value)
+        std.meta.stringToEnum(protocol.Provider, requested.provider.value.slice()) orelse return .unsupported_provider
+    else
+        null;
     if (current == null and
-        (requested.workspace.state != .value or requested.model.state != .value))
+        (requested.workspace.state != .value or provider == null or requested.model.state != .value))
     {
         return .incomplete_initial_configuration;
     }
     if (current) |existing| {
+        if (provider) |value| {
+            if (value != existing.provider) return .provider_is_immutable;
+        }
         if (requested.model.state == .value and
-            !existing.model.eql(requested.model.value.slice()) and
-            continuation_risk)
+            !existing.model.eql(requested.model.value.slice()))
         {
-            return .continuation_model_incompatible;
+            return .model_is_immutable;
         }
     }
     return null;
@@ -1257,6 +1263,7 @@ fn planConfigurationUpdate(
     }
 
     if (canonical_workspace) |workspace| next.workspace = workspace.*;
+    if (requested.provider.state == .value) next.provider = std.meta.stringToEnum(protocol.Provider, requested.provider.value.slice()).?;
     if (requested.model.state == .value) next.model = requested.model.value;
     if (requested.tools.state == .value) {
         next.tools_mask = 0;
@@ -1524,15 +1531,7 @@ pub const Store = struct {
 
         const current = try self.readSession(command.session.slice());
         const current_configuration: ?*const CurrentConfiguration = if (current) |*value| value else null;
-        const continuation_risk = if (current_configuration) |existing|
-            if (configuration.model.state == .value and
-                !existing.model.eql(configuration.model.value.slice()))
-                try self.sessionHasContinuationRisk(command.session.slice())
-            else
-                false
-        else
-            false;
-        if (configurationBeforeWorkspace(current_configuration, configuration, continuation_risk)) |rejection| {
+        if (configurationBeforeWorkspace(current_configuration, configuration)) |rejection| {
             return try self.saveConfigurationRejection(command, &digest, rejection, faults);
         }
 
@@ -1637,17 +1636,6 @@ pub const Store = struct {
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
         return .{ .rejected = .{ .replayed = false, .code = code } };
-    }
-
-    fn sessionHasContinuationRisk(self: *Store, session_ref: []const u8) !bool {
-        const statement = try prepare(self.database, continuation_risk_sql);
-        defer _ = c.sqlite3_finalize(statement);
-        try bindText(statement, 1, session_ref);
-        return switch (c.sqlite3_step(statement)) {
-            c.SQLITE_ROW => true,
-            c.SQLITE_DONE => false,
-            else => error.ContinuationReadFailed,
-        };
     }
 
     pub fn submitMessage(
@@ -2394,6 +2382,7 @@ pub const Store = struct {
         };
         try observation.session.set(session_ref);
         observation.workspace = current.workspace;
+        observation.provider = current.provider;
         observation.model = current.model;
         try observation.permission_mode.set(if (current.permission_mode == 0) "ask" else "bypass");
         if (current.instructions_id) |content_id| {
@@ -2464,6 +2453,8 @@ pub const Store = struct {
         try capture.appendJsonString(session_ref);
         try capture.append(",\"workspace\":");
         try capture.appendJsonString(current.workspace.slice());
+        try capture.append(",\"provider\":");
+        try capture.appendJsonString(@tagName(current.provider));
         try capture.append(",\"model\":");
         try capture.appendJsonString(current.model.slice());
         try capture.appendFmt(",\"revision\":\"{d}\",\"tools\":", .{current.revision});
@@ -2825,7 +2816,7 @@ pub const Store = struct {
                 "first_value(field_order) OVER (PARTITION BY content_id ORDER BY revision,field_order) owner_field FROM occurrence) " ++
                 "SELECT revision_row.revision,revision_row.command_key,revision_row.workspace,revision_row.model," ++
                 "revision_row.tools_mask,revision_row.permission_mode,revision_row.instructions_content_id,revision_row.output_schema_content_id," ++
-                "instructions.owner_revision,instructions.owner_field,output_schema.owner_revision,output_schema.owner_field " ++
+                "instructions.owner_revision,instructions.owner_field,output_schema.owner_revision,output_schema.owner_field,revision_row.provider " ++
                 "FROM session_revision revision_row JOIN ownership instructions ON instructions.revision=revision_row.revision AND instructions.field_order=0 " ++
                 "LEFT JOIN ownership output_schema ON output_schema.revision=revision_row.revision AND output_schema.field_order=1 " ++
                 "WHERE revision_row.session_ref=?1 ORDER BY revision_row.revision",
@@ -2843,6 +2834,8 @@ pub const Store = struct {
             try appendColumnString(statement, 1, 128, capture);
             try capture.append(",\"workspace\":");
             try appendColumnString(statement, 2, protocol.max_workspace_bytes, capture);
+            try capture.append(",\"provider\":");
+            try capture.appendJsonString(@tagName(try readProvider(statement, 12)));
             try capture.append(",\"model\":");
             try appendColumnString(statement, 3, protocol.max_model_bytes, capture);
             try capture.append(",\"tools\":");
@@ -3034,7 +3027,7 @@ pub const Store = struct {
     }
 
     fn appendModelOperations(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-        const statement = try prepare(self.database, "SELECT operation_id,turn_id,resolution_code,resolution_content_id,interrupted_by_command_key FROM model_operation WHERE session_ref=?1 ORDER BY operation_id");
+        const statement = try prepare(self.database, "SELECT operation_id,turn_id,resolution_code,resolution_content_id,interrupted_by_command_key,settings_revision FROM model_operation WHERE session_ref=?1 ORDER BY operation_id");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         var first = true;
@@ -3046,6 +3039,9 @@ pub const Store = struct {
             try self.appendInlineOutcome(statement, 2, 3, capture);
             try capture.append(",\"interrupted_by\":");
             try appendNullableColumnString(statement, 4, 128, capture);
+            const revision = c.sqlite3_column_int64(statement, 5);
+            if (revision <= 0) return error.CorruptStore;
+            try capture.appendFmt(",\"settings_revision\":\"{d}\"", .{revision});
             try capture.append("}");
         }
     }
@@ -4058,7 +4054,7 @@ pub const Store = struct {
         try self.validateCurrentAttempt(view.binding);
         const statement = try prepare(
             self.database,
-            "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask " ++
+            "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider " ++
                 "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref " ++
                 "AND r.revision=o.settings_revision JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
         );
@@ -4078,6 +4074,7 @@ pub const Store = struct {
         } else null;
         return .{
             .model = model,
+            .provider = try readProvider(statement, 4),
             .baseline_instructions = .{ .view = view, .length = instructions.length, .digest = instructions.digest },
             .output_schema = output_schema,
             .tools_mask = @intCast(tools),
@@ -5353,7 +5350,7 @@ pub const Store = struct {
     }
 
     fn readSession(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
-        const statement = try prepare(self.database, "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position FROM session WHERE session_ref=?1");
+        const statement = try prepare(self.database, "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider FROM session WHERE session_ref=?1");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         const step_result = c.sqlite3_step(statement);
@@ -5377,18 +5374,19 @@ pub const Store = struct {
         const next_position = c.sqlite3_column_int64(statement, 7);
         if (next_position <= 0) return error.CorruptStore;
         current.next_position = @intCast(next_position);
+        current.provider = try readProvider(statement, 8);
         return current;
     }
 
     fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !void {
-        const statement = try prepare(self.database, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)");
+        const statement = try prepare(self.database, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)");
         defer _ = c.sqlite3_finalize(statement);
         try bindCurrent(statement, session_ref, current);
         try expectDone(statement);
     }
 
     fn updateSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !void {
-        const statement = try prepare(self.database, "UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,next_position=?9 WHERE session_ref=?1");
+        const statement = try prepare(self.database, "UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,next_position=?9,provider=?10 WHERE session_ref=?1");
         defer _ = c.sqlite3_finalize(statement);
         try bindCurrent(statement, session_ref, current);
         try expectDone(statement);
@@ -5402,7 +5400,7 @@ pub const Store = struct {
         current: *const CurrentConfiguration,
         instructions_updated: bool,
     ) !void {
-        const statement = try prepare(self.database, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)");
+        const statement = try prepare(self.database, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id,provider) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         try bindU64(statement, 2, current.revision);
@@ -5414,6 +5412,7 @@ pub const Store = struct {
         try bindI64(statement, 8, current.tools_mask);
         try bindI64(statement, 9, current.permission_mode);
         try bindNullableI64(statement, 10, current.output_schema_id);
+        try bindText(statement, 11, @tagName(current.provider));
         try expectDone(statement);
     }
 
@@ -5720,6 +5719,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE TABLE session(
         \\ session_ref TEXT PRIMARY KEY CHECK(length(CAST(session_ref AS BLOB)) BETWEEN 1 AND 128),
         \\ workspace TEXT NOT NULL CHECK(length(CAST(workspace AS BLOB)) BETWEEN 1 AND 4096),
+        \\ provider TEXT NOT NULL,
         \\ model TEXT NOT NULL CHECK(length(CAST(model AS BLOB)) BETWEEN 1 AND 256),
         \\ instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),
         \\ tools_mask INTEGER NOT NULL CHECK(tools_mask BETWEEN 0 AND 3),
@@ -5745,6 +5745,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ revision INTEGER NOT NULL CHECK(revision>0),
         \\ command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key) DEFERRABLE INITIALLY DEFERRED,
         \\ workspace TEXT NOT NULL,
+        \\ provider TEXT NOT NULL,
         \\ model TEXT NOT NULL,
         \\ instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),
         \\ instructions_updated INTEGER NOT NULL CHECK(instructions_updated IN (0,1)),
@@ -6037,6 +6038,13 @@ fn bindCurrent(statement: *c.sqlite3_stmt, session_ref: []const u8, current: *co
     try bindNullableI64(statement, 7, current.output_schema_id);
     try bindU64(statement, 8, current.revision);
     try bindU64(statement, 9, current.next_position);
+    try bindText(statement, 10, @tagName(current.provider));
+}
+
+fn readProvider(statement: *c.sqlite3_stmt, column: c_int) !protocol.Provider {
+    var name: protocol.Bounded(protocol.max_provider_bytes) = .{};
+    try readText(statement, column, &name);
+    return std.meta.stringToEnum(protocol.Provider, name.slice()) orelse error.CorruptStore;
 }
 
 fn nextIdentity(database: *c.sqlite3, comptime table: []const u8, comptime column: []const u8) !u64 {
@@ -6282,6 +6290,8 @@ fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace: []
     try command.session.set(session_ref);
     command.configuration.workspace.state = .value;
     try command.configuration.workspace.value.set(workspace);
+    command.configuration.provider.state = .value;
+    try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set(model);
     return command;
@@ -8652,13 +8662,13 @@ test "failed control commit saves no answer after reopening" {
     try std.testing.expect((try storage.observeCommand("rollback-stop")).status == .absent);
 }
 
-test "configuration pre-Workspace decisions preserve completeness and continuation precedence" {
+test "configuration pre-Workspace decisions preserve completeness and immutable binding" {
     const Case = struct {
         name: []const u8,
         has_current: bool,
         workspace_requested: bool,
+        provider_requested: ?[]const u8,
         model_requested: ?[]const u8,
-        continuation_risk: bool,
         expected: ?ConfigurationRejection,
     };
     const cases = [_]Case{
@@ -8666,54 +8676,64 @@ test "configuration pre-Workspace decisions preserve completeness and continuati
             .name = "new sparse request",
             .has_current = false,
             .workspace_requested = false,
+            .provider_requested = null,
             .model_requested = null,
-            .continuation_risk = false,
             .expected = .incomplete_initial_configuration,
         },
         .{
             .name = "new request missing model",
             .has_current = false,
             .workspace_requested = true,
+            .provider_requested = "codex",
             .model_requested = null,
-            .continuation_risk = false,
+            .expected = .incomplete_initial_configuration,
+        },
+        .{
+            .name = "new request missing provider",
+            .has_current = false,
+            .workspace_requested = true,
+            .provider_requested = null,
+            .model_requested = "model-a",
             .expected = .incomplete_initial_configuration,
         },
         .{
             .name = "new complete request",
             .has_current = false,
             .workspace_requested = true,
+            .provider_requested = "codex",
             .model_requested = "model-a",
-            .continuation_risk = true,
             .expected = null,
         },
         .{
-            .name = "risky incompatible model before Workspace",
+            .name = "different model is immutable",
             .has_current = true,
             .workspace_requested = true,
+            .provider_requested = "codex",
             .model_requested = "model-b",
-            .continuation_risk = true,
-            .expected = .continuation_model_incompatible,
+            .expected = .model_is_immutable,
         },
         .{
-            .name = "same model with continuation",
+            .name = "same binding is accepted",
             .has_current = true,
             .workspace_requested = false,
+            .provider_requested = "codex",
             .model_requested = "model-a",
-            .continuation_risk = true,
             .expected = null,
         },
         .{
-            .name = "compatible sparse update",
+            .name = "omitted binding is accepted",
             .has_current = true,
             .workspace_requested = false,
-            .model_requested = "model-b",
-            .continuation_risk = false,
+            .provider_requested = null,
+            .model_requested = null,
             .expected = null,
         },
+        .{ .name = "unknown provider is bounded", .has_current = true, .workspace_requested = false, .provider_requested = "other", .model_requested = null, .expected = .unsupported_provider },
     };
 
     var existing: CurrentConfiguration = .{};
     try existing.workspace.set("/canonical/workspace");
+    existing.provider = .codex;
     try existing.model.set("model-a");
     existing.instructions_id = 11;
     existing.revision = 1;
@@ -8727,15 +8747,196 @@ test "configuration pre-Workspace decisions preserve completeness and continuati
             requested.model.state = .value;
             try requested.model.value.set(model);
         }
+        if (case.provider_requested) |provider| {
+            requested.provider.state = .value;
+            try requested.provider.value.set(provider);
+        }
         const current: ?*const CurrentConfiguration = if (case.has_current) &existing else null;
         std.testing.expectEqual(
             case.expected,
-            configurationBeforeWorkspace(current, &requested, case.continuation_risk),
+            configurationBeforeWorkspace(current, &requested),
         ) catch |err| {
             std.debug.print("configuration pre-Workspace case failed: {s}\n", .{case.name});
             return err;
         };
     }
+}
+
+test "Store configuration requires and freezes provider model and workspace" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+
+    for (0..8) |mask| {
+        var key_buffer: [32]u8 = undefined;
+        var session_buffer: [32]u8 = undefined;
+        var command = try completeConfiguration(
+            try std.fmt.bufPrint(&key_buffer, "presence-{d}", .{mask}),
+            try std.fmt.bufPrint(&session_buffer, "direct/presence-{d}", .{mask}),
+            workspace,
+            "model-a",
+        );
+        if (mask & 1 == 0) command.configuration.workspace.state = .omitted;
+        if (mask & 2 == 0) command.configuration.provider.state = .omitted;
+        if (mask & 4 == 0) command.configuration.model.state = .omitted;
+        const reply = storage.configure(&command, .{});
+        if (mask == 7) {
+            try std.testing.expect(reply == .accepted);
+        } else {
+            try std.testing.expect(reply == .rejected);
+            try std.testing.expectEqual(ConfigurationRejection.incomplete_initial_configuration, reply.rejected.code);
+            try std.testing.expect(!(try storage.inspectSession(command.session.slice())).found);
+        }
+    }
+
+    var initial = try completeConfiguration("binding-initial", "direct/binding", workspace, "model-a");
+    try std.testing.expect(storage.configure(&initial, .{}) == .accepted);
+    const observation = try storage.inspectSession("direct/binding");
+    try std.testing.expectEqual(protocol.Provider.codex, observation.provider.?);
+    try std.testing.expectEqualStrings("model-a", observation.model.slice());
+
+    var equal: protocol.ConfigureCommand = .{};
+    try equal.key.set("binding-equal");
+    try equal.session.set("direct/binding");
+    equal.configuration.provider.state = .value;
+    try equal.configuration.provider.value.set("codex");
+    equal.configuration.model.state = .value;
+    try equal.configuration.model.value.set("model-a");
+    try std.testing.expect(storage.configure(&equal, .{}) == .accepted);
+
+    var different = equal;
+    try different.key.set("binding-different");
+    different.configuration.model.value.len = 0;
+    try different.configuration.model.value.set("model-a ");
+    const rejected = storage.configure(&different, .{});
+    try std.testing.expect(rejected == .rejected);
+    try std.testing.expectEqual(ConfigurationRejection.model_is_immutable, rejected.rejected.code);
+}
+
+test "unsupported provider rejects mixed configuration atomically and replays exact shape" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var initial = try completeConfiguration("atomic-initial", "direct/atomic", workspace, "model-a");
+    try std.testing.expect(storage.configure(&initial, .{}) == .accepted);
+
+    var update: protocol.ConfigureCommand = .{};
+    try update.key.set("atomic-unsupported");
+    try update.session.set("direct/atomic");
+    update.configuration.provider.state = .value;
+    try update.configuration.provider.value.set("anthropic");
+    update.configuration.instructions = try testingBytesContent(&tmp, "atomic-instructions", "new instructions");
+    update.configuration.output_schema = try testingBytesContent(&tmp, "atomic-schema", "{}");
+    update.configuration.tools.state = .value;
+    update.configuration.tools.count = 0;
+    update.configuration.permission_mode.state = .value;
+    try update.configuration.permission_mode.value.set("bypass");
+    defer update.removeTemporaryContent(std.testing.io) catch unreachable;
+    const content_count = try queryU64(storage.database, "SELECT count(*) FROM content");
+    const revision_count = try queryU64(storage.database, "SELECT count(*) FROM session_revision");
+    const rejected = storage.configure(&update, .{});
+    try std.testing.expect(rejected == .rejected);
+    try std.testing.expectEqual(ConfigurationRejection.unsupported_provider, rejected.rejected.code);
+    try std.testing.expectEqual(content_count, try queryU64(storage.database, "SELECT count(*) FROM content"));
+    try std.testing.expectEqual(revision_count, try queryU64(storage.database, "SELECT count(*) FROM session_revision"));
+    const current = try storage.inspectSession("direct/atomic");
+    try std.testing.expectEqual(@as(u64, 1), current.revision);
+    try std.testing.expectEqual(@as(u8, 3), current.tools_mask);
+    try std.testing.expectEqualStrings("ask", current.permission_mode.slice());
+    const replay = storage.configure(&update, .{});
+    try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+
+    var omitted: protocol.ConfigureCommand = .{};
+    try omitted.key.set("provider-shape");
+    try omitted.session.set("direct/atomic");
+    omitted.configuration.tools.state = .value;
+    omitted.configuration.tools.count = 0;
+    try std.testing.expect(storage.configure(&omitted, .{}) == .accepted);
+    var explicit = omitted;
+    explicit.configuration.provider.state = .value;
+    try explicit.configuration.provider.value.set("codex");
+    try std.testing.expect(storage.configure(&explicit, .{}) == .conflict);
+    try std.testing.expect(storage.configure(&omitted, .{}).accepted.replayed);
+}
+
+fn expectBindingPreserved(storage: *Store, session: []const u8, phase: []const u8) !void {
+    for (0..6) |variant| {
+        const before = try storage.inspectSession(session);
+        var key_buffer: [128]u8 = undefined;
+        var update: protocol.ConfigureCommand = .{};
+        try update.key.set(try std.fmt.bufPrint(&key_buffer, "binding-{s}-{d}", .{ phase, variant }));
+        try update.session.set(session);
+        if (variant & 1 != 0 or variant == 4) {
+            update.configuration.provider.state = .value;
+            try update.configuration.provider.value.set(if (variant == 4) "anthropic" else "codex");
+        }
+        if (variant & 2 != 0 or variant == 5) {
+            update.configuration.model.state = .value;
+            try update.configuration.model.value.set(if (variant == 5) "model-b" else "model-a");
+        }
+        if (variant >= 4) {
+            update.configuration.tools.state = .value;
+            update.configuration.tools.count = 0;
+            update.configuration.permission_mode.state = .value;
+            try update.configuration.permission_mode.value.set("bypass");
+        }
+        const reply = storage.configure(&update, .{});
+        if (variant < 4) {
+            try std.testing.expect(reply == .accepted);
+            try std.testing.expectEqual(before.revision + 1, reply.accepted.revision);
+        } else {
+            try std.testing.expect(reply == .rejected);
+            try std.testing.expectEqual(if (variant == 4) ConfigurationRejection.unsupported_provider else ConfigurationRejection.model_is_immutable, reply.rejected.code);
+        }
+        const after = try storage.inspectSession(session);
+        try std.testing.expectEqual(before.revision + @as(u64, if (variant < 4) 1 else 0), after.revision);
+        try std.testing.expectEqual(protocol.Provider.codex, after.provider.?);
+        try std.testing.expectEqualStrings("model-a", after.model.slice());
+        try std.testing.expectEqual(before.tools_mask, after.tools_mask);
+        try std.testing.expectEqualStrings(before.permission_mode.slice(), after.permission_mode.slice());
+        try std.testing.expectEqualDeep(before.instructions, after.instructions);
+        try std.testing.expectEqualDeep(before.output_schema, after.output_schema);
+    }
+}
+
+test "provider survives reopen and corrupt canonical provider fences current and historical reads" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var configuration = try completeConfiguration("provider-reopen", "direct/provider-reopen", workspace, "model-a");
+    var storage = try testingStore(&tmp, std.testing.io);
+    try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+    try expectBindingPreserved(&storage, "direct/provider-reopen", "before-reopen");
+    try storage.close();
+    storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try std.testing.expectEqual(protocol.Provider.codex, (try storage.inspectSession("direct/provider-reopen")).provider.?);
+    try expectBindingPreserved(&storage, "direct/provider-reopen", "after-reopen");
+
+    const file = try tmp.dir.createFile(std.testing.io, "provider-reopen-message", .{ .read = true });
+    try file.writeStreamingAll(std.testing.io, "message");
+    try file.sync(std.testing.io);
+    var message = try completeMessage("provider-reopen-message", "direct/provider-reopen", file, "message");
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try exec(storage.database, "UPDATE session_revision SET provider='other' WHERE session_ref='direct/provider-reopen'");
+    var view = try storage.openHistoricalView(binding);
+    try std.testing.expectError(error.CorruptStore, view.settings());
+    view.close();
+    try exec(storage.database, "UPDATE session_revision SET provider='codex' WHERE session_ref='direct/provider-reopen'");
+    try storage.close();
+    storage = try testingStore(&tmp, std.testing.io);
+
+    try exec(storage.database, "UPDATE session SET provider='other' WHERE session_ref='direct/provider-reopen'");
+    try std.testing.expectError(error.CorruptStore, storage.inspectSession("direct/provider-reopen"));
 }
 
 test "configuration planning preserves sparse defaults and rejection precedence" {
@@ -8782,13 +8983,13 @@ test "configuration planning preserves sparse defaults and rejection precedence"
             .name = "explicit update requests imports and clear",
             .created = false,
             .workspace = .same,
-            .model = "model-b",
+            .model = "model-a",
             .empty_tools = true,
             .permission = "bypass",
             .instructions = .value,
             .schema = .clear,
             .expected_actions = .{ .instructions = .import_requested, .output_schema = .clear },
-            .expected_model = "model-b",
+            .expected_model = "model-a",
             .expected_tools = 0,
             .expected_permission = 1,
         },
@@ -8821,12 +9022,15 @@ test "configuration planning preserves sparse defaults and rejection precedence"
     for (cases) |case| {
         var existing: CurrentConfiguration = .{};
         try existing.workspace.set("/canonical/workspace");
+        existing.provider = .codex;
         try existing.model.set("model-a");
         existing.instructions_id = 11;
         existing.output_schema_id = 12;
         existing.revision = case.current_revision;
 
         var requested: protocol.Configuration = .{};
+        requested.provider.state = .value;
+        try requested.provider.value.set("codex");
         if (case.workspace != .omitted) requested.workspace.state = .value;
         if (case.model) |model| {
             requested.model.state = .value;
@@ -8966,8 +9170,10 @@ test "configuration answers replay without reverting newer settings" {
     var update: protocol.ConfigureCommand = .{};
     try update.key.set("update");
     try update.session.set("direct/test");
-    update.configuration.model.state = .value;
-    try update.configuration.model.value.set("model-b");
+    update.configuration.tools.state = .value;
+    update.configuration.tools.count = 0;
+    update.configuration.permission_mode.state = .value;
+    try update.configuration.permission_mode.value.set("bypass");
     const update_reply = storage.configure(&update, .{});
     try std.testing.expect(update_reply == .accepted);
     try std.testing.expectEqual(@as(u64, 2), update_reply.accepted.revision);
@@ -8977,10 +9183,10 @@ test "configuration answers replay without reverting newer settings" {
     try std.testing.expect(replay.accepted.replayed);
     try std.testing.expectEqual(@as(u64, 1), replay.accepted.revision);
     const observation = try storage.inspectSession("direct/test");
-    try std.testing.expectEqualStrings("model-b", observation.model.slice());
+    try std.testing.expectEqualStrings("model-a", observation.model.slice());
     try std.testing.expectEqual(@as(u64, 2), observation.revision);
-    try std.testing.expectEqual(@as(u8, 3), observation.tools_mask);
-    try std.testing.expectEqualStrings("ask", observation.permission_mode.slice());
+    try std.testing.expectEqual(@as(u8, 0), observation.tools_mask);
+    try std.testing.expectEqualStrings("bypass", observation.permission_mode.slice());
     try std.testing.expectEqual(@as(u64, 0), observation.instructions.length);
     var empty_digest: [32]u8 = undefined;
     empty_digest = protocol.contentDigest("");
@@ -8994,8 +9200,8 @@ test "configuration answers replay without reverting newer settings" {
     try std.testing.expectError(error.RangeOutOfBounds, reader.read(1, &content_window));
     try std.testing.expect((try storage.observeCommand("first")).status == .accepted);
 
-    first.configuration.model.value.len = 0;
-    try first.configuration.model.value.set("model-c");
+    first.configuration.tools.state = .value;
+    first.configuration.tools.count = 0;
     try std.testing.expect(storage.configure(&first, .{}) == .conflict);
 }
 
@@ -9887,7 +10093,7 @@ test "content verification failure rolls back new imports and deduplicated input
             const command_count = try queryU64(storage.database, "SELECT count(*) FROM core_command");
             const revision_count = try queryU64(storage.database, "SELECT count(*) FROM session_revision");
 
-            var command = try completeConfiguration("invalid", "direct/import", workspace, "model-b");
+            var command = try completeConfiguration("invalid", "direct/import", workspace, "model-a");
             command.configuration.instructions = try testingContent(&tmp, "invalid", 'b', length);
             defer command.removeTemporaryContent(std.testing.io) catch unreachable;
             const content = &command.configuration.instructions;
@@ -10161,14 +10367,17 @@ test "one committed selection freezes its settings and input prefix" {
     const active_update = storage.configure(&update, .{});
     try std.testing.expect(active_update == .rejected);
     try std.testing.expectEqual(
-        ConfigurationRejection.continuation_model_incompatible,
+        ConfigurationRejection.model_is_immutable,
         active_update.rejected.code,
     );
+    try expectBindingPreserved(&storage, "direct/dispatch", "during-work");
 
     var view = try storage.openHistoricalView(binding);
     defer if (view.active) view.close();
     const settings = try view.settings();
+    try std.testing.expectEqual(protocol.Provider.codex, settings.provider);
     try std.testing.expectEqualStrings("model-a", settings.model.slice());
+    try std.testing.expectEqual(@as(u8, 3), settings.tools_mask);
     const first_input = (try view.nextEntry(0)).?;
     const second_input = (try view.nextEntry(first_input.position)).?;
     const instruction = (try view.nextEntry(second_input.position)).?;
@@ -10204,12 +10413,25 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession("direct/dispatch")).pending_messages);
 
     try update.key.set("configure-after-failure");
-    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    const failed_update = storage.configure(&update, .{});
+    try std.testing.expect(failed_update == .rejected);
+    try std.testing.expectEqual(ConfigurationRejection.model_is_immutable, failed_update.rejected.code);
+    try expectBindingPreserved(&storage, "direct/dispatch", "after-failure");
+
+    var tools_update: protocol.ConfigureCommand = .{};
+    try tools_update.key.set("tools-after-failure");
+    try tools_update.session.set("direct/dispatch");
+    tools_update.configuration.tools.state = .value;
+    tools_update.configuration.tools.count = 0;
+    try std.testing.expect(storage.configure(&tools_update, .{}) == .accepted);
 
     const later = (try storage.admitNextModelAttempt(.{})).?;
     var later_view = try storage.openHistoricalView(later.permit.binding);
     defer later_view.close();
-    try std.testing.expectEqualStrings("model-b", (try later_view.settings()).model.slice());
+    const later_settings = try later_view.settings();
+    try std.testing.expectEqual(protocol.Provider.codex, later_settings.provider);
+    try std.testing.expectEqualStrings("model-a", later_settings.model.slice());
+    try std.testing.expectEqual(@as(u8, 0), later_settings.tools_mask);
     var position: u64 = 0;
     for ([_]HistoricalEntryKind{ .user, .user, .instruction, .user }) |kind| {
         const entry = (try later_view.nextEntry(position)).?;
@@ -10219,7 +10441,7 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expect((try later_view.nextEntry(position)) == null);
 }
 
-test "continued accepted output keeps model continuation incompatible" {
+test "continued accepted output keeps model immutable" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
@@ -10329,12 +10551,13 @@ test "continued accepted output keeps model continuation incompatible" {
     const rejected = storage.configure(&update, .{});
     try std.testing.expect(rejected == .rejected);
     try std.testing.expectEqual(
-        ConfigurationRejection.continuation_model_incompatible,
+        ConfigurationRejection.model_is_immutable,
         rejected.rejected.code,
     );
 
     const completion_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try storage.settleModelSuccess(completion_binding, &output, .{});
+    try expectBindingPreserved(&storage, "direct/continued-output", "after-output");
     const completed = (try storage.observeCommand("continued-first")).message.?.queue.?;
     const completion = switch (completed.state) {
         .completed => |value| value,
@@ -10734,8 +10957,8 @@ test "runnable discovery measures eligible ineligible and history populations in
             if (ineligible != 0) {
                 try exec(
                     database,
-                    "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode," ++
-                        "output_schema_content_id,revision,next_position) VALUES('stopped','/','model-a',1,0,0,NULL,1,1)",
+                    "INSERT INTO session(session_ref,workspace,provider,model,instructions_content_id,tools_mask,permission_mode," ++
+                        "output_schema_content_id,revision,next_position) VALUES('stopped','/','codex','model-a',1,0,0,NULL,1,1)",
                 );
                 const insert = try std.fmt.allocPrintSentinel(
                     std.testing.allocator,
@@ -10753,9 +10976,9 @@ test "runnable discovery measures eligible ineligible and history populations in
             const eligible_insert = try std.fmt.allocPrintSentinel(
                 std.testing.allocator,
                 "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
-                    "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode," ++
+                    "INSERT INTO session(session_ref,workspace,provider,model,instructions_content_id,tools_mask,permission_mode," ++
                     "output_schema_content_id,revision,next_position) " ++
-                    "SELECT printf('eligible-%06d',value),'/','model-a',1,0,0,NULL,1,1 FROM sequence; " ++
+                    "SELECT printf('eligible-%06d',value),'/','codex','model-a',1,0,0,NULL,1,1 FROM sequence; " ++
                     "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
                     "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id) " ++
                     "SELECT {1}+value,printf('eligible-%06d',value),printf('eligible-%d',value),1,NULL FROM sequence",
@@ -10871,48 +11094,6 @@ test "runnable discovery measures eligible ineligible and history populations in
 test "content reader metadata and decode window remain bounded" {
     try std.testing.expect(@sizeOf(ContentReader) <= projection_read_window_bytes + 512);
     try std.testing.expect(@sizeOf(HistoricalReader) <= projection_read_window_bytes + 1024);
-}
-
-test "continuation risk follows output and active Turn indexes without Operation scan" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-
-    const statement = try prepare(storage.database, "EXPLAIN QUERY PLAN " ++ continuation_risk_sql);
-    defer _ = c.sqlite3_finalize(statement);
-    try bindText(statement, 1, "direct/query-plan");
-    var uses_output_index = false;
-    var uses_active_turn_index = false;
-    var uses_current_operation_identity = false;
-    var scans_model_operations = false;
-    while (true) switch (c.sqlite3_step(statement)) {
-        c.SQLITE_ROW => {
-            const pointer = c.sqlite3_column_text(statement, 3) orelse return error.InvalidQueryPlan;
-            const length = c.sqlite3_column_bytes(statement, 3);
-            if (length < 0) return error.InvalidQueryPlan;
-            const detail = pointer[0..@intCast(length)];
-            uses_output_index = uses_output_index or
-                std.mem.indexOf(u8, detail, "model_output_history") != null;
-            uses_active_turn_index = uses_active_turn_index or
-                std.mem.indexOf(u8, detail, "turn_one_active_per_session") != null;
-            uses_current_operation_identity = uses_current_operation_identity or
-                (std.mem.indexOf(u8, detail, "current") != null and
-                    std.mem.indexOf(u8, detail, "INTEGER PRIMARY KEY") != null);
-            const scans_relation = std.mem.startsWith(u8, detail, "SCAN ") or
-                std.mem.indexOf(u8, detail, " SCAN ") != null;
-            scans_model_operations = scans_model_operations or
-                (scans_relation and
-                    (std.mem.indexOf(u8, detail, "current") != null or
-                        std.mem.indexOf(u8, detail, "model_operation") != null));
-        },
-        c.SQLITE_DONE => break,
-        else => return error.InvalidQueryPlan,
-    };
-    try std.testing.expect(uses_output_index);
-    try std.testing.expect(uses_active_turn_index);
-    try std.testing.expect(uses_current_operation_identity);
-    try std.testing.expect(!scans_model_operations);
 }
 
 test "retry admission and exhausted recovery use their selection indexes" {

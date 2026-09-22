@@ -106,6 +106,8 @@ def configure(state, store, ordinal):
         session,
         "--workspace",
         ROOT,
+        "--provider",
+        "codex",
         "--model",
         "model-a",
     )

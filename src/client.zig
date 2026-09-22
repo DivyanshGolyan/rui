@@ -18,6 +18,7 @@ pub const ConfigureInput = struct {
     key: []const u8,
     session: []const u8,
     workspace: OptionalText = .{},
+    provider: OptionalText = .{},
     model: OptionalText = .{},
     instructions: OptionalFile = .{},
     tools: ?[]const u8 = null,
@@ -313,6 +314,8 @@ fn captureConfigure(io: std.Io, paths: *const platform.Paths, input: ConfigureIn
     try capture.writeJsonString(input.session);
     try capture.write(",\"configuration\":{\"workspace\":");
     try capture.writeOptionalText(input.workspace);
+    try capture.write(",\"provider\":");
+    try capture.writeOptionalText(input.provider);
     try capture.write(",\"model\":");
     try capture.writeOptionalText(input.model);
     try capture.write(",\"instructions\":");

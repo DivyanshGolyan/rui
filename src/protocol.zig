@@ -10,6 +10,10 @@ pub const max_session_bytes = 128;
 pub const max_store_bytes = 492;
 pub const max_workspace_bytes = 4096;
 pub const max_model_bytes = 256;
+pub const Provider = enum { codex };
+// Like permission-mode selectors, retain bounded unsupported names so admission
+// can save their rejection. This is an ingress bound, not a provider registry.
+pub const max_provider_bytes = 16;
 pub const max_header_bytes = 16 * 1024;
 pub const content_window_bytes = 4096;
 pub const max_json_depth = 64;
@@ -69,6 +73,7 @@ pub const ToolsField = struct {
 
 pub const Configuration = struct {
     workspace: OptionalBounded(max_workspace_bytes) = .{},
+    provider: OptionalBounded(max_provider_bytes) = .{},
     model: OptionalBounded(max_model_bytes) = .{},
     instructions: ContentField = .{},
     tools: ToolsField = .{},
@@ -111,6 +116,7 @@ pub const ConfigureCommand = struct {
         hashField(&hash, "rui/core/configure/v1");
         hashField(&hash, self.session.slice());
         hashOptional(&hash, &self.configuration.workspace);
+        hashOptional(&hash, &self.configuration.provider);
         hashOptional(&hash, &self.configuration.model);
         hashContent(&hash, &self.configuration.instructions);
         hash.update(&.{@intFromEnum(self.configuration.tools.state)});
@@ -433,6 +439,9 @@ const Parser = struct {
         try self.expectByte('{');
         try self.expectKey("workspace");
         try self.readOptionalSmall(max_workspace_bytes, &request.configuration.workspace);
+        try self.expectByte(',');
+        try self.expectKey("provider");
+        try self.readOptionalSmall(max_provider_bytes, &request.configuration.provider);
         try self.expectByte(',');
         try self.expectKey("model");
         try self.readOptionalSmall(max_model_bytes, &request.configuration.model);
@@ -1382,6 +1391,60 @@ test "observation needs no scratch at a full budget" {
     const request = try parser.parse();
     try std.testing.expect(request == .observe_command);
     try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
+}
+
+test "configuration provider envelope preserves exact spelling and omission" {
+    const cases = [_]struct { field: []const u8, expected: ?[]const u8, failure: ?anyerror = null }{
+        .{ .field = "{\"state\":\"omitted\"}", .expected = null },
+        .{ .field = "{\"state\":\"value\",\"value\":\"codex\"}", .expected = "codex" },
+        .{ .field = "{\"state\":\"value\",\"value\":\"c\\u006fdex\"}", .expected = "codex" },
+        // Admission, not parsing, rejects bounded unsupported spellings.
+        .{ .field = "{\"state\":\"value\",\"value\":\"Codex\"}", .expected = "Codex" },
+        .{ .field = "{\"state\":\"value\",\"value\":\"other\"}", .expected = "other" },
+        .{ .field = "{\"state\":\"value\",\"value\":\"anthropic\"}", .expected = "anthropic" },
+        .{ .field = "{\"state\":\"value\",\"value\":\"12345678901234567\"}", .expected = null, .failure = error.ValueTooLong },
+        .{ .field = "{\"state\":\"null\"}", .expected = null, .failure = error.InvalidFieldState },
+    };
+    var omitted_digest: [32]u8 = undefined;
+    var codex_digest: [32]u8 = undefined;
+    for (cases, 0..) |case, index| {
+        var buffer: [1024]u8 = undefined;
+        const json = try std.fmt.bufPrint(
+            &buffer,
+            "{{\"version\":\"1\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
+                "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{s},\"model\":{{\"state\":\"omitted\"}}," ++
+                "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"omitted\"}}," ++
+                "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}}}",
+            .{case.field},
+        );
+        var source = SocketBody.init(-1, 0);
+        @memcpy(source.buffer[0..json.len], json);
+        source.end = json.len;
+        var cleanup_failed = false;
+        var parser = Parser{ .source = &source, .options = .{
+            .io = std.testing.io,
+            .fd = -1,
+            .content_length = json.len,
+            .scratch_path = "unused",
+            .request_number = 0,
+            .cleanup_failed = &cleanup_failed,
+        } };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parser.parse());
+            continue;
+        }
+        const request = try parser.parse();
+        const field = request.configure.configuration.provider;
+        if (case.expected) |value| {
+            try std.testing.expectEqual(FieldState.value, field.state);
+            try std.testing.expectEqualStrings(value, field.value.slice());
+        } else try std.testing.expectEqual(FieldState.omitted, field.state);
+        const digest = request.configure.semanticDigest();
+        if (index == 0) omitted_digest = digest else if (index == 1) codex_digest = digest;
+        if (index == 2) try std.testing.expectEqualSlices(u8, &codex_digest, &digest);
+        if (index > 2) try std.testing.expect(!std.mem.eql(u8, &codex_digest, &digest));
+    }
+    try std.testing.expect(!std.mem.eql(u8, &omitted_digest, &codex_digest));
 }
 
 test "Session report profile is closed and omission selects Current" {

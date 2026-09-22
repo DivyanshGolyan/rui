@@ -203,10 +203,10 @@ INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_
 UPDATE session SET next_position=2*%[1]d+1 WHERE session_ref='queue/template';
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created)
  SELECT 's-config',1,'queue/stopped',randomblob(32),NULL,NULL,1,'accepted',1,1 WHERE %[2]d>0;
-INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position)
- SELECT 'queue/stopped',t.workspace,t.model,t.instructions_content_id,t.tools_mask,t.permission_mode,t.output_schema_content_id,1,1 FROM session t WHERE t.session_ref='queue/template' AND %[2]d>0;
-INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id)
- SELECT 'queue/stopped',1,'s-config',t.workspace,t.model,t.instructions_content_id,0,t.tools_mask,t.permission_mode,t.output_schema_content_id FROM session t WHERE t.session_ref='queue/template' AND %[2]d>0;
+INSERT INTO session(session_ref,workspace,provider,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position)
+ SELECT 'queue/stopped',t.workspace,t.provider,t.model,t.instructions_content_id,t.tools_mask,t.permission_mode,t.output_schema_content_id,1,1 FROM session t WHERE t.session_ref='queue/template' AND %[2]d>0;
+INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id)
+ SELECT 'queue/stopped',1,'s-config',t.workspace,t.provider,t.model,t.instructions_content_id,0,t.tools_mask,t.permission_mode,t.output_schema_content_id FROM session t WHERE t.session_ref='queue/template' AND %[2]d>0;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[2]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[2]d)
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created)
  SELECT 's-msg-'||i,2,'queue/stopped',randomblob(32),(SELECT v FROM q),NULL,1,'accepted',1,0 FROM n;
@@ -221,11 +221,11 @@ WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[3]d>0 UNION ALL SELECT i+1 FROM n WHERE
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created)
  SELECT 'e-config-'||i,1,'queue/eligible/'||printf('%%06d',i),randomblob(32),NULL,NULL,1,'accepted',1,1 FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[3]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[3]d)
-INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position)
- SELECT 'queue/eligible/'||printf('%%06d',i),t.workspace,t.model,t.instructions_content_id,t.tools_mask,t.permission_mode,t.output_schema_content_id,1,1 FROM n CROSS JOIN session t WHERE t.session_ref='queue/template';
+INSERT INTO session(session_ref,workspace,provider,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position)
+ SELECT 'queue/eligible/'||printf('%%06d',i),t.workspace,t.provider,t.model,t.instructions_content_id,t.tools_mask,t.permission_mode,t.output_schema_content_id,1,1 FROM n CROSS JOIN session t WHERE t.session_ref='queue/template';
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[3]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[3]d)
-INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id)
- SELECT 'queue/eligible/'||printf('%%06d',i),1,'e-config-'||i,t.workspace,t.model,t.instructions_content_id,0,t.tools_mask,t.permission_mode,t.output_schema_content_id FROM n CROSS JOIN session t WHERE t.session_ref='queue/template';
+INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id)
+ SELECT 'queue/eligible/'||printf('%%06d',i),1,'e-config-'||i,t.workspace,t.provider,t.model,t.instructions_content_id,0,t.tools_mask,t.permission_mode,t.output_schema_content_id FROM n CROSS JOIN session t WHERE t.session_ref='queue/template';
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[3]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[3]d)
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created)
  SELECT 'e-msg-'||i,2,'queue/eligible/'||printf('%%06d',i),randomblob(32),(SELECT v FROM q),NULL,1,'accepted',1,0 FROM n;

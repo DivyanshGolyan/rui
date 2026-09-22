@@ -3809,6 +3809,8 @@ test "preparing slots belong to their live preparations" {
     try command.session.set("direct/prep-belong");
     command.configuration.workspace.state = .value;
     try command.configuration.workspace.value.set(workspace);
+    command.configuration.provider.state = .value;
+    try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
     try std.testing.expect(storage.configure(&command, .{}) == .accepted);

@@ -36,7 +36,7 @@ func (c Client) Configure(key, session string, extra ...string) error {
 	}
 	arguments := []string{
 		"configure", "--store", c.Store, "--record", filepath.Join(c.Artifacts, key+"-configure.json"),
-		"--key", key + "-configure", "--session", session, "--workspace", workspace, "--model", "model-a",
+		"--key", key + "-configure", "--session", session, "--workspace", workspace, "--provider", "codex", "--model", "model-a",
 	}
 	arguments = append(arguments, extra...)
 	var answer map[string]any
