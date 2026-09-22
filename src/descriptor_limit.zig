@@ -30,7 +30,19 @@ pub fn observe(io: std.Io) !Observation {
         @intCast(limit.rlim_cur),
         @intCast(native.RLIM_INFINITY),
     );
-    var descriptors = try std.Io.Dir.cwd().openDir(io, directory_path, .{ .iterate = true });
+    return .{
+        .open_descriptors = try countOpenDescriptors(io, directory_path, soft_limit),
+        .soft_limit = soft_limit,
+    };
+}
+
+fn countOpenDescriptors(io: std.Io, directory_path: []const u8, soft_limit: ?usize) !usize {
+    var descriptors = std.Io.Dir.cwd().openDir(io, directory_path, .{ .iterate = true }) catch |err| {
+        if (builtin.os.tag == .linux) {
+            if (soft_limit) |finite_limit| return countFiniteLimit(finite_limit);
+        }
+        return err;
+    };
     defer descriptors.close(io);
     var count: usize = 0;
     var iterator = descriptors.iterate();
@@ -38,7 +50,29 @@ pub fn observe(io: std.Io) !Observation {
         const descriptor = std.fmt.parseInt(std.posix.fd_t, entry.name, 10) catch continue;
         if (descriptor != descriptors.handle) count = try std.math.add(usize, count, 1);
     }
-    return .{ .open_descriptors = count, .soft_limit = soft_limit };
+    return count;
+}
+
+fn countFiniteLimit(limit: usize) !usize {
+    const fd_max: usize = @intCast(std.math.maxInt(std.posix.fd_t));
+    const end = @min(limit, try std.math.add(usize, fd_max, 1));
+    var count: usize = 0;
+    for (0..end) |raw_fd| {
+        const fd: std.posix.fd_t = @intCast(raw_fd);
+        while (true) {
+            const result = std.posix.system.fcntl(fd, std.posix.F.GETFD, @as(usize, 0));
+            switch (std.posix.errno(result)) {
+                .SUCCESS => {
+                    count = try std.math.add(usize, count, 1);
+                    break;
+                },
+                .BADF => break,
+                .INTR => continue,
+                else => |err| return std.posix.unexpectedErrno(err),
+            }
+        }
+    }
+    return count;
 }
 
 test "native limit conversion preserves finite and unlimited results" {
@@ -52,6 +86,17 @@ test "native limit conversion rejects invalid queries and values" {
         try std.testing.expectError(
             error.InvalidDescriptorLimit,
             convertQuery(0, @as(u128, std.math.maxInt(usize)) + 1, std.math.maxInt(u128)),
+        );
+    }
+}
+
+test "finite-limit scan observes the test process without procfs" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const observation = try observe(std.testing.io);
+    if (observation.soft_limit) |limit| {
+        try std.testing.expectEqual(
+            observation.open_descriptors,
+            try countOpenDescriptors(std.testing.io, "/rui-test-missing-procfs", limit),
         );
     }
 }

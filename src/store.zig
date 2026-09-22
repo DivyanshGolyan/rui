@@ -8349,12 +8349,14 @@ test "controls wait behind an active model settlement transaction" {
         .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
     }};
 
+    const SettlementCheckpoint = enum(u8) { waiting, transaction_active, worker_finished };
     const Shared = struct {
         io: std.Io,
         order: std.atomic.Value(u64) = .init(0),
-        transaction_active: std.Io.Semaphore = .{},
+        checkpoint_ready: std.Io.Semaphore = .{},
         settlement_release: std.Io.Semaphore = .{},
         controls_requested: std.Io.Semaphore = .{},
+        checkpoint: std.atomic.Value(SettlementCheckpoint) = .init(.waiting),
         transaction_active_order: std.atomic.Value(u64) = .init(0),
         settlement_complete_order: std.atomic.Value(u64) = .init(0),
 
@@ -8367,11 +8369,25 @@ test "controls wait behind an active model settlement transaction" {
             switch (phase) {
                 .transaction_active => {
                     self.transaction_active_order.store(self.next(), .seq_cst);
-                    self.transaction_active.post(self.io);
+                    std.debug.assert(
+                        self.checkpoint.cmpxchgStrong(
+                            .waiting,
+                            .transaction_active,
+                            .acq_rel,
+                            .acquire,
+                        ) == null,
+                    );
+                    self.checkpoint_ready.post(self.io);
                     self.settlement_release.waitUncancelable(self.io);
                 },
                 .settlement_complete => self.settlement_complete_order.store(self.next(), .seq_cst),
                 else => {},
+            }
+        }
+
+        fn workerFinished(self: *@This()) void {
+            if (self.checkpoint.swap(.worker_finished, .acq_rel) != .worker_finished) {
+                self.checkpoint_ready.post(self.io);
             }
         }
     };
@@ -8394,9 +8410,15 @@ test "controls wait behind an active model settlement transaction" {
         binding: AttemptBinding,
         calls: []const TestingCall,
         shared: *Shared,
+        failure_before_settlement: ?anyerror = null,
         result: ?anyerror = null,
 
         fn run(self: *@This()) void {
+            defer self.shared.workerFinished();
+            if (self.failure_before_settlement) |err| {
+                self.result = err;
+                return;
+            }
             settleCallsForTestingWithFaults(
                 self.storage,
                 self.tmp,
@@ -8438,6 +8460,21 @@ test "controls wait behind an active model settlement transaction" {
         }
     };
 
+    var early_shared: Shared = .{ .io = std.testing.io };
+    var early: SettlementContext = .{
+        .storage = &storage,
+        .tmp = &tmp,
+        .binding = binding,
+        .calls = &calls,
+        .shared = &early_shared,
+        .failure_before_settlement = error.InjectedSettlementCheckpointFailure,
+    };
+    const early_thread = try std.Thread.spawn(.{}, SettlementContext.run, .{&early});
+    early_shared.checkpoint_ready.waitUncancelable(std.testing.io);
+    early_thread.join();
+    try std.testing.expectEqual(SettlementCheckpoint.worker_finished, early_shared.checkpoint.load(.acquire));
+    try std.testing.expectEqual(error.InjectedSettlementCheckpointFailure, early.result.?);
+
     var shared: Shared = .{ .io = std.testing.io };
     var settlement_thread: ?std.Thread = null;
     var stop_thread: ?std.Thread = null;
@@ -8457,7 +8494,14 @@ test "controls wait behind an active model settlement transaction" {
         .shared = &shared,
     };
     settlement_thread = try std.Thread.spawn(.{}, SettlementContext.run, .{&settlement});
-    shared.transaction_active.waitUncancelable(std.testing.io);
+    shared.checkpoint_ready.waitUncancelable(std.testing.io);
+    if (shared.checkpoint.load(.acquire) == .worker_finished) {
+        settlement_thread.?.join();
+        settlement_thread = null;
+        if (settlement.result) |err| return err;
+        return error.SettlementCheckpointMissing;
+    }
+    try std.testing.expectEqual(SettlementCheckpoint.transaction_active, shared.checkpoint.load(.acquire));
 
     var stop = try completeSessionStop("transaction-race-stop", "direct/transaction-race");
     var interrupt = try completeModelInterruption(

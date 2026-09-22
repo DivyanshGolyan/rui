@@ -682,7 +682,10 @@ def fill_ordinary_capacity(socket_path):
     held = []
     for _ in range(10):
         while len(held) < ORDINARY_CLIENTS:
-            candidate = open_partial(socket_path, "/v1/inspect-session")
+            try:
+                candidate = open_partial(socket_path, "/v1/inspect-session")
+            except (BrokenPipeError, ConnectionResetError):
+                continue
             time.sleep(0.05)
             candidate.settimeout(0.001)
             try:

@@ -20,10 +20,12 @@ Requires Zig 0.16.0, Python 3, Perl, a C toolchain and Make. The build pins nati
 zig build
 zig build test-logic
 zig build check
-./zig-out/bin/rui serve --store /absolute/path/to/private-store
+./zig-out/bin/rui serve \
+  --store /absolute/path/to/private-store \
+  --active-capacity 8
 ```
 
-Model transport is disabled by default. Development testing requires an explicit `--provider-endpoint`: HTTPS or loopback HTTP, with no authentication attached. Run `./zig-out/bin/rui` to print command usage.
+The production default Active Capacity remains 1,000. Startup rejects a requested population when the process descriptor limit cannot support it, so this development command selects a smaller population that fits ordinary finite limits. Model transport is disabled by default. Development testing requires an explicit `--provider-endpoint`: HTTPS or loopback HTTP, with no authentication attached. Run `./zig-out/bin/rui` to print command usage.
 
 ## Try the implemented development path
 

@@ -190,6 +190,8 @@ pub fn serve(
     const descriptor_requirement = try descriptor_capacity.calculate(
         descriptor_observation.open_descriptors,
         active_capacity,
+        max_ordinary_clients,
+        control_headroom,
         provider_endpoint != null,
         builtin.os.tag,
     );
@@ -199,8 +201,9 @@ pub fn serve(
     ) catch |err| {
         if (err == error.DescriptorCapacityInsufficient) {
             std.debug.print(
-                "rui: descriptor capacity insufficient: required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} self_wake={d}\n",
+                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} self_wake={d}\n",
                 .{
+                    active_capacity,
                     descriptor_requirement.total,
                     descriptor_observation.soft_limit.?,
                     descriptor_requirement.inherited,

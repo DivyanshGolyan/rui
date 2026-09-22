@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
 import http.server
 import json
+import os
 import pathlib
+import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 
+import bash_integration as bash
+import control_integration as control
+import dispatch_integration as fixture
 from host_process import HostDiagnostics, start_ready_process, stop_process
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
 ROOT = pathlib.Path.cwd()
+fixture.RUI = RUI
+control.RUI = RUI
 
 
 class HeldEndpoint(http.server.ThreadingHTTPServer):
@@ -125,6 +133,221 @@ def message(state, store, session, ordinal):
     assert result["answer"]["status"] == "accepted", result
 
 
+def observe(state, store, ordinal):
+    return command(
+        state,
+        "observe-command",
+        "--store",
+        store,
+        "--key",
+        f"message-{ordinal}",
+    )["observation"]
+
+
+def wait_for(predicate, description, timeout=10):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.025)
+    raise AssertionError(f"timed out waiting for {description}")
+
+
+def failed_result(state, store, ordinal):
+    observation = observe(state, store, ordinal)
+    return observation if observation.get("result", {}).get("code") == "provider_http_422" else None
+
+
+def execution_idle(state, store, session):
+    report = command(state, "inspect-session", "--store", store, "--session", session)
+    execution = report["execution"]
+    return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0" else None
+
+
+def open_gate(path):
+    os.mkfifo(path)
+    return os.open(path, os.O_RDWR | os.O_NONBLOCK)
+
+
+def fill_classification_capacity(socket_path):
+    held = []
+    deadline = time.monotonic() + 10
+    try:
+        while time.monotonic() < deadline:
+            while len(held) < 2:
+                try:
+                    candidate = control.open_partial(
+                        socket_path,
+                        "/v1/control/held",
+                        complete_headers=False,
+                    )
+                except (BrokenPipeError, ConnectionResetError):
+                    continue
+                candidate.settimeout(0.01)
+                try:
+                    early = candidate.recv(1, socket.MSG_PEEK)
+                except TimeoutError:
+                    candidate.settimeout(5)
+                    held.append(candidate)
+                else:
+                    if early:
+                        head, body = control.read_http_response(candidate)
+                        assert b" 503 " in head, (head, body)
+                    candidate.close()
+
+            try:
+                extra = control.open_partial(
+                    socket_path,
+                    "/v1/control/extra",
+                    complete_headers=False,
+                )
+            except (BrokenPipeError, ConnectionResetError):
+                continue
+            try:
+                head, body = control.read_http_response(extra)
+            except TimeoutError:
+                held.append(extra)
+            else:
+                extra.close()
+                if b"classification_capacity_exhausted" in body:
+                    assert b" 503 " in head, (head, body)
+                    for connection in held[2:]:
+                        connection.close()
+                    return held[:2]
+
+            live = []
+            for candidate in held:
+                candidate.settimeout(0.001)
+                try:
+                    early = candidate.recv(1, socket.MSG_PEEK)
+                except TimeoutError:
+                    candidate.settimeout(5)
+                    live.append(candidate)
+                    continue
+                if early:
+                    head, body = control.read_http_response(candidate)
+                    assert b" 503 " in head, (head, body)
+                candidate.close()
+            held = live
+    except BaseException:
+        for connection in held:
+            connection.close()
+        raise
+    for connection in held:
+        connection.close()
+    raise AssertionError("classification admission never stabilized at capacity")
+
+
+def prove_bash_spawn_with_full_client_population(state, required):
+    store = state / "bash-client-overlap-store"
+    gate_path = state / "bash-client-overlap-gate"
+    keeper = open_gate(gate_path)
+    releases = [state / f"bash-release-{ordinal}" for ordinal in range(2)]
+    markers = [state / f"bash-marker-{ordinal}" for ordinal in range(2)]
+    commands = [
+        f"printf x > {shlex.quote(str(marker))}; "
+        f"i=0; while [ ! -e {shlex.quote(str(release))} ] && [ \"$i\" -lt 3000 ]; "
+        "do sleep 0.01; i=$((i+1)); done"
+        for marker, release in zip(markers, releases)
+    ]
+    responses = [
+        fixture.sse_tool_calls(
+            f"descriptor-bash-{ordinal}-calls",
+            [
+                (
+                    "bash",
+                    f"descriptor-bash-{ordinal}-call",
+                    json.dumps({"cmd": commands[ordinal], "timeout_ms": None}, separators=(",", ":")),
+                )
+            ],
+        )
+        for ordinal in range(2)
+    ]
+    responses += [
+        fixture.sse_answer(
+            f"descriptor-bash-{ordinal}-answer",
+            f"descriptor-bash-{ordinal}-reasoning",
+            f"descriptor-bash-{ordinal}-message",
+            "done",
+        )[0]
+        for ordinal in range(2)
+    ]
+    endpoint = fixture.SuccessEndpoint(responses)
+    endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    endpoint_thread.start()
+    host = None
+    diagnostics = None
+    held = []
+    try:
+        # The FIFO gate itself is test-only and consumes one descriptor while
+        # it holds the production transition, so this witness supplies one
+        # descriptor beyond the production requirement.
+        witness_limit = required + 1
+        host, ready = start_ready_process(
+            limited_host(
+                witness_limit,
+                "serve",
+                "--store",
+                store,
+                "--active-capacity",
+                "2",
+                "--provider-endpoint",
+                f"http://127.0.0.1:{endpoint.server_port}/responses",
+                "--test-phase-trace",
+                "--test-transition",
+                "action-attempt-admitted",
+                "--test-transition-gate-path",
+                gate_path,
+            ),
+            required_fields={"descriptor_requirement": str(required), "descriptor_limit": str(witness_limit)},
+        )
+        diagnostics = HostDiagnostics(host)
+        sessions = [f"direct/descriptor-bash-{ordinal}" for ordinal in range(2)]
+        for ordinal, session in enumerate(sessions):
+            bash.configure(state, store, f"bash-configure-{ordinal}", session, permission="bypass")
+            fixture.message(state, store, f"bash-message-{ordinal}", session, f"run bash {ordinal}")
+            diagnostics.wait("action_attempt_admitted", action=str(ordinal + 1), attempt="1")
+            if ordinal == 0:
+                os.write(keeper, b"x")
+                wait_for(markers[0].exists, "first Bash process")
+
+        socket_path = ready["socket"]
+        held = control.fill_ordinary_capacity(socket_path)
+        control.assert_ordinary_capacity_busy(socket_path)
+        for connection in held:
+            connection.close()
+        held = []
+        held = fill_classification_capacity(socket_path)
+
+        held += control.fill_ordinary_capacity(socket_path)
+
+        os.write(keeper, b"x")
+        wait_for(markers[1].exists, "second Bash spawn with full clients")
+        for connection in held:
+            connection.close()
+        held = []
+        for release in releases:
+            release.touch()
+        for ordinal, session in enumerate(sessions):
+            wait_for(lambda session=session: bash.resolution(store, session) == "succeeded", f"Bash {ordinal} result")
+        wait_for(lambda: execution_idle(state, store, sessions[0]), "Bash overlap execution drain")
+        assert host.poll() is None, diagnostics.tail()
+    finally:
+        for connection in held:
+            connection.close()
+        for release in releases:
+            release.touch(exist_ok=True)
+        if host is not None:
+            stop_process(host)
+        if diagnostics is not None:
+            diagnostics.close()
+        os.close(keeper)
+        endpoint.shutdown()
+        endpoint.server_close()
+        endpoint_thread.join(timeout=3)
+
+
 def main():
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-descriptor-capacity-"))
     state.chmod(0o700)
@@ -132,6 +355,7 @@ def main():
     endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     endpoint_thread.start()
     host = None
+    documented = None
     diagnostics = None
     try:
         required = 72 if sys.platform == "darwin" else 70
@@ -154,6 +378,7 @@ def main():
         assert rejected.returncode != 0, rejected.stdout
         assert not rejected.stdout.startswith("ready "), rejected.stdout
         assert "descriptor capacity insufficient" in rejected.stderr, rejected.stderr
+        assert "active_capacity=2" in rejected.stderr, rejected.stderr
         assert f"required={required}" in rejected.stderr, rejected.stderr
         assert f"soft_limit={required - 1}" in rejected.stderr, rejected.stderr
         assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
@@ -176,7 +401,7 @@ def main():
             },
         )
         diagnostics = HostDiagnostics(host)
-        sessions = [configure(state, store, ordinal) for ordinal in range(3)]
+        sessions = [configure(state, store, ordinal) for ordinal in range(4)]
         message(state, store, sessions[0], 0)
         message(state, store, sessions[1], 1)
         endpoint.wait_for("requests", 2)
@@ -184,11 +409,40 @@ def main():
 
         endpoint.release.set()
         endpoint.wait_for("completed", 2)
+        for ordinal in range(2):
+            wait_for(lambda ordinal=ordinal: failed_result(state, store, ordinal), f"message {ordinal} result")
+        wait_for(lambda: execution_idle(state, store, sessions[0]), "first complete execution drain")
+
+        endpoint.release.clear()
         message(state, store, sessions[2], 2)
-        endpoint.wait_for("requests", 3)
-        endpoint.wait_for("completed", 3)
+        message(state, store, sessions[3], 3)
+        endpoint.wait_for("requests", 4)
+        assert endpoint.completed == 2, endpoint.completed
+        endpoint.release.set()
+        endpoint.wait_for("completed", 4)
+        for ordinal in range(2, 4):
+            wait_for(lambda ordinal=ordinal: failed_result(state, store, ordinal), f"message {ordinal} result")
+        wait_for(lambda: execution_idle(state, store, sessions[2]), "second complete execution drain")
         assert host.poll() is None, diagnostics.tail()
+
+        documented_store = state / "documented-store"
+        documented, _ = start_ready_process(
+            limited_host(
+                256,
+                "serve",
+                "--store",
+                documented_store,
+                "--active-capacity",
+                "8",
+            ),
+            required_fields={"active_capacity": "8", "descriptor_limit": "256"},
+        )
+        stop_process(documented)
+        documented = None
+        prove_bash_spawn_with_full_client_population(state, required)
     finally:
+        if documented is not None:
+            stop_process(documented)
         if host is not None:
             stop_process(host)
         if diagnostics is not None:
