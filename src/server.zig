@@ -1174,7 +1174,7 @@ fn stopSupersededBash(
                 if (!active.stop_accepted) {
                     active.stop_accepted = true;
                     traceActionControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
-                    const action = active.execution.requestStop();
+                    const action = active.execution.requestStop(.now(host.io, .awake));
                     traceActionControlOutcome(
                         host,
                         "lifecycle_action_attempted",
@@ -1938,7 +1938,7 @@ fn shutdownExecution(
             preparation.* = null;
             discardBashResources(host, slot, active.token, cleanup);
         },
-        .bash => |*active| active.execution.requestInfrastructureShutdown(),
+        .bash => |*active| active.execution.requestInfrastructureShutdown(.now(host.io, .awake)),
         .bash_prepared_cleanup, .named_scratch => {},
         .provider => |*active| {
             const token = active.owner.token;

@@ -420,6 +420,8 @@ After Attempt admission, one shared preparation workspace incrementally decodes 
 
 Terminal child status, signaling authority, original-group absence, each pipe's terminal reason and semantic Resolution are independent facts. A successful signal, reaped leader or pipe EOF proves none of the others. A signaling attempt may fail independently; once read-only observation establishes original-group absence and the remaining release conditions hold, that failure does not retain custody or fence admission. The anchored original process group is the cancellation scope; descendants that establish another process group or session are outside it. Expiry begins retirement, but `timed_out` is saved only after trustworthy retirement and capture. Custody loss before settlement recovers as indeterminate rather than timeout.
 
+Lifecycle policy uses the owner's explicit service-time observation. Pipe reads and writes report progress or capture-failure intent; they do not choose termination time or grace. The owner applies that intent at its supplied observation, and the native path samples again after a potentially blocking pipe operation. The first termination transition fixes the 100 ms grace and cleanup watchdog; repeated stop, failure or shutdown requests do not extend either deadline. Deterministic owner tests supply time directly and never consult a global clock.
+
 #### Retiring the original process group
 
 Observe a launched direct child without reaping; TERM the anchored original process group, wait 100 ms, KILL that group and any still-live direct child, retire nonzero signaling authority, reap the direct child exactly once, then establish original-group absence with read-only probes.
@@ -430,7 +432,7 @@ After group absence, snapshot each open pipe's queued bytes once, drain exactly 
 
 #### Releasing custody
 
-Release execution custody only after the child is reaped, signaling is retired, group absence is established, and each pipe handle is closed with an honest terminal reason recorded—EOF, finite-tail incomplete capture or capture failure. Delivery references must be gone, and scratch must be released or transferred. A committed Resolution remains independently usable while local cleanup continues.
+Release execution custody only after the child is reaped, signaling is retired, group absence is established, and each pipe handle is closed with an honest terminal reason recorded—EOF, finite-tail incomplete capture or capture failure. Delivery references must be gone, and scratch must be released or transferred. Unconfirmed reap, group or removal state remains ineligible for release and slot reuse. A committed Resolution remains independently usable while local cleanup continues.
 
 #### When cleanup cannot finish
 
@@ -681,6 +683,8 @@ Target Linux/macOS on x86-64/ARM64 through capabilities, not distribution allowl
 
 Protect socket/parent directory; validate Store identity/wire version before mutation. Reclaim only the expected stale socket after ownership. Unavailable/inaccessible/competing owners reject. Clients never auto-start or access SQLite; disconnects/timeouts do not cancel work.
 
+On shutdown, listener closure first prevents new handlers, then the execution owner drains every process, transport and retained-cleanup owner, and existing connection handlers drain. Only afterward may the Store connection close and the OS-held lease release. These populations and their existing synchronization are the release proof; there is no parallel shutdown registry. Optional retained output has no independent lease authority after producer aliases and execution custody retire: ordinary retention cleanup runs while the Host lives, and any named leftovers are handled by the startup policy below.
+
 ### Infrastructure shutdown
 
 Infrastructure shutdown promptly fences dispatch, interrupts supported effects and safely collects evidence/cleans up without awaiting model completion or inventing user stops/cancellation. It has no completion deadline when the operating system cannot establish physical effect retirement or resource reclamation: the Host remains in a low-frequency blocked drain with its Store lease, execution storage and custody intact. Forced process termination is an explicit unclean custody loss; restart then uses committed uncertainty and owned-leftover cleanup. Explicit restart preserves recovery allowance; remote effects and duplicate model cost remain possible.
@@ -726,6 +730,8 @@ Qualification procedure, fixture pacing, CPU brackets and control sampling live 
 #### Shared scratch ownership
 
 One shared temporary owner covers request/response/metadata, ingress, reports, exports, Edit output and retained spillover. Canonical SQLite and persistent diagnostics are separate; temporary copies count. Model request/response files may overlap; Bash has separate stdout/stderr and optional input files; client ingress/outgoing roles may overlap. These derive accounting, not file quotas. Ownership transfer preserves charges. Protect current work/publication/delivery/I/O. Release files with no later consumer; optional **Spillover Output** becomes disposable after its excerpt/result is saved and execution releases it. Evict oldest eligible retained files to satisfy byte reservations or retained-file capacity, not LRU, a background expiry service or per-tool pool.
+
+Before admission, startup classifies scratch entries by canonical typed name. Owned names are exactly the implemented request, response, response-metadata, Bash input/output and report prefixes followed by their canonical numeric components and `.tmp`; request/report number zero is allowed only where those producers use it, while other components are positive canonical decimals. Regular files with those names are removed, and another filesystem type refuses startup. Malformed components, prefix/suffix lookalikes, unrelated files, canonical Store files and diagnostics are preserved. The expected endpoint path is removed only when it is a Unix socket; another type refuses startup. Temporary content never reconstructs semantic state, a dispatch permit or a saved result.
 
 Reserve growth before I/O with checked arithmetic and serialized owner accounting. Charge sparse gaps and simultaneous copies; overwrites need no new charge. Return a provably unused reservation after short/error writes; an unknown partial write retains its submitted increment until safe cleanup. Ingress charges decoded file growth, not HTTP framing or escaping, and transfers each charge with its sealed file. Failed removal retains only that file’s charge until restart cleanup. After the owner closes its final descriptor, an already-absent private name establishes reclamation; otherwise private scratch charge survives unlink and pending I/O, releasing only after successful shrink or safe final closure. No writable alias may bypass accounting; no per-write heap allocation, directory scan, SQLite transaction or global lock across disk I/O. Logical bytes do not model block rounding/cache/compression or reserve real disk space.
 
