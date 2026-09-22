@@ -170,7 +170,7 @@ def open_gate(path):
     return os.open(path, os.O_RDWR | os.O_NONBLOCK)
 
 
-def fill_classification_capacity(socket_path):
+def fill_classification_capacity(socket_path, expected_exhaustion):
     held = []
     deadline = time.monotonic() + 10
     try:
@@ -210,7 +210,7 @@ def fill_classification_capacity(socket_path):
                 held.append(extra)
             else:
                 extra.close()
-                if b"classification_capacity_exhausted" in body:
+                if expected_exhaustion in body:
                     assert b" 503 " in head, (head, body)
                     for connection in held[2:]:
                         connection.close()
@@ -237,6 +237,21 @@ def fill_classification_capacity(socket_path):
     for connection in held:
         connection.close()
     raise AssertionError("classification admission never stabilized at capacity")
+
+
+def assert_connections_live(connections):
+    for ordinal, connection in enumerate(connections):
+        original_timeout = connection.gettimeout()
+        connection.settimeout(0.001)
+        try:
+            unexpected = connection.recv(1, socket.MSG_PEEK)
+        except TimeoutError:
+            continue
+        finally:
+            connection.settimeout(original_timeout)
+        raise AssertionError(
+            f"held connection {ordinal} responded or closed before Bash spawn: {unexpected!r}"
+        )
 
 
 def prove_bash_spawn_with_full_client_population(state, required):
@@ -315,12 +330,11 @@ def prove_bash_spawn_with_full_client_population(state, required):
         socket_path = ready["socket"]
         held = control.fill_ordinary_capacity(socket_path)
         control.assert_ordinary_capacity_busy(socket_path)
-        for connection in held:
-            connection.close()
-        held = []
-        held = fill_classification_capacity(socket_path)
-
-        held += control.fill_ordinary_capacity(socket_path)
+        held += fill_classification_capacity(
+            socket_path, b"connection_capacity_exhausted"
+        )
+        assert len(held) == 12
+        assert_connections_live(held)
 
         os.write(keeper, b"x")
         wait_for(markers[1].exists, "second Bash spawn with full clients")
