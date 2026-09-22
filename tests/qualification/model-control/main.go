@@ -133,13 +133,6 @@ func latencyStatus(limitMS float64, values ...float64) string {
 	return "passed"
 }
 
-func settlementQualificationStatus(overlapped bool, limitMS float64, values ...float64) string {
-	if !overlapped {
-		return "incomplete"
-	}
-	return latencyStatus(limitMS, values...)
-}
-
 func requireAcceptedIdleStop(reply map[string]any) error {
 	status, ok := measurement.StringField(reply, "answer", "status")
 	if !ok || status != "accepted" {
@@ -1358,7 +1351,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	p95MS := p95(latencies)
 	return map[string]any{
 		"scope":  "10 fully captured reports held during real Store import of one streamed 100,000-byte answer, two later controls, then 10 result deliveries blocked by a 4 KiB test-only socket send buffer",
-		"status": settlementQualificationStatus(overlapped, 1000, p95MS, controlMS), "ordinary_connections": ordinaryClients, "active_model_responses": 1, "concurrent_control_commands": controlHeadroom, "qualification_limit_ms": 1000,
+		"status": latencyStatus(1000, p95MS, controlMS), "ordinary_connections": ordinaryClients, "active_model_responses": 1, "concurrent_control_commands": controlHeadroom, "qualification_limit_ms": 1000,
 		"large_answer_bytes": large, "test_client_send_buffer_bytes": 4096, "large_answer_sha256": digestText, "blocked_result_clients": ordinaryClients, "blocked_result_delivery_observed": true,
 		"blocked_result_control_acknowledgment_ms": controlMS, "blocked_result_clean_reread": true, "post_disconnect_dispatch_fenced": fenced,
 		"settlement_lock_acquired_at_ns": strconv.FormatUint(settlementLockAt, 10), "settlement_complete_at_ns": strconv.FormatUint(settlementCompleteAt, 10),

@@ -96,7 +96,12 @@ pub const ControlTrace = struct {
     }
 };
 
-pub const SettlementTracePhase = enum { lock_requested, lock_acquired, settlement_complete };
+pub const SettlementTracePhase = enum {
+    lock_requested,
+    lock_acquired,
+    transaction_active,
+    settlement_complete,
+};
 
 pub const SettlementTrace = struct {
     context: *anyopaque,
@@ -4535,6 +4540,10 @@ pub const Store = struct {
         faults: Faults,
     ) !void {
         try exec(self.database, "BEGIN IMMEDIATE");
+        if (faults.settlement_trace) |trace| {
+            std.debug.assert(c.sqlite3_txn_state(self.database, "main") == c.SQLITE_TXN_WRITE);
+            trace.mark(.transaction_active);
+        }
         try self.validateCurrentAttempt(binding);
         const operation = try prepare(
             self.database,
@@ -6414,6 +6423,17 @@ fn settleCallsForTesting(
     file_prefix: []const u8,
     calls: []const TestingCall,
 ) !void {
+    return settleCallsForTestingWithFaults(storage, tmp, binding, file_prefix, calls, .{});
+}
+
+fn settleCallsForTestingWithFaults(
+    storage: *Store,
+    tmp: *std.testing.TmpDir,
+    binding: AttemptBinding,
+    file_prefix: []const u8,
+    calls: []const TestingCall,
+    faults: Faults,
+) !void {
     var source_buffer: [64 * 1024]u8 = undefined;
     var source_writer = std.Io.Writer.fixed(&source_buffer);
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -6509,7 +6529,7 @@ fn settleCallsForTesting(
         .openai_model = .{},
         .x_openai_model = .{},
         .request_id = .{},
-    }, .{});
+    }, faults);
 }
 
 fn settleTwoActionsForTesting(
@@ -8302,6 +8322,203 @@ test "exact model interruption rejects stale targets and replays before applicab
     const resolved = storage.interruptModel(&after, .{});
     try std.testing.expect(resolved == .rejected);
     try std.testing.expectEqual(ModelInterruptionRejection.operation_resolved, resolved.rejected.code);
+}
+
+test "controls wait behind an active model settlement transaction" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    try configureTestSession(&storage, "transaction-race-config", "direct/transaction-race");
+    try submitTestMessage(
+        &storage,
+        &tmp,
+        "transaction-race-message",
+        "transaction-race-message",
+        "direct/transaction-race",
+        "execute",
+    );
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{.{
+        .item_id = "transaction-race-item",
+        .name = "bash",
+        .encoded_call_id = "transaction-race-call",
+        .decoded_call_id = "transaction-race-call",
+        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+    }};
+
+    const Shared = struct {
+        io: std.Io,
+        order: std.atomic.Value(u64) = .init(0),
+        transaction_active: std.Io.Semaphore = .{},
+        settlement_release: std.Io.Semaphore = .{},
+        controls_requested: std.Io.Semaphore = .{},
+        transaction_active_order: std.atomic.Value(u64) = .init(0),
+        settlement_complete_order: std.atomic.Value(u64) = .init(0),
+
+        fn next(self: *@This()) u64 {
+            return self.order.fetchAdd(1, .seq_cst) + 1;
+        }
+
+        fn settlementTrace(context: *anyopaque, phase: SettlementTracePhase) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (phase) {
+                .transaction_active => {
+                    self.transaction_active_order.store(self.next(), .seq_cst);
+                    self.transaction_active.post(self.io);
+                    self.settlement_release.waitUncancelable(self.io);
+                },
+                .settlement_complete => self.settlement_complete_order.store(self.next(), .seq_cst),
+                else => {},
+            }
+        }
+    };
+    const ControlProbe = struct {
+        shared: *Shared,
+        lock_acquired_order: std.atomic.Value(u64) = .init(0),
+
+        fn mark(context: *anyopaque, phase: ControlTracePhase) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (phase) {
+                .lock_requested => self.shared.controls_requested.post(self.shared.io),
+                .lock_acquired => self.lock_acquired_order.store(self.shared.next(), .seq_cst),
+                else => {},
+            }
+        }
+    };
+    const SettlementContext = struct {
+        storage: *Store,
+        tmp: *std.testing.TmpDir,
+        binding: AttemptBinding,
+        calls: []const TestingCall,
+        shared: *Shared,
+        result: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            settleCallsForTestingWithFaults(
+                self.storage,
+                self.tmp,
+                self.binding,
+                "transaction-race-metadata",
+                self.calls,
+                .{ .settlement_trace = .{ .context = self.shared, .mark_fn = Shared.settlementTrace } },
+            ) catch |err| {
+                self.result = err;
+            };
+        }
+    };
+    const StopContext = struct {
+        storage: *Store,
+        command: *const protocol.SessionStopCommand,
+        probe: ControlProbe,
+        reply: ?SessionStopReply = null,
+        finished: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            self.reply = self.storage.stopSession(self.command, .{
+                .control_trace = .{ .context = &self.probe, .mark_fn = ControlProbe.mark },
+            });
+            self.finished.store(true, .seq_cst);
+        }
+    };
+    const InterruptContext = struct {
+        storage: *Store,
+        command: *const protocol.ModelInterruptionCommand,
+        probe: ControlProbe,
+        reply: ?ModelInterruptionReply = null,
+        finished: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            self.reply = self.storage.interruptModel(self.command, .{
+                .control_trace = .{ .context = &self.probe, .mark_fn = ControlProbe.mark },
+            });
+            self.finished.store(true, .seq_cst);
+        }
+    };
+
+    var shared: Shared = .{ .io = std.testing.io };
+    var settlement_thread: ?std.Thread = null;
+    var stop_thread: ?std.Thread = null;
+    var interrupt_thread: ?std.Thread = null;
+    var settlement_released = false;
+    defer {
+        if (!settlement_released) shared.settlement_release.post(std.testing.io);
+        if (settlement_thread) |thread| thread.join();
+        if (stop_thread) |thread| thread.join();
+        if (interrupt_thread) |thread| thread.join();
+    }
+    var settlement: SettlementContext = .{
+        .storage = &storage,
+        .tmp = &tmp,
+        .binding = binding,
+        .calls = &calls,
+        .shared = &shared,
+    };
+    settlement_thread = try std.Thread.spawn(.{}, SettlementContext.run, .{&settlement});
+    shared.transaction_active.waitUncancelable(std.testing.io);
+
+    var stop = try completeSessionStop("transaction-race-stop", "direct/transaction-race");
+    var interrupt = try completeModelInterruption(
+        "transaction-race-interrupt",
+        "direct/transaction-race",
+        binding,
+    );
+    var stop_context: StopContext = .{
+        .storage = &storage,
+        .command = &stop,
+        .probe = .{ .shared = &shared },
+    };
+    var interrupt_context: InterruptContext = .{
+        .storage = &storage,
+        .command = &interrupt,
+        .probe = .{ .shared = &shared },
+    };
+    stop_thread = try std.Thread.spawn(.{}, StopContext.run, .{&stop_context});
+    interrupt_thread = try std.Thread.spawn(.{}, InterruptContext.run, .{&interrupt_context});
+    shared.controls_requested.waitUncancelable(std.testing.io);
+    shared.controls_requested.waitUncancelable(std.testing.io);
+    try std.testing.expectEqual(@as(u64, 0), stop_context.probe.lock_acquired_order.load(.seq_cst));
+    try std.testing.expectEqual(@as(u64, 0), interrupt_context.probe.lock_acquired_order.load(.seq_cst));
+    try std.testing.expect(!stop_context.finished.load(.seq_cst));
+    try std.testing.expect(!interrupt_context.finished.load(.seq_cst));
+
+    shared.settlement_release.post(std.testing.io);
+    settlement_released = true;
+    settlement_thread.?.join();
+    settlement_thread = null;
+    stop_thread.?.join();
+    stop_thread = null;
+    interrupt_thread.?.join();
+    interrupt_thread = null;
+    if (settlement.result) |err| return err;
+
+    const settlement_complete_order = shared.settlement_complete_order.load(.seq_cst);
+    try std.testing.expect(shared.transaction_active_order.load(.seq_cst) < settlement_complete_order);
+    try std.testing.expect(settlement_complete_order < stop_context.probe.lock_acquired_order.load(.seq_cst));
+    try std.testing.expect(settlement_complete_order < interrupt_context.probe.lock_acquired_order.load(.seq_cst));
+    try std.testing.expectEqual(c.SQLITE_TXN_NONE, c.sqlite3_txn_state(storage.database, "main"));
+
+    const stop_reply = stop_context.reply.?;
+    try std.testing.expect(stop_reply == .accepted);
+    try std.testing.expectEqual(binding.turn_id, stop_reply.accepted.selection.selected_turn_id.?);
+    try std.testing.expectEqual(SessionStopCompletion.completed, stop_reply.accepted.completion);
+    const interrupt_reply = interrupt_context.reply.?;
+    try std.testing.expect(interrupt_reply == .rejected);
+    try std.testing.expectEqual(ModelInterruptionRejection.operation_resolved, interrupt_reply.rejected.code);
+
+    const action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation");
+    try expectContent(
+        &storage,
+        try storage.actionCallId("direct/transaction-race", action_id),
+        "transaction-race-call",
+    );
+    try expectContent(
+        &storage,
+        try storage.actionArguments("direct/transaction-race", action_id),
+        "{\"cmd\":\"true\",\"timeout_ms\":null}",
+    );
 }
 
 test "model interruption removes a scheduled retry from admission" {

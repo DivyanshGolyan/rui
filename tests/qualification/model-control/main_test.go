@@ -71,7 +71,7 @@ func TestControlTimingEvidenceRejectsMissingWrongMalformedAndDuplicateRecords(t 
 	}
 }
 
-func TestSettlementQualificationRequiresObservedOverlap(t *testing.T) {
+func TestSettlementOverlapRemainsDiagnostic(t *testing.T) {
 	timings, err := parseControlTimings(
 		[]map[string]any{timingRecord("stop", "session_stop", "210", "220", "230", "235", "10", "10", "10", "5", "35")},
 		[]expectedControlTiming{{key: "stop", kind: "session_stop"}},
@@ -86,11 +86,8 @@ func TestSettlementQualificationRequiresObservedOverlap(t *testing.T) {
 	if overlapped {
 		t.Fatal("nonoverlapping timing qualified")
 	}
-	if got := settlementQualificationStatus(overlapped, 1000, 10, 20); got != "incomplete" {
-		t.Fatalf("nonoverlap status = %s", got)
-	}
-	if got := controlStatus(map[string]any{"status": "passed"}, map[string]any{"status": "incomplete"}); got != "incomplete" {
-		t.Fatalf("top-level nonoverlap status = %s", got)
+	if got := latencyStatus(1000, 10, 20); got != "passed" {
+		t.Fatalf("representative latency status = %s", got)
 	}
 }
 

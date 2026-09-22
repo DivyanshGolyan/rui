@@ -2527,6 +2527,7 @@ const SettlementTrace = struct {
         traceOperation(self.host, switch (phase) {
             .lock_requested => "settlement_lock_requested",
             .lock_acquired => "settlement_lock_acquired",
+            .transaction_active => "settlement_transaction_active",
             .settlement_complete => "settlement_complete",
         }, self.binding);
     }

@@ -142,6 +142,90 @@ func TestCheckedCPUDelta(t *testing.T) {
 	}
 }
 
+func TestSleepUntilRechecksSerializedWallPostcondition(t *testing.T) {
+	base := time.Unix(0, 0)
+	readings := []time.Time{
+		base.Add(90 * time.Second),
+		base.Add(85 * time.Second),
+		base.Add(100 * time.Second),
+	}
+	index := 0
+	now := func() time.Time {
+		if index >= len(readings) {
+			t.Fatal("wall clock read past scripted values")
+		}
+		value := readings[index]
+		index++
+		return value
+	}
+	var sleeps []time.Duration
+	err := sleepUntil(
+		base.Add(100*time.Second),
+		now,
+		func(delay time.Duration) { sleeps = append(sleeps, delay) },
+		func() (time.Duration, error) { return time.Minute, nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []time.Duration{10 * time.Second, 15 * time.Second}
+	if len(sleeps) != len(want) {
+		t.Fatalf("sleep requests = %v, want %v", sleeps, want)
+	}
+	for index := range want {
+		if sleeps[index] != want[index] {
+			t.Fatalf("sleep request %d = %v, want %v", index, sleeps[index], want[index])
+		}
+	}
+}
+
+func TestSleepUntilHandlesAlreadyReachedForwardJumpAndDeadline(t *testing.T) {
+	base := time.Unix(0, 0)
+	tests := []struct {
+		name      string
+		readings  []time.Time
+		remaining time.Duration
+		wantSleep []time.Duration
+		wantError string
+	}{
+		{name: "already reached", readings: []time.Time{base.Add(100 * time.Second)}},
+		{name: "forward jump", readings: []time.Time{base.Add(90 * time.Second), base.Add(110 * time.Second)}, remaining: time.Minute, wantSleep: []time.Duration{10 * time.Second}},
+		{name: "deadline", readings: []time.Time{base.Add(90 * time.Second)}, remaining: 5 * time.Second, wantError: "scheduled observation exceeds run-wide deadline"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			index := 0
+			now := func() time.Time {
+				value := test.readings[index]
+				index++
+				return value
+			}
+			var sleeps []time.Duration
+			err := sleepUntil(
+				base.Add(100*time.Second),
+				now,
+				func(delay time.Duration) { sleeps = append(sleeps, delay) },
+				func() (time.Duration, error) { return test.remaining, nil },
+			)
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error = %v, want containing %q", err, test.wantError)
+			}
+			if len(sleeps) != len(test.wantSleep) {
+				t.Fatalf("sleep requests = %v, want %v", sleeps, test.wantSleep)
+			}
+			for index := range test.wantSleep {
+				if sleeps[index] != test.wantSleep[index] {
+					t.Fatalf("sleep request %d = %v, want %v", index, sleeps[index], test.wantSleep[index])
+				}
+			}
+		})
+	}
+}
+
 func TestFactLogWriteReportsClosedArtifact(t *testing.T) {
 	log, err := NewFactLog(filepath.Join(t.TempDir(), "facts.jsonl"))
 	if err != nil {
