@@ -33,7 +33,7 @@ Similarly, Zig's [`Compile.make`](https://codeberg.org/ziglang/zig/src/tag/0.16.
 
 ## Local observations (not edit-rebuild or clean-cache qualification)
 
-Measured sequentially on 2026-09-23 in the Linux x86-64 orb (4 reported CPUs, 7.8 GiB RAM), Zig 0.16.0, with existing `zig-pkg` and partially populated `.zig-cache`; commands used `/usr/bin/time -f 'wall=%e user=%U system=%S maxrss_kb=%M' zig build <step> --summary all`. The working tree had no tracked edits before these runs; this is neither a clean source export nor a changed-source incremental benchmark. Step times printed by Zig are rounded and overlapping steps are not additive.
+Measured sequentially on 2026-09-23 at Git revision [`8a5a74a`](https://github.com/DivyanshGolyan/rui/commit/8a5a74ac953b775f55a308c19ff394431b052f99) in the Linux x86-64 orb (4 reported CPUs, 7.8 GiB RAM), Zig 0.16.0, with existing `zig-pkg` and partially populated `.zig-cache`; commands used `/usr/bin/time -f 'wall=%e user=%U system=%S maxrss_kb=%M' zig build <step> --summary all`. The working tree was clean at the start; the research note became untracked (dirty) during later runs, but no tracked source/build inputs changed. This is neither a clean source export nor a changed-source incremental benchmark. Step times printed by Zig are rounded and overlapping steps are not additive.
 
 | Command in run order | Wall | Decisive summary |
 | --- | ---: | --- |
