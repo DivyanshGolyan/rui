@@ -114,7 +114,6 @@ const Host = struct {
     store: *store_module.Store,
     faults: Faults,
     provider_endpoint: ?[]const u8 = null,
-    provider_ca_file: ?[]const u8 = null,
     bash_path: []const u8 = default_bash_path,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
     retention: *output_retention.Queue = undefined,
@@ -184,7 +183,6 @@ pub fn serve(
     active_capacity: usize,
     faults: Faults,
     provider_endpoint: ?[]const u8,
-    provider_ca_file: ?[]const u8,
     bash_path: []const u8,
     bash_timeout_ms: u64,
 ) !void {
@@ -259,7 +257,6 @@ pub fn serve(
         .store = &storage,
         .faults = faults,
         .provider_endpoint = provider_endpoint,
-        .provider_ca_file = provider_ca_file,
         .bash_path = bash_path,
         .bash_timeout_ms = bash_timeout_ms,
         .retention = undefined,
@@ -567,7 +564,7 @@ fn executionMain(host: *Host) void {
     defer host.allocator.free(slots);
     for (slots) |*slot| slot.* = .free;
     var reactor: ?provider.Reactor = if (host.provider_endpoint != null)
-        provider.Reactor.init(slots.len) catch |err| {
+        provider.Reactor.init() catch |err| {
             fenceDispatch(host, "transport reactor initialization", err);
             return;
         }
@@ -864,25 +861,9 @@ fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []Execu
     }) catch |err| {
         fenceDispatch(host, "transport completion", err);
         return false;
-    };
-    if (completion) |finished| {
-        completeTransfer(host, slots, finished);
-        return true;
-    }
-    for (slots) |*slot| switch (slot.*) {
-        .provider => |*active| {
-            if (!active.transfer.queueDeadlineExpired()) continue;
-            active_reactor.cancel(&active.transfer);
-            completeTransfer(host, slots, .{
-                .identity = active.transfer.identity(),
-                .outcome = .{ .transport_finished = .{ .disposition = .temporary_connection } },
-                .queued_after = 0,
-            });
-            return true;
-        },
-        else => {},
-    };
-    return false;
+    } orelse return false;
+    completeTransfer(host, slots, completion);
+    return true;
 }
 
 fn cancelSupersededTransfers(
@@ -1603,7 +1584,6 @@ fn launchPreparedRequest(
     } };
     const active = &slot.provider;
     active.transfer.start(host.provider_endpoint.?, request.*, binding, .{
-        .ca_file = host.provider_ca_file,
         .inactivity_seconds = @intCast(host.faults.provider_inactivity_seconds),
         .request_read_fault = host.faults.request_read,
         .response_acquire_fault = host.faults.response_acquire,
@@ -1734,7 +1714,6 @@ fn completeTransfer(
         .temporary_http => std.fmt.bufPrint(&code_buffer, "provider_temporary_http_{d}", .{evidence.http_status}) catch unreachable,
         .temporary_connection => "provider_transport_failure",
         .permanent_transport => "provider_transport_permanent",
-        .unsupported_http_version => "provider_http2_required",
         .authentication_failure => "provider_authentication_failed",
         .tls_verification_failure => "provider_tls_verification_failed",
         .invalid_headers => "invalid_provider_headers",

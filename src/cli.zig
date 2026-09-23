@@ -38,7 +38,6 @@ fn postCommandHoldDescriptors(ready: std.posix.fd_t, release: std.posix.fd_t) !v
 fn serve(io: std.Io, args: []const []const u8) !void {
     var store_path: ?[]const u8 = null;
     var provider_endpoint: ?[]const u8 = null;
-    var provider_ca_file: ?[]const u8 = null;
     var bash_path: []const u8 = server.default_bash_path;
     var bash_timeout_ms: u64 = server.default_bash_timeout_ms;
     var active_capacity: usize = server.default_active_capacity;
@@ -50,8 +49,6 @@ fn serve(io: std.Io, args: []const []const u8) !void {
             store_path = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--provider-endpoint")) {
             provider_endpoint = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--provider-ca-file")) {
-            provider_ca_file = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--bash-path")) {
             bash_path = try takeValue(args, &index);
             if (bash_path.len == 0) return error.InvalidBashPath;
@@ -145,7 +142,6 @@ fn serve(io: std.Io, args: []const []const u8) !void {
         active_capacity,
         faults,
         provider_endpoint,
-        provider_ca_file,
         bash_path,
         bash_timeout_ms,
     );
@@ -435,7 +431,7 @@ fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
 fn usage() error{InvalidArguments} {
     std.debug.print(
         \\usage:
-        \\  rui serve --store PATH [--active-capacity N] [--provider-endpoint URL] [--provider-ca-file PATH] [--fault NAME]
+        \\  rui serve --store PATH [--active-capacity N] [--provider-endpoint URL] [--fault NAME]
         \\  rui configure --store PATH --record FILE --key KEY --session REF [settings]
         \\    First configuration requires --workspace PATH --provider codex --model MODEL.
         \\  rui message --store PATH --record FILE --key KEY --session REF --text FILE|-
