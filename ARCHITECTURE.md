@@ -242,6 +242,8 @@ Concurrent Codex Attempts to one origin share a lazily established HTTP/2 connec
 
 Loopback H1 exists for deterministic local semantic tests, not as a managed HTTPS fallback or proof of multiplexing. With one allowed connection below capacity 100, its requests progress serially; a fixture that withholds the first response until all \(C\) requests arrive must use TLS/H2. Retaining this bounded local route avoids making ordinary Store/recovery fixtures implement H2 streams and TLS, while transport and concurrent-resource qualification exercise the actual H2 interface.
 
+Native transport completion is not response readiness. The Transfer retains its capture while accepted writes or a seal are pending, gives late capture failure precedence over transport success, and exposes a final local outcome only after drainage. A control detaches the easy handle immediately but keeps the Transfer until the same drainage condition makes destruction safe. The Host consumes that final outcome for Attempt settlement and custody; it does not infer capture readiness or repair preliminary transport metadata. The local pause timestamp is the single pause fact for both curl resumption and inactivity accounting, including synchronous re-pause during resumption.
+
 Transport retains the completed scratch through its cleanup boundary. The [adapter-view experiments](research/README.md#provider-wire-contract) support this shape, not production qualification.
 
 ### Codex wire binding

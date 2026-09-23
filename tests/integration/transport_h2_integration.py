@@ -563,19 +563,19 @@ def paused_capture_inactivity(root, endpoint):
                                        f"paused capture result {index}", timeout=20)
             assert result["status"] == "completed", result
             assert dispatch.read_result(store, key) == endpoint.answers[f"paused-{index}"]
-        with sqlite3.connect(store / "rui.sqlite3") as database:
-            attempts = database.execute("SELECT attempt_ordinal,allowance_used FROM model_operation").fetchall()
-            assert attempts == [(1, 1)] * 20, attempts
         execution = dispatch.command("inspect-session", "--store", store,
                                      "--session", "direct/paused-0")["execution"]
         assert execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0", execution
-        print(json.dumps({"case": "paused_capture_inactivity", "streams": len(endpoint.streams),
-                          "attempts": 20, "hold_seconds": 3.5}), flush=True)
     finally:
         os.write(keeper, b"r")
         os.close(keeper)
         dispatch.stop_host(host)
         diagnostics.close()
+    with sqlite3.connect(store / "rui.sqlite3") as database:
+        attempts = database.execute("SELECT attempt_ordinal,allowance_used FROM model_operation").fetchall()
+        assert attempts == [(1, 1)] * 20, attempts
+    print(json.dumps({"case": "paused_capture_inactivity", "streams": len(endpoint.streams),
+                      "attempts": 20, "hold_seconds": 3.5}), flush=True)
 
 
 def capture_failure_on_resume(root, endpoint):
@@ -868,15 +868,15 @@ def negotiated_h2_early_error(root, endpoint):
         assert result["code"] == "retry_exhausted", result
         assert len(endpoint.streams) == 4, endpoint.streams
         assert all(text == "early-h2" for _, _, text, _ in endpoint.streams)
-        with sqlite3.connect(store / "rui.sqlite3") as database:
-            attempts = database.execute(
-                "SELECT attempt_ordinal,allowance_used FROM model_operation"
-            ).fetchone()
-            assert attempts == (4, 4), attempts
-        print(json.dumps({"case": "negotiated_h2_early_error", "posts": len(endpoint.streams),
-                          "result": result["code"]}), flush=True)
     finally:
         dispatch.stop_host(host)
+    with sqlite3.connect(store / "rui.sqlite3") as database:
+        attempts = database.execute(
+            "SELECT attempt_ordinal,allowance_used FROM model_operation"
+        ).fetchone()
+        assert attempts == (4, 4), attempts
+    print(json.dumps({"case": "negotiated_h2_early_error", "posts": len(endpoint.streams),
+                      "result": result["code"]}), flush=True)
 
 
 def main():
