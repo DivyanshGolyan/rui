@@ -558,7 +558,7 @@ pub const TransportEvidence = struct {
     retry_after_deadline_ms: ?i64 = null,
 };
 
-pub const CaptureFailure = enum { scratch_exhausted, write_failed };
+pub const CaptureFailure = enum { scratch_exhausted, write_failed, seal_failed };
 
 pub const TransferIdentity = *const opaque {};
 pub const TransportHandleIdentity = *const opaque {};
@@ -631,6 +631,15 @@ pub const Reactor = struct {
         transfer.in_reactor = false;
     }
 
+    pub fn resumeIfReady(self: *Reactor, transfer: *Transfer) !bool {
+        _ = self;
+        if (!transfer.in_reactor or !transfer.paused or !transfer.writer.hasRoom()) return false;
+        transfer.paused = false;
+        if (c.curl_easy_pause(transfer.easy, c.CURLPAUSE_CONT) != c.CURLE_OK)
+            return error.TransportResumeFailed;
+        return true;
+    }
+
     pub fn drive(self: *Reactor, timeout_ms: c_int) !void {
         var running: c_int = 0;
         if (c.curl_multi_perform(self.multi, &running) != c.CURLM_OK) return error.TransportReactorFailed;
@@ -701,6 +710,138 @@ pub const Reactor = struct {
     }
 };
 
+// The reactor never performs capture I/O. All accepted callback bytes live in
+// this fixed queue until the single writer finishes, including its active
+// entry. A paused callback has accepted nothing and curl will redeliver it.
+pub const CaptureWriter = struct {
+    const capacity = 16;
+    const Entry = struct {
+        capture: *ResponseCapture,
+        length: usize = 0,
+        bytes: [c.CURL_MAX_WRITE_SIZE]u8 = undefined,
+        seal: bool = false,
+        fail_seal: bool = false,
+    };
+
+    io: std.Io,
+    mutex: std.Io.Mutex = .init,
+    available: std.Io.Condition = .init,
+    entries: [capacity]Entry = undefined,
+    head: usize = 0,
+    count: usize = 0,
+    stopping: bool = false,
+    test_gate_path: ?[]const u8 = null,
+
+    pub fn run(self: *CaptureWriter) void {
+        while (true) {
+            self.mutex.lockUncancelable(self.io);
+            while (self.count == 0 and !self.stopping) self.available.waitUncancelable(self.io, &self.mutex);
+            if (self.count == 0 and self.stopping) {
+                self.mutex.unlock(self.io);
+                return;
+            }
+            const entry = &self.entries[self.head];
+            const capture = entry.capture;
+            const failed = capture.failure != null;
+            self.mutex.unlock(self.io);
+
+            if (entry.seal) {
+                if (!failed) capture.seal(entry.fail_seal) catch {
+                    self.mutex.lockUncancelable(self.io);
+                    capture.failure = .seal_failed;
+                    self.mutex.unlock(self.io);
+                };
+            } else if (!failed) {
+                if (self.test_gate_path) |path| {
+                    self.test_gate_path = null;
+                    std.debug.print("{{\"rui_test_phase\":\"capture_write_gate_entered\"}}\n", .{});
+                    if (std.Io.Dir.cwd().openFile(self.io, path, .{})) |gate| {
+                        defer gate.close(self.io);
+                        var release: [1]u8 = undefined;
+                        _ = gate.readStreaming(self.io, &.{&release}) catch {};
+                    } else |_| {}
+                }
+                capture.file.writeStreamingAll(capture.io, entry.bytes[0..entry.length]) catch {
+                    self.mutex.lockUncancelable(self.io);
+                    capture.failure = .write_failed;
+                    self.mutex.unlock(self.io);
+                };
+            }
+
+            self.mutex.lockUncancelable(self.io);
+            if (!entry.seal and capture.failure == null) capture.length += entry.length;
+            capture.pending_writes -= 1;
+            self.head = (self.head + 1) % capacity;
+            self.count -= 1;
+            self.mutex.unlock(self.io);
+        }
+    }
+
+    pub fn stop(self: *CaptureWriter, thread: std.Thread) void {
+        self.mutex.lockUncancelable(self.io);
+        self.stopping = true;
+        self.available.signal(self.io);
+        self.mutex.unlock(self.io);
+        thread.join();
+        std.debug.assert(self.count == 0);
+    }
+
+    fn offer(self: *CaptureWriter, capture: *ResponseCapture, bytes: []const u8) usize {
+        std.debug.assert(bytes.len <= c.CURL_MAX_WRITE_SIZE);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (capture.failure != null) return 0;
+        if (self.count == capacity) return c.CURL_WRITEFUNC_PAUSE;
+        if (capture.fail_write) {
+            capture.failure = .write_failed;
+            return 0;
+        }
+        if (!capture.budget.reserve(bytes.len)) {
+            capture.failure = .scratch_exhausted;
+            return 0;
+        }
+        capture.charged = std.math.add(u64, capture.charged, bytes.len) catch {
+            capture.budget.release(bytes.len);
+            capture.failure = .write_failed;
+            return 0;
+        };
+        const entry = &self.entries[(self.head + self.count) % capacity];
+        entry.* = .{ .capture = capture, .length = bytes.len };
+        @memcpy(entry.bytes[0..bytes.len], bytes);
+        capture.pending_writes += 1;
+        self.count += 1;
+        self.available.signal(self.io);
+        return bytes.len;
+    }
+
+    pub fn seal(self: *CaptureWriter, capture: *ResponseCapture, fail: bool) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.count == capacity) return false;
+        self.entries[(self.head + self.count) % capacity] = .{
+            .capture = capture,
+            .seal = true,
+            .fail_seal = fail,
+        };
+        capture.pending_writes += 1;
+        self.count += 1;
+        self.available.signal(self.io);
+        return true;
+    }
+
+    pub fn drained(self: *CaptureWriter, capture: *ResponseCapture) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return capture.pending_writes == 0;
+    }
+
+    pub fn hasRoom(self: *CaptureWriter) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.count < capacity;
+    }
+};
+
 pub fn initialize() !void {
     if (comptime !transport_options.enabled) return error.TransportUnavailableOnTarget;
     if (c.curl_global_init(c.CURL_GLOBAL_DEFAULT) != c.CURLE_OK) return error.TransportInitializationFailed;
@@ -741,6 +882,7 @@ pub const ResponseCapture = struct {
     sealed: bool = false,
     fail_write: bool = false,
     failure: ?CaptureFailure = null,
+    pending_writes: usize = 0,
 
     pub fn init(
         io: std.Io,
@@ -787,36 +929,6 @@ pub const ResponseCapture = struct {
         };
     }
 
-    fn write(self: *ResponseCapture, bytes: []const u8) !void {
-        std.debug.assert(!self.sealed);
-        if (self.fail_write) {
-            self.failure = .write_failed;
-            return error.InjectedResponseWriteFailure;
-        }
-        if (!self.budget.reserve(bytes.len)) {
-            self.failure = .scratch_exhausted;
-            return error.ResponseScratchExhausted;
-        }
-        const next_charged = std.math.add(u64, self.charged, bytes.len) catch {
-            self.budget.release(bytes.len);
-            self.failure = .write_failed;
-            return error.ResponseLengthOverflow;
-        };
-        const next_length = std.math.add(u64, self.length, bytes.len) catch {
-            self.budget.release(bytes.len);
-            self.failure = .write_failed;
-            return error.ResponseLengthOverflow;
-        };
-        // Retain the whole callback reservation after a partial OS write. The
-        // failed capture is released immediately and never undercounts disk.
-        self.charged = next_charged;
-        self.file.writeStreamingAll(self.io, bytes) catch |err| {
-            self.failure = .write_failed;
-            return err;
-        };
-        self.length = next_length;
-    }
-
     pub fn seal(self: *ResponseCapture, fail: bool) !void {
         std.debug.assert(!self.sealed);
         if (fail) return error.InjectedResponseSealFailure;
@@ -830,6 +942,7 @@ pub const ResponseCapture = struct {
     }
 
     pub fn deinit(self: *ResponseCapture) void {
+        std.debug.assert(self.pending_writes == 0);
         self.file.close(self.io);
         if (self.readonly) |readonly| readonly.close(self.io);
         self.budget.release(self.charged);
@@ -861,6 +974,8 @@ pub const Transfer = struct {
     request: PreparedRequest,
     read_context: ReadContext,
     response: ResponseCapture,
+    writer: *CaptureWriter,
+    paused: bool = false,
     response_owned: bool = true,
     header_context: HeaderContext = .{},
     timeout_context: TimeoutContext,
@@ -875,6 +990,7 @@ pub const Transfer = struct {
         request: PreparedRequest,
         binding: store.AttemptBinding,
         options: TransportOptions,
+        writer: *CaptureWriter,
         scratch_path: []const u8,
         response_budget: ScratchBudget,
         retained_response: *?named_scratch.Owner,
@@ -919,6 +1035,7 @@ pub const Transfer = struct {
                 .fail = options.request_read_fault,
             },
             .response = response,
+            .writer = writer,
             .binding = binding,
             .requires_h2 = !std.mem.startsWith(u8, endpoint, "http://"),
             .completion_identity_fault = options.completion_identity_fault,
@@ -936,7 +1053,7 @@ pub const Transfer = struct {
         try setOpt(easy, c.CURLOPT_SEEKDATA, &self.read_context);
         try setOpt(easy, c.CURLOPT_UPLOAD_BUFFERSIZE, @as(c_long, 16 * 1024));
         try setOpt(easy, c.CURLOPT_WRITEFUNCTION, writeCallback);
-        try setOpt(easy, c.CURLOPT_WRITEDATA, &self.response);
+        try setOpt(easy, c.CURLOPT_WRITEDATA, self);
         try setOpt(easy, c.CURLOPT_HEADERFUNCTION, headerCallback);
         try setOpt(easy, c.CURLOPT_HEADERDATA, &self.header_context);
         try setOpt(easy, c.CURLOPT_HTTPHEADER, headers);
@@ -963,12 +1080,21 @@ pub const Transfer = struct {
     }
 
     fn completionOutcome(self: *Transfer, result: c.CURLcode) !CompletionOutcome {
-        if (self.response.failure) |failure| return .{ .response_capture_failed = failure };
+        if (self.captureFailure()) |failure| return .{ .response_capture_failed = failure };
         if (self.read_context.failed) return .request_source_failed;
         return .{ .transport_finished = try self.transportEvidence(result) };
     }
 
+    pub fn captureFailure(self: *Transfer) ?CaptureFailure {
+        self.writer.mutex.lockUncancelable(self.writer.io);
+        defer self.writer.mutex.unlock(self.writer.io);
+        return self.response.failure;
+    }
+
     fn transportEvidence(self: *Transfer, result: c.CURLcode) !TransportEvidence {
+        self.writer.mutex.lockUncancelable(self.writer.io);
+        const captured_length = self.response.length;
+        self.writer.mutex.unlock(self.writer.io);
         var version: c_long = 0;
         if (c.curl_easy_getinfo(self.easy, c.CURLINFO_HTTP_VERSION, &version) != c.CURLE_OK)
             return error.InvalidHttpEvidence;
@@ -976,7 +1102,7 @@ pub const Transfer = struct {
         // before curl records any HTTP version. A negotiated H2 stream error
         // retains version 2 and remains with the ordinary retry owner.
         if (self.requires_h2 and result == c.CURLE_HTTP2 and version == 0)
-            return .{ .disposition = .unsupported_http_version, .response_bytes = self.response.length };
+            return .{ .disposition = .unsupported_http_version, .response_bytes = captured_length };
         const disposition: TransportDisposition = if (self.header_context.invalid)
             .invalid_headers
         else if (result != c.CURLE_OK)
@@ -989,12 +1115,12 @@ pub const Transfer = struct {
             else
                 c.CURL_HTTP_VERSION_2_0))
             {
-                return .{ .disposition = .unsupported_http_version, .response_bytes = self.response.length };
+                return .{ .disposition = .unsupported_http_version, .response_bytes = captured_length };
             }
         }
         if (disposition != .success) return .{
             .disposition = disposition,
-            .response_bytes = self.response.length,
+            .response_bytes = captured_length,
             .retry_after_ms = self.header_context.retry_after_ms,
             .retry_after_deadline_ms = self.header_context.retry_after_deadline_ms,
         };
@@ -1014,7 +1140,7 @@ pub const Transfer = struct {
         return .{
             .disposition = http_disposition,
             .http_status = status,
-            .response_bytes = self.response.length,
+            .response_bytes = captured_length,
             .retry_after_ms = self.header_context.retry_after_ms,
             .retry_after_deadline_ms = self.header_context.retry_after_deadline_ms,
         };
@@ -1040,6 +1166,7 @@ pub const Transfer = struct {
 
     pub fn deinit(self: *Transfer) void {
         std.debug.assert(!self.in_reactor);
+        std.debug.assert(self.writer.drained(&self.response));
         c.curl_slist_free_all(self.headers);
         c.curl_easy_cleanup(self.easy);
         self.request.deinit();
@@ -1153,10 +1280,11 @@ fn curlFailureDisposition(result: c.CURLcode, inactivity_expired: bool) Transpor
 }
 
 fn writeCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?*anyopaque) callconv(.c) usize {
-    const context: *ResponseCapture = @ptrCast(@alignCast(context_pointer orelse return 0));
+    const transfer: *Transfer = @ptrCast(@alignCast(context_pointer orelse return 0));
     const bytes = std.math.mul(usize, size, count) catch return 0;
-    context.write(pointer[0..bytes]) catch return 0;
-    return bytes;
+    const accepted = transfer.writer.offer(&transfer.response, pointer[0..bytes]);
+    if (accepted == c.CURL_WRITEFUNC_PAUSE) transfer.paused = true;
+    return accepted;
 }
 
 fn headerCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?*anyopaque) callconv(.c) usize {

@@ -14,3 +14,14 @@
 +          data->set.method != HTTPREQ_POST &&
 +          Curl_h2_http_1_1_error(data)) {
      CURLcode ret = Curl_retry_request(data, &newurl);
+--- a/lib/vtls/vtls.c
++++ b/lib/vtls/vtls.c
+@@ -1696,1 +1696,8 @@ CURLcode Curl_alpn_set_negotiated(struct Curl_cfilter *cf,
++  /* A completed TLS handshake without h2 cannot authorize an HTTPS POST. */
++  if(data->state.http_neg.wanted == CURL_HTTP_V2x &&
++     (proto_len != 2 || !proto || memcmp(proto, "h2", 2))) {
++    failf(data, "ALPN: server did not negotiate h2");
++    return CURLE_HTTP2;
++  }
++
+   if(connssl->negotiated.alpn) {

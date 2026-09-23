@@ -93,17 +93,19 @@ fi
     CC="$cc" AR="$zig ar" RANLIB="$zig ranlib" \
     sh "$nghttp2_source/configure" --host="$curl_host" \
         --prefix="$prefix" --enable-lib-only --disable-shared --enable-static
-    make -j4
-    make install
+    # The pinned release includes generated Autotools files. Archive extraction
+    # can reorder mtimes and spuriously request a local aclocal/automake.
+    make -j4 ACLOCAL=true AUTOMAKE=true AUTOCONF=true AUTOHEADER=true
+    make install ACLOCAL=true AUTOMAKE=true AUTOCONF=true AUTOHEADER=true
 ) >>"$log" 2>&1 || {
     tail -100 "$log" >&2
     exit 1
 }
 
-# Patch only the isolated build copy. curl's default automatic retry of a
-# reused zero-response POST cannot prove whether the peer processed it.
+# Patch only the isolated build copy. curl must reject missing H2 ALPN before
+# a POST and must not auto-retry a reused zero-response POST of unknown effect.
 cp -R "$curl_source" "$curl_patched"
-patch -d "$curl_patched" -p1 < "$curl_patch" >>"$log" 2>&1
+(cd "$curl_patched" && git apply "$curl_patch") >>"$log" 2>&1
 
 (
     cd "$curl_build"

@@ -17,6 +17,7 @@ import h2.errors
 import h2.settings
 
 import dispatch_integration as dispatch
+from host_process import HostDiagnostics
 
 
 class Endpoint(socketserver.ThreadingTCPServer):
@@ -125,7 +126,9 @@ class StreamHandler(socketserver.BaseRequestHandler):
                             conn.send_headers(target, [(":status", "200"), ("content-type", "text/event-stream")])
                             conn.send_headers(sibling, [(":status", "200"), ("content-type", "text/event-stream")])
                             if self.server.isolation == "capture":
-                                payload, _, _ = dispatch.sse_answer("large", "reasoning-large", "message-large", "L" * 100_000)
+                                # Cross the capture limit within initial H2 credit; the
+                                # target stays open so its abort has an observable reset.
+                                payload, _, _ = dispatch.sse_answer("large", "reasoning-large", "message-large", "L" * 40_000)
                                 outgoing_bodies[target] = payload
                             pending.clear()
                             continue
@@ -162,13 +165,20 @@ class StreamHandler(socketserver.BaseRequestHandler):
                         )
                         outgoing_bodies[self.server.stream_ids["isolation-sibling"]] = payload
             for stream, body in list(outgoing_bodies.items()):
-                credit = min(conn.local_flow_control_window(stream), conn.max_outbound_frame_size, len(body))
-                if credit:
-                    conn.send_data(stream, body[:credit], end_stream=credit == len(body))
-                    if credit == len(body):
-                        del outgoing_bodies[stream]
-                    else:
-                        outgoing_bodies[stream] = body[credit:]
+                # A single frame per recv can deadlock: no peer event need
+                # arrive while an incomplete response waits in this queue.
+                while body:
+                    credit = min(conn.local_flow_control_window(stream), conn.max_outbound_frame_size, len(body))
+                    if not credit:
+                        break
+                    hold_target_open = (self.server.isolation == "capture" and
+                                        stream == self.server.stream_ids["isolation-target"])
+                    conn.send_data(stream, body[:credit], end_stream=credit == len(body) and not hold_target_open)
+                    body = body[credit:]
+                if not body:
+                    del outgoing_bodies[stream]
+                else:
+                    outgoing_bodies[stream] = body
             outgoing = conn.data_to_send()
             if outgoing:
                 sock.sendall(outgoing)
@@ -234,6 +244,67 @@ def round_trip(root, endpoint, capacity):
         }), flush=True)
     finally:
         dispatch.stop_host(host)
+
+
+def stalled_capture(root, endpoint):
+    store = root / "stalled-capture-store"
+    gate = root / "capture-write-gate"
+    os.mkfifo(gate)
+    keeper = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+    host = dispatch.start_host(
+        store, f"https://localhost:{endpoint.server_address[1]}/responses",
+        "--provider-ca-file", str(root / "cert.pem"),
+        "--test-response-capture-gate-path", str(gate), "--test-phase-trace", active_capacity=100,
+    )
+    diagnostics = HostDiagnostics(host)
+    released = False
+    try:
+        for index in range(100):
+            session = f"direct/stalled-{index}"
+            dispatch.configure(root, store, f"stalled-config-{index}", session, "model-a")
+            dispatch.message(root, store, f"stalled-message-{index}", session, f"stalled-{index}")
+        dispatch.wait_for(lambda: len(endpoint.streams) == 100, "100 live H2 streams", timeout=45)
+        diagnostics.wait("capture_write_gate_entered", timeout=30)
+        processing = dispatch.observe(store, "stalled-message-0")["processing"]
+        reply = dispatch.command(
+            "interrupt-model", "--store", store, "--record", root / "stalled-interrupt.json",
+            "--key", "stalled-interrupt", "--session", "direct/stalled-0",
+            "--turn", processing["turn"], "--operation", processing["operation"],
+        )
+        assert reply["answer"]["status"] == "accepted", reply
+        diagnostics.wait("effect_stop_requested", control_key="stalled-interrupt", timeout=15)
+        held = dispatch.command("inspect-session", "--store", store,
+                                "--session", "direct/stalled-0")["execution"]
+        assert int(held["custody_occupied"]) > 0, held
+        assert dispatch.observe(store, "stalled-message-1").get("result") is None
+        stalled_rss_kib = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(host.pid)]))
+        os.write(keeper, b"r")
+        released = True
+        for index in range(100):
+            key = f"stalled-message-{index}"
+            result = dispatch.wait_for(lambda key=key: dispatch.observe(store, key).get("result"),
+                                       f"stalled result {index}", timeout=45)
+            if index == 0:
+                assert result["status"] == "cancelled", result
+            else:
+                assert result["status"] == "completed", result
+                assert dispatch.read_result(store, key) == endpoint.answers[f"stalled-{index}"]
+        execution = dispatch.command("inspect-session", "--store", store,
+                                     "--session", "direct/stalled-0")["execution"]
+        assert execution["custody_occupied"] == "0", execution
+        assert execution["scratch_used_bytes"] == "0", execution
+        assert len(endpoint.connections) == 1, endpoint.connections
+        idle_rss_kib = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(host.pid)]))
+        print(json.dumps({"case": "stalled_local_capture", "live_streams": 100,
+                          "connections": 1, "control_before_release": True,
+                          "stalled_host_rss_kib": stalled_rss_kib,
+                          "completed_idle_host_rss_kib": idle_rss_kib}), flush=True)
+    finally:
+        if not released:
+            os.write(keeper, b"r")
+        os.close(keeper)
+        dispatch.stop_host(host)
+        diagnostics.close()
 
 
 def refused_stream(root, endpoint, phase):
@@ -331,7 +402,7 @@ def isolated_bad_header(root, endpoint):
 
 def isolated_terminal_stream(root, endpoint, mode):
     store = root / f"isolation-{mode}-store"
-    options = ("--test-request-scratch-limit", str(64 * 1024)) if mode == "capture" else ()
+    options = ("--test-request-scratch-limit", str(32 * 1024)) if mode == "capture" else ()
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
         "--provider-ca-file", str(root / "cert.pem"), *options, active_capacity=2,
@@ -439,7 +510,13 @@ def unsupported_https(root):
         )
         assert result["code"] == "provider_http2_required", result
         assert endpoint.requests == []
-        print(json.dumps({"case": "non_h2_https", "result": result["code"], "posts": 0}), flush=True)
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            attempts = database.execute(
+                "SELECT attempt_ordinal,allowance_used FROM model_operation"
+            ).fetchone()
+            assert attempts == (1, 1), attempts
+        print(json.dumps({"case": "non_h2_https", "result": result["code"],
+                          "posts": 0, "attempts": attempts[0]}), flush=True)
     finally:
         dispatch.stop_host(host)
         endpoint.shutdown()
@@ -468,6 +545,15 @@ def main():
                 endpoint.shutdown()
                 endpoint.server_close()
                 thread.join(timeout=5)
+        endpoint = Endpoint(tls, 100, sse=True)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        thread.start()
+        try:
+            stalled_capture(root, endpoint)
+        finally:
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
         for phase in ("headers", "upload"):
             endpoint = Endpoint(tls, 1, refuse_at=phase)
             thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
