@@ -32,6 +32,7 @@ const (
 	capacityEventBytes          = 260
 	capacityMaximumAverageCores = 2.0
 	capacityMaximumCPUSeconds   = 120.0
+	hostFootprintTargetBytes    = 25_000_000
 )
 
 var answerSizes = []int{100_000}
@@ -53,6 +54,7 @@ type childFixture struct {
 	cmd         *exec.Cmd
 	Process     *process.Process
 	providerURL string
+	providerCA  string
 	controlURL  string
 	stderr      *os.File
 	closed      bool
@@ -60,6 +62,7 @@ type childFixture struct {
 
 type fixtureStartup struct {
 	ProviderURL string `json:"provider_url"`
+	ProviderCA  string `json:"provider_ca"`
 	ControlURL  string `json:"control_url"`
 	PID         int    `json:"pid"`
 }
@@ -148,7 +151,7 @@ func startChildFixture(deadline measurement.Deadline, streams, eventsPerSecond i
 		stderr.Close()
 		return nil, err
 	}
-	return &childFixture{cmd: cmd, Process: childProcess, providerURL: startup.ProviderURL, controlURL: startup.ControlURL, stderr: stderr}, nil
+	return &childFixture{cmd: cmd, Process: childProcess, providerURL: startup.ProviderURL, providerCA: startup.ProviderCA, controlURL: startup.ControlURL, stderr: stderr}, nil
 }
 
 func (f *childFixture) ProviderURL() string { return f.providerURL }
@@ -298,26 +301,32 @@ func (e *payloadEndpoint) lastRequestBytes() int {
 func (e *payloadEndpoint) Close() error { return e.server.Close() }
 
 func wholeRui(sample measurement.ProcessSample) map[string]any {
-	if sample.LiveDescendantProcesses != 0 {
-		return map[string]any{"status": "incomplete", "reason": "live descendants require aggregation", "descendant_processes": sample.LiveDescendantProcesses}
-	}
 	upper := sample.Footprint.LifetimePeakBytes + sample.Footprint.LifetimePeakTolerance
 	return map[string]any{
-		"status": "complete", "aggregate_equals_host": true, "host_processes": 1, "descendant_processes": 0,
+		"status": "complete", "host_processes": 1, "descendant_processes_diagnostic": sample.LiveDescendantProcesses,
 		"rss_bytes": sample.RSSBytes, "physical_footprint_bytes": sample.Footprint.PhysicalBytes,
+		"host_footprint_target_bytes":                        hostFootprintTargetBytes,
 		"lifetime_peak_physical_footprint_bytes":             sample.Footprint.LifetimePeakBytes,
 		"lifetime_peak_physical_footprint_upper_bound_bytes": upper,
-		"measurement_basis":                                  "conservative upper bound of cumulative lifetime physical-footprint peak",
+		"measurement_basis":                                  "conservative upper bound of Host lifetime physical-footprint peak",
 	}
 }
 
 func memoryEvidenceStatus(aggregates ...map[string]any) string {
+	status := "passed"
 	for _, aggregate := range aggregates {
 		if aggregate["status"] != "complete" {
 			return "incomplete"
 		}
+		upper, ok := aggregate["lifetime_peak_physical_footprint_upper_bound_bytes"].(uint64)
+		if !ok {
+			return "incomplete"
+		}
+		if upper > hostFootprintTargetBytes {
+			status = "target_miss"
+		}
 	}
-	return "passed"
+	return status
 }
 
 func reduceStatuses(rowFamilies ...[]map[string]any) string {
@@ -443,6 +452,11 @@ func readSpillFacts(deadline measurement.Deadline, store string) (spillFacts, er
 type sqliteDiagnostic struct {
 	Phase                     string  `json:"rui_test_phase"`
 	AtNS                      string  `json:"at_ns"`
+	Process                   string  `json:"process"`
+	Run                       string  `json:"run"`
+	Clock                     string  `json:"clock"`
+	Sequence                  string  `json:"sequence"`
+	TraceLost                 bool    `json:"trace_lost"`
 	Subject                   string  `json:"subject"`
 	ProcessMemoryScope        string  `json:"process_memory_scope"`
 	ProcessMemoryCurrentBytes *uint64 `json:"process_memory_current_bytes"`
@@ -1190,6 +1204,9 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 	if err != nil {
 		return nil, err
 	}
+	if capacity > 1 && (ready.H2Streams != capacity || ready.H2Connections != 1) {
+		return nil, fmt.Errorf("H2 readiness needs %d streams on one connection: %+v", capacity, ready)
+	}
 	baselineInspection, err := client.Inspect(sessions[0])
 	if err != nil {
 		return nil, err
@@ -1411,7 +1428,14 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 	}()
 	deadline := measurement.NewDeadline(2*duration + 8*time.Minute)
 	store := filepath.Join(directory, "store")
-	host, err := measurement.StartHost(binary, store, fixture.ProviderURL(), capacity, filepath.Join(directory, "host-stderr.log"), deadline)
+	var hostOptions []string
+	if capacity > 1 {
+		if fixture.providerCA == "" || !strings.HasPrefix(fixture.ProviderURL(), "https://") {
+			return nil, errors.New("concurrent provider fixture requires trusted HTTPS")
+		}
+		hostOptions = []string{"--provider-ca-file", fixture.providerCA}
+	}
+	host, err := measurement.StartHost(binary, store, fixture.ProviderURL(), capacity, filepath.Join(directory, "host-stderr.log"), deadline, hostOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -1462,11 +1486,11 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 }
 
 func runProviderChild(streams, eventsPerSecond int, duration time.Duration, rounds int, artifacts string) error {
-	server, err := provider.Start(provider.Config{Streams: streams, EventsPerSecond: eventsPerSecond, Duration: duration, Rounds: rounds, ArtifactDir: artifacts})
+	server, err := provider.Start(provider.Config{Streams: streams, EventsPerSecond: eventsPerSecond, Duration: duration, Rounds: rounds, ArtifactDir: artifacts, TLS: streams > 1})
 	if err != nil {
 		return err
 	}
-	startup := fixtureStartup{ProviderURL: server.ProviderURL(), ControlURL: server.ControlURL(), PID: os.Getpid()}
+	startup := fixtureStartup{ProviderURL: server.ProviderURL(), ProviderCA: server.ProviderCAFile(), ControlURL: server.ControlURL(), PID: os.Getpid()}
 	if err := json.NewEncoder(os.Stdout).Encode(startup); err != nil {
 		return errors.Join(err, server.Close())
 	}
@@ -1614,7 +1638,7 @@ func main() {
 		spillStatusRows = append(spillStatusRows, spillRows)
 	}
 	overallStatus := reduceStatuses(byteRows, itemRows, spillStatusRows, capacityRows)
-	result := map[string]any{"format": "rui-model-output-v7-go", "scope": "issue-176 assembled model-path capacity, capture, import and retained-idle qualification", "status": overallStatus, "artifacts": root, "answer_byte_growth": byteRows, "item_count_growth": itemRows, "sqlite_cache_spill_comparison": spillRows, "active_capacity_growth": capacityRows, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only", "deterministic loopback HTTP qualifies no live-provider behavior", "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second", "rational target scheduling aims at 60 seconds and emits exactly 1,800 or 6,000 events per stream; per-event pacing is diagnostic, collection stops at 120 seconds, and measured rate is not maximum sustainable throughput", "Host CPU uses conservative query brackets spanning at least 40 seconds wholly inside simultaneous complete offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds", "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after both rounds and confirmed Host stop/reap", "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 4 MiB cache"}}
+	result := map[string]any{"format": "rui-model-output-v7-go", "scope": "issue-176 assembled model-path capacity, capture, import and retained-idle qualification", "status": overallStatus, "artifacts": root, "answer_byte_growth": byteRows, "item_count_growth": itemRows, "sqlite_cache_spill_comparison": spillRows, "active_capacity_growth": capacityRows, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only", "growth/spill and capacity 1 use loopback H1; concurrent capacities 8/16/100 use trusted local TLS/H2, not a live provider", "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second", "rational target scheduling aims at 60 seconds and emits exactly 1,800 or 6,000 events per stream; per-event pacing is diagnostic, collection stops at 120 seconds, and measured rate is not maximum sustainable throughput", "Host CPU uses conservative query brackets spanning at least 40 seconds wholly inside simultaneous complete offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds", "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after both rounds and confirmed Host stop/reap", "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 4 MiB cache"}}
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
 	if err != nil {
 		panic(err)

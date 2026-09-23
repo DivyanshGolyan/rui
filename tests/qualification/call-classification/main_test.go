@@ -23,10 +23,14 @@ func TestScenarioCallsVaryClassificationAndPayloadIndependently(t *testing.T) {
 			t.Fatalf("valid call %d classified by fixture as %q", index, calls[index].Name)
 		}
 		var descriptor struct {
-			Cmd string `json:"cmd"`
+			Cmd       string `json:"cmd"`
+			TimeoutMS *int   `json:"timeout_ms"`
 		}
 		if err := json.Unmarshal([]byte(calls[index].Arguments), &descriptor); err != nil {
 			t.Fatal(err)
+		}
+		if !bytes.Contains([]byte(calls[index].Arguments), []byte(`"timeout_ms":null`)) || descriptor.TimeoutMS != nil {
+			t.Fatalf("valid descriptor omitted required nullable timeout: %s", calls[index].Arguments)
 		}
 		if !bytes.HasPrefix([]byte(descriptor.Cmd), []byte("touch \"/must/not/run\"")) {
 			t.Fatalf("valid call does not create the forbidden-effect sentinel if launched: %q", descriptor.Cmd)
@@ -71,7 +75,7 @@ func TestCombineStatusPreservesVerdictPrecedence(t *testing.T) {
 }
 
 func TestAggregatePhysicalVerdictUsesCheckedLifetimePeakBounds(t *testing.T) {
-	target := uint64(24 * 1024 * 1024)
+	target := physicalFootprintTargetBytes
 	complete := func(peak, tolerance uint64) map[string]measurement.Footprint {
 		result := map[string]measurement.Footprint{}
 		for _, family := range requiredCLIFamilies {
@@ -90,9 +94,9 @@ func TestAggregatePhysicalVerdictUsesCheckedLifetimePeakBounds(t *testing.T) {
 		want         string
 		wantUpper    uint64
 	}{
-		{"pass at 24 MiB", &measurement.FootprintVerdict{LowerBoundBytes: 20 << 20, UpperBoundBytes: 20 << 20}, complete(4<<20, 0), 23 << 20, 1, true, true, "passed", target},
-		{"target miss", &measurement.FootprintVerdict{LowerBoundBytes: 20 << 20, UpperBoundBytes: 20 << 20}, complete(4<<20, 0), target + 1, 1, true, true, "target_miss", target},
-		{"target straddle from rounding", &measurement.FootprintVerdict{LowerBoundBytes: 20 << 20, UpperBoundBytes: 20 << 20}, complete((4<<20)+1, 1), 23 << 20, 1, true, true, "unavailable", target + 2},
+		{"pass at 25 MB", &measurement.FootprintVerdict{LowerBoundBytes: 20 << 20, UpperBoundBytes: 20 << 20}, complete(target-(20<<20), 0), 23 << 20, 1, true, true, "passed", target},
+		{"target miss", &measurement.FootprintVerdict{LowerBoundBytes: 20 << 20, UpperBoundBytes: 20 << 20}, complete(target-(20<<20), 0), target + 1, 1, true, true, "target_miss", target},
+		{"target straddle from rounding", &measurement.FootprintVerdict{LowerBoundBytes: 20 << 20, UpperBoundBytes: 20 << 20}, complete(target-(20<<20)+1, 1), 23 << 20, 1, true, true, "unavailable", target + 2},
 		{"missing command family", &measurement.FootprintVerdict{LowerBoundBytes: 20 << 20, UpperBoundBytes: 20 << 20}, map[string]measurement.Footprint{"inspection": {LifetimePeakBytes: 4 << 20}}, 23 << 20, 1, true, true, "unavailable", math.MaxUint64},
 		{"missing family preserves established miss", &measurement.FootprintVerdict{LowerBoundBytes: target + 1, UpperBoundBytes: target + 1}, map[string]measurement.Footprint{"inspection": {LifetimePeakBytes: 4 << 20}}, 23 << 20, 1, true, true, "target_miss", math.MaxUint64},
 		{"missing Host scenario", &measurement.FootprintVerdict{LowerBoundBytes: 20 << 20, UpperBoundBytes: 20 << 20}, complete(4<<20, 0), 23 << 20, 1, true, false, "unavailable", math.MaxUint64},
@@ -110,6 +114,23 @@ func TestAggregatePhysicalVerdictUsesCheckedLifetimePeakBounds(t *testing.T) {
 				t.Fatalf("upper bound=%d want %d: %+v", verdict.UpperBoundBytes, test.wantUpper, verdict)
 			}
 		})
+	}
+}
+
+func TestAcceptedHostFootprintIgnoresSeparateCLIAndRequiresAllScenarios(t *testing.T) {
+	qualified := newPhysicalQualification()
+	qualified.addHost("held", measurement.FootprintVerdict{LowerBoundBytes: physicalFootprintTargetBytes - 1, UpperBoundBytes: physicalFootprintTargetBytes})
+	qualified.observedLower = physicalFootprintTargetBytes + 1
+	qualified.helperCensus = false
+	if got := qualified.acceptedHostVerdict(1); got.Status != "passed" || got.UpperBoundBytes != physicalFootprintTargetBytes {
+		t.Fatalf("Host-only boundary: %+v", got)
+	}
+	if got := qualified.acceptedHostVerdict(2); got.Status != "unavailable" {
+		t.Fatalf("missing Host scenario passed: %+v", got)
+	}
+	qualified.addHost("idle", measurement.FootprintVerdict{LowerBoundBytes: physicalFootprintTargetBytes + 1, UpperBoundBytes: physicalFootprintTargetBytes + 512})
+	if got := qualified.acceptedHostVerdict(2); got.Status != "target_miss" {
+		t.Fatalf("Host above target passed: %+v", got)
 	}
 }
 

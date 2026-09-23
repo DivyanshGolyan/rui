@@ -1,0 +1,6 @@
+ok  	rui.local/qualification/model-output	(cached)
+ok  	rui.local/qualification/model-output/provider	(cached)
+ok  	rui.local/qualification/model-control	(cached)
+?   	rui.local/qualification/model-dispatch	[no test files]
+ok  	rui.local/qualification/call-classification	(cached)
+ok  	rui.local/qualification/model-queue	(cached)

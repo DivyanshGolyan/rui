@@ -21,12 +21,12 @@
  /* this is how much we want "in flight" for a stream, unthrottled */
 -#define H2_STREAM_WINDOW_SIZE_MAX   (10 * 1024 * 1024)
 +/* Rui caps receive credit per stream so paused captures cannot retain 10 MiB each. */
-+#define H2_STREAM_WINDOW_SIZE_MAX   (8 * 1024)
++#define H2_STREAM_WINDOW_SIZE_MAX   (16 * 1024)
  /* this is how much we want "in flight" for a stream, initially, IFF
   * nghttp2 allows us to tweak the local window size. */
  #if NGHTTP2_HAS_SET_LOCAL_WINDOW_SIZE
 -#define H2_STREAM_WINDOW_SIZE_INITIAL  (64 * 1024)
-+#define H2_STREAM_WINDOW_SIZE_INITIAL  (8 * 1024)
++#define H2_STREAM_WINDOW_SIZE_INITIAL  (16 * 1024)
  #else
  #define H2_STREAM_WINDOW_SIZE_INITIAL H2_STREAM_WINDOW_SIZE_MAX
  #endif

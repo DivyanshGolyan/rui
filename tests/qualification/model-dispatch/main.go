@@ -2,11 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,11 +23,14 @@ var inputBytes = []int{100_000, 500_000, 1_000_000, 4_000_000}
 var capacities = []int{1, 8, 16, 100}
 
 type endpoint struct {
-	server   *http.Server
-	listener net.Listener
-	mu       sync.Mutex
-	requests []int
-	release  chan struct{}
+	server    *http.Server
+	listener  net.Listener
+	tlsServer *httptest.Server
+	caFile    string
+	mu        sync.Mutex
+	requests  []int
+	h2Peers   map[string]struct{}
+	release   chan struct{}
 }
 
 func newEndpoint() (*endpoint, error) {
@@ -33,19 +38,40 @@ func newEndpoint() (*endpoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	fixture := &endpoint{listener: listener, release: make(chan struct{})}
+	fixture := &endpoint{listener: listener, release: make(chan struct{}), h2Peers: make(map[string]struct{})}
 	fixture.server = &http.Server{Handler: http.HandlerFunc(fixture.serve)}
 	go fixture.server.Serve(listener)
 	return fixture, nil
 }
 
+func newEndpointTLS(root string) (*endpoint, error) {
+	fixture := &endpoint{release: make(chan struct{}), h2Peers: make(map[string]struct{})}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(fixture.serve))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	fixture.tlsServer = server
+	fixture.caFile = filepath.Join(root, "overlap-cert.pem")
+	if err := os.WriteFile(fixture.caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+		server.Close()
+		return nil, err
+	}
+	return fixture, nil
+}
+
 func (e *endpoint) serve(writer http.ResponseWriter, request *http.Request) {
+	if e.tlsServer != nil && (request.ProtoMajor != 2 || request.TLS == nil || request.TLS.NegotiatedProtocol != "h2") {
+		http.Error(writer, "HTTP/2 required", http.StatusHTTPVersionNotSupported)
+		return
+	}
 	body, err := io.ReadAll(request.Body)
 	if err != nil {
 		return
 	}
 	e.mu.Lock()
 	e.requests = append(e.requests, len(body))
+	if request.ProtoMajor == 2 {
+		e.h2Peers[request.RemoteAddr] = struct{}{}
+	}
 	release := e.release
 	e.mu.Unlock()
 	select {
@@ -54,12 +80,19 @@ func (e *endpoint) serve(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	response := []byte(`{"error":"measured failure"}`)
-	writer.Header().Set("Connection", "close")
+	if request.ProtoMajor == 1 {
+		writer.Header().Set("Connection", "close")
+	}
 	writer.WriteHeader(http.StatusUnprocessableEntity)
 	_, _ = writer.Write(response)
 }
 
-func (e *endpoint) URL() string { return "http://" + e.listener.Addr().String() + "/responses" }
+func (e *endpoint) URL() string {
+	if e.tlsServer != nil {
+		return e.tlsServer.URL + "/responses"
+	}
+	return "http://" + e.listener.Addr().String() + "/responses"
+}
 
 func (e *endpoint) reset() {
 	e.mu.Lock()
@@ -92,6 +125,10 @@ func (e *endpoint) requestBytes() int {
 
 func (e *endpoint) Close() error {
 	e.releaseAll()
+	if e.tlsServer != nil {
+		e.tlsServer.Close()
+		return nil
+	}
 	return e.server.Close()
 }
 
@@ -314,7 +351,7 @@ func overlap(binary, root string, fixture *endpoint) (map[string]any, error) {
 		return nil, err
 	}
 	deadline := measurement.NewDeadline(90 * time.Second)
-	host, err := startHost(deadline, binary, directory, fixture.URL(), directory, 8, 0)
+	host, err := measurement.StartHost(binary, directory, fixture.URL(), 8, filepath.Join(directory, "host-stderr.log"), deadline, "--provider-ca-file", fixture.caFile)
 	if err != nil {
 		return nil, err
 	}
@@ -335,11 +372,17 @@ func overlap(binary, root string, fixture *endpoint) (map[string]any, error) {
 		if err != nil {
 			return nil, err
 		}
+		fixture.mu.Lock()
+		connections := len(fixture.h2Peers)
+		fixture.mu.Unlock()
+		if connections != 1 {
+			return nil, fmt.Errorf("overlap needs eight H2 streams on one connection, got %d", connections)
+		}
 		process, err := sample(host, directory, "overlap")
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"active_capacity": 8, "endpoint_requests": fixture.count(), "execution": exec,
+		return map[string]any{"active_capacity": 8, "endpoint_requests": fixture.count(), "h2_connections": connections, "execution": exec,
 			"custody_record_bytes": host.Ready["custody_record_bytes"], "execution_slot_bytes": host.Ready["execution_slot_bytes"], "process": process}, nil
 	}()
 	fixture.releaseAll()
@@ -373,7 +416,12 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	overlapping, err := overlap(os.Args[1], root, fixture)
+	overlapFixture, err := newEndpointTLS(root)
+	if err != nil {
+		panic(err)
+	}
+	defer overlapFixture.Close()
+	overlapping, err := overlap(os.Args[1], root, overlapFixture)
 	if err != nil {
 		panic(err)
 	}
@@ -383,7 +431,7 @@ func main() {
 		"transport":            map[string]string{"curl": "8.22.0", "openssl": "3.6.3", "resolver": "threaded"},
 		"idle_capacity_growth": idle, "request_growth_and_delayed_cleanup": growth, "overlapping_transport": overlapping,
 		"elapsed_seconds": time.Since(started).Seconds(),
-		"limits":          []string{"macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only", "endpoint is deterministic loopback HTTP and qualifies no TLS trust store or live provider behavior", "request cases size aggregate context input; endpoint_request_bytes reports the complete serialized request including envelope", "idle CPU is process CPU-time growth over a two-second quiet interval and must remain below 1% of one core", "process termination is crash evidence, not power-loss qualification"},
+		"limits":          []string{"macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only", "idle and request-growth cases use loopback H1; overlapping transport uses trusted local TLS/H2, not a live provider", "request cases size aggregate context input; endpoint_request_bytes reports the complete serialized request including envelope", "idle CPU is process CPU-time growth over a two-second quiet interval and must remain below 1% of one core", "process termination is crash evidence, not power-loss qualification"},
 	}
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), os.Args[1], "")
 	if err != nil {

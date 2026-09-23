@@ -334,16 +334,17 @@ def refused_stream(root, endpoint, phase):
             "REFUSED_STREAM same-Attempt settlement", timeout=20,
         )
         assert dispatch.observe(store, f"refused-{phase}-message")["result"]["code"] == "provider_http_422"
-        with sqlite3.connect(store / "rui.sqlite3") as database:
-            attempts = database.execute(
-                "SELECT attempt_ordinal,allowance_used FROM model_operation"
-            ).fetchone()
-            assert attempts == (1, 1), attempts
         assert len(endpoint.streams) == 2, endpoint.streams
         assert [text for _, _, text, _ in endpoint.streams] == (
             [None, "refused-request"] if phase == "headers" else ["refused-request"] * 2
         )
         assert len(endpoint.connections) == 2, endpoint.connections
+        dispatch.stop_host(host)
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            attempts = database.execute(
+                "SELECT attempt_ordinal,allowance_used FROM model_operation"
+            ).fetchone()
+            assert attempts == (1, 1), attempts
         print(json.dumps({
             "case": f"refused_{phase}", "attempts": 1,
             "observed_streams": len(endpoint.streams), "connections": len(endpoint.connections),
@@ -368,14 +369,15 @@ def dead_reused_connection(root, endpoint):
                 f"settled {text} after reused H2 failure", timeout=20,
             )
             assert dispatch.observe(store, f"dead-{text}-message")["result"]["code"] == "provider_http_422"
+        assert [text for _, _, text, _ in endpoint.streams] == ["warm", "dead", "dead"]
+        assert endpoint.streams[0][0] == endpoint.streams[1][0]
+        assert endpoint.streams[2][0] != endpoint.streams[1][0]
+        dispatch.stop_host(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
             assert database.execute(
                 "SELECT attempt_ordinal,allowance_used FROM model_operation "
                 "WHERE session_ref='direct/dead'"
             ).fetchone() == (2, 2)
-        assert [text for _, _, text, _ in endpoint.streams] == ["warm", "dead", "dead"]
-        assert endpoint.streams[0][0] == endpoint.streams[1][0]
-        assert endpoint.streams[2][0] != endpoint.streams[1][0]
         print(json.dumps({
             "case": "dead_reuse", "attempts_for_dead": 2,
             "observed_streams": len(endpoint.streams), "connections": len(endpoint.connections),
@@ -449,6 +451,12 @@ def isolated_terminal_stream(root, endpoint, mode):
         assert endpoint.resets == [endpoint.stream_ids["isolation-target"]], endpoint.resets
         assert len(endpoint.connections) == 1 and len(endpoint.streams) == 2
         assert {text for _, _, text, _ in endpoint.streams} == {"isolation-target", "isolation-sibling"}
+        execution = dispatch.command(
+            "inspect-session", "--store", store, "--session", "direct/target"
+        )["execution"]
+        assert execution["custody_occupied"] == "0", execution
+        assert execution["scratch_used_bytes"] == "0", execution
+        dispatch.stop_host(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
             assert database.execute(
                 "SELECT attempt_ordinal,allowance_used FROM model_operation ORDER BY operation_id"
@@ -457,11 +465,6 @@ def isolated_terminal_stream(root, endpoint, mode):
                 assert database.execute(
                     "SELECT interrupted_by_command_key FROM model_operation WHERE session_ref='direct/target'"
                 ).fetchone() == ("cancel-interrupt",)
-        execution = dispatch.command(
-            "inspect-session", "--store", store, "--session", "direct/target"
-        )["execution"]
-        assert execution["custody_occupied"] == "0", execution
-        assert execution["scratch_used_bytes"] == "0", execution
         print(json.dumps({"case": f"sibling_{mode}", "streams": 2, "connections": 1,
                           "target_resets": len(endpoint.resets), "sibling": "completed"}), flush=True)
     finally:
@@ -485,16 +488,17 @@ def connection_failure(root, endpoint):
                 f"connection failure settlement {index}", timeout=20,
             )
             assert dispatch.observe(store, f"drop-message-{index}")["result"]["code"] == "provider_http_422"
-        with sqlite3.connect(store / "rui.sqlite3") as database:
-            assert database.execute(
-                "SELECT attempt_ordinal,allowance_used FROM model_operation ORDER BY operation_id"
-            ).fetchall() == [(2, 2), (2, 2)]
         assert len(endpoint.streams) == 4, endpoint.streams
         assert sorted(text for _, _, text, _ in endpoint.streams) == ["drop-0", "drop-0", "drop-1", "drop-1"]
         observation = dispatch.command(
             "inspect-session", "--store", store, "--session", "direct/drop-0"
         )["execution"]
         assert observation["custody_occupied"] == "0", observation
+        dispatch.stop_host(host)
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            assert database.execute(
+                "SELECT attempt_ordinal,allowance_used FROM model_operation ORDER BY operation_id"
+            ).fetchall() == [(2, 2), (2, 2)]
         print(json.dumps({"case": "connection_failure", "streams": 4, "attempts_per_operation": 2}), flush=True)
     finally:
         dispatch.stop_host(host)
@@ -522,6 +526,7 @@ def unsupported_https(root):
         )
         assert result["code"] == "provider_http2_required", result
         assert endpoint.requests == []
+        dispatch.stop_host(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
             attempts = database.execute(
                 "SELECT attempt_ordinal,allowance_used FROM model_operation"

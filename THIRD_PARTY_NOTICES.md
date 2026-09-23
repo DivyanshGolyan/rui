@@ -38,7 +38,7 @@ Rui builds a pinned static curl 8.22.0 with HTTP/2 via nghttp2, OpenSSL, Apple
 SecTrust on macOS and the supported threaded asynchronous resolver. The build
 patches curl's automatic zero-response reused-connection POST retry and POST
 HTTP/2-to-HTTP/1.1 downgrade so an ambiguous POST is not silently replayed. It
-also caps H2 per-stream receive credit at 8 KiB to limit paused-capture buffering.
+also caps H2 per-stream receive credit at 16 KiB to limit paused-capture buffering.
 
 - Source: `https://curl.se/download/curl-8.22.0.tar.xz`
 - Zig package content hash: `N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM`
