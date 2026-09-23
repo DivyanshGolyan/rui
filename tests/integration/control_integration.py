@@ -925,7 +925,9 @@ def prove_delivery_and_settlement_contention(
         ]
         if cleanup_delay_ms:
             extra += ["--test-cleanup-delay-ms", str(cleanup_delay_ms)]
-        process, fields = start_host(store, url, *extra, active_capacity=CONTROL_HEADROOM)
+        # H1 now has ceil(C/100) connections. Keep two independently held
+        # fixture responses while exercising the two client control places.
+        process, fields = start_host(store, url, *extra, active_capacity=101)
         milestones = HostDiagnostics(process)
         resource_samples = {}
         if sample_host is not None:
