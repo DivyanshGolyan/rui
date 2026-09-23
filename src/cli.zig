@@ -107,6 +107,8 @@ fn serve(io: std.Io, args: []const []const u8) !void {
             faults.model_cleanup_gate_path = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--test-response-capture-gate-path")) {
             faults.response_capture_gate_path = try takeValue(args, &index);
+        } else if (std.mem.eql(u8, arg, "--test-response-capture-gate-min-written-bytes")) {
+            faults.response_capture_gate_min_written_bytes = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
         } else if (std.mem.eql(u8, arg, "--test-bash-observed-exit-gate-path")) {
             faults.bash_observed_exit_gate_path = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--test-bash-cleanup-gate-path")) {

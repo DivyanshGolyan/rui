@@ -1,0 +1,108 @@
+--- a/build.zig
++++ b/build.zig
+@@ -1,8 +1,12 @@
+ const std = @import("std");
++var measurement_h1: bool = false;
++var measurement_upload_bytes: u32 = 16384;
+-
++
+ pub fn build(b: *std.Build) void {
+     const target = b.standardTargetOptions(.{});
+     const optimize = b.standardOptimizeOption(.{});
++    measurement_h1 = b.option(bool, "measurement-h1", "Temporary HTTPS H1 topology comparison") orelse false;
++    measurement_upload_bytes = b.option(u32, "measurement-upload-bytes", "Temporary upload buffer comparison") orelse 16384;
+     const pinned_transport = addPinnedTransport(b, target);
+-
++
+     const rui = addRui(b, target, optimize, "rui", pinned_transport);
+@@ -406,6 +410,8 @@
+         (target.result.cpu.arch == .aarch64 or target.result.cpu.arch == .x86_64);
+     const options = b.addOptions();
+     options.addOption(bool, "enabled", enabled);
++    options.addOption(bool, "measurement_h1", measurement_h1);
++    options.addOption(u32, "measurement_upload_bytes", measurement_upload_bytes);
+     compile.root_module.addOptions("transport_options", options);
+     compile.root_module.addIncludePath(if (enabled)
+         pinned.output.path(b, "include")
+--- a/src/provider.zig
++++ b/src/provider.zig
+@@ -592,7 +592,7 @@
+     pub fn init(capacity: usize) !Reactor {
+         const multi = c.curl_multi_init() orelse return error.TransportAllocationFailed;
+         errdefer _ = c.curl_multi_cleanup(multi);
+-        const connections = capacity / 100 + @intFromBool(capacity % 100 != 0);
++        const connections = if (transport_options.measurement_h1) capacity else capacity / 100 + @intFromBool(capacity % 100 != 0);
+         if (connections > std.math.maxInt(c_long) or
+             c.curl_multi_setopt(multi, c.CURLMOPT_PIPELINING, @as(c_long, c.CURLPIPE_MULTIPLEX)) != c.CURLM_OK or
+             c.curl_multi_setopt(multi, c.CURLMOPT_MAX_CONCURRENT_STREAMS, @as(c_long, 100)) != c.CURLM_OK or
+@@ -1037,7 +1037,7 @@
+             .response = response,
+             .writer = writer,
+             .binding = binding,
+-            .requires_h2 = !std.mem.startsWith(u8, endpoint, "http://"),
++            .requires_h2 = !transport_options.measurement_h1 and !std.mem.startsWith(u8, endpoint, "http://"),
+             .completion_identity_fault = options.completion_identity_fault,
+             .timeout_context = .{
+                 .io = request.io,
+@@ -1051,7 +1051,7 @@
+         try setOpt(easy, c.CURLOPT_READDATA, &self.read_context);
+         try setOpt(easy, c.CURLOPT_SEEKFUNCTION, seekCallback);
+         try setOpt(easy, c.CURLOPT_SEEKDATA, &self.read_context);
+-        try setOpt(easy, c.CURLOPT_UPLOAD_BUFFERSIZE, @as(c_long, 16 * 1024));
++        try setOpt(easy, c.CURLOPT_UPLOAD_BUFFERSIZE, @as(c_long, transport_options.measurement_upload_bytes));
+         try setOpt(easy, c.CURLOPT_WRITEFUNCTION, writeCallback);
+         try setOpt(easy, c.CURLOPT_WRITEDATA, self);
+         try setOpt(easy, c.CURLOPT_HEADERFUNCTION, headerCallback);
+@@ -1070,7 +1070,7 @@
+         try setOpt(easy, c.CURLOPT_NOPROGRESS, @as(c_long, 0));
+         try setOpt(easy, c.CURLOPT_XFERINFOFUNCTION, xferInfoCallback);
+         try setOpt(easy, c.CURLOPT_XFERINFODATA, &self.timeout_context);
+-        try setOpt(easy, c.CURLOPT_HTTP_VERSION, @as(c_long, if (std.mem.startsWith(u8, endpoint, "http://"))
++        try setOpt(easy, c.CURLOPT_HTTP_VERSION, @as(c_long, if (transport_options.measurement_h1 or std.mem.startsWith(u8, endpoint, "http://"))
+             c.CURL_HTTP_VERSION_1_1
+         else
+             c.CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE));
+--- a/tests/integration/transport_h2_integration.py
++++ b/tests/integration/transport_h2_integration.py
+@@ -1,5 +1,6 @@
+ #!/usr/bin/env python3
+ """Native owner/ALPN/stream witness; requires h2==4.3.0 and OpenSSL CLI."""
++import hashlib
+ import json
+ import os
+ import pathlib
+@@ -102,6 +103,8 @@
+                         self.server.stream_ids[text] = event.stream_id
+                         if self.server.sse:
+                             answer = f"answer-{text}" if len(self.server.streams) % 2 else "L" * 8192 + text
++                            if hasattr(self.server, "release"):
++                                answer = f"answer-{text}" if int(text.rsplit("-", 1)[1]) % 2 else "L" * 8192 + text
+                             self.server.answers[text] = answer.encode()
+                         refuse = self.server.refuse_at == "upload" and not self.server.refused
+                         if refuse:
+@@ -114,6 +117,9 @@
+                         continue
+                     pending.append(event.stream_id)
+                     if len(pending) == self.server.population:
++                        if hasattr(self.server, "release"):
++                            self.server.ready.set()
++                            assert self.server.release.wait(90), "H2 measurement gate not released"
+                         with self.server.lock:
+                             drop = self.server.drop_once and not self.server.dropped
+                             if drop:
+@@ -136,9 +142,13 @@
+                             if self.server.sse:
+                                 text = next(text for _, stream_id, text, _ in self.server.streams if stream_id == stream)
+                                 payload, _, _ = dispatch.sse_answer(
+-                                    f"response-{stream}", f"reasoning-{stream}",
+-                                    f"message-{stream}", self.server.answers[text].decode(),
++                                    f"response-{text if hasattr(self.server, 'release') else stream}",
++                                    f"reasoning-{text if hasattr(self.server, 'release') else stream}",
++                                    f"message-{text if hasattr(self.server, 'release') else stream}",
++                                    self.server.answers[text].decode(),
+                                 )
++                                if hasattr(self.server, "release"):
++                                    self.server.payload_hashes[text] = hashlib.sha256(payload).hexdigest()
+                                 conn.send_headers(stream, [
+                                     (":status", "200"), ("content-type", "text/event-stream"),
+                                     ("content-length", str(len(payload))),

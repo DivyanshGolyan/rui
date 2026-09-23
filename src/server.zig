@@ -62,6 +62,7 @@ pub const Faults = struct {
     response_write: bool = false,
     response_seal: bool = false,
     response_capture_gate_path: ?[]const u8 = null,
+    response_capture_gate_min_written_bytes: usize = 0,
     response_metadata: bool = false,
     response_metadata_unlink: bool = false,
     response_read: bool = false,
@@ -574,6 +575,7 @@ fn executionMain(host: *Host) void {
     var capture_writer = provider.CaptureWriter{
         .io = host.io,
         .test_gate_path = host.faults.response_capture_gate_path,
+        .test_gate_min_written_bytes = host.faults.response_capture_gate_min_written_bytes,
     };
     const capture_thread: ?std.Thread = if (host.provider_endpoint != null)
         std.Thread.spawn(.{}, provider.CaptureWriter.run, .{&capture_writer}) catch |err| {

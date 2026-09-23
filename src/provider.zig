@@ -731,6 +731,7 @@ pub const CaptureWriter = struct {
     count: usize = 0,
     stopping: bool = false,
     test_gate_path: ?[]const u8 = null,
+    test_gate_min_written_bytes: usize = 0,
 
     pub fn run(self: *CaptureWriter) void {
         while (true) {
@@ -752,15 +753,15 @@ pub const CaptureWriter = struct {
                     self.mutex.unlock(self.io);
                 };
             } else if (!failed) {
-                if (self.test_gate_path) |path| {
+                if (self.test_gate_path) |path| if (capture.length >= self.test_gate_min_written_bytes) {
                     self.test_gate_path = null;
-                    std.debug.print("{{\"rui_test_phase\":\"capture_write_gate_entered\"}}\n", .{});
+                    std.debug.print("{{\"rui_test_phase\":\"capture_write_gate_entered\",\"written_bytes\":{d}}}\n", .{capture.length});
                     if (std.Io.Dir.cwd().openFile(self.io, path, .{})) |gate| {
                         defer gate.close(self.io);
                         var release: [1]u8 = undefined;
                         _ = gate.readStreaming(self.io, &.{&release}) catch {};
                     } else |_| {}
-                }
+                };
                 capture.file.writeStreamingAll(capture.io, entry.bytes[0..entry.length]) catch {
                     self.mutex.lockUncancelable(self.io);
                     capture.failure = .write_failed;

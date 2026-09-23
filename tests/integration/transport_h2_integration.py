@@ -24,7 +24,7 @@ class Endpoint(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, tls, population, refuse_at=None, dead_reuse=False, bad_header=False, drop_once=False, sse=False, isolation=None):
+    def __init__(self, tls, population, refuse_at=None, dead_reuse=False, bad_header=False, drop_once=False, sse=False, isolation=None, after_progress=False):
         super().__init__(("127.0.0.1", 0), StreamHandler)
         self.tls = tls
         self.population = population
@@ -37,6 +37,7 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.drop_once = drop_once
         self.dropped = False
         self.sse = sse
+        self.after_progress = after_progress
         self.answers = {}
         self.isolation = isolation
         self.stream_ids = {}
@@ -101,7 +102,11 @@ class StreamHandler(socketserver.BaseRequestHandler):
                         self.server.streams.append((self.client_address, event.stream_id, text, body))
                         self.server.stream_ids[text] = event.stream_id
                         if self.server.sse:
-                            answer = f"answer-{text}" if len(self.server.streams) % 2 else "L" * 8192 + text
+                            if self.server.after_progress and text == "stalled-0":
+                                # Only the interrupt target exceeds the 10-KiB write-gate threshold.
+                                answer = "L" * 80_000 + text
+                            else:
+                                answer = f"answer-{text}" if len(self.server.streams) % 2 else "L" * 8192 + text
                             self.server.answers[text] = answer.encode()
                         refuse = self.server.refuse_at == "upload" and not self.server.refused
                         if refuse:
@@ -246,28 +251,34 @@ def round_trip(root, endpoint, capacity):
         dispatch.stop_host(host)
 
 
-def stalled_capture(root, endpoint):
-    store = root / "stalled-capture-store"
-    gate = root / "capture-write-gate"
+def stalled_capture(root, endpoint, after_progress=False):
+    phase = "after-progress" if after_progress else "before-first-write"
+    records = root / phase
+    records.mkdir(mode=0o700)
+    store = root / f"stalled-capture-{phase}-store"
+    gate = root / f"capture-write-{phase}-gate"
     os.mkfifo(gate)
     keeper = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
         "--provider-ca-file", str(root / "cert.pem"),
-        "--test-response-capture-gate-path", str(gate), "--test-phase-trace", active_capacity=100,
+        "--test-response-capture-gate-path", str(gate),
+        *(["--test-response-capture-gate-min-written-bytes", "10000"] if after_progress else []),
+        "--test-phase-trace", active_capacity=100,
     )
     diagnostics = HostDiagnostics(host)
     released = False
     try:
         for index in range(100):
             session = f"direct/stalled-{index}"
-            dispatch.configure(root, store, f"stalled-config-{index}", session, "model-a")
-            dispatch.message(root, store, f"stalled-message-{index}", session, f"stalled-{index}")
+            dispatch.configure(records, store, f"stalled-config-{index}", session, "model-a")
+            dispatch.message(records, store, f"stalled-message-{index}", session, f"stalled-{index}")
         dispatch.wait_for(lambda: len(endpoint.streams) == 100, "100 live H2 streams", timeout=45)
-        diagnostics.wait("capture_write_gate_entered", timeout=30)
+        gate_event = diagnostics.wait("capture_write_gate_entered", timeout=30)[0]
+        assert (gate_event["written_bytes"] >= 10_000) == after_progress, gate_event
         processing = dispatch.observe(store, "stalled-message-0")["processing"]
         reply = dispatch.command(
-            "interrupt-model", "--store", store, "--record", root / "stalled-interrupt.json",
+            "interrupt-model", "--store", store, "--record", records / "stalled-interrupt.json",
             "--key", "stalled-interrupt", "--session", "direct/stalled-0",
             "--turn", processing["turn"], "--operation", processing["operation"],
         )
@@ -295,8 +306,9 @@ def stalled_capture(root, endpoint):
         assert execution["scratch_used_bytes"] == "0", execution
         assert len(endpoint.connections) == 1, endpoint.connections
         idle_rss_kib = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(host.pid)]))
-        print(json.dumps({"case": "stalled_local_capture", "live_streams": 100,
+        print(json.dumps({"case": "stalled_local_capture", "phase": phase, "live_streams": 100,
                           "connections": 1, "control_before_release": True,
+                          "capture_written_before_gate": gate_event["written_bytes"],
                           "stalled_host_rss_kib": stalled_rss_kib,
                           "completed_idle_host_rss_kib": idle_rss_kib}), flush=True)
     finally:
@@ -545,15 +557,16 @@ def main():
                 endpoint.shutdown()
                 endpoint.server_close()
                 thread.join(timeout=5)
-        endpoint = Endpoint(tls, 100, sse=True)
-        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-        thread.start()
-        try:
-            stalled_capture(root, endpoint)
-        finally:
-            endpoint.shutdown()
-            endpoint.server_close()
-            thread.join(timeout=5)
+        for after_progress in (False, True):
+            endpoint = Endpoint(tls, 100, sse=True, after_progress=after_progress)
+            thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+            thread.start()
+            try:
+                stalled_capture(root, endpoint, after_progress)
+            finally:
+                endpoint.shutdown()
+                endpoint.server_close()
+                thread.join(timeout=5)
         for phase in ("headers", "upload"):
             endpoint = Endpoint(tls, 1, refuse_at=phase)
             thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
