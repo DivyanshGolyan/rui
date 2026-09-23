@@ -769,12 +769,7 @@ const Parser = struct {
         var value: u16 = 0;
         for (0..4) |_| {
             const byte = try self.source.readByte();
-            const digit: u16 = switch (byte) {
-                '0'...'9' => byte - '0',
-                'a'...'f' => byte - 'a' + 10,
-                'A'...'F' => byte - 'A' + 10,
-                else => return error.InvalidUnicodeEscape,
-            };
+            const digit: u16 = std.fmt.charToDigit(byte, 16) catch return error.InvalidUnicodeEscape;
             value = value * 16 + digit;
         }
         return value;

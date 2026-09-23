@@ -153,7 +153,7 @@ pub const BashParser = struct {
                     }
                 },
                 .unicode => {
-                    self.unicode_value = self.unicode_value * 16 + (hexDigit(next) orelse return .invalid);
+                    self.unicode_value = self.unicode_value * 16 + (std.fmt.charToDigit(next, 16) catch return .invalid);
                     self.unicode_digits += 1;
                     if (self.unicode_digits == 4) {
                         if (self.unicode_value >= 0xd800 and self.unicode_value <= 0xdbff) {
@@ -177,7 +177,7 @@ pub const BashParser = struct {
                     self.phase = .low_unicode;
                 },
                 .low_unicode => {
-                    self.unicode_value = self.unicode_value * 16 + (hexDigit(next) orelse return .invalid);
+                    self.unicode_value = self.unicode_value * 16 + (std.fmt.charToDigit(next, 16) catch return .invalid);
                     self.unicode_digits += 1;
                     if (self.unicode_digits == 4) {
                         if (self.unicode_value < 0xdc00 or self.unicode_value > 0xdfff) return .invalid;
@@ -267,15 +267,6 @@ fn isSpace(byte: u8) bool {
     return switch (byte) {
         ' ', '\t', '\r', '\n' => true,
         else => false,
-    };
-}
-
-fn hexDigit(byte: u8) ?u8 {
-    return switch (byte) {
-        '0'...'9' => byte - '0',
-        'a'...'f' => byte - 'a' + 10,
-        'A'...'F' => byte - 'A' + 10,
-        else => null,
     };
 }
 
