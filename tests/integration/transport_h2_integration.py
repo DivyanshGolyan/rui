@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Native owner/ALPN/stream witness; requires h2==4.3.0 and OpenSSL CLI."""
+import http.server
 import json
 import os
 import pathlib
+import re
 import socketserver
 import sqlite3
 import ssl
 import subprocess
 import tempfile
 import threading
+import time
 
 import h2.config
 import h2.connection
@@ -48,6 +51,58 @@ class Endpoint(socketserver.ThreadingTCPServer):
     def get_request(self):
         sock, address = super().get_request()
         return self.tls.wrap_socket(sock, server_side=True), address
+
+
+class H1Endpoint(http.server.ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self):
+        super().__init__(("127.0.0.1", 0), H1Handler)
+        self.lock = threading.Lock()
+        self.first_ready = threading.Event()
+        self.release_first = threading.Event()
+        self.requests = []
+        self.connections = set()
+        self.active = 0
+        self.maximum_active = 0
+
+
+class H1Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self):
+        assert self.path == "/responses"
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        request = json.loads(body)
+        text = next(item["content"][0]["text"] for item in reversed(request["input"])
+                    if item.get("role") == "user")
+        with self.server.lock:
+            self.server.requests.append((text, body))
+            self.server.connections.add(self.client_address)
+            self.server.active += 1
+            self.server.maximum_active = max(self.server.maximum_active, self.server.active)
+            first = len(self.server.requests) == 1
+        try:
+            if first:
+                self.server.first_ready.set()
+                assert self.server.release_first.wait(20), "first H1 response was never released"
+            payload, _, _ = dispatch.sse_answer(
+                f"response-{text}", f"reasoning-{text}", f"message-{text}", f"answer-{text}",
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(payload)
+            self.close_connection = True
+        finally:
+            with self.server.lock:
+                self.server.active -= 1
+
+    def log_message(self, *_):
+        pass
 
 
 class StreamHandler(socketserver.BaseRequestHandler):
@@ -249,6 +304,88 @@ def round_trip(root, endpoint, capacity):
         }), flush=True)
     finally:
         dispatch.stop_host(host)
+
+
+def queued_h1(root):
+    capacity = 8
+    endpoint = H1Endpoint()
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    store = root / "bounded-h1-store"
+    host = None
+    try:
+        host = dispatch.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
+                                   active_capacity=capacity)
+        def open_descriptors():
+            if os.path.isdir(f"/proc/{host.pid}/fd"):
+                return len(os.listdir(f"/proc/{host.pid}/fd"))
+            rows = subprocess.check_output(["/usr/sbin/lsof", "-n", "-P", "-p", str(host.pid)],
+                                           text=True).splitlines()
+            return sum(bool(re.fullmatch(r"\d+[rwu]?", row.split()[3])) for row in rows[1:])
+
+        idle_fds = []
+        for round_number in range(2):
+            for index in range(capacity):
+                session = f"direct/h1-{index}"
+                if round_number == 0:
+                    dispatch.configure(root, store, f"h1-config-{index}", session, "model-a")
+                dispatch.message(root, store, f"h1-message-{round_number}-{index}", session,
+                                 f"h1-{round_number}-{index}")
+            if round_number == 0:
+                assert endpoint.first_ready.wait(15), "first H1 request never arrived"
+                # An all-eight-ready barrier would strand work behind the one-connection cap.
+                # Hold only the first response; the Host must keep serving controls without spinning.
+                def cpu_seconds():
+                    value = subprocess.check_output(["ps", "-o", "time=", "-p", str(host.pid)], text=True).strip()
+                    return sum(float(part) * 60 ** index for index, part in enumerate(reversed(value.split(":"))))
+
+                time.sleep(0.2)
+                before_cpu = cpu_seconds()
+                time.sleep(3)
+                held_cpu = cpu_seconds() - before_cpu
+                with endpoint.lock:
+                    assert len(endpoint.requests) == 1 and endpoint.active == 1, endpoint.requests
+                    assert len(endpoint.connections) == 1, endpoint.connections
+                held_fds = open_descriptors()
+                assert held_cpu <= 1, f"queued H1 Host used {held_cpu} CPU seconds in 3 wall seconds"
+                for index in range(capacity):
+                    pending = dispatch.observe(store, f"h1-message-0-{index}")
+                    assert (pending.get("processing") or {}).get("attempt") == "1", pending
+                    assert pending.get("result") is None, pending
+                inspection = dispatch.command("inspect-session", "--store", store,
+                                              "--session", "direct/h1-1")["execution"]
+                assert int(inspection["custody_occupied"]) > 0, inspection
+                endpoint.release_first.set()
+            for index in range(capacity):
+                key = f"h1-message-{round_number}-{index}"
+                result = dispatch.wait_for(lambda key=key: dispatch.observe(store, key).get("result"),
+                                           f"queued H1 result {key}", timeout=40)
+                assert result["status"] == "completed", result
+                assert dispatch.read_result(store, key) == f"answer-h1-{round_number}-{index}".encode()
+            execution = dispatch.command("inspect-session", "--store", store,
+                                         "--session", "direct/h1-0")["execution"]
+            assert execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0", execution
+            idle_fds.append(open_descriptors())
+        with endpoint.lock:
+            assert len(endpoint.requests) == 2 * capacity, endpoint.requests
+            assert {text for text, _ in endpoint.requests} == {
+                f"h1-{round_number}-{index}" for round_number in range(2) for index in range(capacity)
+            }
+            assert endpoint.maximum_active == 1 and endpoint.active == 0, endpoint.maximum_active
+            assert len(endpoint.connections) == 2 * capacity, endpoint.connections
+        assert idle_fds[1] <= idle_fds[0], idle_fds
+        print(json.dumps({"case": "bounded_loopback_h1", "capacity": capacity, "rounds": 2,
+                          "requests": len(endpoint.requests), "tcp_connections": len(endpoint.connections),
+                          "maximum_simultaneous_requests": endpoint.maximum_active,
+                          "held_host_cpu_seconds_in_3s": held_cpu, "held_fds": held_fds,
+                          "completed_idle_fds": idle_fds}), flush=True)
+    finally:
+        endpoint.release_first.set()
+        if host is not None:
+            dispatch.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
 
 
 def stalled_capture(root, endpoint, after_progress=False):
@@ -544,6 +681,7 @@ def unsupported_https(root):
 def main():
     with tempfile.TemporaryDirectory(prefix="rui-h2-") as tmp:
         root = pathlib.Path(tmp)
+        queued_h1(root)
         subprocess.run([
             "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
             "-keyout", str(root / "key.pem"), "-out", str(root / "cert.pem"),
