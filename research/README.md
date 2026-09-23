@@ -14,6 +14,8 @@ Maintained executable checks and recorded qualification live in [tests/qualifica
 
 [Development build latency](build-times-sources.md) maps Zig 0.16 build/cache controls onto Rui's steps and records bounded Linux timings for initially uncached steps and warm-cache runs; recommendations only, not edit-rebuild or clean-cache qualification.
 
+[Warm integration-test wall time](integration-test-wall-time-sources.md) cites Zig and Python primary sources for build scheduling and fixture shutdown, with measured Linux baselines and the fast/full gate boundary; it does not qualify platform latency or cold compilation.
+
 [Permission ownership prior art](permission-prior-art.md) compares Pi, DeepSeek Harness, OpenCode v2 and Codex CLI approval ownership, grant lifetimes and client reconnect versus process restart; pinned source evidence only, with no accepted contract change.
 
 [Rejected tool-call prior art](rejected-tool-call-prior-art.md) compares malformed provider output, invalid parameters, unknown tools, execution failures, denial, sibling isolation and model feedback across the same four runtimes; the accepted contract now uses its provider-envelope versus call-descriptor boundary for issue #198.

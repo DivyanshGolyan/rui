@@ -23,9 +23,14 @@ pub fn build(b: *std.Build) void {
     configureBashPlatform(b, tests);
     configureTransport(b, tests, target, pinned_transport);
     const run_tests = b.addRunArtifact(tests);
+    run_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
 
     const test_step = b.step("test", "Run unit, Store, and protocol tests");
     test_step.dependOn(&run_tests.step);
+    const run_full_tests = b.addRunArtifact(tests);
+    run_full_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "1");
+    const full_test_step = b.step("test-full", "Run native tests including the real 60-second client deadline witness");
+    full_test_step.dependOn(&run_full_tests.step);
 
     const logic_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -137,7 +142,7 @@ pub fn build(b: *std.Build) void {
 
     const check_step = b.step(
         "check",
-        "Run the canonical formatting, test, integration, and production-build gates",
+        "Run formatting, native tests, process integrations in parallel, and production builds",
     );
     const format = b.addSystemCommand(&.{
         b.graph.zig_exe,
@@ -148,14 +153,28 @@ pub fn build(b: *std.Build) void {
         b.pathFromRoot("src"),
     });
     const release = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
+    const fast_integrations = b.addSystemCommand(&.{"sh"});
+    fast_integrations.addFileArg(b.path("tests/integration/check.sh"));
+    fast_integrations.addArtifactArg(release_safe);
+    fast_integrations.addArtifactArg(debug);
+    fast_integrations.addArg("parallel");
+    fast_integrations.addArtifactArg(tests);
+    fast_integrations.step.dependOn(&format.step);
+    fast_integrations.step.dependOn(&release.step);
+    check_step.dependOn(&fast_integrations.step);
+
+    const full_check_step = b.step(
+        "check-full",
+        "Run native exact-timeout evidence and process integrations serially without unrelated load",
+    );
     const process_integrations = b.addSystemCommand(&.{"sh"});
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
     process_integrations.addArtifactArg(release_safe);
     process_integrations.addArtifactArg(debug);
     process_integrations.step.dependOn(&format.step);
-    process_integrations.step.dependOn(&run_tests.step);
+    process_integrations.step.dependOn(&run_full_tests.step);
     process_integrations.step.dependOn(&release.step);
-    check_step.dependOn(&process_integrations.step);
+    full_check_step.dependOn(&process_integrations.step);
 
     const measurement_tests = b.addSystemCommand(&.{
         "go", "test", "-mod=readonly", "./...",

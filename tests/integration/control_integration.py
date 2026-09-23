@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, start_ready_process, stop_process
+from host_process import HostDiagnostics, TestHTTPServer, start_ready_process, stop_process
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -58,7 +58,7 @@ MAX_MODEL_INTERRUPTION_REQUEST_BYTES = (
 )
 
 
-class StreamingEndpoint(http.server.ThreadingHTTPServer):
+class StreamingEndpoint(TestHTTPServer):
     allow_reuse_address = True
 
     def __init__(self):
@@ -152,7 +152,7 @@ def successful_sse(index, answer=None):
     )
 
 
-class SuccessfulEndpoint(http.server.ThreadingHTTPServer):
+class SuccessfulEndpoint(TestHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, large_answer_bytes=0):
@@ -217,7 +217,7 @@ class SuccessfulHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-class RetryWaitEndpoint(http.server.ThreadingHTTPServer):
+class RetryWaitEndpoint(TestHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, label):

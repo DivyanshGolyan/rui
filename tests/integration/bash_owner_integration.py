@@ -176,12 +176,9 @@ def main():
             lambda: continuations[0].body_finished_at,
             "self-unlink continuation",
         )
-        resources = fixture.command(
-            "inspect-session",
-            "--store",
-            isolated_store,
-            "--session",
-            f"direct/{name}",
+        resources = fixture.wait_for(
+            lambda: bash_fixture.execution_custody_idle(isolated_store, f"direct/{name}"),
+            "self-unlink cleanup",
         )["execution"]
         assert resources["dispatch_fenced"] is False, resources
         assert resources["custody_occupied"] == "0", resources

@@ -15,7 +15,7 @@ import time
 import bash_integration as bash
 import control_integration as control
 import dispatch_integration as fixture
-from host_process import HostDiagnostics, start_ready_process, stop_process
+from host_process import HostDiagnostics, TestHTTPServer, start_ready_process, stop_process
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -24,7 +24,7 @@ fixture.RUI = RUI
 control.RUI = RUI
 
 
-class HeldEndpoint(http.server.ThreadingHTTPServer):
+class HeldEndpoint(TestHTTPServer):
     allow_reuse_address = True
 
     def __init__(self):
