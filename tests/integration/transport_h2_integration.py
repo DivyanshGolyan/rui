@@ -23,7 +23,7 @@ class Endpoint(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, tls, population, refuse_at=None, dead_reuse=False, bad_header=False, drop_once=False, sse=False):
+    def __init__(self, tls, population, refuse_at=None, dead_reuse=False, bad_header=False, drop_once=False, sse=False, isolation=None):
         super().__init__(("127.0.0.1", 0), StreamHandler)
         self.tls = tls
         self.population = population
@@ -37,6 +37,10 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.dropped = False
         self.sse = sse
         self.answers = {}
+        self.isolation = isolation
+        self.stream_ids = {}
+        self.resets = []
+        self.ready = threading.Event()
         self.lock = threading.Lock()
 
     def get_request(self):
@@ -94,6 +98,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
                     )
                     with self.server.lock:
                         self.server.streams.append((self.client_address, event.stream_id, text, body))
+                        self.server.stream_ids[text] = event.stream_id
                         if self.server.sse:
                             answer = f"answer-{text}" if len(self.server.streams) % 2 else "L" * 8192 + text
                             self.server.answers[text] = answer.encode()
@@ -114,6 +119,16 @@ class StreamHandler(socketserver.BaseRequestHandler):
                                 self.server.dropped = True
                         if drop:
                             return
+                        if self.server.isolation:
+                            target = self.server.stream_ids["isolation-target"]
+                            sibling = self.server.stream_ids["isolation-sibling"]
+                            conn.send_headers(target, [(":status", "200"), ("content-type", "text/event-stream")])
+                            conn.send_headers(sibling, [(":status", "200"), ("content-type", "text/event-stream")])
+                            if self.server.isolation == "capture":
+                                payload, _, _ = dispatch.sse_answer("large", "reasoning-large", "message-large", "L" * 100_000)
+                                outgoing_bodies[target] = payload
+                            pending.clear()
+                            continue
                         for stream in pending:
                             if self.server.sse:
                                 text = next(text for _, stream_id, text, _ in self.server.streams if stream_id == stream)
@@ -137,6 +152,15 @@ class StreamHandler(socketserver.BaseRequestHandler):
                             conn.send_headers(stream, headers)
                             conn.send_data(stream, b"bad", end_stream=True)
                         pending.clear()
+                elif isinstance(event, h2.events.StreamReset):
+                    with self.server.lock:
+                        self.server.resets.append(event.stream_id)
+                    outgoing_bodies.pop(event.stream_id, None)
+                    if self.server.isolation and event.stream_id == self.server.stream_ids["isolation-target"]:
+                        payload, _, _ = dispatch.sse_answer(
+                            "sibling", "reasoning-sibling", "message-sibling", "unaffected sibling",
+                        )
+                        outgoing_bodies[self.server.stream_ids["isolation-sibling"]] = payload
             for stream, body in list(outgoing_bodies.items()):
                 credit = min(conn.local_flow_control_window(stream), conn.max_outbound_frame_size, len(body))
                 if credit:
@@ -148,6 +172,8 @@ class StreamHandler(socketserver.BaseRequestHandler):
             outgoing = conn.data_to_send()
             if outgoing:
                 sock.sendall(outgoing)
+            if self.server.isolation and not pending and len(self.server.stream_ids) == 2:
+                self.server.ready.set()
 
 
 def round_trip(root, endpoint, capacity):
@@ -303,6 +329,62 @@ def isolated_bad_header(root, endpoint):
         dispatch.stop_host(host)
 
 
+def isolated_terminal_stream(root, endpoint, mode):
+    store = root / f"isolation-{mode}-store"
+    options = ("--test-request-scratch-limit", str(64 * 1024)) if mode == "capture" else ()
+    host = dispatch.start_host(
+        store, f"https://localhost:{endpoint.server_address[1]}/responses",
+        "--provider-ca-file", str(root / "cert.pem"), *options, active_capacity=2,
+    )
+    try:
+        for name in ("target", "sibling"):
+            dispatch.configure(root, store, f"{mode}-{name}-config", f"direct/{name}", "model-a")
+            dispatch.message(root, store, f"{mode}-{name}-message", f"direct/{name}", f"isolation-{name}")
+        assert endpoint.ready.wait(20), f"both {mode} streams did not become live"
+        if mode == "cancel":
+            processing = dispatch.observe(store, "cancel-target-message")["processing"]
+            reply = dispatch.command(
+                "interrupt-model", "--store", store, "--record", root / "cancel-interrupt.json",
+                "--key", "cancel-interrupt", "--session", "direct/target",
+                "--turn", processing["turn"], "--operation", processing["operation"],
+            )
+            assert reply["answer"]["status"] == "accepted", reply
+        target = dispatch.wait_for(
+            lambda: dispatch.observe(store, f"{mode}-target-message").get("result"),
+            f"{mode} target settlement", timeout=20,
+        )
+        assert (target["status"], target.get("code")) == (
+            ("cancelled", "cancelled") if mode == "cancel" else ("failed", "response_scratch_exhausted")
+        ), target
+        sibling = dispatch.wait_for(
+            lambda: dispatch.observe(store, f"{mode}-sibling-message").get("result"),
+            f"{mode} sibling completion", timeout=20,
+        )
+        assert sibling["status"] == "completed", sibling
+        assert dispatch.read_result(store, f"{mode}-sibling-message") == b"unaffected sibling"
+        dispatch.wait_for(lambda: endpoint.resets, f"{mode} stream reset", timeout=20)
+        assert endpoint.resets == [endpoint.stream_ids["isolation-target"]], endpoint.resets
+        assert len(endpoint.connections) == 1 and len(endpoint.streams) == 2
+        assert {text for _, _, text, _ in endpoint.streams} == {"isolation-target", "isolation-sibling"}
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            assert database.execute(
+                "SELECT attempt_ordinal,allowance_used FROM model_operation ORDER BY operation_id"
+            ).fetchall() == [(1, 1), (1, 1)]
+            if mode == "cancel":
+                assert database.execute(
+                    "SELECT interrupted_by_command_key FROM model_operation WHERE session_ref='direct/target'"
+                ).fetchone() == ("cancel-interrupt",)
+        execution = dispatch.command(
+            "inspect-session", "--store", store, "--session", "direct/target"
+        )["execution"]
+        assert execution["custody_occupied"] == "0", execution
+        assert execution["scratch_used_bytes"] == "0", execution
+        print(json.dumps({"case": f"sibling_{mode}", "streams": 2, "connections": 1,
+                          "target_resets": len(endpoint.resets), "sibling": "completed"}), flush=True)
+    finally:
+        dispatch.stop_host(host)
+
+
 def connection_failure(root, endpoint):
     store = root / "connection-failure-store"
     host = dispatch.start_host(
@@ -414,6 +496,16 @@ def main():
             endpoint.shutdown()
             endpoint.server_close()
             thread.join(timeout=5)
+        for mode in ("cancel", "capture"):
+            endpoint = Endpoint(tls, 2, isolation=mode)
+            thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+            thread.start()
+            try:
+                isolated_terminal_stream(root, endpoint, mode)
+            finally:
+                endpoint.shutdown()
+                endpoint.server_close()
+                thread.join(timeout=5)
         endpoint = Endpoint(tls, 2, drop_once=True)
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
         thread.start()
