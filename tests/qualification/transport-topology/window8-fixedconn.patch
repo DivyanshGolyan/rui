@@ -16,11 +16,10 @@
      CURLcode ret = Curl_retry_request(data, &newurl);
 --- a/lib/http2.c
 +++ b/lib/http2.c
-@@ -65,10 +65,11 @@
+@@ -65,10 +65,10 @@
  #define H2_NW_SEND_CHUNKS       1
  /* this is how much we want "in flight" for a stream, unthrottled */
 -#define H2_STREAM_WINDOW_SIZE_MAX   (10 * 1024 * 1024)
-+/* Rui caps receive credit per stream so paused captures cannot retain 10 MiB each. */
 +#define H2_STREAM_WINDOW_SIZE_MAX   (8 * 1024)
  /* this is how much we want "in flight" for a stream, initially, IFF
   * nghttp2 allows us to tweak the local window size. */
@@ -30,6 +29,16 @@
  #else
  #define H2_STREAM_WINDOW_SIZE_INITIAL H2_STREAM_WINDOW_SIZE_MAX
  #endif
+@@ -81,7 +81,7 @@
+ /* We need to accommodate the max number of streams with their window sizes on
+  * the overall connection. Streams might become PAUSED which will block their
+  * received QUOTA in the connection window. If we run out of space, the server
+  * is blocked from sending us any data. See #10988 for an issue with this. */
+-#define HTTP2_HUGE_WINDOW_SIZE (100 * H2_STREAM_WINDOW_SIZE_MAX)
++#define HTTP2_HUGE_WINDOW_SIZE (100 * 10 * 1024 * 1024)
+-
++
+ #define H2_SETTINGS_IV_LEN 3
 --- a/lib/vtls/vtls.c
 +++ b/lib/vtls/vtls.c
 @@ -1696,1 +1696,8 @@ CURLcode Curl_alpn_set_negotiated(struct Curl_cfilter *cf,

@@ -103,7 +103,7 @@ fi
 }
 
 # Patch only the isolated build copy. curl must reject missing H2 ALPN before
-# a POST and must not auto-retry a reused zero-response POST of unknown effect.
+# a POST, avoid ambiguous automatic POST retries, and bound paused-stream credit.
 cp -R "$curl_source" "$curl_patched"
 (cd "$curl_patched" && git apply "$curl_patch") >>"$log" 2>&1
 
