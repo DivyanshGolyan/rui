@@ -128,8 +128,7 @@ fn runtimeDirectoryForUid(buffer: []u8, uid: u32) ![]const u8 {
 fn socketPathForCanonical(canonical: []const u8, buffer: []u8) ![]const u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(canonical, &digest, .{});
-    var hash_text: [32]u8 = undefined;
-    _ = std.fmt.bufPrint(&hash_text, "{x}", .{digest[0..16]}) catch unreachable;
+    const hash_text = std.fmt.bytesToHex(digest[0..16].*, .lower);
     var runtime_buffer: [max_runtime_directory_bytes]u8 = undefined;
     const runtime = try runtimeDirectory(&runtime_buffer);
     return std.fmt.bufPrint(buffer, "{s}/{s}{s}", .{ runtime, hash_text, socket_suffix });
@@ -250,6 +249,12 @@ test "Store paths canonicalize aliases to one socket" {
     const two = try pathsFromOpenStore(second, std.testing.io);
     try std.testing.expectEqualStrings(one.store.slice(), two.store.slice());
     try std.testing.expectEqualStrings(one.socket.slice(), two.socket.slice());
+}
+
+test "socket path uses the first 16 SHA-256 bytes in lowercase hex" {
+    var buffer: [max_socket_path_bytes]u8 = undefined;
+    const path = try socketPathForCanonical("/tmp/rui-stdlib-hex", &buffer);
+    try std.testing.expect(std.mem.endsWith(u8, path, "/043ea4efef72c68973ebffcb0927e537.sock"));
 }
 
 test "Store path capacities follow the SQLite VFS and derived suffixes" {

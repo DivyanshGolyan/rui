@@ -357,7 +357,7 @@ pub const ReplayCursor = struct {
             },
             .key_unicode => {
                 const byte = try self.take(source, bytes_left) orelse return error.UnexpectedJsonEnd;
-                self.unicode_value = self.unicode_value * 16 + (hexDigit(byte) orelse return error.InvalidJsonEscape);
+                self.unicode_value = self.unicode_value * 16 + (std.fmt.charToDigit(byte, 16) catch return error.InvalidJsonEscape);
                 self.unicode_digits += 1;
                 if (self.unicode_digits == 4) {
                     if (self.unicode_value <= std.math.maxInt(u8)) {
@@ -397,7 +397,7 @@ pub const ReplayCursor = struct {
                 const byte = try self.take(source, bytes_left) orelse return error.UnexpectedJsonEnd;
                 if (self.value_in_string) {
                     if (self.value_unicode_digits != 0) {
-                        _ = hexDigit(byte) orelse return error.InvalidJsonEscape;
+                        _ = std.fmt.charToDigit(byte, 16) catch return error.InvalidJsonEscape;
                         self.value_unicode_digits -= 1;
                     } else if (self.value_escape) {
                         self.value_escape = false;
@@ -543,15 +543,6 @@ pub const ReplayCursor = struct {
 
 fn isSpace(byte: u8) bool {
     return byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n';
-}
-
-fn hexDigit(byte: u8) ?u8 {
-    return switch (byte) {
-        '0'...'9' => byte - '0',
-        'a'...'f' => byte - 'a' + 10,
-        'A'...'F' => byte - 'A' + 10,
-        else => null,
-    };
 }
 
 const TestSink = struct {
