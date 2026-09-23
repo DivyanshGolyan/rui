@@ -60,6 +60,7 @@ pub const Faults = struct {
     response_acquire: bool = false,
     response_unlink: bool = false,
     response_write: bool = false,
+    response_write_on_resume: bool = false,
     response_seal: bool = false,
     response_capture_gate_path: ?[]const u8 = null,
     response_capture_gate_min_written_bytes: usize = 0,
@@ -942,11 +943,30 @@ fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []Execu
                 };
                 return true;
             }
+            if (host.faults.response_write_on_resume and active.transfer.paused and active.transfer.writer.hasRoom()) {
+                active.transfer.response.fail_write = true;
+                host.faults.response_write_on_resume = false;
+            }
             const resumed = active_reactor.resumeIfReady(&active.transfer) catch |err| {
                 fenceDispatch(host, "transport resume", err);
                 return false;
             };
-            if (resumed) return true;
+            switch (resumed) {
+                .resumed => return true,
+                .finished => |outcome| {
+                    switch (outcome) {
+                        .response_capture_failed => traceSubject(host, "transport_resume_capture_failure", "cause", "local_capture"),
+                        else => {},
+                    }
+                    active.completion = .{
+                        .identity = active.transfer.identity(),
+                        .outcome = outcome,
+                        .queued_after = 0,
+                    };
+                    return true;
+                },
+                .not_ready => {},
+            }
             if (!active.transfer.queueDeadlineExpired()) continue;
             active_reactor.cancel(&active.transfer);
             active.completion = .{

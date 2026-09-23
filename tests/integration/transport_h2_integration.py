@@ -27,7 +27,7 @@ class Endpoint(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, tls, population, refuse_at=None, dead_reuse=False, bad_header=False, drop_once=False, sse=False, isolation=None, after_progress=False):
+    def __init__(self, tls, population, refuse_at=None, dead_reuse=False, bad_header=False, drop_once=False, sse=False, isolation=None, after_progress=False, early_protocol_error=False, eager_sse=False):
         super().__init__(("127.0.0.1", 0), StreamHandler)
         self.tls = tls
         self.population = population
@@ -41,6 +41,8 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.dropped = False
         self.sse = sse
         self.after_progress = after_progress
+        self.early_protocol_error = early_protocol_error
+        self.eager_sse = eager_sse
         self.answers = {}
         self.isolation = isolation
         self.stream_ids = {}
@@ -57,8 +59,9 @@ class H1Endpoint(http.server.ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self):
+    def __init__(self, trickle_first=False):
         super().__init__(("127.0.0.1", 0), H1Handler)
+        self.trickle_first = trickle_first
         self.lock = threading.Lock()
         self.first_ready = threading.Event()
         self.release_first = threading.Event()
@@ -84,18 +87,28 @@ class H1Handler(http.server.BaseHTTPRequestHandler):
             self.server.maximum_active = max(self.server.maximum_active, self.server.active)
             first = len(self.server.requests) == 1
         try:
-            if first:
-                self.server.first_ready.set()
-                assert self.server.release_first.wait(20), "first H1 response was never released"
             payload, _, _ = dispatch.sse_answer(
                 f"response-{text}", f"reasoning-{text}", f"message-{text}", f"answer-{text}",
             )
+            if first:
+                self.server.first_ready.set()
+                if not self.server.trickle_first:
+                    assert self.server.release_first.wait(20), "first H1 response was never released"
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("Connection", "close")
             self.end_headers()
-            self.wfile.write(payload)
+            if first and self.server.trickle_first:
+                offset = 0
+                while not self.server.release_first.is_set():
+                    self.wfile.write(payload[offset:offset + 1])
+                    self.wfile.flush()
+                    offset += 1
+                    assert self.server.release_first.wait(0.2) or offset < len(payload)
+                self.wfile.write(payload[offset:])
+            else:
+                self.wfile.write(payload)
             self.close_connection = True
         finally:
             with self.server.lock:
@@ -172,8 +185,27 @@ class StreamHandler(socketserver.BaseRequestHandler):
                     if refuse:
                         conn.reset_stream(event.stream_id, error_code=h2.errors.ErrorCodes.REFUSED_STREAM)
                         continue
+                    if self.server.early_protocol_error:
+                        # DATA on stream zero is an H2 connection protocol error,
+                        # after the POST but before any response version is known.
+                        sock.sendall(b"\x00\x00\x01\x00\x00\x00\x00\x00\x00x")
+                        return
+                    if self.server.eager_sse:
+                        payload, _, _ = dispatch.sse_answer(
+                            f"response-{event.stream_id}", f"reasoning-{event.stream_id}",
+                            f"message-{event.stream_id}", self.server.answers[text].decode(),
+                        )
+                        conn.send_headers(event.stream_id, [
+                            (":status", "200"), ("content-type", "text/event-stream"),
+                            ("content-length", str(len(payload))),
+                        ])
+                        outgoing_bodies[event.stream_id] = payload
+                        if len(self.server.streams) == self.server.population:
+                            self.server.ready.set()
+                        continue
                     pending.append(event.stream_id)
                     if len(pending) == self.server.population:
+                        self.server.ready.set()
                         with self.server.lock:
                             drop = self.server.drop_once and not self.server.dropped
                             if drop:
@@ -388,6 +420,51 @@ def queued_h1(root):
         thread.join(timeout=5)
 
 
+def queued_h1_inactivity(root):
+    endpoint = H1Endpoint(trickle_first=True)
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    store = root / "bounded-h1-inactivity-store"
+    host = dispatch.start_host(
+        store, f"http://127.0.0.1:{endpoint.server_port}/responses",
+        "--test-provider-inactivity-seconds", "1", "--test-retry-waits-ms", "60000,60000,60000",
+        active_capacity=2,
+    )
+    try:
+        for index in range(2):
+            dispatch.configure(root, store, f"queued-config-{index}", f"direct/queued-{index}", "model-a")
+            dispatch.message(root, store, f"queued-message-{index}", f"direct/queued-{index}", f"queued-{index}")
+        assert endpoint.first_ready.wait(15), "first H1 request never arrived"
+        time.sleep(1.7)
+        with endpoint.lock:
+            assert len(endpoint.requests) == 1 and endpoint.active == 1, endpoint.requests
+            held = endpoint.requests[0][0]
+        queued = 1 if held == "queued-0" else 0
+        assert dispatch.observe(store, f"queued-message-{queued}").get("result") is None
+        endpoint.release_first.set()
+        held_result = dispatch.wait_for(
+            lambda: dispatch.observe(store, f"queued-message-{1 - queued}").get("result"),
+            "trickling H1 request completes", timeout=10,
+        )
+        assert held_result["status"] == "completed", held_result
+        assert dispatch.read_result(store, f"queued-message-{1 - queued}") == f"answer-{held}".encode()
+    finally:
+        dispatch.stop_host(host)
+        endpoint.release_first.set()
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+    with sqlite3.connect(store / "rui.sqlite3") as database:
+        rows = database.execute(
+            "SELECT attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code "
+            "FROM model_operation ORDER BY operation_id"
+        ).fetchall()
+        assert rows[queued][:3] == (1, 1, 0) and rows[queued][3] > 0, rows
+        assert rows[queued][4] == "provider_transport_failure", rows
+    print(json.dumps({"case": "queued_h1_inactivity", "received_requests": 1,
+                      "queued_attempt_failure": rows[queued][4]}), flush=True)
+
+
 def stalled_capture(root, endpoint, after_progress=False):
     phase = "after-progress" if after_progress else "before-first-write"
     records = root / phase
@@ -451,6 +528,103 @@ def stalled_capture(root, endpoint, after_progress=False):
     finally:
         if not released:
             os.write(keeper, b"r")
+        os.close(keeper)
+        dispatch.stop_host(host)
+        diagnostics.close()
+
+
+def paused_capture_inactivity(root, endpoint):
+    store = root / "paused-inactivity-store"
+    gate = root / "paused-inactivity-gate"
+    os.mkfifo(gate)
+    keeper = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+    host = dispatch.start_host(
+        store, f"https://localhost:{endpoint.server_address[1]}/responses",
+        "--provider-ca-file", str(root / "cert.pem"),
+        "--test-response-capture-gate-path", str(gate),
+        "--test-provider-inactivity-seconds", "3", "--test-phase-trace", active_capacity=20,
+    )
+    diagnostics = HostDiagnostics(host)
+    try:
+        for index in range(20):
+            session = f"direct/paused-{index}"
+            dispatch.configure(root, store, f"paused-config-{index}", session, "model-a")
+            dispatch.message(root, store, f"paused-message-{index}", session, f"paused-{index}")
+        assert endpoint.ready.wait(15), "20 H2 requests did not arrive"
+        diagnostics.wait("capture_write_gate_entered", timeout=15)
+        # The local writer is blocked, not the provider. Hold beyond the
+        # provider inactivity interval while curl's receive queue fills.
+        time.sleep(3.5)
+        assert len(endpoint.streams) == 20, endpoint.streams
+        os.write(keeper, b"r")
+        for index in range(20):
+            key = f"paused-message-{index}"
+            result = dispatch.wait_for(lambda key=key: dispatch.observe(store, key).get("result"),
+                                       f"paused capture result {index}", timeout=20)
+            assert result["status"] == "completed", result
+            assert dispatch.read_result(store, key) == endpoint.answers[f"paused-{index}"]
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            attempts = database.execute("SELECT attempt_ordinal,allowance_used FROM model_operation").fetchall()
+            assert attempts == [(1, 1)] * 20, attempts
+        execution = dispatch.command("inspect-session", "--store", store,
+                                     "--session", "direct/paused-0")["execution"]
+        assert execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0", execution
+        print(json.dumps({"case": "paused_capture_inactivity", "streams": len(endpoint.streams),
+                          "attempts": 20, "hold_seconds": 3.5}), flush=True)
+    finally:
+        os.write(keeper, b"r")
+        os.close(keeper)
+        dispatch.stop_host(host)
+        diagnostics.close()
+
+
+def capture_failure_on_resume(root, endpoint):
+    store = root / "resume-capture-failure-store"
+    gate = root / "resume-capture-failure-gate"
+    os.mkfifo(gate)
+    keeper = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+    host = dispatch.start_host(
+        store, f"https://localhost:{endpoint.server_address[1]}/responses",
+        "--provider-ca-file", str(root / "cert.pem"),
+        "--test-response-capture-gate-path", str(gate),
+        "--fault", "response-write-on-resume", "--test-phase-trace", active_capacity=20,
+    )
+    diagnostics = HostDiagnostics(host)
+    try:
+        for index in range(20):
+            session = f"direct/resume-{index}"
+            dispatch.configure(root, store, f"resume-config-{index}", session, "model-a")
+            dispatch.message(root, store, f"resume-message-{index}", session, f"resume-{index}")
+        assert endpoint.ready.wait(15), "20 H2 requests did not arrive"
+        diagnostics.wait("capture_write_gate_entered", timeout=15)
+        os.write(keeper, b"r")
+        outcomes = []
+        completed = 0
+        for index in range(20):
+            key = f"resume-message-{index}"
+            result = dispatch.wait_for(lambda key=key: dispatch.observe(store, key).get("result"),
+                                       f"resume result {index}", timeout=20)
+            outcomes.append(result.get("code"))
+            if result["status"] == "completed":
+                completed += 1
+                assert dispatch.read_result(store, key) == endpoint.answers[f"resume-{index}"]
+        assert outcomes.count("response_write_failed") == 1, outcomes
+        assert len(diagnostics.matching("transport_resume_capture_failure")) == 1, diagnostics.records[-12:]
+        assert completed == 19, outcomes
+        dispatch.configure(root, store, "resume-after-config", "direct/resume-after", "model-a")
+        dispatch.message(root, store, "resume-after-message", "direct/resume-after", "resume-after")
+        later = dispatch.wait_for(lambda: dispatch.observe(store, "resume-after-message").get("result"),
+                                  "new admission after local capture failure", timeout=20)
+        assert later["status"] == "completed", later
+        assert dispatch.read_result(store, "resume-after-message") == endpoint.answers["resume-after"]
+        execution = dispatch.command("inspect-session", "--store", store,
+                                     "--session", "direct/resume-0")["execution"]
+        assert execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0", execution
+        assert len(endpoint.connections) == 1, endpoint.connections
+        print(json.dumps({"case": "capture_failure_on_resume", "capture_failures": outcomes.count("response_write_failed"),
+                          "unaffected_siblings": completed, "new_admission": later["status"]}), flush=True)
+    finally:
+        os.write(keeper, b"r")
         os.close(keeper)
         dispatch.stop_host(host)
         diagnostics.close()
@@ -678,10 +852,38 @@ def unsupported_https(root):
         thread.join(timeout=5)
 
 
+def negotiated_h2_early_error(root, endpoint):
+    store = root / "early-h2-error-store"
+    host = dispatch.start_host(
+        store, f"https://localhost:{endpoint.server_address[1]}/responses",
+        "--provider-ca-file", str(root / "cert.pem"), "--test-retry-waits-ms", "1,1,1",
+    )
+    try:
+        dispatch.configure(root, store, "early-h2-config", "direct/early-h2", "model-a")
+        dispatch.message(root, store, "early-h2-message", "direct/early-h2", "early-h2")
+        result = dispatch.wait_for(
+            lambda: dispatch.observe(store, "early-h2-message").get("result"),
+            "negotiated H2 protocol failure settlement", timeout=20,
+        )
+        assert result["code"] == "retry_exhausted", result
+        assert len(endpoint.streams) == 4, endpoint.streams
+        assert all(text == "early-h2" for _, _, text, _ in endpoint.streams)
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            attempts = database.execute(
+                "SELECT attempt_ordinal,allowance_used FROM model_operation"
+            ).fetchone()
+            assert attempts == (4, 4), attempts
+        print(json.dumps({"case": "negotiated_h2_early_error", "posts": len(endpoint.streams),
+                          "result": result["code"]}), flush=True)
+    finally:
+        dispatch.stop_host(host)
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="rui-h2-") as tmp:
         root = pathlib.Path(tmp)
         queued_h1(root)
+        queued_h1_inactivity(root)
         subprocess.run([
             "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
             "-keyout", str(root / "key.pem"), "-out", str(root / "cert.pem"),
@@ -710,6 +912,24 @@ def main():
                 endpoint.shutdown()
                 endpoint.server_close()
                 thread.join(timeout=5)
+        endpoint = Endpoint(tls, 20, sse=True, eager_sse=True)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        thread.start()
+        try:
+            paused_capture_inactivity(root, endpoint)
+        finally:
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
+        endpoint = Endpoint(tls, 20, sse=True, eager_sse=True)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        thread.start()
+        try:
+            capture_failure_on_resume(root, endpoint)
+        finally:
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
         for phase in ("headers", "upload"):
             endpoint = Endpoint(tls, 1, refuse_at=phase)
             thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
@@ -753,6 +973,15 @@ def main():
         thread.start()
         try:
             connection_failure(root, endpoint)
+        finally:
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
+        endpoint = Endpoint(tls, 1, early_protocol_error=True)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        thread.start()
+        try:
+            negotiated_h2_early_error(root, endpoint)
         finally:
             endpoint.shutdown()
             endpoint.server_close()

@@ -36,7 +36,7 @@
 +  /* A completed TLS handshake without h2 cannot authorize an HTTPS POST. */
 +  if(data->state.http_neg.wanted == CURL_HTTP_V2x &&
 +     (proto_len != 2 || !proto || memcmp(proto, "h2", 2))) {
-+    failf(data, "ALPN: server did not negotiate h2");
++    failf(data, "RUI_ALPN_H2_REQUIRED: server did not negotiate h2");
 +    return CURLE_HTTP2;
 +  }
 +

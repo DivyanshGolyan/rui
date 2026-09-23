@@ -589,6 +589,12 @@ var foreign_completion_identity: u8 = 0;
 pub const Reactor = struct {
     multi: *c.CURLM,
 
+    pub const Resume = union(enum) {
+        not_ready,
+        resumed,
+        finished: CompletionOutcome,
+    };
+
     pub fn init(capacity: usize) !Reactor {
         const multi = c.curl_multi_init() orelse return error.TransportAllocationFailed;
         errdefer _ = c.curl_multi_cleanup(multi);
@@ -631,13 +637,15 @@ pub const Reactor = struct {
         transfer.in_reactor = false;
     }
 
-    pub fn resumeIfReady(self: *Reactor, transfer: *Transfer) !bool {
-        _ = self;
-        if (!transfer.in_reactor or !transfer.paused or !transfer.writer.hasRoom()) return false;
+    pub fn resumeIfReady(self: *Reactor, transfer: *Transfer) !Resume {
+        if (!transfer.in_reactor or !transfer.paused or !transfer.writer.hasRoom()) return .not_ready;
         transfer.paused = false;
-        if (c.curl_easy_pause(transfer.easy, c.CURLPAUSE_CONT) != c.CURLE_OK)
-            return error.TransportResumeFailed;
-        return true;
+        transfer.timeout_context.resumeAfterPause(std.Io.Clock.Timestamp.now(transfer.timeout_context.io, .awake));
+        const result = c.curl_easy_pause(transfer.easy, c.CURLPAUSE_CONT);
+        if (result == c.CURLE_OK) return .resumed;
+        const outcome = try transfer.completionOutcome(result);
+        self.cancel(transfer);
+        return .{ .finished = outcome };
     }
 
     pub fn drive(self: *Reactor, timeout_ms: c_int) !void {
@@ -965,8 +973,20 @@ const TimeoutContext = struct {
     inactivity_ns: i64,
     last_download: c.curl_off_t = 0,
     last_progress: std.Io.Clock.Timestamp = undefined,
+    paused_at: ?std.Io.Clock.Timestamp = null,
     armed: bool = false,
     expired: bool = false,
+
+    fn pause(self: *TimeoutContext, now: std.Io.Clock.Timestamp) void {
+        std.debug.assert(self.paused_at == null);
+        self.paused_at = now;
+    }
+
+    fn resumeAfterPause(self: *TimeoutContext, now: std.Io.Clock.Timestamp) void {
+        const paused_at = self.paused_at orelse unreachable;
+        self.last_progress = self.last_progress.addDuration(paused_at.durationTo(now));
+        self.paused_at = null;
+    }
 };
 
 pub const Transfer = struct {
@@ -979,6 +999,7 @@ pub const Transfer = struct {
     paused: bool = false,
     response_owned: bool = true,
     header_context: HeaderContext = .{},
+    error_buffer: [c.CURL_ERROR_SIZE]u8 = @splat(0),
     timeout_context: TimeoutContext,
     in_reactor: bool = false,
     completion_identity_fault: CompletionIdentityFault,
@@ -1057,6 +1078,7 @@ pub const Transfer = struct {
         try setOpt(easy, c.CURLOPT_WRITEDATA, self);
         try setOpt(easy, c.CURLOPT_HEADERFUNCTION, headerCallback);
         try setOpt(easy, c.CURLOPT_HEADERDATA, &self.header_context);
+        try setOpt(easy, c.CURLOPT_ERRORBUFFER, self.error_buffer[0..].ptr);
         try setOpt(easy, c.CURLOPT_HTTPHEADER, headers);
         try setOpt(easy, c.CURLOPT_FOLLOWLOCATION, @as(c_long, 0));
         try setOpt(easy, c.CURLOPT_MAXREDIRS, @as(c_long, 0));
@@ -1099,10 +1121,10 @@ pub const Transfer = struct {
         var version: c_long = 0;
         if (c.curl_easy_getinfo(self.easy, c.CURLINFO_HTTP_VERSION, &version) != c.CURLE_OK)
             return error.InvalidHttpEvidence;
-        // A TLS peer that cannot establish H2 may reject the client preface
-        // before curl records any HTTP version. A negotiated H2 stream error
-        // retains version 2 and remains with the ordinary retry owner.
-        if (self.requires_h2 and result == c.CURLE_HTTP2 and version == 0)
+        // Only the patched TLS ALPN guard emits this marker. A negotiated H2
+        // stream can also fail with CURLE_HTTP2 before any response version.
+        if (self.requires_h2 and result == c.CURLE_HTTP2 and
+            std.mem.startsWith(u8, &self.error_buffer, "RUI_ALPN_H2_REQUIRED:"))
             return .{ .disposition = .unsupported_http_version, .response_bytes = captured_length };
         const disposition: TransportDisposition = if (self.header_context.invalid)
             .invalid_headers
@@ -1149,6 +1171,7 @@ pub const Transfer = struct {
 
     fn armTimeout(self: *Transfer) void {
         self.timeout_context.last_progress = std.Io.Clock.Timestamp.now(self.timeout_context.io, .awake);
+        self.timeout_context.paused_at = null;
         self.timeout_context.armed = true;
         self.timeout_context.expired = false;
     }
@@ -1158,7 +1181,7 @@ pub const Transfer = struct {
     // waiting consumes this Attempt's inactivity interval too.
     pub fn queueDeadlineExpired(self: *Transfer) bool {
         const timeout = &self.timeout_context;
-        if (!timeout.armed) return false;
+        if (!timeout.armed or timeout.paused_at != null) return false;
         const now = std.Io.Clock.Timestamp.now(timeout.io, .awake);
         if (timeout.last_progress.durationTo(now).raw.nanoseconds < timeout.inactivity_ns) return false;
         timeout.expired = true;
@@ -1244,6 +1267,7 @@ fn xferInfoCallback(
 ) callconv(.c) c_int {
     const context: *TimeoutContext = @ptrCast(@alignCast(context_pointer orelse return 1));
     if (!context.armed) return 0;
+    if (context.paused_at != null) return 0;
     const now = std.Io.Clock.Timestamp.now(context.io, .awake);
     if (download_now != context.last_download) {
         context.last_download = download_now;
@@ -1284,7 +1308,10 @@ fn writeCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?*
     const transfer: *Transfer = @ptrCast(@alignCast(context_pointer orelse return 0));
     const bytes = std.math.mul(usize, size, count) catch return 0;
     const accepted = transfer.writer.offer(&transfer.response, pointer[0..bytes]);
-    if (accepted == c.CURL_WRITEFUNC_PAUSE) transfer.paused = true;
+    if (accepted == c.CURL_WRITEFUNC_PAUSE and !transfer.paused) {
+        transfer.paused = true;
+        transfer.timeout_context.pause(std.Io.Clock.Timestamp.now(transfer.timeout_context.io, .awake));
+    }
     return accepted;
 }
 
@@ -1535,6 +1562,27 @@ test "curl disposition retries only temporary connection and explicit inactivity
         TransportDisposition.tls_verification_failure,
         curlFailureDisposition(c.CURLE_PEER_FAILED_VERIFICATION, false),
     );
+}
+
+test "local capture pause excludes only its own duration from inactivity" {
+    const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+    var timeout = TimeoutContext{
+        .io = std.testing.io,
+        .inactivity_ns = std.time.ns_per_s,
+        .last_progress = now.subDuration(.{ .raw = .fromMilliseconds(250), .clock = .awake }),
+        .armed = true,
+    };
+    timeout.pause(now);
+    var transfer: Transfer = undefined;
+    transfer.timeout_context = timeout;
+    try std.testing.expect(!transfer.queueDeadlineExpired());
+    try std.testing.expectEqual(@as(c_int, 0), xferInfoCallback(&transfer.timeout_context, 0, 0, 0, 0));
+    try std.testing.expect(!transfer.timeout_context.expired);
+    const resume_at = now.addDuration(.{ .raw = .fromSeconds(5), .clock = .awake });
+    transfer.timeout_context.resumeAfterPause(resume_at);
+    try std.testing.expectEqual(@as(i96, 250 * std.time.ns_per_ms), transfer.timeout_context.last_progress.durationTo(resume_at).raw.nanoseconds);
+    transfer.timeout_context.last_progress = now.subDuration(.{ .raw = .fromSeconds(2), .clock = .awake });
+    try std.testing.expect(transfer.queueDeadlineExpired());
 }
 
 test "real preparation consumes the configured allowance across multiple advances" {
