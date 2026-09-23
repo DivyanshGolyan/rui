@@ -30,6 +30,7 @@ pub const PreparationFaults = struct {
 };
 
 pub const TransportOptions = struct {
+    ca_file: ?[]const u8 = null,
     inactivity_seconds: i64 = 5 * 60,
     request_read_fault: bool = false,
     response_acquire_fault: bool = false,
@@ -546,6 +547,7 @@ pub const TransportDisposition = enum {
     authentication_failure,
     tls_verification_failure,
     invalid_headers,
+    unsupported_http_version,
 };
 
 pub const TransportEvidence = struct {
@@ -587,8 +589,20 @@ var foreign_completion_identity: u8 = 0;
 pub const Reactor = struct {
     multi: *c.CURLM,
 
-    pub fn init() !Reactor {
-        return .{ .multi = c.curl_multi_init() orelse return error.TransportAllocationFailed };
+    pub fn init(capacity: usize) !Reactor {
+        const multi = c.curl_multi_init() orelse return error.TransportAllocationFailed;
+        errdefer _ = c.curl_multi_cleanup(multi);
+        const connections = capacity / 100 + @intFromBool(capacity % 100 != 0);
+        if (connections > std.math.maxInt(c_long) or
+            c.curl_multi_setopt(multi, c.CURLMOPT_PIPELINING, @as(c_long, c.CURLPIPE_MULTIPLEX)) != c.CURLM_OK or
+            c.curl_multi_setopt(multi, c.CURLMOPT_MAX_CONCURRENT_STREAMS, @as(c_long, 100)) != c.CURLM_OK or
+            c.curl_multi_setopt(multi, c.CURLMOPT_MAX_HOST_CONNECTIONS, @as(c_long, @intCast(connections))) != c.CURLM_OK or
+            c.curl_multi_setopt(multi, c.CURLMOPT_MAX_TOTAL_CONNECTIONS, @as(c_long, @intCast(connections))) != c.CURLM_OK or
+            c.curl_multi_setopt(multi, c.CURLMOPT_MAXCONNECTS, @as(c_long, @intCast(connections))) != c.CURLM_OK)
+        {
+            return error.TransportCapabilityMissing;
+        }
+        return .{ .multi = multi };
     }
 
     pub fn deinit(self: *Reactor) void {
@@ -697,6 +711,7 @@ pub fn initialize() !void {
         !std.mem.startsWith(u8, std.mem.span(info.*.ssl_version), openssl_version) or
         info.*.features & c.CURL_VERSION_SSL == 0 or
         info.*.features & c.CURL_VERSION_ASYNCHDNS == 0 or
+        info.*.features & c.CURL_VERSION_HTTP2 == 0 or
         info.*.features & c.CURL_VERSION_THREADSAFE == 0)
     {
         return error.TransportCapabilityMissing;
@@ -852,6 +867,7 @@ pub const Transfer = struct {
     in_reactor: bool = false,
     completion_identity_fault: CompletionIdentityFault,
     binding: store.AttemptBinding,
+    requires_h2: bool,
 
     pub fn start(
         self: *Transfer,
@@ -904,6 +920,7 @@ pub const Transfer = struct {
             },
             .response = response,
             .binding = binding,
+            .requires_h2 = !std.mem.startsWith(u8, endpoint, "http://"),
             .completion_identity_fault = options.completion_identity_fault,
             .timeout_context = .{
                 .io = request.io,
@@ -915,6 +932,9 @@ pub const Transfer = struct {
         try setOpt(easy, c.CURLOPT_POSTFIELDSIZE_LARGE, @as(c.curl_off_t, @intCast(request.length)));
         try setOpt(easy, c.CURLOPT_READFUNCTION, readCallback);
         try setOpt(easy, c.CURLOPT_READDATA, &self.read_context);
+        try setOpt(easy, c.CURLOPT_SEEKFUNCTION, seekCallback);
+        try setOpt(easy, c.CURLOPT_SEEKDATA, &self.read_context);
+        try setOpt(easy, c.CURLOPT_UPLOAD_BUFFERSIZE, @as(c_long, 16 * 1024));
         try setOpt(easy, c.CURLOPT_WRITEFUNCTION, writeCallback);
         try setOpt(easy, c.CURLOPT_WRITEDATA, &self.response);
         try setOpt(easy, c.CURLOPT_HEADERFUNCTION, headerCallback);
@@ -923,8 +943,12 @@ pub const Transfer = struct {
         try setOpt(easy, c.CURLOPT_FOLLOWLOCATION, @as(c_long, 0));
         try setOpt(easy, c.CURLOPT_MAXREDIRS, @as(c_long, 0));
         try setOpt(easy, c.CURLOPT_NOSIGNAL, @as(c_long, 1));
-        try setOpt(easy, c.CURLOPT_FRESH_CONNECT, @as(c_long, 1));
-        try setOpt(easy, c.CURLOPT_FORBID_REUSE, @as(c_long, 1));
+        if (options.ca_file) |path| {
+            var ca_buffer: [std.posix.PATH_MAX + 1:0]u8 = undefined;
+            const ca_z = std.fmt.bufPrintZ(&ca_buffer, "{s}", .{path}) catch return error.InvalidProviderCaFile;
+            if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidProviderCaFile;
+            try setOpt(easy, c.CURLOPT_CAINFO, ca_z.ptr);
+        }
         try setOpt(easy, c.CURLOPT_CONNECTTIMEOUT_MS, connect_timeout_ms);
         try setOpt(easy, c.CURLOPT_NOPROGRESS, @as(c_long, 0));
         try setOpt(easy, c.CURLOPT_XFERINFOFUNCTION, xferInfoCallback);
@@ -932,7 +956,7 @@ pub const Transfer = struct {
         try setOpt(easy, c.CURLOPT_HTTP_VERSION, @as(c_long, if (std.mem.startsWith(u8, endpoint, "http://"))
             c.CURL_HTTP_VERSION_1_1
         else
-            c.CURL_HTTP_VERSION_2TLS));
+            c.CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE));
         if (builtin.os.tag == .macos and !std.mem.startsWith(u8, endpoint, "http://")) {
             try setOpt(easy, c.CURLOPT_SSL_OPTIONS, @as(c_long, c.CURLSSLOPT_NATIVE_CA));
         }
@@ -945,12 +969,29 @@ pub const Transfer = struct {
     }
 
     fn transportEvidence(self: *Transfer, result: c.CURLcode) !TransportEvidence {
+        var version: c_long = 0;
+        if (c.curl_easy_getinfo(self.easy, c.CURLINFO_HTTP_VERSION, &version) != c.CURLE_OK)
+            return error.InvalidHttpEvidence;
+        // A TLS peer that cannot establish H2 may reject the client preface
+        // before curl records any HTTP version. A negotiated H2 stream error
+        // retains version 2 and remains with the ordinary retry owner.
+        if (self.requires_h2 and result == c.CURLE_HTTP2 and version == 0)
+            return .{ .disposition = .unsupported_http_version, .response_bytes = self.response.length };
         const disposition: TransportDisposition = if (self.header_context.invalid)
             .invalid_headers
         else if (result != c.CURLE_OK)
             curlFailureDisposition(result, self.timeout_context.expired)
         else
             .success;
+        if (result == c.CURLE_OK) {
+            if (version != (if (!self.requires_h2)
+                c.CURL_HTTP_VERSION_1_1
+            else
+                c.CURL_HTTP_VERSION_2_0))
+            {
+                return .{ .disposition = .unsupported_http_version, .response_bytes = self.response.length };
+            }
+        }
         if (disposition != .success) return .{
             .disposition = disposition,
             .response_bytes = self.response.length,
@@ -983,6 +1024,18 @@ pub const Transfer = struct {
         self.timeout_context.last_progress = std.Io.Clock.Timestamp.now(self.timeout_context.io, .awake);
         self.timeout_context.armed = true;
         self.timeout_context.expired = false;
+    }
+
+    // curl does not invoke progress callbacks for an easy waiting in the
+    // multi connection queue. The reactor owner checks the same clock so
+    // waiting consumes this Attempt's inactivity interval too.
+    pub fn queueDeadlineExpired(self: *Transfer) bool {
+        const timeout = &self.timeout_context;
+        if (!timeout.armed) return false;
+        const now = std.Io.Clock.Timestamp.now(timeout.io, .awake);
+        if (timeout.last_progress.durationTo(now).raw.nanoseconds < timeout.inactivity_ns) return false;
+        timeout.expired = true;
+        return true;
     }
 
     pub fn deinit(self: *Transfer) void {
@@ -1045,6 +1098,13 @@ fn readCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?*a
     }
     context.offset += actual;
     return actual;
+}
+
+fn seekCallback(context_pointer: ?*anyopaque, offset: c.curl_off_t, origin: c_int) callconv(.c) c_int {
+    const context: *ReadContext = @ptrCast(@alignCast(context_pointer orelse return c.CURL_SEEKFUNC_FAIL));
+    if (origin != c.SEEK_SET or offset < 0 or offset > context.length) return c.CURL_SEEKFUNC_FAIL;
+    context.offset = @intCast(offset);
+    return c.CURL_SEEKFUNC_OK;
 }
 
 fn xferInfoCallback(
@@ -1306,10 +1366,23 @@ test "duplicate Retry-After headers retain both independent constraints" {
 test "idle reactor reports zero unprocessed completions without consuming messages" {
     try initialize();
     defer c.curl_global_cleanup();
-    var reactor = try Reactor.init();
-    defer reactor.deinit();
-    try std.testing.expectEqual(@as(u64, 0), try reactor.unprocessedCompletions());
-    try std.testing.expectEqual(@as(u64, 0), try reactor.unprocessedCompletions());
+    for ([_]usize{ 1, 100, 101, 1000 }) |capacity| {
+        var reactor = try Reactor.init(capacity);
+        defer reactor.deinit();
+        try std.testing.expectEqual(@as(u64, 0), try reactor.unprocessedCompletions());
+        try std.testing.expectEqual(@as(u64, 0), try reactor.unprocessedCompletions());
+    }
+}
+
+test "sealed POST source rewinds only within its complete length" {
+    var context = ReadContext{ .io = undefined, .file = undefined, .length = 129, .offset = 101 };
+    try std.testing.expectEqual(@as(c_int, c.CURL_SEEKFUNC_OK), seekCallback(&context, 0, c.SEEK_SET));
+    try std.testing.expectEqual(@as(u64, 0), context.offset);
+    try std.testing.expectEqual(@as(c_int, c.CURL_SEEKFUNC_OK), seekCallback(&context, 129, c.SEEK_SET));
+    try std.testing.expectEqual(@as(c_int, c.CURL_SEEKFUNC_FAIL), seekCallback(&context, 130, c.SEEK_SET));
+    try std.testing.expectEqual(@as(c_int, c.CURL_SEEKFUNC_FAIL), seekCallback(&context, -1, c.SEEK_SET));
+    try std.testing.expectEqual(@as(c_int, c.CURL_SEEKFUNC_FAIL), seekCallback(&context, 0, c.SEEK_CUR));
+    try std.testing.expectEqual(@as(u64, 129), context.offset);
 }
 
 test "curl disposition retries only temporary connection and explicit inactivity failures" {

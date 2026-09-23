@@ -34,8 +34,10 @@ notice, SQLite includes this blessing:
 
 ## curl 8.22.0
 
-Rui builds a pinned static curl 8.22.0 with HTTP, OpenSSL, Apple SecTrust on
-macOS and the supported threaded asynchronous resolver.
+Rui builds a pinned static curl 8.22.0 with HTTP/2 via nghttp2, OpenSSL, Apple
+SecTrust on macOS and the supported threaded asynchronous resolver. The build
+patches curl's automatic zero-response reused-connection POST retry and POST
+HTTP/2-to-HTTP/1.1 downgrade so an ambiguous POST is not silently replayed.
 
 - Source: `https://curl.se/download/curl-8.22.0.tar.xz`
 - Zig package content hash: `N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM`
@@ -44,6 +46,22 @@ macOS and the supported threaded asynchronous resolver.
 Copyright (c) Daniel Stenberg and contributors. Permission to use, copy,
 modify and distribute the software for any purpose with or without fee is
 granted under the conditions in that notice. The software is provided
+without warranty.
+
+## nghttp2 1.70.0
+
+Rui links the pinned static nghttp2 library for HTTP/2 framing; HTTP/3/QUIC is
+not built.
+
+- Source: `https://github.com/nghttp2/nghttp2/releases/download/v1.70.0/nghttp2-1.70.0.tar.xz`
+- Archive SHA-256: `e05cb1388eaca3830aded4ccf20044b6e1ac1a61411dcca11b0437c4285c8bc2`
+- Zig package content hash: `N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb`
+- License: MIT, reproduced in the source archive's `COPYING` file
+
+Copyright (c) 2012, 2014, 2015, 2016 Tatsuhiro Tsujikawa and nghttp2
+contributors. Permission is granted, free of
+charge, to use, copy, modify, merge, publish, distribute, sublicense and/or
+sell copies under the conditions in `COPYING`. The software is provided
 without warranty.
 
 ## OpenSSL 3.6.3

@@ -3185,8 +3185,8 @@ def main():
         stale_thread.join(timeout=5)
 
         # The smallest age-indexed selector keeps no scan state. With one live
-        # transport and one free slot it still finds a due Operation behind
-        # 100 older future retries within the light-discovery target.
+        # transport and a second permitted H1 connection it still finds a due
+        # Operation behind 100 older future retries within the light-discovery target.
         backlog_stall_release = threading.Event()
         backlog_retry_release = threading.Event()
         backlog_endpoint = SuccessEndpoint(
@@ -3235,7 +3235,7 @@ def main():
             backlog_store,
             f"http://127.0.0.1:{backlog_endpoint.server_port}/responses",
             "--active-capacity",
-            "2",
+            "101",
             "--test-retry-waits-ms",
             "2000,60000,60000",
         )
@@ -3421,7 +3421,7 @@ def main():
             recovery_store,
             f"http://127.0.0.1:{recovery_endpoint.server_port}/responses",
             "--active-capacity",
-            "2",
+            "101",
             "--test-before-launch-delay-ms",
             "100",
             "--test-retry-waits-ms",
@@ -3632,7 +3632,7 @@ def main():
             capacity_store,
             f"http://127.0.0.1:{capacity_endpoint.server_port}/responses",
             "--active-capacity",
-            "2",
+            "101",
         )
         processes.append(host)
         configure(state, capacity_store, "capacity-config-a", "direct/capacity-a", "model-a")
@@ -3661,6 +3661,91 @@ def main():
         capacity_endpoint.shutdown()
         capacity_endpoint.server_close()
         capacity_thread.join(timeout=5)
+
+        # H1 loopback is still supported, but a capacity-two Host now has
+        # only one provider connection. The second admitted Attempt waits in
+        # curl, then drains after the first releases it rather than spinning
+        # or opening a second socket.
+        h1_release = threading.Event()
+        h1_endpoint = SuccessEndpoint(
+            [],
+            responses_by_input={
+                "first": (sse_answer("h1-first", "h1-first-r", "model-a", "first answer")[0], h1_release),
+                "second": sse_answer("h1-second", "h1-second-r", "model-a", "second answer")[0],
+            },
+        )
+        h1_thread = threading.Thread(target=h1_endpoint.serve_forever, daemon=True)
+        h1_thread.start()
+        h1_store = state / "h1-queued-store"
+        h1_host = start_host(
+            h1_store,
+            f"http://127.0.0.1:{h1_endpoint.server_port}/responses",
+            "--active-capacity",
+            "2",
+        )
+        processes.append(h1_host)
+        configure(state, h1_store, "h1-config-first", "direct/h1-first", "model-a")
+        configure(state, h1_store, "h1-config-second", "direct/h1-second", "model-a")
+        message(state, h1_store, "h1-message-first", "direct/h1-first", "first")
+        wait_for(lambda: len(h1_endpoint.requests) == 1, "first H1 request")
+        message(state, h1_store, "h1-message-second", "direct/h1-second", "second")
+        wait_for(
+            lambda: command("inspect-session", "--store", h1_store, "--session", "direct/h1-second")["execution"]["custody_occupied"] == "2",
+            "second H1 Attempt queued under the connection bound",
+        )
+        assert len(h1_endpoint.requests) == 1, h1_endpoint.requests
+        h1_release.set()
+        wait_for(lambda: completed_observation(h1_store, "h1-message-second"), "queued H1 completion")
+        assert read_result(h1_store, "h1-message-first") == b"first answer"
+        assert read_result(h1_store, "h1-message-second") == b"second answer"
+        assert len(h1_endpoint.requests) == 2
+        stop_host(h1_host)
+        processes.remove(h1_host)
+        h1_endpoint.shutdown()
+        h1_endpoint.server_close()
+        h1_thread.join(timeout=5)
+
+        # A capacity-waiting easy has no curl progress callback. Its Attempt
+        # must still expire while the first H1 response makes steady progress.
+        slow_endpoint = SuccessEndpoint(
+            [ResponseSpec(b"x" * 2048, {}, 422, chunk_delay=0.015)]
+        )
+        slow_thread = threading.Thread(target=slow_endpoint.serve_forever, daemon=True)
+        slow_thread.start()
+        slow_store = state / "h1-queue-deadline-store"
+        slow_host = start_host(
+            slow_store,
+            f"http://127.0.0.1:{slow_endpoint.server_port}/responses",
+            "--test-provider-inactivity-seconds", "1",
+            "--test-retry-waits-ms", "60000,60000,60000",
+            active_capacity=2,
+        )
+        processes.append(slow_host)
+        configure(state, slow_store, "slow-config-first", "direct/slow-first", "model-a")
+        configure(state, slow_store, "slow-config-second", "direct/slow-second", "model-a")
+        message(state, slow_store, "slow-message-first", "direct/slow-first", "first")
+        wait_for(lambda: len(slow_endpoint.requests) == 1, "progressing first H1 response")
+        message(state, slow_store, "slow-message-second", "direct/slow-second", "second")
+
+        def queued_attempt_expired():
+            with sqlite3.connect(slow_store / "rui.sqlite3") as database:
+                return database.execute(
+                    "SELECT attempt_ordinal,uncertain,retry_due_at_ms FROM model_operation "
+                    "WHERE session_ref='direct/slow-second'"
+                ).fetchone()
+
+        retry = wait_for(
+            lambda: (row if (row := queued_attempt_expired()) and row[1] == 0 else None),
+            "queued H1 Attempt retry eligibility",
+        )
+        assert retry[0] == 1 and retry[2] is not None, retry
+        assert len(slow_endpoint.requests) == 1, slow_endpoint.requests
+        wait_for(lambda: observe(slow_store, "slow-message-first").get("result"), "progressing H1 completion", timeout=15)
+        stop_host(slow_host)
+        processes.remove(slow_host)
+        slow_endpoint.shutdown()
+        slow_endpoint.server_close()
+        slow_thread.join(timeout=5)
 
         # A failed Attempt commit rolls back all provenance and cannot produce
         # an endpoint launch.
