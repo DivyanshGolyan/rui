@@ -5,6 +5,7 @@ import json
 import fcntl
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import sys
@@ -27,7 +28,8 @@ class ManagedHandler(fixture.SuccessHandler):
     def do_POST(self):
         with self.server.lock:
             self.server.header_observations.append(
-                (self.path, self.headers.get("Authorization"), self.headers.get("ChatGPT-Account-ID"))
+                (self.path, self.headers.get("Authorization"), self.headers.get("ChatGPT-Account-ID"),
+                 self.headers.get("session-id"), self.headers.get("originator"))
             )
         super().do_POST()
 
@@ -174,7 +176,11 @@ def run():
         assert failure["result"]["code"] == "provider_http_401", failure
         time.sleep(0.4)
         assert len(endpoint.requests) == 4, "managed authentication rejection resent a model request"
-        assert all(path == "/responses" and bearer == "Bearer " + ACCESS and account == ACCOUNT for path, bearer, account in endpoint.header_observations)
+        assert len(endpoint.header_observations) == 4
+        session_ids = {row[3] for row in endpoint.header_observations}
+        assert len(session_ids) == 1 and re.fullmatch(r"[0-9a-f]{32}", next(iter(session_ids)))
+        assert all(path == "/responses" and bearer == "Bearer " + ACCESS and account == ACCOUNT and originator == "rui"
+                   for path, bearer, account, _, originator in endpoint.header_observations)
         fixture.stop_host(host)
         host = None
 

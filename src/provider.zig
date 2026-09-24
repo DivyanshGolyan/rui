@@ -39,6 +39,7 @@ pub const PreparedRequest = struct {
     charged: u64,
     budget: ScratchBudget,
     structured_output: bool,
+    session_affinity: [16]u8,
 
     pub fn deinit(self: *PreparedRequest) void {
         self.file.close(self.io);

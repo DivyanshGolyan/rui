@@ -74,13 +74,17 @@ def run():
         assert fixture.read_result(store, "federal") == b"answer-managed-federal"
         assert len(endpoint.streams) == 3 and len(endpoint.connections) == 1
         assert len({stream for _, stream, _, _ in endpoint.streams}) == 3
+        session_ids = {headers[b"session-id"] for headers in endpoint.request_headers}
+        assert len(session_ids) == 1 and re.fullmatch(rb"[0-9a-f]{32}", next(iter(session_ids)))
         for headers in endpoint.request_headers[:2]:
             assert headers[b":path"] == b"/responses"
             assert headers[b"authorization"] == ("Bearer " + codex.ACCESS).encode()
             assert headers[b"chatgpt-account-id"] == codex.ACCOUNT.encode()
+            assert headers[b"originator"] == b"rui"
             assert b"x-openai-fedramp" not in headers
         assert endpoint.request_headers[2][b"x-openai-fedramp"] == b"true"
         assert endpoint.request_headers[2][b"authorization"] == ("Bearer " + codex.ACCESS).encode()
+        assert endpoint.request_headers[2][b"originator"] == b"rui"
         observations = re.findall(
             rb"rui: codex transfer operation=\d+ http_version=(\d+) connection_id=(-?\d+) new_connections=(-?\d+)",
             diagnostics.tail(),

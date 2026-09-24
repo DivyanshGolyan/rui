@@ -1802,7 +1802,7 @@ fn launchPreparedRequest(
     var headers: model_adapter.Headers = .{};
     defer headers.deinit();
     if (credential) |value| {
-        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value) catch |err| {
+        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity) catch |err| {
             request.deinit();
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, token);
@@ -4674,6 +4674,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
             .charged = 2,
             .budget = .{ .used = &host.scratch_used, .limit = 2 },
             .structured_output = false,
+            .session_affinity = .{0} ** 16,
         };
         const owner = ModelPreparingSlot{ .token = token, .binding = binding };
         var slot = ExecutionSlot{ .model_preparing = owner };

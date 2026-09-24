@@ -59,12 +59,13 @@ pub fn validateAuthenticationEndpoint(endpoint: []const u8, ca_file: ?[]const u8
 pub const Headers = struct {
     bearer: [codex_credentials.max_token_bytes + 32:0]u8 = undefined,
     account: [codex_credentials.max_account_id_bytes + 32:0]u8 = undefined,
-    entries: [4][:0]const u8 = undefined,
+    session: [48:0]u8 = undefined,
+    entries: [6][:0]const u8 = undefined,
     length: usize = 0,
 
     /// Initialize in final stack storage. The entries are borrowed only until
     /// Transfer.start copies them into its owned curl header list.
-    pub fn init(self: *Headers, endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Credential) !void {
+    pub fn init(self: *Headers, endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Credential, affinity: [16]u8) !void {
         const access = credential.record.access_token.slice();
         const account_id = credential.record.account_id.slice();
         if (authentication.fixture) {
@@ -79,8 +80,10 @@ pub const Headers = struct {
         for (account_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialHeader;
         const bearer = try std.fmt.bufPrintZ(&self.bearer, "Authorization: Bearer {s}", .{access});
         const account = try std.fmt.bufPrintZ(&self.account, "ChatGPT-Account-ID: {s}", .{account_id});
-        self.entries = .{ "Accept: text/event-stream", bearer, account, "X-OpenAI-Fedramp: true" };
-        self.length = if (credential.record.fedramp) 4 else 3;
+        const session_id = std.fmt.bytesToHex(affinity, .lower);
+        const session = try std.fmt.bufPrintZ(&self.session, "session-id: {s}", .{&session_id});
+        self.entries = .{ "Accept: text/event-stream", bearer, account, session, "originator: rui", "X-OpenAI-Fedramp: true" };
+        self.length = if (credential.record.fedramp) 6 else 5;
     }
 
     pub fn slice(self: *const Headers) []const [:0]const u8 {
@@ -522,6 +525,7 @@ pub const Preparation = struct {
             .charged = self.writer.charged,
             .budget = self.writer.budget,
             .structured_output = self.settings.?.output_schema != null,
+            .session_affinity = self.settings.?.session_affinity,
         };
         self.active = false;
         self.phase = .complete;
@@ -838,6 +842,45 @@ const PreparationTestSetup = struct {
         try std.testing.expect(self.storage.submitMessage(&command, .{}) == .accepted);
     }
 };
+
+test "Codex affinity separates Sessions and Stores and survives reopening" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    try setup.configure("config-a", "direct/a");
+    try setup.submit("message-a", "key-a", "direct/a", "same input");
+    var admitted_a = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding_a = try admitted_a.permit.consume();
+    var view_a = try setup.storage.openHistoricalView(binding_a);
+    const affinity_a = (try view_a.settings()).session_affinity;
+    view_a.close();
+
+    try setup.configure("config-b", "direct/b");
+    try setup.submit("message-b", "key-b", "direct/b", "same input");
+    var admitted_b = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding_b = try admitted_b.permit.consume();
+    var view_b = try setup.storage.openHistoricalView(binding_b);
+    try std.testing.expect(!std.mem.eql(u8, &affinity_a, &(try view_b.settings()).session_affinity));
+    view_b.close();
+
+    try setup.storage.close();
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
+    setup.storage = try store.Store.open(std.testing.io, database, setup.root);
+    var reopened = try setup.storage.openHistoricalView(binding_a);
+    try std.testing.expectEqual(affinity_a, (try reopened.settings()).session_affinity);
+    reopened.close();
+
+    var other: PreparationTestSetup = undefined;
+    try other.init();
+    defer other.close();
+    try other.configure("config-a", "direct/a");
+    try other.submit("message-a", "key-a", "direct/a", "same input");
+    var admitted_other = (try other.storage.admitNextModelAttempt(.{})).?;
+    var other_view = try other.storage.openHistoricalView(try admitted_other.permit.consume());
+    try std.testing.expect(!std.mem.eql(u8, &affinity_a, &(try other_view.settings()).session_affinity));
+    other_view.close();
+}
 
 const DrainedRequest = struct { bytes: []u8, length: u64, digest: [32]u8 };
 
