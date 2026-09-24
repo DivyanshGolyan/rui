@@ -130,6 +130,29 @@ pub fn build(b: *std.Build) void {
     );
     codex_integration_step.dependOn(&codex_integration.step);
 
+    const credential_actor = b.addExecutable(.{
+        .name = "codex-credential-actor",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/codex_credential_actor.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    credential_actor.root_module.link_libc = true;
+    credential_actor.root_module.addImport("codex_credentials", b.createModule(.{
+        .root_source_file = b.path("src/codex_credentials.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    }));
+    const credential_integration = b.addSystemCommand(&.{"python3"});
+    credential_integration.addFileArg(b.path("tests/integration/codex_credential_integration.py"));
+    credential_integration.addArtifactArg(credential_actor);
+    const credential_integration_step = b.step(
+        "codex-credential-integration",
+        "Run native cross-process credential lock and refresh-generation transitions",
+    );
+    credential_integration_step.dependOn(&credential_integration.step);
+
     const codex_h2_integration = b.addSystemCommand(&.{"python3"});
     codex_h2_integration.addFileArg(b.path("tests/integration/codex_h2_integration.py"));
     codex_h2_integration.addArtifactArg(release_safe);
