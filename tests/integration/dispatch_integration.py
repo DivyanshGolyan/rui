@@ -14,14 +14,14 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, start_ready_process, stop_process
+from host_process import HostDiagnostics, TestHTTPServer, start_ready_process, stop_process
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
 ROOT = pathlib.Path.cwd()
 
 
-class FailureEndpoint(http.server.ThreadingHTTPServer):
+class FailureEndpoint(TestHTTPServer):
     allow_reuse_address = True
 
     def __init__(self):
@@ -278,7 +278,7 @@ def classification_population(prefix, forbidden_effect, count=32):
     return calls
 
 
-class SuccessEndpoint(http.server.ThreadingHTTPServer):
+class SuccessEndpoint(TestHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, responses, responses_by_input=None):

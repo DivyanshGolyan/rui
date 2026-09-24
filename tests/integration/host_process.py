@@ -1,5 +1,6 @@
 """Bounded startup and cleanup for Host processes used by integration evidence."""
 
+import http.server
 import json
 import os
 import selectors
@@ -10,6 +11,13 @@ import time
 
 READINESS_LIMIT = 16 * 1024
 STDERR_TAIL_LIMIT = 16 * 1024
+
+
+class TestHTTPServer(http.server.ThreadingHTTPServer):
+    """Stop fixture accept loops promptly; response timing belongs to each case."""
+
+    def serve_forever(self, poll_interval=0.01):
+        super().serve_forever(poll_interval=poll_interval)
 
 
 class HostDiagnostics:

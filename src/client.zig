@@ -849,7 +849,25 @@ fn delayedResponse(io: std.Io, fd: std.posix.fd_t, delay: std.Io.Duration, respo
     writeAll(fd, response) catch {};
 }
 
+test "Host processing wait starts inactivity only after the first response byte" {
+    const sockets = try socketPair();
+    defer closeTestDescriptor(sockets[0]);
+    const writer = try std.Thread.spawn(.{}, delayedResponse, .{
+        std.testing.io,
+        sockets[1],
+        std.Io.Duration.fromMilliseconds(50),
+        empty_test_response,
+    });
+    defer writer.join();
+    const head = try readResponseHeadWithInactivity(sockets[0], 10);
+    try std.testing.expectEqual(@as(u16, 200), head.status);
+}
+
 test "Host processing wait does not consume response transfer inactivity" {
+    // The fast test above checks the same boundary; this opt-in witness checks
+    // the production 60-second value with real elapsed time.
+    if (!std.mem.eql(u8, std.process.Environ.getPosix(std.testing.environ, "RUI_TEST_EXACT_INACTIVITY") orelse "", "1"))
+        return error.SkipZigTest;
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
     const writer = try std.Thread.spawn(.{}, delayedResponse, .{
