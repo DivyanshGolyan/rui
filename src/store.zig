@@ -716,12 +716,7 @@ const EncodedStringReader = struct {
         var value: u21 = 0;
         for (0..4) |_| {
             const byte = try self.requiredRaw();
-            const digit: u8 = switch (byte) {
-                '0'...'9' => byte - '0',
-                'a'...'f' => byte - 'a' + 10,
-                'A'...'F' => byte - 'A' + 10,
-                else => return error.InvalidEncodedString,
-            };
+            const digit = std.fmt.charToDigit(byte, 16) catch return error.InvalidEncodedString;
             value = value * 16 + digit;
         }
         return value;
@@ -5673,12 +5668,7 @@ fn readOutputHex(source: anytype) !u21 {
     var value: u21 = 0;
     for (0..4) |_| {
         const byte = try source.take();
-        const digit: u8 = switch (byte) {
-            '0'...'9' => byte - '0',
-            'a'...'f' => byte - 'a' + 10,
-            'A'...'F' => byte - 'A' + 10,
-            else => return error.InvalidJsonEscape,
-        };
+        const digit = std.fmt.charToDigit(byte, 16) catch return error.InvalidJsonEscape;
         value = value * 16 + digit;
     }
     return value;

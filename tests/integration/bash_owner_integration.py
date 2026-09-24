@@ -15,11 +15,6 @@ def execution_idle(store, session):
     return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0" else None
 
 
-def custody_released(store, session):
-    report = fixture.command("inspect-session", "--store", store, "--session", session)
-    return report if report["execution"]["custody_occupied"] == "0" else None
-
-
 def continuation_endpoint(names):
     specs = [
         fixture.ResponseSpec(
@@ -124,7 +119,7 @@ def main():
             "slot reuse after incremental preparation failure",
         )
         for name in ("preparation-failure", "slot-reuse"):
-            fixture.wait_for(lambda name=name: custody_released(store, f"direct/{name}"), f"{name} cleanup")
+            fixture.wait_for(lambda name=name: bash_fixture.execution_custody_idle(store, f"direct/{name}"), f"{name} cleanup")
         fixture.stop_host(host)
         host = None
         endpoint.shutdown()
@@ -157,7 +152,7 @@ def main():
                 lambda: continuations[0].body_finished_at,
                 f"{name} continuation",
             )
-            fixture.wait_for(lambda: custody_released(isolated_store, f"direct/{name}"), f"{name} cleanup")
+            fixture.wait_for(lambda: bash_fixture.execution_custody_idle(isolated_store, f"direct/{name}"), f"{name} cleanup")
             fixture.stop_host(host)
             host = None
             endpoint.shutdown()
@@ -185,7 +180,7 @@ def main():
             "self-unlink continuation",
         )
         resources = fixture.wait_for(
-            lambda: custody_released(isolated_store, f"direct/{name}"),
+            lambda: bash_fixture.execution_custody_idle(isolated_store, f"direct/{name}"),
             "self-unlink cleanup",
         )["execution"]
         assert resources["dispatch_fenced"] is False, resources

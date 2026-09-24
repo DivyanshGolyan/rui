@@ -12,6 +12,10 @@ Maintained executable checks and recorded qualification live in [tests/qualifica
 
 [Resource profiling sources](resource-profiling-sources.md) evaluates reusable CPU, memory, waiting and I/O evidence, platform tools and measurement validity; recommendations only, with no runtime or qualification change.
 
+[Development build latency](build-times-sources.md) maps Zig 0.16 build/cache controls onto Rui's steps and records bounded Linux timings for initially uncached steps and warm-cache runs; recommendations only, not edit-rebuild or clean-cache qualification.
+
+[Warm integration-test wall time](integration-test-wall-time-sources.md) cites Zig and Python primary sources for build scheduling and fixture shutdown, with measured Linux baselines and the fast/full gate boundary; it does not qualify platform latency or cold compilation.
+
 [Permission ownership prior art](permission-prior-art.md) compares Pi, DeepSeek Harness, OpenCode v2 and Codex CLI approval ownership, grant lifetimes and client reconnect versus process restart; pinned source evidence only, with no accepted contract change.
 
 [Rejected tool-call prior art](rejected-tool-call-prior-art.md) compares malformed provider output, invalid parameters, unknown tools, execution failures, denial, sibling isolation and model feedback across the same four runtimes; the accepted contract now uses its provider-envelope versus call-descriptor boundary for issue #198.
@@ -30,7 +34,7 @@ Maintained executable checks and recorded qualification live in [tests/qualifica
 
 [Command-key collision evidence](idempotency-collision-evidence.md) compares stable-key conflicts, replacement and enforced namespaces against AWS, Stripe, TigerBeetle and RFC 9562; no contract change or runtime qualification.
 
-These artifacts answer bounded questions; they are not production implementation or release certification. [ARCHITECTURE.md](../ARCHITECTURE.md) owns current behavior and [VERIFICATION.md](../VERIFICATION.md) owns required proof. Recorded native measurements are Mac-specific. Synthetic SQLite schemas, historical evaluator binaries, model assumptions and experimental limits do not establish current Linux behavior, wire compatibility or whole-Host guarantees.
+These artifacts answer bounded questions; they are not production implementation or release certification. [ARCHITECTURE.md](../ARCHITECTURE.md) owns current behavior and [VERIFICATION.md](../VERIFICATION.md) owns required proof. Historical native runtime/resource measurements are generally Mac-specific; the development build timings above are Linux-specific and do not qualify runtime behavior. Synthetic SQLite schemas, historical evaluator binaries, model assumptions and experimental limits do not establish current Linux behavior, wire compatibility or whole-Host guarantees.
 
 Run commands below from the repository root, sequentially in a disposable checkout: some runners overwrite adjacent results or generate reports. Native probes generally need macOS, Apple Clang, Python 3, Zig 0.16 and the pinned SQLite package; inspect each runner's dependency handling. Pure Python probes use the standard library unless stated. Keep source, compiler/library metadata, raw results and counterexamples together. New observations must identify their own machine/build rather than silently inheriting recorded provenance.
 

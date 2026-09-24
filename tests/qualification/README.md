@@ -20,7 +20,7 @@ The current `zig build measure-execution-service` path is ungated empirical meas
 
 | Purpose | Entry point |
 | --- | --- |
-| Native tests and process integration | `zig build check`; Zig tests plus [admission](../integration/admission_integration.sh), [dispatch](../integration/dispatch_integration.py), [Bash execution](../integration/bash_integration.py), [Bash lifecycle faults](../integration/bash_lifecycle_integration.py), [controls](../integration/control_integration.py) and [process checks](../integration/host_process_test.py) |
+| Native tests and process integration | `zig build check` for parallel functional feedback; `zig build check-full` for serial process evidence plus the exact 60-second client inactivity witness. Both include Zig tests and [admission](../integration/admission_integration.sh), [dispatch](../integration/dispatch_integration.py), [Bash execution](../integration/bash_integration.py), [Bash lifecycle faults](../integration/bash_lifecycle_integration.py), [controls](../integration/control_integration.py) and [process checks](../integration/host_process_test.py). The fast gate reports one native skip. |
 | Shared production-turn logic | `zig build test-logic`; [execution turn](../../src/execution_turn.zig) and portable custody/scratch owners without Host, Bash or transport fixtures |
 | Supported-target compilation | `zig build cross-check`; use `zig build cross-check-linux` in Linux-only environments and `zig build cross-check-macos` where Xcode or Command Line Tools provides the Apple SDK |
 | Go measurement-runner tests | `GOTOOLCHAIN=local go -C tests/qualification mod download`, then `zig build measurement-check` |

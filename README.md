@@ -20,10 +20,13 @@ Requires Zig 0.16.0, Python 3, Perl, a C toolchain and Make. The build pins nati
 zig build
 zig build test-logic
 zig build check
+zig build check-full
 ./zig-out/bin/rui serve \
   --store /absolute/path/to/private-store \
   --active-capacity 8
 ```
+
+`check` runs the native and process-case corpus concurrently for warm development feedback, then runs Debug admission without the parallel load; it skips one real-time 61-second client deadline witness. Run `check-full` before claiming full gate evidence: it includes that witness and runs process integrations serially so their latency observations are not perturbed by unrelated suites. Both use ReleaseSafe native tests, ReleaseSafe and Debug Host builds, and a ReleaseSmall production build; see [canonical gates](VERIFICATION.md#canonical-gates).
 
 The production default Active Capacity remains 1,000. Startup rejects a requested population when the process descriptor limit cannot support it, so this development command selects a smaller population that fits ordinary finite limits. Model transport is disabled by default. Development testing requires an explicit `--provider-endpoint`: HTTPS (negotiated HTTP/2 required) or loopback HTTP/1.1, with no authentication attached. A private test CA can be selected with `--provider-ca-file PATH`; peer and hostname verification remain enabled. Run `./zig-out/bin/rui` to print command usage.
 
