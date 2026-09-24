@@ -81,7 +81,7 @@ def start(store, endpoint, *extra):
 
 
 def run():
-    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-codex."))
+    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-codex.")).resolve()
     credential_dir = state / "private"
     credential_dir.mkdir(mode=0o700)
     credential_file = credential_dir / "codex.json"
@@ -130,6 +130,7 @@ def run():
 
         credentials(credential_file)
         host = start(store, url)
+        diagnostics = HostDiagnostics(host)
         fixture.message(state, store, "message", "managed/session", "run the proof")
         action = fixture.wait_for(lambda: bash.action_for(store, "managed/session"), "managed Bash proposal")
         assert fixture.read_action(store, "managed/session", action["action"], "call-id") == b"managed-call"
@@ -183,6 +184,10 @@ def run():
                    for path, bearer, account, _, originator in endpoint.header_observations)
         fixture.stop_host(host)
         host = None
+        diagnostics.close()
+        assert b"rui: codex transfer" not in diagnostics.tail()
+        assert not diagnostics.matching("codex_transfer"), "ordinary Host emitted test-only transfer observations"
+        diagnostics = None
 
         # Block the worker on the same stable file lock used by login while
         # a public stop is accepted. Releasing it must not revive dispatch.

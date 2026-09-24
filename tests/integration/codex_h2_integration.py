@@ -18,7 +18,7 @@ from host_process import HostDiagnostics, start_ready_process
 
 
 def run():
-    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-codex-h2."))
+    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-codex-h2.")).resolve()
     private = root / "private"
     private.mkdir(mode=0o700)
     path = private / "codex.json"
@@ -40,11 +40,25 @@ def run():
     complete = False
     store = root / "store"
     try:
+        # Inherited stdio (3), fixed Host (9/11), clients (42), one execution
+        # place (10), auth worker (8/10), and self-wake (1). Keep the fixture's
+        # descriptor limit on the Host child, not its TLS peer or callers.
+        required = {"linux": 73, "darwin": 77}[sys.platform]
+        serve = [fixture.RUI, "serve", "--store", store, "--active-capacity", "1",
+                 "--test-codex-fixture-endpoint", f"https://localhost:{endpoint.server_address[1]}/responses",
+                 "--provider-ca-file", root / "cert.pem", "--test-phase-trace"]
+        def limited(limit):
+            return ["sh", "-c", 'ulimit -n "$1"; shift; exec "$@"',
+                    "rui-managed-descriptors", str(limit), *serve]
+
+        rejected = subprocess.run(limited(required - 1), capture_output=True, text=True, timeout=15)
+        assert rejected.returncode != 0 and "descriptor capacity insufficient" in rejected.stderr, rejected.stderr
+        assert f"required={required}" in rejected.stderr and "authentication=" in rejected.stderr
+        assert not store.exists(), "managed capacity rejection created Store files"
         host, _ = start_ready_process(
-            [fixture.RUI, "serve", "--store", store, "--active-capacity", "1",
-             "--test-codex-fixture-endpoint", f"https://localhost:{endpoint.server_address[1]}/responses",
-             "--provider-ca-file", root / "cert.pem"],
-            required_fields={"execution": "enabled", "curl": "8.22.0"},
+            limited(required),
+            required_fields={"execution": "enabled", "curl": "8.22.0",
+                             "descriptor_requirement": str(required), "descriptor_limit": str(required)},
         )
         diagnostics = HostDiagnostics(host)
         configuration = fixture.command(
@@ -85,14 +99,11 @@ def run():
         assert endpoint.request_headers[2][b"x-openai-fedramp"] == b"true"
         assert endpoint.request_headers[2][b"authorization"] == ("Bearer " + codex.ACCESS).encode()
         assert endpoint.request_headers[2][b"originator"] == b"rui"
-        observations = re.findall(
-            rb"rui: codex transfer operation=\d+ http_version=(\d+) connection_id=(-?\d+) new_connections=(-?\d+)",
-            diagnostics.tail(),
-        )
+        observations = diagnostics.matching("codex_transfer")
         assert len(observations) == 3, observations
-        assert [int(row[0]) for row in observations] == [3, 3, 3], observations
-        assert int(observations[0][1]) >= 0 and len({row[1] for row in observations}) == 1, observations
-        assert [int(row[2]) for row in observations] == [1, 0, 0], observations
+        assert [row["http_version"] for row in observations] == [3, 3, 3], observations
+        assert observations[0]["connection_id"] >= 0 and len({row["connection_id"] for row in observations}) == 1, observations
+        assert [row["new_connections"] for row in observations] == [1, 0, 0], observations
         print("codex synthetic TLS/H2 production transfers passed: ALPN h2, one connection, three streams, curl version 3, reuse 1/0/0, conditional FedRAMP header")
         complete = True
     finally:

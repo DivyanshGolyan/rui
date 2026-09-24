@@ -25,9 +25,12 @@ def observations(host):
 
     def drain():
         for line in host.stderr:
-            match = re.search(rb"rui: codex transfer (operation=\d+ http_version=\d+ connection_id=-?\d+ new_connections=\d+ correlation_present=(?:true|false) correlation_sha256=[0-9a-f]+ alpn=unavailable)", line)
-            if match and len(records) < 8:
-                records.append(dict(part.split("=", 1) for part in match.group(1).decode().split()))
+            if b'"rui_test_phase":"codex_transfer"' in line and len(records) < 8:
+                record = json.loads(line)
+                records.append({key: record[key] for key in (
+                    "operation", "http_version", "connection_id", "new_connections",
+                    "correlation_present", "correlation_sha256", "alpn",
+                )})
             rejection = re.search(rb"rui: provider output rejected for operation (\d+): ([A-Za-z][A-Za-z0-9_]*)", line)
             if rejection:
                 print(f"Provider validation rejected operation {rejection[1].decode()}: {rejection[2].decode()}", flush=True)
@@ -82,7 +85,7 @@ def reasoning_token_count(store, operation):
 def run(model, external_credential=None):
     if external_credential is not None and not external_credential.is_absolute():
         raise ValueError("credential path must be absolute")
-    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-codex-live."))
+    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-codex-live.")).resolve()
     private = state / "credentials"
     private.mkdir(mode=0o700)
     store = state / "store"
@@ -110,7 +113,7 @@ def run(model, external_credential=None):
 
         def start():
             process, ready = start_ready_process(
-                [caller.RUI, "serve", "--store", store, "--active-capacity", "2", "--codex"],
+                [caller.RUI, "serve", "--store", store, "--active-capacity", "2", "--codex", "--test-phase-trace"],
                 required_fields={"execution": "enabled"}, timeout=20,
             )
             records, thread = observations(process)

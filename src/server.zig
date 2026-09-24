@@ -202,6 +202,7 @@ pub fn serve(
         max_ordinary_clients,
         control_headroom,
         provider_endpoint != null,
+        authentication != null,
         builtin.os.tag,
     );
     descriptor_capacity.validate(
@@ -210,7 +211,7 @@ pub fn serve(
     ) catch |err| {
         if (err == error.DescriptorCapacityInsufficient) {
             std.debug.print(
-                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} self_wake={d}\n",
+                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d}\n",
                 .{
                     active_capacity,
                     descriptor_requirement.total,
@@ -219,6 +220,7 @@ pub fn serve(
                     descriptor_requirement.fixed_host,
                     descriptor_requirement.clients,
                     descriptor_requirement.execution,
+                    descriptor_requirement.authentication,
                     descriptor_requirement.self_wake,
                 },
             );
@@ -1903,20 +1905,21 @@ fn completeTransfer(
     const owner = active.owner;
     traceCompletionQueue(host, completion.queued_after, owner.binding);
     defer traceOperation(host, "provider_completion_serviced", owner.binding);
-    if (host.authentication != null) {
+    if (host.authentication != null and host.faults.test_phase_trace) {
         const observation = active.transfer.protocolObservation();
         const correlation = active.transfer.requestId();
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(correlation, &digest, .{});
-        std.debug.print("rui: {s} transfer operation={d} http_version={d} connection_id={d} new_connections={d} correlation_present={} correlation_sha256={x} alpn=unavailable\n", .{
-            model_adapter.provider_label,
+        var trace: protocol.ResponseBuffer = .{};
+        trace.appendFmt("{{\"rui_test_phase\":\"codex_transfer\",\"operation\":\"{d}\",\"http_version\":{d},\"connection_id\":{d},\"new_connections\":{d},\"correlation_present\":{s},\"correlation_sha256\":\"{x}\",\"alpn\":\"unavailable\"}}", .{
             owner.binding.operation_id,
             observation.http_version,
             observation.connection_id,
             observation.new_connections,
-            correlation.len != 0,
+            if (correlation.len != 0) "true" else "false",
             digest,
-        });
+        }) catch unreachable;
+        writeTestTrace(host, &trace);
     }
     const evidence = switch (completion.outcome) {
         .response_capture_failed => |failure| {

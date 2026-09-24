@@ -8,7 +8,7 @@ zig build -Doptimize=ReleaseSafe
 python3 tests/integration/codex_h2_integration.py zig-out/bin/rui
 ```
 
-The synthetic Codex fixture needs Python `h2==4.3.0`, OpenSSL and on macOS `TMPDIR=/private/tmp` to avoid the `/var` symlink rejected by the credential owner. Both native runs passed: TLS peer negotiated ALPN h2, three managed streams used one connection, curl reported HTTP version 3 (HTTP/2) each time and new-connection counts 1/0/0. The snapshots below are **requested allocator bytes**, not physical footprint or isolated per-request allocations. Peaks are lifetime peaks since each Host began.
+The synthetic Codex fixture needs Python `h2==4.3.0` and OpenSSL. The earlier macOS runs set `TMPDIR=/private/tmp` to avoid the `/var` symlink rejected by the credential owner; current runners resolve only their generated temporary root before deriving a credential path. Both native runs passed: TLS peer negotiated ALPN h2, three managed streams used one connection, curl reported HTTP version 3 (HTTP/2) each time and new-connection counts 1/0/0. The snapshots below are **requested allocator bytes**, not physical footprint or isolated per-request allocations. Peaks are lifetime peaks since each Host began.
 
 | Platform / instrumented binary SHA-256 | Ready curl live/peak | Ready OpenSSL live/peak | Operations 1/2/3 curl live (peak at 3) | Operations 1/2/3 OpenSSL live (peak) |
 | --- | ---: | ---: | ---: | ---: |
