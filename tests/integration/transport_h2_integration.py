@@ -9,6 +9,7 @@ import socketserver
 import sqlite3
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -27,7 +28,7 @@ class Endpoint(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, tls, population, refuse_at=None, dead_reuse=False, bad_header=False, drop_once=False, sse=False, isolation=None, after_progress=False, early_protocol_error=False, eager_sse=False):
+    def __init__(self, tls, population, refuse_at=None, dead_reuse=False, bad_header=False, drop_once=False, sse=False, isolation=None, after_progress=False, early_protocol_error=False, eager_sse=False, observed_shape=False):
         super().__init__(("127.0.0.1", 0), StreamHandler)
         self.tls = tls
         self.population = population
@@ -43,10 +44,12 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.after_progress = after_progress
         self.early_protocol_error = early_protocol_error
         self.eager_sse = eager_sse
+        self.observed_shape = observed_shape
         self.answers = {}
         self.isolation = isolation
         self.stream_ids = {}
         self.resets = []
+        self.offered_bytes = 0
         self.ready = threading.Event()
         self.lock = threading.Lock()
 
@@ -118,6 +121,60 @@ class H1Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+def observed_shape_answer(text):
+    return "x" * (48 * 32 - len(text)) + text
+
+
+def observed_shape_sse(stream, text):
+    # Mac Codex 0.154.0 HTTP SSE: small deltas, but response lifecycle data
+    # measured 37–39 KiB. Padding is synthetic; no private payload is replayed.
+    answer = observed_shape_answer(text)
+    response_id = f"response-{stream}"
+    body, _, _ = dispatch.sse_answer(response_id, f"reasoning-{stream}", f"message-{stream}", answer)
+    events = [json.loads(record[6:]) for record in body.split(b"\n\n") if record.startswith(b"data: {")]
+
+    def padded(event, container, field, size):
+        container[field] = ""
+        remaining = size - len(json.dumps(event, separators=(",", ":")).encode())
+        assert remaining >= 0
+        container[field] = "x" * remaining
+        assert len(json.dumps(event, separators=(",", ":")).encode()) == size
+        return event
+
+    response = {"id": response_id, "status": "in_progress", "output": [], "metadata": {}}
+    created = padded({"type": "response.created", "response": response}, response["metadata"], "synthetic_padding", 37_217)
+    progress = {"type": "response.in_progress", "response": response}
+    assert len(json.dumps(progress, separators=(",", ":")).encode()) == 37_221
+    deltas = []
+    for index in range(0, len(answer), 32):
+        delta = {"type": "response.output_text.delta", "item_id": f"message-{stream}",
+                 "output_index": 1, "content_index": 0, "delta": answer[index:index + 32]}
+        deltas.append(padded(delta, delta, "obfuscation", 218))
+    assert len(deltas) == 48
+    completed = events[-1]
+    completed["response"]["metadata"] = {}
+    padded(completed, completed["response"]["metadata"], "synthetic_padding", 39_316)
+    return dispatch.encode_sse([created, progress, *events[:3], *deltas, *events[3:]]), answer
+
+
+def host_physical_peak(pid):
+    if sys.platform != "darwin":
+        return None
+    report = subprocess.run(
+        ["/usr/bin/footprint", "-f", "bytes", "-p", str(pid)],
+        capture_output=True, text=True, check=True, timeout=30,
+    ).stdout
+    return int(re.search(r"^\s*phys_footprint_peak: (\d+) B$", report, re.M).group(1))
+
+
+def open_descriptors(pid):
+    if os.path.isdir(f"/proc/{pid}/fd"):
+        return len(os.listdir(f"/proc/{pid}/fd"))
+    rows = subprocess.check_output(["/usr/sbin/lsof", "-n", "-P", "-p", str(pid)],
+                                   text=True).splitlines()
+    return sum(bool(re.fullmatch(r"\d+[rwu]?", row.split()[3])) for row in rows[1:])
+
+
 class StreamHandler(socketserver.BaseRequestHandler):
     def handle(self):
         sock = self.request
@@ -170,7 +227,9 @@ class StreamHandler(socketserver.BaseRequestHandler):
                         self.server.streams.append((self.client_address, event.stream_id, text, body))
                         self.server.stream_ids[text] = event.stream_id
                         if self.server.sse:
-                            if self.server.after_progress and text == "stalled-0":
+                            if self.server.observed_shape:
+                                answer = observed_shape_answer(text)
+                            elif self.server.after_progress and text == "stalled-0":
                                 # Only the interrupt target exceeds the 10-KiB write-gate threshold.
                                 answer = "L" * 80_000 + text
                             else:
@@ -227,10 +286,16 @@ class StreamHandler(socketserver.BaseRequestHandler):
                         for stream in pending:
                             if self.server.sse:
                                 text = next(text for _, stream_id, text, _ in self.server.streams if stream_id == stream)
-                                payload, _, _ = dispatch.sse_answer(
-                                    f"response-{stream}", f"reasoning-{stream}",
-                                    f"message-{stream}", self.server.answers[text].decode(),
-                                )
+                                if self.server.observed_shape:
+                                    payload, answer = observed_shape_sse(stream, text)
+                                    assert answer.encode() == self.server.answers[text]
+                                else:
+                                    payload, _, _ = dispatch.sse_answer(
+                                        f"response-{stream}", f"reasoning-{stream}",
+                                        f"message-{stream}", self.server.answers[text].decode(),
+                                    )
+                                with self.server.lock:
+                                    self.server.offered_bytes += len(payload)
                                 conn.send_headers(stream, [
                                     (":status", "200"), ("content-type", "text/event-stream"),
                                     ("content-length", str(len(payload))),
@@ -278,13 +343,13 @@ class StreamHandler(socketserver.BaseRequestHandler):
                 self.server.ready.set()
 
 
-def round_trip(root, endpoint, capacity):
+def round_trip(root, endpoint, capacity, ca_file):
     store = root / f"store-{capacity}"
     host = dispatch.start_host(
         store,
         f"https://localhost:{endpoint.server_address[1]}/responses",
         "--provider-ca-file",
-        str(root / "cert.pem"),
+        str(ca_file),
         active_capacity=capacity,
     )
     try:
@@ -311,15 +376,20 @@ def round_trip(root, endpoint, capacity):
                 )
                 assert dispatch.observe(store, key)["result"]["status"] == "completed"
                 assert dispatch.read_result(store, key) == endpoint.answers[f"h2-{capacity}-{round_number}-{index}"]
+            # Store settlement precedes the execution owner's custody release.
+            dispatch.wait_for(
+                lambda: dispatch.command(
+                    "inspect-session", "--store", store, "--session", f"direct/h2-{capacity}-0"
+                )["execution"]["custody_occupied"] == "0",
+                f"H2 custody drainage after round {round_number}", timeout=20,
+            )
             observation = dispatch.command(
                 "inspect-session", "--store", store, "--session", f"direct/h2-{capacity}-0"
             )["execution"]
             assert observation["custody_occupied"] == "0", observation
             assert observation["scratch_used_bytes"] == "0", observation
-            if os.path.isdir(f"/proc/{host.pid}/fd"):
-                idle_fds.append(len(os.listdir(f"/proc/{host.pid}/fd")))
-        if idle_fds:
-            assert idle_fds[1] <= idle_fds[0], idle_fds
+            idle_fds.append(open_descriptors(host.pid))
+        assert idle_fds[1] <= idle_fds[0], idle_fds
         streams = list(endpoint.streams)
         assert len(streams) == 2 * capacity
         assert len({(address, stream) for address, stream, _, _ in streams}) == len(streams)
@@ -328,11 +398,16 @@ def round_trip(root, endpoint, capacity):
             for round_number in range(2) for index in range(capacity)
         }
         assert len(endpoint.connections) == 1, endpoint.connections
+        if endpoint.observed_shape:
+            assert endpoint.offered_bytes >= 2 * capacity * (37_217 + 37_221 + 39_316 + 48 * 218)
         print(json.dumps({
+            "case": "observed_shape" if endpoint.observed_shape else "round_trip",
             "capacity": capacity, "rounds": 2, "alpn": "h2",
             "tcp_connections": len(endpoint.connections), "streams": len(streams),
             "request_bytes": sum(len(body) for _, _, _, body in streams),
-            "completed_idle_fds": idle_fds or None,
+            "offered_sse_bytes": endpoint.offered_bytes,
+            "host_physical_peak_bytes": host_physical_peak(host.pid) if endpoint.observed_shape else None,
+            "completed_idle_fds": idle_fds,
         }), flush=True)
     finally:
         dispatch.stop_host(host)
@@ -348,13 +423,6 @@ def queued_h1(root):
     try:
         host = dispatch.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
                                    active_capacity=capacity)
-        def open_descriptors():
-            if os.path.isdir(f"/proc/{host.pid}/fd"):
-                return len(os.listdir(f"/proc/{host.pid}/fd"))
-            rows = subprocess.check_output(["/usr/sbin/lsof", "-n", "-P", "-p", str(host.pid)],
-                                           text=True).splitlines()
-            return sum(bool(re.fullmatch(r"\d+[rwu]?", row.split()[3])) for row in rows[1:])
-
         idle_fds = []
         for round_number in range(2):
             for index in range(capacity):
@@ -378,7 +446,7 @@ def queued_h1(root):
                 with endpoint.lock:
                     assert len(endpoint.requests) == 1 and endpoint.active == 1, endpoint.requests
                     assert len(endpoint.connections) == 1, endpoint.connections
-                held_fds = open_descriptors()
+                held_fds = open_descriptors(host.pid)
                 assert held_cpu <= 1, f"queued H1 Host used {held_cpu} CPU seconds in 3 wall seconds"
                 for index in range(capacity):
                     pending = dispatch.observe(store, f"h1-message-0-{index}")
@@ -397,7 +465,7 @@ def queued_h1(root):
             execution = dispatch.command("inspect-session", "--store", store,
                                          "--session", "direct/h1-0")["execution"]
             assert execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0", execution
-            idle_fds.append(open_descriptors())
+            idle_fds.append(open_descriptors(host.pid))
         with endpoint.lock:
             assert len(endpoint.requests) == 2 * capacity, endpoint.requests
             assert {text for text, _ in endpoint.requests} == {
@@ -466,7 +534,9 @@ def queued_h1_inactivity(root):
 
 
 def stalled_capture(root, endpoint, after_progress=False):
-    phase = "after-progress" if after_progress else "before-first-write"
+    phase = ("observed-" if endpoint.observed_shape else "") + (
+        "after-progress" if after_progress else "before-first-write"
+    )
     records = root / phase
     records.mkdir(mode=0o700)
     store = root / f"stalled-capture-{phase}-store"
@@ -503,6 +573,7 @@ def stalled_capture(root, endpoint, after_progress=False):
         assert int(held["custody_occupied"]) > 0, held
         assert dispatch.observe(store, "stalled-message-1").get("result") is None
         stalled_rss_kib = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(host.pid)]))
+        held_physical_peak = host_physical_peak(host.pid) if endpoint.observed_shape else None
         os.write(keeper, b"r")
         released = True
         for index in range(100):
@@ -520,11 +591,15 @@ def stalled_capture(root, endpoint, after_progress=False):
         assert execution["scratch_used_bytes"] == "0", execution
         assert len(endpoint.connections) == 1, endpoint.connections
         idle_rss_kib = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(host.pid)]))
-        print(json.dumps({"case": "stalled_local_capture", "phase": phase, "live_streams": 100,
+        idle_physical_peak = host_physical_peak(host.pid) if endpoint.observed_shape else None
+        print(json.dumps({"case": "stalled_observed_shape" if endpoint.observed_shape else "stalled_local_capture",
+                          "phase": phase, "live_streams": 100,
                           "connections": 1, "control_before_release": True,
                           "capture_written_before_gate": gate_event["written_bytes"],
                           "stalled_host_rss_kib": stalled_rss_kib,
-                          "completed_idle_host_rss_kib": idle_rss_kib}), flush=True)
+                          "completed_idle_host_rss_kib": idle_rss_kib,
+                          "held_physical_peak_bytes": held_physical_peak,
+                          "completed_idle_physical_peak_bytes": idle_physical_peak}), flush=True)
     finally:
         if not released:
             os.write(keeper, b"r")
@@ -879,11 +954,38 @@ def negotiated_h2_early_error(root, endpoint):
                       "result": result["code"]}), flush=True)
 
 
+def observed_shape_cases(root, tls):
+    (root / "observed-shape").mkdir(mode=0o700)
+    for capacity in (1, 100):
+        endpoint = Endpoint(tls, capacity, sse=True, observed_shape=True)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        thread.start()
+        try:
+            round_trip(root / "observed-shape", endpoint, capacity, root / "cert.pem")
+        finally:
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
+    for after_progress in (False, True):
+        endpoint = Endpoint(tls, 100, sse=True, observed_shape=True)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        thread.start()
+        try:
+            stalled_capture(root, endpoint, after_progress)
+        finally:
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
+
+
 def main():
+    observed_only = len(sys.argv) == 3 and sys.argv[2] == "--observed-shape-only"
+    assert len(sys.argv) == 2 or observed_only
     with tempfile.TemporaryDirectory(prefix="rui-h2-") as tmp:
         root = pathlib.Path(tmp)
-        queued_h1(root)
-        queued_h1_inactivity(root)
+        if not observed_only:
+            queued_h1(root)
+            queued_h1_inactivity(root)
         subprocess.run([
             "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
             "-keyout", str(root / "key.pem"), "-out", str(root / "cert.pem"),
@@ -892,16 +994,20 @@ def main():
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(root / "cert.pem", root / "key.pem")
         tls.set_alpn_protocols(["h2"])
+        if observed_only:
+            observed_shape_cases(root, tls)
+            return
         for capacity in (1, 100):
             endpoint = Endpoint(tls, capacity, sse=True)
             thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
             thread.start()
             try:
-                round_trip(root, endpoint, capacity)
+                round_trip(root, endpoint, capacity, root / "cert.pem")
             finally:
                 endpoint.shutdown()
                 endpoint.server_close()
                 thread.join(timeout=5)
+        observed_shape_cases(root, tls)
         for after_progress in (False, True):
             endpoint = Endpoint(tls, 100, sse=True, after_progress=after_progress)
             thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
