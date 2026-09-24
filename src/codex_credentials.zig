@@ -62,26 +62,38 @@ pub const Lease = struct {
 };
 
 pub fn lease(path: []const u8) !Lease {
-    var owner = try Owner.open(path);
-    errdefer owner.close();
-    const lock = try owner.acquireLock(.shared);
-    errdefer lock.close(io);
-    var record = try owner.readRecord();
-    errdefer std.crypto.secureZero(u8, std.mem.asBytes(&record));
-    try owner.syncDirectory();
-    if (record.state != .ready) return error.RefreshRequiresLogin;
-    return .{ .owner = owner, .lock = lock, .record = record };
+    var result: Lease = undefined;
+    try leaseInto(path, &result);
+    return result;
+}
+
+/// Initialize the lease in its final owner storage; on failure no lock or
+/// token-bearing record remains with the caller.
+pub fn leaseInto(path: []const u8, destination: *Lease) !void {
+    destination.owner = try Owner.open(path);
+    errdefer destination.owner.close();
+    destination.lock = try destination.owner.acquireLock(.shared);
+    errdefer destination.lock.close(io);
+    try destination.owner.readRecordInto(&destination.record);
+    errdefer std.crypto.secureZero(u8, std.mem.asBytes(&destination.record));
+    try destination.owner.syncDirectory();
+    if (destination.record.state != .ready) return error.RefreshRequiresLogin;
 }
 
 pub fn load(path: []const u8) !Record {
+    var result: Record = undefined;
+    try loadInto(path, &result);
+    return result;
+}
+
+pub fn loadInto(path: []const u8, destination: *Record) !void {
     var owner = try Owner.open(path);
     defer owner.close();
     const lock = try owner.acquireLock(.shared);
     defer lock.close(io);
-    var record = try owner.readRecord();
-    errdefer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+    try owner.readRecordInto(destination);
+    errdefer std.crypto.secureZero(u8, std.mem.asBytes(destination));
     try owner.syncDirectory();
-    return record;
 }
 
 /// `expected_generation == null` is an explicit login. It may replace an
@@ -206,6 +218,12 @@ const Owner = struct {
     }
 
     fn readRecord(self: *Owner) !Record {
+        var result: Record = undefined;
+        try self.readRecordInto(&result);
+        return result;
+    }
+
+    fn readRecordInto(self: *Owner, destination: *Record) !void {
         const file = try self.parent.openFile(io, self.finalName(), .{
             .allow_directory = false,
             .follow_symlinks = false,
@@ -218,7 +236,7 @@ const Owner = struct {
         defer std.crypto.secureZero(u8, &bytes);
         const count = try file.readPositionalAll(io, bytes[0..@intCast(stat.size + 1)], 0);
         if (count != stat.size) return error.CredentialFileChanged;
-        return parse(bytes[0..count]);
+        try parseInto(bytes[0..count], destination);
     }
 
     fn publish(self: *Owner, record: *const Record) !void {
@@ -355,11 +373,17 @@ fn encode(record: *const Record, destination: []u8) ![]const u8 {
 }
 
 fn parse(bytes: []const u8) !Record {
+    var result: Record = undefined;
+    try parseInto(bytes, &result);
+    return result;
+}
+
+fn parseInto(bytes: []const u8, record: *Record) !void {
     var lines = std.mem.splitScalar(u8, bytes, '\n');
     if (!std.mem.eql(u8, lines.next() orelse return error.InvalidCredentialFile, "version=3"))
         return error.UnsupportedCredentialVersion;
-    var record: Record = .{ .generation = try decimal(u64, field(lines.next(), "generation=")), .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 0, .refreshed_at = 0 };
-    errdefer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+    record.* = .{ .generation = try decimal(u64, field(lines.next(), "generation=")), .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 0, .refreshed_at = 0 };
+    errdefer std.crypto.secureZero(u8, std.mem.asBytes(record));
     try record.account_id.set(try field(lines.next(), "account_id="));
     const fedramp = try field(lines.next(), "fedramp=");
     if (std.mem.eql(u8, fedramp, "1")) record.fedramp = true else if (!std.mem.eql(u8, fedramp, "0")) return error.InvalidCredentialFile;
@@ -372,8 +396,7 @@ fn parse(bytes: []const u8) !Record {
         return error.InvalidCredentialState;
     if (!std.mem.eql(u8, lines.next() orelse return error.InvalidCredentialFile, "") or lines.next() != null)
         return error.TrailingCredentialData;
-    try validateRecord(&record);
-    return record;
+    try validateRecord(record);
 }
 
 fn field(line: ?[]const u8, prefix: []const u8) ![]const u8 {

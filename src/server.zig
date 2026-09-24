@@ -584,12 +584,14 @@ const AuthWorker = struct {
     authentication: model_adapter.Authentication,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
-    state: enum { idle, requested, ready, failed } = .idle,
-    credential: ?model_adapter.Credential = null,
+    state: enum { idle, requested, ready, in_use, failed } = .idle,
+    // Only .ready/.in_use own this final storage. The execution thread borrows
+    // it through launch; the worker never publishes a value copy of the lease.
+    credential: model_adapter.Credential = undefined,
     failure: ?anyerror = null,
     stopping: bool = false,
 
-    const Result = union(enum) { ready: model_adapter.Credential, failed: anyerror };
+    const Result = union(enum) { ready: *const model_adapter.Credential, failed: anyerror };
 
     fn request(self: *AuthWorker) void {
         self.mutex.lockUncancelable(self.io);
@@ -603,12 +605,10 @@ const AuthWorker = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return switch (self.state) {
-            .idle, .requested => null,
+            .idle, .requested, .in_use => null,
             .ready => result: {
-                const value = self.credential.?;
-                self.credential = null;
-                self.state = .idle;
-                break :result .{ .ready = value };
+                self.state = .in_use;
+                break :result .{ .ready = &self.credential };
             },
             .failed => result: {
                 const err = self.failure.?;
@@ -619,13 +619,22 @@ const AuthWorker = struct {
         };
     }
 
+    fn finish(self: *AuthWorker) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        std.debug.assert(self.state == .in_use);
+        self.credential.release();
+        self.state = .idle;
+    }
+
     fn stop(self: *AuthWorker, thread: std.Thread) void {
         self.mutex.lockUncancelable(self.io);
         self.stopping = true;
         self.condition.broadcast(self.io);
         self.mutex.unlock(self.io);
         thread.join();
-        if (self.credential) |*value| value.release();
+        std.debug.assert(self.state != .in_use);
+        if (self.state == .ready) self.credential.release();
     }
 
     fn run(self: *AuthWorker) void {
@@ -638,15 +647,16 @@ const AuthWorker = struct {
                 return;
             }
             self.mutex.unlock(self.io);
-            const acquired = model_adapter.acquireCredential(self.io, self.authentication);
-            self.mutex.lockUncancelable(self.io);
-            if (acquired) |value| {
-                self.credential = value;
-                self.state = .ready;
-            } else |err| {
+            model_adapter.acquireCredentialInto(self.io, self.authentication, &self.credential) catch |err| {
+                self.mutex.lockUncancelable(self.io);
                 self.failure = err;
                 self.state = .failed;
-            }
+                self.condition.broadcast(self.io);
+                self.mutex.unlock(self.io);
+                continue;
+            };
+            self.mutex.lockUncancelable(self.io);
+            self.state = .ready;
             self.condition.broadcast(self.io);
             self.mutex.unlock(self.io);
         }
@@ -1721,15 +1731,15 @@ fn advanceModelPreparation(
 }
 
 fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) bool {
-    const result = host.auth_worker.?.take() orelse return false;
+    const worker = host.auth_worker.?;
+    const result = worker.take() orelse return false;
     const active = &slot.model_authenticating;
     const owner = active.owner;
     var request = active.request;
     if (result == .ready) {
-        var credential = result.ready;
-        defer credential.release();
+        defer worker.finish();
         if (!active.cancelled and host.launchAllowed()) {
-            launchPreparedRequest(host, reactor, slot, owner, &request, &credential);
+            launchPreparedRequest(host, reactor, slot, owner, &request, result.ready);
         } else {
             request.deinit();
             finishCustodyNow(host, owner.token);
@@ -3594,6 +3604,53 @@ test "model retry and inactivity defaults match the owning resource contract" {
         store_module.maximum_model_attempts,
         @as(u64, default_retry_waits_ms.len + 1),
     );
+}
+
+test "authentication handoff borrows the sole credential lease and releases it once" {
+    const credentials = @import("codex_credentials.zig");
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(io, "private", .{
+        .permissions = .fromMode(0o700),
+    });
+    private.close(io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/private/auth", .{root[0..root_len]});
+    var record = credentials.Record{
+        .generation = 0,
+        .account_id = .{},
+        .id_token = .{},
+        .access_token = .{},
+        .refresh_token = .{},
+        .expires_at = 4_102_444_800,
+        .refreshed_at = 1_750_000_000,
+    };
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+    try record.account_id.set("test-account");
+    try record.id_token.set("aaa.bbb.ccc");
+    try record.access_token.set("aaa.bbb.ccc");
+    try record.refresh_token.set("test-refresh");
+    try credentials.install(path, &record, null);
+
+    var worker = AuthWorker{ .io = io, .authentication = .{ .path = path } };
+    try credentials.leaseInto(path, &worker.credential);
+    worker.state = .ready;
+    defer if (worker.state == .ready or worker.state == .in_use) worker.credential.release();
+    const borrowed = worker.take().?.ready;
+    try std.testing.expect(borrowed == &worker.credential);
+    try std.testing.expect(worker.take() == null);
+    try std.testing.expectEqualStrings("test-refresh", borrowed.record.refresh_token.slice());
+    worker.finish();
+    try std.testing.expect(worker.state == .idle);
+    worker.request();
+    try std.testing.expect(worker.state == .requested);
+    // The released lock can be acquired again for the next generation.
+    var next: credentials.Lease = undefined;
+    try credentials.leaseInto(path, &next);
+    next.release();
 }
 
 test "cleanup delay follows elapsed time and preserves custody reuse" {

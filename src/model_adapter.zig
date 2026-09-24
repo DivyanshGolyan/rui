@@ -26,8 +26,8 @@ pub const observation_names: provider.ObservationNames = .{
 pub const Authentication = struct { path: []const u8, fixture: bool = false };
 pub const Credential = codex_credentials.Lease;
 
-pub fn acquireCredential(io: std.Io, authentication: Authentication) !Credential {
-    return codex_auth.acquire(io, authentication.path, authentication.fixture);
+pub fn acquireCredentialInto(io: std.Io, authentication: Authentication, destination: *Credential) !void {
+    return codex_auth.acquireInto(io, authentication.path, authentication.fixture, destination);
 }
 
 pub fn authenticationFailureCode(err: anyerror) []const u8 {

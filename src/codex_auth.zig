@@ -76,8 +76,9 @@ fn validateSelected(record: *const credentials.Record, fixture: bool) !void {
         return error.InvalidCredentialExpiry;
 }
 
-pub fn acquire(io: std.Io, path: []const u8, fixture: bool) !credentials.Lease {
-    var record = try credentials.load(path);
+pub fn acquireInto(io: std.Io, path: []const u8, fixture: bool, destination: *credentials.Lease) !void {
+    var record: credentials.Record = undefined;
+    try credentials.loadInto(path, &record);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
     if (record.state != .ready) return error.RefreshRequiresLogin;
     try validateSelected(&record, fixture);
@@ -108,13 +109,12 @@ pub fn acquire(io: std.Io, path: []const u8, fixture: bool) !credentials.Lease {
             }
         }.exchange);
     }
-    var result = try credentials.lease(path);
-    errdefer result.release();
-    try validateSelected(&result.record, fixture);
+    try credentials.leaseInto(path, destination);
+    errdefer destination.release();
+    try validateSelected(&destination.record, fixture);
     const launch_now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_s));
-    if (result.record.expires_at != 0 and result.record.expires_at <= launch_now)
+    if (destination.record.expires_at != 0 and destination.record.expires_at <= launch_now)
         return error.ExpiredCredential;
-    return result;
 }
 
 const TokenWire = struct {

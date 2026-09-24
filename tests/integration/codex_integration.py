@@ -42,6 +42,15 @@ def credentials(path, *, state="ready", access=ACCESS, fedramp=False):
     path.chmod(0o600)
 
 
+def lock_available(lock):
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    fcntl.flock(lock, fcntl.LOCK_UN)
+    return True
+
+
 def proposal_with_private_reasoning(command):
     reasoning = {"type": "reasoning", "id": "managed-reasoning", "summary": [],
                  "encrypted_content": "synthetic-private-reasoning"}
@@ -209,6 +218,11 @@ def run():
         assert configured["answer"]["status"] == "accepted"
         fixture.message(state, stop_store, "handoff-message", "managed/handoff", "do not launch")
         diagnostics.wait("prepared_before_handoff", timeout=10)
+        # Header construction borrows the worker's lease; its stable lock
+        # must remain owned through the final launch decision, even if a stop
+        # wins that handoff. A copied/early-released owner would allow this.
+        with open(credential_dir / ".codex.json.lock", "r+b") as lock:
+            assert not lock_available(lock), "authenticated handoff released its credential lease early"
         stopped = fixture.command(
             "stop-session", "--store", stop_store, "--record", state / "handoff-stop.json",
             "--key", "handoff-stop", "--session", "managed/handoff",
@@ -217,6 +231,8 @@ def run():
         fixture.wait_for(lambda: bash.execution_custody_idle(stop_store, "managed/handoff"),
                          "stopped authenticated handoff custody", timeout=10)
         assert len(endpoint.requests) == 4, "stopped authenticated handoff launched a model request"
+        with open(credential_dir / ".codex.json.lock", "r+b") as lock:
+            fixture.wait_for(lambda: lock_available(lock), "credential lease release after stopped handoff")
 
         schema = state / "unsupported-schema.json"
         schema.write_text('{"type":"object"}')
