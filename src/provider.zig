@@ -157,9 +157,8 @@ pub const Preparation = struct {
         model_prefix,
         model,
         envelope,
-        baseline,
-        baseline_content,
-        baseline_suffix,
+        instructions_content,
+        input_prefix,
         history_next,
         entry_comma,
         entry_prefix,
@@ -286,16 +285,12 @@ pub const Preparation = struct {
                 },
                 .model_prefix => self.emitFixed("{\"model\":\"", .model),
                 .model => self.emitJsonBytes(self.settings.?.model.slice(), .envelope),
-                .envelope => self.emitFixed("\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[", .baseline),
-                .baseline => self.emitFixed("{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"", .baseline_content),
-                .baseline_content => {
+                .envelope => self.emitFixed("\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"", .instructions_content),
+                .instructions_content => {
                     const reader = self.view.openContent(self.settings.?.baseline_instructions) catch |err| return .{ .failed = err };
-                    self.emitJsonReader(reader, .baseline_suffix);
+                    self.emitJsonReader(reader, .input_prefix);
                 },
-                .baseline_suffix => {
-                    self.input_comma = true;
-                    self.emitFixed("\"}]}", .history_next);
-                },
+                .input_prefix => self.emitFixed("\",\"input\":[", .history_next),
                 .history_next => {
                     const entry = self.view.nextEntry(self.after_position) catch |err| return .{ .failed = err };
                     self.current_entry = entry;
@@ -317,7 +312,7 @@ pub const Preparation = struct {
                         const prefix = if (entry.kind == .user)
                             "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\""
                         else
-                            "{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"";
+                            "{\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"";
                         self.emitFixed(prefix, .entry_content);
                     }
                 },
@@ -2300,8 +2295,7 @@ const composed_replayed_call_a = "{\"type\":\"function_call\",\"id\":\"order-ite
 const composed_replayed_call_b = "{\"type\":\"function_call\",\"id\":\"order-item-b\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"order-call-b\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}\"}";
 
 const composed_expected =
-    "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[" ++
-    "{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"\"}]}," ++
+    "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[" ++
     "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"do work\"}]}," ++
     composed_replayed ++ "," ++
     composed_replayed_call_a ++ "," ++
@@ -2312,7 +2306,7 @@ const composed_expected =
     "\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":{\"type\":\"object\"}}}}";
 
 test "request preparation minimal golden is exact across schedules" {
-    const expected = "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}]";
+    const expected = "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}]";
     const full_expected = expected ++ ",\"tools\":[]}";
     const schedules = [_][2]usize{ .{ 16, 2 }, .{ 1, 1 }, .{ 16384, 64 }, .{ 7, 3 } };
     var first_bytes: ?[]u8 = null;
@@ -2502,7 +2496,7 @@ test "request preparation freezes settings at admission" {
     try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
     const result = try drainPreparation(&preparation, 3, 2, 8192);
     defer std.testing.allocator.free(result.bytes);
-    const expected = "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"input\":[{\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}],\"tools\":[" ++
+    const expected = "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}],\"tools\":[" ++
         bash_tool_json ++ "," ++ edit_tool_json ++ "]}";
     try std.testing.expectEqualStrings(expected, result.bytes);
     try std.testing.expectEqual(@as(u64, expected.len), result.length);

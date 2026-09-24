@@ -487,8 +487,8 @@ def prove_reused_session(state):
         assert fixture.read_result(store, "reuse-second") == b"second-turn-answer"
         assert len(endpoint.requests) == 4, endpoint.requests
         initial_request = json.loads(endpoint.requests[0])
+        assert initial_request["instructions"] == "", initial_request
         assert initial_request["input"] == [
-            {"role": "system", "content": [{"type": "input_text", "text": ""}]},
             {"role": "user", "content": [{"type": "input_text", "text": "first work"}]},
         ], initial_request
         second_request = json.loads(endpoint.requests[2])

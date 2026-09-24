@@ -1261,14 +1261,13 @@ def main():
         wait_for(lambda: len(success_endpoint.requests) == 2, "two successful requests")
         first_request = json.loads(success_endpoint.requests[0])
         second_request = json.loads(success_endpoint.requests[1])
+        assert first_request["instructions"] == second_request["instructions"] == ""
         assert first_request["input"] == [
-            {"role": "system", "content": [{"type": "input_text", "text": ""}]},
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
         ]
         expected_reasoning = dict(first_reasoning)
         expected_reasoning.pop("created_by")
         assert second_request["input"] == [
-            {"role": "system", "content": [{"type": "input_text", "text": ""}]},
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
             expected_reasoning,
             first_message_item,
@@ -1752,7 +1751,7 @@ def main():
         assert expected_private in frozen_retry["input"], frozen_retry["input"]
         assert continued_message in frozen_retry["input"], frozen_retry["input"]
         assert not any(
-            item.get("role") == "system"
+            item.get("role") == "developer"
             and item.get("content", [{}])[0].get("text") == "new instructions"
             for item in frozen_retry["input"]
         )
@@ -1991,8 +1990,8 @@ def main():
         pending_request = json.loads(pending_endpoint.requests[1])
         expected_pending_reasoning = dict(pending_reasoning)
         expected_pending_reasoning.pop("created_by")
+        assert pending_request["instructions"] == ""
         assert pending_request["input"] == [
-            {"role": "system", "content": [{"type": "input_text", "text": ""}]},
             {"role": "user", "content": [{"type": "input_text", "text": "before cutoff"}]},
             expected_pending_reasoning,
             pending_message_item,
@@ -2542,15 +2541,15 @@ def main():
             "store": False,
             "stream": True,
             "include": ["reasoning.encrypted_content"],
+            "instructions": "A",
             "input": [
-                {"role": "system", "content": [{"type": "input_text", "text": "A"}]},
                 {
                     "role": "user",
                     "content": [{"type": "input_text", "text": 'first "message"\n'}],
                 },
-                {"role": "system", "content": [{"type": "input_text", "text": "B"}]},
-                {"role": "system", "content": [{"type": "input_text", "text": "A"}]},
-                {"role": "system", "content": [{"type": "input_text", "text": "A"}]},
+                {"role": "developer", "content": [{"type": "input_text", "text": "B"}]},
+                {"role": "developer", "content": [{"type": "input_text", "text": "A"}]},
+                {"role": "developer", "content": [{"type": "input_text", "text": "A"}]},
             ],
             "tools": [
                 {
@@ -2606,6 +2605,7 @@ def main():
         assert successor["input"] == expected["input"] + [
             {"role": "user", "content": [{"type": "input_text", "text": "later message"}]}
         ], successor
+        assert successor["instructions"] == "A", successor
         assert successor["model"] == "model-a", successor
         assert successor["tools"] == [], successor
         assert "text" not in successor, successor
