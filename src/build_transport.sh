@@ -3,9 +3,11 @@ set -eu
 
 openssl_source=$1
 curl_source=$2
-prefix=$3
-target=$4
-zig=$5
+nghttp2_source=$3
+curl_patch=$4
+prefix=$5
+target=$6
+zig=$7
 
 case "$target" in
     aarch64-macos)
@@ -49,6 +51,8 @@ esac
 build_root=$(mktemp -d "${TMPDIR:-/tmp}/rui-transport.XXXXXX")
 openssl_build="$build_root/openssl"
 curl_build="$build_root/curl"
+curl_patched="$build_root/curl-source"
+nghttp2_build="$build_root/nghttp2"
 log="$build_root/build.log"
 
 cleanup() {
@@ -57,7 +61,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-mkdir -p "$openssl_build" "$curl_build" "$prefix"
+mkdir -p "$openssl_build" "$curl_build" "$nghttp2_build" "$prefix"
 : >"$log"
 
 if [ "${sdk:-}" ]; then
@@ -85,12 +89,32 @@ fi
 }
 
 (
+    cd "$nghttp2_build"
+    CC="$cc" AR="$zig ar" RANLIB="$zig ranlib" \
+    sh "$nghttp2_source/configure" --host="$curl_host" \
+        --prefix="$prefix" --enable-lib-only --disable-shared --enable-static
+    # The pinned release includes generated Autotools files. Archive extraction
+    # can reorder mtimes and spuriously request a local aclocal/automake.
+    make -j4 ACLOCAL=true AUTOMAKE=true AUTOCONF=true AUTOHEADER=true
+    make install ACLOCAL=true AUTOMAKE=true AUTOCONF=true AUTOHEADER=true
+) >>"$log" 2>&1 || {
+    tail -100 "$log" >&2
+    exit 1
+}
+
+# Patch only the isolated build copy. curl must reject missing H2 ALPN before
+# a POST, avoid ambiguous automatic POST retries, and bound paused-stream credit.
+cp -R "$curl_source" "$curl_patched"
+(cd "$curl_patched" && git apply "$curl_patch") >>"$log" 2>&1
+
+(
     cd "$curl_build"
     CC="$cc" AR="$zig ar" RANLIB="$zig ranlib" \
-    PKG_CONFIG_PATH="$prefix/lib/pkgconfig" sh "$curl_source/configure" \
+    PKG_CONFIG_PATH="$prefix/lib/pkgconfig" sh "$curl_patched/configure" \
         --host="$curl_host" \
         --prefix="$prefix" \
         --with-openssl="$prefix" \
+        --with-nghttp2="$prefix" \
         "$curl_trust" \
         --enable-threaded-resolver \
         --disable-shared --enable-static --enable-http \
@@ -102,7 +126,7 @@ fi
         --disable-docs --disable-manual --disable-libcurl-option --disable-dependency-tracking
     make -C lib -j4
     mkdir -p "$prefix/include/curl" "$prefix/lib"
-    cp "$curl_source"/include/curl/*.h "$prefix/include/curl/"
+    cp "$curl_patched"/include/curl/*.h "$prefix/include/curl/"
     cp lib/.libs/libcurl.a "$prefix/lib/libcurl.a"
     "$zig" ranlib "$prefix/lib/libcurl.a"
 ) >>"$log" 2>&1 || {
@@ -112,6 +136,8 @@ fi
 
 grep '^#define LIBCURL_VERSION "8.22.0"' "$prefix/include/curl/curlver.h" >/dev/null
 grep '^# *define OPENSSL_VERSION_STR "3.6.3"' "$prefix/include/openssl/opensslv.h" >/dev/null
+grep '^#define NGHTTP2_VERSION "1.70.0"' "$prefix/include/nghttp2/nghttp2ver.h" >/dev/null
 test -f "$prefix/lib/libcurl.a"
+test -f "$prefix/lib/libnghttp2.a"
 test -f "$prefix/lib/libssl.a"
 test -f "$prefix/lib/libcrypto.a"

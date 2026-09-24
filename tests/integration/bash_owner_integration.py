@@ -118,6 +118,8 @@ def main():
             lambda: continuations[1].body_finished_at,
             "slot reuse after incremental preparation failure",
         )
+        for name in ("preparation-failure", "slot-reuse"):
+            fixture.wait_for(lambda name=name: bash_fixture.execution_custody_idle(store, f"direct/{name}"), f"{name} cleanup")
         fixture.stop_host(host)
         host = None
         endpoint.shutdown()
@@ -150,6 +152,7 @@ def main():
                 lambda: continuations[0].body_finished_at,
                 f"{name} continuation",
             )
+            fixture.wait_for(lambda: bash_fixture.execution_custody_idle(isolated_store, f"direct/{name}"), f"{name} cleanup")
             fixture.stop_host(host)
             host = None
             endpoint.shutdown()

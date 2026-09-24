@@ -31,17 +31,17 @@ func TestReduceStatusesIncludesEveryFamilyAndPreservesPrecedence(t *testing.T) {
 	}
 }
 
-func TestMemoryEvidenceRequiresCompleteAggregationWithoutApplyingAQuota(t *testing.T) {
-	incomplete := wholeRui(measurement.ProcessSample{LiveDescendantProcesses: 1})
-	if got := memoryEvidenceStatus(incomplete); got != "incomplete" {
-		t.Fatalf("live descendant reduced to %s", got)
+func TestMemoryEvidenceBoundsOnlyHostAndRequiresMeasuredPeak(t *testing.T) {
+	under := wholeRui(measurement.ProcessSample{LiveDescendantProcesses: 1, Footprint: measurement.Footprint{LifetimePeakBytes: hostFootprintTargetBytes - 1, LifetimePeakTolerance: 1}})
+	if got := memoryEvidenceStatus(under); got != "passed" {
+		t.Fatalf("Host-only boundary reduced to %s", got)
 	}
-	large := wholeRui(measurement.ProcessSample{Footprint: measurement.Footprint{LifetimePeakBytes: 257 * 1024 * 1024}})
-	if got := memoryEvidenceStatus(large); got != "passed" {
-		t.Fatalf("complete footprint observation reduced to %s", got)
+	over := wholeRui(measurement.ProcessSample{Footprint: measurement.Footprint{LifetimePeakBytes: hostFootprintTargetBytes, LifetimePeakTolerance: 1}})
+	if got := memoryEvidenceStatus(under, over); got != "target_miss" {
+		t.Fatalf("upper-bound miss reduced to %s", got)
 	}
-	if _, hasRetiredTarget := large["within_256_mib_target"]; hasRetiredTarget {
-		t.Fatalf("complete footprint observation retained retired target: %v", large)
+	if got := memoryEvidenceStatus(map[string]any{"status": "complete"}); got != "incomplete" {
+		t.Fatalf("missing Host peak reduced to %s", got)
 	}
 }
 
@@ -77,7 +77,7 @@ func TestSpillVerdictRequiresEverySuccessPredicate(t *testing.T) {
 	resolution := "completed"
 	zero := 0
 	validFacts := spillFacts{IntegrityCheck: "ok", CompletedTurns: 1, CanonicalOutputItems: 2, AssistantProjections: 1, OperationCount: 1, AttemptOrdinal: &attempt, ResolutionCode: &resolution, Uncertain: &zero}
-	completeMemory := map[string]any{"status": "complete"}
+	completeMemory := wholeRui(measurement.ProcessSample{Footprint: measurement.Footprint{LifetimePeakBytes: hostFootprintTargetBytes - 1}})
 	validExecution := map[string]any{"dispatch_fenced": false, "custody_occupied": "0", "scratch_used_bytes": "0"}
 	if status, _, _ := spillVerdict(true, true, false, 1, completeMemory, completeMemory, validExecution, validFacts, "", "observed"); status != "passed" {
 		t.Fatalf("valid spill success reduced to %s", status)
@@ -116,7 +116,7 @@ func TestSpillVerdictRequiresExactCleanRollback(t *testing.T) {
 	uncertain := 1
 	retryDue := int64(0)
 	rollback := spillFacts{IntegrityCheck: "ok", PartialTurns: 1, OperationCount: 1, AttemptOrdinal: &attempt, Uncertain: &uncertain, RetryDueAtMS: &retryDue}
-	completeMemory := map[string]any{"status": "complete"}
+	completeMemory := wholeRui(measurement.ProcessSample{Footprint: measurement.Footprint{LifetimePeakBytes: hostFootprintTargetBytes - 1}})
 	message := "dispatch fenced after model output import failure: OutOfMemory"
 	if status, clean, expected := spillVerdict(false, false, true, 1, completeMemory, nil, nil, rollback, message, "unavailable"); status != "expected_memory_failure" || !clean || !expected {
 		t.Fatalf("valid rollback = %s clean=%t expected=%t", status, clean, expected)
@@ -162,7 +162,7 @@ func TestSpillVerdictFailurePrecedesMemoryEvidence(t *testing.T) {
 	resolution := "completed"
 	validFacts := spillFacts{IntegrityCheck: "ok", CompletedTurns: 1, CanonicalOutputItems: 2, AssistantProjections: 1, OperationCount: 1, AttemptOrdinal: &attempt, ResolutionCode: &resolution, Uncertain: &zero}
 	execution := map[string]any{"dispatch_fenced": false, "custody_occupied": "0", "scratch_used_bytes": "0"}
-	completeMemory := map[string]any{"status": "complete"}
+	completeMemory := wholeRui(measurement.ProcessSample{Footprint: measurement.Footprint{LifetimePeakBytes: hostFootprintTargetBytes - 1}})
 	if status, _, _ := spillVerdict(true, true, false, 1, completeMemory, completeMemory, execution, validFacts, "", "unavailable"); status != "incomplete" {
 		t.Fatalf("missing write evidence reduced to %s", status)
 	}
@@ -238,7 +238,7 @@ func TestSpillDiagnosticsRequireEffectiveConfiguration(t *testing.T) {
 func TestSpillDiagnosticCacheSizeSettingPreservesRawPragmaMeaning(t *testing.T) {
 	decode := func(value string) sqliteDiagnostic {
 		t.Helper()
-		encoded := []byte(`{"rui_test_phase":"sqlite_diagnostic","subject":"measure/spill","process_memory_scope":"SQLite process-global allocator; one Store per Host","cache_used_scope":"connection-current approximate pager bytes","cache_spills_scope":"connection cumulative mid-transaction spills","hard_heap_limit_bytes":16777216,"cache_spills":0,"cache_size_setting":` + value + `,"cache_size_setting_scope":"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages","cache_spill_threshold":991,"synchronous":3,"journal_mode":"delete"}`)
+		encoded := []byte(`{"rui_test_phase":"sqlite_diagnostic","subject":"measure/spill","process_memory_scope":"SQLite process-global allocator; one Store per Host","cache_used_scope":"connection-current approximate pager bytes","cache_spills_scope":"connection cumulative mid-transaction spills","hard_heap_limit_bytes":16777216,"cache_spills":0,"cache_size_setting":` + value + `,"cache_size_setting_scope":"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages","cache_spill_threshold":991,"synchronous":3,"journal_mode":"delete","process":"42","run":"100","clock":"awake_ns","sequence":"5","trace_lost":false}`)
 		records, err := sqliteDiagnosticRecords(encoded)
 		if err != nil || len(records) != 1 {
 			t.Fatalf("decode %s: records=%d err=%v", value, len(records), err)

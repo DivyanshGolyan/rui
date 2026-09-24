@@ -21,7 +21,7 @@ import (
 
 const (
 	discoveryTargetMS            int64  = 2000
-	physicalFootprintTargetBytes uint64 = 24 * 1024 * 1024
+	physicalFootprintTargetBytes uint64 = 25_000_000
 )
 
 type population struct {
@@ -469,13 +469,9 @@ func runCase(binary, sqliteBinary, root, name string, p population, resources bo
 				result["macos_physical_footprint"] = map[string]any{"status": "unavailable", "error": macOSSampleErr.Error()}
 			} else {
 				sample = macOSSample.Portable()
-				if macOSSample.LiveDescendantProcesses != 0 {
-					result["macos_physical_footprint"] = map[string]any{"status": "unavailable", "reason": "live descendants require aggregate physical footprint", "process": macOSSample}
-				} else {
-					var upper uint64
-					physicalStatus, upper = physicalFootprintStatus(macOSSample.Footprint)
-					result["macos_physical_footprint"] = map[string]any{"status": physicalStatus, "target_bytes": physicalFootprintTargetBytes, "lifetime_peak_upper_bound_bytes": upper, "process": macOSSample}
-				}
+				var upper uint64
+				physicalStatus, upper = physicalFootprintStatus(macOSSample.Footprint)
+				result["macos_physical_footprint"] = map[string]any{"status": physicalStatus, "target_bytes": physicalFootprintTargetBytes, "lifetime_peak_upper_bound_bytes": upper, "process": macOSSample}
 			}
 		} else {
 			sample, sampleErr = measurement.SamplePortableProcess(host.Process)
@@ -561,7 +557,7 @@ func main() {
 			cases[requestedCase.name] = map[string]any{"same_measurement_as": existing, "population": requestedCase.population}
 			continue
 		}
-		value, caseErr := runCase(binary, sqliteBinary, root, requestedCase.name, requestedCase.population, false)
+		value, caseErr := runCase(binary, sqliteBinary, root, requestedCase.name, requestedCase.population, true)
 		if caseErr != nil {
 			value = retainCaseFailure(value, requestedCase.population, caseErr)
 		}

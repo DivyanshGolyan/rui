@@ -6,12 +6,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,32 +30,57 @@ const controlHeadroom = 2
 type streamEndpoint struct {
 	server      *http.Server
 	listener    net.Listener
+	tlsServer   *httptest.Server
+	caFile      string
 	mu          sync.Mutex
 	requests    int
 	disconnects int
+	h2Peers     map[string]struct{}
 	release     chan struct{}
 }
 
-func startStreamEndpoint() (*streamEndpoint, error) {
+func startStreamEndpoint(tlsEnabled bool, root string) (*streamEndpoint, error) {
+	e := &streamEndpoint{release: make(chan struct{}), h2Peers: make(map[string]struct{})}
+	if tlsEnabled {
+		server := httptest.NewUnstartedServer(http.HandlerFunc(e.serve))
+		server.EnableHTTP2 = true
+		server.StartTLS()
+		e.tlsServer = server
+		e.caFile = filepath.Join(root, "control-provider-cert.pem")
+		if err := os.WriteFile(e.caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+			server.Close()
+			return nil, err
+		}
+		return e, nil
+	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
-	e := &streamEndpoint{listener: listener, release: make(chan struct{})}
+	e.listener = listener
 	e.server = &http.Server{Handler: http.HandlerFunc(e.serve)}
 	go e.server.Serve(listener)
 	return e, nil
 }
 func (e *streamEndpoint) serve(writer http.ResponseWriter, request *http.Request) {
+	if e.tlsServer != nil && (request.ProtoMajor != 2 || request.TLS == nil || request.TLS.NegotiatedProtocol != "h2") {
+		http.Error(writer, "HTTP/2 required", http.StatusHTTPVersionNotSupported)
+		return
+	}
 	_, err := io.Copy(io.Discard, request.Body)
 	if err != nil {
 		return
 	}
 	e.mu.Lock()
 	e.requests++
+	if request.ProtoMajor == 2 {
+		e.h2Peers[request.RemoteAddr] = struct{}{}
+	}
 	e.mu.Unlock()
 	writer.Header().Set("Content-Type", "text/event-stream")
-	writer.Header().Set("Connection", "close")
+	if request.ProtoMajor == 1 {
+		writer.Header().Set("Connection", "close")
+	}
 	writer.WriteHeader(200)
 	controller := http.NewResponseController(writer)
 	_ = controller.Flush()
@@ -84,7 +111,12 @@ func (e *streamEndpoint) serve(writer http.ResponseWriter, request *http.Request
 		}
 	}
 }
-func (e *streamEndpoint) URL() string { return "http://" + e.listener.Addr().String() + "/responses" }
+func (e *streamEndpoint) URL() string {
+	if e.tlsServer != nil {
+		return e.tlsServer.URL + "/responses"
+	}
+	return "http://" + e.listener.Addr().String() + "/responses"
+}
 func (e *streamEndpoint) counts() (int, int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -95,6 +127,10 @@ func (e *streamEndpoint) Close() error {
 	case <-e.release:
 	default:
 		close(e.release)
+	}
+	if e.tlsServer != nil {
+		e.tlsServer.Close()
+		return nil
 	}
 	return e.server.Close()
 }
@@ -489,7 +525,7 @@ func activeCancellation(binary, root, url string, endpoint *streamEndpoint) (res
 	}
 	store := filepath.Join(directory, "store")
 	deadline := measurement.NewDeadline(4 * time.Minute)
-	host, err := measurement.StartHost(binary, store, url, capacity, filepath.Join(directory, "host-stderr.log"), deadline)
+	host, err := measurement.StartHost(binary, store, url, capacity, filepath.Join(directory, "host-stderr.log"), deadline, "--provider-ca-file", endpoint.caFile)
 	if err != nil {
 		return nil, err
 	}
@@ -513,6 +549,12 @@ func activeCancellation(binary, root, url string, endpoint *streamEndpoint) (res
 			requests, disconnects := endpoint.counts()
 			if requests-disconnects != capacity {
 				return false, nil
+			}
+			endpoint.mu.Lock()
+			connections := len(endpoint.h2Peers)
+			endpoint.mu.Unlock()
+			if connections != 1 {
+				return false, fmt.Errorf("expected 100 H2 streams on one connection, got %d", connections)
 			}
 			observation, err := client.Inspect(sessions[0])
 			if err != nil {
@@ -599,25 +641,44 @@ func activeCancellation(binary, root, url string, endpoint *streamEndpoint) (res
 		return nil, err
 	}
 	_, disconnects := endpoint.counts()
+	endpoint.mu.Lock()
+	connections := len(endpoint.h2Peers)
+	endpoint.mu.Unlock()
 	stopP95 := p95(stops)
-	return map[string]any{"status": latencyStatus(1000, interruptionMS, stopP95), "active_capacity": capacity, "active_model_streams": capacity, "control_samples": samples, "exact_interruption_acknowledgment_ms": interruptionMS, "session_stop_p95_acknowledgment_ms": stopP95, "qualification_limit_ms": 1000, "before_controls": before, "after_cleanup": after, "resource_delta_after_cleanup": delta(before, after), "provider_disconnects": disconnects}, nil
+	return map[string]any{"status": latencyStatus(1000, interruptionMS, stopP95), "active_capacity": capacity, "active_model_streams": capacity, "h2_connections": connections, "control_samples": samples, "exact_interruption_acknowledgment_ms": interruptionMS, "session_stop_p95_acknowledgment_ms": stopP95, "qualification_limit_ms": 1000, "before_controls": before, "after_cleanup": after, "resource_delta_after_cleanup": delta(before, after), "provider_disconnects": disconnects}, nil
 }
 
 type successEndpoint struct {
 	server      *http.Server
 	listener    net.Listener
+	tlsServer   *httptest.Server
+	caFile      string
 	mu          sync.Mutex
 	requests    int
+	h2Peers     map[string]struct{}
 	release     chan struct{}
 	answerBytes int
 }
 
-func startSuccessEndpoint(answerBytes int) (*successEndpoint, error) {
+func startSuccessEndpoint(answerBytes int, tlsRoot string) (*successEndpoint, error) {
+	endpoint := &successEndpoint{release: make(chan struct{}), answerBytes: answerBytes, h2Peers: make(map[string]struct{})}
+	if tlsRoot != "" {
+		server := httptest.NewUnstartedServer(http.HandlerFunc(endpoint.serve))
+		server.EnableHTTP2 = true
+		server.StartTLS()
+		endpoint.tlsServer = server
+		endpoint.caFile = filepath.Join(tlsRoot, "control-first-cert.pem")
+		if err := os.WriteFile(endpoint.caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+			server.Close()
+			return nil, err
+		}
+		return endpoint, nil
+	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
-	endpoint := &successEndpoint{listener: listener, release: make(chan struct{}), answerBytes: answerBytes}
+	endpoint.listener = listener
 	endpoint.server = &http.Server{Handler: http.HandlerFunc(endpoint.serve)}
 	go endpoint.server.Serve(listener)
 	return endpoint, nil
@@ -641,6 +702,10 @@ func successfulSSE(index int, answer string) []byte {
 }
 
 func (e *successEndpoint) serve(writer http.ResponseWriter, request *http.Request) {
+	if e.tlsServer != nil && (request.ProtoMajor != 2 || request.TLS == nil || request.TLS.NegotiatedProtocol != "h2") {
+		http.Error(writer, "HTTP/2 required", http.StatusHTTPVersionNotSupported)
+		return
+	}
 	_, err := io.Copy(io.Discard, request.Body)
 	if err != nil {
 		return
@@ -648,6 +713,9 @@ func (e *successEndpoint) serve(writer http.ResponseWriter, request *http.Reques
 	e.mu.Lock()
 	e.requests++
 	index := e.requests
+	if request.ProtoMajor == 2 {
+		e.h2Peers[request.RemoteAddr] = struct{}{}
+	}
 	e.mu.Unlock()
 	select {
 	case <-e.release:
@@ -671,7 +739,9 @@ func (e *successEndpoint) serve(writer http.ResponseWriter, request *http.Reques
 	writer.Header().Set("Content-Length", strconv.Itoa(contentLength))
 	writer.Header().Set("OpenAI-Model", "model-a")
 	writer.Header().Set("X-Request-Id", fmt.Sprintf("request-%d", index))
-	writer.Header().Set("Connection", "close")
+	if request.ProtoMajor == 1 {
+		writer.Header().Set("Connection", "close")
+	}
 	writer.WriteHeader(200)
 	chunk := bytes.Repeat([]byte{'x'}, 64*1024)
 	for partIndex, part := range parts {
@@ -691,8 +761,13 @@ func (e *successEndpoint) serve(writer http.ResponseWriter, request *http.Reques
 	}
 }
 
-func (e *successEndpoint) URL() string { return "http://" + e.listener.Addr().String() + "/responses" }
-func (e *successEndpoint) count() int  { e.mu.Lock(); defer e.mu.Unlock(); return e.requests }
+func (e *successEndpoint) URL() string {
+	if e.tlsServer != nil {
+		return e.tlsServer.URL + "/responses"
+	}
+	return "http://" + e.listener.Addr().String() + "/responses"
+}
+func (e *successEndpoint) count() int { e.mu.Lock(); defer e.mu.Unlock(); return e.requests }
 func (e *successEndpoint) releaseAll() {
 	select {
 	case <-e.release:
@@ -700,7 +775,14 @@ func (e *successEndpoint) releaseAll() {
 		close(e.release)
 	}
 }
-func (e *successEndpoint) Close() error { e.releaseAll(); return e.server.Close() }
+func (e *successEndpoint) Close() error {
+	e.releaseAll()
+	if e.tlsServer != nil {
+		e.tlsServer.Close()
+		return nil
+	}
+	return e.server.Close()
+}
 
 func rawUnixRequest(socketPath, route string, body []byte, receiveBuffer int) (net.Conn, error) {
 	connection, err := net.DialTimeout("unix", socketPath, 5*time.Second)
@@ -991,7 +1073,7 @@ func concurrentStops(client measurement.Client, sessions []string, processing ma
 func controlFirst(binary, root string) (result map[string]any, resultError error) {
 	directory := filepath.Join(root, "control-first")
 	_ = os.Mkdir(directory, 0o700)
-	endpoint, err := startSuccessEndpoint(0)
+	endpoint, err := startSuccessEndpoint(0, directory)
 	if err != nil {
 		return nil, err
 	}
@@ -999,7 +1081,7 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 	deadline := measurement.NewDeadline(4 * time.Minute)
 	store := filepath.Join(directory, "store")
 	stderrPath := filepath.Join(directory, "host-stderr.log")
-	host, err := measurement.StartHost(binary, store, endpoint.URL(), controlHeadroom, stderrPath, deadline, "--test-phase-trace", "--test-inspection-reply-delay-ms", "8000", "--test-before-result-delay-ms", "1200")
+	host, err := measurement.StartHost(binary, store, endpoint.URL(), controlHeadroom, stderrPath, deadline, "--provider-ca-file", endpoint.caFile, "--test-phase-trace", "--test-inspection-reply-delay-ms", "8000", "--test-before-result-delay-ms", "1200")
 	if err != nil {
 		return nil, err
 	}
@@ -1015,6 +1097,15 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 		}
 	}
 	if err := measurement.WaitFor(deadline, 25*time.Millisecond, "successful requests for both control places", func() (bool, error) { return endpoint.count() == controlHeadroom, nil }); err != nil {
+		return nil, err
+	}
+	endpoint.mu.Lock()
+	connections := len(endpoint.h2Peers)
+	endpoint.mu.Unlock()
+	if connections != 1 {
+		return nil, fmt.Errorf("control-first H2 TCP connections=%d want=1", connections)
+	}
+	if _, err := sample(host, directory, "live-h2"); err != nil {
 		return nil, err
 	}
 	inspections, err := openInspections(host.Ready["socket"], store, sessions[0])
@@ -1054,8 +1145,12 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 			return nil, fmt.Errorf("control-first result %d was %s", index, status)
 		}
 	}
+	retained, err := sample(host, directory, "retained")
+	if err != nil {
+		return nil, err
+	}
 	p95MS := p95(latencies)
-	return map[string]any{"scope": "10 fully captured reports held during delivery while two controls commit before sealed settlement", "status": latencyStatus(1000, p95MS), "ordinary_connections": ordinaryClients, "concurrent_control_commands": controlHeadroom, "qualification_limit_ms": 1000, "model_settlement_superseded": true, "total_durable_acknowledgment": map[string]any{"p95_ms": p95MS, "maximum_ms": slicesMax(latencies)}}, nil
+	return map[string]any{"scope": "10 fully captured reports held during delivery while two controls commit before sealed settlement", "status": latencyStatus(1000, p95MS), "ordinary_connections": ordinaryClients, "h2_connections": connections, "h2_streams": controlHeadroom, "concurrent_control_commands": controlHeadroom, "retained_host": retained, "qualification_limit_ms": 1000, "model_settlement_superseded": true, "total_durable_acknowledgment": map[string]any{"p95_ms": p95MS, "maximum_ms": slicesMax(latencies)}}, nil
 }
 
 func repeatedDigest(value byte, count int) string {
@@ -1137,7 +1232,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	directory := filepath.Join(root, "real-settlement")
 	_ = os.Mkdir(directory, 0o700)
 	const large = 100_000
-	endpoint, err := startSuccessEndpoint(large)
+	endpoint, err := startSuccessEndpoint(large, "")
 	if err != nil {
 		return nil, err
 	}
@@ -1401,7 +1496,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	endpoint, err := startStreamEndpoint()
+	endpoint, err := startStreamEndpoint(false, root)
 	if err != nil {
 		panic(err)
 	}
@@ -1410,11 +1505,16 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	activeResult, err := activeCancellation(binary, root, endpoint.URL(), endpoint)
+	_ = endpoint.Close()
+	activeEndpoint, err := startStreamEndpoint(true, root)
 	if err != nil {
 		panic(err)
 	}
-	_ = endpoint.Close()
+	activeResult, err := activeCancellation(binary, root, activeEndpoint.URL(), activeEndpoint)
+	if err != nil {
+		panic(err)
+	}
+	_ = activeEndpoint.Close()
 	controlFirstResult, err := controlFirst(binary, root)
 	if err != nil {
 		panic(err)

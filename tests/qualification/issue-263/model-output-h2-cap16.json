@@ -1,0 +1,1600 @@
+{
+  "active_capacity_growth": [
+    {
+      "active_capacity": 16,
+      "events_per_second_per_stream": 30,
+      "process_identity": {
+        "all_distinct": true,
+        "controller_pid": 51430,
+        "host_pid": 51432,
+        "provider_pid": 51431
+      },
+      "rounds": [
+        {
+          "active_capacity": 16,
+          "all_results_audited": true,
+          "audit_rows": [
+            {
+              "key": "capacity-16-round-1-0",
+              "session": "measure/capacity-16/1/0",
+              "input_text": "capacity-16-round-1-0",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/0",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-0",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-0",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-1-1",
+              "session": "measure/capacity-16/1/1",
+              "input_text": "capacity-16-round-1-1",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/1",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-1",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-1",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-1-2",
+              "session": "measure/capacity-16/1/2",
+              "input_text": "capacity-16-round-1-2",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/2",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-2",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-2",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-1-3",
+              "session": "measure/capacity-16/1/3",
+              "input_text": "capacity-16-round-1-3",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/3",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-3",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-3",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-1-4",
+              "session": "measure/capacity-16/1/4",
+              "input_text": "capacity-16-round-1-4",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/4",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-4",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-4",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-1-5",
+              "session": "measure/capacity-16/1/5",
+              "input_text": "capacity-16-round-1-5",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/5",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-5",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-5",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-1-6",
+              "session": "measure/capacity-16/1/6",
+              "input_text": "capacity-16-round-1-6",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/6",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-6",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-6",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-1-7",
+              "session": "measure/capacity-16/1/7",
+              "input_text": "capacity-16-round-1-7",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/7",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-7",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-7",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-1-8",
+              "session": "measure/capacity-16/1/8",
+              "input_text": "capacity-16-round-1-8",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/8",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-8",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-8",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-1-9",
+              "session": "measure/capacity-16/1/9",
+              "input_text": "capacity-16-round-1-9",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/9",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-9",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-9",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-1-10",
+              "session": "measure/capacity-16/1/10",
+              "input_text": "capacity-16-round-1-10",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/10",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-10",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-10",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-1-11",
+              "session": "measure/capacity-16/1/11",
+              "input_text": "capacity-16-round-1-11",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/11",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-11",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-11",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-1-12",
+              "session": "measure/capacity-16/1/12",
+              "input_text": "capacity-16-round-1-12",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/12",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-12",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-12",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-1-13",
+              "session": "measure/capacity-16/1/13",
+              "input_text": "capacity-16-round-1-13",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/13",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-13",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-13",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-1-14",
+              "session": "measure/capacity-16/1/14",
+              "input_text": "capacity-16-round-1-14",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/14",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-14",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-14",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-1-15",
+              "session": "measure/capacity-16/1/15",
+              "input_text": "capacity-16-round-1-15",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/1/15",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-1-15",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-1-15",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            }
+          ],
+          "capture_before_terminal": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "16",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "7492054",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "provider": "codex",
+              "reference": "measure/capacity-16/1/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui263-mac-16"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "1",
+              "status": "in_flight",
+              "turn": "1"
+            }
+          },
+          "capture_observation_complete": true,
+          "cleanup_observation_complete": true,
+          "completion_inspection": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "0",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "0",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "provider": "codex",
+              "reference": "measure/capacity-16/1/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui263-mac-16"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": {
+                "code": "completed",
+                "content": {
+                  "bytes": "37",
+                  "sha256": "9c9f76d5bb605a59dcacda208971a95c6dd02fc5bab49e1fc9b87aa898e1fa12"
+                }
+              },
+              "operation": "1",
+              "status": "completed",
+              "turn": "1"
+            }
+          },
+          "cpu": {
+            "at_most_2_average_cores": true,
+            "average_cores_conservative": 0.05311495057356499,
+            "bracket_valid": true,
+            "complete_work_at_most_120_cpu_seconds": true,
+            "complete_work_cpu_seconds": 3.720079333333333,
+            "cpu_seconds": 2.1246767083333333,
+            "earliest_stream_final_completion_unix_ns": 1790154739801002000,
+            "first_query": {
+              "finish_unix_ns": 1790154689833271000,
+              "host_cpu_seconds": 0.7415215833333333,
+              "start_unix_ns": 1790154689833128000
+            },
+            "maximum_sample_window_seconds": 40.00245,
+            "minimum_sample_window_seconds": 40.001481417,
+            "provider_offer_qualified": true,
+            "second_query": {
+              "finish_unix_ns": 1790154729835674000,
+              "host_cpu_seconds": 2.8661982916666666,
+              "start_unix_ns": 1790154729834847000
+            },
+            "status": "passed"
+          },
+          "durable_audit_prerequisite_met": true,
+          "events_per_second_per_stream": 30,
+          "expected_provider_work": {
+            "batches": 28800,
+            "events": 28800,
+            "bytes": 7488000
+          },
+          "expected_response_scratch_delta_bytes": 7488000,
+          "expected_retained_scratch_bytes": 7492054,
+          "fixture_completion": {
+            "h2_streams": 16,
+            "h2_connections": 1,
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 16,
+            "ready_streams": 16,
+            "offer_finished_streams": 16,
+            "terminal_finished_streams": 16,
+            "valid_offer_streams": 16,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 28800,
+            "completed_events": 28800,
+            "offer_bytes": 7488000,
+            "expected_batches": 28800,
+            "expected_events": 28800,
+            "expected_offer_bytes": 7488000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "maximum_completion_delay": {
+              "id": "capacity-16-round-1-9",
+              "ordinal": 19,
+              "observed_ns": 18990667
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-16-round-1-11",
+              "ordinal": 19,
+              "observed_ns": 50007042
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-16-round-1-10",
+              "ordinal": 21,
+              "observed_ns": 50853250
+            },
+            "latest_final_completion_unix_ns": 1790154739802346000,
+            "earliest_final_completion_unix_ns": 1790154739801002000,
+            "terminal_bytes": 13268,
+            "request_bytes": 4054,
+            "request_set_sha256": "ce0098c112fa6daa4d5d8e99da66cc8b0e7d950131bbd5a1706bcdf20c6dd037",
+            "start_unix_ns": 1790154679831720000,
+            "offer_horizon_unix_ns": 1790154739865053334,
+            "hard_deadline_unix_ns": 1790154799831720000,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "fixture_ready": {
+            "h2_streams": 16,
+            "h2_connections": 1,
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 16,
+            "ready_streams": 16,
+            "offer_finished_streams": 0,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 0,
+            "maximum_completed_batches": 0,
+            "completed_batches": 0,
+            "completed_events": 0,
+            "offer_bytes": 0,
+            "expected_batches": 28800,
+            "expected_events": 28800,
+            "expected_offer_bytes": 7488000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "terminal_bytes": 0,
+            "request_bytes": 4054,
+            "request_set_sha256": "ce0098c112fa6daa4d5d8e99da66cc8b0e7d950131bbd5a1706bcdf20c6dd037",
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "host_dimensions": {
+            "capture": "passed",
+            "cleanup": "passed",
+            "durable_audit": "passed",
+            "request_integrity": "passed",
+            "result_delivery": "passed"
+          },
+          "initial": {
+            "host": {
+              "rss_bytes": 10272768,
+              "virtual_bytes": 421023449088,
+              "cpu_user_seconds": 0.007150916666666666,
+              "cpu_system_seconds": 0.006623625,
+              "threads": 5,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 15,
+              "open_descriptors": 11,
+              "disk_read_bytes": 40960,
+              "disk_write_bytes": 229376,
+              "footprint": {
+                "physical_footprint_bytes": 5669888,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 5669888,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            },
+            "whole_rui": {
+              "descendant_processes_diagnostic": 0,
+              "host_footprint_target_bytes": 25000000,
+              "host_processes": 1,
+              "lifetime_peak_physical_footprint_bytes": 5669888,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 5670400,
+              "measurement_basis": "conservative upper bound of Host lifetime physical-footprint peak",
+              "physical_footprint_bytes": 5669888,
+              "rss_bytes": 10272768,
+              "status": "complete"
+            }
+          },
+          "observed_offer": {
+            "events_per_second": 480.2351071005995,
+            "seconds": 59.970626,
+            "status": "observed"
+          },
+          "offer_seconds": 60,
+          "offline_audit_after_host_reaped": true,
+          "paced_offer": {
+            "h2_streams": 16,
+            "h2_connections": 1,
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 16,
+            "ready_streams": 16,
+            "offer_finished_streams": 16,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 16,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 28800,
+            "completed_events": 28800,
+            "offer_bytes": 7488000,
+            "expected_batches": 28800,
+            "expected_events": 28800,
+            "expected_offer_bytes": 7488000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "maximum_completion_delay": {
+              "id": "capacity-16-round-1-9",
+              "ordinal": 19,
+              "observed_ns": 18990667
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-16-round-1-11",
+              "ordinal": 19,
+              "observed_ns": 50007042
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-16-round-1-10",
+              "ordinal": 21,
+              "observed_ns": 50853250
+            },
+            "latest_final_completion_unix_ns": 1790154739802346000,
+            "earliest_final_completion_unix_ns": 1790154739801002000,
+            "terminal_bytes": 0,
+            "request_bytes": 4054,
+            "request_set_sha256": "ce0098c112fa6daa4d5d8e99da66cc8b0e7d950131bbd5a1706bcdf20c6dd037",
+            "start_unix_ns": 1790154679831720000,
+            "offer_horizon_unix_ns": 1790154739865053334,
+            "hard_deadline_unix_ns": 1790154799831720000,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "provider_process": {
+            "initial": {
+              "rss_bytes": 10256384,
+              "virtual_bytes": 421786238976,
+              "cpu_user_seconds": 0.004238708333333333,
+              "cpu_system_seconds": 0.004731375,
+              "threads": 6,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 10,
+              "open_descriptors": 7,
+              "disk_read_bytes": 0,
+              "disk_write_bytes": 8192,
+              "footprint": {
+                "physical_footprint_bytes": 5014528,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 5014528,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            },
+            "pid": 51431,
+            "retained": {
+              "rss_bytes": 14958592,
+              "virtual_bytes": 421830639616,
+              "cpu_user_seconds": 0.8950834166666666,
+              "cpu_system_seconds": 0.7506954583333333,
+              "threads": 11,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 12,
+              "open_descriptors": 9,
+              "disk_read_bytes": 32768,
+              "disk_write_bytes": 102400,
+              "footprint": {
+                "physical_footprint_bytes": 10029056,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 10029056,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            }
+          },
+          "request_integrity": {
+            "expected_bytes": 4054,
+            "expected_set_sha256": "ce0098c112fa6daa4d5d8e99da66cc8b0e7d950131bbd5a1706bcdf20c6dd037",
+            "observed_bytes": 4054,
+            "observed_set_sha256": "ce0098c112fa6daa4d5d8e99da66cc8b0e7d950131bbd5a1706bcdf20c6dd037",
+            "status": "passed"
+          },
+          "result_delivery_complete": true,
+          "retained": {
+            "host": {
+              "rss_bytes": 13303808,
+              "virtual_bytes": 421731745792,
+              "cpu_user_seconds": 1.8375994583333333,
+              "cpu_system_seconds": 1.9164528333333333,
+              "threads": 4,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 16,
+              "open_descriptors": 12,
+              "disk_read_bytes": 6492160,
+              "disk_write_bytes": 16355328,
+              "footprint": {
+                "physical_footprint_bytes": 11534336,
+                "physical_footprint_rounding_tolerance_bytes": 524288,
+                "lifetime_peak_physical_footprint_bytes": 12582912,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
+              }
+            },
+            "whole_rui": {
+              "descendant_processes_diagnostic": 0,
+              "host_footprint_target_bytes": 25000000,
+              "host_processes": 1,
+              "lifetime_peak_physical_footprint_bytes": 12582912,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 13107200,
+              "measurement_basis": "conservative upper bound of Host lifetime physical-footprint peak",
+              "physical_footprint_bytes": 11534336,
+              "rss_bytes": 13303808,
+              "status": "complete"
+            }
+          },
+          "retained_request_baseline": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "16",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "4054",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "provider": "codex",
+              "reference": "measure/capacity-16/1/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui263-mac-16"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "1",
+              "status": "in_flight",
+              "turn": "1"
+            }
+          },
+          "retained_request_scratch_bytes": 4054,
+          "round": 1,
+          "status": "passed"
+        },
+        {
+          "active_capacity": 16,
+          "all_results_audited": true,
+          "audit_rows": [
+            {
+              "key": "capacity-16-round-2-0",
+              "session": "measure/capacity-16/2/0",
+              "input_text": "capacity-16-round-2-0",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/0",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-0",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-0",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-2-1",
+              "session": "measure/capacity-16/2/1",
+              "input_text": "capacity-16-round-2-1",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/1",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-1",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-1",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-2-2",
+              "session": "measure/capacity-16/2/2",
+              "input_text": "capacity-16-round-2-2",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/2",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-2",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-2",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-2-3",
+              "session": "measure/capacity-16/2/3",
+              "input_text": "capacity-16-round-2-3",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/3",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-3",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-3",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-2-4",
+              "session": "measure/capacity-16/2/4",
+              "input_text": "capacity-16-round-2-4",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/4",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-4",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-4",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-2-5",
+              "session": "measure/capacity-16/2/5",
+              "input_text": "capacity-16-round-2-5",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/5",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-5",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-5",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-2-6",
+              "session": "measure/capacity-16/2/6",
+              "input_text": "capacity-16-round-2-6",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/6",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-6",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-6",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-2-7",
+              "session": "measure/capacity-16/2/7",
+              "input_text": "capacity-16-round-2-7",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/7",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-7",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-7",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-2-8",
+              "session": "measure/capacity-16/2/8",
+              "input_text": "capacity-16-round-2-8",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/8",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-8",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-8",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-2-9",
+              "session": "measure/capacity-16/2/9",
+              "input_text": "capacity-16-round-2-9",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/9",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-9",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-9",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-2-10",
+              "session": "measure/capacity-16/2/10",
+              "input_text": "capacity-16-round-2-10",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/10",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-10",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-10",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-2-11",
+              "session": "measure/capacity-16/2/11",
+              "input_text": "capacity-16-round-2-11",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/11",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-11",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-11",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-2-12",
+              "session": "measure/capacity-16/2/12",
+              "input_text": "capacity-16-round-2-12",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/12",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-12",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-12",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-2-13",
+              "session": "measure/capacity-16/2/13",
+              "input_text": "capacity-16-round-2-13",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/13",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-13",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-13",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-2-14",
+              "session": "measure/capacity-16/2/14",
+              "input_text": "capacity-16-round-2-14",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/14",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-14",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-14",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            },
+            {
+              "key": "capacity-16-round-2-15",
+              "session": "measure/capacity-16/2/15",
+              "input_text": "capacity-16-round-2-15",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-16/2/15",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "completed",
+              "response_id": "capacity-response-capacity-16-round-2-15",
+              "body_model": "model-a-served",
+              "openai_model": "model-a-served",
+              "request_id": "capacity-capacity-16-round-2-15",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            }
+          ],
+          "capture_before_terminal": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "16",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "7492054",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "provider": "codex",
+              "reference": "measure/capacity-16/2/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui263-mac-16"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "17",
+              "status": "in_flight",
+              "turn": "17"
+            }
+          },
+          "capture_observation_complete": true,
+          "cleanup_observation_complete": true,
+          "completion_inspection": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "0",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "0",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "provider": "codex",
+              "reference": "measure/capacity-16/2/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui263-mac-16"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": {
+                "code": "completed",
+                "content": {
+                  "bytes": "37",
+                  "sha256": "4cf3ae63067b2fe74589cb330e88dabb2d1ce7499fd080732c20ae195f73a779"
+                }
+              },
+              "operation": "17",
+              "status": "completed",
+              "turn": "17"
+            }
+          },
+          "cpu": {
+            "at_most_2_average_cores": true,
+            "average_cores_conservative": 0.05021700796928388,
+            "bracket_valid": true,
+            "complete_work_at_most_120_cpu_seconds": true,
+            "complete_work_cpu_seconds": 3.5328761249999996,
+            "cpu_seconds": 2.0088268749999996,
+            "earliest_stream_final_completion_unix_ns": 1790154802969543000,
+            "first_query": {
+              "finish_unix_ns": 1790154753002163000,
+              "host_cpu_seconds": 4.407453583333333,
+              "start_unix_ns": 1790154753001901000
+            },
+            "maximum_sample_window_seconds": 40.004169458,
+            "minimum_sample_window_seconds": 40.002918458,
+            "provider_offer_qualified": true,
+            "second_query": {
+              "finish_unix_ns": 1790154793006165000,
+              "host_cpu_seconds": 6.416280458333333,
+              "start_unix_ns": 1790154793005177000
+            },
+            "status": "passed"
+          },
+          "durable_audit_prerequisite_met": true,
+          "events_per_second_per_stream": 30,
+          "expected_provider_work": {
+            "batches": 28800,
+            "events": 28800,
+            "bytes": 7488000
+          },
+          "expected_response_scratch_delta_bytes": 7488000,
+          "expected_retained_scratch_bytes": 7492054,
+          "fixture_completion": {
+            "h2_streams": 16,
+            "h2_connections": 1,
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 16,
+            "ready_streams": 16,
+            "offer_finished_streams": 16,
+            "terminal_finished_streams": 16,
+            "valid_offer_streams": 16,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 28800,
+            "completed_events": 28800,
+            "offer_bytes": 7488000,
+            "expected_batches": 28800,
+            "expected_events": 28800,
+            "expected_offer_bytes": 7488000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "maximum_completion_delay": {
+              "id": "capacity-16-round-2-5",
+              "ordinal": 927,
+              "observed_ns": 18780750
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-16-round-2-13",
+              "ordinal": 964,
+              "observed_ns": 48097292
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-16-round-2-13",
+              "ordinal": 929,
+              "observed_ns": 50899959
+            },
+            "latest_final_completion_unix_ns": 1790154802969628000,
+            "earliest_final_completion_unix_ns": 1790154802969543000,
+            "terminal_bytes": 13268,
+            "request_bytes": 4054,
+            "request_set_sha256": "036457823eeeebd1f42a09cb5340936e79234272df4739ba66a9f04f1b8faceb",
+            "start_unix_ns": 1790154742999683000,
+            "offer_horizon_unix_ns": 1790154803033016334,
+            "hard_deadline_unix_ns": 1790154862999683000,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "fixture_ready": {
+            "h2_streams": 16,
+            "h2_connections": 1,
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 16,
+            "ready_streams": 16,
+            "offer_finished_streams": 0,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 0,
+            "maximum_completed_batches": 0,
+            "completed_batches": 0,
+            "completed_events": 0,
+            "offer_bytes": 0,
+            "expected_batches": 28800,
+            "expected_events": 28800,
+            "expected_offer_bytes": 7488000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "terminal_bytes": 0,
+            "request_bytes": 4054,
+            "request_set_sha256": "036457823eeeebd1f42a09cb5340936e79234272df4739ba66a9f04f1b8faceb",
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "host_dimensions": {
+            "capture": "passed",
+            "cleanup": "passed",
+            "durable_audit": "passed",
+            "request_integrity": "passed",
+            "result_delivery": "passed"
+          },
+          "initial": {
+            "host": {
+              "rss_bytes": 13320192,
+              "virtual_bytes": 421731745792,
+              "cpu_user_seconds": 1.8386724583333331,
+              "cpu_system_seconds": 1.9166047083333333,
+              "threads": 4,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 16,
+              "open_descriptors": 12,
+              "disk_read_bytes": 6492160,
+              "disk_write_bytes": 16355328,
+              "footprint": {
+                "physical_footprint_bytes": 11534336,
+                "physical_footprint_rounding_tolerance_bytes": 524288,
+                "lifetime_peak_physical_footprint_bytes": 12582912,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
+              }
+            },
+            "whole_rui": {
+              "descendant_processes_diagnostic": 0,
+              "host_footprint_target_bytes": 25000000,
+              "host_processes": 1,
+              "lifetime_peak_physical_footprint_bytes": 12582912,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 13107200,
+              "measurement_basis": "conservative upper bound of Host lifetime physical-footprint peak",
+              "physical_footprint_bytes": 11534336,
+              "rss_bytes": 13320192,
+              "status": "complete"
+            }
+          },
+          "observed_offer": {
+            "events_per_second": 480.24056050076416,
+            "seconds": 59.969945,
+            "status": "observed"
+          },
+          "offer_seconds": 60,
+          "offline_audit_after_host_reaped": true,
+          "paced_offer": {
+            "h2_streams": 16,
+            "h2_connections": 1,
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 16,
+            "ready_streams": 16,
+            "offer_finished_streams": 16,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 16,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 28800,
+            "completed_events": 28800,
+            "offer_bytes": 7488000,
+            "expected_batches": 28800,
+            "expected_events": 28800,
+            "expected_offer_bytes": 7488000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "maximum_completion_delay": {
+              "id": "capacity-16-round-2-5",
+              "ordinal": 927,
+              "observed_ns": 18780750
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-16-round-2-13",
+              "ordinal": 964,
+              "observed_ns": 48097292
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-16-round-2-13",
+              "ordinal": 929,
+              "observed_ns": 50899959
+            },
+            "latest_final_completion_unix_ns": 1790154802969628000,
+            "earliest_final_completion_unix_ns": 1790154802969543000,
+            "terminal_bytes": 0,
+            "request_bytes": 4054,
+            "request_set_sha256": "036457823eeeebd1f42a09cb5340936e79234272df4739ba66a9f04f1b8faceb",
+            "start_unix_ns": 1790154742999683000,
+            "offer_horizon_unix_ns": 1790154803033016334,
+            "hard_deadline_unix_ns": 1790154862999683000,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "provider_process": {
+            "initial": {
+              "rss_bytes": 14974976,
+              "virtual_bytes": 421830639616,
+              "cpu_user_seconds": 0.8951937083333332,
+              "cpu_system_seconds": 0.7510148333333333,
+              "threads": 11,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 12,
+              "open_descriptors": 9,
+              "disk_read_bytes": 32768,
+              "disk_write_bytes": 106496,
+              "footprint": {
+                "physical_footprint_bytes": 10029056,
+                "physical_footprint_rounding_tolerance_bytes": 512,
+                "lifetime_peak_physical_footprint_bytes": 10029056,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 512
+              }
+            },
+            "pid": 51431,
+            "retained": {
+              "rss_bytes": 16367616,
+              "virtual_bytes": 421839716352,
+              "cpu_user_seconds": 1.6766680416666666,
+              "cpu_system_seconds": 1.46500575,
+              "threads": 12,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 12,
+              "open_descriptors": 9,
+              "disk_read_bytes": 65536,
+              "disk_write_bytes": 196608,
+              "footprint": {
+                "physical_footprint_bytes": 11534336,
+                "physical_footprint_rounding_tolerance_bytes": 524288,
+                "lifetime_peak_physical_footprint_bytes": 11534336,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
+              }
+            }
+          },
+          "request_integrity": {
+            "expected_bytes": 4054,
+            "expected_set_sha256": "036457823eeeebd1f42a09cb5340936e79234272df4739ba66a9f04f1b8faceb",
+            "observed_bytes": 4054,
+            "observed_set_sha256": "036457823eeeebd1f42a09cb5340936e79234272df4739ba66a9f04f1b8faceb",
+            "status": "passed"
+          },
+          "result_delivery_complete": true,
+          "retained": {
+            "host": {
+              "rss_bytes": 14303232,
+              "virtual_bytes": 421865963520,
+              "cpu_user_seconds": 3.5818354166666664,
+              "cpu_system_seconds": 3.726870833333333,
+              "threads": 4,
+              "live_descendant_processes": 0,
+              "open_descriptor_rows": 16,
+              "open_descriptors": 12,
+              "disk_read_bytes": 15958016,
+              "disk_write_bytes": 31019008,
+              "footprint": {
+                "physical_footprint_bytes": 13631488,
+                "physical_footprint_rounding_tolerance_bytes": 524288,
+                "lifetime_peak_physical_footprint_bytes": 13631488,
+                "lifetime_peak_physical_footprint_rounding_tolerance_bytes": 524288
+              }
+            },
+            "whole_rui": {
+              "descendant_processes_diagnostic": 0,
+              "host_footprint_target_bytes": 25000000,
+              "host_processes": 1,
+              "lifetime_peak_physical_footprint_bytes": 13631488,
+              "lifetime_peak_physical_footprint_upper_bound_bytes": 14155776,
+              "measurement_basis": "conservative upper bound of Host lifetime physical-footprint peak",
+              "physical_footprint_bytes": 13631488,
+              "rss_bytes": 14303232,
+              "status": "complete"
+            }
+          },
+          "retained_request_baseline": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "16",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "4054",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "session": {
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_schema": null,
+              "permission_mode": "ask",
+              "provider": "codex",
+              "reference": "measure/capacity-16/2/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/Users/divyanshgolyan/code/personal/rui263-mac-16"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "17",
+              "status": "in_flight",
+              "turn": "17"
+            }
+          },
+          "retained_request_scratch_bytes": 4054,
+          "round": 2,
+          "status": "passed"
+        }
+      ],
+      "same_host_rounds": 2,
+      "second_retained_delta_from_first": {
+        "open_descriptor_rows": 0,
+        "physical_footprint_bytes": 2097152,
+        "rss_bytes": 999424,
+        "status": "observed",
+        "virtual_bytes": 134217728
+      },
+      "status": "passed"
+    }
+  ],
+  "answer_byte_growth": [],
+  "artifacts": "/private/tmp/rui-output-measure-4289254519",
+  "binary": "/Users/divyanshgolyan/code/personal/rui263-mac-16/zig-out/bin/rui",
+  "binary_sha256": "c66b604d42a291fa4ab8f2ed2786cdba971ab6dccc95af664b13c212b730d3c9",
+  "elapsed_seconds": 126.0341045,
+  "format": "rui-model-output-v7-go",
+  "item_count_growth": [],
+  "limits": [
+    "macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only",
+    "deterministic loopback HTTP qualifies no live-provider behavior",
+    "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second",
+    "rational target scheduling aims at 60 seconds and emits exactly 1,800 or 6,000 events per stream; per-event pacing is diagnostic, collection stops at 120 seconds, and measured rate is not maximum sustainable throughput",
+    "Host CPU uses conservative query brackets spanning at least 40 seconds wholly inside simultaneous complete offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds",
+    "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after both rounds and confirmed Host stop/reap",
+    "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 4 MiB cache"
+  ],
+  "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+  "measurement_runtime": {
+    "go_arch": "arm64",
+    "go_os": "darwin",
+    "go_version": "go1.27.1",
+    "gopsutil_version": "v4.26.7",
+    "logical_cpus": 10,
+    "module_path": "rui.local/qualification",
+    "physical_memory_bytes": 17179869184
+  },
+  "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
+  "scope": "issue-176 assembled model-path capacity, capture, import and retained-idle qualification",
+  "sqlite_cache_spill_comparison": null,
+  "status": "passed",
+  "tested_revision": "415c2c1a63498b5bdd3cd333b02373c2ca99c8ab",
+  "working_tree_dirty": true,
+  "zig": "0.16.0"
+}

@@ -5,16 +5,19 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -54,6 +57,8 @@ type fixture struct {
 	artifactDir      string
 	facts            *os.File
 	streams          map[string]*stream
+	h2Peers          map[string]struct{}
+	h2Streams        int
 	ready            int
 	offerFinished    int
 	terminalFinished int
@@ -76,19 +81,23 @@ type Config struct {
 	EventsPerSecond int
 	ArtifactDir     string
 	Rounds          int
+	TLS             bool
 }
 
 type Server struct {
-	fixtureMu    sync.RWMutex
-	resetMu      sync.Mutex
-	fixture      *fixture
-	config       Config
-	round        int
-	server       *http.Server
-	listener     net.Listener
-	facts        *os.File
-	shutdown     chan struct{}
-	shutdownOnce sync.Once
+	fixtureMu     sync.RWMutex
+	resetMu       sync.Mutex
+	fixture       *fixture
+	config        Config
+	round         int
+	server        *http.Server
+	listener      net.Listener
+	providerTLS   *httptest.Server
+	providerCA    string
+	h2Connections atomic.Int64
+	facts         *os.File
+	shutdown      chan struct{}
+	shutdownOnce  sync.Once
 }
 
 type requestBody struct {
@@ -112,6 +121,8 @@ type streamFact struct {
 }
 
 type Summary struct {
+	H2Streams                     int                      `json:"h2_streams"`
+	H2Connections                 int64                    `json:"h2_connections"`
 	DeliveryMethod                string                   `json:"delivery_method"`
 	DeliveryRule                  deliveryRule             `json:"delivery_rule"`
 	ExpectedStreams               int                      `json:"expected_streams"`
@@ -424,6 +435,7 @@ func newFixture(expected int, duration time.Duration, eventsPerSecond int, artif
 		artifactDir:     artifactDir,
 		facts:           facts,
 		streams:         make(map[string]*stream, expected),
+		h2Peers:         make(map[string]struct{}),
 		readyCh:         make(chan struct{}),
 		startCh:         make(chan struct{}),
 		offerCh:         make(chan struct{}),
@@ -612,12 +624,18 @@ func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.streams[id] = current
+	if r.ProtoMajor == 2 {
+		f.h2Streams++
+		f.h2Peers[r.RemoteAddr] = struct{}{}
+	}
 	f.mu.Unlock()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("OpenAI-Model", "model-a-served")
 	w.Header().Set("X-Request-Id", "capacity-"+id)
-	w.Header().Set("Connection", "close")
+	if r.ProtoMajor == 1 {
+		w.Header().Set("Connection", "close")
+	}
 	w.WriteHeader(http.StatusOK)
 	controller := http.NewResponseController(w)
 	if err := controller.Flush(); err != nil {
@@ -744,6 +762,8 @@ func (f *fixture) factsSnapshot() ([]streamFact, Summary) {
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 	result := Summary{
+		H2Streams:          f.h2Streams,
+		H2Connections:      int64(len(f.h2Peers)),
 		DeliveryMethod:     deliveryMethod,
 		DeliveryRule:       selectedDeliveryRule(f.batchInterval),
 		ExpectedStreams:    f.expected,
@@ -879,8 +899,13 @@ func waitFor(ctx context.Context, channel <-chan struct{}) error {
 }
 
 func (s *Server) ProviderURL() string {
+	if s.providerTLS != nil {
+		return s.providerTLS.URL + "/responses"
+	}
 	return "http://" + s.listener.Addr().String() + "/responses"
 }
+
+func (s *Server) ProviderCAFile() string { return s.providerCA }
 
 func (s *Server) currentFixture() *fixture {
 	s.fixtureMu.RLock()
@@ -905,6 +930,9 @@ func (s *Server) WaitReady(ctx context.Context) (Summary, error) {
 		return Summary{}, err
 	}
 	rows, result := f.factsSnapshot()
+	if s.config.TLS {
+		result.H2Connections = s.h2Connections.Load()
+	}
 	if err := writeJSON(filepath.Join(f.artifactDir, "requests.json"), rows); err != nil {
 		return Summary{}, err
 	}
@@ -1046,11 +1074,35 @@ func Start(config Config) (*Server, error) {
 	}
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	result := &Server{fixture: fixture, config: config, round: 1, server: server, listener: listener, facts: facts, shutdown: make(chan struct{})}
-	mux.HandleFunc("/responses", func(writer http.ResponseWriter, request *http.Request) {
+	serveResponse := func(writer http.ResponseWriter, request *http.Request) {
+		if config.TLS && (request.ProtoMajor != 2 || request.TLS == nil || request.TLS.NegotiatedProtocol != "h2") {
+			http.Error(writer, "HTTP/2 required", http.StatusHTTPVersionNotSupported)
+			return
+		}
 		result.fixtureMu.RLock()
 		defer result.fixtureMu.RUnlock()
 		result.fixture.serveResponse(writer, request)
-	})
+	}
+	if config.TLS {
+		providerTLS := httptest.NewUnstartedServer(http.HandlerFunc(serveResponse))
+		providerTLS.EnableHTTP2 = true
+		providerTLS.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+			if state == http.StateNew {
+				result.h2Connections.Add(1)
+			}
+		}
+		providerTLS.StartTLS()
+		result.providerTLS = providerTLS
+		result.providerCA = filepath.Join(config.ArtifactDir, "provider-cert.pem")
+		if err := os.WriteFile(result.providerCA, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: providerTLS.Certificate().Raw}), 0o600); err != nil {
+			providerTLS.Close()
+			listener.Close()
+			facts.Close()
+			return nil, err
+		}
+	} else {
+		mux.HandleFunc("/responses", serveResponse)
+	}
 	writeSummary := func(writer http.ResponseWriter, summary Summary, err error) {
 		writer.Header().Set("Content-Type", "application/json")
 		if err != nil {
@@ -1100,6 +1152,9 @@ func Start(config Config) (*Server, error) {
 func (s *Server) Close() error {
 	f := s.currentFixture()
 	f.cancel()
+	if s.providerTLS != nil {
+		s.providerTLS.Close()
+	}
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	shutdownError := s.server.Shutdown(shutdown)

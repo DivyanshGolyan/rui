@@ -66,6 +66,15 @@ pub fn build(b: *std.Build) void {
     );
     dispatch_integration_step.dependOn(&dispatch_integration.step);
 
+    const h2_integration = b.addSystemCommand(&.{"python3"});
+    h2_integration.addFileArg(b.path("tests/integration/transport_h2_integration.py"));
+    h2_integration.addArtifactArg(release_safe);
+    const h2_integration_step = b.step(
+        "transport-h2-integration",
+        "Run the native TLS/H2 stream and bounded connection fixture (requires Python h2==4.3.0)",
+    );
+    h2_integration_step.dependOn(&h2_integration.step);
+
     const bash_integration = b.addSystemCommand(&.{"python3"});
     bash_integration.addFileArg(b.path("tests/integration/bash_integration.py"));
     bash_integration.addArtifactArg(release_safe);
@@ -389,10 +398,13 @@ const PinnedTransport = struct {
 fn addPinnedTransport(b: *std.Build, target: std.Build.ResolvedTarget) PinnedTransport {
     const openssl = b.dependency("openssl", .{});
     const curl = b.dependency("curl", .{});
+    const nghttp2 = b.dependency("nghttp2", .{});
     const build_transport = b.addSystemCommand(&.{"sh"});
     build_transport.addFileArg(b.path("src/build_transport.sh"));
     build_transport.addDirectoryArg(openssl.path("."));
     build_transport.addDirectoryArg(curl.path("."));
+    build_transport.addDirectoryArg(nghttp2.path("."));
+    build_transport.addFileArg(b.path("src/curl-post-retry.patch"));
     const target_name = b.fmt("{s}-{s}", .{
         @tagName(target.result.cpu.arch),
         @tagName(target.result.os.tag),
@@ -420,6 +432,7 @@ fn configureTransport(
         b.dependency("curl", .{}).path("include"));
     if (!enabled) return;
     compile.root_module.addObjectFile(pinned.output.path(b, "lib/libcurl.a"));
+    compile.root_module.addObjectFile(pinned.output.path(b, "lib/libnghttp2.a"));
     compile.root_module.addObjectFile(pinned.output.path(b, "lib/libssl.a"));
     compile.root_module.addObjectFile(pinned.output.path(b, "lib/libcrypto.a"));
     if (target.result.os.tag == .macos) {

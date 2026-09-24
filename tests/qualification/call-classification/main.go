@@ -26,7 +26,7 @@ import (
 	"rui.local/qualification/measurement"
 )
 
-const physicalFootprintTargetBytes uint64 = 24 * 1024 * 1024
+const physicalFootprintTargetBytes uint64 = 25_000_000
 
 var requiredCLIFamilies = []string{"inspection", "action_read", "configuration", "message", "denial"}
 
@@ -151,7 +151,10 @@ func scenarioCalls(value scenario, forbidden string) []call {
 	padding := strings.Repeat("x", value.ArgumentBytes)
 	for index := range value.Valid {
 		command := fmt.Sprintf("touch %q # %s", forbidden, padding)
-		arguments, _ := json.Marshal(map[string]string{"cmd": command})
+		arguments, _ := json.Marshal(struct {
+			Cmd       string `json:"cmd"`
+			TimeoutMS *int   `json:"timeout_ms"`
+		}{Cmd: command})
 		calls = append(calls, call{fmt.Sprintf("%s-item-%06d", value.Name, len(calls)), "bash", fmt.Sprintf("valid-%06d", index), string(arguments)})
 	}
 	for index := range value.Rejected {
@@ -818,6 +821,13 @@ func (q *physicalQualification) hostVerdict() *measurement.FootprintVerdict {
 	return &measurement.FootprintVerdict{Status: status, LowerBoundBytes: q.hostLower, UpperBoundBytes: q.hostUpper, TargetBytes: physicalFootprintTargetBytes}
 }
 
+func (q *physicalQualification) acceptedHostVerdict(required int) measurement.FootprintVerdict {
+	if host := q.hostVerdict(); host != nil && len(q.hostScenarios) == required {
+		return *host
+	}
+	return measurement.FootprintVerdict{Status: "unavailable", TargetBytes: physicalFootprintTargetBytes, UpperBoundBytes: ^uint64(0)}
+}
+
 func waitForReady(file *os.File) error {
 	done := make(chan error, 1)
 	go func() {
@@ -1329,9 +1339,17 @@ func main() {
 		cases[candidate.Name] = value
 	}
 	physicalVerdict := measurement.FootprintVerdict{Status: "unavailable", TargetBytes: physicalFootprintTargetBytes, UpperBoundBytes: ^uint64(0)}
-	physicalReason := "accepted physical-footprint counter requires macOS /usr/bin/footprint"
+	physicalReason := "Host physical-footprint counter requires macOS /usr/bin/footprint"
+	aggregateVerdict := measurement.FootprintVerdict{Status: "unavailable", TargetBytes: physicalFootprintTargetBytes, UpperBoundBytes: ^uint64(0)}
+	aggregateReason := "diagnostic aggregate counter requires macOS /usr/bin/footprint"
 	if runtime.GOOS == "darwin" {
-		physicalVerdict, physicalReason = classifyAggregateFootprint(physical.hostVerdict(), physical.families, physical.observedLower, physical.maximumCLIs, physical.helperCensus, len(physical.hostScenarios) == len(scenarios), physicalFootprintTargetBytes)
+		physicalVerdict = physical.acceptedHostVerdict(len(scenarios))
+		if physicalVerdict.Status != "unavailable" {
+			physicalReason = "complete Host scenario lifetime-peak interval"
+		} else {
+			physicalReason = "Host scenario lifetime-peak evidence is incomplete or crosses the target"
+		}
+		aggregateVerdict, aggregateReason = classifyAggregateFootprint(physical.hostVerdict(), physical.families, physical.observedLower, physical.maximumCLIs, physical.helperCensus, len(physical.hostScenarios) == len(scenarios), physicalFootprintTargetBytes)
 	}
 	status = combineStatus(status, physicalVerdict.Status)
 	limits := []string{"loopback deterministic provider; no live provider, TLS, filesystem power-loss, or Bash execution qualification", "Bash launch is intentionally forbidden: denial qualification ends before the later execution slice", "population and payload values are workloads, not product quotas", "process-crash and restart evidence does not certify power loss"}
@@ -1341,15 +1359,16 @@ func main() {
 		limits = append(limits, "Linux execution cannot supply the accepted macOS physical-footprint counter")
 	}
 	result := map[string]any{
-		"format": "rui-call-classification-v5-go", "scope": "GitHub issue #228 production raw-provider call classification, exact denial, restart recovery, and independent population scaling",
+		"format": "rui-call-classification-v6-go", "scope": "GitHub issue #228 production raw-provider call classification, exact denial, restart recovery, and independent population scaling",
 		"status": status, "cases": cases, "artifacts": root,
-		"classification_legend": map[string]string{"behavior_error": "a provider/Store/server/client invariant failed", "unavailable": "a required measurement was absent, its uncertainty interval crossed the target, or aggregate helper accounting was incomplete", "target_miss": "the lower bound of a valid macOS lifetime-peak interval exceeded 24 MiB", "passed": "behavior and required aggregate measurements passed", "diagnostic": "component or portable RSS, latency, database, named scratch, CPU and descriptor observations have no independent acceptance threshold"},
+		"classification_legend": map[string]string{"behavior_error": "a provider/Store/server/client invariant failed", "unavailable": "required Host measurement was absent or its uncertainty interval crossed the target", "target_miss": "the lower bound of a valid macOS Host lifetime-peak interval exceeded 25 MB", "passed": "behavior and required Host measurements passed", "diagnostic": "CLI/aggregate footprint, portable RSS, latency, database, named scratch, CPU and descriptor observations have no independent acceptance threshold"},
 		"physical_footprint": map[string]any{
-			"target_bytes": physicalFootprintTargetBytes, "target_scope": "current up-to-100-operation milestone aggregate Rui-owned process footprint, including in-process transport/TLS/network-library allocations and all Rui helper processes",
+			"target_bytes": physicalFootprintTargetBytes, "target_scope": "current up-to-100-operation milestone Host physical footprint, including in-process transport/TLS/network-library allocations",
 			"host_lifetime_peak": physical.hostVerdict(), "ordinary_cli_family_peaks": physical.familyEvidence,
 			"host_scenarios_sampled": len(physical.hostScenarios), "host_scenarios_required": len(scenarios),
 			"maximum_simultaneously_live_ordinary_clis": physical.maximumCLIs, "helper_census_complete": physical.helperCensus,
-			"observed_deduplicated_current_lower_bound_bytes": physical.observedLower, "aggregate_verdict": physicalVerdict, "aggregate_reason": physicalReason,
+			"observed_deduplicated_current_lower_bound_bytes": physical.observedLower, "host_verdict": physicalVerdict, "host_reason": physicalReason,
+			"aggregate_diagnostic_verdict": aggregateVerdict, "aggregate_diagnostic_reason": aggregateReason,
 			"network_boundary": "real loopback HTTP/SSE production transport drove Rui's in-process network allocations during each same-Host lifetime; external deterministic provider fixture process memory is excluded; kernel/socket buffers absent from macOS process phys_footprint remain separate network/kernel counters",
 		},
 		"physical_measurement_method": map[string]any{

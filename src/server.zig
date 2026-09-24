@@ -60,7 +60,10 @@ pub const Faults = struct {
     response_acquire: bool = false,
     response_unlink: bool = false,
     response_write: bool = false,
+    response_write_on_resume: bool = false,
     response_seal: bool = false,
+    response_capture_gate_path: ?[]const u8 = null,
+    response_capture_gate_min_written_bytes: usize = 0,
     response_metadata: bool = false,
     response_metadata_unlink: bool = false,
     response_read: bool = false,
@@ -114,6 +117,8 @@ const Host = struct {
     store: *store_module.Store,
     faults: Faults,
     provider_endpoint: ?[]const u8 = null,
+    provider_ca_file: ?[]const u8 = null,
+    capture_writer: ?*provider.CaptureWriter = null,
     bash_path: []const u8 = default_bash_path,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
     retention: *output_retention.Queue = undefined,
@@ -183,6 +188,7 @@ pub fn serve(
     active_capacity: usize,
     faults: Faults,
     provider_endpoint: ?[]const u8,
+    provider_ca_file: ?[]const u8,
     bash_path: []const u8,
     bash_timeout_ms: u64,
 ) !void {
@@ -257,6 +263,7 @@ pub fn serve(
         .store = &storage,
         .faults = faults,
         .provider_endpoint = provider_endpoint,
+        .provider_ca_file = provider_ca_file,
         .bash_path = bash_path,
         .bash_timeout_ms = bash_timeout_ms,
         .retention = undefined,
@@ -563,8 +570,25 @@ fn executionMain(host: *Host) void {
     };
     defer host.allocator.free(slots);
     for (slots) |*slot| slot.* = .free;
+    var capture_writer = provider.CaptureWriter{
+        .io = host.io,
+        .test_gate_path = host.faults.response_capture_gate_path,
+        .test_gate_min_written_bytes = host.faults.response_capture_gate_min_written_bytes,
+    };
+    const capture_thread: ?std.Thread = if (host.provider_endpoint != null)
+        std.Thread.spawn(.{}, provider.CaptureWriter.run, .{&capture_writer}) catch |err| {
+            fenceDispatch(host, "capture writer initialization", err);
+            return;
+        }
+    else
+        null;
+    if (capture_thread != null) host.capture_writer = &capture_writer;
+    defer if (capture_thread) |thread| {
+        host.capture_writer = null;
+        capture_writer.stop(thread);
+    };
     var reactor: ?provider.Reactor = if (host.provider_endpoint != null)
-        provider.Reactor.init() catch |err| {
+        provider.Reactor.init(slots.len) catch |err| {
             fenceDispatch(host, "transport reactor initialization", err);
             return;
         }
@@ -854,16 +878,51 @@ const slotsHaveBash = hasBash;
 
 fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) bool {
     const active_reactor = reactor orelse return false;
+    for (slots) |*slot| switch (slot.*) {
+        .provider => |*active| {
+            switch (active.transfer.advanceFinalization(host.faults.response_seal)) {
+                .pending => {},
+                .discarded => {
+                    const owner = active.owner;
+                    active.transfer.deinit();
+                    beginCleanup(host, slot, owner);
+                    return true;
+                },
+                .ready => |finished| {
+                    completeTransfer(host, slot, finished);
+                    return true;
+                },
+            }
+        },
+        else => {},
+    };
     const active_transfers = ActiveSlots{ .slots = slots };
-    const completion = active_reactor.nextCompletion(.{
+    const completed = active_reactor.nextCompletion(.{
         .context = &active_transfers,
         .find_fn = findActiveTransfer,
     }) catch |err| {
         fenceDispatch(host, "transport completion", err);
         return false;
-    } orelse return false;
-    completeTransfer(host, slots, completion);
-    return true;
+    };
+    if (completed) return true;
+    for (slots) |*slot| switch (slot.*) {
+        .provider => |*active| {
+            const progress = active_reactor.advance(&active.transfer, &host.faults.response_write_on_resume) catch |err| {
+                fenceDispatch(host, "transport advance", err);
+                return false;
+            };
+            switch (progress) {
+                .progressed => return true,
+                .resume_capture_failure => {
+                    traceSubject(host, "transport_resume_capture_failure", "cause", "local_capture");
+                    return true;
+                },
+                .not_ready => {},
+            }
+        },
+        else => {},
+    };
+    return false;
 }
 
 fn cancelSupersededTransfers(
@@ -887,6 +946,7 @@ fn cancelSupersededTransfers(
             slot.* = .free;
         },
         .provider => |*active| {
+            if (active.transfer.isDiscarded()) continue;
             const superseded = host.store.operationSupersededByControl(active.owner.binding) catch |err| {
                 fenceDispatch(host, "control reconciliation", err);
                 return;
@@ -894,9 +954,11 @@ fn cancelSupersededTransfers(
             const control = superseded orelse continue;
             const owner = active.owner;
             traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), owner.binding);
-            reactor.?.cancel(&active.transfer);
-            active.transfer.deinit();
-            beginCleanup(host, slot, owner);
+            reactor.?.discard(&active.transfer);
+            if (active.transfer.advanceFinalization(false) == .discarded) {
+                active.transfer.deinit();
+                beginCleanup(host, slot, owner);
+            }
         },
         .free, .bash_preparing, .bash, .bash_prepared_cleanup, .cleanup, .named_scratch => {},
     };
@@ -1584,13 +1646,14 @@ fn launchPreparedRequest(
     } };
     const active = &slot.provider;
     active.transfer.start(host.provider_endpoint.?, request.*, binding, .{
+        .ca_file = host.provider_ca_file,
         .inactivity_seconds = @intCast(host.faults.provider_inactivity_seconds),
         .request_read_fault = host.faults.request_read,
         .response_acquire_fault = host.faults.response_acquire,
         .response_unlink_fault = host.faults.response_unlink,
         .response_write_fault = host.faults.response_write,
         .completion_identity_fault = host.faults.completion_identity_fault,
-    }, host.lease.paths.scratch.slice(), request_budget, &retained_response) catch |err| {
+    }, host.capture_writer.?, host.lease.paths.scratch.slice(), request_budget, &retained_response) catch |err| {
         request.deinit();
         if (retained_response) |retained| {
             host.custody.detach(token) catch unreachable;
@@ -1659,18 +1722,9 @@ fn launchPreparedRequest(
 
 fn completeTransfer(
     host: *Host,
-    slots: []ExecutionSlot,
+    slot: *ExecutionSlot,
     completion: provider.Completion,
 ) void {
-    const slot = for (slots) |*candidate| {
-        switch (candidate.*) {
-            .provider => |*active| if (active.transfer.identity() == completion.identity) break candidate,
-            else => {},
-        }
-    } else {
-        fenceDispatch(host, "unknown transport completion", error.UnknownTransportCompletion);
-        return;
-    };
     const active = &slot.provider;
     const owner = active.owner;
     traceCompletionQueue(host, completion.queued_after, owner.binding);
@@ -1680,6 +1734,7 @@ fn completeTransfer(
             const code = switch (failure) {
                 .scratch_exhausted => "response_scratch_exhausted",
                 .write_failed => "response_write_failed",
+                .seal_failed => "response_seal_failed",
             };
             settleAttemptFailure(host, owner.token, owner.binding, code, .terminal);
             active.transfer.deinit();
@@ -1714,6 +1769,7 @@ fn completeTransfer(
         .temporary_http => std.fmt.bufPrint(&code_buffer, "provider_temporary_http_{d}", .{evidence.http_status}) catch unreachable,
         .temporary_connection => "provider_transport_failure",
         .permanent_transport => "provider_transport_permanent",
+        .unsupported_http_version => "provider_http2_required",
         .authentication_failure => "provider_authentication_failed",
         .tls_verification_failure => "provider_tls_verification_failed",
         .invalid_headers => "invalid_provider_headers",
@@ -1747,12 +1803,6 @@ const SuccessfulCompletion = union(enum) {
 fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulCompletion {
     const owner = active.owner;
     const structured_output = active.transfer.hasStructuredOutput();
-    active.transfer.response.seal(host.faults.response_seal) catch |err| {
-        std.debug.print("rui: response seal failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, owner.token, owner.binding, "response_seal_failed", .terminal);
-        active.transfer.deinit();
-        return .cleanup;
-    };
     if (structured_output) {
         settleAttemptFailure(host, owner.token, owner.binding, "unsupported_output_schema", .terminal);
         active.transfer.deinit();
@@ -1984,7 +2034,9 @@ fn shutdownExecution(
         .bash_prepared_cleanup, .named_scratch => {},
         .provider => |*active| {
             const token = active.owner.token;
-            reactor.?.cancel(&active.transfer);
+            reactor.?.discard(&active.transfer);
+            while (active.transfer.advanceFinalization(false) == .pending)
+                _ = host.io.sleep(.fromMilliseconds(25), .awake) catch {};
             active.transfer.deinit();
             host.custody.detach(token) catch unreachable;
             host.custody.cleanupComplete(token) catch unreachable;

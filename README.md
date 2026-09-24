@@ -26,9 +26,9 @@ zig build check-full
   --active-capacity 8
 ```
 
-`check` runs the complete native and process-case corpus concurrently for warm development feedback, except for one real-time 61-second client deadline witness. Run `check-full` before claiming full gate evidence: it includes that witness and runs process integrations serially so their latency observations are not perturbed by unrelated suites. Both use ReleaseSafe native tests, ReleaseSafe and Debug Host builds, and a ReleaseSmall production build; see [canonical gates](VERIFICATION.md#canonical-gates).
+`check` runs native and process suites concurrently for warm development feedback, then runs the short-deadline Host-startup and Debug admission cases without the parallel load; it skips one real-time 61-second client deadline witness. Run `check-full` before claiming full gate evidence: it includes that witness and runs process integrations serially so their latency observations are not perturbed by unrelated suites. Both use ReleaseSafe native tests, ReleaseSafe and Debug Host builds, and a ReleaseSmall production build; see [canonical gates](VERIFICATION.md#canonical-gates).
 
-The production default Active Capacity remains 1,000. Startup rejects a requested population when the process descriptor limit cannot support it, so this development command selects a smaller population that fits ordinary finite limits. Model transport is disabled by default. Development testing requires an explicit `--provider-endpoint`: HTTPS or loopback HTTP, with no authentication attached. Run `./zig-out/bin/rui` to print command usage.
+The production default Active Capacity remains 1,000. Startup rejects a requested population when the process descriptor limit cannot support it, so this development command selects a smaller population that fits ordinary finite limits. Model transport is disabled by default. Development testing requires an explicit `--provider-endpoint`: HTTPS (negotiated HTTP/2 required) or loopback HTTP/1.1, with no authentication attached. A private test CA can be selected with `--provider-ca-file PATH`; peer and hostname verification remain enabled. Run `./zig-out/bin/rui` to print command usage.
 
 ## Try the implemented development path
 

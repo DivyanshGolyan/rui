@@ -1,0 +1,85 @@
+{
+  "connections": 100,
+  "custody": {
+    "custody_occupied": "0",
+    "dispatch_fenced": false,
+    "scratch_used_bytes": "0",
+    "status": "partial",
+    "unavailable": [
+      "structured_output"
+    ]
+  },
+  "gate_event": null,
+  "gated": null,
+  "live": {
+    "child_pids": [],
+    "children_exit": 1,
+    "descriptor_rows": 415,
+    "footprint_exit": 0,
+    "lsof_exit": 0,
+    "numbered_fds": 411,
+    "phase": "live",
+    "phys_footprint": 33736384,
+    "phys_footprint_peak": 33883840,
+    "pid": 32620,
+    "requested_allocation": {
+      "curl_live": 2194925,
+      "curl_peak": 2194925,
+      "gate_held": false,
+      "openssl_live": 14357197,
+      "openssl_peak": 14391790,
+      "paused_current": 0,
+      "paused_peak": 0,
+      "queue_bytes": 0,
+      "queue_entries": 0,
+      "rui_test_phase": "transport_allocation_snapshot"
+    },
+    "rss_exit": 0,
+    "rss_kib": 36736,
+    "timestamp_unix": 1790139732.487544
+  },
+  "mode": "timed",
+  "request_count": 100,
+  "requests_sha256": "7f015e978ea3cd9081b560d94a7858637ce23bb3b461849f3216ba24400e8d78",
+  "response_sha256": "75351890be18969717ccc780f9ec57eda81d93b32951ecce74cd52f6c30b4969",
+  "serviced_idle": {
+    "child_pids": [],
+    "children_exit": 1,
+    "descriptor_rows": 15,
+    "footprint_exit": 0,
+    "lsof_exit": 0,
+    "numbered_fds": 11,
+    "phase": "serviced-idle",
+    "phys_footprint": 27379392,
+    "phys_footprint_peak": 34014912,
+    "pid": 32620,
+    "requested_allocation": {
+      "curl_live": 30126,
+      "curl_peak": 2195796,
+      "gate_held": false,
+      "openssl_live": 535881,
+      "openssl_peak": 14391790,
+      "paused_current": 0,
+      "paused_peak": 0,
+      "queue_bytes": 0,
+      "queue_entries": 0,
+      "rui_test_phase": "transport_allocation_snapshot"
+    },
+    "rss_exit": 0,
+    "rss_kib": 36128,
+    "timestamp_unix": 1790139737.731395
+  },
+  "streams": null,
+  "timing": {
+    "all_durable_observed_ns": 361379063779750,
+    "all_ms": 2181.521542,
+    "first_durable_observed_ns": 361376906309208,
+    "first_ms": 24.051,
+    "observation": "model_settlement_committed host stderr trace",
+    "poll_interval_ms": null,
+    "polls": 0,
+    "release_monotonic_ns": 361376882258208
+  },
+  "topology": "h1",
+  "upload_bytes": 16384
+}

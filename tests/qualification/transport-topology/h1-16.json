@@ -1,0 +1,39 @@
+{
+  "connections": 100,
+  "live": {
+    "child_pids": [],
+    "children_exit": 1,
+    "descriptor_rows": 415,
+    "footprint_exit": 0,
+    "lsof_exit": 0,
+    "numbered_fds": 411,
+    "phase": "live",
+    "phys_footprint": 32818880,
+    "phys_footprint_peak": 32818880,
+    "pid": 92357,
+    "rss_exit": 0,
+    "rss_kib": 36736,
+    "timestamp_unix": 1790137186.462697
+  },
+  "request_count": 100,
+  "requests_sha256": "7f015e978ea3cd9081b560d94a7858637ce23bb3b461849f3216ba24400e8d78",
+  "response_sha256": "75351890be18969717ccc780f9ec57eda81d93b32951ecce74cd52f6c30b4969",
+  "serviced_idle": {
+    "child_pids": [],
+    "children_exit": 1,
+    "descriptor_rows": 15,
+    "footprint_exit": 0,
+    "lsof_exit": 0,
+    "numbered_fds": 11,
+    "phase": "serviced-idle",
+    "phys_footprint": 24430272,
+    "phys_footprint_peak": 33146560,
+    "pid": 92357,
+    "rss_exit": 0,
+    "rss_kib": 34160,
+    "timestamp_unix": 1790137190.314815
+  },
+  "streams": null,
+  "topology": "h1",
+  "upload_bytes": 16384
+}
