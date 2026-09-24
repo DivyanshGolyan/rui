@@ -28,6 +28,9 @@ def observations(host):
             match = re.search(rb"rui: codex transfer (operation=\d+ http_version=\d+ connection_id=-?\d+ new_connections=\d+ correlation_present=(?:true|false) correlation_sha256=[0-9a-f]+ alpn=unavailable)", line)
             if match and len(records) < 8:
                 records.append(dict(part.split("=", 1) for part in match.group(1).decode().split()))
+            rejection = re.search(rb"rui: provider output rejected for operation (\d+): ([A-Za-z][A-Za-z0-9_]*)", line)
+            if rejection:
+                print(f"Provider validation rejected operation {rejection[1].decode()}: {rejection[2].decode()}", flush=True)
 
     thread = threading.Thread(target=drain, daemon=True)
     thread.start()
@@ -64,14 +67,16 @@ def private_reasoning_count(store, operation):
         ).fetchone()[0]
 
 
-def run(model):
+def run(model, external_credential=None):
+    if external_credential is not None and not external_credential.is_absolute():
+        raise ValueError("credential path must be absolute")
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-codex-live."))
     private = state / "credentials"
     private.mkdir(mode=0o700)
     store = state / "store"
     workspace = state / "workspace"
     workspace.mkdir()
-    credential = private / "codex.json"
+    credential = external_credential or private / "codex.json"
     os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
     session = "qualification/codex"
     command = "printf 'once\\n' >> effect-count; shasum -a 256 effect-count"
@@ -87,8 +92,9 @@ def run(model):
     try:
         # The device code is shown directly to the operator, never captured in
         # an artifact or included in the payload-free qualification report.
-        print("Rui-owned device login (requires an enabled account):", flush=True)
-        subprocess.run([str(caller.RUI), "login", "codex"], check=True, timeout=1000)
+        if not credential.exists():
+            print("Rui-owned device login (requires an enabled account):", flush=True)
+            subprocess.run([str(caller.RUI), "login", "codex"], check=True, timeout=1000)
 
         def start():
             process, ready = start_ready_process(
@@ -146,7 +152,8 @@ def run(model):
         assert (workspace / "effect-count").read_bytes() == b"once\n"
         caller.wait_for(lambda: len(first_observations) >= 2, "first Host transport observations", timeout=10)
         assert len(first_observations) == 2, "expected initial and tool-continuation managed transfers"
-        assert private_reasoning_count(store, first_observations[0]["operation"]) > 0, "no accepted private reasoning to replay"
+        reasoning_counts = [private_reasoning_count(store, record["operation"]) for record in first_observations]
+        print(f"Pre-restart private reasoning item counts: {reasoning_counts}", flush=True)
         assert all(int(record["http_version"]) == 3 for record in first_observations), "HTTP/2 not observed"
         assert first_observations[0]["connection_id"] == first_observations[1]["connection_id"], "connection reuse not observed"
         assert [int(record["new_connections"]) for record in first_observations] == [1, 0], "sequential reuse not observed"
@@ -186,8 +193,10 @@ def run(model):
             "transport": first_observations + later_observations,
             "host_resources_before_restart": resources,
             "bash_effect_count": 1, "committed_recovery_model_requests": 0,
-            "post_restart_model_requests": 1, "private_replay": "fixture-verified; live continuation accepted",
+            "post_restart_model_requests": 1, "private_reasoning_counts": reasoning_counts,
+            "private_replay": "fixture-verified; live continuation accepted" if reasoning_counts[0] else "not observed on initial live transfer",
         }, sort_keys=True))
+        assert reasoning_counts[0] > 0, "no accepted private reasoning to replay; live qualification incomplete"
     finally:
         try:
             if host is not None:
@@ -201,8 +210,9 @@ if __name__ == "__main__":
     parser.add_argument("rui", type=pathlib.Path, help="built Rui binary")
     parser.add_argument("--live", action="store_true", help="explicitly authorize a live authenticated journey")
     parser.add_argument("--model", required=True, help="exact requested subscription model")
+    parser.add_argument("--credential-file", type=pathlib.Path, help="reuse an isolated Rui credential file across diagnostic runs; operator must remove it")
     args = parser.parse_args()
     if not args.live:
         parser.error("live account calls require --live; ordinary build gates never run this runner")
     caller.RUI = args.rui.resolve()
-    run(args.model)
+    run(args.model, args.credential_file)

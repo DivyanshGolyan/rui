@@ -674,7 +674,10 @@ fn validateCompleted(
             !std.mem.eql(u8, &record.content_digest, &identity.content_digest)) return error.ContradictoryProviderOutput;
         index += 1;
     }
-    if (index != expected_items or try reader.nextItem() != null) return error.ContradictoryProviderOutput;
+    // The managed stream can omit the repeated items from response.completed.
+    // Any nonempty terminal list must still match every streamed done item.
+    if (index != 0 and (index != expected_items or try reader.nextItem() != null))
+        return error.ContradictoryProviderOutput;
     if (try fields.get("usage")) |usage| {
         const usage_fields = try readFields(io, file, usage, &.{"total_tokens"});
         _ = try usage_fields.get("total_tokens");
@@ -981,6 +984,27 @@ test "provider preserves ordered trustworthy function call envelopes" {
     var order_tmp = std.testing.tmpDir(.{});
     defer order_tmp.cleanup();
     try std.testing.expectError(error.UnsupportedProviderOutput, validateTestingSse(&order_tmp, late_message, 64 * 1024));
+}
+
+test "empty terminal output uses complete streamed items but partial terminal output contradicts them" {
+    const first = "{\"type\":\"function_call\",\"id\":\"item-1\",\"name\":\"bash\",\"call_id\":\"call-1\",\"arguments\":\"{}\"}";
+    const second = "{\"type\":\"function_call\",\"id\":\"item-2\",\"name\":\"bash\",\"call_id\":\"call-2\",\"arguments\":\"{}\"}";
+    const items = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ first ++ "}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ second ++ "}\n\n";
+    const terminal = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"status\":\"completed\",\"output\":";
+    var empty_tmp = std.testing.tmpDir(.{});
+    defer empty_tmp.cleanup();
+    const accepted = try validateTestingSse(&empty_tmp, items ++ terminal ++ "[]}}\n\n", 64 * 1024);
+    try std.testing.expectEqual(@as(u64, 2), accepted.output.item_count);
+    try std.testing.expectEqual(@as(u64, 2), accepted.output.call_count);
+
+    var partial_tmp = std.testing.tmpDir(.{});
+    defer partial_tmp.cleanup();
+    try std.testing.expectError(error.ContradictoryProviderOutput, validateTestingSse(&partial_tmp, items ++ terminal ++ "[" ++ first ++ "]}}\n\n", 64 * 1024));
+
+    var missing_tmp = std.testing.tmpDir(.{});
+    defer missing_tmp.cleanup();
+    try std.testing.expectError(error.IncompleteProviderOutput, validateTestingSse(&missing_tmp, terminal ++ "[]}}\n\n", 64 * 1024));
 }
 
 test "function call argument stream events are scratch and completed items remain authority" {
