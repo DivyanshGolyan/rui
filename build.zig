@@ -121,6 +121,24 @@ pub fn build(b: *std.Build) void {
     );
     bash_recovery_integration_step.dependOn(&bash_recovery_integration.step);
 
+    const codex_integration = b.addSystemCommand(&.{"python3"});
+    codex_integration.addFileArg(b.path("tests/integration/codex_integration.py"));
+    codex_integration.addArtifactArg(release_safe);
+    const codex_integration_step = b.step(
+        "codex-integration",
+        "Run synthetic managed-route credentials, Bash continuation and fresh-Host caller journey",
+    );
+    codex_integration_step.dependOn(&codex_integration.step);
+
+    const codex_h2_integration = b.addSystemCommand(&.{"python3"});
+    codex_h2_integration.addFileArg(b.path("tests/integration/codex_h2_integration.py"));
+    codex_h2_integration.addArtifactArg(release_safe);
+    const codex_h2_integration_step = b.step(
+        "codex-h2-integration",
+        "Run synthetic managed TLS/H2 negotiation and observed sequential reuse (requires h2==4.3.0)",
+    );
+    codex_h2_integration_step.dependOn(&codex_h2_integration.step);
+
     const control_integration = b.addSystemCommand(&.{"python3"});
     control_integration.addFileArg(b.path("tests/integration/control_integration.py"));
     control_integration.addArtifactArg(release_safe);

@@ -1,5 +1,7 @@
 test {
     _ = @import("attempt.zig");
+    _ = @import("codex_auth.zig");
+    _ = @import("codex_credentials.zig");
     _ = @import("descriptor_capacity.zig");
     _ = @import("descriptor_limit.zig");
     _ = @import("execution_turn.zig");

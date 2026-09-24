@@ -8,7 +8,7 @@ Rui is in development. Today the direct CLI can configure reusable Sessions, que
 
 The precise model is documented in [Architecture](ARCHITECTURE.md): valid Bash descriptors become inspectable Actions, unknown tools and invalid descriptors become stable call-local rejections, and a Bash attempt that loses local custody resolves as indeterminate rather than replaying automatically.
 
-JavaScript workflows, Edit, structured answers and provider authentication are not implemented. Bash process-group stopping cannot contain detached descendants. Retained full output is optional: FIFO eviction or restart may remove it without changing the saved result. Codex subscription is the planned first live provider; live-provider, power-loss and complete 1,000-operation mixed qualification remain outstanding.
+JavaScript workflows, Edit and structured answers are not implemented. Rui-owned Codex login/refresh protocol parsing, private credential persistence and managed transport have deterministic/native fixture coverage; the authentication HTTP exchange and an authenticated live journey on Linux and macOS remain unqualified. Do not treat this as qualified live provider support. Bash process-group stopping cannot contain detached descendants. Retained full output is optional: FIFO eviction or restart may remove it without changing the saved result. Live-provider, power-loss and complete 1,000-operation mixed qualification remain outstanding.
 
 Targets Linux and macOS on x86-64 and ARM64. All four cross-compile. Broad runtime/resource qualification has run on Apple Silicon macOS. The model-queue workload has run on Linux and macOS; its macOS run passed the required physical-footprint target.
 
@@ -30,6 +30,12 @@ zig build check-full
 
 The production default Active Capacity remains 1,000. Startup rejects a requested population when the process descriptor limit cannot support it, so this development command selects a smaller population that fits ordinary finite limits. Model transport is disabled by default. Development testing requires an explicit `--provider-endpoint`: HTTPS (negotiated HTTP/2 required) or loopback HTTP/1.1, with no authentication attached. A private test CA can be selected with `--provider-ca-file PATH`; peer and hostname verification remain enabled. Run `./zig-out/bin/rui` to print command usage.
 
+For the implemented but unqualified Codex route, `rui login codex` prompts for a device code and stores credentials under `~/.config/rui/codex.json` in a private directory. `RUI_CODEX_CREDENTIAL_FILE` may select another absolute path under an owner-only directory. Device authentication must be enabled for the account/workspace. `rui serve --store /absolute/path/to/private-store --active-capacity 8 --codex` then selects only the fixed ChatGPT subscription route; it does not attach credentials to a development endpoint. Configure a Session with an exact model, `--tools bash` or `--tools none`, and text output; Edit and output schemas are rejected before dispatch in managed mode. A failed or interrupted refresh may require an explicit new login. These commands describe the implemented interface, **not** a live quickstart or model-availability claim.
+
+`zig build codex-integration` exercises a synthetic credential, exact Bash approval, private continuation and fresh-Host recovery through public callers. `zig build codex-h2-integration` additionally needs Python `h2==4.3.0` and OpenSSL and checks managed TLS/HTTP2 negotiation, connection reuse and conditional FedRAMP routing. Neither uses live credentials.
+
+An authorized native qualification can run `python3 tests/integration/codex_live.py /absolute/path/to/rui --live --model EXACT_MODEL` separately on Linux and macOS. It prompts for Rui-owned device login, approves only its exact inspected harmless Bash proposal and reports payload-free observations; it is not in ordinary build gates. Until both journeys pass, this is not a qualified live-provider quickstart.
+
 ## Try the implemented development path
 
 Run the narrated public-caller journey from issue [#260](https://github.com/DivyanshGolyan/rui/issues/260): configure an ask-mode Session, submit a message, inspect and approve one exact Bash Action, read its saved answer, crash the Host, then recover the original submission without repeating the effect.
@@ -46,7 +52,7 @@ This development smoke check is not a live-provider quickstart or power-loss tes
 
 The [delivery plan](https://github.com/DivyanshGolyan/rui/issues/164) separates [direct-core development readiness](https://github.com/DivyanshGolyan/rui/issues/168) from [full qualification](https://github.com/DivyanshGolyan/rui/issues/231). Essential safety evidence stays with each capability; broad qualification does not block independent feature development after the readiness checkpoint. Full stage, support, performance and release claims still require their evidence.
 
-The runnable #260 slice is implemented above. After critical safety closeout, planned independent feature slices include a [thin live Codex path](https://github.com/DivyanshGolyan/rui/issues/272) and a [minimal durable workflow](https://github.com/DivyanshGolyan/rui/issues/273). This is priority order, not a workflow dependency on credentials or live-provider access; these links do not add to the implemented surface described in [Status](#status).
+The runnable #260 slice and deterministic/native implementation of the [Codex path](https://github.com/DivyanshGolyan/rui/issues/272) are described above. Authenticated native Linux/macOS qualification still gates that issue's closure. A [minimal durable workflow](https://github.com/DivyanshGolyan/rui/issues/273) remains planned; these links do not expand the implemented surface described in [Status](#status).
 
 ## Read next
 

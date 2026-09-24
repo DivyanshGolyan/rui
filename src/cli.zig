@@ -1,5 +1,8 @@
 const std = @import("std");
 const client = @import("client.zig");
+const codex_auth = @import("codex_auth.zig");
+const codex_credentials = @import("codex_credentials.zig");
+const provider = @import("provider.zig");
 const protocol = @import("protocol.zig");
 const server = @import("server.zig");
 
@@ -8,7 +11,8 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(allocator);
     if (args.len < 2) return usage();
     const command = args[1];
-    if (std.mem.eql(u8, command, "serve")) return serve(init.io, args[2..]);
+    if (std.mem.eql(u8, command, "serve")) return serve(init, args[2..]);
+    if (std.mem.eql(u8, command, "login")) return login(init, args[2..]);
     if (std.mem.eql(u8, command, "configure")) try configure(init.io, args[2..]) else if (std.mem.eql(u8, command, "message")) try message(init.io, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init.io, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init.io, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try denyAction(init.io, args[2..]) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init.io, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init.io, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init.io, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init.io, args[2..]) else return usage();
     try postCommandHold(init);
 }
@@ -35,10 +39,69 @@ fn postCommandHoldDescriptors(ready: std.posix.fd_t, release: std.posix.fd_t) !v
     if (std.c.read(release, &acknowledgment, acknowledgment.len) != 1) return error.PostCommandHoldClosed;
 }
 
-fn serve(io: std.Io, args: []const []const u8) !void {
+fn credentialPath(init: std.process.Init, buffer: []u8, create: bool) ![]const u8 {
+    if (init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE")) |path| {
+        if (!std.fs.path.isAbsolute(path)) return error.InvalidCredentialPath;
+        return path;
+    }
+    const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+    if (!std.fs.path.isAbsolute(home)) return error.InvalidCredentialPath;
+    if (create) {
+        var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/.config/rui", .{home});
+        var opened = try std.Io.Dir.cwd().createDirPathOpen(init.io, directory, .{
+            .permissions = .fromMode(0o700),
+        });
+        opened.close(init.io);
+    }
+    return std.fmt.bufPrint(buffer, "{s}/.config/rui/codex.json", .{home});
+}
+
+fn login(init: std.process.Init, args: []const []const u8) !void {
+    if (args.len != 1 or !std.mem.eql(u8, args[0], "codex")) return usage();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try credentialPath(init, &path_buffer, true);
+    {
+        var existing = codex_credentials.load(path) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => return err,
+        };
+        if (existing) |*value| std.crypto.secureZero(u8, std.mem.asBytes(value));
+    }
+    try provider.initialize();
+    defer provider.deinitialize();
+    var tokens = try codex_auth.login(init.io, struct {
+        fn display(code: []const u8) !void {
+            std.debug.print("Open https://auth.openai.com/codex/device and enter code: {s}\n", .{code});
+        }
+    }.display);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&tokens));
+    var record: codex_credentials.Record = .{
+        .generation = 0,
+        .account_id = .{},
+        .fedramp = (try codex_auth.parseAccount(tokens.id_token.slice())).fedramp,
+        .id_token = .{},
+        .access_token = .{},
+        .refresh_token = .{},
+        .expires_at = (try codex_auth.parseExpiry(tokens.access_token.slice())) orelse 0,
+        .refreshed_at = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s)),
+    };
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+    try record.account_id.set(tokens.account_id.slice());
+    try record.id_token.set(tokens.id_token.slice());
+    try record.access_token.set(tokens.access_token.slice());
+    try record.refresh_token.set(tokens.refresh_token.slice());
+    try codex_credentials.install(path, &record, null);
+    try std.Io.File.stdout().writeStreamingAll(init.io, "Codex login installed.\n");
+}
+
+fn serve(init: std.process.Init, args: []const []const u8) !void {
+    const io = init.io;
     var store_path: ?[]const u8 = null;
     var provider_endpoint: ?[]const u8 = null;
     var provider_ca_file: ?[]const u8 = null;
+    var managed = false;
+    var fixture_endpoint: ?[]const u8 = null;
     var bash_path: []const u8 = server.default_bash_path;
     var bash_timeout_ms: u64 = server.default_bash_timeout_ms;
     var active_capacity: usize = server.default_active_capacity;
@@ -48,6 +111,10 @@ fn serve(io: std.Io, args: []const []const u8) !void {
         const arg = args[index];
         if (std.mem.eql(u8, arg, "--store")) {
             store_path = try takeValue(args, &index);
+        } else if (std.mem.eql(u8, arg, "--codex")) {
+            managed = true;
+        } else if (std.mem.eql(u8, arg, "--test-codex-fixture-endpoint")) {
+            fixture_endpoint = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--provider-endpoint")) {
             provider_endpoint = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--provider-ca-file")) {
@@ -142,14 +209,22 @@ fn serve(io: std.Io, args: []const []const u8) !void {
     }
     if ((faults.control_gate_keys == null) != (faults.control_gate_path == null)) return error.IncompleteControlGate;
     if ((faults.test_transition == null) != (faults.test_transition_gate_path == null)) return error.IncompleteTestTransitionGate;
+    if ((managed and (provider_endpoint != null or provider_ca_file != null or fixture_endpoint != null)) or
+        (fixture_endpoint != null and provider_endpoint != null)) return error.ManagedDevelopmentEndpointConflict;
+    if (fixture_endpoint != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null)
+        return error.FixtureCredentialPathRequired;
+    var credential_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const credential_path: ?[]const u8 = if (managed or fixture_endpoint != null) try credentialPath(init, &credential_path_buffer, false) else null;
     return server.serve(
         io,
         std.heap.c_allocator,
         store_path orelse return usage(),
         active_capacity,
         faults,
-        provider_endpoint,
+        if (managed) "https://chatgpt.com/backend-api/codex/responses" else fixture_endpoint orelse provider_endpoint,
         provider_ca_file,
+        credential_path,
+        fixture_endpoint != null,
         bash_path,
         bash_timeout_ms,
     );
@@ -439,7 +514,8 @@ fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
 fn usage() error{InvalidArguments} {
     std.debug.print(
         \\usage:
-        \\  rui serve --store PATH [--active-capacity N] [--provider-endpoint URL] [--provider-ca-file PATH] [--fault NAME]
+        \\  rui login codex
+        \\  rui serve --store PATH [--active-capacity N] [--codex | --provider-endpoint URL] [--provider-ca-file PATH] [--fault NAME]
         \\  rui configure --store PATH --record FILE --key KEY --session REF [settings]
         \\    First configuration requires --workspace PATH --provider codex --model MODEL.
         \\  rui message --store PATH --record FILE --key KEY --session REF --text FILE|-

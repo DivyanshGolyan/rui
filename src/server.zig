@@ -1,4 +1,6 @@
 const std = @import("std");
+const codex_auth = @import("codex_auth.zig");
+const codex_credentials = @import("codex_credentials.zig");
 const builtin = @import("builtin");
 const trace_native = @cImport({
     @cInclude("unistd.h");
@@ -118,6 +120,9 @@ const Host = struct {
     faults: Faults,
     provider_endpoint: ?[]const u8 = null,
     provider_ca_file: ?[]const u8 = null,
+    credential_path: ?[]const u8 = null,
+    test_codex_fixture: bool = false,
+    auth_worker: ?*AuthWorker = null,
     capture_writer: ?*provider.CaptureWriter = null,
     bash_path: []const u8 = default_bash_path,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
@@ -189,6 +194,8 @@ pub fn serve(
     faults: Faults,
     provider_endpoint: ?[]const u8,
     provider_ca_file: ?[]const u8,
+    credential_path: ?[]const u8,
+    test_codex_fixture: bool,
     bash_path: []const u8,
     bash_timeout_ms: u64,
 ) !void {
@@ -264,6 +271,8 @@ pub fn serve(
         .faults = faults,
         .provider_endpoint = provider_endpoint,
         .provider_ca_file = provider_ca_file,
+        .credential_path = credential_path,
+        .test_codex_fixture = test_codex_fixture,
         .bash_path = bash_path,
         .bash_timeout_ms = bash_timeout_ms,
         .retention = undefined,
@@ -282,6 +291,11 @@ pub fn serve(
     var provider_initialization_owned = false;
     if (provider_endpoint) |endpoint| {
         try provider.validateEndpoint(endpoint);
+        if (test_codex_fixture and
+            !std.mem.startsWith(u8, endpoint, "http://127.0.0.1:") and
+            !std.mem.startsWith(u8, endpoint, "http://[::1]:") and
+            !(std.mem.startsWith(u8, endpoint, "https://localhost:") and provider_ca_file != null))
+            return error.InvalidCodexFixtureEndpoint;
         try provider.initialize();
         provider_initialization_owned = true;
     }
@@ -444,9 +458,16 @@ const ModelPreparingSlot = struct {
     binding: store_module.AttemptBinding,
 };
 
+const ModelAuthenticatingSlot = struct {
+    owner: ModelPreparingSlot,
+    request: provider.PreparedRequest,
+    cancelled: bool = false,
+};
+
 const ExecutionSlot = union(enum) {
     free,
     model_preparing: ModelPreparingSlot,
+    model_authenticating: ModelAuthenticatingSlot,
     provider: ProviderSlot,
     bash_preparing: BashPreparingSlot,
     bash: BashSlot,
@@ -467,6 +488,7 @@ fn slotToken(slot: *const ExecutionSlot) ?execution.CustodyToken {
     return switch (slot.*) {
         .free => null,
         .model_preparing => |*active| active.token,
+        .model_authenticating => |*active| active.owner.token,
         .provider => |*active| active.owner.token,
         .bash_preparing => |*active| active.token,
         .bash => |*active| active.token,
@@ -482,6 +504,7 @@ fn checkSlotCustodyAgreement(slots: []const ExecutionSlot, custody: *execution.C
         switch (slot.*) {
             .free => {},
             .model_preparing => |*active| try custody.checkAttachedModel(active.token, active.binding),
+            .model_authenticating => |*active| try custody.checkAttachedModel(active.owner.token, active.owner.binding),
             .provider => |*active| try custody.checkAttachedModel(active.owner.token, active.owner.binding),
             .bash_preparing => |*active| try custody.checkAttachedAction(active.token, active.binding),
             // Delivery closure detaches custody while the .bash payload is
@@ -563,7 +586,169 @@ const LifecycleMeasurement = struct {
 
 const lifecycle_trace_interval_ms = 100;
 
+// One Host-wide authentication I/O job. Canonical custody remains in the
+// execution slot while file locks, refresh TLS and persistence run here.
+const AuthWorker = struct {
+    io: std.Io,
+    path: []const u8,
+    fixture: bool = false,
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+    state: enum { idle, requested, ready, failed } = .idle,
+    credential: ?codex_credentials.Lease = null,
+    failure: ?anyerror = null,
+    stopping: bool = false,
+
+    const Result = union(enum) { ready: codex_credentials.Lease, failed: anyerror };
+
+    fn request(self: *AuthWorker) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        std.debug.assert(self.state == .idle);
+        self.state = .requested;
+        self.condition.broadcast(self.io);
+    }
+
+    fn take(self: *AuthWorker) ?Result {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return switch (self.state) {
+            .idle, .requested => null,
+            .ready => result: {
+                const value = self.credential.?;
+                self.credential = null;
+                self.state = .idle;
+                break :result .{ .ready = value };
+            },
+            .failed => result: {
+                const err = self.failure.?;
+                self.failure = null;
+                self.state = .idle;
+                break :result .{ .failed = err };
+            },
+        };
+    }
+
+    fn stop(self: *AuthWorker, thread: std.Thread) void {
+        self.mutex.lockUncancelable(self.io);
+        self.stopping = true;
+        self.condition.broadcast(self.io);
+        self.mutex.unlock(self.io);
+        thread.join();
+        if (self.credential) |*value| value.release();
+    }
+
+    fn run(self: *AuthWorker) void {
+        while (true) {
+            self.mutex.lockUncancelable(self.io);
+            while (!self.stopping and self.state != .requested)
+                self.condition.waitUncancelable(self.io, &self.mutex);
+            if (self.stopping) {
+                self.mutex.unlock(self.io);
+                return;
+            }
+            self.mutex.unlock(self.io);
+            const acquired = self.acquire();
+            self.mutex.lockUncancelable(self.io);
+            if (acquired) |value| {
+                self.credential = value;
+                self.state = .ready;
+            } else |err| {
+                self.failure = err;
+                self.state = .failed;
+            }
+            self.condition.broadcast(self.io);
+            self.mutex.unlock(self.io);
+        }
+    }
+
+    fn acquire(self: *AuthWorker) !codex_credentials.Lease {
+        var record = try codex_credentials.load(self.path);
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+        if (record.state != .ready) return error.RefreshRequiresLogin;
+        if (self.fixture and
+            (!std.mem.eql(u8, record.access_token.slice(), codex_auth.fixture_access_token) or
+                !codex_auth.isFixtureId(record.id_token.slice()) or
+                !std.mem.eql(u8, record.account_id.slice(), codex_auth.fixture_account_id)))
+            return error.FixtureRequiresSyntheticCredential;
+        const account = try codex_auth.parseAccount(record.id_token.slice());
+        if (!std.mem.eql(u8, account.id.slice(), record.account_id.slice()) or
+            account.fedramp != record.fedramp) return error.AccountMismatch;
+        if (((try codex_auth.parseExpiry(record.access_token.slice())) orelse 0) != record.expires_at)
+            return error.InvalidCredentialExpiry;
+        const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds, std.time.ns_per_s));
+        if (shouldRefresh(&record, now)) {
+            const claimed = claimed: {
+                codex_credentials.markRefreshPending(self.path, record.generation) catch |err| switch (err) {
+                    // Another Host or explicit login won the mutation lock.
+                    // Reread its authoritative result instead of using the
+                    // old generation or refreshing its possibly spent token.
+                    error.GenerationMismatch => break :claimed false,
+                    else => return err,
+                };
+                break :claimed true;
+            };
+            if (claimed) {
+                var tokens: codex_auth.Tokens = .{};
+                defer std.crypto.secureZero(u8, std.mem.asBytes(&tokens));
+                try tokens.id_token.set(record.id_token.slice());
+                try tokens.access_token.set(record.access_token.slice());
+                try tokens.refresh_token.set(record.refresh_token.slice());
+                try tokens.account_id.set(record.account_id.slice());
+                var refreshed = try codex_auth.refresh(&tokens);
+                defer std.crypto.secureZero(u8, std.mem.asBytes(&refreshed));
+                var replacement = record;
+                defer std.crypto.secureZero(u8, std.mem.asBytes(&replacement));
+                try replacement.id_token.set(refreshed.id_token.slice());
+                try replacement.access_token.set(refreshed.access_token.slice());
+                try replacement.refresh_token.set(refreshed.refresh_token.slice());
+                replacement.fedramp = (try codex_auth.parseAccount(refreshed.id_token.slice())).fedramp;
+                replacement.expires_at = (try codex_auth.parseExpiry(refreshed.access_token.slice())) orelse 0;
+                replacement.refreshed_at = @intCast(@divFloor(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds, std.time.ns_per_s));
+                codex_credentials.install(self.path, &replacement, record.generation) catch |err| switch (err) {
+                    error.GenerationMismatch => {}, // explicit login replaced the pending record
+                    else => return err,
+                };
+            }
+        }
+        var result = try codex_credentials.lease(self.path);
+        errdefer result.release();
+        if (self.fixture and
+            (!std.mem.eql(u8, result.record.access_token.slice(), codex_auth.fixture_access_token) or
+                !codex_auth.isFixtureId(result.record.id_token.slice()) or
+                !std.mem.eql(u8, result.record.account_id.slice(), codex_auth.fixture_account_id)))
+            return error.FixtureRequiresSyntheticCredential;
+        const selected = try codex_auth.parseAccount(result.record.id_token.slice());
+        if (!std.mem.eql(u8, selected.id.slice(), result.record.account_id.slice()) or
+            selected.fedramp != result.record.fedramp) return error.AccountMismatch;
+        if (((try codex_auth.parseExpiry(result.record.access_token.slice())) orelse 0) != result.record.expires_at)
+            return error.InvalidCredentialExpiry;
+        const launch_now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds, std.time.ns_per_s));
+        if (result.record.expires_at != 0 and result.record.expires_at <= launch_now)
+            return error.ExpiredCredential;
+        return result;
+    }
+};
+
+fn shouldRefresh(record: *const codex_credentials.Record, now: i64) bool {
+    if (record.expires_at != 0) return record.expires_at <= now + 60;
+    return now -| record.refreshed_at >= 8 * 24 * 60 * 60;
+}
+
 fn executionMain(host: *Host) void {
+    var auth_worker = AuthWorker{ .io = host.io, .path = host.credential_path orelse "", .fixture = host.test_codex_fixture };
+    const auth_thread: ?std.Thread = if (host.credential_path != null)
+        std.Thread.spawn(.{}, AuthWorker.run, .{&auth_worker}) catch |err| {
+            fenceDispatch(host, "authentication worker initialization", err);
+            return;
+        }
+    else
+        null;
+    if (auth_thread != null) host.auth_worker = &auth_worker;
+    defer if (auth_thread) |thread| {
+        host.auth_worker = null;
+        auth_worker.stop(thread);
+    };
     const slots = host.allocator.alloc(ExecutionSlot, host.custody.records.len) catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
         return;
@@ -746,7 +931,9 @@ const NativeTurn = struct {
     }
 
     pub fn modelPreparationOpen(self: *const NativeTurn) bool {
-        return !self.model_preparation_active.*;
+        if (self.model_preparation_active.*) return false;
+        for (self.slots) |slot| if (slot == .model_authenticating) return false;
+        return true;
     }
 
     pub fn hasTransport(self: *const NativeTurn) bool {
@@ -945,6 +1132,17 @@ fn cancelSupersededTransfers(
             finishCustodyNow(host, active.token);
             slot.* = .free;
         },
+        .model_authenticating => |*active| {
+            if (active.cancelled) continue;
+            const superseded = host.store.operationSupersededByControl(active.owner.binding) catch |err| {
+                fenceDispatch(host, "authentication control reconciliation", err);
+                return;
+            };
+            if (superseded) |control| {
+                traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), active.owner.binding);
+                active.cancelled = true;
+            }
+        },
         .provider => |*active| {
             if (active.transfer.isDiscarded()) continue;
             const superseded = host.store.operationSupersededByControl(active.owner.binding) catch |err| {
@@ -985,6 +1183,7 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
     for (active.slots) |slot| switch (slot) {
         .provider => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .model_preparing => |value| if (value.binding.operation_id == operation_id) return true,
+        .model_authenticating => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .cleanup => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .free, .bash_preparing, .bash, .bash_prepared_cleanup, .named_scratch => {},
     };
@@ -1508,6 +1707,7 @@ fn beginAdmittedAttempt(
         host.lease.paths.scratch.slice(),
         request_budget,
         .{
+            .managed_route = host.credential_path != null,
             .first_step = host.faults.request_first_step,
             .write = host.faults.request_write,
             .seal = host.faults.request_seal,
@@ -1554,6 +1754,10 @@ fn advanceModelPreparation(
     byte_allowance: usize,
     item_allowance: usize,
 ) bool {
+    if (host.auth_worker != null) {
+        for (slots) |*slot| if (slot.* == .model_authenticating)
+            return advanceAuthentication(host, reactor.?, slot);
+    }
     if (!preparation_active.*) return false;
     const slot = for (slots) |*candidate| switch (candidate.*) {
         .model_preparing => break candidate,
@@ -1589,10 +1793,45 @@ fn advanceModelPreparation(
             traceOperation(host, "preparation_completed", owner.binding);
             preparation_active.* = false;
             var request = value;
-            launchPreparedRequest(host, reactor.?, slot, owner, &request);
+            if (host.auth_worker) |worker| {
+                slot.* = .{ .model_authenticating = .{ .owner = owner, .request = request } };
+                worker.request();
+            } else launchPreparedRequest(host, reactor.?, slot, owner, &request, null);
         },
     }
     return true;
+}
+
+fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) bool {
+    const result = host.auth_worker.?.take() orelse return false;
+    const active = &slot.model_authenticating;
+    const owner = active.owner;
+    var request = active.request;
+    if (result == .ready) {
+        var credential = result.ready;
+        defer credential.release();
+        if (!active.cancelled and host.launchAllowed()) {
+            launchPreparedRequest(host, reactor, slot, owner, &request, &credential.record);
+        } else {
+            request.deinit();
+            finishCustodyNow(host, owner.token);
+            slot.* = .free;
+        }
+    } else {
+        request.deinit();
+        if (!active.cancelled)
+            settleAttemptFailure(host, owner.token, owner.binding, authenticationFailureCode(result.failed), .terminal);
+        finishCustodyNow(host, owner.token);
+        slot.* = .free;
+    }
+    return true;
+}
+
+fn authenticationFailureCode(err: anyerror) []const u8 {
+    return switch (err) {
+        error.RefreshRejected, error.RefreshRequiresLogin, error.ExpiredCredential, error.AccountMismatch, error.InvalidCredentialExpiry => "provider_authentication_failed",
+        else => "provider_authentication_backend_failed",
+    };
 }
 
 fn finishModelPreparationFailure(
@@ -1616,6 +1855,7 @@ fn launchPreparedRequest(
     slot: *ExecutionSlot,
     owner: ModelPreparingSlot,
     request: *provider.PreparedRequest,
+    credential: ?*const codex_credentials.Record,
 ) void {
     const token = owner.token;
     const binding = owner.binding;
@@ -1647,6 +1887,12 @@ fn launchPreparedRequest(
     const active = &slot.provider;
     active.transfer.start(host.provider_endpoint.?, request.*, binding, .{
         .ca_file = host.provider_ca_file,
+        .managed_auth = if (credential) |value| .{
+            .access_token = value.access_token.slice(),
+            .account_id = value.account_id.slice(),
+            .fedramp = value.fedramp,
+        } else null,
+        .test_managed_fixture = host.test_codex_fixture,
         .inactivity_seconds = @intCast(host.faults.provider_inactivity_seconds),
         .request_read_fault = host.faults.request_read,
         .response_acquire_fault = host.faults.response_acquire,
@@ -1674,7 +1920,7 @@ fn launchPreparedRequest(
         slot.* = .free;
         return;
     };
-    if (host.faults.before_launch_delay_ms != 0) {
+    if (host.faults.before_launch_delay_ms != 0 and credential == null) {
         traceOperation(host, "prepared_before_handoff", binding);
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
     }
@@ -1729,6 +1975,20 @@ fn completeTransfer(
     const owner = active.owner;
     traceCompletionQueue(host, completion.queued_after, owner.binding);
     defer traceOperation(host, "provider_completion_serviced", owner.binding);
+    if (host.credential_path != null) {
+        const observation = active.transfer.protocolObservation();
+        const correlation = active.transfer.requestId();
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(correlation, &digest, .{});
+        std.debug.print("rui: codex transfer operation={d} http_version={d} connection_id={d} new_connections={d} correlation_present={} correlation_sha256={x} alpn=unavailable\n", .{
+            owner.binding.operation_id,
+            observation.http_version,
+            observation.connection_id,
+            observation.new_connections,
+            correlation.len != 0,
+            digest,
+        });
+    }
     const evidence = switch (completion.outcome) {
         .response_capture_failed => |failure| {
             const code = switch (failure) {
@@ -2025,6 +2285,11 @@ fn shutdownExecution(
             finishCustodyNow(host, active.token);
             slot.* = .free;
         },
+        .model_authenticating => |*active| {
+            active.request.deinit();
+            finishCustodyNow(host, active.owner.token);
+            slot.* = .free;
+        },
         .bash_preparing => |active| {
             const cleanup = preparation.*.?.cancel();
             preparation.* = null;
@@ -2080,6 +2345,7 @@ fn hasOwnedSlots(slots: []const ExecutionSlot) bool {
 
 fn preparationFailureCode(err: anyerror) []const u8 {
     return switch (err) {
+        error.UnsupportedCodexConfiguration => "unsupported_codex_configuration",
         error.InjectedFirstPreparationFailure => "request_preparation_failed",
         error.RequestScratchExhausted => "request_scratch_exhausted",
         error.InjectedRequestWriteFailure => "request_write_failed",
@@ -3422,6 +3688,17 @@ test "model retry and inactivity defaults match the owning resource contract" {
     );
 }
 
+test "credential refresh uses token expiry or the last successful opaque exchange" {
+    var record: codex_credentials.Record = undefined;
+    record.expires_at = 1_000;
+    record.refreshed_at = 100;
+    try std.testing.expect(!shouldRefresh(&record, 939));
+    try std.testing.expect(shouldRefresh(&record, 940));
+    record.expires_at = 0;
+    try std.testing.expect(!shouldRefresh(&record, 100 + 8 * 24 * 60 * 60 - 1));
+    try std.testing.expect(shouldRefresh(&record, 100 + 8 * 24 * 60 * 60));
+}
+
 test "cleanup delay follows elapsed time and preserves custody reuse" {
     var records: [1]execution.CustodyRecord = undefined;
     var host = Host{
@@ -4448,7 +4725,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
         var slot = ExecutionSlot{ .model_preparing = owner };
         var reactor: provider.Reactor = undefined; // Must never be accessed.
         @field(host, flag).store(true, .release);
-        launchPreparedRequest(&host, &reactor, &slot, owner, &request);
+        launchPreparedRequest(&host, &reactor, &slot, owner, &request, null);
         try std.testing.expect(slot == .free);
         try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());

@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Opt-in native public-caller qualification; never part of ordinary build gates."""
+
+import argparse
+import hashlib
+import json
+import os
+import pathlib
+import platform
+import re
+import shutil
+import sqlite3
+import subprocess
+import tempfile
+import threading
+import time
+
+import bash_integration as bash
+import dispatch_integration as caller
+from host_process import start_ready_process
+
+
+def observations(host):
+    records = []
+
+    def drain():
+        for line in host.stderr:
+            match = re.search(rb"rui: codex transfer (operation=\d+ http_version=\d+ connection_id=-?\d+ new_connections=\d+ correlation_present=(?:true|false) correlation_sha256=[0-9a-f]+ alpn=unavailable)", line)
+            if match and len(records) < 8:
+                records.append(dict(part.split("=", 1) for part in match.group(1).decode().split()))
+
+    thread = threading.Thread(target=drain, daemon=True)
+    thread.start()
+    return records, thread
+
+
+def wait_for(store, key, predicate, label):
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        value = caller.observe(store, key)
+        if predicate(value):
+            return value
+        result = value.get("result", {})
+        if result.get("code") or result.get("status") in ("failed", "stopped"):
+            raise AssertionError(f"{label}: saved failure {result.get('code', result.get('status'))}")
+        time.sleep(0.5)
+    raise AssertionError(f"timed out waiting for {label}")
+
+
+def evidence(store):
+    with sqlite3.connect(f"file:{store / 'rui.sqlite3'}?mode=ro", uri=True) as db:
+        return db.execute(
+            "SELECT response_id,body_model,openai_model,x_openai_model,request_id "
+            "FROM model_operation WHERE response_id IS NOT NULL ORDER BY operation_id"
+        ).fetchall()
+
+
+def private_reasoning_count(store, operation):
+    with sqlite3.connect(f"file:{store / 'rui.sqlite3'}?mode=ro", uri=True) as db:
+        return db.execute(
+            "SELECT count(*) FROM model_output_item item JOIN content c ON c.content_id=item.content_id "
+            "WHERE item.operation_id=? AND item.item_kind=1 AND c.private=1",
+            (operation,),
+        ).fetchone()[0]
+
+
+def run(model):
+    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-codex-live."))
+    private = state / "credentials"
+    private.mkdir(mode=0o700)
+    store = state / "store"
+    workspace = state / "workspace"
+    workspace.mkdir()
+    credential = private / "codex.json"
+    os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
+    session = "qualification/codex"
+    command = "printf 'once\\n' >> effect-count; shasum -a 256 effect-count"
+    prompt = (
+        "Call Bash once with exactly this cmd and timeout_ms null: " + command +
+        ". After its result, answer with the hex SHA-256 value printed by Bash. "
+        "Do not run another tool or guess the value."
+    )
+    host = None
+    reader = None
+    first_observations = []
+    later_observations = []
+    try:
+        # The device code is shown directly to the operator, never captured in
+        # an artifact or included in the payload-free qualification report.
+        print("Rui-owned device login (requires an enabled account):", flush=True)
+        subprocess.run([str(caller.RUI), "login", "codex"], check=True, timeout=1000)
+
+        def start():
+            process, ready = start_ready_process(
+                [caller.RUI, "serve", "--store", store, "--active-capacity", "2", "--codex"],
+                required_fields={"execution": "enabled"}, timeout=20,
+            )
+            records, thread = observations(process)
+            return process, records, thread, {"curl": ready["curl"], "openssl": ready["openssl"]}
+
+        def stop():
+            nonlocal host, reader
+            if host.poll() is None:
+                host.kill()
+            host.wait(timeout=10)
+            reader.join(timeout=5)
+            assert not reader.is_alive(), "Host diagnostics did not drain"
+            host.stdout.close()
+            host.stderr.close()
+            host = None
+            reader = None
+
+        host, first_observations, reader, dependencies = start()
+        configured = caller.command(
+            "configure", "--store", store, "--record", state / "configure.json",
+            "--key", "configure", "--session", session, "--workspace", workspace,
+            "--provider", "codex", "--model", model, "--tools", "bash",
+            "--permission-mode", "ask",
+        )
+        assert configured["answer"]["status"] == "accepted", "configuration rejected"
+        caller.message(state, store, "first", session, prompt)
+        deadline = time.monotonic() + 180
+        action = None
+        while time.monotonic() < deadline:
+            action = bash.action_for(store, session)
+            if action:
+                break
+            result = caller.observe(store, "first").get("result", {})
+            if result.get("code"):
+                raise AssertionError(f"proposal failed: {result['code']}")
+            time.sleep(0.5)
+        assert action is not None, "no inspectable Bash proposal"
+        args = json.loads(caller.read_action(store, session, action["action"], "arguments"))
+        assert args == {"cmd": command, "timeout_ms": None}, "proposal differed from the safe command; nothing approved"
+        assert action["authorization"] == "pending" and not (workspace / "effect-count").exists()
+        bash.allow(state, store, "approve", session, action["action"])
+        first = wait_for(store, "first", lambda value: value.get("result", {}).get("status") == "completed", "first answer")
+        bash_report = caller.command("inspect-session", "--store", store, "--session", session, "--profile", "full")
+        actions = bash_report["full"]["actions"]
+        assert len(actions) == 1 and actions[0]["resolution"] == "succeeded", "Bash did not settle once"
+        expected = hashlib.sha256(b"once\n").hexdigest()
+        assert expected.encode() in actions[0]["result"]["text"].encode(), "tool did not print the independently computed digest"
+        original_answer = caller.read_result(store, "first")
+        assert expected.encode() in original_answer, "final answer omitted the tool-produced digest"
+        caller.wait_for(lambda: bash.execution_custody_idle(store, session), "committed cleanup", timeout=30)
+        assert (workspace / "effect-count").read_bytes() == b"once\n"
+        caller.wait_for(lambda: len(first_observations) >= 2, "first Host transport observations", timeout=10)
+        assert len(first_observations) == 2, "expected initial and tool-continuation managed transfers"
+        assert private_reasoning_count(store, first_observations[0]["operation"]) > 0, "no accepted private reasoning to replay"
+        assert all(int(record["http_version"]) == 3 for record in first_observations), "HTTP/2 not observed"
+        assert first_observations[0]["connection_id"] == first_observations[1]["connection_id"], "connection reuse not observed"
+        assert [int(record["new_connections"]) for record in first_observations] == [1, 0], "sequential reuse not observed"
+        before = evidence(store)
+        assert len(before) == 2 and all(row[0] for row in before), "missing response identities"
+        resources = bash.process_resources(host)
+
+        stop()  # after the committed result, not an interrupted Bash effect
+        host, later_observations, reader, restarted_dependencies = start()
+        assert restarted_dependencies == dependencies
+        recovered = caller.retry_message(state, store, "first")
+        assert recovered["answer"]["replayed"] is True
+        assert caller.read_result(store, "first") == original_answer
+        assert caller.observe(store, "first")["result"] == first["result"]
+        assert evidence(store) == before and not later_observations
+        assert (workspace / "effect-count").read_bytes() == b"once\n"
+
+        caller.message(state, store, "later", session, "What SHA-256 digest did the approved tool return earlier? Answer without Bash.")
+        later = wait_for(store, "later", lambda value: value.get("result", {}).get("status") == "completed", "post-restart answer")
+        assert expected.encode() in caller.read_result(store, "later"), "continued answer lost the tool witness"
+        caller.wait_for(lambda: bash.execution_custody_idle(store, session), "post-restart cleanup", timeout=30)
+        assert (workspace / "effect-count").read_bytes() == b"once\n"
+        caller.wait_for(lambda: len(later_observations) >= 1, "fresh Host transport observation", timeout=10)
+        assert len(later_observations) == 1 and int(later_observations[0]["http_version"]) == 3
+        after = evidence(store)
+        assert len(after) == 3 and after[:2] == before and after[2][0]
+        print(json.dumps({
+            "revision": bash.source_revision(), "system": platform.system(),
+            "architecture": platform.machine(), "requested_model": model,
+            "route": "/backend-api/codex/responses", "authentication": "Rui device code",
+            "native_dependencies": dependencies,
+            "public_result_identity": {"first": first["processing"], "later": later["processing"]},
+            "served_model_evidence": [
+                {"body": row[1] or None, "openai_model": row[2] or None, "x_openai_model": row[3] or None,
+                 "correlation_present": bool(row[4])} for row in after
+            ],
+            "transport": first_observations + later_observations,
+            "host_resources_before_restart": resources,
+            "bash_effect_count": 1, "committed_recovery_model_requests": 0,
+            "post_restart_model_requests": 1, "private_replay": "fixture-verified; live continuation accepted",
+        }, sort_keys=True))
+    finally:
+        try:
+            if host is not None:
+                stop()
+        finally:
+            shutil.rmtree(state)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("rui", type=pathlib.Path, help="built Rui binary")
+    parser.add_argument("--live", action="store_true", help="explicitly authorize a live authenticated journey")
+    parser.add_argument("--model", required=True, help="exact requested subscription model")
+    args = parser.parse_args()
+    if not args.live:
+        parser.error("live account calls require --live; ordinary build gates never run this runner")
+    caller.RUI = args.rui.resolve()
+    run(args.model)

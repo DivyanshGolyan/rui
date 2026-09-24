@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const codex_auth = @import("codex_auth.zig");
 const named_scratch = @import("named_scratch.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
@@ -19,6 +20,7 @@ pub const request_scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
 pub const max_endpoint_bytes = 2048;
 
 pub const PreparationFaults = struct {
+    managed_route: bool = false,
     first_step: bool = false,
     write: bool = false,
     seal: bool = false,
@@ -31,6 +33,8 @@ pub const PreparationFaults = struct {
 
 pub const TransportOptions = struct {
     ca_file: ?[]const u8 = null,
+    managed_auth: ?struct { access_token: []const u8, account_id: []const u8, fedramp: bool } = null,
+    test_managed_fixture: bool = false,
     inactivity_seconds: i64 = 5 * 60,
     request_read_fault: bool = false,
     response_acquire_fault: bool = false,
@@ -279,6 +283,9 @@ pub const Preparation = struct {
             switch (self.phase) {
                 .settings => {
                     self.settings = self.view.settings() catch |err| return .{ .failed = err };
+                    if (self.faults.managed_route and
+                        (self.settings.?.tools_mask & 2 != 0 or self.settings.?.output_schema != null))
+                        return .{ .failed = error.UnsupportedCodexConfiguration };
                     self.phase = switch (self.settings.?.provider) {
                         .codex => .model_prefix,
                     };
@@ -550,6 +557,12 @@ pub const TransportEvidence = struct {
     http_status: u16 = 0,
     retry_after_ms: ?u64 = null,
     retry_after_deadline_ms: ?i64 = null,
+};
+
+pub const ProtocolObservation = struct {
+    http_version: c_long,
+    connection_id: c.curl_off_t,
+    new_connections: c_long,
 };
 
 pub const CaptureFailure = enum { scratch_exhausted, write_failed, seal_failed };
@@ -1073,9 +1086,33 @@ pub const Transfer = struct {
         const easy = c.curl_easy_init() orelse return error.TransportAllocationFailed;
         errdefer c.curl_easy_cleanup(easy);
         var headers: ?*c.curl_slist = null;
-        headers = c.curl_slist_append(headers, "Content-Type: application/json") orelse
-            return error.TransportAllocationFailed;
-        errdefer c.curl_slist_free_all(headers);
+        errdefer freeHeaders(headers);
+        try appendHeader(&headers, "Content-Type: application/json");
+        if (options.managed_auth) |auth| {
+            if (options.test_managed_fixture) {
+                if ((!std.mem.startsWith(u8, endpoint, "http://127.0.0.1:") and
+                    !std.mem.startsWith(u8, endpoint, "http://[::1]:") and
+                    !(std.mem.startsWith(u8, endpoint, "https://localhost:") and options.ca_file != null)) or
+                    !std.mem.eql(u8, auth.access_token, codex_auth.fixture_access_token) or
+                    !std.mem.eql(u8, auth.account_id, codex_auth.fixture_account_id))
+                    return error.InvalidManagedFixture;
+            } else if (!std.mem.eql(u8, endpoint, "https://chatgpt.com/backend-api/codex/responses"))
+                return error.ManagedEndpointMismatch;
+            var bearer: [16 * 1024 + 32:0]u8 = undefined;
+            var account: [1024 + 32:0]u8 = undefined;
+            defer std.crypto.secureZero(u8, &bearer);
+            defer std.crypto.secureZero(u8, &account);
+            const bearer_z = try std.fmt.bufPrintZ(&bearer, "Authorization: Bearer {s}", .{auth.access_token});
+            const account_z = try std.fmt.bufPrintZ(&account, "ChatGPT-Account-ID: {s}", .{auth.account_id});
+            for (auth.access_token) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialHeader;
+            for (auth.account_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialHeader;
+            if (auth.access_token.len == 0 or auth.account_id.len == 0) return error.InvalidCredentialHeader;
+            try appendHeader(&headers, "Accept: text/event-stream");
+            try appendHeader(&headers, bearer_z.ptr);
+            try appendHeader(&headers, account_z.ptr);
+            if (auth.fedramp)
+                try appendHeader(&headers, "X-OpenAI-Fedramp: true");
+        }
         var response = ResponseCapture.init(
             request.io,
             scratch_path,
@@ -1270,8 +1307,8 @@ pub const Transfer = struct {
     pub fn deinit(self: *Transfer) void {
         std.debug.assert(!self.in_reactor);
         std.debug.assert(self.writer.drained(&self.response));
-        c.curl_slist_free_all(self.headers);
         c.curl_easy_cleanup(self.easy);
+        freeHeaders(self.headers);
         self.request.deinit();
         if (self.response_owned) self.response.deinit();
         self.* = undefined;
@@ -1286,6 +1323,16 @@ pub const Transfer = struct {
 
     pub fn requestId(self: *const Transfer) []const u8 {
         return self.header_context.request_id.slice();
+    }
+
+    /// Payload-free curl observations for a completed managed transfer.
+    /// Connection IDs are meaningful only inside one Reactor/Host lifetime.
+    pub fn protocolObservation(self: *const Transfer) ProtocolObservation {
+        var result: ProtocolObservation = .{ .http_version = 0, .connection_id = -1, .new_connections = -1 };
+        _ = c.curl_easy_getinfo(self.easy, c.CURLINFO_HTTP_VERSION, &result.http_version);
+        _ = c.curl_easy_getinfo(self.easy, c.CURLINFO_CONN_ID, &result.connection_id);
+        _ = c.curl_easy_getinfo(self.easy, c.CURLINFO_NUM_CONNECTS, &result.new_connections);
+        return result;
     }
 
     pub fn openaiModel(self: *const Transfer) []const u8 {
@@ -1442,6 +1489,19 @@ fn parseRetryAfter(value: []const u8, now_seconds: c.time_t) ?RetryAfter {
 
 fn setOpt(easy: *c.CURL, option: c.CURLoption, value: anytype) !void {
     if (c.curl_easy_setopt(easy, option, value) != c.CURLE_OK) return error.TransportOptionFailed;
+}
+
+fn appendHeader(headers: *?*c.curl_slist, value: [*:0]const u8) !void {
+    const next = c.curl_slist_append(headers.*, value) orelse return error.TransportAllocationFailed;
+    headers.* = next;
+}
+
+fn freeHeaders(headers: ?*c.curl_slist) void {
+    var node = headers;
+    while (node) |current| : (node = current.*.next) {
+        std.crypto.secureZero(u8, std.mem.span(current.*.data));
+    }
+    c.curl_slist_free_all(headers);
 }
 
 pub fn validateEndpoint(endpoint: []const u8) !void {
