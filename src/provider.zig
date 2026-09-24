@@ -1758,17 +1758,21 @@ test "full capture queue rejects an offer without changing its charge or pending
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
-test "Transfer finalization gives late capture failure priority and retains cancelled writes" {
+test "Transfer finalization records late capture failure and retains discarded writes and seals" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var used = std.atomic.Value(u64).init(0);
+    var used = std.atomic.Value(u64).init(41);
     var writer = CaptureWriter{ .io = std.testing.io };
     for ([_]enum { write_failure, seal_failure, discard, discard_after_completion }{
         .write_failure, .seal_failure, .discard, .discard_after_completion,
     }, 0..) |scenario, index| {
         var name_buffer: [32]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buffer, "capture-{d}", .{index});
-        const file = try tmp.dir.createFile(std.testing.io, name, .{ .read = true });
+        const created = try tmp.dir.createFile(std.testing.io, name, .{ .read = true });
+        const file = if (scenario == .write_failure) blk: {
+            created.close(std.testing.io);
+            break :blk try tmp.dir.openFile(std.testing.io, name, .{});
+        } else created;
         const readonly = try tmp.dir.openFile(std.testing.io, name, .{});
         try tmp.dir.deleteFile(std.testing.io, name);
         var transfer: Transfer = undefined;
@@ -1782,30 +1786,32 @@ test "Transfer finalization gives late capture failure priority and retains canc
         transfer.local = .receiving;
         transfer.in_reactor = false;
         try std.testing.expectEqual(@as(usize, 3), writer.offer(&transfer.response, "xyz"));
-        try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
+        try std.testing.expectEqual(@as(u64, 44), used.load(.acquire));
         if (scenario == .discard or scenario == .discard_after_completion) {
-            if (scenario == .discard_after_completion)
+            if (scenario == .discard_after_completion) {
                 transfer.finish(.{ .transport_finished = .{ .disposition = .success } }, 0);
+                try std.testing.expect(transfer.advanceFinalization(false) == .pending);
+                try std.testing.expectEqual(@as(usize, 2), writer.count);
+            }
             transfer.discard();
             try std.testing.expect(transfer.advanceFinalization(false) == .pending);
         } else {
             transfer.finish(.{ .transport_finished = .{ .disposition = .success } }, 0);
             try std.testing.expect(transfer.advanceFinalization(scenario == .seal_failure) == .pending);
         }
-        if (scenario == .write_failure) {
-            // A worker failure after native success must override its pending
-            // outcome; the already accepted queue entry still must drain.
-            writer.mutex.lockUncancelable(writer.io);
-            transfer.response.failure = .write_failed;
-            writer.mutex.unlock(writer.io);
-        }
         writer.mutex.lockUncancelable(writer.io);
         writer.processOne();
-        if (scenario != .discard and scenario != .discard_after_completion) {
+        if (scenario == .write_failure) {
+            try std.testing.expectEqual(CaptureFailure.write_failed, transfer.captureFailure().?);
+            try std.testing.expectEqual(@as(u64, 0), transfer.response.length);
+        }
+        if (scenario != .discard) {
+            try std.testing.expectEqual(@as(usize, 1), transfer.response.pending_writes);
             try std.testing.expect(transfer.advanceFinalization(true) == .pending);
             writer.mutex.lockUncancelable(writer.io);
             writer.processOne();
         }
+        if (scenario == .discard_after_completion) try std.testing.expect(transfer.response.sealed);
         const final = transfer.advanceFinalization(false);
         switch (scenario) {
             .discard, .discard_after_completion => try std.testing.expect(final == .discarded),
@@ -1814,7 +1820,7 @@ test "Transfer finalization gives late capture failure priority and retains canc
         }
         try std.testing.expectEqual(@as(usize, 0), writer.count);
         transfer.response.deinit();
-        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
     }
 }
 
