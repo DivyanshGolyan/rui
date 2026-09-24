@@ -118,7 +118,8 @@ pub fn install(path: []const u8, record: *const Record, expected_generation: ?u6
         const old = current orelse return error.GenerationMismatch;
         if (old.generation != expected or old.state != .refresh_pending)
             return error.GenerationMismatch;
-        if (!std.mem.eql(u8, old.account_id.slice(), replacement.account_id.slice()))
+        if (!std.mem.eql(u8, old.account_id.slice(), replacement.account_id.slice()) or
+            old.fedramp != replacement.fedramp)
             return error.AccountMismatch;
         replacement.generation = std.math.add(u64, expected, 1) catch return error.GenerationExhausted;
     } else {
@@ -149,7 +150,8 @@ pub fn exchangeRefresh(path: []const u8, expected_generation: u64, context: anyt
     defer std.crypto.secureZero(u8, std.mem.asBytes(&replacement));
     try validateRecord(&replacement);
     if (replacement.state != .ready) return error.InstallMustBeReady;
-    if (!std.mem.eql(u8, record.account_id.slice(), replacement.account_id.slice()))
+    if (!std.mem.eql(u8, record.account_id.slice(), replacement.account_id.slice()) or
+        record.fedramp != replacement.fedramp)
         return error.AccountMismatch;
     replacement.generation = std.math.add(u64, expected_generation, 1) catch return error.GenerationExhausted;
     try owner.publish(&replacement);
@@ -487,6 +489,40 @@ test "explicit login overtakes refresh intent without overwriting its new accoun
     defer selected.release();
     try std.testing.expectEqual(@as(u64, 2), selected.record.generation);
     try std.testing.expectEqualStrings("account-B", selected.record.account_id.slice());
+}
+
+test "refresh preserves routing but explicit login may replace it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try testPath(&tmp, "auth", &path_buffer);
+    for ([_]bool{ false, true }) |initial_fedramp| {
+        var original = try testRecord("acct", 0);
+        original.fedramp = initial_fedramp;
+        try install(path, &original, null);
+        const generation = (try load(path)).generation;
+        try std.testing.expectError(error.AccountMismatch, exchangeRefresh(path, generation, {}, struct {
+            fn change(_: void, current: *const Record) !Record {
+                var replacement = current.*;
+                replacement.fedramp = !current.fedramp;
+                replacement.state = .ready;
+                return replacement;
+            }
+        }.change));
+        const pending = try load(path);
+        try std.testing.expectEqual(State.refresh_pending, pending.state);
+        try std.testing.expectEqual(generation, pending.generation);
+        try std.testing.expectEqual(initial_fedramp, pending.fedramp);
+        try std.testing.expectError(error.RefreshRequiresLogin, lease(path));
+        var changed = original;
+        changed.fedramp = !initial_fedramp;
+        try std.testing.expectError(error.AccountMismatch, install(path, &changed, generation));
+        try install(path, &changed, null);
+        var selected = try lease(path);
+        try std.testing.expectEqual(generation + 1, selected.record.generation);
+        try std.testing.expectEqual(!initial_fedramp, selected.record.fedramp);
+        selected.release();
+    }
 }
 
 test "unsafe paths and credential aliases fail closed" {

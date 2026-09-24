@@ -237,7 +237,9 @@ pub fn parseRefreshResponse(current: *const Tokens, json: []const u8) !Tokens {
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(&result));
     if (wire.has_id) {
         const account = try parseAccount(wire.id.slice());
-        if (!std.mem.eql(u8, account.id.slice(), current.account_id.slice())) return error.AccountChanged;
+        if (!std.mem.eql(u8, account.id.slice(), current.account_id.slice()) or
+            account.fedramp != (try parseAccount(current.id_token.slice())).fedramp)
+            return error.AccountChanged;
         result.id_token = wire.id;
     }
     if (wire.has_access) result.access_token = wire.access;
@@ -470,6 +472,20 @@ test "refresh preserves omitted fields and refuses account replacement" {
     var json: [512]u8 = undefined;
     const response = try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\"}}", .{foreign});
     try std.testing.expectError(error.AccountChanged, parseRefreshResponse(&current, response));
+}
+
+test "refresh keeps the account's routing claim in both directions" {
+    var current: Tokens = .{};
+    try current.id_token.set(fixture_id_token);
+    try current.access_token.set("opaque-access");
+    try current.refresh_token.set("refresh-old");
+    current.account_id = (try parseAccount(fixture_id_token)).id;
+    var json: [512]u8 = undefined;
+    const to_federal = try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\"}}", .{fixture_fedramp_id_token});
+    try std.testing.expectError(error.AccountChanged, parseRefreshResponse(&current, to_federal));
+    try current.id_token.set(fixture_fedramp_id_token);
+    const from_federal = try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\"}}", .{fixture_id_token});
+    try std.testing.expectError(error.AccountChanged, parseRefreshResponse(&current, from_federal));
 }
 
 test "authorization exchange requires and owns all token fields" {
