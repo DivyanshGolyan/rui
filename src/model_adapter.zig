@@ -16,6 +16,7 @@ const PreparedRequest = provider.PreparedRequest;
 // The sole V1 model adapter owns Codex wire grammar, output interpretation,
 // and managed-route authentication. The Host owns only effect scheduling and
 // the provider transport owns only curl and sealed byte lifetimes.
+pub const provider_label = "codex";
 pub const managed_endpoint = "https://chatgpt.com/backend-api/codex/responses";
 pub const observation_names: provider.ObservationNames = .{
     .request_id = "x-request-id",
@@ -31,6 +32,17 @@ pub fn acquireCredential(io: std.Io, authentication: Authentication) !Credential
 
 pub fn authenticationFailureCode(err: anyerror) []const u8 {
     return codex_auth.failureCode(err);
+}
+
+pub fn preparationFailureCode(err: anyerror) []const u8 {
+    return switch (err) {
+        error.UnsupportedCodexConfiguration => "unsupported_codex_configuration",
+        error.InjectedFirstPreparationFailure => "request_preparation_failed",
+        error.RequestScratchExhausted => "request_scratch_exhausted",
+        error.InjectedRequestWriteFailure => "request_write_failed",
+        error.InjectedRequestSealFailure, error.RequestSealFailed => "request_seal_failed",
+        else => "request_preparation_failed",
+    };
 }
 
 fn fixtureEndpoint(endpoint: []const u8, ca_file: ?[]const u8) bool {

@@ -1653,7 +1653,7 @@ fn beginAdmittedAttempt(
             slot.* = .free;
             return .admitted;
         }
-        settleAttemptFailure(host, token, binding, preparationFailureCode(err), .terminal);
+        settleAttemptFailure(host, token, binding, model_adapter.preparationFailureCode(err), .terminal);
         finishCustodyNow(host, token);
         slot.* = .free;
         return .admitted;
@@ -1754,7 +1754,7 @@ fn finishModelPreparationFailure(
     if (host.store.isFenced()) {
         fenceDispatch(host, "canonical request read", err);
     } else if (err != error.SupersededByControl) {
-        settleAttemptFailure(host, owner.token, owner.binding, preparationFailureCode(err), .terminal);
+        settleAttemptFailure(host, owner.token, owner.binding, model_adapter.preparationFailureCode(err), .terminal);
     }
     finishCustodyNow(host, owner.token);
     slot.* = .free;
@@ -1898,7 +1898,8 @@ fn completeTransfer(
         const correlation = active.transfer.requestId();
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(correlation, &digest, .{});
-        std.debug.print("rui: codex transfer operation={d} http_version={d} connection_id={d} new_connections={d} correlation_present={} correlation_sha256={x} alpn=unavailable\n", .{
+        std.debug.print("rui: {s} transfer operation={d} http_version={d} connection_id={d} new_connections={d} correlation_present={} correlation_sha256={x} alpn=unavailable\n", .{
+            model_adapter.provider_label,
             owner.binding.operation_id,
             observation.http_version,
             observation.connection_id,
@@ -2259,17 +2260,6 @@ fn hasOwnedSlots(slots: []const ExecutionSlot) bool {
         if (slot != .free) return true;
     }
     return false;
-}
-
-fn preparationFailureCode(err: anyerror) []const u8 {
-    return switch (err) {
-        error.UnsupportedCodexConfiguration => "unsupported_codex_configuration",
-        error.InjectedFirstPreparationFailure => "request_preparation_failed",
-        error.RequestScratchExhausted => "request_scratch_exhausted",
-        error.InjectedRequestWriteFailure => "request_write_failed",
-        error.InjectedRequestSealFailure, error.RequestSealFailed => "request_seal_failed",
-        else => "request_preparation_failed",
-    };
 }
 
 fn settleAttemptFailure(
