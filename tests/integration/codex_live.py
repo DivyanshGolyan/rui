@@ -146,7 +146,6 @@ def run(model, external_credential=None):
             "with binomial coefficients; do not use tools or write code.",
         )
         reasoning = wait_for(store, "reasoning", lambda value: value.get("result", {}).get("status") == "completed", "reasoning answer")
-        assert private_reasoning_count(store, reasoning["processing"]["operation"]) > 0, "no private reasoning to replay"
         assert not (workspace / "effect-count").exists(), "reasoning request caused a Bash effect"
         enabled = caller.command(
             "configure", "--store", store, "--record", state / "enable-bash.json",
@@ -181,24 +180,26 @@ def run(model, external_credential=None):
         assert (workspace / "effect-count").read_bytes() == b"once\n"
         caller.wait_for(lambda: len(first_observations) >= 3, "first Host transport observations", timeout=10)
         assert len(first_observations) == 3, "expected reasoning, Bash proposal and tool-continuation managed transfers"
-        reasoning_counts = [private_reasoning_count(store, record["operation"]) for record in first_observations]
-        reasoning_tokens = [reasoning_token_count(store, record["operation"]) for record in first_observations]
-        print(f"Pre-restart reasoning: private item counts={reasoning_counts}, token usage={reasoning_tokens}", flush=True)
         assert all(int(record["http_version"]) == 3 for record in first_observations), "HTTP/2 not observed"
         assert len({record["connection_id"] for record in first_observations}) == 1, "connection reuse not observed"
         assert [int(record["new_connections"]) for record in first_observations] == [1, 0, 0], "sequential reuse not observed"
-        before = evidence(store)
-        assert len(before) == 3 and all(row[0] for row in before), "missing response identities"
         resources = bash.process_resources(host)
 
-        stop()  # after the committed result, not an interrupted Bash effect
+        stop()  # committed result, not an interrupted Bash effect; SQLite reads only after exit
+        reasoning_counts = [private_reasoning_count(store, record["operation"]) for record in first_observations]
+        reasoning_tokens = [reasoning_token_count(store, record["operation"]) for record in first_observations]
+        print(f"Pre-restart reasoning: private item counts={reasoning_counts}, token usage={reasoning_tokens}", flush=True)
+        assert reasoning_counts[0] > 0, "no accepted private reasoning to replay; live qualification incomplete"
+        assert first_observations[0]["operation"] == reasoning["processing"]["operation"]
+        before = evidence(store)
+        assert len(before) == 3 and all(row[0] for row in before), "missing response identities"
         host, later_observations, reader, restarted_dependencies = start()
         assert restarted_dependencies == dependencies
         recovered = caller.retry_message(state, store, "first")
         assert recovered["answer"]["replayed"] is True
         assert caller.read_result(store, "first") == original_answer
         assert caller.observe(store, "first")["result"] == first["result"]
-        assert evidence(store) == before and not later_observations
+        assert not later_observations
         assert (workspace / "effect-count").read_bytes() == b"once\n"
 
         caller.message(state, store, "later", session, "What SHA-256 digest did the approved tool return earlier? Answer without Bash.")
@@ -208,6 +209,7 @@ def run(model, external_credential=None):
         assert (workspace / "effect-count").read_bytes() == b"once\n"
         caller.wait_for(lambda: len(later_observations) >= 1, "fresh Host transport observation", timeout=10)
         assert len(later_observations) == 1 and int(later_observations[0]["http_version"]) == 3
+        stop()  # release the Store owner before inspecting private response shape
         after = evidence(store)
         assert len(after) == 4 and after[:3] == before and after[3][0]
         print(json.dumps({
@@ -227,7 +229,6 @@ def run(model, external_credential=None):
             "reasoning_token_usage": reasoning_tokens,
             "private_replay": "request bytes fixture-verified; live subsequent requests accepted",
         }, sort_keys=True))
-        assert reasoning_counts[0] > 0, "no accepted private reasoning to replay; live qualification incomplete"
     finally:
         try:
             if host is not None:
