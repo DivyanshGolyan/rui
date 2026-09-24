@@ -193,6 +193,31 @@ def run():
         fixture.wait_for(lambda: bash.execution_custody_idle(stop_store, "managed/stop"),
                          "cancelled authentication custody", timeout=10)
         assert len(endpoint.requests) == 4, "stopped authentication launched a model request"
+        fixture.stop_host(host)
+        host = None
+        diagnostics.close()
+
+        # The credential is already selected and the transfer prepared. A
+        # committed stop before the final handoff must still suppress POST.
+        host = start(stop_store, url, "--test-phase-trace", "--test-before-launch-delay-ms", "1500")
+        diagnostics = HostDiagnostics(host)
+        configured = fixture.command(
+            "configure", "--store", stop_store, "--record", state / "handoff-config.json",
+            "--key", "handoff-config", "--session", "managed/handoff", "--workspace", fixture.ROOT,
+            "--provider", "codex", "--model", "model-a", "--tools", "none",
+        )
+        assert configured["answer"]["status"] == "accepted"
+        fixture.message(state, stop_store, "handoff-message", "managed/handoff", "do not launch")
+        diagnostics.wait("prepared_before_handoff", timeout=10)
+        stopped = fixture.command(
+            "stop-session", "--store", stop_store, "--record", state / "handoff-stop.json",
+            "--key", "handoff-stop", "--session", "managed/handoff",
+        )
+        assert stopped["answer"]["status"] == "accepted"
+        fixture.wait_for(lambda: bash.execution_custody_idle(stop_store, "managed/handoff"),
+                         "stopped authenticated handoff custody", timeout=10)
+        assert len(endpoint.requests) == 4, "stopped authenticated handoff launched a model request"
+
         schema = state / "unsupported-schema.json"
         schema.write_text('{"type":"object"}')
         for feature, tools, extra in (("edit", "edit", []),
@@ -212,7 +237,7 @@ def run():
             )
             assert rejected["result"]["code"] == "unsupported_codex_configuration", rejected
             assert len(endpoint.requests) == 4
-        print("codex synthetic managed journey passed: approved effect once, private continuation, fresh Host, post-restart dispatch, no authentication resend, stopped authentication and unsupported settings never launch")
+        print("codex synthetic managed journey passed: approved effect once, private continuation, fresh Host, post-restart dispatch, no authentication resend, stopped authentication/handoff and unsupported settings never launch")
         complete = True
     finally:
         if host is not None:

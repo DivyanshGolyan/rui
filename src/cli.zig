@@ -2,6 +2,7 @@ const std = @import("std");
 const client = @import("client.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
+const model_adapter = @import("model_adapter.zig");
 const provider = @import("provider.zig");
 const protocol = @import("protocol.zig");
 const server = @import("server.zig");
@@ -221,10 +222,9 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
         store_path orelse return usage(),
         active_capacity,
         faults,
-        if (managed) "https://chatgpt.com/backend-api/codex/responses" else fixture_endpoint orelse provider_endpoint,
+        if (managed) model_adapter.managed_endpoint else fixture_endpoint orelse provider_endpoint,
         provider_ca_file,
-        credential_path,
-        fixture_endpoint != null,
+        if (credential_path) |path| model_adapter.Authentication{ .path = path, .fixture = fixture_endpoint != null } else null,
         bash_path,
         bash_timeout_ms,
     );

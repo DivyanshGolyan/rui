@@ -118,19 +118,30 @@ pub fn install(path: []const u8, record: *const Record, expected_generation: ?u6
     try owner.publish(&replacement);
 }
 
-/// Commits the refresh fence before any network refresh. A restart that sees
-/// this state must require explicit login; it must not replay the refresh.
-pub fn markRefreshPending(path: []const u8, expected_generation: u64) !void {
+/// Keep the stable lock from the durable intent through the exchange and save.
+/// Other Hosts wait for the live claimant; after a crash they see the pending
+/// record and require login instead of repeating a possibly consumed token.
+/// The exchange owns its network effects and returns a complete replacement.
+pub fn exchangeRefresh(path: []const u8, expected_generation: u64, context: anytype, exchange: anytype) !bool {
     var owner = try Owner.open(path);
     defer owner.close();
     const lock = try owner.acquireLock(.exclusive);
     defer lock.close(io);
     var record = try owner.readRecord();
     defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
-    if (record.generation != expected_generation or record.state != .ready)
-        return error.GenerationMismatch;
+    if (record.state != .ready) return error.RefreshRequiresLogin;
+    if (record.generation != expected_generation) return false;
     record.state = .refresh_pending;
     try owner.publish(&record);
+    var replacement = try exchange(context, &record);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&replacement));
+    try validateRecord(&replacement);
+    if (replacement.state != .ready) return error.InstallMustBeReady;
+    if (!std.mem.eql(u8, record.account_id.slice(), replacement.account_id.slice()))
+        return error.AccountMismatch;
+    replacement.generation = std.math.add(u64, expected_generation, 1) catch return error.GenerationExhausted;
+    try owner.publish(&replacement);
+    return true;
 }
 
 const Owner = struct {
@@ -407,10 +418,18 @@ test "successive login, generation compare, pending restart, and privacy" {
     try install(path, &second, null);
     try std.testing.expectEqual(@as(u64, 2), (try load(path)).generation);
     try std.testing.expectError(error.GenerationMismatch, install(path, &second, 1));
-    try markRefreshPending(path, 2);
+    try std.testing.expectError(error.InjectedRefreshFailure, exchangeRefresh(path, 2, {}, struct {
+        fn fail(_: void, _: *const Record) error{InjectedRefreshFailure}!Record {
+            return error.InjectedRefreshFailure;
+        }
+    }.fail));
     const pending = try load(path);
     try std.testing.expectEqual(State.refresh_pending, pending.state);
-    try std.testing.expectError(error.GenerationMismatch, markRefreshPending(path, 2));
+    try std.testing.expectError(error.RefreshRequiresLogin, exchangeRefresh(path, 2, {}, struct {
+        fn unexpected(_: void, _: *const Record) error{UnexpectedRefresh}!Record {
+            return error.UnexpectedRefresh;
+        }
+    }.unexpected));
     try std.testing.expectEqual(@as(u64, 2), pending.generation);
     try install(path, &second, 2);
     try std.testing.expectEqual(@as(u64, 3), (try load(path)).generation);
@@ -431,7 +450,11 @@ test "explicit login overtakes refresh intent without overwriting its new accoun
     var initial = try lease(path);
     try std.testing.expectEqualStrings("account-A", initial.record.account_id.slice());
     initial.release();
-    try markRefreshPending(path, 1);
+    try std.testing.expectError(error.InjectedRefreshFailure, exchangeRefresh(path, 1, {}, struct {
+        fn fail(_: void, _: *const Record) error{InjectedRefreshFailure}!Record {
+            return error.InjectedRefreshFailure;
+        }
+    }.fail));
     try std.testing.expectError(error.RefreshRequiresLogin, lease(path));
     var new_login = try testRecord("account-B", 0);
     try std.testing.expectError(error.AccountMismatch, install(path, &new_login, 1));

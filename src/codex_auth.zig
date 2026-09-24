@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const credentials = @import("codex_credentials.zig");
 
 const c = @cImport({
     @cInclude("curl/curl.h");
@@ -16,8 +17,8 @@ pub const fixture_id_token = "e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJydWktdGVzdC1hY2
 pub const fixture_fedramp_id_token = "e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoicnVpLXRlc3QtYWNjb3VudCIsImNoYXRncHRfYWNjb3VudF9pc19mZWRyYW1wIjp0cnVlfX0.c2ln";
 pub const fixture_account_id = "rui-test-account";
 pub const response_limit = 64 * 1024;
-pub const token_limit = 16 * 1024;
-pub const account_limit = 1024;
+pub const token_limit = credentials.max_token_bytes;
+pub const account_limit = credentials.max_account_id_bytes;
 
 pub fn isFixtureId(id_token: []const u8) bool {
     return std.mem.eql(u8, id_token, fixture_id_token) or
@@ -49,6 +50,72 @@ pub const Tokens = struct {
     refresh_token: Bounded(token_limit) = .{},
     account_id: Bounded(account_limit) = .{},
 };
+
+pub fn failureCode(err: anyerror) []const u8 {
+    return switch (err) {
+        error.RefreshRejected, error.RefreshRequiresLogin, error.ExpiredCredential, error.AccountMismatch, error.AccountChanged, error.InvalidCredentialExpiry => "provider_authentication_failed",
+        else => "provider_authentication_backend_failed",
+    };
+}
+
+fn shouldRefresh(record: *const credentials.Record, now: i64) bool {
+    if (record.expires_at != 0) return record.expires_at <= now + 60;
+    return now -| record.refreshed_at >= 8 * 24 * 60 * 60;
+}
+
+fn validateSelected(record: *const credentials.Record, fixture: bool) !void {
+    if (fixture and
+        (!std.mem.eql(u8, record.access_token.slice(), fixture_access_token) or
+            !isFixtureId(record.id_token.slice()) or
+            !std.mem.eql(u8, record.account_id.slice(), fixture_account_id)))
+        return error.FixtureRequiresSyntheticCredential;
+    const account = try parseAccount(record.id_token.slice());
+    if (!std.mem.eql(u8, account.id.slice(), record.account_id.slice()) or
+        account.fedramp != record.fedramp) return error.AccountMismatch;
+    if (((try parseExpiry(record.access_token.slice())) orelse 0) != record.expires_at)
+        return error.InvalidCredentialExpiry;
+}
+
+pub fn acquire(io: std.Io, path: []const u8, fixture: bool) !credentials.Lease {
+    var record = try credentials.load(path);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+    if (record.state != .ready) return error.RefreshRequiresLogin;
+    try validateSelected(&record, fixture);
+    const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_s));
+    if (shouldRefresh(&record, now)) {
+        const Context = struct { io: std.Io, fixture: bool };
+        _ = try credentials.exchangeRefresh(path, record.generation, Context{ .io = io, .fixture = fixture }, struct {
+            fn exchange(context: Context, current: *const credentials.Record) !credentials.Record {
+                try validateSelected(current, context.fixture);
+                var tokens: Tokens = .{};
+                defer std.crypto.secureZero(u8, std.mem.asBytes(&tokens));
+                try tokens.id_token.set(current.id_token.slice());
+                try tokens.access_token.set(current.access_token.slice());
+                try tokens.refresh_token.set(current.refresh_token.slice());
+                try tokens.account_id.set(current.account_id.slice());
+                var refreshed = try refresh(&tokens);
+                defer std.crypto.secureZero(u8, std.mem.asBytes(&refreshed));
+                var replacement = current.*;
+                defer std.crypto.secureZero(u8, std.mem.asBytes(&replacement));
+                try replacement.id_token.set(refreshed.id_token.slice());
+                try replacement.access_token.set(refreshed.access_token.slice());
+                try replacement.refresh_token.set(refreshed.refresh_token.slice());
+                replacement.fedramp = (try parseAccount(refreshed.id_token.slice())).fedramp;
+                replacement.expires_at = (try parseExpiry(refreshed.access_token.slice())) orelse 0;
+                replacement.refreshed_at = @intCast(@divFloor(std.Io.Clock.Timestamp.now(context.io, .real).raw.nanoseconds, std.time.ns_per_s));
+                replacement.state = .ready;
+                return replacement;
+            }
+        }.exchange);
+    }
+    var result = try credentials.lease(path);
+    errdefer result.release();
+    try validateSelected(&result.record, fixture);
+    const launch_now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_s));
+    if (result.record.expires_at != 0 and result.record.expires_at <= launch_now)
+        return error.ExpiredCredential;
+    return result;
+}
 
 const TokenWire = struct {
     id_token: ?[]const u8 = null,
@@ -437,4 +504,15 @@ test "authorization exchange percent-encodes code and verifier independently" {
             "&code=a%2Bb%20%26&redirect_uri=https%3A%2F%2Fauth.openai.com%2Fdeviceauth%2Fcallback&code_verifier=v%2F%3D%2B",
         body,
     );
+}
+
+test "credential refresh uses token expiry or the last successful opaque exchange" {
+    var record: credentials.Record = undefined;
+    record.expires_at = 1_000;
+    record.refreshed_at = 100;
+    try std.testing.expect(!shouldRefresh(&record, 939));
+    try std.testing.expect(shouldRefresh(&record, 940));
+    record.expires_at = 0;
+    try std.testing.expect(!shouldRefresh(&record, 100 + 8 * 24 * 60 * 60 - 1));
+    try std.testing.expect(shouldRefresh(&record, 100 + 8 * 24 * 60 * 60));
 }
