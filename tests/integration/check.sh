@@ -28,7 +28,6 @@ if [ "${3:-}" = parallel ]; then
     run_case bash-recovery python3 "$directory/bash_recovery_integration.py" "$release_safe"
     run_case control python3 "$directory/control_integration.py" "$release_safe"
     run_case descriptor-capacity python3 "$directory/descriptor_capacity_integration.py" "$release_safe"
-    run_case host-process python3 "$directory/host_process_test.py"
 
     set -- $pids
     failed=0
@@ -43,15 +42,21 @@ if [ "${3:-}" = parallel ]; then
             failed=1
         fi
     done
-    # The Debug capture-contender fixture has a five-second deadline; run it
-    # after the parallel load so that deadline tests ownership, not CPU share.
-    if sh "$directory/admission_integration.sh" "$debug" >"$output/admission-debug.log" 2>&1; then
-        printf 'admission-debug passed\n'
-    else
-        printf 'admission-debug failed:\n' >&2
-        cat "$output/admission-debug.log" >&2
-        failed=1
-    fi
+    # Host startup and Debug capture have short deadlines. Test them after the
+    # parallel load so those deadlines observe behavior rather than CPU share.
+    run_isolated_case() {
+        name=$1
+        shift
+        if "$@" >"$output/$name.log" 2>&1; then
+            printf '%s passed\n' "$name"
+        else
+            printf '%s failed:\n' "$name" >&2
+            cat "$output/$name.log" >&2
+            failed=1
+        fi
+    }
+    run_isolated_case host-process python3 "$directory/host_process_test.py"
+    run_isolated_case admission-debug sh "$directory/admission_integration.sh" "$debug"
     if [ "$failed" -eq 0 ]; then
         tail -n 1 "$output/native.log"
     fi
