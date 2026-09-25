@@ -4,7 +4,7 @@ Rui (रुई, Hindi for cotton) is a local runtime for coding-agent workflows.
 
 ## Status
 
-Rui is in development. Today the direct CLI can configure reusable Sessions, queue messages, receive text-model responses, stop or interrupt work, inspect proposed tools, authorize Bash and read saved results. One-shot human commands save generated-key requests before transmission; the explicit-key/record commands remain available. Keyed requests, permission decisions and admitted work survive restart.
+Rui is in development. Today the direct CLI can configure reusable Sessions, queue messages, receive text-model responses, stop or interrupt work, inspect proposed tools, authorize Bash and read saved results. `rui session` is an explicit terminal caller for an already configured Session; one-shot commands stay nonblocking and scriptable. Both save generated-key mutations before transmission; the explicit-key/record commands remain available. Keyed requests, permission decisions and admitted work survive restart.
 
 The precise model is documented in [Architecture](ARCHITECTURE.md): valid Bash descriptors become inspectable Actions, unknown tools and invalid descriptors become stable call-local rejections, and a Bash attempt that loses local custody resolves as indeterminate rather than replaying automatically.
 
@@ -33,20 +33,25 @@ The production default Active Capacity remains 1,000. Startup rejects a requeste
 For the qualified exact `gpt-6-luna` binding, sign in once with Rui and start a managed Host against a private Store:
 
 ```sh
-./zig-out/bin/rui login codex
-./zig-out/bin/rui serve --store /absolute/path/to/private-store --active-capacity 8 --codex
+RUI="$PWD/zig-out/bin/rui"
+STORE="$HOME/.local/share/rui/store"
+"$RUI" login codex
+"$RUI" serve --store "$STORE" --active-capacity 8 --codex
 ```
 
-In another terminal, configure a Session with a private Workspace and a fresh command key (choose paths you own):
+In another terminal, configure a Session whose Workspace is the **actual project directory** (Bash uses it as its working directory), and enter it:
 
 ```sh
-./zig-out/bin/rui configure --store /absolute/path/to/private-store \
-  --record /absolute/path/to/private-record/configure.json --key unique-configure-key \
-  --session my/codex --workspace /absolute/path/to/workspace \
+RUI="$PWD/zig-out/bin/rui"
+STORE="$HOME/.local/share/rui/store"
+"$RUI" configure --store "$STORE" --session my/codex --workspace "$PWD" \
   --provider codex --model gpt-6-luna --tools bash --permission-mode ask
+"$RUI" session --store "$STORE" --session my/codex
 ```
 
-For one-shot use, omit both `--record` and `--key` from `configure`, `message`, `allow-action` or `deny-action`. Each prints a saved request handle before sending and then its admission. Start the Host separately; use the same explicit Store and full Session reference on each new mutation:
+At `rui>`, type a message. It saves the request, follows that message's result, and presents any proposed Bash Action with its exact call ID and arguments before asking for **allow once**, **deny** or **later**. `/status` shows effective settings, current work and recent message keys; `/result KEY` reads a prior answer even from a fresh caller without local records. `/wait` follows the active Turn (or oldest queued admission) once; `/requests` lists only this caller's local recovery records; `/configure --model MODEL` updates this Session; `/exit` detaches without stopping Host work. Unknown Sessions must be configured before entry. `rui session` requires a terminal; it does not silently become a scripted mode on redirection. If a submission or decision loses its reply, use `rui requests` and `rui recover HANDLE` rather than creating a new request by guessing what happened.
+
+For one-shot/scripted use, omit both `--record` and `--key` from `configure`, `message`, `allow-action` or `deny-action`. Each prints a saved request handle before sending, then an admission and destination/next step; `--json` gives deterministic newline-delimited capture and admission objects. Use the same explicit Store and full Session reference on each new mutation:
 
 ```sh
 ./zig-out/bin/rui configure --store /absolute/path/to/private-store --session my/codex \
@@ -54,6 +59,7 @@ For one-shot use, omit both `--record` and `--key` from `configure`, `message`, 
   --tools bash --permission-mode ask
 ./zig-out/bin/rui message --store /absolute/path/to/private-store --session my/codex "Investigate the failing test"
 ./zig-out/bin/rui follow SAVED_MESSAGE_HANDLE
+./zig-out/bin/rui wait-session --store /absolute/path/to/private-store --session my/codex
 ./zig-out/bin/rui inspect-action --store /absolute/path/to/private-store --session my/codex --action ACTION_ID
 ./zig-out/bin/rui allow-action --store /absolute/path/to/private-store --session my/codex --action ACTION_ID
 ./zig-out/bin/rui result SAVED_MESSAGE_HANDLE
@@ -61,7 +67,7 @@ For one-shot use, omit both `--record` and `--key` from `configure`, `message`, 
 ./zig-out/bin/rui recover SAVED_MESSAGE_HANDLE
 ```
 
-`message` accepts literal positional text, `-` for stdin, or `--text FILE` to capture a file. `requests` only lists local records; `recover` reuses the exact saved inputs after an uncertain reply, even if the input file changes. The private records live under `~/.config/rui/requests` and do not expire independently. A new message needs a new command/key; `follow` detaches without stopping work, and can show an earlier Turn's permission while the saved message is queued. Human commands default to Markdown-like text with admission status, replay and rejection code; `--json` mutations emit complete newline-delimited capture and admission objects so the handle remains parseable if the reply is lost. Result and inspection rendering use unlinked temporary scratch under `TMPDIR` (or `/tmp`), not durable request records. Explicit `--record` and `--key` retain the original low-level JSON route. Workflow Session discovery waits for the Host Workflow inspection operation. The [Bash walkthrough](#try-the-implemented-development-path) still demonstrates the explicit-key route with a deterministic endpoint. `rui` without arguments prints exact usage.
+`message` accepts literal positional text, `-` for stdin, or `--text FILE` to capture a file. `wait-session` selects work once and returns idle immediately if none; `--terminal` waits past permission attention for the selected terminal outcome. `follow HANDLE` always stays bound to that saved Message and can show an earlier Turn's permission while its Message is queued. `requests` only lists local records; `recover` reuses the exact saved inputs after an uncertain reply, even if the input file changes. The private records live under `~/.config/rui/requests` and do not expire independently. A new message needs a new command/key. Result and inspection rendering use unlinked temporary scratch under `TMPDIR` (or `/tmp`), not durable request records. Explicit `--record` and `--key` retain the original low-level JSON route. Workflow Session discovery waits for the Host Workflow inspection operation. The [Bash walkthrough](#try-the-implemented-development-path) still demonstrates the explicit-key route with a deterministic endpoint. `rui` without arguments prints exact usage.
 
 Managed mode uses `POST /backend-api/codex/responses` with verified TLS and negotiated HTTP/2; it does not attach credentials to a development endpoint. The device-code login requires account/workspace enablement and persists under `~/.config/rui/codex.json` for reuse across Host restarts. `RUI_CODEX_CREDENTIAL_FILE` may instead select another absolute path under an owner-only directory. Rui refreshes when required, but a failed or interrupted refresh may require a new login; live refresh was not exercised. Edit and output schemas fail before managed dispatch. The live responses reported `gpt-6-luna` in their bodies; served-model headers and provider correlation were absent, and direct ALPN observation was unavailable. This qualifies only the stated model, route and native platform pairs—not general Codex model availability or a release-wide resource bound.
 

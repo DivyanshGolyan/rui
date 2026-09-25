@@ -2467,6 +2467,11 @@ pub const Store = struct {
         }
         try capture.appendFmt("}},\"pending_messages\":\"{d}\",\"work\":", .{pending_messages});
         try self.appendCurrentWork(session_ref, pending_messages, capture);
+        try capture.append(",\"selected_message\":");
+        try self.appendSelectedMessage(session_ref, capture);
+        try capture.append(",\"recent_messages\":[");
+        try self.appendRecentMessages(session_ref, capture);
+        try capture.append("]");
         try capture.appendFmt(",\"actions\":{{\"count\":\"{d}\",\"unresolved\":[", .{
             action_count,
         });
@@ -2568,6 +2573,63 @@ pub const Store = struct {
             try capture.append("null");
         }
         try capture.append("}}");
+    }
+
+    fn appendSelectedMessage(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+        // An active Turn owns the selection even if a successor is queued.
+        const active = try prepare(self.database, "SELECT m.command_key FROM turn t INDEXED BY turn_one_active_per_session " ++
+            "JOIN message_admission m ON m.admission_id=t.first_admission_id " ++
+            "WHERE t.session_ref=?1 AND t.outcome_code IS NULL");
+        defer _ = c.sqlite3_finalize(active);
+        try bindText(active, 1, session_ref);
+        const active_step = c.sqlite3_step(active);
+        if (active_step == c.SQLITE_ROW) {
+            var key: protocol.Bounded(protocol.max_key_bytes) = .{};
+            try readText(active, 0, &key);
+            return capture.appendJsonString(key.slice());
+        }
+        if (active_step != c.SQLITE_DONE) return error.TurnReadFailed;
+
+        const queued = try prepare(self.database, "SELECT command_key FROM message_admission INDEXED BY message_admission_session_pending " ++
+            "WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2 ORDER BY admission_id LIMIT 1");
+        defer _ = c.sqlite3_finalize(queued);
+        try bindText(queued, 1, session_ref);
+        try bindU64(queued, 2, try self.latestSessionStopCutoff(session_ref));
+        const queued_step = c.sqlite3_step(queued);
+        if (queued_step == c.SQLITE_ROW) {
+            var key: protocol.Bounded(protocol.max_key_bytes) = .{};
+            try readText(queued, 0, &key);
+            return capture.appendJsonString(key.slice());
+        }
+        if (queued_step != c.SQLITE_DONE) return error.MessageAdmissionReadFailed;
+        try capture.append("null");
+    }
+
+    fn appendRecentMessages(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+        // Traverse terminal Turns newest-first, then their admissions newest-first.
+        // CROSS JOIN fixes that indexed order so LIMIT stops after ten Messages,
+        // even when older history or unrelated Sessions grow.
+        const statement = try prepare(self.database, "SELECT t.turn_id,m.command_key,t.outcome_code FROM turn t INDEXED BY turn_session_latest " ++
+            "CROSS JOIN message_admission m INDEXED BY message_admission_session_order " ++
+            "WHERE t.session_ref=?1 AND t.outcome_code IS NOT NULL " ++
+            "AND m.session_ref=t.session_ref AND m.turn_id=t.turn_id " ++
+            "ORDER BY t.turn_id DESC,m.admission_id DESC LIMIT 10");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        var first = true;
+        while (try nextReportRow(statement, &first, capture, error.TurnReadFailed)) {
+            const id = c.sqlite3_column_int64(statement, 0);
+            if (id <= 0) return error.CorruptStore;
+            var key: protocol.Bounded(protocol.max_key_bytes) = .{};
+            var code: protocol.Bounded(96) = .{};
+            try readText(statement, 1, &key);
+            try readText(statement, 2, &code);
+            try capture.appendFmt("{{\"turn\":\"{d}\",\"message\":", .{id});
+            try capture.appendJsonString(key.slice());
+            try capture.append(",\"outcome\":");
+            try capture.appendJsonString(code.slice());
+            try capture.append("}");
+        }
     }
 
     fn countActionablePermissions(self: *Store, session_ref: []const u8) !u64 {
@@ -6699,6 +6761,54 @@ test "Current excludes history while Full exposes exact closed Session inventory
     try std.testing.expect(conversation_content.get("text") == null);
 }
 
+test "Current selects active then queued work and bounds recent Message identities" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "selection-config", "direct/selection");
+
+    for (0..12) |index| {
+        var file: [48]u8 = undefined;
+        var key: [48]u8 = undefined;
+        try submitTestMessage(&storage, &tmp, try std.fmt.bufPrint(&file, "selection-file-{d}", .{index}), try std.fmt.bufPrint(&key, "selection-message-{d}", .{index}), "direct/selection", "input");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
+    }
+    {
+        const bytes = try testingSessionReport(&storage, &tmp, "direct/selection", 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer report.deinit();
+        try std.testing.expect(report.value.object.get("selected_message").? == .null);
+        const recent = report.value.object.get("recent_messages").?.array.items;
+        try std.testing.expectEqual(@as(usize, 10), recent.len);
+        for (recent, 0..) |item, index| {
+            var expected: [48]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "selection-message-{d}", .{11 - index}), item.object.get("message").?.string);
+            try std.testing.expectEqualStrings("provider_http_422", item.object.get("outcome").?.string);
+        }
+    }
+    try submitTestMessage(&storage, &tmp, "selection-next-file", "selection-next", "direct/selection", "next");
+    {
+        const bytes = try testingSessionReport(&storage, &tmp, "direct/selection", 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer report.deinit();
+        try std.testing.expectEqualStrings("selection-next", report.value.object.get("selected_message").?.string);
+    }
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    try submitTestMessage(&storage, &tmp, "selection-queued-file", "selection-queued", "direct/selection", "queued");
+    {
+        const bytes = try testingSessionReport(&storage, &tmp, "direct/selection", 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer report.deinit();
+        try std.testing.expectEqualStrings("selection-next", report.value.object.get("selected_message").?.string);
+        try std.testing.expectEqualStrings("1", report.value.object.get("pending_messages").?.string);
+    }
+}
+
 test "Full preserves rejected model interruption targets as canonical u64 text" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -7915,9 +8025,9 @@ test "Current report work is independent of terminal tool history" {
         }
     };
 
-    const one_group = try Measure.run(1);
     const sixteen_groups = try Measure.run(16);
-    try std.testing.expectEqual(one_group, sixteen_groups);
+    const sixty_four_groups = try Measure.run(64);
+    try std.testing.expectEqual(sixteen_groups, sixty_four_groups);
 }
 
 test "Current pending count skips excluded Message history by indexed cutoff" {
