@@ -21,6 +21,7 @@ pub fn build(b: *std.Build) void {
     });
     configureSqlite(b, tests);
     configureBashPlatform(b, tests);
+    configureTerminalEditor(b, tests);
     configureTransport(b, tests, target, pinned_transport);
     const run_tests = b.addRunArtifact(tests);
     run_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
@@ -40,6 +41,7 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = if (test_filter) |filter| &.{filter} else &.{},
     });
+    configureTerminalEditor(b, logic_tests);
     const run_logic_tests = b.addRunArtifact(logic_tests);
     const logic_test_step = b.step(
         "test-logic",
@@ -428,6 +430,7 @@ fn addRui(
     executable.root_module.link_libc = true;
     configureSqlite(b, executable);
     configureBashPlatform(b, executable);
+    configureTerminalEditor(b, executable);
     configureTransport(b, executable, target, pinned_transport);
     return executable;
 }
@@ -525,6 +528,16 @@ fn configureBashPlatform(b: *std.Build, compile: *std.Build.Step.Compile) void {
     compile.root_module.addCSourceFile(.{
         .file = b.path("src/bash_platform.c"),
         .flags = &.{"-std=c11"},
+    });
+}
+
+fn configureTerminalEditor(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    const utf8proc = b.dependency("utf8proc", .{});
+    compile.root_module.link_libc = true;
+    compile.root_module.addIncludePath(utf8proc.path("."));
+    compile.root_module.addCSourceFile(.{
+        .file = utf8proc.path("utf8proc.c"),
+        .flags = &.{ "-std=c99", "-O2" },
     });
 }
 

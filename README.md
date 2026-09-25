@@ -45,18 +45,22 @@ In another terminal, configure a Session whose Workspace is the **actual project
 RUI="$PWD/zig-out/bin/rui"
 STORE="$HOME/.local/share/rui/store"
 "$RUI" configure --store "$STORE" --session my/codex --workspace "$PWD" \
-  --provider codex --model gpt-6-luna --tools bash --permission-mode ask
+  --provider codex --model gpt-6-luna
 "$RUI" session --store "$STORE" --session my/codex
 ```
 
-At `rui>`, type a message. It saves the request, follows that message's result, and presents any proposed Bash Action with its exact call ID and arguments (control characters escaped) before asking for **allow once**, **deny** or **later**. `/status` shows effective settings, current work and recent message keys; `/result KEY` reads a prior answer even from a fresh caller without local records. `/wait` follows the active Turn (or oldest queued admission) once; `/requests` lists only this caller's local recovery records; `/configure --model MODEL` updates this Session; `/exit` or Ctrl+C at a prompt detaches without stopping Host work. Interactive lines beyond 64 KiB are rejected without sending; use one-shot `message --text FILE` for longer text. Unknown Sessions must be configured before entry. `rui session` requires a terminal; it does not silently become a scripted mode on redirection. If a submission or decision loses its reply, use `rui requests` and `rui recover HANDLE` rather than creating a new request by guessing what happened.
+The example uses the **new** Session defaults: Bash only and `bypass`, so Bash can run without a permission prompt. Existing Sessions keep their saved settings; `/status` shows them. Use `--permission-mode ask` at configuration (or `/configure --permission-mode ask` while entered) when you want to approve each proposed Action.
+
+At `rui>`, type a message. It saves the request and follows that message's result. Interactive success output shows the answer without request receipts or completion labels; `/requests` retains local recovery handles and `/status` shows Store, effective settings, current work and recent message keys. In `ask` mode, Rui displays the exact Action ID and complete arguments (control characters escaped) before offering **allow once**, **deny** or **later**. The opaque call ID remains available with one-shot `inspect-action`. `/result KEY` reads a prior answer even from a fresh caller without local records. `/wait` follows the active Turn (or oldest queued admission) once; `/configure --model MODEL` updates this Session; `/exit` or Ctrl+C at a prompt detaches without stopping Host work. Interactive lines beyond 64 KiB are rejected without sending; use one-shot `message --text FILE` for longer text. Unknown Sessions must be configured before entry. `rui session` requires a terminal; it does not silently become a scripted mode on redirection. If a submission or decision loses its reply, use `rui requests` and `rui recover HANDLE` rather than creating a new request by guessing what happened.
+
+The inline prompt supports arrows, Home/End, Backspace/Delete, Ctrl-A/E/U/K/W/D and ESC-Backspace for word deletion. Terminal-marked (bracketed) paste can include newlines as one Message; ordinary Enter sends. There is no message history or completion. Option-Backspace works when your terminal sends ESC-Backspace. Command-Backspace clears to the line start only if your terminal is configured to send Ctrl-U; Ghostty's default legacy encoding sends the same DEL byte as ordinary Backspace, so Rui cannot distinguish them. An overlong or invalid draft is rejected in full, even if you later delete characters. If the terminal cannot safely position the cursor for an edit (for example near a wrap), no Message is sent; use the one-shot `message --text FILE` route. An Action prompt accepts only a fresh `a`, `d` or `l` and Enter, never a marked paste; unmarked paste *after* that prompt cannot be distinguished from typing.
 
 For one-shot/scripted use, omit both `--record` and `--key` from `configure`, `message`, `allow-action` or `deny-action`. Each prints a saved request handle before sending, then an admission and destination/next step; `--json` gives deterministic newline-delimited capture and admission objects. Use the same explicit Store and full Session reference on each new mutation:
 
 ```sh
 ./zig-out/bin/rui configure --store /absolute/path/to/private-store --session my/codex \
   --workspace /absolute/path/to/workspace --provider codex --model gpt-6-luna \
-  --tools bash --permission-mode ask
+  --permission-mode ask
 ./zig-out/bin/rui message --store /absolute/path/to/private-store --session my/codex "Investigate the failing test"
 ./zig-out/bin/rui follow SAVED_MESSAGE_HANDLE
 ./zig-out/bin/rui wait-session --store /absolute/path/to/private-store --session my/codex

@@ -1175,8 +1175,8 @@ const CurrentConfiguration = struct {
     provider: protocol.Provider = undefined,
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
     instructions_id: ?i64 = null,
-    tools_mask: u8 = 3,
-    permission_mode: u8 = 0,
+    tools_mask: u8 = 1,
+    permission_mode: u8 = 1,
     output_schema_id: ?i64 = null,
     revision: u64 = 0,
     next_position: u64 = 1,
@@ -6491,6 +6491,24 @@ fn configureTestSession(
     try std.testing.expect(storage.configure(&command, .{}) == .accepted);
 }
 
+fn configureTestSessionAsk(
+    storage: *Store,
+    key: []const u8,
+    session_ref: []const u8,
+    include_edit: bool,
+) !void {
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration(key, session_ref, workspace, "model-a");
+    command.configuration.tools.state = .value;
+    command.configuration.tools.count = if (include_edit) 2 else 1;
+    command.configuration.tools.values[0] = .bash;
+    if (include_edit) command.configuration.tools.values[1] = .edit;
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("ask");
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+}
+
 fn submitTestMessage(
     storage: *Store,
     tmp: *std.testing.TmpDir,
@@ -6929,6 +6947,12 @@ test "Full revisions own repeated content once and render semantic settings" {
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var initial = try completeConfiguration("revision-owner-1", "direct/revision-owner", workspace, "model-a");
+    initial.configuration.tools.state = .value;
+    initial.configuration.tools.count = 2;
+    initial.configuration.tools.values[0] = .bash;
+    initial.configuration.tools.values[1] = .edit;
+    initial.configuration.permission_mode.state = .value;
+    try initial.configuration.permission_mode.value.set("ask");
     initial.configuration.instructions = try testingContent(&tmp, "revision-owner-instructions", 1, 64 * 1024);
     const schema_a = "{}";
     initial.configuration.output_schema = try testingBytesContent(&tmp, "revision-owner-schema-a", schema_a);
@@ -7054,7 +7078,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
 
-    try configureTestSession(&storage, "action-config", "direct/actions");
+    try configureTestSessionAsk(&storage, "action-config", "direct/actions", false);
     try submitTestMessage(&storage, &tmp, "action-message", "action-message", "direct/actions", "propose");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleTwoActionsForTesting(&storage, &tmp, binding, "action-metadata");
@@ -7164,7 +7188,7 @@ test "Current reports progress alongside an actionable sibling" {
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    try configureTestSession(&storage, "mixed-config", "direct/mixed");
+    try configureTestSessionAsk(&storage, "mixed-config", "direct/mixed", false);
     try submitTestMessage(&storage, &tmp, "mixed-file", "mixed-message", "direct/mixed", "propose");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleTwoActionsForTesting(&storage, &tmp, binding, "mixed-metadata");
@@ -7196,7 +7220,7 @@ test "Action settlement atomically yields to an earlier Session stop" {
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    try configureTestSession(&storage, "settlement-stop-config", "direct/settlement-stop");
+    try configureTestSessionAsk(&storage, "settlement-stop-config", "direct/settlement-stop", false);
     try submitTestMessage(
         &storage,
         &tmp,
@@ -7268,7 +7292,7 @@ test "earlier Action settlement remains authoritative after Session stop" {
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    try configureTestSession(&storage, "settlement-first-config", "direct/settlement-first");
+    try configureTestSessionAsk(&storage, "settlement-first-config", "direct/settlement-first", false);
     try submitTestMessage(
         &storage,
         &tmp,
@@ -7365,7 +7389,7 @@ test "Full reports every closed Action resolution without fencing" {
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    try configureTestSession(&storage, "shutdown-report-config", "direct/shutdown-report");
+    try configureTestSessionAsk(&storage, "shutdown-report-config", "direct/shutdown-report", false);
     try submitTestMessage(&storage, &tmp, "shutdown-report-message", "shutdown-report-message", "direct/shutdown-report", "execute");
     const model_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{.{
@@ -7490,7 +7514,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
 
-    try configureTestSession(&storage, "mixed-config", "direct/mixed-calls");
+    try configureTestSessionAsk(&storage, "mixed-config", "direct/mixed-calls", true);
     try submitTestMessage(&storage, &tmp, "mixed-message", "mixed-message", "direct/mixed-calls", "classify");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
@@ -7643,7 +7667,7 @@ test "complete call outcomes continue once in call order ahead of pending input"
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    try configureTestSession(&storage, "result-config", "direct/tool-results");
+    try configureTestSessionAsk(&storage, "result-config", "direct/tool-results", false);
     try submitTestMessage(&storage, &tmp, "result-first", "result-first", "direct/tool-results", "first");
     const first_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
@@ -7731,7 +7755,7 @@ test "terminal call-result import and read failures preserve canonical authority
     defer import_tmp.cleanup();
     var import_store = try testingStore(&import_tmp, std.testing.io);
     defer import_store.close() catch unreachable;
-    try configureTestSession(&import_store, "result-import-config", "direct/result-import");
+    try configureTestSessionAsk(&import_store, "result-import-config", "direct/result-import", false);
     try submitTestMessage(&import_store, &import_tmp, "result-import-message", "result-import-message", "direct/result-import", "call");
     const import_binding = (try import_store.admitNextModelAttempt(.{})).?.permit.binding;
     const valid_call = [_]TestingCall{.{ .item_id = "import-item", .name = "bash", .encoded_call_id = "import-call", .decoded_call_id = "import-call", .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}" }};
@@ -7822,7 +7846,7 @@ test "missing canonical call outcome rows fence history and inspection" {
         var storage = try testingStore(&tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session_ref = session_refs[index];
-        try configureTestSession(&storage, config_keys[index], session_ref);
+        try configureTestSessionAsk(&storage, config_keys[index], session_ref, false);
         try submitTestMessage(
             &storage,
             &tmp,
@@ -9059,8 +9083,8 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
     try std.testing.expectEqual(revision_count, try queryU64(storage.database, "SELECT count(*) FROM session_revision"));
     const current = try storage.inspectSession("direct/atomic");
     try std.testing.expectEqual(@as(u64, 1), current.revision);
-    try std.testing.expectEqual(@as(u8, 3), current.tools_mask);
-    try std.testing.expectEqualStrings("ask", current.permission_mode.slice());
+    try std.testing.expectEqual(@as(u8, 1), current.tools_mask);
+    try std.testing.expectEqualStrings("bypass", current.permission_mode.slice());
     const replay = storage.configure(&update, .{});
     try std.testing.expect(replay == .rejected and replay.rejected.replayed);
 
@@ -9117,19 +9141,28 @@ fn expectBindingPreserved(storage: *Store, session: []const u8, phase: []const u
     }
 }
 
-test "provider survives reopen and corrupt canonical provider fences current and historical reads" {
+test "persisted settings survive reopen and corrupt canonical provider fences current and historical reads" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var configuration = try completeConfiguration("provider-reopen", "direct/provider-reopen", workspace, "model-a");
+    configuration.configuration.tools.state = .value;
+    configuration.configuration.tools.count = 2;
+    configuration.configuration.tools.values[0] = .bash;
+    configuration.configuration.tools.values[1] = .edit;
+    configuration.configuration.permission_mode.state = .value;
+    try configuration.configuration.permission_mode.value.set("ask");
     var storage = try testingStore(&tmp, std.testing.io);
     try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
     try expectBindingPreserved(&storage, "direct/provider-reopen", "before-reopen");
     try storage.close();
     storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(protocol.Provider.codex, (try storage.inspectSession("direct/provider-reopen")).provider.?);
+    const reopened = try storage.inspectSession("direct/provider-reopen");
+    try std.testing.expectEqual(protocol.Provider.codex, reopened.provider.?);
+    try std.testing.expectEqual(@as(u8, 3), reopened.tools_mask);
+    try std.testing.expectEqualStrings("ask", reopened.permission_mode.slice());
     try expectBindingPreserved(&storage, "direct/provider-reopen", "after-reopen");
 
     const file = try tmp.dir.createFile(std.testing.io, "provider-reopen-message", .{ .read = true });
@@ -9183,6 +9216,8 @@ test "configuration planning preserves sparse defaults and rejection precedence"
             .workspace = .same,
             .model = "model-a",
             .expected_actions = .{ .instructions = .default_empty, .output_schema = .clear },
+            .expected_tools = 1,
+            .expected_permission = 1,
             .expected_revision = 1,
         },
         .{
@@ -9237,6 +9272,8 @@ test "configuration planning preserves sparse defaults and rejection precedence"
         existing.provider = .codex;
         try existing.model.set("model-a");
         existing.instructions_id = 11;
+        existing.tools_mask = 3;
+        existing.permission_mode = 0;
         existing.output_schema_id = 12;
         existing.revision = case.current_revision;
 
@@ -10591,7 +10628,7 @@ test "one committed selection freezes its settings and input prefix" {
     const settings = try view.settings();
     try std.testing.expectEqual(protocol.Provider.codex, settings.provider);
     try std.testing.expectEqualStrings("model-a", settings.model.slice());
-    try std.testing.expectEqual(@as(u8, 3), settings.tools_mask);
+    try std.testing.expectEqual(@as(u8, 1), settings.tools_mask);
     const first_input = (try view.nextEntry(0)).?;
     const second_input = (try view.nextEntry(first_input.position)).?;
     const instruction = (try view.nextEntry(second_input.position)).?;
