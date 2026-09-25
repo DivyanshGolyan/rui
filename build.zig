@@ -9,6 +9,34 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(rui);
     b.installFile("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md");
 
+    const quickjs = b.dependency("quickjs", .{});
+    const evaluator = b.addExecutable(.{
+        .name = "rui-evaluator",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    evaluator.root_module.link_libc = true;
+    evaluator.root_module.addIncludePath(quickjs.path("."));
+    evaluator.root_module.addCSourceFile(.{
+        .file = b.path("src/evaluator_child.c"),
+        .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE", "-DQUICKJS_NG_BUILD=1" },
+    });
+    for ([_][]const u8{ "quickjs.c", "dtoa.c", "libregexp.c", "libunicode.c" }) |file| {
+        evaluator.root_module.addCSourceFile(.{
+            .file = quickjs.path(file),
+            .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE", "-DQUICKJS_NG_BUILD=1" },
+        });
+    }
+    evaluator.root_module.linkSystemLibrary("m", .{});
+
+    const evaluator_integration = b.addSystemCommand(&.{"python3"});
+    evaluator_integration.addFileArg(b.path("tests/integration/evaluator_integration.py"));
+    evaluator_integration.addArtifactArg(evaluator);
+    const evaluator_step = b.step("workflow-check", "Run the standalone QuickJS worker checks");
+    evaluator_step.dependOn(&evaluator_integration.step);
+
     const test_filter = b.option([]const u8, "test-filter", "Run tests whose names contain this text");
     const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
     const tests = b.addTest(.{
@@ -213,6 +241,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addArtifactArg(tests);
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.step.dependOn(&release.step);
+    fast_integrations.step.dependOn(&evaluator_integration.step);
     check_step.dependOn(&fast_integrations.step);
 
     const full_check_step = b.step(
@@ -223,8 +252,12 @@ pub fn build(b: *std.Build) void {
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
     process_integrations.addArtifactArg(release_safe);
     process_integrations.addArtifactArg(debug);
+    const full_evaluator = b.addSystemCommand(&.{"python3"});
+    full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
+    full_evaluator.addArtifactArg(evaluator);
+    full_evaluator.step.dependOn(&run_full_tests.step);
     process_integrations.step.dependOn(&format.step);
-    process_integrations.step.dependOn(&run_full_tests.step);
+    process_integrations.step.dependOn(&full_evaluator.step);
     process_integrations.step.dependOn(&release.step);
     full_check_step.dependOn(&process_integrations.step);
 

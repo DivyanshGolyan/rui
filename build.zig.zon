@@ -24,6 +24,10 @@
             .url = "https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v2.11.3.tar.gz",
             .hash = "N-V-__8AACywKABFCj0r_Y-jIWsk9ahy10zlk78hjn6S-39g",
         },
+        .quickjs = .{
+            .url = "https://github.com/quickjs-ng/quickjs/archive/1ab8676f4b6d6d669baeb5f21790fb9734636a20.tar.gz",
+            .hash = "N-V-__8AAC-eRACa__taXkae9pRIZde7nn8oQSxb9n9rhkFp",
+        },
     },
     .paths = .{
         "build.zig",
