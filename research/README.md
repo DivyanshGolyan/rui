@@ -18,6 +18,10 @@ Maintained executable checks and recorded qualification live in [tests/qualifica
 
 [CLI mode and reconnect evidence](cli-ux-sources.md) compares official Codex and Claude Code interactive/headless modes, permission handling and resume identity with Rui's caller requirements; product patterns, not an interface decision or human-use study.
 
+[Terminal line-editing sources](terminal-line-editing-sources.md) compares primary terminal, Ghostty, libedit, Readline, linenoise and macOS key-mapping evidence against Rui's bounded input and approval boundary; candidate evaluation, not platform qualification.
+
+[Terminal Unicode boundaries](rui-terminal-unicode-sources.md) compares strict UTF-8, grapheme segmentation and provisional cell-width evidence for bounded CLI editing; research behind the pinned utf8proc choice, not Mac display qualification.
+
 [Darwin child-status boundary](darwin-waitid-status-sources.md) compares pinned POSIX and XNU `waitid`/`waitpid` exit representations against a native Mac probe and Rui's Bash adapter. It identifies one reproduced mismatch; nearby boundaries are checks, not additional demonstrated defects.
 
 [Warm integration-test wall time](integration-test-wall-time-sources.md) cites Zig and Python primary sources for build scheduling and fixture shutdown, with measured Linux baselines and the fast/full gate boundary; it does not qualify platform latency or cold compilation.
