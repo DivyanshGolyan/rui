@@ -1056,13 +1056,23 @@ pub const max_control_observation_bytes = @max(
     @max(max_model_interruption_accepted_observation_bytes, max_model_interruption_rejected_observation_bytes),
 );
 
+const max_content_reference_bytes =
+    "{\"type\":\"text\",\"bytes\":\"".len + 20 + "\",\"sha256\":\"".len + 64 + "\"}".len;
+pub const max_message_observation_bytes = control_observation_prefix_bytes +
+    "accepted\",\"kind\":\"message\",\"target\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"input\":".len + max_content_reference_bytes +
+    ",\"queue\":{\"status\":\"completed\",\"admission\":\"".len + 20 + "\"}".len +
+    ",\"processing\":{\"turn\":\"".len + 20 + "\",\"operation\":\"".len + 20 + "\",\"attempt\":\"".len + 20 + "\"}".len +
+    ",\"result\":{\"status\":\"completed\",\"text\":".len + max_content_reference_bytes + "}".len +
+    ",\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"".len + 20 + "\"}}}".len;
+
 pub const max_control_error_response_bytes =
     "{\"version\":\"1\",\"type\":".len + maximumJsonStringBytes(32) +
     ",\"code\":".len + maximumJsonStringBytes(96) + "}".len;
 
 pub const max_control_response_bytes = @max(
     @max(@max(max_session_stop_reply_bytes, max_model_interruption_reply_bytes), max_permission_decision_reply_bytes),
-    @max(max_control_observation_bytes, max_control_error_response_bytes),
+    @max(@max(max_control_observation_bytes, max_message_observation_bytes), max_control_error_response_bytes),
 );
 
 // Only bounded replies and errors use this resident buffer. Complete reports

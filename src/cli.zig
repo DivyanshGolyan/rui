@@ -566,7 +566,11 @@ fn readTerminalLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
     mode.iflag.IXON = false;
     mode.cc[@intFromEnum(std.posix.V.MIN)] = 1;
     mode.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-    try std.posix.tcsetattr(0, .NOW, mode);
+    // A previous prompt's typeahead is not input for this prompt. In
+    // particular, a pasted line after a Message must not approve an Action
+    // that had not yet been shown. Changing modes with FLUSH is atomic with
+    // discarding unread input, including lines buffered in canonical mode.
+    try std.posix.tcsetattr(0, .FLUSH, mode);
     defer std.posix.tcsetattr(0, .NOW, original) catch |err|
         std.debug.print("rui: could not restore terminal: {s}\n", .{@errorName(err)});
     try std.Io.File.stdout().writeStreamingAll(io, prompt);
@@ -987,13 +991,7 @@ fn stringField(value: std.json.Value, name: []const u8) ![]const u8 {
     return field.string;
 }
 
-const SavedRequest = struct {
-    path: protocol.Bounded(std.Io.Dir.max_path_bytes) = .{},
-    store: protocol.Bounded(protocol.max_store_bytes) = .{},
-    key: protocol.Bounded(protocol.max_key_bytes) = .{},
-    session: protocol.Bounded(protocol.max_session_bytes) = .{},
-    kind: protocol.Bounded(32) = .{},
-};
+const SavedRequest = client.CapturedIdentity;
 
 fn requestPath(init: std.process.Init, handle: []const u8, buffer: []u8) ![]const u8 {
     if (handle.len != 36) return error.InvalidRequestHandle;
@@ -1008,40 +1006,9 @@ fn requestPath(init: std.process.Init, handle: []const u8, buffer: []u8) ![]cons
 }
 
 fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
-    var value: SavedRequest = .{};
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try requestPath(init, handle, &path_buffer);
-    try value.path.set(path);
-    var file = try std.Io.Dir.cwd().openFile(init.io, path, .{});
-    defer file.close(init.io);
-    // The capture owner writes these bounded identity fields before any
-    // variable content. JSON escaping can expand each input byte sixfold.
-    const header_bytes = 6 * (protocol.max_store_bytes + protocol.max_key_bytes + protocol.max_session_bytes) + 256;
-    var buffer: [header_bytes]u8 = undefined;
-    const count = try file.readPositionalAll(init.io, &buffer, 0);
-    const prefix = buffer[0..count];
-    const kind_marker = std.mem.indexOf(u8, prefix, ",\"configuration\"") orelse
-        std.mem.indexOf(u8, prefix, ",\"text\"") orelse
-        std.mem.indexOf(u8, prefix, ",\"decision\"") orelse
-        return error.InvalidRequestRecord;
-    var head: [header_bytes]u8 = undefined;
-    if (kind_marker + 1 > head.len) return error.InvalidRequestRecord;
-    @memcpy(head[0..kind_marker], prefix[0..kind_marker]);
-    head[kind_marker] = '}';
-    const Fields = struct {
-        version: []const u8,
-        kind: []const u8,
-        store: []const u8,
-        key: []const u8,
-        session: []const u8,
-    };
-    const parsed = try std.json.parseFromSlice(Fields, std.heap.c_allocator, head[0 .. kind_marker + 1], .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    if (!std.mem.eql(u8, parsed.value.version, "1") or !std.mem.eql(u8, parsed.value.key, handle)) return error.InvalidRequestRecord;
-    try value.store.set(parsed.value.store);
-    try value.key.set(parsed.value.key);
-    try value.session.set(parsed.value.session);
-    try value.kind.set(parsed.value.kind);
+    const value = try client.readCapturedIdentity(init.io, path, handle);
     if (!value.kind.eql("configure") and !value.kind.eql("message") and
         !value.kind.eql("permission_decision")) return error.InvalidRequestRecord;
     return value;
@@ -1084,8 +1051,10 @@ fn recover(init: std.process.Init, args: []const []const u8) !void {
     if (args.len != 1 and !json) return usage();
     const saved = try savedRequest(init, args[0]);
     const kind = if (saved.kind.eql("permission_decision")) "permission-decision" else saved.kind.slice();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try requestPath(init, args[0], &path_buffer);
     var buffer: client.ReplyBuffer = .{};
-    const reply = try client.retry(init.io, saved.store.slice(), saved.path.slice(), kind, &buffer);
+    const reply = try client.retry(init.io, saved.store.slice(), path, kind, &buffer);
     if (json) try writeCommandReply(init.io, reply) else try writeAdmission(init.io, reply, null);
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
@@ -1353,43 +1322,23 @@ fn followMessage(init: std.process.Init, saved: *const SavedRequest, json: bool,
             try writeFollowOutcome(init, observation, json);
             return null;
         }
-        const processing = observation.object.get("processing");
-        const queue = try objectField(observation, "queue");
-        if (processing != null or std.mem.eql(u8, try stringField(queue, "status"), "queued")) {
-            // Test-only pause after observing the key, before reading Session Current.
-            try testGate(init.io, "RUI_TEST_FOLLOW_GATE");
-            const work = try inspectWork(init, saved.store.slice(), saved.session.slice());
-            if (work.action.len != 0 and work.turn.len != 0) {
-                var fresh_response: client.ReplyBuffer = .{};
-                const fresh_reply = try client.observeCommand(init.io, saved.store.slice(), saved.key.slice(), &fresh_response);
-                if (fresh_reply.status != 200) return error.ObservationFailed;
-                var fresh_parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, fresh_reply.body, .{});
-                defer fresh_parsed.deinit();
-                const fresh = try objectField(fresh_parsed.value, "observation");
-                const fresh_status = try stringField(fresh, "status");
-                if (std.mem.eql(u8, fresh_status, "absent")) return error.RequestNotAdmitted;
-                if (!std.mem.eql(u8, try stringField(fresh, "kind"), "message") or
-                    !std.mem.eql(u8, try stringField(fresh, "target"), saved.session.slice())) return error.RequestBindingMismatch;
-                if (std.mem.eql(u8, fresh_status, "rejected") or fresh.object.contains("result")) {
-                    try writeFollowOutcome(init, fresh, json);
-                    return null;
-                }
-                const fresh_processing = fresh.object.get("processing");
-                const fresh_queue = try objectField(fresh, "queue");
-                if (!terminal_only and (!session_wait or work.status.eql("waiting_for_permission")) and
-                    (std.mem.eql(u8, try stringField(fresh_queue, "status"), "queued") or
-                        (fresh_processing != null and std.mem.eql(u8, work.turn.slice(), try stringField(fresh_processing.?, "turn")))))
-                {
-                    if (json) {
-                        var line: [160]u8 = undefined;
-                        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{{\"return\":\"attention\",\"status\":\"{s}\",\"action\":\"{s}\"}}\n", .{ work.status.slice(), work.action.slice() }));
-                    } else {
-                        var line: [160]u8 = undefined;
-                        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "return: attention\nstatus: {s}\naction: {s}\n", .{ work.status.slice(), work.action.slice() }));
-                    }
-                    return work;
-                }
+        const progress = try objectField(observation, "progress");
+        const state = try stringField(progress, "status");
+        const action = try objectField(progress, "action");
+        // Test-only pause after capturing the Message's coherent observation.
+        try testGate(init.io, "RUI_TEST_FOLLOW_GATE");
+        if (!terminal_only and action == .string and (!session_wait or std.mem.eql(u8, state, "waiting_for_permission"))) {
+            var work: Work = .{};
+            try work.status.set(state);
+            try work.action.set(action.string);
+            if (json) {
+                var line: [160]u8 = undefined;
+                try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{{\"return\":\"attention\",\"status\":\"{s}\",\"action\":\"{s}\"}}\n", .{ work.status.slice(), work.action.slice() }));
+            } else {
+                var line: [160]u8 = undefined;
+                try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "return: attention\nstatus: {s}\naction: {s}\n", .{ work.status.slice(), work.action.slice() }));
             }
+            return work;
         }
         try std.Io.sleep(init.io, .fromMilliseconds(100), .awake);
     }

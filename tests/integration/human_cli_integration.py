@@ -157,6 +157,9 @@ def main():
         queued = admit(home, "message", "--store", store, "--session", session,
             "queued behind permission")["request"]
         assert run(home, "result", queued) == "result: queued\n"
+        queued_fact = fixture.command("observe-command", "--store", store, "--key", queued)["observation"]
+        assert queued_fact["queue"]["status"] == "queued" and queued_fact["progress"] == {
+            "status": "waiting_for_permission", "action": action}, queued_fact
         scratch = state / "render-scratch"
         scratch.mkdir()
         render_environment = {"TMPDIR": str(scratch)}
@@ -432,6 +435,7 @@ def main():
             return report["actionable_permissions"][0]["action"] if report["actionable_permissions"] else None
 
         action_b = fixture.wait_for(b_action, "B permission before Current")
+        assert fixture.command("observe-command", "--store", store, "--key", message_a)["observation"]["result"]["status"] == "completed"
         pathlib.Path(f"{race_gate}.release").touch()
         pathlib.Path(f"{wait_gate}.release").touch()
         output, error = race_follower.communicate(timeout=10)
@@ -475,13 +479,18 @@ def main():
         os.close(slave)
         try:
             assert "Work: idle" in read_terminal(master, "rui> ")
-            proposal = terminal_step(master, "interactive request", "Allow once, deny, or later?")
+            os.write(master, b"interactive request\na\n")
+            proposal = read_terminal(master, "Allow once, deny, or later?")
+            time.sleep(0.2)
+            assert counter.read_text() == "x", "pasted typeahead approved an unseen Action"
             assert json.loads(proposal.split("call ID: ", 1)[1].splitlines()[0]) == control_call, proposal
             assert json.loads(proposal.split("Bash arguments: ", 1)[1].splitlines()[0]) == padded_arguments, proposal
             assert "\\u001b" in proposal and "\\u202e" in proposal and "\\u00e9" in proposal
             assert "\\r  " in proposal and "\x1b" not in proposal and "\u202e" not in proposal, proposal
             interactive_key = proposal.split("request: ", 1)[1].splitlines()[0]
             action_id = proposal.split("Action ", 1)[1].splitlines()[0]
+            current_action = fixture.command("inspect-session", "--store", store, "--session", interactive)
+            assert [item["action"] for item in current_action["actionable_permissions"]] == [action_id], current_action
             mismatch = admit(home, "allow-action", "--store", store, "--session", session,
                 "--action", action_id)
             assert mismatch["admission"]["answer"]["status"] == "rejected", mismatch
