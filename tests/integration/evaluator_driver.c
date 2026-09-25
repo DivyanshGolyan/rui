@@ -29,11 +29,24 @@ static int descriptor_count(void) {
     return count;
 }
 
-static int stall_output(void *context, uint64_t amount) {
-    (void)context;
-    (void)amount;
-    struct timespec delay = {6, 0};
-    while (nanosleep(&delay, &delay) && errno == EINTR) {}
+struct output_sink { int fd; uint64_t budget, length; int stall; };
+
+static int append_output(void *context, const unsigned char *bytes, size_t length) {
+    struct output_sink *sink = context;
+    if (sink->stall) {
+        struct timespec delay = {6, 0};
+        while (nanosleep(&delay, &delay) && errno == EINTR) {}
+    }
+    if (length > sink->budget - sink->length) return -1;
+    size_t remaining = length;
+    while (remaining) {
+        ssize_t count = write(sink->fd, bytes, remaining);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) return -1;
+        bytes += count;
+        remaining -= (size_t)count;
+    }
+    sink->length += length;
     return 0;
 }
 
@@ -61,7 +74,10 @@ int main(int argc, char **argv) {
     struct cancellation cancellation = {.immediate = !strcmp(argv[3], "cancel")};
     clock_gettime(CLOCK_MONOTONIC, &cancellation.start);
     int use_cancel = cancellation.immediate || !strcmp(argv[3], "live-cancel");
-    int stall = !strcmp(argv[3], "stall-write");
+    struct output_sink sink = {
+        .fd = output, .budget = strtoull(argv[4], NULL, 10),
+        .stall = !strcmp(argv[3], "stall-write"),
+    };
     int baseline = descriptor_count();
     int result = 0;
     if (!strcmp(argv[3], "run-input-rw") && write(output, "partial", 7) != 7)
@@ -69,13 +85,16 @@ int main(int argc, char **argv) {
     char diagnostic[4096];
     size_t diagnostic_length = 0;
     int check = !strcmp(argv[3], "check");
-    for (int i = 0; i < repeat && result == 0; i++)
-        result = rui_evaluate(argv[1], input, prepared, output,
-                              strtoull(argv[4], NULL, 10), check,
+    for (int i = 0; i < repeat && result == 0; i++) {
+        if (ftruncate(output, 0) || lseek(output, 0, SEEK_SET) < 0) return 4;
+        sink.length = 0;
+        result = rui_evaluate(argv[1], input, prepared, check,
                               use_cancel ? cancelled : NULL, &cancellation,
-                              stall ? stall_output : NULL, NULL,
+                              append_output, &sink,
                               check ? diagnostic : NULL, check ? sizeof(diagnostic) : 0,
                               check ? &diagnostic_length : NULL);
+    }
+    if (result && ftruncate(output, 0)) return 4;
     if (use_cancel && result != 1) return 6;
     if (descriptor_count() != baseline) return 7;
     if (result && check && diagnostic_length &&
