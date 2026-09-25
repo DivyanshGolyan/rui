@@ -608,6 +608,15 @@ fn writeAdmission(io: std.Io, reply: client.CommandReply, json_record: ?[]const 
     const status = try stringField(answer, "status");
     var line: [128]u8 = undefined;
     try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "admitted: {s}\n", .{status}));
+    const replayed = try objectField(answer, "replayed");
+    if (replayed != .bool) return error.InvalidObservation;
+    try std.Io.File.stdout().writeStreamingAll(io, if (replayed.bool) "replayed: true\n" else "replayed: false\n");
+    if (answer.object.get("code")) |code| {
+        if (code != .string) return error.InvalidObservation;
+        try std.Io.File.stdout().writeStreamingAll(io, "code: ");
+        try std.Io.File.stdout().writeStreamingAll(io, code.string);
+        try std.Io.File.stdout().writeStreamingAll(io, "\n");
+    }
 }
 
 fn objectField(value: std.json.Value, name: []const u8) !std.json.Value {
@@ -763,16 +772,8 @@ fn result(init: std.process.Init, args: []const []const u8) !void {
         return;
     }
     if (json) {
-        var source_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        var key: [36]u8 = undefined;
-        const source = try newRequest(init, &source_buffer, &key);
-        const path = try std.fmt.bufPrint(&path_buffer, "{s}.answer", .{source[0 .. source.len - 5]});
-        const file = try std.Io.Dir.cwd().createFile(init.io, path, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
-        defer {
-            file.close(init.io);
-            std.Io.Dir.cwd().deleteFile(init.io, path) catch {};
-        }
+        const file = try renderScratch(init);
+        defer file.close(init.io);
         var read_buffer: client.ReplyBuffer = .{};
         const answer = try client.readResult(init.io, saved.store.slice(), saved.key.slice(), file, &read_buffer);
         if (answer != .answer) return error.ResultReadFailed;
@@ -796,6 +797,27 @@ const Work = struct {
     turn: protocol.Bounded(32) = .{},
     action: protocol.Bounded(32) = .{},
 };
+
+fn renderScratch(init: std.process.Init) !std.Io.File {
+    const path = init.environ_map.get("TMPDIR") orelse "/tmp";
+    if (!std.fs.path.isAbsolute(path)) return error.InvalidTemporaryDirectory;
+    const dir = try std.Io.Dir.cwd().openDir(init.io, path, .{});
+    defer dir.close(init.io);
+    return createRenderScratch(init.io, dir, false);
+}
+
+fn createRenderScratch(io: std.Io, dir: std.Io.Dir, fail_unlink: bool) !std.Io.File {
+    var random: [16]u8 = undefined;
+    try std.Io.randomSecure(io, &random);
+    var name_buffer: [64]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buffer, "rui-render-{s}.tmp", .{std.fmt.bytesToHex(random, .lower)});
+    const file = try dir.createFile(io, name, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
+    errdefer file.close(io);
+    // Scratch is descriptor-owned: interrupted clients leave no named payload.
+    if (fail_unlink) return error.RenderScratchCleanupFailed;
+    dir.deleteFile(io, name) catch return error.RenderScratchCleanupFailed;
+    return file;
+}
 
 fn tokenString(token: std.json.Token) ![]const u8 {
     return switch (token) {
@@ -854,16 +876,8 @@ fn readWork(reader: *std.json.Reader) !Work {
 }
 
 fn inspectWork(init: std.process.Init, saved: *const SavedRequest) !Work {
-    var request_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var key: [36]u8 = undefined;
-    const request_path = try newRequest(init, &request_buffer, &key);
-    const path = try std.fmt.bufPrint(&path_buffer, "{s}.report", .{request_path[0 .. request_path.len - 5]});
-    const file = try std.Io.Dir.cwd().createFile(init.io, path, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
-    defer {
-        file.close(init.io);
-        std.Io.Dir.cwd().deleteFile(init.io, path) catch {};
-    }
+    const file = try renderScratch(init);
+    defer file.close(init.io);
     var response: client.ReplyBuffer = .{};
     const reply = try client.inspectSession(init.io, saved.store.slice(), saved.session.slice(), .current, file, &response);
     switch (reply) {
@@ -907,9 +921,13 @@ fn follow(init: std.process.Init, args: []const []const u8) !void {
             }
             return;
         }
-        if (observation.object.get("processing")) |processing| {
+        const processing = observation.object.get("processing");
+        const queue = try objectField(observation, "queue");
+        if (processing != null or std.mem.eql(u8, try stringField(queue, "status"), "queued")) {
             const work = try inspectWork(init, &saved);
-            if (work.action.len != 0 and std.mem.eql(u8, work.turn.slice(), try stringField(processing, "turn"))) {
+            if (work.action.len != 0 and work.turn.len != 0 and
+                (processing == null or std.mem.eql(u8, work.turn.slice(), try stringField(processing.?, "turn"))))
+            {
                 if (json) {
                     var line: [160]u8 = undefined;
                     try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{{\"return\":\"attention\",\"status\":\"{s}\",\"action\":\"{s}\"}}\n", .{ work.status.slice(), work.action.slice() }));
@@ -936,16 +954,8 @@ fn inspectAction(init: std.process.Init, args: []const []const u8) !void {
     }
     const target = action orelse return usage();
     if (json) {
-        var request_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        var key: [36]u8 = undefined;
-        const request_path = try newRequest(init, &request_buffer, &key);
-        const path = try std.fmt.bufPrint(&path_buffer, "{s}.action", .{request_path[0 .. request_path.len - 5]});
-        const file = try std.Io.Dir.cwd().createFile(io, path, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
-        defer {
-            file.close(io);
-            std.Io.Dir.cwd().deleteFile(io, path) catch {};
-        }
+        const file = try renderScratch(init);
+        defer file.close(io);
         var buffer: client.ReplyBuffer = .{};
         const call = try client.readActionCallId(io, store orelse return usage(), session orelse return usage(), target, file, &buffer);
         if (call != .answer) return error.ActionReadFailed;
@@ -1044,6 +1054,24 @@ test "post-command hold reports release-pipe cleanup" {
     const release = try testPipe();
     closeDescriptor(release[1]);
     try std.testing.expectError(error.PostCommandHoldClosed, postCommandHoldDescriptors(ready[1], release[0]));
+}
+
+test "render scratch has no named payload and refuses failed unlink" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const file = try createRenderScratch(io, tmp.dir, false);
+    defer file.close(io);
+    try file.writeStreamingAll(io, "private answer");
+    var directory = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer directory.close(io);
+    var iterator = directory.iterate();
+    try std.testing.expect((try iterator.next(io)) == null);
+
+    try std.testing.expectError(error.RenderScratchCleanupFailed, createRenderScratch(io, tmp.dir, true));
+    iterator = directory.iterate();
+    const abandoned = (try iterator.next(io)).?;
+    try std.testing.expectEqual(@as(u64, 0), (try tmp.dir.statFile(io, abandoned.name, .{})).size);
 }
 
 fn testPipe() ![2]std.posix.fd_t {

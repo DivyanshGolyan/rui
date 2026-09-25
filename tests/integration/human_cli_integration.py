@@ -15,8 +15,8 @@ import time
 import dispatch_integration as fixture
 
 
-def run(home, *args, success=True):
-    env = {**os.environ, "HOME": str(home)}
+def run(home, *args, success=True, environment=None):
+    env = {**os.environ, "HOME": str(home), **(environment or {})}
     result = subprocess.run([str(fixture.RUI), *map(str, args)], env=env, capture_output=True, text=True, timeout=20)
     if success:
         assert result.returncode == 0, (args, result.stdout, result.stderr)
@@ -71,6 +71,7 @@ def main():
         assert config["admission"]["answer"]["status"] == "accepted", config
         assert config["request"] in json.loads(run(home, "requests", "--json"))
         assert json.loads(run(home, "recover", config["request"], "--json"))["answer"]["replayed"] is True
+        assert run(home, "recover", config["request"]) == "admitted: accepted\nreplayed: true\n"
 
         text = state / "input"
         text.write_text("first input")
@@ -91,8 +92,28 @@ def main():
         attention = run(home, "follow", first)
         assert "return: attention" in attention and "status: waiting_for_permission" in attention, attention
         action = attention.split("action: ", 1)[1].splitlines()[0]
+        queued = admit(home, "message", "--store", store, "--session", session,
+            "queued behind permission")["request"]
+        assert run(home, "result", queued) == "result: queued\n"
+        scratch = state / "render-scratch"
+        scratch.mkdir()
+        render_environment = {"TMPDIR": str(scratch)}
+        queued_attention = json.loads(run(home, "follow", queued, "--json", environment=render_environment))
+        assert queued_attention == {"return": "attention", "status": "waiting_for_permission", "action": action}, queued_attention
         presentation = run(home, "inspect-action", "--store", store, "--session", session, "--action", action)
         assert f"Action {action}\ncall ID: human-call\nBash arguments: {arguments}" in presentation, presentation
+        fresh_home = state / "fresh-home"
+        fresh_home.mkdir()
+        assert not (fresh_home / ".config").exists()
+        assert json.loads(run(fresh_home, "inspect-action", "--store", store, "--session", session,
+            "--action", action, "--json", environment=render_environment)) == {"action": action, "call_id": "human-call", "arguments": arguments}
+        assert not (fresh_home / ".config").exists()
+        assert list(scratch.iterdir()) == []
+        unavailable = subprocess.run([str(fixture.RUI), "inspect-action", "--store", str(store),
+            "--session", session, "--action", action, "--json"],
+            env={**os.environ, "HOME": str(fresh_home), "TMPDIR": str(state / "missing-scratch")},
+            capture_output=True, text=True, timeout=20)
+        assert unavailable.returncode != 0 and unavailable.stdout == "", unavailable
         exact = json.loads(run(home, "inspect-action", "--store", store, "--session", session,
             "--action", action, "--json"))
         assert exact == {"action": action, "call_id": "human-call", "arguments": arguments}, exact
@@ -106,13 +127,21 @@ def main():
         recovered_decision = json.loads(run(home, "recover", decision_key, "--json"))["answer"]
         assert recovered_decision["status"] == "accepted" and recovered_decision["replayed"] is True
         fixture.wait_for(lambda: fixture.completed_observation(store, first), "first saved answer")
+        fixture.wait_for(lambda: fixture.completed_observation(store, queued), "queued answer after permission")
         stale = admit(home, "deny-action", "--store", store, "--session", session,
             "--action", action)
         assert stale["admission"]["answer"]["status"] == "rejected", stale
+        assert run(home, "result", queued) == "result: completed\nfirst answer\n"
+        assert run(home, "follow", queued) == "return: outcome\nstatus: completed\n"
+        assert run(home, "recover", stale["request"]) == "admitted: rejected\nreplayed: true\ncode: action_not_pending\n"
+        stale_default = run(home, "deny-action", "--store", store, "--session", session,
+            "--action", action)
+        assert stale_default.splitlines()[1:] == ["admitted: rejected", "replayed: false", "code: action_not_pending"], stale_default
         assert run(home, "result", first) == "result: completed\nfirst answer\n"
-        completed_result = json.loads(run(home, "result", first, "--json"))
+        completed_result = json.loads(run(home, "result", first, "--json", environment=render_environment))
         assert completed_result["answer"] == "first answer"
         assert completed_result["observation"]["result"]["status"] == "completed"
+        assert list(scratch.iterdir()) == []
         completed_follow = json.loads(run(home, "follow", first, "--json"))
         assert completed_follow["return"] == "outcome"
         assert completed_follow["observation"]["result"]["status"] == "completed"
@@ -131,12 +160,15 @@ def main():
         assert len(after - before) == 1, (before, after)
         second = (after - before).pop()
         assert caller.poll() is None
+        assert fixture.command("observe-command", "--store", store,
+            "--key", second)["observation"]["status"] == "absent"
         caller.kill()
         output, _ = caller.communicate(timeout=5)
         assert caller.returncode == -signal.SIGKILL and output == b"", output
         assert second != first
         text.unlink()
-        assert json.loads(run(home, "recover", second, "--json"))["answer"]["status"] == "accepted"
+        initial_recovery = json.loads(run(home, "recover", second, "--json"))["answer"]
+        assert initial_recovery["status"] == "accepted" and initial_recovery["replayed"] is False
         fixture.wait_for(lambda: fixture.completed_observation(store, second), "second saved answer")
         assert run(home, "result", first) == "result: completed\nfirst answer\n"
         assert run(home, "result", second) == "result: completed\nsecond answer\n"
@@ -221,6 +253,30 @@ def main():
             "unknown session")
         assert rejected["admission"]["answer"]["status"] == "rejected", rejected
         assert run(home, "result", rejected["request"]) == "result: rejected\ncode: unknown_session\n"
+        assert run(home, "recover", rejected["request"]) == "admitted: rejected\nreplayed: true\ncode: unknown_session\n"
+
+        large_answer = "x" * 4095 + "🍰" + "y" * (128 * 1024)
+        endpoint.responses.append(fixture.sse_answer("large-answer", "large-reason",
+            "large-message", large_answer)[0])
+        large_session = "human/large"
+        run(home, "configure", "--store", store, "--session", large_session,
+            "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+        large_key = admit(home, "message", "--store", store, "--session", large_session,
+            "large output")["request"]
+        fixture.wait_for(lambda: fixture.completed_observation(store, large_key), "large saved answer")
+        reader = subprocess.Popen([str(fixture.RUI), "result", large_key, "--json"],
+            env={**os.environ, "HOME": str(home), **render_environment},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            assert reader.stdout.read(256).startswith(b'{"observation":')
+            assert reader.poll() is None, "large result should block on unread stdout"
+            assert list(scratch.iterdir()) == [], "rendering must not leave a named payload"
+        finally:
+            if reader.poll() is None:
+                reader.kill()
+            reader.communicate(timeout=5)
+        assert reader.returncode == -signal.SIGKILL and list(scratch.iterdir()) == []
+        assert json.loads(run(home, "result", large_key, "--json", environment=render_environment))["answer"] == large_answer
 
         fixture.crash_host(host, state, "human-cli-crash")
         failed_observation = run(home, "result", first, success=False)
@@ -228,7 +284,7 @@ def main():
         host = fixture.start_host(store, url)
         assert json.loads(run(home, "recover", first, "--json"))["answer"]["replayed"] is True
         assert run(home, "result", first) == "result: completed\nfirst answer\n"
-        assert counter.read_text() == "x" and sibling_effect.read_text() == "y" and len(endpoint.requests) == 8
+        assert counter.read_text() == "x" and sibling_effect.read_text() == "y" and len(endpoint.requests) == 9
         completed = True
         print("human CLI: saved capture, lost reply, exact approval, second key and Host restart passed")
     finally:
