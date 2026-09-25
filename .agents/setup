@@ -248,6 +248,10 @@ fetch_zig_dependency \
     https://curl.se/download/curl-8.22.0.tar.xz \
     N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM \
     curl-8.22.0.tar.xz
+fetch_zig_dependency \
+    https://github.com/nghttp2/nghttp2/releases/download/v1.70.0/nghttp2-1.70.0.tar.xz \
+    N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb \
+    nghttp2-1.70.0.tar.xz
 (cd "$repo_root" && zig build --global-cache-dir "$zig_cache" --fetch=all)
 
 step 'Fetching pinned Go measurement dependencies'
