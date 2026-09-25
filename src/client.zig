@@ -25,6 +25,7 @@ pub const ConfigureInput = struct {
     permission_mode: OptionalText = .{},
     output_schema: OptionalFile = .{},
     drop_reply: ?[]const u8 = null,
+    captured: ?*const fn (std.Io, []const u8) anyerror!void = null,
 };
 
 pub const MessageInput = struct {
@@ -33,7 +34,9 @@ pub const MessageInput = struct {
     key: []const u8,
     session: []const u8,
     text_path: []const u8,
+    text: ?[]const u8 = null,
     drop_reply: ?[]const u8 = null,
+    captured: ?*const fn (std.Io, []const u8) anyerror!void = null,
 };
 
 pub const SessionStopInput = struct {
@@ -62,6 +65,7 @@ pub const PermissionDecisionInput = struct {
     action_id: u64,
     decision: protocol.PermissionDecision = .deny,
     drop_reply: ?[]const u8 = null,
+    captured: ?*const fn (std.Io, []const u8) anyerror!void = null,
 };
 
 pub const ReplyBuffer = protocol.ResponseBuffer;
@@ -111,6 +115,7 @@ pub fn configure(io: std.Io, input: ConfigureInput, reply_buffer: *ReplyBuffer) 
     const paths = try platform.resolveClientPaths(io, input.store);
     try validateIdentityInputs(input.key, input.session);
     try captureConfigure(io, &paths, input);
+    if (input.captured) |notify| try notify(io, input.record);
     return sendRecord(io, &paths, input.record, "/v1/configure", input.drop_reply, reply_buffer);
 }
 
@@ -119,6 +124,7 @@ pub fn message(io: std.Io, input: MessageInput, reply_buffer: *ReplyBuffer) !Com
     const paths = try platform.resolveClientPaths(io, input.store);
     try validateIdentityInputs(input.key, input.session);
     try captureMessage(io, &paths, input);
+    if (input.captured) |notify| try notify(io, input.record);
     return sendRecord(io, &paths, input.record, "/v1/message", input.drop_reply, reply_buffer);
 }
 
@@ -159,6 +165,7 @@ pub fn denyPermission(io: std.Io, input: PermissionDecisionInput, reply_buffer: 
     try validateIdentityInputs(input.key, input.session);
     if (input.action_id == 0) return error.InvalidTarget;
     try capturePermissionDecision(io, &paths, input);
+    if (input.captured) |notify| try notify(io, input.record);
     return sendRecord(io, &paths, input.record, "/v1/control/permission-decision", input.drop_reply, reply_buffer);
 }
 
@@ -341,7 +348,10 @@ fn captureMessage(io: std.Io, paths: *const platform.Paths, input: MessageInput)
     try capture.write(",\"session\":");
     try capture.writeJsonString(input.session);
     try capture.write(",\"text\":{\"state\":\"value\",\"value\":");
-    try capture.writeJsonFile(input.text_path);
+    if (input.text) |value| {
+        if (value.len > protocol.max_sqlite_content_bytes) return error.ContentTooLarge;
+        try capture.writeJsonString(value);
+    } else try capture.writeJsonFile(input.text_path);
     try capture.write("}}");
     try capture.commit();
 }
