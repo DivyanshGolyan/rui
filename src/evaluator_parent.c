@@ -19,17 +19,6 @@ static int64_t milliseconds(void) {
     return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 
-static int write_all(int fd, const unsigned char *p, size_t n) {
-    while (n) {
-        ssize_t wrote = write(fd, p, n);
-        if (wrote < 0 && errno == EINTR) continue;
-        if (wrote <= 0) return -1;
-        p += wrote;
-        n -= (size_t)wrote;
-    }
-    return 0;
-}
-
 static int make_pipe(int pipe_fds[2]) {
 #ifdef __APPLE__
     if (pipe(pipe_fds)) return -1;
@@ -103,18 +92,12 @@ static void *watch_child(void *context) {
 }
 
 int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
-                 int output_fd, uint64_t output_budget, int compile_only,
+                 int compile_only,
                  int (*cancelled)(void *), void *cancel_context,
-                 int (*reserve_output)(void *, uint64_t), void *budget_context,
+                 int (*append_output)(void *, const unsigned char *, size_t), void *output_context,
                  char *diagnostic, size_t diagnostic_capacity,
                  size_t *diagnostic_length) {
     if (diagnostic_length) *diagnostic_length = 0;
-    if (!compile_only) {
-        struct stat output_stat;
-        if (fstat(output_fd, &output_stat) || !S_ISREG(output_stat.st_mode) ||
-            ftruncate(output_fd, 0) || lseek(output_fd, 0, SEEK_SET) < 0)
-            return -1;
-    }
     int input_flags = fcntl(source_fd, F_GETFL);
     struct stat source_stat;
     if (input_flags < 0 || (input_flags & O_ACCMODE) != O_RDONLY ||
@@ -193,7 +176,6 @@ int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
     close(diagnostic_pipe[1]);
     if (err) {
         close(output_pipe[0]); close(diagnostic_pipe[0]);
-        ftruncate(output_fd, 0);
         return cancelled_before_spawn ? 1 : -1;
     }
     int failed = 0;
@@ -263,7 +245,7 @@ int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
                         length |= (uint32_t)header[i] << (8 * i);
                     header_used = 0;
                     if (!length) { complete = 1; continue; }
-                    if (length > 16384 || length > output_budget - received) {
+                    if (length > 16384) {
                         failed = 1;
                         break;
                     }
@@ -271,10 +253,8 @@ int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
                 }
                 size_t body = (size_t)n - offset;
                 if (body > remaining_chunk) body = remaining_chunk;
-                /* A failed write can have modified the file. The owner keeps
-                 * the entire reservation until the file has been discarded. */
-                if ((reserve_output && reserve_output(budget_context, body)) ||
-                    write_all(output_fd, window + offset, body)) {
+                if (body > UINT64_MAX - received || !append_output ||
+                    append_output(output_context, window + offset, body)) {
                     failed = 1;
                     break;
                 }
@@ -324,14 +304,12 @@ int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
         pid_t result = waitpid(pid, &status, 0);
         if (result == pid) reaped = 1;
         else if (result < 0 && errno != EINTR) {
-            ftruncate(output_fd, 0);
             return -1;
         }
     }
     if (failed || !output_eof || !diagnostic_eof ||
         !WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
         (!compile_only && (!complete || remaining_chunk || header_used || !received))) {
-        ftruncate(output_fd, 0);
         return watchdog_result == watchdog_cancelled ? 1 : -1;
     }
     return 0;
