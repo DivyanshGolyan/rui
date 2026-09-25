@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) void {
     const evaluator_integration = b.addSystemCommand(&.{"python3"});
     evaluator_integration.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     evaluator_integration.addArtifactArg(evaluator);
-    const evaluator_step = b.step("workflow-check", "Run the standalone QuickJS worker checks");
+    const evaluator_step = b.step("workflow-check", "Run the isolated QuickJS module worker checks");
     evaluator_step.dependOn(&evaluator_integration.step);
 
     const test_filter = b.option([]const u8, "test-filter", "Run tests whose names contain this text");
