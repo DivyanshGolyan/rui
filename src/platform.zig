@@ -147,7 +147,26 @@ fn isOwnedIngressName(name: []const u8) bool {
         isOwnedNumericScratch(name, "bash-input-") or
         isOwnedNumericScratch(name, "bash-stdout-") or
         isOwnedNumericScratch(name, "bash-stderr-") or
-        isOwnedNumericScratch(name, "report-");
+        isOwnedNumericScratch(name, "report-") or
+        isOwnedEvaluatorScratch(name);
+}
+
+fn isOwnedEvaluatorScratch(name: []const u8) bool {
+    const prefix = "evaluator-";
+    const suffix = if (std.mem.endsWith(u8, name, ".tmp"))
+        ".tmp"
+    else if (std.mem.endsWith(u8, name, ".index"))
+        ".index"
+    else
+        return false;
+    if (!std.mem.startsWith(u8, name, prefix)) return false;
+    const value = name[prefix.len .. name.len - suffix.len];
+    if (value.len == 0 or value.len > 16 or (value.len > 1 and value[0] == '0')) return false;
+    for (value) |byte| {
+        if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false;
+    }
+    _ = std.fmt.parseInt(u64, value, 16) catch return false;
+    return true;
 }
 
 fn isOwnedNumericScratch(name: []const u8, prefix: []const u8) bool {
@@ -351,6 +370,9 @@ test "startup cleanup recognizes only owned ingress names" {
     try std.testing.expect(isOwnedIngressName("bash-stdout-12-2.tmp"));
     try std.testing.expect(isOwnedIngressName("bash-stderr-12-2.tmp"));
     try std.testing.expect(isOwnedIngressName("report-12-2.tmp"));
+    try std.testing.expect(isOwnedIngressName("evaluator-0.tmp"));
+    try std.testing.expect(isOwnedIngressName("evaluator-1a2b3c.index"));
+    try std.testing.expect(isOwnedIngressName("evaluator-ffffffffffffffff.tmp"));
     inline for (.{ "request-", "response-", "response-metadata-", "bash-input-", "bash-stdout-", "bash-stderr-", "report-" }) |prefix| {
         var name_buffer: [64]u8 = undefined;
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}-2.tmp", .{prefix})));
@@ -371,6 +393,16 @@ test "startup cleanup recognizes only owned ingress names" {
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}2-999999999999999999999999999999.tmp", .{prefix})));
     }
     try std.testing.expect(!isOwnedIngressName("response-secret.tmp"));
+    inline for (.{
+        "evaluator-.tmp",
+        "evaluator-00.tmp",
+        "evaluator-01.index",
+        "evaluator-1A.tmp",
+        "evaluator-g.tmp",
+        "evaluator-10000000000000000.tmp",
+        "evaluator-1.tmp.extra",
+        "evaluator-1.index.tmp",
+    }) |name| try std.testing.expect(!isOwnedIngressName(name));
     try std.testing.expect(!isOwnedIngressName("canonical.sqlite3"));
 }
 
@@ -385,6 +417,8 @@ test "startup cleanup removes owned files and preserves lookalikes" {
         "bash-stdout-3-1.tmp",
         "bash-stderr-3-1.tmp",
         "report-0-1.tmp",
+        "evaluator-0.tmp",
+        "evaluator-deadbeef.index",
     };
     const preserved = [_][]const u8{
         "request-00-1.tmp",
@@ -393,6 +427,9 @@ test "startup cleanup removes owned files and preserves lookalikes" {
         "request-1-1",
         "request-x-1.tmp",
         "request-1-1-1.tmp",
+        "evaluator-00.tmp",
+        "evaluator-DEADBEEF.index",
+        "evaluator-deadbeef.index.extra",
         "diagnostic.log",
         "canonical.sqlite3",
     };

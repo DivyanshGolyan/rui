@@ -10,39 +10,8 @@ pub fn build(b: *std.Build) void {
     b.installFile("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md");
 
     const quickjs = b.dependency("quickjs", .{});
-    const evaluator = b.addExecutable(.{
-        .name = "rui-evaluator",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    evaluator.root_module.link_libc = true;
-    evaluator.root_module.addIncludePath(quickjs.path("."));
-    evaluator.root_module.addIncludePath(b.path("src"));
-    evaluator.root_module.addCSourceFile(.{
-        .file = b.path("src/evaluator_child.c"),
-        .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE", "-DQUICKJS_NG_BUILD=1" },
-    });
-    const extended_quickjs = b.addSystemCommand(&.{"sh"});
-    extended_quickjs.addFileArg(b.path("src/build_evaluator.sh"));
-    extended_quickjs.addFileArg(quickjs.path("quickjs.c"));
-    const quickjs_source = extended_quickjs.addOutputFileArg("quickjs.c");
-    extended_quickjs.addFileArg(b.path("src/evaluator_policy.patch"));
-    extended_quickjs.addFileInput(b.path("src/evaluator_string_reader.inc"));
-    extended_quickjs.addFileInput(b.path("src/evaluator_string_reader.h"));
-    extended_quickjs.addFileInput(b.path("src/evaluator_policy.inc"));
-    evaluator.root_module.addCSourceFile(.{
-        .file = quickjs_source,
-        .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE", "-DQUICKJS_NG_BUILD=1" },
-    });
-    for ([_][]const u8{ "dtoa.c", "libregexp.c", "libunicode.c" }) |file| {
-        evaluator.root_module.addCSourceFile(.{
-            .file = quickjs.path(file),
-            .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE", "-DQUICKJS_NG_BUILD=1" },
-        });
-    }
-    evaluator.root_module.linkSystemLibrary("m", .{});
+    const evaluator = addEvaluator(b, target, optimize, quickjs, "rui-evaluator");
+    b.installArtifact(evaluator);
 
     const evaluator_driver = b.addExecutable(.{
         .name = "rui-evaluator-boundary-test",
@@ -66,15 +35,6 @@ pub fn build(b: *std.Build) void {
         .file = b.path("tests/integration/evaluator_containment_probe.c"),
         .flags = &.{"-std=gnu11"},
     });
-    const string_sanitizer = b.addSystemCommand(&.{"sh"});
-    string_sanitizer.addFileArg(b.path("tests/integration/evaluator_string_sanitizer.sh"));
-    string_sanitizer.addFileArg(quickjs_source);
-    string_sanitizer.addFileArg(quickjs.path("quickjs.c"));
-    string_sanitizer.addFileArg(b.path("tests/integration/evaluator_string_probe.c"));
-    string_sanitizer.addFileArg(b.path("src/evaluator_string_reader.h"));
-    const string_sanitizer_step = b.step("evaluator-string-sanitizer", "Check the current QuickJS string extension with ASan/UBSan and allocation faults");
-    string_sanitizer_step.dependOn(&string_sanitizer.step);
-
     const evaluator_integration = b.addSystemCommand(&.{"python3"});
     evaluator_integration.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     evaluator_integration.addArtifactArg(evaluator);
@@ -99,15 +59,11 @@ pub fn build(b: *std.Build) void {
     });
     evaluator_module.addIncludePath(b.path("src"));
     evaluator_host.root_module.addImport("evaluator", evaluator_module);
-    evaluator_host.root_module.addIncludePath(b.path("src"));
-    evaluator_host.root_module.addCSourceFile(.{
-        .file = b.path("src/evaluator_parent.c"),
-        .flags = &.{"-std=gnu11"},
-    });
+    configureEvaluatorParent(b, evaluator_host);
     const run_evaluator_host = b.addRunArtifact(evaluator_host);
     run_evaluator_host.addArtifactArg(evaluator);
     run_evaluator_host.step.dependOn(&evaluator_integration.step);
-    const evaluator_host_step = b.step("evaluator-host-integration", "Run the private evaluator Owner integration");
+    const evaluator_host_step = b.step("evaluator-host-integration", "Run the production evaluator Owner integration");
     evaluator_host_step.dependOn(&run_evaluator_host.step);
 
     const test_filter = b.option([]const u8, "test-filter", "Run tests whose names contain this text");
@@ -395,9 +351,25 @@ pub fn build(b: *std.Build) void {
             }),
             cross_transport,
         );
+        const child = addEvaluator(
+            b,
+            resolved,
+            .ReleaseSmall,
+            quickjs,
+            b.fmt("rui-evaluator-{s}-{s}", .{
+                @tagName(resolved.result.cpu.arch),
+                @tagName(resolved.result.os.tag),
+            }),
+        );
         switch (resolved.result.os.tag) {
-            .linux => linux_cross_step.dependOn(&executable.step),
-            .macos => macos_cross_step.dependOn(&executable.step),
+            .linux => {
+                linux_cross_step.dependOn(&executable.step);
+                linux_cross_step.dependOn(&child.step);
+            },
+            .macos => {
+                macos_cross_step.dependOn(&executable.step);
+                macos_cross_step.dependOn(&child.step);
+            },
             else => unreachable,
         }
     }
@@ -522,6 +494,56 @@ fn sameTransportTarget(a: std.Build.ResolvedTarget, b: std.Build.ResolvedTarget)
     return a.result.cpu.arch == b.result.cpu.arch and
         a.result.os.tag == b.result.os.tag and
         a.result.abi == b.result.abi;
+}
+
+fn addEvaluator(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    quickjs: *std.Build.Dependency,
+    name: []const u8,
+) *std.Build.Step.Compile {
+    const evaluator = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
+    });
+    evaluator.root_module.link_libc = true;
+    evaluator.root_module.addIncludePath(quickjs.path("."));
+    evaluator.root_module.addIncludePath(b.path("src"));
+    evaluator.root_module.addCSourceFile(.{
+        .file = b.path("src/evaluator_child.c"),
+        .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE", "-DQUICKJS_NG_BUILD=1" },
+    });
+    const extended_quickjs = b.addSystemCommand(&.{"sh"});
+    extended_quickjs.addFileArg(b.path("src/build_evaluator.sh"));
+    extended_quickjs.addFileArg(quickjs.path("quickjs.c"));
+    const quickjs_source = extended_quickjs.addOutputFileArg("quickjs.c");
+    extended_quickjs.addFileArg(b.path("src/evaluator_policy.patch"));
+    extended_quickjs.addFileInput(b.path("src/evaluator_string_reader.inc"));
+    extended_quickjs.addFileInput(b.path("src/evaluator_string_reader.h"));
+    extended_quickjs.addFileInput(b.path("src/evaluator_policy.inc"));
+    if (std.mem.eql(u8, name, "rui-evaluator")) {
+        const string_sanitizer = b.addSystemCommand(&.{"sh"});
+        string_sanitizer.addFileArg(b.path("tests/integration/evaluator_string_sanitizer.sh"));
+        string_sanitizer.addFileArg(quickjs_source);
+        string_sanitizer.addFileArg(quickjs.path("quickjs.c"));
+        string_sanitizer.addFileArg(b.path("tests/integration/evaluator_string_probe.c"));
+        string_sanitizer.addFileArg(b.path("src/evaluator_string_reader.h"));
+        const string_sanitizer_step = b.step("evaluator-string-sanitizer", "Check the current QuickJS string extension with ASan/UBSan and allocation faults");
+        string_sanitizer_step.dependOn(&string_sanitizer.step);
+    }
+    evaluator.root_module.addCSourceFile(.{
+        .file = quickjs_source,
+        .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE", "-DQUICKJS_NG_BUILD=1" },
+    });
+    for ([_][]const u8{ "dtoa.c", "libregexp.c", "libunicode.c" }) |file| {
+        evaluator.root_module.addCSourceFile(.{
+            .file = quickjs.path(file),
+            .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE", "-DQUICKJS_NG_BUILD=1" },
+        });
+    }
+    evaluator.root_module.linkSystemLibrary("m", .{});
+    return evaluator;
 }
 
 fn addRui(
@@ -650,6 +672,14 @@ fn configureTerminalEditor(b: *std.Build, compile: *std.Build.Step.Compile) void
     compile.root_module.addCSourceFile(.{
         .file = utf8proc.path("utf8proc.c"),
         .flags = &.{ "-std=c99", "-O2" },
+    });
+}
+
+fn configureEvaluatorParent(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    compile.root_module.addIncludePath(b.path("src"));
+    compile.root_module.addCSourceFile(.{
+        .file = b.path("src/evaluator_parent.c"),
+        .flags = &.{"-std=gnu11"},
     });
 }
 
