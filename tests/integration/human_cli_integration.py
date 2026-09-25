@@ -673,6 +673,8 @@ def main():
             ("first second\x1b\x7fZ", "first Z"),
             ("A中e\u0301🧑‍🌾\x7f", "A中e\u0301"),
             ("\x1b[200~line1\nline2\x1b[201~", "line1\nline2"),
+            ("\x1b[200~a\n\u0301\x1b[201~\x01\x7f\x7fZ", "Z"),
+            ("ab\x01\x04\x05\x04", "b"),
             ("ask src/foo-bar\x17", "ask "),
             ("\x1b[123;4~Z", "Z"),
             ("\x1bZ", "Z"),
