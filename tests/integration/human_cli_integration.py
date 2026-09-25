@@ -42,6 +42,8 @@ def main():
     session = "human/bash"
     counter = workspace / "effect-count"
     arguments = json.dumps({"cmd": "printf x >> effect-count", "timeout_ms": None}, separators=(",", ":"))
+    control_call = "human-call\x1b[1Ghidden\u202e"
+    control_arguments = arguments + "\r  "
     sibling_started = state / "sibling-started"
     sibling_release = state / "sibling-release"
     sibling_effect = workspace / "sibling-effect"
@@ -49,7 +51,7 @@ def main():
         f"while [ ! -e {shlex.quote(str(sibling_release))} ]; do sleep 0.05; done; "
         "printf y >> sibling-effect", "timeout_ms": None}, separators=(",", ":"))
     endpoint = fixture.SuccessEndpoint([
-        fixture.sse_tool_calls("human-calls", [("bash", "human-call", arguments)]),
+        fixture.sse_tool_calls("human-calls", [("bash", control_call, control_arguments)]),
         fixture.sse_answer("human-answer", "human-reason", "human-message", "first answer")[0],
         fixture.sse_answer("second-answer", "second-reason", "second-message", "second answer")[0],
         fixture.sse_tool_calls("sibling-calls", [("bash", "pending-call", arguments),
@@ -92,10 +94,14 @@ def main():
         assert "return: attention" in attention and "status: waiting_for_permission" in attention, attention
         action = attention.split("action: ", 1)[1].splitlines()[0]
         presentation = run(home, "inspect-action", "--store", store, "--session", session, "--action", action)
-        assert f"Action {action}\ncall ID: human-call\nBash arguments: {arguments}" in presentation, presentation
+        assert f"Action {action}\n" in presentation, presentation
+        assert json.loads(presentation.split("call ID: ", 1)[1].splitlines()[0]) == control_call, presentation
+        assert json.loads(presentation.split("Bash arguments: ", 1)[1].splitlines()[0]) == control_arguments, presentation
+        assert "\\u001b" in presentation and "\\u202e" in presentation and "\\r  " in presentation, presentation
+        assert "\x1b" not in presentation and "\u202e" not in presentation and "\r" not in presentation, presentation
         exact = json.loads(run(home, "inspect-action", "--store", store, "--session", session,
             "--action", action, "--json"))
-        assert exact == {"action": action, "call_id": "human-call", "arguments": arguments}, exact
+        assert exact == {"action": action, "call_id": control_call, "arguments": control_arguments}, exact
         assert run(home, "result", first) == "result: processing\n"
         assert not counter.exists()
 

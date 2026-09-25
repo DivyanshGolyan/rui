@@ -771,7 +771,7 @@ fn result(init: std.process.Init, args: []const []const u8) !void {
         try std.Io.File.stdout().writeStreamingAll(init.io, "{\"observation\":");
         try std.Io.File.stdout().writeStreamingAll(init.io, observation_json);
         try std.Io.File.stdout().writeStreamingAll(init.io, ",\"answer\":\"");
-        try writeJsonFileAt(init.io, file, 0, answer.answer.bytes);
+        try writeJsonFileAt(init.io, file, 0, answer.answer.bytes, false);
         return std.Io.File.stdout().writeStreamingAll(init.io, "\"}\n");
     }
     var read_buffer: client.ReplyBuffer = .{};
@@ -940,43 +940,52 @@ fn inspectAction(init: std.process.Init, args: []const []const u8) !void {
         if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--action")) action = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else if (std.mem.eql(u8, args[index], "--json")) json = true else return error.UnknownArgument;
     }
     const target = action orelse return usage();
+    const file = try renderScratch(init);
+    defer file.close(io);
+    var buffer: client.ReplyBuffer = .{};
+    const call = try client.readActionCallId(io, store orelse return usage(), session orelse return usage(), target, file, &buffer);
+    if (call != .answer) return error.ActionReadFailed;
+    const arguments = try client.readActionArguments(io, store.?, session.?, target, file, &buffer);
+    if (arguments != .answer) return error.ActionReadFailed;
+    var line: [96]u8 = undefined;
     if (json) {
-        const file = try renderScratch(init);
-        defer file.close(io);
-        var buffer: client.ReplyBuffer = .{};
-        const call = try client.readActionCallId(io, store orelse return usage(), session orelse return usage(), target, file, &buffer);
-        if (call != .answer) return error.ActionReadFailed;
-        const arguments = try client.readActionArguments(io, store.?, session.?, target, file, &buffer);
-        if (arguments != .answer) return error.ActionReadFailed;
-        var line: [96]u8 = undefined;
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"action\":\"{d}\",\"call_id\":\"", .{target}));
-        try writeJsonFileAt(io, file, 0, call.answer.bytes);
+        try writeJsonFileAt(io, file, 0, call.answer.bytes, false);
         try std.Io.File.stdout().writeStreamingAll(io, "\",\"arguments\":\"");
-        try writeJsonFileAt(io, file, call.answer.bytes, arguments.answer.bytes);
+        try writeJsonFileAt(io, file, call.answer.bytes, arguments.answer.bytes, false);
         return std.Io.File.stdout().writeStreamingAll(io, "\"}\n");
     }
-    var line: [96]u8 = undefined;
-    try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "Action {d}\ncall ID: ", .{target}));
-    var buffer: client.ReplyBuffer = .{};
-    const call = try client.readActionCallId(io, store orelse return usage(), session orelse return usage(), target, std.Io.File.stdout(), &buffer);
-    if (call != .answer) return error.ActionReadFailed;
-    try std.Io.File.stdout().writeStreamingAll(io, "\nBash arguments: ");
-    const arguments = try client.readActionArguments(io, store.?, session.?, target, std.Io.File.stdout(), &buffer);
-    if (arguments != .answer) return error.ActionReadFailed;
-    try std.Io.File.stdout().writeStreamingAll(io, "\n");
+    // Provider-controlled fields must not rewrite the approval display.
+    try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "Action {d}\ncall ID: \"", .{target}));
+    try writeJsonFileAt(io, file, 0, call.answer.bytes, true);
+    try std.Io.File.stdout().writeStreamingAll(io, "\"\nBash arguments: \"");
+    try writeJsonFileAt(io, file, call.answer.bytes, arguments.answer.bytes, true);
+    try std.Io.File.stdout().writeStreamingAll(io, "\"\n");
 }
 
-fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64) !void {
+fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escape_unicode: bool) !void {
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var writer = std.Io.File.stdout().writerStreaming(io, &output_buffer);
-    var chunk: [protocol.content_window_bytes]u8 = undefined;
+    var chunk: [protocol.content_window_bytes + 3]u8 = undefined;
     var offset: u64 = 0;
+    var carry: usize = 0;
     while (offset < length) {
-        const n = try file.readPositionalAll(io, chunk[0..@intCast(@min(length - offset, chunk.len))], start + offset);
+        const n = try file.readPositionalAll(io, chunk[carry..][0..@intCast(@min(length - offset, chunk.len - carry))], start + offset);
         if (n == 0) return error.TruncatedResult;
-        try std.json.Stringify.encodeJsonStringChars(chunk[0..n], .{}, &writer.interface);
         offset += n;
+        const available = carry + n;
+        var complete = available;
+        if (escape_unicode and offset < length) {
+            var lead = available - 1;
+            while (lead != 0 and chunk[lead] & 0xc0 == 0x80) lead -= 1;
+            const width = try std.unicode.utf8ByteSequenceLength(chunk[lead]);
+            if (lead + width > available) complete = lead;
+        }
+        try std.json.Stringify.encodeJsonStringChars(chunk[0..complete], .{ .escape_unicode = escape_unicode }, &writer.interface);
+        carry = available - complete;
+        std.mem.copyForwards(u8, chunk[0..carry], chunk[complete..available]);
     }
+    if (carry != 0) return error.TruncatedResult;
     try writer.flush();
 }
 
