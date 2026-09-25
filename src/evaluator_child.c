@@ -454,6 +454,16 @@ static JSValue strict_data(JSContext *ctx, JSValueConst value,
     return JS_DupValue(ctx, value);
 }
 
+/* Only the module or returned root is completion authority. Detached jobs
+ * disappear with this runtime once that Promise settles. */
+static int settle_promise(JSRuntime *rt, JSContext *ctx, JSValueConst promise) {
+    JSContext *job = NULL;
+    while (JS_PromiseState(ctx, promise) == JS_PROMISE_PENDING) {
+        if (JS_ExecutePendingJob(rt, &job) <= 0) return -1;
+    }
+    return JS_PromiseState(ctx, promise) == JS_PROMISE_FULFILLED ? 0 : -1;
+}
+
 int main(int argc, char **argv) {
     int prepared_check = argc == 2 && !strcmp(argv[1], "check-prepared");
     int prepared_run = argc == 2 && !strcmp(argv[1], "run-prepared");
@@ -550,12 +560,7 @@ int main(int argc, char **argv) {
     JSModuleDef *module_def = JS_VALUE_GET_PTR(module);
     JSValue evaluated = JS_EvalFunction(ctx, module);
     if (JS_IsException(evaluated)) return 5;
-    JSContext *job = NULL;
-    int pending;
-    while ((pending = JS_ExecutePendingJob(rt, &job)) > 0) {}
-    if (pending < 0) return 5;
-    if (JS_IsPromise(evaluated) && JS_PromiseState(ctx, evaluated) != JS_PROMISE_FULFILLED)
-        return 5;
+    if (JS_IsPromise(evaluated) && settle_promise(rt, ctx, evaluated)) return 5;
     JS_FreeValue(ctx, evaluated);
     JSValue namespace = JS_GetModuleNamespace(ctx, module_def);
     if (JS_IsException(namespace)) return 5;
@@ -585,10 +590,8 @@ int main(int argc, char **argv) {
     JS_FreeValue(ctx, entry);
     JS_FreeValue(ctx, args);
     if (JS_IsException(root)) return 5;
-    while ((pending = JS_ExecutePendingJob(rt, &job)) > 0) {}
-    if (pending < 0) return 5;
     if (JS_IsPromise(root)) {
-        if (JS_PromiseState(ctx, root) != JS_PROMISE_FULFILLED) return 5;
+        if (settle_promise(rt, ctx, root)) return 5;
         JSValue value = JS_PromiseResult(ctx, root);
         JS_FreeValue(ctx, root);
         root = value;

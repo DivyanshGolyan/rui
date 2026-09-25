@@ -55,6 +55,15 @@ assert value('({answer: "中😀", missing: typeof process})') == {
 assert value('input.answer', b'\x05\x01\x00\x00\x00\x06\x01\x00\x00\x00'
              + struct.pack('<Q', 6) + b'answer\x03' + struct.pack('<d', 42)) == 42
 assert value('"\\u0001".repeat(3*1024*1024)') == '\x01' * (3 * 1024 * 1024)
+detached = 'Promise.resolve().then(function again() { Promise.resolve().then(again) });'
+# A settled module/returned root does not wait for unrelated continuations.
+module = invoke('run-prepared', detached + 'export default async function workflow() { return 42 }')
+assert module.returncode == 0 and module.stdout == b'\x02\x00\x00\x0042\x00\x00\x00\x00'
+assert value('(()=>{' + detached + ' return 42})()') == 42
+assert invoke('run-prepared', 'export default async function workflow() {' +
+              detached + ' throw Error("root failed") }').returncode != 0
+assert invoke('run-prepared', expression('Promise.resolve().then(function again() {' +
+              ' return Promise.resolve().then(again) })')).returncode != 0
 for invalid in ('({get secret(){return 42}})', '[1,,3]',
                 '(()=>{let x={}; x.self=x; return x})()',
                 '(()=>{}).constructor("return 1")()'):
