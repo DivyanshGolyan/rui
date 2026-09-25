@@ -14,6 +14,8 @@ Maintained executable checks and recorded qualification live in [tests/qualifica
 
 [Development build latency](build-times-sources.md) maps Zig 0.16 build/cache controls onto Rui's steps and records bounded Linux timings for initially uncached steps and warm-cache runs; recommendations only, not edit-rebuild or clean-cache qualification.
 
+[CLI guideline evidence](cli-guidelines-rui.md) compares primary clig.dev guidance with Rui's explicit Host, exact request recovery, acceptance/completion, Action approval and uncertain-effect boundaries; research input only, with no interface-model choice or human-use study.
+
 [Darwin child-status boundary](darwin-waitid-status-sources.md) compares pinned POSIX and XNU `waitid`/`waitpid` exit representations against a native Mac probe and Rui's Bash adapter. It identifies one reproduced mismatch; nearby boundaries are checks, not additional demonstrated defects.
 
 [Warm integration-test wall time](integration-test-wall-time-sources.md) cites Zig and Python primary sources for build scheduling and fixture shutdown, with measured Linux baselines and the fast/full gate boundary; it does not qualify platform latency or cold compilation.
