@@ -216,7 +216,7 @@ def main():
         os.close(slave)
         try:
             greeting = read_terminal(master, "rui> ")
-            assert f"Session: {session}" in greeting and f"Workspace (Bash cwd): {workspace}" in greeting, greeting
+            assert f"Session: {session}" in greeting and f"Workspace (Bash cwd): {workspace.resolve()}" in greeting, greeting
             assert "Permission: ask" in greeting and queued in greeting and first in greeting, greeting
             assert "first answer" in terminal_step(master, f"/result {queued}")
             assert "Local recovery handles" in terminal_step(master, "/requests")
