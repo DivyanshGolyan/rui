@@ -3460,6 +3460,11 @@ fn renderCommandObservation(
                         try response.append("}");
                     },
                 }
+                if (message.progress) |progress| {
+                    try response.appendFmt(",\"progress\":{{\"status\":\"{s}\",\"action\":", .{@tagName(progress.status)});
+                    if (progress.action_id) |id| try response.appendFmt("\"{d}\"", .{id}) else try response.append("null");
+                    try response.append("}");
+                }
             }
         }
         if (observation.session_stop) |stop| {
@@ -4381,21 +4386,24 @@ test "message observation renders every closed queue state without fabricated re
     observation.status = .accepted;
     observation.code.len = 0;
     observation.message.?.queue = .{ .admission_id = 1, .state = .queued };
+    observation.message.?.progress = .{ .status = .waiting_for_permission, .action_id = 7 };
     try Expect.rendered(
         observation,
-        accepted_prefix ++ ",\"queue\":{\"status\":\"queued\",\"admission\":\"1\"}}}",
+        accepted_prefix ++ ",\"queue\":{\"status\":\"queued\",\"admission\":\"1\"},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"7\"}}}",
     );
 
     observation.message.?.queue.?.state = .{ .processing = processing };
+    observation.message.?.progress = .{ .status = .in_flight };
     try Expect.rendered(
         observation,
-        accepted_prefix ++ ",\"queue\":{\"status\":\"processing\",\"admission\":\"1\"}" ++ binding ++ "}}",
+        accepted_prefix ++ ",\"queue\":{\"status\":\"processing\",\"admission\":\"1\"}" ++ binding ++ ",\"progress\":{\"status\":\"in_flight\",\"action\":null}}}",
     );
 
     observation.message.?.queue.?.state = .{ .completed = .{
         .binding = processing,
         .answer = .{ .length = 6, .digest = [_]u8{0xff} ** 32 },
     } };
+    observation.message.?.progress = null;
     try Expect.rendered(
         observation,
         accepted_prefix ++ ",\"queue\":{\"status\":\"completed\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"6\",\"sha256\":\"" ++ full_digest ++ "\"}}}}",
@@ -4415,6 +4423,21 @@ test "message observation renders every closed queue state without fabricated re
         observation,
         accepted_prefix ++ ",\"queue\":{\"status\":\"cancelled\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}}}",
     );
+}
+
+test "Message observation progress fits the resident response bound with escaped identities" {
+    const escaped_key = [_]u8{1} ** protocol.max_key_bytes;
+    const escaped_session = [_]u8{1} ** protocol.max_session_bytes;
+    var observation = store_module.CommandObservation{ .status = .accepted, .kind = .message };
+    try observation.target.set(&escaped_session);
+    observation.message = .{
+        .content = .{ .length = std.math.maxInt(u64), .digest = [_]u8{0xff} ** 32 },
+        .queue = .{ .admission_id = std.math.maxInt(u64), .state = .queued },
+        .progress = .{ .status = .waiting_for_permission, .action_id = std.math.maxInt(u64) },
+    };
+    var response: protocol.ResponseBuffer = .{};
+    try renderCommandObservation(&response, &escaped_key, observation);
+    try std.testing.expect(response.len <= protocol.max_message_observation_bytes);
 }
 
 test "control response variants fit exact worst-case JSON bounds" {

@@ -309,6 +309,48 @@ fn validateIdentityInputs(key: []const u8, session: []const u8) !void {
         !std.unicode.utf8ValidateSlice(session)) return error.InvalidSession;
 }
 
+pub const CapturedIdentity = struct {
+    store: protocol.Bounded(protocol.max_store_bytes) = .{},
+    key: protocol.Bounded(protocol.max_key_bytes) = .{},
+    session: protocol.Bounded(protocol.max_session_bytes) = .{},
+    kind: protocol.Bounded(32) = .{},
+};
+
+// Capture writes identity first, before variable content. Recover the bounded
+// prefix without loading or copying the potentially large captured payload.
+pub fn readCapturedIdentity(io: std.Io, path: []const u8, handle: []const u8) !CapturedIdentity {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const header_bytes = 6 * (protocol.max_store_bytes + protocol.max_key_bytes + protocol.max_session_bytes) + 256;
+    var buffer: [header_bytes]u8 = undefined;
+    const count = try file.readPositionalAll(io, &buffer, 0);
+    const prefix = buffer[0..count];
+    const kind_marker = std.mem.indexOf(u8, prefix, ",\"configuration\"") orelse
+        std.mem.indexOf(u8, prefix, ",\"text\"") orelse
+        std.mem.indexOf(u8, prefix, ",\"decision\"") orelse
+        return error.InvalidRequestRecord;
+    var head: [header_bytes]u8 = undefined;
+    if (kind_marker + 1 > head.len) return error.InvalidRequestRecord;
+    @memcpy(head[0..kind_marker], prefix[0..kind_marker]);
+    head[kind_marker] = '}';
+    const Fields = struct {
+        version: []const u8,
+        kind: []const u8,
+        store: []const u8,
+        key: []const u8,
+        session: []const u8,
+    };
+    const parsed = try std.json.parseFromSlice(Fields, std.heap.c_allocator, head[0 .. kind_marker + 1], .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (!std.mem.eql(u8, parsed.value.version, "1") or !std.mem.eql(u8, parsed.value.key, handle)) return error.InvalidRequestRecord;
+    var identity: CapturedIdentity = .{};
+    try identity.store.set(parsed.value.store);
+    try identity.key.set(parsed.value.key);
+    try identity.session.set(parsed.value.session);
+    try identity.kind.set(parsed.value.kind);
+    return identity;
+}
+
 fn captureConfigure(io: std.Io, paths: *const platform.Paths, input: ConfigureInput) !void {
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, input.record, &output_buffer);
