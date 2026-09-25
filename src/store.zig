@@ -2537,7 +2537,7 @@ pub const Store = struct {
                 try readText(statement, 4, &resolution);
                 status = if (resolution.eql("continued") or resolution.eql("interrupted"))
                     "runnable"
-                else if (resolution.eql("tool_calls") and actionable != 0)
+                else if (resolution.eql("tool_calls") and actionable != 0 and actionable == unresolved_actions)
                     "waiting_for_permission"
                 else if (resolution.eql("tool_calls") and unresolved_actions == 0)
                     "runnable"
@@ -6980,6 +6980,34 @@ test "Bash proposals retain exact order permission provenance denial and stop te
         try std.testing.expectEqualStrings("bypass", action.authorization);
         try std.testing.expectEqualStrings("2", action.permission_revision);
     }
+}
+
+test "Current reports progress alongside an actionable sibling" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "mixed-config", "direct/mixed");
+    try submitTestMessage(&storage, &tmp, "mixed-file", "mixed-message", "direct/mixed", "propose");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleTwoActionsForTesting(&storage, &tmp, binding, "mixed-metadata");
+    const before = try testingSessionReport(&storage, &tmp, "direct/mixed", 1024 * 1024);
+    defer std.testing.allocator.free(before);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, before, .{});
+    defer parsed.deinit();
+    const first = parsed.value.object.get("actions").?.object.get("unresolved").?.array.items[0];
+    const action_id = try std.fmt.parseInt(u64, first.object.get("action").?.string, 10);
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
+    try allow.key.set("mixed-allow");
+    try allow.session.set("direct/mixed");
+    try std.testing.expect(storage.denyPermission(&allow, .{}) == .accepted);
+    const after = try testingSessionReport(&storage, &tmp, "direct/mixed", 1024 * 1024);
+    defer std.testing.allocator.free(after);
+    var mixed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, after, .{});
+    defer mixed.deinit();
+    try std.testing.expectEqualStrings("in_flight", mixed.value.object.get("work").?.object.get("status").?.string);
+    try std.testing.expectEqual(@as(usize, 1), mixed.value.object.get("actionable_permissions").?.array.items.len);
+    try std.testing.expectEqualStrings("processing", @tagName((try storage.observeCommand("mixed-message")).message.?.queue.?.state));
 }
 
 test "Action settlement atomically yields to an earlier Session stop" {

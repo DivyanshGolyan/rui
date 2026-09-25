@@ -14,7 +14,7 @@ pub fn main(init: std.process.Init) !void {
     const command = args[1];
     if (std.mem.eql(u8, command, "serve")) return serve(init, args[2..]);
     if (std.mem.eql(u8, command, "login")) return login(init, args[2..]);
-    if (std.mem.eql(u8, command, "configure")) try configure(init.io, args[2..]) else if (std.mem.eql(u8, command, "message")) try message(init.io, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init.io, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init.io, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try denyAction(init.io, args[2..]) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init.io, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init.io, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init.io, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init.io, args[2..]) else return usage();
+    if (std.mem.eql(u8, command, "configure")) try configure(init, args[2..]) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init.io, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init.io, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init.io, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init.io, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init.io, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, args[2..]) else return usage();
     try postCommandHold(init);
 }
 
@@ -242,7 +242,9 @@ fn parseRetryWaits(value: []const u8) ![3]u64 {
     return waits;
 }
 
-fn configure(io: std.Io, args: []const []const u8) !void {
+fn configure(init: std.process.Init, args: []const []const u8) !void {
+    const io = init.io;
+    var json = false;
     var input = client.ConfigureInput{
         .store = "",
         .record = "",
@@ -258,18 +260,29 @@ fn configure(io: std.Io, args: []const []const u8) !void {
             key_seen = true;
         } else if (std.mem.eql(u8, arg, "--provider")) {
             input.provider = .{ .present = true, .value = try takeValue(args, &index) };
-        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--workspace")) input.workspace = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--model")) input.model = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--instructions")) input.instructions = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--tools")) input.tools = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--permission-mode")) input.permission_mode = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--output-schema")) input.output_schema = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--text-output")) input.output_schema = .{ .state = .explicit_null } else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
+        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--workspace")) input.workspace = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--model")) input.model = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--instructions")) input.instructions = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--tools")) input.tools = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--permission-mode")) input.permission_mode = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--output-schema")) input.output_schema = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--text-output")) input.output_schema = .{ .state = .explicit_null } else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
-    if (input.store.len == 0 or input.record.len == 0 or input.session.len == 0 or !key_seen) return usage();
+    if (input.store.len == 0 or input.session.len == 0 or (input.record.len == 0) != !key_seen) return usage();
+    var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const human = !key_seen;
+    if (human) {
+        input.record = try newRequest(init, &record_buffer, &key_buffer);
+        input.key = &key_buffer;
+        input.captured = if (json) announceCaptureJson else announceCapture;
+    }
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.configure(io, input, &reply_buffer);
-    try writeCommandReply(io, reply);
+    if (human) try writeAdmission(io, reply, if (json) input.record else null) else try writeCommandReply(io, reply);
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
-fn message(io: std.Io, args: []const []const u8) !void {
+fn message(init: std.process.Init, args: []const []const u8) !void {
+    const io = init.io;
+    var json = false;
     var input = client.MessageInput{ .store = "", .record = "", .key = "", .session = "", .text_path = "" };
+    var positional: ?[]const u8 = null;
     var key_seen = false;
     var index: usize = 0;
     while (index < args.len) {
@@ -277,13 +290,25 @@ fn message(io: std.Io, args: []const []const u8) !void {
         if (std.mem.eql(u8, arg, "--store")) input.store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
             input.key = try takeValue(args, &index);
             key_seen = true;
-        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--text")) input.text_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
+        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--text")) input.text_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else if (positional == null and (arg.len == 0 or arg[0] != '-' or std.mem.eql(u8, arg, "-"))) positional = arg else return error.UnknownArgument;
         index += 1;
     }
-    if (input.store.len == 0 or input.record.len == 0 or input.session.len == 0 or input.text_path.len == 0 or !key_seen) return usage();
+    if (positional) |value| {
+        if (key_seen or input.text_path.len != 0) return usage();
+        if (std.mem.eql(u8, value, "-")) input.text_path = "-" else input.text = value;
+    }
+    if (input.store.len == 0 or input.session.len == 0 or (input.text_path.len == 0 and input.text == null) or (input.record.len == 0) != !key_seen) return usage();
+    var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const human = !key_seen;
+    if (human) {
+        input.record = try newRequest(init, &record_buffer, &key_buffer);
+        input.key = &key_buffer;
+        input.captured = if (json) announceCaptureJson else announceCapture;
+    }
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.message(io, input, &reply_buffer);
-    try writeCommandReply(io, reply);
+    if (human) try writeAdmission(io, reply, if (json) input.record else null) else try writeCommandReply(io, reply);
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
@@ -341,11 +366,9 @@ fn interruptModel(io: std.Io, args: []const []const u8) !void {
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
-fn denyAction(io: std.Io, args: []const []const u8) !void {
-    return decideAction(io, args, .deny);
-}
-
-fn decideAction(io: std.Io, args: []const []const u8, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
+fn decideAction(init: std.process.Init, args: []const []const u8, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
+    const io = init.io;
+    var json = false;
     var input = client.PermissionDecisionInput{
         .store = "",
         .record = "",
@@ -365,13 +388,21 @@ fn decideAction(io: std.Io, args: []const []const u8, decision: @FieldType(clien
         } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--action")) {
             input.action_id = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
             action_seen = true;
-        } else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
+        } else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
-    if (input.store.len == 0 or input.record.len == 0 or input.session.len == 0 or !key_seen or !action_seen) return usage();
+    if (input.store.len == 0 or input.session.len == 0 or !action_seen or (input.record.len == 0) != !key_seen) return usage();
+    var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const human = !key_seen;
+    if (human) {
+        input.record = try newRequest(init, &record_buffer, &key_buffer);
+        input.key = &key_buffer;
+        input.captured = if (json) announceCaptureJson else announceCapture;
+    }
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.denyPermission(io, input, &reply_buffer);
-    try writeCommandReply(io, reply);
+    if (human) try writeAdmission(io, reply, if (json) input.record else null) else try writeCommandReply(io, reply);
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
@@ -505,6 +536,453 @@ fn writeCommandReply(io: std.Io, reply: client.CommandReply) !void {
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
 }
 
+fn requestDirectory(init: std.process.Init, buffer: []u8) ![]const u8 {
+    const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+    if (!std.fs.path.isAbsolute(home)) return error.InvalidHome;
+    return std.fmt.bufPrint(buffer, "{s}/.config/rui/requests", .{home});
+}
+
+fn newRequest(init: std.process.Init, path: []u8, key: *[36]u8) ![]const u8 {
+    var bytes: [16]u8 = undefined;
+    try std.Io.randomSecure(init.io, &bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const id = try std.fmt.bufPrint(key, "{x:0>8}-{x:0>4}-{x:0>4}-{x:0>4}-{x:0>12}", .{
+        std.mem.readInt(u32, bytes[0..4], .big),
+        std.mem.readInt(u16, bytes[4..6], .big),
+        std.mem.readInt(u16, bytes[6..8], .big),
+        std.mem.readInt(u16, bytes[8..10], .big),
+        std.mem.readInt(u48, bytes[10..16], .big),
+    });
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory = try requestDirectory(init, &directory_buffer);
+    return std.fmt.bufPrint(path, "{s}/{s}.json", .{ directory, id });
+}
+
+fn announceCapture(io: std.Io, record: []const u8) !void {
+    try captureGate(io);
+    const name = std.fs.path.basename(record);
+    try std.Io.File.stdout().writeStreamingAll(io, "request: ");
+    try std.Io.File.stdout().writeStreamingAll(io, name[0 .. name.len - ".json".len]);
+    try std.Io.File.stdout().writeStreamingAll(io, "\n");
+}
+
+fn announceCaptureJson(io: std.Io, record: []const u8) !void {
+    try captureGate(io);
+    const name = std.fs.path.basename(record);
+    var line: [96]u8 = undefined;
+    try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"event\":\"captured\",\"request\":\"{s}\"}}\n", .{name[0 .. name.len - ".json".len]}));
+}
+
+fn captureGate(io: std.Io) !void {
+    // Test-only crash point after the capture is durable but before the
+    // process publishes its handle or transmits the request.
+    const gate = std.c.getenv("RUI_TEST_CAPTURE_GATE") orelse return;
+    const path = std.mem.span(gate);
+    var ready_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var release_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const ready = try std.fmt.bufPrint(&ready_buffer, "{s}.ready", .{path});
+    const release = try std.fmt.bufPrint(&release_buffer, "{s}.release", .{path});
+    const marker = try std.Io.Dir.cwd().createFile(io, ready, .{ .exclusive = true });
+    marker.close(io);
+    while (true) {
+        if (std.Io.Dir.cwd().statFile(io, release, .{})) |_| break else |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        }
+        try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    }
+}
+
+fn writeAdmission(io: std.Io, reply: client.CommandReply, json_record: ?[]const u8) !void {
+    if (json_record) |record| {
+        const name = std.fs.path.basename(record);
+        var line: [112]u8 = undefined;
+        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"event\":\"admission\",\"request\":\"{s}\",\"admission\":", .{name[0 .. name.len - ".json".len]}));
+        try std.Io.File.stdout().writeStreamingAll(io, reply.body);
+        return std.Io.File.stdout().writeStreamingAll(io, "}\n");
+    }
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
+    defer parsed.deinit();
+    const answer = try objectField(parsed.value, "answer");
+    const status = try stringField(answer, "status");
+    var line: [128]u8 = undefined;
+    try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "admitted: {s}\n", .{status}));
+}
+
+fn objectField(value: std.json.Value, name: []const u8) !std.json.Value {
+    if (value != .object) return error.InvalidObservation;
+    return value.object.get(name) orelse error.InvalidObservation;
+}
+
+fn stringField(value: std.json.Value, name: []const u8) ![]const u8 {
+    const field = try objectField(value, name);
+    if (field != .string) return error.InvalidObservation;
+    return field.string;
+}
+
+const SavedRequest = struct {
+    path: protocol.Bounded(std.Io.Dir.max_path_bytes) = .{},
+    store: protocol.Bounded(protocol.max_store_bytes) = .{},
+    key: protocol.Bounded(protocol.max_key_bytes) = .{},
+    session: protocol.Bounded(protocol.max_session_bytes) = .{},
+    kind: protocol.Bounded(32) = .{},
+};
+
+fn requestPath(init: std.process.Init, handle: []const u8, buffer: []u8) ![]const u8 {
+    if (handle.len != 36) return error.InvalidRequestHandle;
+    for (handle, 0..) |byte, index| {
+        if (index == 8 or index == 13 or index == 18 or index == 23) {
+            if (byte != '-') return error.InvalidRequestHandle;
+        } else if (!std.ascii.isHex(byte) or std.ascii.isUpper(byte)) return error.InvalidRequestHandle;
+    }
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory = try requestDirectory(init, &directory_buffer);
+    return std.fmt.bufPrint(buffer, "{s}/{s}.json", .{ directory, handle });
+}
+
+fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
+    var value: SavedRequest = .{};
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try requestPath(init, handle, &path_buffer);
+    try value.path.set(path);
+    var file = try std.Io.Dir.cwd().openFile(init.io, path, .{});
+    defer file.close(init.io);
+    // The capture owner writes these bounded identity fields before any
+    // variable content. JSON escaping can expand each input byte sixfold.
+    const header_bytes = 6 * (protocol.max_store_bytes + protocol.max_key_bytes + protocol.max_session_bytes) + 256;
+    var buffer: [header_bytes]u8 = undefined;
+    const count = try file.readPositionalAll(init.io, &buffer, 0);
+    const prefix = buffer[0..count];
+    const kind_marker = std.mem.indexOf(u8, prefix, ",\"configuration\"") orelse
+        std.mem.indexOf(u8, prefix, ",\"text\"") orelse
+        std.mem.indexOf(u8, prefix, ",\"decision\"") orelse
+        return error.InvalidRequestRecord;
+    var head: [header_bytes]u8 = undefined;
+    if (kind_marker + 1 > head.len) return error.InvalidRequestRecord;
+    @memcpy(head[0..kind_marker], prefix[0..kind_marker]);
+    head[kind_marker] = '}';
+    const Fields = struct {
+        version: []const u8,
+        kind: []const u8,
+        store: []const u8,
+        key: []const u8,
+        session: []const u8,
+    };
+    const parsed = try std.json.parseFromSlice(Fields, std.heap.c_allocator, head[0 .. kind_marker + 1], .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (!std.mem.eql(u8, parsed.value.version, "1") or !std.mem.eql(u8, parsed.value.key, handle)) return error.InvalidRequestRecord;
+    try value.store.set(parsed.value.store);
+    try value.key.set(parsed.value.key);
+    try value.session.set(parsed.value.session);
+    try value.kind.set(parsed.value.kind);
+    if (!value.kind.eql("configure") and !value.kind.eql("message") and
+        !value.kind.eql("permission_decision")) return error.InvalidRequestRecord;
+    return value;
+}
+
+fn requests(init: std.process.Init, args: []const []const u8) !void {
+    const json = args.len == 1 and std.mem.eql(u8, args[0], "--json");
+    if (args.len != 0 and !json) return usage();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory = try requestDirectory(init, &path);
+    var dir = std.Io.Dir.cwd().openDir(init.io, directory, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return if (json) std.Io.File.stdout().writeStreamingAll(init.io, "[]\n") else {},
+        else => return err,
+    };
+    defer dir.close(init.io);
+    if ((try dir.stat(init.io)).permissions.toMode() & 0o077 != 0) return error.InsecureRecordDirectory;
+    if (json) try std.Io.File.stdout().writeStreamingAll(init.io, "[");
+    var first = true;
+    var iterator = dir.iterate();
+    while (try iterator.next(init.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
+        const handle = entry.name[0 .. entry.name.len - ".json".len];
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        _ = requestPath(init, handle, &path_buffer) catch continue;
+        if (json) {
+            if (!first) try std.Io.File.stdout().writeStreamingAll(init.io, ",");
+            var line: [64]u8 = undefined;
+            try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "\"{s}\"", .{handle}));
+        } else {
+            try std.Io.File.stdout().writeStreamingAll(init.io, handle);
+            try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+        }
+        first = false;
+    }
+    if (json) try std.Io.File.stdout().writeStreamingAll(init.io, "]\n");
+}
+
+fn recover(init: std.process.Init, args: []const []const u8) !void {
+    const json = args.len == 2 and std.mem.eql(u8, args[1], "--json");
+    if (args.len != 1 and !json) return usage();
+    const saved = try savedRequest(init, args[0]);
+    const kind = if (saved.kind.eql("permission_decision")) "permission-decision" else saved.kind.slice();
+    var buffer: client.ReplyBuffer = .{};
+    const reply = try client.retry(init.io, saved.store.slice(), saved.path.slice(), kind, &buffer);
+    if (json) try writeCommandReply(init.io, reply) else try writeAdmission(init.io, reply, null);
+    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
+}
+
+fn result(init: std.process.Init, args: []const []const u8) !void {
+    const json = args.len == 2 and std.mem.eql(u8, args[1], "--json");
+    if (args.len != 1 and !json) return usage();
+    const saved = try savedRequest(init, args[0]);
+    if (!saved.kind.eql("message")) return error.NotMessageRequest;
+    var buffer: client.ReplyBuffer = .{};
+    const reply = try client.observeCommand(init.io, saved.store.slice(), saved.key.slice(), &buffer);
+    if (reply.status != 200) return error.ObservationFailed;
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
+    defer parsed.deinit();
+    const observation = try objectField(parsed.value, "observation");
+    const status = try stringField(observation, "status");
+    if (std.mem.eql(u8, status, "absent")) return error.RequestNotAdmitted;
+    if (!std.mem.eql(u8, try stringField(observation, "kind"), "message") or
+        !std.mem.eql(u8, try stringField(observation, "target"), saved.session.slice())) return error.RequestBindingMismatch;
+    const observation_json = if (json) try std.json.Stringify.valueAlloc(std.heap.c_allocator, observation, .{}) else "";
+    defer if (json) std.heap.c_allocator.free(observation_json);
+    const result_value = observation.object.get("result");
+    const state = if (std.mem.eql(u8, status, "rejected")) "rejected" else if (result_value) |value| try stringField(value, "status") else if (observation.object.get("queue")) |queue| try stringField(queue, "status") else "accepted";
+    if (!json) {
+        var line: [256]u8 = undefined;
+        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "result: {s}\n", .{state}));
+        const details = if (std.mem.eql(u8, state, "rejected")) observation else result_value;
+        if (details) |value| {
+            if (value.object.get("code")) |code| {
+                if (code != .string) return error.InvalidObservation;
+                try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "code: {s}\n", .{code.string}));
+            }
+        }
+    }
+    if (!std.mem.eql(u8, state, "completed")) {
+        if (json) {
+            try std.Io.File.stdout().writeStreamingAll(init.io, "{\"observation\":");
+            try std.Io.File.stdout().writeStreamingAll(init.io, observation_json);
+            try std.Io.File.stdout().writeStreamingAll(init.io, ",\"answer\":null}\n");
+        }
+        return;
+    }
+    if (json) {
+        var source_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var key: [36]u8 = undefined;
+        const source = try newRequest(init, &source_buffer, &key);
+        const path = try std.fmt.bufPrint(&path_buffer, "{s}.answer", .{source[0 .. source.len - 5]});
+        const file = try std.Io.Dir.cwd().createFile(init.io, path, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
+        defer {
+            file.close(init.io);
+            std.Io.Dir.cwd().deleteFile(init.io, path) catch {};
+        }
+        var read_buffer: client.ReplyBuffer = .{};
+        const answer = try client.readResult(init.io, saved.store.slice(), saved.key.slice(), file, &read_buffer);
+        if (answer != .answer) return error.ResultReadFailed;
+        try std.Io.File.stdout().writeStreamingAll(init.io, "{\"observation\":");
+        try std.Io.File.stdout().writeStreamingAll(init.io, observation_json);
+        try std.Io.File.stdout().writeStreamingAll(init.io, ",\"answer\":\"");
+        try writeJsonFileAt(init.io, file, 0, answer.answer.bytes);
+        return std.Io.File.stdout().writeStreamingAll(init.io, "\"}\n");
+    }
+    var read_buffer: client.ReplyBuffer = .{};
+    const answer = try client.readResult(init.io, saved.store.slice(), saved.key.slice(), std.Io.File.stdout(), &read_buffer);
+    switch (answer) {
+        .answer => {},
+        .command => return error.ResultReadFailed,
+    }
+    try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+}
+
+const Work = struct {
+    status: protocol.Bounded(32) = .{},
+    turn: protocol.Bounded(32) = .{},
+    action: protocol.Bounded(32) = .{},
+};
+
+fn tokenString(token: std.json.Token) ![]const u8 {
+    return switch (token) {
+        .string => |s| s,
+        .allocated_string => |s| s,
+        else => error.InvalidObservation,
+    };
+}
+
+fn freeToken(token: std.json.Token) void {
+    if (token == .allocated_string) std.heap.c_allocator.free(token.allocated_string);
+}
+
+fn readWork(reader: *std.json.Reader) !Work {
+    var work: Work = .{};
+    if ((try reader.next()) != .object_begin) return error.InvalidObservation;
+    while (true) {
+        const name = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 64);
+        defer freeToken(name);
+        if (name == .object_end) break;
+        const field = try tokenString(name);
+        if (std.mem.eql(u8, field, "work")) {
+            if ((try reader.next()) != .object_begin) return error.InvalidObservation;
+            while (true) {
+                const inner = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 64);
+                defer freeToken(inner);
+                if (inner == .object_end) break;
+                const key = try tokenString(inner);
+                if (std.mem.eql(u8, key, "status") or std.mem.eql(u8, key, "turn")) {
+                    const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 32);
+                    defer freeToken(value);
+                    if (std.mem.eql(u8, key, "status")) try work.status.set(try tokenString(value)) else try work.turn.set(try tokenString(value));
+                } else try reader.skipValue();
+            }
+        } else if (std.mem.eql(u8, field, "actionable_permissions")) {
+            if ((try reader.next()) != .array_begin) return error.InvalidObservation;
+            while (true) {
+                const item = try reader.next();
+                if (item == .array_end) break;
+                if (item != .object_begin) return error.InvalidObservation;
+                while (true) {
+                    const inner = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 64);
+                    defer freeToken(inner);
+                    if (inner == .object_end) break;
+                    if (std.mem.eql(u8, try tokenString(inner), "action")) {
+                        const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 32);
+                        defer freeToken(value);
+                        if (work.action.len == 0) try work.action.set(try tokenString(value));
+                    } else try reader.skipValue();
+                }
+            }
+        } else try reader.skipValue();
+    }
+    if (work.status.len == 0 or (try reader.next()) != .end_of_document) return error.InvalidObservation;
+    return work;
+}
+
+fn inspectWork(init: std.process.Init, saved: *const SavedRequest) !Work {
+    var request_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key: [36]u8 = undefined;
+    const request_path = try newRequest(init, &request_buffer, &key);
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}.report", .{request_path[0 .. request_path.len - 5]});
+    const file = try std.Io.Dir.cwd().createFile(init.io, path, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
+    defer {
+        file.close(init.io);
+        std.Io.Dir.cwd().deleteFile(init.io, path) catch {};
+    }
+    var response: client.ReplyBuffer = .{};
+    const reply = try client.inspectSession(init.io, saved.store.slice(), saved.session.slice(), .current, file, &response);
+    switch (reply) {
+        .report => {},
+        .command => return error.ObservationFailed,
+    }
+    var input_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var file_reader = file.reader(init.io, &input_buffer);
+    var json_reader = std.json.Reader.init(std.heap.c_allocator, &file_reader.interface);
+    defer json_reader.deinit();
+    return readWork(&json_reader);
+}
+
+fn follow(init: std.process.Init, args: []const []const u8) !void {
+    const json = args.len == 2 and std.mem.eql(u8, args[1], "--json");
+    if (args.len != 1 and !json) return usage();
+    const saved = try savedRequest(init, args[0]);
+    if (!saved.kind.eql("message")) return error.NotMessageRequest;
+    while (true) {
+        var response: client.ReplyBuffer = .{};
+        const reply = try client.observeCommand(init.io, saved.store.slice(), saved.key.slice(), &response);
+        if (reply.status != 200) return error.ObservationFailed;
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
+        defer parsed.deinit();
+        const observation = try objectField(parsed.value, "observation");
+        const status = try stringField(observation, "status");
+        if (std.mem.eql(u8, status, "absent")) return error.RequestNotAdmitted;
+        if (!std.mem.eql(u8, try stringField(observation, "kind"), "message") or
+            !std.mem.eql(u8, try stringField(observation, "target"), saved.session.slice())) return error.RequestBindingMismatch;
+        if (std.mem.eql(u8, status, "rejected") or observation.object.contains("result")) {
+            if (json) {
+                const observation_json = try std.json.Stringify.valueAlloc(std.heap.c_allocator, observation, .{});
+                defer std.heap.c_allocator.free(observation_json);
+                try std.Io.File.stdout().writeStreamingAll(init.io, "{\"return\":\"outcome\",\"observation\":");
+                try std.Io.File.stdout().writeStreamingAll(init.io, observation_json);
+                try std.Io.File.stdout().writeStreamingAll(init.io, "}\n");
+            } else {
+                const state = if (std.mem.eql(u8, status, "rejected")) "rejected" else try stringField(try objectField(observation, "result"), "status");
+                var line: [128]u8 = undefined;
+                try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "return: outcome\nstatus: {s}\n", .{state}));
+            }
+            return;
+        }
+        if (observation.object.get("processing")) |processing| {
+            const work = try inspectWork(init, &saved);
+            if (work.action.len != 0 and std.mem.eql(u8, work.turn.slice(), try stringField(processing, "turn"))) {
+                if (json) {
+                    var line: [160]u8 = undefined;
+                    try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{{\"return\":\"attention\",\"status\":\"{s}\",\"action\":\"{s}\"}}\n", .{ work.status.slice(), work.action.slice() }));
+                } else {
+                    var line: [160]u8 = undefined;
+                    try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "return: attention\nstatus: {s}\naction: {s}\n", .{ work.status.slice(), work.action.slice() }));
+                }
+                return;
+            }
+        }
+        try std.Io.sleep(init.io, .fromMilliseconds(100), .awake);
+    }
+}
+
+fn inspectAction(init: std.process.Init, args: []const []const u8) !void {
+    const io = init.io;
+    var store: ?[]const u8 = null;
+    var session: ?[]const u8 = null;
+    var action: ?u64 = null;
+    var json = false;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--action")) action = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else if (std.mem.eql(u8, args[index], "--json")) json = true else return error.UnknownArgument;
+    }
+    const target = action orelse return usage();
+    if (json) {
+        var request_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var key: [36]u8 = undefined;
+        const request_path = try newRequest(init, &request_buffer, &key);
+        const path = try std.fmt.bufPrint(&path_buffer, "{s}.action", .{request_path[0 .. request_path.len - 5]});
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
+        defer {
+            file.close(io);
+            std.Io.Dir.cwd().deleteFile(io, path) catch {};
+        }
+        var buffer: client.ReplyBuffer = .{};
+        const call = try client.readActionCallId(io, store orelse return usage(), session orelse return usage(), target, file, &buffer);
+        if (call != .answer) return error.ActionReadFailed;
+        const arguments = try client.readActionArguments(io, store.?, session.?, target, file, &buffer);
+        if (arguments != .answer) return error.ActionReadFailed;
+        var line: [96]u8 = undefined;
+        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"action\":\"{d}\",\"call_id\":\"", .{target}));
+        try writeJsonFileAt(io, file, 0, call.answer.bytes);
+        try std.Io.File.stdout().writeStreamingAll(io, "\",\"arguments\":\"");
+        try writeJsonFileAt(io, file, call.answer.bytes, arguments.answer.bytes);
+        return std.Io.File.stdout().writeStreamingAll(io, "\"}\n");
+    }
+    var line: [96]u8 = undefined;
+    try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "Action {d}\ncall ID: ", .{target}));
+    var buffer: client.ReplyBuffer = .{};
+    const call = try client.readActionCallId(io, store orelse return usage(), session orelse return usage(), target, std.Io.File.stdout(), &buffer);
+    if (call != .answer) return error.ActionReadFailed;
+    try std.Io.File.stdout().writeStreamingAll(io, "\nBash arguments: ");
+    const arguments = try client.readActionArguments(io, store.?, session.?, target, std.Io.File.stdout(), &buffer);
+    if (arguments != .answer) return error.ActionReadFailed;
+    try std.Io.File.stdout().writeStreamingAll(io, "\n");
+}
+
+fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64) !void {
+    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var writer = std.Io.File.stdout().writerStreaming(io, &output_buffer);
+    var chunk: [protocol.content_window_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < length) {
+        const n = try file.readPositionalAll(io, chunk[0..@intCast(@min(length - offset, chunk.len))], start + offset);
+        if (n == 0) return error.TruncatedResult;
+        try std.json.Stringify.encodeJsonStringChars(chunk[0..n], .{}, &writer.interface);
+        offset += n;
+    }
+    try writer.flush();
+}
+
 fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
     index.* += 1;
     if (index.* >= args.len) return error.MissingArgumentValue;
@@ -516,8 +994,20 @@ fn usage() error{InvalidArguments} {
         \\usage:
         \\  rui login codex
         \\  rui serve --store PATH [--active-capacity N] [--codex | --provider-endpoint URL] [--provider-ca-file PATH] [--fault NAME]
-        \\  rui configure --store PATH --record FILE --key KEY --session REF [settings]
+        \\  rui configure --store PATH --session REF [settings] [--json]
         \\    First configuration requires --workspace PATH --provider codex --model MODEL.
+        \\  rui message --store PATH --session REF TEXT|- [--json]
+        \\    --text FILE|- also captures a file or stdin before sending.
+        \\  rui inspect-action --store PATH --session REF --action ID [--json]
+        \\  rui allow-action --store PATH --session REF --action ID [--json]
+        \\  rui deny-action --store PATH --session REF --action ID [--json]
+        \\  rui requests [--json]
+        \\  rui recover HANDLE [--json]
+        \\  rui follow HANDLE [--json]
+        \\  rui result HANDLE [--json]
+        \\    Handles are saved under HOME/.config/rui/requests; Host startup is explicit.
+        \\  Low-level explicit-key commands:
+        \\  rui configure --store PATH --record FILE --key KEY --session REF [settings]
         \\  rui message --store PATH --record FILE --key KEY --session REF --text FILE|-
         \\  rui stop-session --store PATH --record FILE --key KEY --session REF
         \\  rui interrupt-model --store PATH --record FILE --key KEY --session REF --turn ID --operation ID
