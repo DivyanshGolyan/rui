@@ -1,0 +1,91 @@
+--- quickjs.c
++++ quickjs.c
+@@ -1044,6 +1044,7 @@ struct JSModuleDef {
+     JSValue func_obj; /* only used for JS modules */
+     JSModuleInitFunc *init_func; /* only used for C modules */
+     bool has_tla; /* true if func_obj contains await */
++    bool op_has_workflow_entry;
+     bool resolved;
+     bool func_created;
+     JSModuleStatus status : 8;
+@@ -27288,4 +27289,5 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
+     case TOK_IMPORT:
++        return js_parse_error(s, "imports are unavailable in a workflow");
+         if (next_token(s))
+             return -1;
+         if (s->token.val == '.') {
+@@ -32637,6 +32639,7 @@ static __exception int js_parse_export(JSParseState *s)
+         if (js_parse_expect(s, '}'))
+             return -1;
+         if (token_is_pseudo_keyword(s, JS_ATOM_from)) {
++            return js_parse_error(s, "imports are unavailable in a workflow");
+             idx = js_parse_from_clause(s, m);
+             if (idx < 0)
+                 return -1;
+@@ -32651,6 +32654,7 @@ static __exception int js_parse_export(JSParseState *s)
+         }
+         break;
+     case '*':
++        return js_parse_error(s, "imports are unavailable in a workflow");
+         if (token_is_pseudo_keyword(s, JS_ATOM_as)) {
+             /* export ns from */
+             if (next_token(s))
+@@ -32687,35 +32691,15 @@ static __exception int js_parse_export(JSParseState *s)
+         break;
+     case TOK_DEFAULT:
+-        if (s->token.val == TOK_CLASS) {
+-            return js_parse_class(s, false, JS_PARSE_EXPORT_DEFAULT);
+-        } else if (s->token.val == TOK_FUNCTION ||
+-                   (token_is_pseudo_keyword(s, JS_ATOM_async) &&
+-                    peek_token(s, true) == TOK_FUNCTION)) {
+-            return js_parse_function_decl2(s, JS_PARSE_FUNC_STATEMENT,
+-                                           JS_FUNC_NORMAL, JS_ATOM_NULL,
+-                                           s->token.ptr,
+-                                           s->token.line_num,
+-                                           s->token.col_num,
+-                                           JS_PARSE_EXPORT_DEFAULT, NULL);
+-        } else {
+-            if (js_parse_assign_expr(s))
+-                return -1;
+-        }
++        if (!token_is_pseudo_keyword(s, JS_ATOM_async) ||
++            peek_token(s, true) != TOK_FUNCTION)
++            return js_parse_error(s, "direct default async function required");
++        if (js_parse_function_decl2(s, JS_PARSE_FUNC_STATEMENT,
++                                    JS_FUNC_NORMAL, JS_ATOM_NULL,
++                                    s->token.ptr,
++                                    s->token.line_num,
++                                    s->token.col_num,
++                                    JS_PARSE_EXPORT_DEFAULT, NULL)) return -1;
++        m->op_has_workflow_entry = true;
++        return 0;
+-        /* set the name of anonymous functions */
+-        set_object_name(s, JS_ATOM_default);
+-
+-        /* store the value in the _default_ global variable and export
+-           it */
+-        local_name = JS_ATOM__default_;
+-        if (define_var(s, s->cur_func, local_name, JS_VAR_DEF_LET) < 0)
+-            return -1;
+-        emit_op(s, OP_scope_put_var_init);
+-        emit_atom(s, local_name);
+-        emit_u16(s, 0);
+-
+-        if (!add_export_entry(s, m, local_name, JS_ATOM_default,
+-                              JS_EXPORT_TYPE_LOCAL))
+-            return -1;
+-        break;
+     case TOK_VAR:
+     case TOK_LET:
+@@ -32920,3 +32918,4 @@ static __exception int js_parse_source_element(JSParseState *s)
+                ((tok = peek_token(s, false)) != '(' && tok != '.'))  {
++        return js_parse_error(s, "imports are unavailable in a workflow");
+         /* the peek_token is needed to avoid confusion with ImportCall
+            (dynamic import) or import.meta */
+@@ -37387,3 +37392,6 @@ static __exception int js_parse_function_decl2(JSParseState *s,
++        if (export_flag == JS_PARSE_EXPORT_DEFAULT && func_kind != JS_FUNC_ASYNC)
++            return js_parse_error(s, "direct default async function required");
++
+         if (s->token.val == TOK_IDENT) {
+             if (s->token.u.ident.is_reserved ||
+                 (s->token.u.ident.atom == JS_ATOM_yield &&
