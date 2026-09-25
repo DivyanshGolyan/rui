@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
 
@@ -49,6 +50,22 @@ def read_terminal(master, marker, timeout=15):
 def terminal_step(master, command, marker="rui> "):
     os.write(master, (command + "\n").encode())
     return read_terminal(master, marker)
+
+
+def terminal_bulk(master, command, marker="rui> "):
+    fixture.wait_for(lambda: not termios.tcgetattr(master)[3] & termios.ICANON,
+        "noncanonical terminal input")
+    def send():
+        payload = (command + "\n").encode()
+        for offset in range(0, len(payload), 1024):
+            os.write(master, payload[offset:offset + 1024])
+
+    writer = threading.Thread(target=send, daemon=True)
+    writer.start()
+    output = read_terminal(master, marker)
+    writer.join(timeout=5)
+    assert not writer.is_alive(), "bulk terminal writer stalled"
+    return output
 
 
 def main():
@@ -436,8 +453,14 @@ def main():
             "--action", action_b)
         assert denied["admission"]["answer"]["status"] == "accepted", denied
         fixture.wait_for(lambda: fixture.completed_observation(store, message_b), "B outcome after decision")
+        control_call = "interactive-bash\x1b[1Ghidden\u202e"
+        argument_prefix = '{"cmd":"printf x >> effect-count # '
+        padded_arguments = json.dumps({"cmd": "printf x >> effect-count # " +
+            "A" * (4095 - len(argument_prefix)) + "é", "timeout_ms": None},
+            ensure_ascii=False, separators=(",", ":")) + "\r  "
+        assert padded_arguments.encode()[4095:4097] == "é".encode()
         endpoint.responses.extend([
-            fixture.sse_tool_calls("interactive-call", [("bash", "interactive-bash", arguments)]),
+            fixture.sse_tool_calls("interactive-call", [("bash", control_call, padded_arguments)]),
             fixture.sse_answer("interactive-answer", "interactive-reason", "interactive-message",
                 "interactive complete")[0],
         ])
@@ -453,8 +476,10 @@ def main():
         try:
             assert "Work: idle" in read_terminal(master, "rui> ")
             proposal = terminal_step(master, "interactive request", "Allow once, deny, or later?")
-            assert "interactive-bash" in proposal, proposal
-            assert json.loads(proposal.split("Bash arguments: ", 1)[1].splitlines()[0]) == arguments, proposal
+            assert json.loads(proposal.split("call ID: ", 1)[1].splitlines()[0]) == control_call, proposal
+            assert json.loads(proposal.split("Bash arguments: ", 1)[1].splitlines()[0]) == padded_arguments, proposal
+            assert "\\u001b" in proposal and "\\u202e" in proposal and "\\u00e9" in proposal
+            assert "\\r  " in proposal and "\x1b" not in proposal and "\u202e" not in proposal, proposal
             interactive_key = proposal.split("request: ", 1)[1].splitlines()[0]
             action_id = proposal.split("Action ", 1)[1].splitlines()[0]
             mismatch = admit(home, "allow-action", "--store", store, "--session", session,
@@ -469,6 +494,7 @@ def main():
             assert "Recent messages" in terminal_step(master, "/status")
             assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
+            assert termios.tcgetattr(master)[3] & termios.ICANON, "terminal mode not restored"
             assert counter.read_text() == "xx", counter.read_text()
         finally:
             if entered.poll() is None:
@@ -532,8 +558,86 @@ def main():
                 entered.kill()
                 entered.wait(timeout=5)
             os.close(master)
+        empty_session = "human/empty-key"
+        run(home, "configure", "--store", store, "--session", empty_session,
+            "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+        empty_release = threading.Event()
+        endpoint.responses.append((fixture.sse_answer("empty-answer", "empty-reason", "empty-message",
+            "empty key answer")[0], empty_release))
+        empty_input = state / "empty-input"
+        empty_input.write_text("empty key input")
+        admission = json.loads(run(home, "message", "--store", store, "--session", empty_session,
+            "--record", state / "empty-record.json", "--key", "", "--text", empty_input))
+        assert admission["answer"]["status"] == "accepted", admission
+        fixture.wait_for(lambda: fixture.command("inspect-session", "--store", store,
+            "--session", empty_session)["work"]["status"] == "in_flight", "empty key active")
+        current = fixture.command("inspect-session", "--store", store, "--session", empty_session)
+        assert current["selected_message"] == "", current
+        empty_wait = subprocess.Popen([str(fixture.RUI), "wait-session", "--store", str(store),
+            "--session", empty_session, "--json"],
+            env={**os.environ, "HOME": str(home)}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            assert json.loads(empty_wait.stdout.readline()) == {"event": "selection", "session": empty_session, "message": ""}
+            empty_release.set()
+            assert json.loads(empty_wait.stdout.readline())["observation"]["result"]["status"] == "completed"
+            assert empty_wait.wait(timeout=10) == 0
+        finally:
+            empty_release.set()
+            if empty_wait.poll() is None:
+                empty_wait.kill()
+                empty_wait.communicate(timeout=5)
+        current = fixture.command("inspect-session", "--store", store, "--session", empty_session)
+        assert current["selected_message"] is None and current["recent_messages"][0]["message"] == "", current
+        endpoint.responses.append(fixture.sse_answer("long-answer", "long-reason", "long-message", "long input intact")[0])
+        long_session = "human/long-input"
+        run(home, "configure", "--store", store, "--session", long_session,
+            "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+        master, slave = pty.openpty()
+        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+            "--session", long_session], env={**os.environ, "HOME": str(home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            assert "Work: idle" in read_terminal(master, "rui> ")
+            before = len(endpoint.requests)
+            long_text = "X" * 5000
+            answer = terminal_bulk(master, long_text)
+            assert "long input intact" in answer, answer
+            assert len(endpoint.requests) == before + 1
+            body = json.loads(endpoint.requests[-1])
+            assert next(item["content"][0]["text"] for item in reversed(body["input"])
+                if item.get("role") == "user") == long_text
+            rejected = terminal_bulk(master, "Y" * (64 * 1024 + 1))
+            assert "StreamTooLong" in rejected and "nothing sent" in rejected, rejected[-1000:]
+            assert len(endpoint.requests) == before + 1, "oversized input reached Host"
+            assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
+            assert entered.wait(timeout=5) == 0
+            assert termios.tcgetattr(master)[3] & termios.ICANON
+        finally:
+            if entered.poll() is None:
+                entered.kill()
+                entered.wait(timeout=5)
+            os.close(master)
+        master, slave = pty.openpty()
+        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+            "--session", empty_session], env={**os.environ, "HOME": str(fresh_home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            assert "Recent messages" in read_terminal(master, "rui> ")
+            fixture.wait_for(lambda: not termios.tcgetattr(master)[3] & termios.ICANON,
+                "terminal ready for Ctrl+C")
+            os.write(master, b"\x03")
+            assert "Detached. Host work continues." in read_terminal(master, "Detached.")
+            assert entered.wait(timeout=5) == 0
+            assert termios.tcgetattr(master)[3] & termios.ICANON
+        finally:
+            if entered.poll() is None:
+                entered.kill()
+                entered.wait(timeout=5)
+            os.close(master)
         completed = True
-        print("human CLI: saved recovery, Session wait/re-entry, PTY approval and Host restart passed")
+        print("human CLI: saved recovery, Session wait/re-entry, exact PTY approval, bounded input and Host restart passed")
     finally:
         sibling_release.touch()
         if failure_release is not None:

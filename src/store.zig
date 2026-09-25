@@ -6809,6 +6809,40 @@ test "Current selects active then queued work and bounds recent Message identiti
     }
 }
 
+test "Current preserves empty Message identity across queue, active Turn and history" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "empty-key-config", "direct/empty-key");
+    try submitTestMessage(&storage, &tmp, "empty-key-file", "", "direct/empty-key", "input");
+    {
+        const bytes = try testingSessionReport(&storage, &tmp, "direct/empty-key", 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer report.deinit();
+        try std.testing.expectEqualStrings("", report.value.object.get("selected_message").?.string);
+    }
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    {
+        const bytes = try testingSessionReport(&storage, &tmp, "direct/empty-key", 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer report.deinit();
+        try std.testing.expectEqualStrings("", report.value.object.get("selected_message").?.string);
+    }
+    try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
+    try submitTestMessage(&storage, &tmp, "after-empty-file", "after-empty", "direct/empty-key", "next");
+    {
+        const bytes = try testingSessionReport(&storage, &tmp, "direct/empty-key", 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer report.deinit();
+        try std.testing.expectEqualStrings("after-empty", report.value.object.get("selected_message").?.string);
+        try std.testing.expectEqualStrings("", report.value.object.get("recent_messages").?.array.items[0].object.get("message").?.string);
+    }
+}
+
 test "Full preserves rejected model interruption targets as canonical u64 text" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
