@@ -608,6 +608,15 @@ fn writeAdmission(io: std.Io, reply: client.CommandReply, json_record: ?[]const 
     const status = try stringField(answer, "status");
     var line: [128]u8 = undefined;
     try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "admitted: {s}\n", .{status}));
+    const replayed = try objectField(answer, "replayed");
+    if (replayed != .bool) return error.InvalidObservation;
+    try std.Io.File.stdout().writeStreamingAll(io, if (replayed.bool) "replayed: true\n" else "replayed: false\n");
+    if (answer.object.get("code")) |code| {
+        if (code != .string) return error.InvalidObservation;
+        try std.Io.File.stdout().writeStreamingAll(io, "code: ");
+        try std.Io.File.stdout().writeStreamingAll(io, code.string);
+        try std.Io.File.stdout().writeStreamingAll(io, "\n");
+    }
 }
 
 fn objectField(value: std.json.Value, name: []const u8) !std.json.Value {
@@ -912,9 +921,13 @@ fn follow(init: std.process.Init, args: []const []const u8) !void {
             }
             return;
         }
-        if (observation.object.get("processing")) |processing| {
+        const processing = observation.object.get("processing");
+        const queue = try objectField(observation, "queue");
+        if (processing != null or std.mem.eql(u8, try stringField(queue, "status"), "queued")) {
             const work = try inspectWork(init, &saved);
-            if (work.action.len != 0 and std.mem.eql(u8, work.turn.slice(), try stringField(processing, "turn"))) {
+            if (work.action.len != 0 and work.turn.len != 0 and
+                (processing == null or std.mem.eql(u8, work.turn.slice(), try stringField(processing.?, "turn"))))
+            {
                 if (json) {
                     var line: [160]u8 = undefined;
                     try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{{\"return\":\"attention\",\"status\":\"{s}\",\"action\":\"{s}\"}}\n", .{ work.status.slice(), work.action.slice() }));
