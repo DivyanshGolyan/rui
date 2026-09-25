@@ -8,7 +8,7 @@ Rui is in development. Today the direct CLI can configure reusable Sessions, que
 
 The precise model is documented in [Architecture](ARCHITECTURE.md): valid Bash descriptors become inspectable Actions, unknown tools and invalid descriptors become stable call-local rejections, and a Bash attempt that loses local custody resolves as indeterminate rather than replaying automatically.
 
-JavaScript workflows, Edit, structured answers and provider authentication are not implemented. Bash process-group stopping cannot contain detached descendants. Retained full output is optional: FIFO eviction or restart may remove it without changing the saved result. Codex subscription is the planned first live provider; live-provider, power-loss and complete 1,000-operation mixed qualification remain outstanding.
+JavaScript workflows, Edit and structured answers are not implemented. Rui-owned Codex login, private credentials and managed transport have deterministic/native fixture coverage. The exact `gpt-6-luna` subscription journey passed natively on Linux x86-64 and macOS arm64: private reasoning replayed within one Session, exact approved Bash, continuation, fresh-Host recovery and a new live request over HTTP/2. The same-Session replay is the accepted [#272 proof](VERIFICATION.md#context-provider-output-and-compaction); a reasoning item in the Bash proposal itself is not required. Disposable instrumented runs also recorded [native TLS allocator requests](tests/qualification/issue-272/README.md) on both platforms. Live refresh, other models/platform pairs, Bash detached-descendant containment, power-loss and complete 1,000-operation mixed qualification remain outstanding. Retained full output is optional: FIFO eviction or restart may remove it without changing the saved result.
 
 Targets Linux and macOS on x86-64 and ARM64. All four cross-compile. Broad runtime/resource qualification has run on Apple Silicon macOS. The model-queue workload has run on Linux and macOS; its macOS run passed the required physical-footprint target.
 
@@ -30,6 +30,28 @@ zig build check-full
 
 The production default Active Capacity remains 1,000. Startup rejects a requested population when the process descriptor limit cannot support it, so this development command selects a smaller population that fits ordinary finite limits. Model transport is disabled by default. Development testing requires an explicit `--provider-endpoint`: HTTPS (negotiated HTTP/2 required) or loopback HTTP/1.1, with no authentication attached. A private test CA can be selected with `--provider-ca-file PATH`; peer and hostname verification remain enabled. Run `./zig-out/bin/rui` to print command usage.
 
+For the qualified exact `gpt-6-luna` binding, sign in once with Rui and start a managed Host against a private Store:
+
+```sh
+./zig-out/bin/rui login codex
+./zig-out/bin/rui serve --store /absolute/path/to/private-store --active-capacity 8 --codex
+```
+
+In another terminal, configure a Session with a private Workspace and a fresh command key (choose paths you own):
+
+```sh
+./zig-out/bin/rui configure --store /absolute/path/to/private-store \
+  --record /absolute/path/to/private-record/configure.json --key unique-configure-key \
+  --session my/codex --workspace /absolute/path/to/workspace \
+  --provider codex --model gpt-6-luna --tools bash --permission-mode ask
+```
+
+Use `rui message`, `inspect-session`, `read-action-arguments`, `allow-action` and `read-result` to submit work and approve only an inspected Action; `rui` without arguments prints exact usage. The [Bash walkthrough](#try-the-implemented-development-path) demonstrates those caller steps with a deterministic endpoint. Managed mode uses `POST /backend-api/codex/responses` with verified TLS and negotiated HTTP/2; it does not attach credentials to a development endpoint. The device-code login requires account/workspace enablement and persists under `~/.config/rui/codex.json` for reuse across Host restarts. `RUI_CODEX_CREDENTIAL_FILE` may instead select another absolute path under an owner-only directory. Rui refreshes when required, but a failed or interrupted refresh may require a new login; live refresh was not exercised. Edit and output schemas fail before managed dispatch. The live responses reported `gpt-6-luna` in their bodies; served-model headers and provider correlation were absent, and direct ALPN observation was unavailable. This qualifies only the stated model, route and native platform pairs—not general Codex model availability or a release-wide resource bound.
+
+`zig build codex-integration` exercises a synthetic credential, exact Bash approval, private continuation and fresh-Host recovery through public callers. `zig build codex-h2-integration` additionally needs Python `h2==4.3.0` and OpenSSL and checks managed TLS/HTTP2 negotiation, connection reuse and conditional FedRAMP routing. Neither uses live credentials.
+
+`zig build codex-credential-integration` also tests cross-process credential mutation without live tokens. The opt-in `python3 tests/integration/codex_live.py /absolute/path/to/rui --live --model gpt-6-luna` runs the accepted public-caller journey with isolated disposable credentials and payload-free observations; it is not in ordinary build gates. For repeated authorized runs, `--credential-file /absolute/path/to/private/codex.json` reuses a Rui-owned credential instead of prompting for a fresh device login each time.
+
 ## Try the implemented development path
 
 Run the narrated public-caller journey from issue [#260](https://github.com/DivyanshGolyan/rui/issues/260): configure an ask-mode Session, submit a message, inspect and approve one exact Bash Action, read its saved answer, crash the Host, then recover the original submission without repeating the effect.
@@ -46,7 +68,7 @@ This development smoke check is not a live-provider quickstart or power-loss tes
 
 The [delivery plan](https://github.com/DivyanshGolyan/rui/issues/164) separates [direct-core development readiness](https://github.com/DivyanshGolyan/rui/issues/168) from [full qualification](https://github.com/DivyanshGolyan/rui/issues/231). Essential safety evidence stays with each capability; broad qualification does not block independent feature development after the readiness checkpoint. Full stage, support, performance and release claims still require their evidence.
 
-The runnable #260 slice is implemented above. After critical safety closeout, planned independent feature slices include a [thin live Codex path](https://github.com/DivyanshGolyan/rui/issues/272) and a [minimal durable workflow](https://github.com/DivyanshGolyan/rui/issues/273). This is priority order, not a workflow dependency on credentials or live-provider access; these links do not add to the implemented surface described in [Status](#status).
+The runnable #260 slice and native [Codex path](https://github.com/DivyanshGolyan/rui/issues/272) are described above. Local qualification evidence is complete for that exact-model slice; publishing changes and closing the issue are separate delivery actions. A [minimal durable workflow](https://github.com/DivyanshGolyan/rui/issues/273) remains planned; these links do not expand the implemented surface described in [Status](#status).
 
 ## Read next
 

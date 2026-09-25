@@ -1,0 +1,283 @@
+diff --git a/build.zig b/build.zig
+index 8a5e4c1..29775e8 100644
+--- a/build.zig
++++ b/build.zig
+@@ -472,6 +472,7 @@ fn configureTransport(
+     else
+         b.dependency("curl", .{}).path("include"));
+     if (!enabled) return;
++    compile.root_module.addCSourceFile(.{ .file = b.path("src/transport_allocation_hooks.c"), .flags = &.{"-std=c11"} });
+     compile.root_module.addObjectFile(pinned.output.path(b, "lib/libcurl.a"));
+     compile.root_module.addObjectFile(pinned.output.path(b, "lib/libnghttp2.a"));
+     compile.root_module.addObjectFile(pinned.output.path(b, "lib/libssl.a"));
+diff --git a/src/provider.zig b/src/provider.zig
+index 1c43710..39a2664 100644
+--- a/src/provider.zig
++++ b/src/provider.zig
+@@ -14,6 +14,18 @@ const c = @cImport({
+     @cInclude("time.h");
+ });
+ 
++extern fn rui_measure_transport_init() c_int;
++extern fn rui_measure_transport_snapshot(*usize, *usize, *usize, *usize) void;
++
++pub fn allocationSnapshot() struct { curl_live: usize, curl_peak: usize, openssl_live: usize, openssl_peak: usize } {
++    var curl_live: usize = 0;
++    var curl_peak: usize = 0;
++    var openssl_live: usize = 0;
++    var openssl_peak: usize = 0;
++    rui_measure_transport_snapshot(&curl_live, &curl_peak, &openssl_live, &openssl_peak);
++    return .{ .curl_live = curl_live, .curl_peak = curl_peak, .openssl_live = openssl_live, .openssl_peak = openssl_peak };
++}
++
+ pub const curl_version = "8.22.0";
+ pub const openssl_version = "OpenSSL/3.6.3";
+ pub const request_scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
+@@ -882,7 +894,7 @@ pub const CaptureWriter = struct {
+ 
+ pub fn initialize() !void {
+     if (comptime !transport_options.enabled) return error.TransportUnavailableOnTarget;
+-    if (c.curl_global_init(c.CURL_GLOBAL_DEFAULT) != c.CURLE_OK) return error.TransportInitializationFailed;
++    if (rui_measure_transport_init() != 0) return error.TransportInitializationFailed;
+     errdefer c.curl_global_cleanup();
+     const info = c.curl_version_info(c.CURLVERSION_NOW) orelse return error.TransportCapabilityMissing;
+     if (!std.mem.eql(u8, std.mem.span(info.*.version), curl_version) or
+diff --git a/src/server.zig b/src/server.zig
+index 89c22a4..f257c35 100644
+--- a/src/server.zig
++++ b/src/server.zig
+@@ -345,6 +345,12 @@ pub fn serve(
+     }
+     try ready.append("\n");
+     try std.Io.File.stdout().writeStreamingAll(io, ready.slice());
++    if (provider_endpoint != null) {
++        const allocation = provider.allocationSnapshot();
++        std.debug.print("rui: transport allocation phase=ready curl_live={d} curl_peak={d} openssl_live={d} openssl_peak={d}\n", .{
++            allocation.curl_live, allocation.curl_peak, allocation.openssl_live, allocation.openssl_peak,
++        });
++    }
+ 
+     while (true) {
+         const stream = listener.accept(io) catch |err| switch (err) {
+@@ -1988,6 +1994,10 @@ fn completeTransfer(
+             correlation.len != 0,
+             digest,
+         });
++        const allocation = provider.allocationSnapshot();
++        std.debug.print("rui: transport allocation operation={d} curl_live={d} curl_peak={d} openssl_live={d} openssl_peak={d}\n", .{
++            owner.binding.operation_id, allocation.curl_live, allocation.curl_peak, allocation.openssl_live, allocation.openssl_peak,
++        });
+     }
+     const evidence = switch (completion.outcome) {
+         .response_capture_failed => |failure| {
+diff --git a/tests/integration/codex_h2_integration.py b/tests/integration/codex_h2_integration.py
+index d0ce44d..1ce5499 100644
+--- a/tests/integration/codex_h2_integration.py
++++ b/tests/integration/codex_h2_integration.py
+@@ -89,6 +89,9 @@ def run():
+         assert [int(row[0]) for row in observations] == [3, 3, 3], observations
+         assert int(observations[0][1]) >= 0 and len({row[1] for row in observations}) == 1, observations
+         assert [int(row[2]) for row in observations] == [1, 0, 0], observations
++        allocation = re.findall(rb"rui: transport allocation (.+)", diagnostics.tail())
++        assert len(allocation) == 4, allocation
++        print("native requested-allocation snapshots:", [row.decode() for row in allocation])
+         print("codex synthetic TLS/H2 production transfers passed: ALPN h2, one connection, three streams, curl version 3, reuse 1/0/0, conditional FedRAMP header")
+         complete = True
+     finally:
+diff --git a/tests/integration/codex_live.py b/tests/integration/codex_live.py
+index 4f33622..c12fea4 100644
+--- a/tests/integration/codex_live.py
++++ b/tests/integration/codex_live.py
+@@ -22,19 +22,23 @@ from host_process import start_ready_process
+ 
+ def observations(host):
+     records = []
++    allocations = []
+ 
+     def drain():
+         for line in host.stderr:
+             match = re.search(rb"rui: codex transfer (operation=\d+ http_version=\d+ connection_id=-?\d+ new_connections=\d+ correlation_present=(?:true|false) correlation_sha256=[0-9a-f]+ alpn=unavailable)", line)
+             if match and len(records) < 8:
+                 records.append(dict(part.split("=", 1) for part in match.group(1).decode().split()))
++            allocation = re.search(rb"rui: transport allocation ((?:phase=ready|operation=\d+) curl_live=\d+ curl_peak=\d+ openssl_live=\d+ openssl_peak=\d+)", line)
++            if allocation and len(allocations) < 8:
++                allocations.append(dict(part.split("=", 1) for part in allocation.group(1).decode().split()))
+             rejection = re.search(rb"rui: provider output rejected for operation (\d+): ([A-Za-z][A-Za-z0-9_]*)", line)
+             if rejection:
+                 print(f"Provider validation rejected operation {rejection[1].decode()}: {rejection[2].decode()}", flush=True)
+ 
+     thread = threading.Thread(target=drain, daemon=True)
+     thread.start()
+-    return records, thread
++    return records, thread, allocations
+ 
+ 
+ def wait_for(store, key, predicate, label):
+@@ -101,6 +105,8 @@ def run(model, external_credential=None):
+     reader = None
+     first_observations = []
+     later_observations = []
++    first_allocations = []
++    later_allocations = []
+     try:
+         # The device code is shown directly to the operator, never captured in
+         # an artifact or included in the payload-free qualification report.
+@@ -113,8 +119,8 @@ def run(model, external_credential=None):
+                 [caller.RUI, "serve", "--store", store, "--active-capacity", "2", "--codex"],
+                 required_fields={"execution": "enabled"}, timeout=20,
+             )
+-            records, thread = observations(process)
+-            return process, records, thread, {"curl": ready["curl"], "openssl": ready["openssl"]}
++            records, thread, allocations = observations(process)
++            return process, records, thread, {"curl": ready["curl"], "openssl": ready["openssl"]}, allocations
+ 
+         def stop():
+             nonlocal host, reader
+@@ -128,7 +134,7 @@ def run(model, external_credential=None):
+             host = None
+             reader = None
+ 
+-        host, first_observations, reader, dependencies = start()
++        host, first_observations, reader, dependencies, first_allocations = start()
+         configured = caller.command(
+             "configure", "--store", store, "--record", state / "configure.json",
+             "--key", "configure", "--session", session, "--workspace", workspace,
+@@ -181,6 +187,8 @@ def run(model, external_credential=None):
+         assert (workspace / "effect-count").read_bytes() == b"once\n"
+         caller.wait_for(lambda: len(first_observations) >= 3, "first Host transport observations", timeout=10)
+         assert len(first_observations) == 3, "expected reasoning, Bash proposal and tool-continuation managed transfers"
++        caller.wait_for(lambda: len(first_allocations) >= 4, "first Host allocator observations", timeout=10)
++        assert len(first_allocations) == 4, first_allocations
+         reasoning_counts = [private_reasoning_count(store, record["operation"]) for record in first_observations]
+         reasoning_tokens = [reasoning_token_count(store, record["operation"]) for record in first_observations]
+         print(f"Pre-restart reasoning: private item counts={reasoning_counts}, token usage={reasoning_tokens}", flush=True)
+@@ -192,7 +200,7 @@ def run(model, external_credential=None):
+         resources = bash.process_resources(host)
+ 
+         stop()  # after the committed result, not an interrupted Bash effect
+-        host, later_observations, reader, restarted_dependencies = start()
++        host, later_observations, reader, restarted_dependencies, later_allocations = start()
+         assert restarted_dependencies == dependencies
+         recovered = caller.retry_message(state, store, "first")
+         assert recovered["answer"]["replayed"] is True
+@@ -208,6 +216,8 @@ def run(model, external_credential=None):
+         assert (workspace / "effect-count").read_bytes() == b"once\n"
+         caller.wait_for(lambda: len(later_observations) >= 1, "fresh Host transport observation", timeout=10)
+         assert len(later_observations) == 1 and int(later_observations[0]["http_version"]) == 3
++        caller.wait_for(lambda: len(later_allocations) >= 2, "fresh Host allocator observations", timeout=10)
++        assert len(later_allocations) == 2, later_allocations
+         after = evidence(store)
+         assert len(after) == 4 and after[:3] == before and after[3][0]
+         print(json.dumps({
+@@ -221,6 +231,7 @@ def run(model, external_credential=None):
+                  "correlation_present": bool(row[4])} for row in after
+             ],
+             "transport": first_observations + later_observations,
++            "instrumented_native_allocations": {"first_host": first_allocations, "fresh_host": later_allocations},
+             "host_resources_before_restart": resources,
+             "bash_effect_count": 1, "committed_recovery_model_requests": 0,
+             "post_restart_model_requests": 1, "private_reasoning_counts": reasoning_counts,
+diff --git a/src/transport_allocation_hooks.c b/src/transport_allocation_hooks.c
+new file mode 100644
+index 0000000..0f13d31
+--- /dev/null
++++ b/src/transport_allocation_hooks.c
+@@ -0,0 +1,98 @@
++/* Disposable diagnostic: requested bytes through curl/nghttp2 and OpenSSL hooks. */
++#include <curl/curl.h>
++#include <openssl/crypto.h>
++#include <stddef.h>
++#include <stdatomic.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++
++typedef union {
++  max_align_t align;
++  struct { size_t size; unsigned kind; } record;
++} Header;
++
++static _Atomic size_t live[2], peak[2];
++
++static void count_change(unsigned kind, size_t old, size_t new_size) {
++  size_t now;
++  if (new_size >= old)
++    now = atomic_fetch_add(&live[kind], new_size - old) + new_size - old;
++  else
++    now = atomic_fetch_sub(&live[kind], old - new_size) - (old - new_size);
++  size_t high = atomic_load(&peak[kind]);
++  while (now > high && !atomic_compare_exchange_weak(&peak[kind], &high, now)) {}
++}
++
++static void *allocate(size_t size, unsigned kind) {
++  if (size > SIZE_MAX - sizeof(Header)) return NULL;
++  Header *h = malloc(sizeof(Header) + size);
++  if (!h) return NULL;
++  h->record.size = size;
++  h->record.kind = kind;
++  count_change(kind, 0, size);
++  return h + 1;
++}
++
++static void release(void *pointer) {
++  if (!pointer) return;
++  Header *h = (Header *)pointer - 1;
++  count_change(h->record.kind, h->record.size, 0);
++  free(h);
++}
++
++static void *resize(void *pointer, size_t size, unsigned kind) {
++  if (!pointer) return allocate(size, kind);
++  if (!size) { release(pointer); return NULL; }
++  if (size > SIZE_MAX - sizeof(Header)) return NULL;
++  Header *h = (Header *)pointer - 1;
++  size_t old = h->record.size;
++  Header *next = realloc(h, sizeof(Header) + size);
++  if (!next) return NULL;
++  next->record.size = size;
++  count_change(kind, old, size);
++  return next + 1;
++}
++
++static void *curl_alloc(size_t size) { return allocate(size, 0); }
++static void *curl_resize(void *p, size_t size) { return resize(p, size, 0); }
++static void *curl_zero(size_t count, size_t size) {
++  if (size && count > SIZE_MAX / size) return NULL;
++  size_t bytes = count * size;
++  void *p = curl_alloc(bytes);
++  if (p) memset(p, 0, bytes);
++  return p;
++}
++static char *curl_copy(const char *text) {
++  size_t size = strlen(text) + 1;
++  char *p = curl_alloc(size);
++  if (p) memcpy(p, text, size);
++  return p;
++}
++static void *openssl_alloc(size_t size, const char *file, int line) {
++  (void)file; (void)line;
++  return allocate(size, 1);
++}
++static void *openssl_resize(void *p, size_t size, const char *file, int line) {
++  (void)file; (void)line;
++  return resize(p, size, 1);
++}
++static void openssl_release(void *p, const char *file, int line) {
++  (void)file; (void)line;
++  release(p);
++}
++
++/* Called once before curl/OpenSSL initialization; failure is fatal, never partial evidence. */
++int rui_measure_transport_init(void) {
++  if (!CRYPTO_set_mem_functions(openssl_alloc, openssl_resize, openssl_release)) return 1;
++  return curl_global_init_mem(CURL_GLOBAL_DEFAULT, curl_alloc, release,
++                              curl_resize, curl_copy, curl_zero) == CURLE_OK ? 0 : 2;
++}
++
++void rui_measure_transport_snapshot(size_t *curl_live, size_t *curl_peak,
++                                    size_t *openssl_live, size_t *openssl_peak) {
++  *curl_live = atomic_load(&live[0]);
++  *curl_peak = atomic_load(&peak[0]);
++  *openssl_live = atomic_load(&live[1]);
++  *openssl_peak = atomic_load(&peak[1]);
++}

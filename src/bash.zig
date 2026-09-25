@@ -160,6 +160,42 @@ fn decodeObservation(observation: BashObservation) Term {
     };
 }
 
+test "native Bash observation agrees with reap for wide process exit values" {
+    for ([_]struct { raw: c_int, expected: u8 }{
+        .{ .raw = 2, .expected = 2 },
+        .{ .raw = 257, .expected = 1 },
+        .{ .raw = 512, .expected = 0 },
+        .{ .raw = -1, .expected = 255 },
+    }) |case| {
+        const pid = std.c.fork();
+        if (pid == 0) std.c._exit(case.raw);
+        if (pid < 0) return error.TestForkFailed;
+        var reaped = false;
+        defer if (!reaped) {
+            _ = std.c.waitpid(pid, null, 0);
+        };
+
+        var observed: BashObservation = undefined;
+        var ready = false;
+        for (0..1000) |_| {
+            const result = rui_bash_observe(pid, &observed);
+            try std.testing.expect(result >= 0);
+            if (result == 1) {
+                ready = true;
+                break;
+            }
+            try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(ready);
+        try std.testing.expectEqual(Term{ .exited = case.expected }, decodeObservation(observed));
+
+        var consumed: BashObservation = undefined;
+        try std.testing.expectEqual(@as(c_int, 1), rui_bash_reap(pid, &consumed));
+        reaped = true;
+        try std.testing.expectEqual(Term{ .exited = case.expected }, decodeObservation(consumed));
+    }
+}
+
 const OwnedFile = struct {
     io: std.Io,
     file: ?std.Io.File,

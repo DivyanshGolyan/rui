@@ -291,12 +291,13 @@ class SuccessEndpoint(TestHTTPServer):
 
 
 class ResponseSpec:
-    def __init__(self, body, headers, status=200, *, retry_date_seconds=None, chunk_delay=0):
+    def __init__(self, body, headers, status=200, *, retry_date_seconds=None, chunk_delay=0, gate_timeout=10):
         self.body = body
         self.headers = headers
         self.status = status
         self.retry_date_seconds = retry_date_seconds
         self.chunk_delay = chunk_delay
+        self.gate_timeout = gate_timeout
         self.body_finished_at = None
 
 
@@ -323,7 +324,7 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
                 payload = self.server.responses.pop(0)
         if isinstance(payload, tuple):
             payload, release = payload
-            if not release.wait(10):
+            if not release.wait(payload.gate_timeout if isinstance(payload, ResponseSpec) else 10):
                 raise RuntimeError("success fixture response was never released")
         headers = {"X-Request-Id": f"request-{len(self.server.requests)}", "OpenAI-Model": "model-a-served"}
         status = 200
@@ -1261,14 +1262,13 @@ def main():
         wait_for(lambda: len(success_endpoint.requests) == 2, "two successful requests")
         first_request = json.loads(success_endpoint.requests[0])
         second_request = json.loads(success_endpoint.requests[1])
+        assert first_request["instructions"] == second_request["instructions"] == ""
         assert first_request["input"] == [
-            {"role": "system", "content": [{"type": "input_text", "text": ""}]},
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
         ]
         expected_reasoning = dict(first_reasoning)
         expected_reasoning.pop("created_by")
         assert second_request["input"] == [
-            {"role": "system", "content": [{"type": "input_text", "text": ""}]},
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
             expected_reasoning,
             first_message_item,
@@ -1752,7 +1752,7 @@ def main():
         assert expected_private in frozen_retry["input"], frozen_retry["input"]
         assert continued_message in frozen_retry["input"], frozen_retry["input"]
         assert not any(
-            item.get("role") == "system"
+            item.get("role") == "developer"
             and item.get("content", [{}])[0].get("text") == "new instructions"
             for item in frozen_retry["input"]
         )
@@ -1991,8 +1991,8 @@ def main():
         pending_request = json.loads(pending_endpoint.requests[1])
         expected_pending_reasoning = dict(pending_reasoning)
         expected_pending_reasoning.pop("created_by")
+        assert pending_request["instructions"] == ""
         assert pending_request["input"] == [
-            {"role": "system", "content": [{"type": "input_text", "text": ""}]},
             {"role": "user", "content": [{"type": "input_text", "text": "before cutoff"}]},
             expected_pending_reasoning,
             pending_message_item,
@@ -2542,15 +2542,15 @@ def main():
             "store": False,
             "stream": True,
             "include": ["reasoning.encrypted_content"],
+            "instructions": "A",
             "input": [
-                {"role": "system", "content": [{"type": "input_text", "text": "A"}]},
                 {
                     "role": "user",
                     "content": [{"type": "input_text", "text": 'first "message"\n'}],
                 },
-                {"role": "system", "content": [{"type": "input_text", "text": "B"}]},
-                {"role": "system", "content": [{"type": "input_text", "text": "A"}]},
-                {"role": "system", "content": [{"type": "input_text", "text": "A"}]},
+                {"role": "developer", "content": [{"type": "input_text", "text": "B"}]},
+                {"role": "developer", "content": [{"type": "input_text", "text": "A"}]},
+                {"role": "developer", "content": [{"type": "input_text", "text": "A"}]},
             ],
             "tools": [
                 {
@@ -2606,6 +2606,7 @@ def main():
         assert successor["input"] == expected["input"] + [
             {"role": "user", "content": [{"type": "input_text", "text": "later message"}]}
         ], successor
+        assert successor["instructions"] == "A", successor
         assert successor["model"] == "model-a", successor
         assert successor["tools"] == [], successor
         assert "text" not in successor, successor
@@ -3293,8 +3294,8 @@ def main():
             [
                 ResponseSpec(b"retry later", {}, 503),
                 ResponseSpec(b"sentinel retry later", {}, 503),
-                (ResponseSpec(b"retried", {}, 422), recovery_retry_release),
-                (ResponseSpec(b"new work", {}, 422), recovery_new_release),
+                (ResponseSpec(b"retried", {}, 422, gate_timeout=30), recovery_retry_release),
+                (ResponseSpec(b"new work", {}, 422, gate_timeout=30), recovery_new_release),
             ]
         )
         recovery_thread = threading.Thread(
@@ -3451,32 +3452,35 @@ def main():
             "direct/recovery-sentinel",
         )
         assert inspection["execution"]["dispatch_fenced"] is False, inspection
-        wait_for(lambda: len(recovery_endpoint.requests) >= 3, "recovery retry launch")
-        new_admitted = wait_for(
-            lambda: (
-                value
-                if (value := observe(recovery_store, "recovery-new-message"))[
-                    "queue"
-                ]["status"]
-                == "processing"
-                else None
-            ),
-            "new admission during exhausted recovery",
-        )
-        assert new_admitted["processing"]["attempt"] == "1", new_admitted
-        assert command(
-            "inspect-session",
-            "--store",
-            recovery_store,
-            "--session",
-            "direct/recovery-new",
-        )["execution"]["custody_occupied"] == "2"
-        assert "result" not in observe(
-            recovery_store, "recovery-sentinel-message"
-        ), unresolved_sentinel
-        wait_for(lambda: len(recovery_endpoint.requests) >= 4, "recovery new launch")
-        recovery_retry_release.set()
-        recovery_new_release.set()
+        try:
+            wait_for(lambda: len(recovery_endpoint.requests) >= 3, "recovery retry launch")
+            new_admitted = wait_for(
+                lambda: (
+                    value
+                    if (value := observe(recovery_store, "recovery-new-message"))[
+                        "queue"
+                    ]["status"]
+                    == "processing"
+                    else None
+                ),
+                "new admission during exhausted recovery",
+            )
+            assert new_admitted["processing"]["attempt"] == "1", new_admitted
+            wait_for(lambda: len(recovery_endpoint.requests) >= 4, "recovery new launch")
+            custody = command(
+                "inspect-session",
+                "--store",
+                recovery_store,
+                "--session",
+                "direct/recovery-new",
+            )["execution"]
+            assert custody["custody_occupied"] == "2", custody
+            assert "result" not in observe(
+                recovery_store, "recovery-sentinel-message"
+            ), unresolved_sentinel
+        finally:
+            recovery_retry_release.set()
+            recovery_new_release.set()
         recovery_latencies = []
         recovery_deadline = time.monotonic() + 30
         sentinel_terminal = None
@@ -3726,23 +3730,25 @@ def main():
         message(state, slow_store, "slow-message-first", "direct/slow-first", "first")
         wait_for(lambda: len(slow_endpoint.requests) == 1, "progressing first H1 response")
         message(state, slow_store, "slow-message-second", "direct/slow-second", "second")
-
-        def queued_attempt_expired():
-            with sqlite3.connect(slow_store / "rui.sqlite3") as database:
-                return database.execute(
-                    "SELECT attempt_ordinal,uncertain,retry_due_at_ms FROM model_operation "
-                    "WHERE session_ref='direct/slow-second'"
-                ).fetchone()
-
-        retry = wait_for(
-            lambda: (row if (row := queued_attempt_expired()) and row[1] == 0 else None),
-            "queued H1 Attempt retry eligibility",
+        wait_for(
+            lambda: command("inspect-session", "--store", slow_store, "--session", "direct/slow-second")["execution"]["custody_occupied"] == "2",
+            "both H1 Attempts in custody",
         )
-        assert retry[0] == 1 and retry[2] is not None, retry
+        wait_for(
+            lambda: command("inspect-session", "--store", slow_store, "--session", "direct/slow-second")["execution"]["custody_occupied"] == "1",
+            "queued H1 Attempt releases custody on expiry",
+        )
         assert len(slow_endpoint.requests) == 1, slow_endpoint.requests
+        assert slow_host.poll() is None, "Host exited during queued H1 expiry"
         wait_for(lambda: observe(slow_store, "slow-message-first").get("result"), "progressing H1 completion", timeout=15)
         stop_host(slow_host)
         processes.remove(slow_host)
+        with sqlite3.connect(slow_store / "rui.sqlite3") as database:
+            retry = database.execute(
+                "SELECT attempt_ordinal,uncertain,retry_due_at_ms FROM model_operation "
+                "WHERE session_ref='direct/slow-second'"
+            ).fetchone()
+        assert retry[0] == 1 and retry[1] == 0 and retry[2] is not None, retry
         slow_endpoint.shutdown()
         slow_endpoint.server_close()
         slow_thread.join(timeout=5)

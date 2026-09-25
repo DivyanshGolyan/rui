@@ -29,16 +29,20 @@ int rui_bash_observe(pid_t pid, struct rui_bash_observation *observation) {
     switch (info.si_code) {
     case CLD_EXITED:
         observation->kind = 1;
+        /* Darwin waitid can retain the full exit value; waitpid exposes only
+           its low byte. Keep observation and final reap on the same status. */
+        observation->value = (uint8_t)info.si_status;
         break;
     case CLD_KILLED:
     case CLD_DUMPED:
         observation->kind = 2;
+        observation->value = info.si_status;
         break;
     default:
         observation->kind = 3;
+        observation->value = info.si_status;
         break;
     }
-    observation->value = info.si_status;
     return 1;
 }
 

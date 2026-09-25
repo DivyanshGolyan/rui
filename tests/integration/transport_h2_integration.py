@@ -34,6 +34,7 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.population = population
         self.connections = []
         self.streams = []
+        self.request_headers = []
         self.refuse_at = refuse_at
         self.refused = False
         self.dead_reuse = dead_reuse
@@ -201,6 +202,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
                 if isinstance(event, h2.events.RequestReceived):
                     assert event.stream_id not in bodies
                     with self.server.lock:
+                        self.server.request_headers.append(dict(event.headers))
                         refuse = self.server.refuse_at == "headers" and not self.server.refused
                         if refuse:
                             self.server.refused = True
