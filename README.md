@@ -14,7 +14,7 @@ Targets Linux and macOS on x86-64 and ARM64. All four cross-compile. Broad runti
 
 ## Build
 
-Requires Zig 0.16.0, Python 3, Perl, a C toolchain and Make. The build pins native dependencies.
+Requires Zig 0.16.0, Python 3, Perl, `patch`, a C toolchain and Make. The build pins native dependencies.
 
 ```sh
 zig build
