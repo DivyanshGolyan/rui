@@ -5,7 +5,11 @@
 
 /* The caller owns an immutable read-only source fd, an immutable read-only
  * regular prepared-input fd (-1 only for compile-only), and a writable
- * regular scratch-file output fd; the output is empty on failure.
+ * regular scratch-file output fd. On failure, output may contain untrusted
+ * partial bytes even if best-effort truncation was attempted. The caller
+ * retains file custody and its charge until confirmed shrink, or confirmed
+ * removal/absence plus final closure. Failure alone never authorizes refund
+ * or artifact reuse.
  * This synchronous shim cannot bound a stalled filesystem write. The caller also
  * owns serialization: another lifecycle cannot begin until this call returns.
  * No database transaction should be held during this call. Returns 1 only
