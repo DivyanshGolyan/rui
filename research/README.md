@@ -16,6 +16,8 @@ Maintained executable checks and recorded qualification live in [tests/qualifica
 
 [CLI guideline evidence](cli-guidelines-rui.md) compares primary clig.dev guidance with Rui's explicit Host, exact request recovery, acceptance/completion, Action approval and uncertain-effect boundaries; research input only, with no interface-model choice or human-use study.
 
+[CLI mode and reconnect evidence](cli-ux-sources.md) compares official Codex and Claude Code interactive/headless modes, permission handling and resume identity with Rui's caller requirements; product patterns, not an interface decision or human-use study.
+
 [Darwin child-status boundary](darwin-waitid-status-sources.md) compares pinned POSIX and XNU `waitid`/`waitpid` exit representations against a native Mac probe and Rui's Bash adapter. It identifies one reproduced mismatch; nearby boundaries are checks, not additional demonstrated defects.
 
 [Warm integration-test wall time](integration-test-wall-time-sources.md) cites Zig and Python primary sources for build scheduling and fixture shutdown, with measured Linux baselines and the fast/full gate boundary; it does not qualify platform latency or cold compilation.
