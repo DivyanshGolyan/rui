@@ -357,7 +357,9 @@ fn erase(self: *Editor, from: usize, to: usize) Event {
     if (self.rejected != null or from == to) return .none;
     std.mem.copyForwards(u8, self.buffer[from .. self.length - (to - from)], self.buffer[to..self.length]);
     self.length -= to - from;
-    self.cursor = from;
+    // Removing a separator may join the suffix to the preceding cluster.
+    // Snap to the first boundary at or after the erased range's start.
+    self.cursor = if (from == 0) 0 else self.next(from - 1);
     return .redraw;
 }
 
@@ -561,6 +563,33 @@ test "inserting a joiner before an emoji leaves the caret at a cluster boundary"
     try std.testing.expectEqual(editor.length, editor.cursor);
     try std.testing.expectEqual(Event.redraw, editor.feed(0x7f));
     try std.testing.expectEqual(@as(usize, 0), editor.length);
+}
+
+test "deleting a separator does not leave the caret inside a joined grapheme" {
+    var storage: [80]u8 = undefined;
+    var editor: Editor = .{ .buffer = &storage };
+    for ("\x1b[200~a\n\u{301}\x1b[201~\x01") |byte| _ = editor.feed(byte);
+    try std.testing.expectEqualStrings("a\n\u{301}", storage[0..editor.length]);
+    try std.testing.expectEqual(@as(usize, 2), editor.cursor);
+    try std.testing.expectEqual(Event.redraw, editor.feed(0x7f));
+    try std.testing.expectEqualStrings("a\u{301}", storage[0..editor.length]);
+    try std.testing.expectEqual(editor.length, editor.cursor);
+    try std.testing.expectEqual(Event.redraw, editor.feed(0x7f));
+    try std.testing.expectEqual(@as(usize, 0), editor.length);
+}
+
+test "Ctrl-D exits only on an empty draft and otherwise deletes forward" {
+    var storage: [80]u8 = undefined;
+    var editor: Editor = .{ .buffer = &storage };
+    try std.testing.expectEqual(Event.eof, editor.feed(4));
+    for ("ab\x01") |byte| _ = editor.feed(byte);
+    try std.testing.expectEqual(Event.redraw, editor.feed(4));
+    try std.testing.expectEqualStrings("b", storage[0..editor.length]);
+    try std.testing.expectEqual(Event.redraw, editor.feed(5));
+    try std.testing.expectEqual(Event.none, editor.feed(4));
+    try std.testing.expectEqualStrings("b", storage[0..editor.length]);
+    try std.testing.expectEqual(Event.redraw, editor.feed(0x7f));
+    try std.testing.expectEqual(Event.eof, editor.feed(4));
 }
 
 test "flag and variation selector are each deleted as one grapheme" {
