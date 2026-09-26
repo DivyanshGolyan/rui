@@ -293,6 +293,15 @@ pub const ContentReference = struct {
 pub const MessageObservation = struct {
     content: ContentReference,
     queue: ?AcceptedMessageQueue = null,
+    // Present only while this admission can still advance. This is a fact
+    // about its active dependency, not an instruction to a particular caller.
+    progress: ?MessageProgress = null,
+};
+
+pub const MessageProgress = struct {
+    pub const Status = enum { runnable, in_flight, waiting_for_permission };
+    status: Status,
+    action_id: ?u64 = null,
 };
 
 pub const AcceptedMessageQueue = struct {
@@ -2255,6 +2264,14 @@ pub const Store = struct {
                     command.accepted,
                 ) catch |err| return self.fenceReadFailure(err),
             };
+            const queue = observation.message.?.queue orelse return self.fenceReadFailure(error.CorruptStore);
+            switch (queue.state) {
+                .queued, .processing => {
+                    observation.message.?.progress = self.readMessageProgress(command.target.slice(), queue.state) catch |err|
+                        return self.fenceReadFailure(err);
+                },
+                else => {},
+            }
         } else if (command.kind == .session_stop and command.accepted) {
             const selection = self.readSessionStopSelection(key) catch |err|
                 return self.fenceReadFailure(err);
@@ -2334,6 +2351,53 @@ pub const Store = struct {
                     .{ .admission_id = projection.admission_id, .state = .{ .failed = .{ .binding = applied.binding, .code = outcome } } };
             },
         };
+    }
+
+    fn readMessageProgress(self: *Store, session_ref: []const u8, state: AcceptedMessageQueue.State) !MessageProgress {
+        const statement = try prepare(self.database, "SELECT t.turn_id,o.resolution_code FROM turn t INDEXED BY turn_one_active_per_session " ++
+            "JOIN model_operation o ON o.operation_id=t.operation_id " ++
+            "WHERE t.session_ref=?1 AND t.outcome_code IS NULL");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        const step = c.sqlite3_step(statement);
+        if (step == c.SQLITE_DONE) {
+            if (state != .queued) return error.CorruptStore;
+            return .{ .status = .runnable };
+        }
+        if (step != c.SQLITE_ROW) return error.TurnReadFailed;
+        const turn_id = c.sqlite3_column_int64(statement, 0);
+        if (turn_id <= 0) return error.CorruptStore;
+        if (state == .processing and state.processing.turn_id != @as(u64, @intCast(turn_id))) return error.CorruptStore;
+        const resolution = if (c.sqlite3_column_type(statement, 1) == c.SQLITE_NULL) null else blk: {
+            var code: protocol.Bounded(96) = .{};
+            try readText(statement, 1, &code);
+            break :blk code;
+        };
+        return self.activeMessageProgress(session_ref, resolution);
+    }
+
+    fn activeMessageProgress(self: *Store, session_ref: []const u8, resolution: ?protocol.Bounded(96)) !MessageProgress {
+        const statement = try prepare(self.database, "SELECT count(*),count(*) FILTER (WHERE action.permission_state=0)," ++
+            "min(CASE WHEN action.permission_state=0 THEN action.action_id END) " ++
+            "FROM turn active INDEXED BY turn_one_active_per_session " ++
+            "JOIN action_operation action ON action.parent_operation_id=active.operation_id " ++
+            "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND action.resolution_code IS NULL");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.ActionReadFailed;
+        const unresolved = c.sqlite3_column_int64(statement, 0);
+        const actionable = c.sqlite3_column_int64(statement, 1);
+        if (unresolved < 0 or actionable < 0 or actionable > unresolved) return error.CorruptStore;
+        const action_id: ?u64 = if (actionable == 0) null else blk: {
+            const id = c.sqlite3_column_int64(statement, 2);
+            if (id <= 0) return error.CorruptStore;
+            break :blk @intCast(id);
+        };
+        const status: MessageProgress.Status = if (resolution) |code|
+            if (code.eql("continued") or code.eql("interrupted")) .runnable else if (code.eql("tool_calls") and actionable != 0 and actionable == unresolved) .waiting_for_permission else if (code.eql("tool_calls") and unresolved == 0) .runnable else .in_flight
+        else
+            .in_flight;
+        return .{ .status = status, .action_id = action_id };
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {
@@ -2534,22 +2598,13 @@ pub const Store = struct {
         const operation_id = c.sqlite3_column_int64(statement, 1);
         if (turn_id <= 0 or operation_id <= 0) return error.CorruptStore;
         if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) {
-            const actionable = try self.countActionablePermissions(session_ref);
-            const unresolved_actions = try self.countUnresolvedActiveActions(session_ref);
-            var status: []const u8 = "in_flight";
-            if (c.sqlite3_column_type(statement, 4) != c.SQLITE_NULL) {
-                var resolution: protocol.Bounded(96) = .{};
-                try readText(statement, 4, &resolution);
-                status = if (resolution.eql("continued") or resolution.eql("interrupted"))
-                    "runnable"
-                else if (resolution.eql("tool_calls") and actionable != 0 and actionable == unresolved_actions)
-                    "waiting_for_permission"
-                else if (resolution.eql("tool_calls") and unresolved_actions == 0)
-                    "runnable"
-                else
-                    "in_flight";
-            }
-            return capture.appendFmt("{{\"status\":\"{s}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"latest_outcome\":null}}", .{ status, turn_id, operation_id });
+            const resolution = if (c.sqlite3_column_type(statement, 4) == c.SQLITE_NULL) null else blk: {
+                var code: protocol.Bounded(96) = .{};
+                try readText(statement, 4, &code);
+                break :blk code;
+            };
+            const progress = try self.activeMessageProgress(session_ref, resolution);
+            return capture.appendFmt("{{\"status\":\"{s}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"latest_outcome\":null}}", .{ @tagName(progress.status), turn_id, operation_id });
         }
         var code: protocol.Bounded(96) = .{};
         try readText(statement, 2, &code);
@@ -2630,37 +2685,6 @@ pub const Store = struct {
             try capture.appendJsonString(code.slice());
             try capture.append("}");
         }
-    }
-
-    fn countActionablePermissions(self: *Store, session_ref: []const u8) !u64 {
-        const statement = try prepare(
-            self.database,
-            "SELECT count(*) FROM turn active INDEXED BY turn_one_active_per_session " ++
-                "JOIN action_operation action ON action.parent_operation_id=active.operation_id " ++
-                "WHERE active.session_ref=?1 AND active.outcome_code IS NULL " ++
-                "AND action.permission_state=0 AND action.resolution_code IS NULL",
-        );
-        defer _ = c.sqlite3_finalize(statement);
-        try bindText(statement, 1, session_ref);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.ActionReadFailed;
-        const count = c.sqlite3_column_int64(statement, 0);
-        if (count < 0) return error.CorruptStore;
-        return @intCast(count);
-    }
-
-    fn countUnresolvedActiveActions(self: *Store, session_ref: []const u8) !u64 {
-        const statement = try prepare(
-            self.database,
-            "SELECT count(*) FROM turn active INDEXED BY turn_one_active_per_session " ++
-                "JOIN action_operation action ON action.parent_operation_id=active.operation_id " ++
-                "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND action.resolution_code IS NULL",
-        );
-        defer _ = c.sqlite3_finalize(statement);
-        try bindText(statement, 1, session_ref);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.ActionReadFailed;
-        const count = c.sqlite3_column_int64(statement, 0);
-        if (count < 0) return error.CorruptStore;
-        return @intCast(count);
     }
 
     fn appendActionablePermissions(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
@@ -6790,6 +6814,8 @@ test "Current selects active then queued work and bounds recent Message identiti
         }
     }
     try submitTestMessage(&storage, &tmp, "selection-next-file", "selection-next", "direct/selection", "next");
+    try std.testing.expectEqual(MessageProgress.Status.runnable, (try storage.observeCommand("selection-next")).message.?.progress.?.status);
+    try std.testing.expect((try storage.observeCommand("selection-message-11")).message.?.progress == null);
     {
         const bytes = try testingSessionReport(&storage, &tmp, "direct/selection", 1024 * 1024);
         defer std.testing.allocator.free(bytes);
@@ -6799,6 +6825,10 @@ test "Current selects active then queued work and bounds recent Message identiti
     }
     _ = (try storage.admitNextModelAttempt(.{})).?;
     try submitTestMessage(&storage, &tmp, "selection-queued-file", "selection-queued", "direct/selection", "queued");
+    const queued = (try storage.observeCommand("selection-queued")).message.?;
+    try std.testing.expect(queued.queue.?.state == .queued);
+    try std.testing.expectEqual(MessageProgress.Status.in_flight, queued.progress.?.status);
+    try std.testing.expect(queued.progress.?.action_id == null);
     {
         const bytes = try testingSessionReport(&storage, &tmp, "direct/selection", 1024 * 1024);
         defer std.testing.allocator.free(bytes);
@@ -6806,6 +6836,43 @@ test "Current selects active then queued work and bounds recent Message identiti
         defer report.deinit();
         try std.testing.expectEqualStrings("selection-next", report.value.object.get("selected_message").?.string);
         try std.testing.expectEqualStrings("1", report.value.object.get("pending_messages").?.string);
+    }
+}
+
+test "Current preserves empty Message identity across queue, active Turn and history" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "empty-key-config", "direct/empty-key");
+    try submitTestMessage(&storage, &tmp, "empty-key-file", "", "direct/empty-key", "input");
+    try std.testing.expectEqual(MessageProgress.Status.runnable, (try storage.observeCommand("")).message.?.progress.?.status);
+    {
+        const bytes = try testingSessionReport(&storage, &tmp, "direct/empty-key", 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer report.deinit();
+        try std.testing.expectEqualStrings("", report.value.object.get("selected_message").?.string);
+    }
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expectEqual(MessageProgress.Status.in_flight, (try storage.observeCommand("")).message.?.progress.?.status);
+    {
+        const bytes = try testingSessionReport(&storage, &tmp, "direct/empty-key", 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer report.deinit();
+        try std.testing.expectEqualStrings("", report.value.object.get("selected_message").?.string);
+    }
+    try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
+    try std.testing.expect((try storage.observeCommand("")).message.?.progress == null);
+    try submitTestMessage(&storage, &tmp, "after-empty-file", "after-empty", "direct/empty-key", "next");
+    {
+        const bytes = try testingSessionReport(&storage, &tmp, "direct/empty-key", 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer report.deinit();
+        try std.testing.expectEqualStrings("after-empty", report.value.object.get("selected_message").?.string);
+        try std.testing.expectEqualStrings("", report.value.object.get("recent_messages").?.array.items[0].object.get("message").?.string);
     }
 }
 
@@ -7117,7 +7184,10 @@ test "Current reports progress alongside an actionable sibling" {
     defer mixed.deinit();
     try std.testing.expectEqualStrings("in_flight", mixed.value.object.get("work").?.object.get("status").?.string);
     try std.testing.expectEqual(@as(usize, 1), mixed.value.object.get("actionable_permissions").?.array.items.len);
-    try std.testing.expectEqualStrings("processing", @tagName((try storage.observeCommand("mixed-message")).message.?.queue.?.state));
+    const message = (try storage.observeCommand("mixed-message")).message.?;
+    try std.testing.expectEqualStrings("processing", @tagName(message.queue.?.state));
+    try std.testing.expectEqual(MessageProgress.Status.in_flight, message.progress.?.status);
+    try std.testing.expectEqual(action_id + 1, message.progress.?.action_id.?);
 }
 
 test "Action settlement atomically yields to an earlier Session stop" {
@@ -10482,6 +10552,8 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectError(error.DispatchPermitConsumed, admitted.permit.consume());
     const first_observation = (try storage.observeCommand("dispatch-1")).message.?.queue.?;
     const second_observation = (try storage.observeCommand("dispatch-2")).message.?.queue.?;
+    try std.testing.expectEqual(MessageProgress.Status.in_flight, (try storage.observeCommand("dispatch-1")).message.?.progress.?.status);
+    try std.testing.expectEqual(MessageProgress.Status.in_flight, (try storage.observeCommand("dispatch-2")).message.?.progress.?.status);
     const first_binding = switch (first_observation.state) {
         .processing => |value| value,
         else => return error.ExpectedProcessingObservation,

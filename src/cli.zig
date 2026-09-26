@@ -339,6 +339,11 @@ fn acceptedReply(reply: client.CommandReply) !bool {
     return std.mem.eql(u8, try stringField(try objectField(parsed.value, "answer"), "status"), "accepted");
 }
 
+const Attention = struct {
+    work: Work,
+    message: protocol.Bounded(protocol.max_key_bytes),
+};
+
 fn waitSession(init: std.process.Init, args: []const []const u8) !void {
     var store: ?[]const u8 = null;
     var session_ref: ?[]const u8 = null;
@@ -354,46 +359,52 @@ fn waitSession(init: std.process.Init, args: []const []const u8) !void {
     };
 }
 
-fn waitForSession(init: std.process.Init, store: []const u8, session_ref: []const u8, json: bool, terminal_only: bool) !?Work {
-    const work = try inspectWork(init, store, session_ref);
-    if (work.workspace.len == 0) return error.SessionNotConfigured;
-    if (work.selected_message.len == 0) {
+fn waitForSession(init: std.process.Init, store: []const u8, session_ref: []const u8, json: bool, terminal_only: bool) !?Attention {
+    const saved = blk: {
+        const report = try inspectWork(init, store, session_ref);
+        defer report.file.close(init.io);
+        const work = report.work;
+        if (work.workspace.len == 0) return error.SessionNotConfigured;
+        const selected = if (work.selected_message) |key| key.slice() else {
+            if (json) {
+                try std.Io.File.stdout().writeStreamingAll(init.io, "{\"return\":\"idle\"}\n");
+            } else try std.Io.File.stdout().writeStreamingAll(init.io, "return: idle (no active or queued message)\n");
+            return null;
+        };
         if (json) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "{\"return\":\"idle\"}\n");
-        } else try std.Io.File.stdout().writeStreamingAll(init.io, "return: idle (no active or queued message)\n");
-        return null;
-    }
-    if (json) {
-        const selection = try std.json.Stringify.valueAlloc(std.heap.c_allocator, .{
-            .event = "selection",
-            .session = session_ref,
-            .message = work.selected_message.slice(),
-        }, .{});
-        defer std.heap.c_allocator.free(selection);
-        try std.Io.File.stdout().writeStreamingAll(init.io, selection);
-        try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
-    } else {
-        try writeSafeField(init.io, "selected message: ", work.selected_message.slice());
-    }
-    const saved = try selectedRequest(store, session_ref, work.selected_message.slice());
-    var attention = try followMessage(init, &saved, json, true, terminal_only);
-    if (attention) |*pending| pending.selected_message = work.selected_message;
-    if (attention == null and !json) try showResult(init, &saved, false);
-    return attention;
+            const selection = try std.json.Stringify.valueAlloc(std.heap.c_allocator, .{
+                .event = "selection",
+                .session = session_ref,
+                .message = selected,
+            }, .{});
+            defer std.heap.c_allocator.free(selection);
+            try std.Io.File.stdout().writeStreamingAll(init.io, selection);
+            try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+        } else {
+            try writeSafeField(init.io, "selected message: ", selected);
+        }
+        if (!terminal_only and work.action_count > 1) try showActionable(init.io, report.file, json);
+        break :blk try selectedRequest(store, session_ref, selected);
+    };
+    if (try followMessage(init, &saved, json, true, terminal_only)) |attention|
+        return .{ .work = attention, .message = saved.key };
+    if (!json) try showResult(init, &saved, false);
+    return null;
 }
 
 fn showSessionStatus(init: std.process.Init, store: []const u8, session_ref: []const u8) !void {
-    const work = try inspectWork(init, store, session_ref);
+    const report = try inspectWork(init, store, session_ref);
+    defer report.file.close(init.io);
+    const work = report.work;
     if (work.workspace.len == 0) return error.SessionNotConfigured;
     try writeSafeField(init.io, "Session: ", session_ref);
     try writeSafeField(init.io, "Store: ", store);
     try writeSafeField(init.io, "Workspace (Bash cwd): ", work.workspace.slice());
     try writeSafeField(init.io, "Permission: ", work.permission_mode.slice());
     try writeSafeField(init.io, "Work: ", work.status.slice());
-    if (work.selected_message.len != 0)
-        try writeSafeField(init.io, "Current message: ", work.selected_message.slice());
-    if (work.action.len != 0)
-        try writeSafeField(init.io, "Action requiring attention: ", work.action.slice());
+    if (work.selected_message) |selected|
+        try writeSafeField(init.io, "Current message: ", selected.slice());
+    if (work.action_count != 0) try showActionable(init.io, report.file, false);
     if (work.recent_count != 0) {
         try std.Io.File.stdout().writeStreamingAll(init.io, "Recent messages (use /result KEY for an answer):\n");
         for (work.recent[0..work.recent_count]) |recent| {
@@ -418,7 +429,7 @@ fn writeSafeText(io: std.Io, value: []const u8) !void {
     try writer.flush();
 }
 
-fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []const u8, text: []const u8) !?Work {
+fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []const u8, text: []const u8) !?Attention {
     var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const record = try newRequest(init, &record_buffer, &key_buffer);
@@ -437,10 +448,10 @@ fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []cons
     if (reply.status != 200) return error.MessageNotAdmitted;
     if (!try acceptedReply(reply)) return null;
     const saved = try selectedRequest(store, session_ref, &key_buffer);
-    var attention = try followMessage(init, &saved, false, false, false);
-    if (attention) |*pending| try pending.selected_message.set(&key_buffer);
-    if (attention == null) try showResult(init, &saved, false);
-    return attention;
+    if (try followMessage(init, &saved, false, false, false)) |attention|
+        return .{ .work = attention, .message = saved.key };
+    try showResult(init, &saved, false);
+    return null;
 }
 
 fn enterSession(init: std.process.Init, args: []const []const u8) !void {
@@ -462,21 +473,21 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
     };
     try std.Io.File.stdout().writeStreamingAll(init.io, "Type a message or /help. /exit detaches without stopping work.\n");
     var input_buffer: [64 * 1024]u8 = undefined;
-    var input = std.Io.File.stdin().readerStreaming(init.io, &input_buffer);
     while (true) {
-        try std.Io.File.stdout().writeStreamingAll(init.io, "rui> ");
-        const line = (input.interface.takeDelimiter('\n') catch |err| {
-            if (err == error.StreamTooLong) std.debug.print("rui: terminal line exceeds 64 KiB; nothing sent. Use rui message --text FILE for longer input.\n", .{});
-            return err;
+        const line = (readTerminalLine(init.io, &input_buffer, "rui> ") catch |err| {
+            if (err == error.InteractiveInterrupted) break;
+            if (err == error.TerminalRestoreFailed) return err;
+            std.debug.print("rui: input rejected ({s}); nothing sent. Use rui message --text FILE for longer input.\n", .{@errorName(err)});
+            continue;
         }) orelse break;
-        const text = std.mem.trimEnd(u8, line, "\r");
+        const text = line;
         if (text.len == 0) continue;
         if (std.mem.eql(u8, text, "/exit")) break;
         if (std.mem.eql(u8, text, "/help")) {
             try std.Io.File.stdout().writeStreamingAll(init.io, "/status  /wait  /requests  /result KEY  /configure [settings]  /exit\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
             continue;
         }
-        const attention: ?Work = if (std.mem.eql(u8, text, "/status")) blk: {
+        const attention: ?Attention = if (std.mem.eql(u8, text, "/status")) blk: {
             showSessionStatus(init, destination, reference) catch |err| std.debug.print("rui: status: {s}\n", .{@errorName(err)});
             break :blk null;
         } else if (std.mem.eql(u8, text, "/requests")) blk: {
@@ -542,22 +553,100 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
             std.debug.print("rui: message: {s}; check /requests before resubmitting\n", .{@errorName(err)});
             break :blk null;
         };
-        if (attention) |action| interactiveAction(init, destination, reference, action, &input.interface) catch |err|
+        if (attention) |action| interactiveAction(init, destination, reference, action) catch |err| {
+            if (err == error.InteractiveInterrupted) break;
+            if (err == error.TerminalRestoreFailed) return err;
             std.debug.print("rui: Action observation or decision failed: {s}; check /requests and /status\n", .{@errorName(err)});
+        };
     }
     try std.Io.File.stdout().writeStreamingAll(init.io, "Detached. Host work continues.\n");
 }
 
-fn interactiveAction(init: std.process.Init, store: []const u8, session_ref: []const u8, initial: Work, reader: *std.Io.Reader) !void {
-    const saved = try selectedRequest(store, session_ref, initial.selected_message.slice());
-    var pending: ?Work = initial;
+// Enter noncanonical mode before showing the prompt, so even an immediate paste
+// cannot be truncated by the terminal. Restore it before any Host I/O.
+fn readTerminalLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
+    const original = try std.posix.tcgetattr(0);
+    var mode = original;
+    mode.lflag.ICANON = false;
+    mode.lflag.ECHO = false;
+    mode.lflag.ISIG = false; // Ctrl+C is handled below, with restoration first.
+    mode.lflag.IEXTEN = false;
+    mode.iflag.IXON = false;
+    mode.cc[@intFromEnum(std.posix.V.MIN)] = 1;
+    mode.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+    // A previous prompt's typeahead is not input for this prompt. In
+    // particular, a pasted line after a Message must not approve an Action
+    // that had not yet been shown. Changing modes with FLUSH is atomic with
+    // discarding unread input, including lines buffered in canonical mode.
+    try std.posix.tcsetattr(0, .FLUSH, mode);
+    const line = readTerminalDraft(io, buffer, prompt) catch |err| {
+        std.posix.tcsetattr(0, .NOW, original) catch return error.TerminalRestoreFailed;
+        return err;
+    };
+    std.posix.tcsetattr(0, .NOW, original) catch return error.TerminalRestoreFailed;
+    return line;
+}
+
+fn readTerminalDraft(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
+    try std.Io.File.stdout().writeStreamingAll(io, prompt);
+    var length: usize = 0;
+    var invalid = false;
+    var overflow = false;
+    while (true) {
+        var byte: [1]u8 = undefined;
+        if (try std.posix.read(0, &byte) == 0) return if (length == 0) null else error.IncompleteTerminalLine;
+        switch (byte[0]) {
+            3 => {
+                try std.Io.File.stdout().writeStreamingAll(io, "^C\n");
+                return error.InteractiveInterrupted;
+            },
+            4 => {
+                if (length != 0) {
+                    invalid = true; // This reader has no forward-delete editing contract.
+                    continue;
+                }
+                try std.Io.File.stdout().writeStreamingAll(io, "\n");
+                return null;
+            },
+            '\n', '\r' => {
+                try std.Io.File.stdout().writeStreamingAll(io, "\n");
+                if (overflow) return error.StreamTooLong;
+                if (invalid) return error.InvalidTerminalInput;
+                return buffer[0..length];
+            },
+            8, 127 => if (!invalid and !overflow and length != 0) {
+                length -= 1;
+                while (length != 0 and buffer[length] & 0xc0 == 0x80) length -= 1;
+                try std.Io.File.stdout().writeStreamingAll(io, "\x08 \x08");
+            },
+            else => {
+                if (byte[0] < 32 and byte[0] != '\t') {
+                    invalid = true;
+                    continue;
+                }
+                if (invalid or overflow) continue;
+                if (length == buffer.len) {
+                    overflow = true;
+                    continue;
+                }
+                buffer[length] = byte[0];
+                length += 1;
+                try std.Io.File.stdout().writeStreamingAll(io, &byte);
+            },
+        }
+    }
+}
+
+fn interactiveAction(init: std.process.Init, store: []const u8, session_ref: []const u8, initial: Attention) !void {
+    const saved = try selectedRequest(store, session_ref, initial.message.slice());
+    var pending: ?Work = initial.work;
     while (pending) |work| {
         if (work.action.len == 0) return;
         const id = try std.fmt.parseInt(u64, work.action.slice(), 10);
         try inspectAction(init, &.{ "--store", store, "--session", session_ref, "--action", work.action.slice() });
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Allow once, deny, or later? [a/d/l] ");
-        const choice = (try reader.takeDelimiter('\n')) orelse return;
-        const selection = std.mem.trim(u8, choice, " \r");
+        var choice_buffer: [64]u8 = undefined;
+        const choice = (try readTerminalLine(init.io, &choice_buffer, "Allow once, deny, or later? [a/d/l] ")) orelse return;
+        const selection = std.mem.trim(u8, choice, " ");
         const decision: protocol.PermissionDecision = if (std.mem.eql(u8, selection, "a")) .allow_once else if (std.mem.eql(u8, selection, "d")) .deny else {
             try std.Io.File.stdout().writeStreamingAll(init.io, "No decision sent; use /wait to revisit.\n");
             return;
@@ -921,13 +1010,7 @@ fn stringField(value: std.json.Value, name: []const u8) ![]const u8 {
     return field.string;
 }
 
-const SavedRequest = struct {
-    path: protocol.Bounded(std.Io.Dir.max_path_bytes) = .{},
-    store: protocol.Bounded(protocol.max_store_bytes) = .{},
-    key: protocol.Bounded(protocol.max_key_bytes) = .{},
-    session: protocol.Bounded(protocol.max_session_bytes) = .{},
-    kind: protocol.Bounded(32) = .{},
-};
+const SavedRequest = client.CapturedIdentity;
 
 fn requestPath(init: std.process.Init, handle: []const u8, buffer: []u8) ![]const u8 {
     if (handle.len != 36) return error.InvalidRequestHandle;
@@ -942,40 +1025,9 @@ fn requestPath(init: std.process.Init, handle: []const u8, buffer: []u8) ![]cons
 }
 
 fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
-    var value: SavedRequest = .{};
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try requestPath(init, handle, &path_buffer);
-    try value.path.set(path);
-    var file = try std.Io.Dir.cwd().openFile(init.io, path, .{});
-    defer file.close(init.io);
-    // The capture owner writes these bounded identity fields before any
-    // variable content. JSON escaping can expand each input byte sixfold.
-    const header_bytes = 6 * (protocol.max_store_bytes + protocol.max_key_bytes + protocol.max_session_bytes) + 256;
-    var buffer: [header_bytes]u8 = undefined;
-    const count = try file.readPositionalAll(init.io, &buffer, 0);
-    const prefix = buffer[0..count];
-    const kind_marker = std.mem.indexOf(u8, prefix, ",\"configuration\"") orelse
-        std.mem.indexOf(u8, prefix, ",\"text\"") orelse
-        std.mem.indexOf(u8, prefix, ",\"decision\"") orelse
-        return error.InvalidRequestRecord;
-    var head: [header_bytes]u8 = undefined;
-    if (kind_marker + 1 > head.len) return error.InvalidRequestRecord;
-    @memcpy(head[0..kind_marker], prefix[0..kind_marker]);
-    head[kind_marker] = '}';
-    const Fields = struct {
-        version: []const u8,
-        kind: []const u8,
-        store: []const u8,
-        key: []const u8,
-        session: []const u8,
-    };
-    const parsed = try std.json.parseFromSlice(Fields, std.heap.c_allocator, head[0 .. kind_marker + 1], .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    if (!std.mem.eql(u8, parsed.value.version, "1") or !std.mem.eql(u8, parsed.value.key, handle)) return error.InvalidRequestRecord;
-    try value.store.set(parsed.value.store);
-    try value.key.set(parsed.value.key);
-    try value.session.set(parsed.value.session);
-    try value.kind.set(parsed.value.kind);
+    const value = try client.readCapturedIdentity(init.io, path, handle);
     if (!value.kind.eql("configure") and !value.kind.eql("message") and
         !value.kind.eql("permission_decision")) return error.InvalidRequestRecord;
     return value;
@@ -1018,8 +1070,10 @@ fn recover(init: std.process.Init, args: []const []const u8) !void {
     if (args.len != 1 and !json) return usage();
     const saved = try savedRequest(init, args[0]);
     const kind = if (saved.kind.eql("permission_decision")) "permission-decision" else saved.kind.slice();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try requestPath(init, args[0], &path_buffer);
     var buffer: client.ReplyBuffer = .{};
-    const reply = try client.retry(init.io, saved.store.slice(), saved.path.slice(), kind, &buffer);
+    const reply = try client.retry(init.io, saved.store.slice(), path, kind, &buffer);
     if (json) try writeCommandReply(init.io, reply) else try writeAdmission(init.io, reply, null);
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
@@ -1096,9 +1150,10 @@ const Work = struct {
     status: protocol.Bounded(32) = .{},
     turn: protocol.Bounded(32) = .{},
     action: protocol.Bounded(32) = .{},
+    action_count: usize = 0,
     workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
     permission_mode: protocol.Bounded(16) = .{},
-    selected_message: protocol.Bounded(protocol.max_key_bytes) = .{},
+    selected_message: ?protocol.Bounded(protocol.max_key_bytes) = null,
     recent: [10]Recent = [_]Recent{.{}} ** 10,
     recent_count: usize = 0,
 };
@@ -1164,7 +1219,11 @@ fn readWork(reader: *std.json.Reader) !Work {
         } else if (std.mem.eql(u8, field, "selected_message")) {
             const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, protocol.max_key_bytes);
             defer freeToken(value);
-            if (value != .null) try work.selected_message.set(try tokenString(value));
+            if (value != .null) {
+                var selected: protocol.Bounded(protocol.max_key_bytes) = .{};
+                try selected.set(try tokenString(value));
+                work.selected_message = selected;
+            }
         } else if (std.mem.eql(u8, field, "recent_messages")) {
             if ((try reader.next()) != .array_begin) return error.InvalidObservation;
             while (true) {
@@ -1172,6 +1231,7 @@ fn readWork(reader: *std.json.Reader) !Work {
                 if (item == .array_end) break;
                 if (item != .object_begin or work.recent_count == work.recent.len) return error.InvalidObservation;
                 const recent = &work.recent[work.recent_count];
+                var has_message = false;
                 while (true) {
                     const inner = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 64);
                     defer freeToken(inner);
@@ -1180,10 +1240,13 @@ fn readWork(reader: *std.json.Reader) !Work {
                     if (std.mem.eql(u8, key, "message") or std.mem.eql(u8, key, "outcome")) {
                         const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, protocol.max_key_bytes);
                         defer freeToken(value);
-                        if (std.mem.eql(u8, key, "message")) try recent.key.set(try tokenString(value)) else try recent.outcome.set(try tokenString(value));
+                        if (std.mem.eql(u8, key, "message")) {
+                            try recent.key.set(try tokenString(value));
+                            has_message = true;
+                        } else try recent.outcome.set(try tokenString(value));
                     } else try reader.skipValue();
                 }
-                if (recent.key.len == 0 or recent.outcome.len == 0) return error.InvalidObservation;
+                if (!has_message or recent.outcome.len == 0) return error.InvalidObservation;
                 work.recent_count += 1;
             }
         } else if (std.mem.eql(u8, field, "work")) {
@@ -1213,6 +1276,7 @@ fn readWork(reader: *std.json.Reader) !Work {
                         const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 32);
                         defer freeToken(value);
                         if (work.action.len == 0) try work.action.set(try tokenString(value));
+                        work.action_count += 1;
                     } else try reader.skipValue();
                 }
             }
@@ -1222,9 +1286,16 @@ fn readWork(reader: *std.json.Reader) !Work {
     return work;
 }
 
-fn inspectWork(init: std.process.Init, store: []const u8, session_ref: []const u8) !Work {
+const SessionObservation = struct {
+    work: Work,
+    // The complete Current capture remains owned until all its permissions
+    // have been displayed; no per-Action resident list is needed.
+    file: std.Io.File,
+};
+
+fn inspectWork(init: std.process.Init, store: []const u8, session_ref: []const u8) !SessionObservation {
     const file = try renderScratch(init);
-    defer file.close(init.io);
+    errdefer file.close(init.io);
     var response: client.ReplyBuffer = .{};
     const reply = try client.inspectSession(init.io, store, session_ref, .current, file, &response);
     switch (reply) {
@@ -1235,7 +1306,54 @@ fn inspectWork(init: std.process.Init, store: []const u8, session_ref: []const u
     var file_reader = file.reader(init.io, &input_buffer);
     var json_reader = std.json.Reader.init(std.heap.c_allocator, &file_reader.interface);
     defer json_reader.deinit();
-    return readWork(&json_reader);
+    return .{ .work = try readWork(&json_reader), .file = file };
+}
+
+fn showActionable(io: std.Io, file: std.Io.File, json: bool) !void {
+    var input_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var file_reader = file.reader(io, &input_buffer);
+    var reader = std.json.Reader.init(std.heap.c_allocator, &file_reader.interface);
+    defer reader.deinit();
+    if ((try reader.next()) != .object_begin) return error.InvalidObservation;
+    while (true) {
+        const name = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 64);
+        defer freeToken(name);
+        if (name == .object_end) return error.InvalidObservation;
+        if (!std.mem.eql(u8, try tokenString(name), "actionable_permissions")) {
+            try reader.skipValue();
+            continue;
+        }
+        if ((try reader.next()) != .array_begin) return error.InvalidObservation;
+        if (json) try std.Io.File.stdout().writeStreamingAll(io, "{\"event\":\"actionable_permissions\",\"actions\":[");
+        var first = true;
+        while (true) {
+            const item = try reader.next();
+            if (item == .array_end) break;
+            if (item != .object_begin) return error.InvalidObservation;
+            var action: protocol.Bounded(32) = .{};
+            while (true) {
+                const field = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 64);
+                defer freeToken(field);
+                if (field == .object_end) break;
+                if (std.mem.eql(u8, try tokenString(field), "action")) {
+                    const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 32);
+                    defer freeToken(value);
+                    try action.set(try tokenString(value));
+                } else try reader.skipValue();
+            }
+            if (action.len == 0) return error.InvalidObservation;
+            _ = std.fmt.parseInt(u64, action.slice(), 10) catch return error.InvalidObservation;
+            if (json) {
+                if (!first) try std.Io.File.stdout().writeStreamingAll(io, ",");
+                try std.Io.File.stdout().writeStreamingAll(io, "\"");
+                try std.Io.File.stdout().writeStreamingAll(io, action.slice());
+                try std.Io.File.stdout().writeStreamingAll(io, "\"");
+            } else try writeSafeField(io, "Action requiring attention: ", action.slice());
+            first = false;
+        }
+        if (json) try std.Io.File.stdout().writeStreamingAll(io, "]}\n");
+        return;
+    }
 }
 
 fn writeFollowOutcome(init: std.process.Init, observation: std.json.Value, json: bool) !void {
@@ -1279,43 +1397,23 @@ fn followMessage(init: std.process.Init, saved: *const SavedRequest, json: bool,
             try writeFollowOutcome(init, observation, json);
             return null;
         }
-        const processing = observation.object.get("processing");
-        const queue = try objectField(observation, "queue");
-        if (processing != null or std.mem.eql(u8, try stringField(queue, "status"), "queued")) {
-            // Test-only pause after observing the key, before reading Session Current.
-            try testGate(init.io, "RUI_TEST_FOLLOW_GATE");
-            const work = try inspectWork(init, saved.store.slice(), saved.session.slice());
-            if (work.action.len != 0 and work.turn.len != 0) {
-                var fresh_response: client.ReplyBuffer = .{};
-                const fresh_reply = try client.observeCommand(init.io, saved.store.slice(), saved.key.slice(), &fresh_response);
-                if (fresh_reply.status != 200) return error.ObservationFailed;
-                var fresh_parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, fresh_reply.body, .{});
-                defer fresh_parsed.deinit();
-                const fresh = try objectField(fresh_parsed.value, "observation");
-                const fresh_status = try stringField(fresh, "status");
-                if (std.mem.eql(u8, fresh_status, "absent")) return error.RequestNotAdmitted;
-                if (!std.mem.eql(u8, try stringField(fresh, "kind"), "message") or
-                    !std.mem.eql(u8, try stringField(fresh, "target"), saved.session.slice())) return error.RequestBindingMismatch;
-                if (std.mem.eql(u8, fresh_status, "rejected") or fresh.object.contains("result")) {
-                    try writeFollowOutcome(init, fresh, json);
-                    return null;
-                }
-                const fresh_processing = fresh.object.get("processing");
-                const fresh_queue = try objectField(fresh, "queue");
-                if (!terminal_only and (!session_wait or work.status.eql("waiting_for_permission")) and
-                    (std.mem.eql(u8, try stringField(fresh_queue, "status"), "queued") or
-                        (fresh_processing != null and std.mem.eql(u8, work.turn.slice(), try stringField(fresh_processing.?, "turn")))))
-                {
-                    if (json) {
-                        var line: [160]u8 = undefined;
-                        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{{\"return\":\"attention\",\"status\":\"{s}\",\"action\":\"{s}\"}}\n", .{ work.status.slice(), work.action.slice() }));
-                    } else {
-                        var line: [160]u8 = undefined;
-                        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "return: attention\nstatus: {s}\naction: {s}\n", .{ work.status.slice(), work.action.slice() }));
-                    }
-                    return work;
-                }
+        const progress = try objectField(observation, "progress");
+        const state = try stringField(progress, "status");
+        const action = try objectField(progress, "action");
+        // Test-only pause after capturing the Message's coherent observation.
+        try testGate(init.io, "RUI_TEST_FOLLOW_GATE");
+        if (!terminal_only and action == .string and (!session_wait or std.mem.eql(u8, state, "waiting_for_permission"))) {
+            var work: Work = .{};
+            try work.status.set(state);
+            try work.action.set(action.string);
+            if (json) {
+                var line: [160]u8 = undefined;
+                try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{{\"return\":\"attention\",\"status\":\"{s}\",\"action\":\"{s}\"}}\n", .{ work.status.slice(), work.action.slice() }));
+            } else {
+                var line: [160]u8 = undefined;
+                try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "return: attention\nstatus: {s}\naction: {s}\n", .{ work.status.slice(), work.action.slice() }));
             }
+            return work;
         }
         try std.Io.sleep(init.io, .fromMilliseconds(100), .awake);
     }
@@ -1347,7 +1445,8 @@ fn inspectAction(init: std.process.Init, args: []const []const u8) !void {
         try writeJsonFileAt(io, file, call.answer.bytes, arguments.answer.bytes, false);
         return std.Io.File.stdout().writeStreamingAll(io, "\"}\n");
     }
-    // Provider-controlled fields must not rewrite the approval display.
+    // Quote provider-controlled fields so control and bidi bytes cannot alter the
+    // proposal visible next to the human approval prompt.
     try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "Action {d}\ncall ID: \"", .{target}));
     try writeJsonFileAt(io, file, 0, call.answer.bytes, true);
     try std.Io.File.stdout().writeStreamingAll(io, "\"\nBash arguments: \"");
