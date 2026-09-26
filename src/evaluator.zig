@@ -178,7 +178,7 @@ pub const Owner = struct {
             scratch = try std.Io.Dir.cwd().openDir(self.io, self.scratch_path, .{});
             var random: u64 = undefined;
             self.io.random(@ptrCast(&random));
-            const name = try std.fmt.bufPrint(&name_buffer, "evaluator-{x}.tmp", .{random});
+            const name = try named_scratch.EvaluatorName.format(&name_buffer, random, .output);
             const output = try scratch.?.createFile(self.io, name, .{
                 .read = true,
                 .exclusive = true,
@@ -194,7 +194,7 @@ pub const Owner = struct {
                 },
             };
             var index_name_buffer: [64]u8 = undefined;
-            const index_name = try std.fmt.bufPrint(&index_name_buffer, "evaluator-{x}.index", .{random});
+            const index_name = try named_scratch.EvaluatorName.format(&index_name_buffer, random, .index);
             const index = try scratch.?.createFile(self.io, index_name, .{
                 .read = true,
                 .exclusive = true,
