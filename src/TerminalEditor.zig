@@ -112,8 +112,7 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
                 prompt.len + editor.length < initial_size.col and
                 current_size.col == initial_size.col and current_size.row == initial_size.row)
             {
-                editor.length -= 1;
-                editor.cursor -= 1;
+                editor.deleteTail(1);
                 try output.writeStreamingAll(io, "\x08\x1b[0K");
                 continue;
             }
@@ -437,6 +436,11 @@ fn deletePrevious(self: *Editor) Event {
 // prefix. Count clusters, then find the retained boundary in one forward scan.
 fn deleteTail(self: *Editor, count: usize) void {
     std.debug.assert(self.cursor == self.length and count != 0);
+    if (self.plain_ascii) {
+        self.length -|= count;
+        self.cursor = self.length;
+        return;
+    }
     var offset: usize = 0;
     var prior: ?c_int = null;
     var state: c_int = 0;
@@ -615,7 +619,11 @@ test "grapheme deletion, distinct word bindings and multiline paste" {
 
 test "batched tail deletion retains exact Unicode clusters and following input" {
     const cases = .{
+        .{ "abc", 1, "ab" },
+        .{ "abc", 3, "" },
+        .{ "abc", 5, "" },
         .{ "first second", 6, "first " },
+        .{ "éa", 2, "" },
         .{ "A中e\u{301}🧑‍🌾", 1, "A中e\u{301}" },
         .{ "A中e\u{301}🧑‍🌾", 2, "A中" },
         .{ "🇺🇸🇨🇦", 1, "🇺🇸" },
