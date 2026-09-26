@@ -83,6 +83,33 @@ pub fn build(b: *std.Build) void {
     const evaluator_step = b.step("workflow-check", "Run the isolated QuickJS evaluator boundary checks");
     evaluator_step.dependOn(&evaluator_integration.step);
 
+    const evaluator_host = b.addExecutable(.{
+        .name = "rui-evaluator-host-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/evaluator_host.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    evaluator_host.root_module.link_libc = true;
+    const evaluator_module = b.createModule(.{
+        .root_source_file = b.path("src/evaluator.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    evaluator_module.addIncludePath(b.path("src"));
+    evaluator_host.root_module.addImport("evaluator", evaluator_module);
+    evaluator_host.root_module.addIncludePath(b.path("src"));
+    evaluator_host.root_module.addCSourceFile(.{
+        .file = b.path("src/evaluator_parent.c"),
+        .flags = &.{"-std=gnu11"},
+    });
+    const run_evaluator_host = b.addRunArtifact(evaluator_host);
+    run_evaluator_host.addArtifactArg(evaluator);
+    run_evaluator_host.step.dependOn(&evaluator_integration.step);
+    const evaluator_host_step = b.step("evaluator-host-integration", "Run the private evaluator Owner integration");
+    evaluator_host_step.dependOn(&run_evaluator_host.step);
+
     const test_filter = b.option([]const u8, "test-filter", "Run tests whose names contain this text");
     const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
     const tests = b.addTest(.{
@@ -287,7 +314,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addArtifactArg(tests);
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.step.dependOn(&release.step);
-    fast_integrations.step.dependOn(&evaluator_integration.step);
+    fast_integrations.step.dependOn(&run_evaluator_host.step);
     check_step.dependOn(&fast_integrations.step);
 
     const full_check_step = b.step(
@@ -305,8 +332,11 @@ pub fn build(b: *std.Build) void {
     full_evaluator.addArtifactArg(evaluator_probe);
     full_evaluator.step.dependOn(&run_full_tests.step);
     full_evaluator.step.dependOn(&string_sanitizer.step);
+    const full_evaluator_host = b.addRunArtifact(evaluator_host);
+    full_evaluator_host.addArtifactArg(evaluator);
+    full_evaluator_host.step.dependOn(&full_evaluator.step);
     process_integrations.step.dependOn(&format.step);
-    process_integrations.step.dependOn(&full_evaluator.step);
+    process_integrations.step.dependOn(&full_evaluator_host.step);
     process_integrations.step.dependOn(&release.step);
     full_check_step.dependOn(&process_integrations.step);
 

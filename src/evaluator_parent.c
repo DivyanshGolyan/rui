@@ -109,10 +109,12 @@ int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
                  char *diagnostic, size_t diagnostic_capacity,
                  size_t *diagnostic_length) {
     if (diagnostic_length) *diagnostic_length = 0;
-    struct stat output_stat;
-    if (fstat(output_fd, &output_stat) || !S_ISREG(output_stat.st_mode) ||
-        ftruncate(output_fd, 0) || lseek(output_fd, 0, SEEK_SET) < 0)
-        return -1;
+    if (!compile_only) {
+        struct stat output_stat;
+        if (fstat(output_fd, &output_stat) || !S_ISREG(output_stat.st_mode) ||
+            ftruncate(output_fd, 0) || lseek(output_fd, 0, SEEK_SET) < 0)
+            return -1;
+    }
     int input_flags = fcntl(source_fd, F_GETFL);
     struct stat source_stat;
     if (input_flags < 0 || (input_flags & O_ACCMODE) != O_RDONLY ||
