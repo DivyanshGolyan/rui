@@ -203,6 +203,9 @@ def main():
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             assert "return: idle" in terminal_step(master, "/wait")
             assert "Usage: /configure" in terminal_step(master, "/configure --session human/other")
+            assert "Use a file for" in terminal_step(master, "/configure --instructions -")
+            assert "Use a file for" in terminal_step(master, "/configure --output-schema -")
+            assert f"Session: {session}" in terminal_step(master, "/status")
             configured = terminal_step(master, "/configure --model model-a")
             assert "admitted: accepted" in configured, configured
             assert f"Session: {session}" in terminal_step(master, "/status")
@@ -467,6 +470,63 @@ def main():
             assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
             assert counter.read_text() == "xx", counter.read_text()
+        finally:
+            if entered.poll() is None:
+                entered.kill()
+                entered.wait(timeout=5)
+            os.close(master)
+        unsafe_session = "human/unsafe-key"
+        unsafe_key = "message\n\x1b[2J\u202e"
+        unsafe_release = threading.Event()
+        endpoint.responses.append((fixture.sse_answer("unsafe-answer", "unsafe-reason",
+            "unsafe-message", "safe result")[0], unsafe_release))
+        run(home, "configure", "--store", store, "--session", unsafe_session,
+            "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+        unsafe_text = state / "unsafe-input"
+        unsafe_text.write_text("report status")
+        run(home, "message", "--store", store, "--session", unsafe_session,
+            "--record", state / "unsafe-record.json", "--key", unsafe_key, "--text", unsafe_text)
+        fixture.wait_for(lambda: fixture.command("inspect-session", "--store", store,
+            "--session", unsafe_session)["selected_message"] == unsafe_key, "unsafe key selected")
+        waiter = subprocess.Popen([str(fixture.RUI), "wait-session", "--store", str(store),
+            "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            assert waiter.stdout.readline() == "selected message: message\\n\\u001b[2J\\u202e\n"
+            master, slave = pty.openpty()
+            entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+                "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
+                stdin=slave, stdout=slave, stderr=slave)
+            os.close(slave)
+            try:
+                read_terminal(master, "rui> ")
+                status = terminal_step(master, "/status")
+                assert "Current message: message\\n\\u001b[2J\\u202e" in status, status
+                assert "\x1b[2J" not in status and "\u202e" not in status, status
+                assert "Detached." in terminal_step(master, "/exit", "Detached.")
+                assert entered.wait(timeout=5) == 0
+            finally:
+                if entered.poll() is None:
+                    entered.kill()
+                    entered.wait(timeout=5)
+                os.close(master)
+        finally:
+            unsafe_release.set()
+            waiter.communicate(timeout=10)
+        fixture.wait_for(lambda: fixture.completed_observation(store, unsafe_key), "unsafe key result")
+        assert fixture.command("inspect-session", "--store", store,
+            "--session", unsafe_session)["recent_messages"][0]["message"] == unsafe_key
+        master, slave = pty.openpty()
+        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+            "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            greeting = read_terminal(master, "rui> ")
+            assert "message\\n\\u001b[2J\\u202e: completed" in greeting, greeting
+            assert "\x1b[2J" not in greeting and "\u202e" not in greeting, greeting
+            assert "Detached." in terminal_step(master, "/exit", "Detached.")
+            assert entered.wait(timeout=5) == 0
         finally:
             if entered.poll() is None:
                 entered.kill()

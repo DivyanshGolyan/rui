@@ -373,8 +373,7 @@ fn waitForSession(init: std.process.Init, store: []const u8, session_ref: []cons
         try std.Io.File.stdout().writeStreamingAll(init.io, selection);
         try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
     } else {
-        var line: [protocol.max_key_bytes + 32]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "selected message: {s}\n", .{work.selected_message.slice()}));
+        try writeSafeField(init.io, "selected message: ", work.selected_message.slice());
     }
     const saved = try selectedRequest(store, session_ref, work.selected_message.slice());
     var attention = try followMessage(init, &saved, json, true, terminal_only);
@@ -386,18 +385,37 @@ fn waitForSession(init: std.process.Init, store: []const u8, session_ref: []cons
 fn showSessionStatus(init: std.process.Init, store: []const u8, session_ref: []const u8) !void {
     const work = try inspectWork(init, store, session_ref);
     if (work.workspace.len == 0) return error.SessionNotConfigured;
-    var line: [protocol.max_store_bytes + protocol.max_session_bytes + protocol.max_workspace_bytes + 160]u8 = undefined;
-    try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "Session: {s}\nStore: {s}\nWorkspace (Bash cwd): {s}\nPermission: {s}\nWork: {s}\n", .{ session_ref, store, work.workspace.slice(), work.permission_mode.slice(), work.status.slice() }));
+    try writeSafeField(init.io, "Session: ", session_ref);
+    try writeSafeField(init.io, "Store: ", store);
+    try writeSafeField(init.io, "Workspace (Bash cwd): ", work.workspace.slice());
+    try writeSafeField(init.io, "Permission: ", work.permission_mode.slice());
+    try writeSafeField(init.io, "Work: ", work.status.slice());
     if (work.selected_message.len != 0)
-        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "Current message: {s}\n", .{work.selected_message.slice()}));
+        try writeSafeField(init.io, "Current message: ", work.selected_message.slice());
     if (work.action.len != 0)
-        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "Action requiring attention: {s}\n", .{work.action.slice()}));
+        try writeSafeField(init.io, "Action requiring attention: ", work.action.slice());
     if (work.recent_count != 0) {
         try std.Io.File.stdout().writeStreamingAll(init.io, "Recent messages (use /result KEY for an answer):\n");
         for (work.recent[0..work.recent_count]) |recent| {
-            try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "  {s}: {s}\n", .{ recent.key.slice(), recent.outcome.slice() }));
+            try std.Io.File.stdout().writeStreamingAll(init.io, "  ");
+            try writeSafeText(init.io, recent.key.slice());
+            try std.Io.File.stdout().writeStreamingAll(init.io, ": ");
+            try writeSafeField(init.io, "", recent.outcome.slice());
         }
     }
+}
+
+fn writeSafeField(io: std.Io, label: []const u8, value: []const u8) !void {
+    try std.Io.File.stdout().writeStreamingAll(io, label);
+    try writeSafeText(io, value);
+    try std.Io.File.stdout().writeStreamingAll(io, "\n");
+}
+
+fn writeSafeText(io: std.Io, value: []const u8) !void {
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
+    try std.json.Stringify.encodeJsonStringChars(value, .{ .escape_unicode = true }, &writer.interface);
+    try writer.flush();
 }
 
 fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []const u8, text: []const u8) !?Work {
@@ -499,6 +517,12 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
                 config_args[count] = flag;
                 count += 1;
                 if (value) |setting| {
+                    if (std.mem.eql(u8, setting, "-") and
+                        (std.mem.eql(u8, flag, "--instructions") or std.mem.eql(u8, flag, "--output-schema")))
+                    {
+                        try std.Io.File.stdout().writeStreamingAll(init.io, "Use a file for /configure content; terminal stdin belongs to this Session.\n");
+                        break :blk null;
+                    }
                     config_args[count] = setting;
                     count += 1;
                 }
