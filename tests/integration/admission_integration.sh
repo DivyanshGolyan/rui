@@ -385,8 +385,8 @@ fi
 created=$($rui configure --store "$store" --record "$records/rejected-create.json" --key rejected-create --session direct/rejected --workspace "$root" --provider codex --model model-a)
 contains "$created" '"status":"accepted"'
 defaults=$($rui inspect-session --store "$store" --session direct/rejected)
-contains "$defaults" '"tools":["bash","edit"]'
-contains "$defaults" '"permission_mode":"ask"'
+contains "$defaults" '"tools":["bash"]'
+contains "$defaults" '"permission_mode":"bypass"'
 contains "$defaults" '"instructions":{"bytes":"0"'
 contains "$defaults" '"output_schema":null'
 rejected=$($rui retry --store "$store" --record "$records/incomplete.json" --kind configure)

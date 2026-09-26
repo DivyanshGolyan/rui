@@ -478,6 +478,10 @@ def configure(state, store, key, session, model, schema=None, instructions=None)
         "codex",
         "--model",
         model,
+        "--tools",
+        "bash,edit",
+        "--permission-mode",
+        "ask",
     ]
     if schema is not None:
         schema_path = state / f"{key}-schema.json"

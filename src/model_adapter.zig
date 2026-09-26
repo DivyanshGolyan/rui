@@ -1141,6 +1141,12 @@ fn establishComposedHistory(setup: *PreparationTestSetup, session: []const u8) !
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
+        command.configuration.tools.state = .value;
+        command.configuration.tools.count = 2;
+        command.configuration.tools.values[0] = .bash;
+        command.configuration.tools.values[1] = .edit;
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("ask");
         command.configuration.output_schema = .{
             .state = .value,
             .file = file,
@@ -1360,6 +1366,16 @@ test "request preparation freezes settings at admission" {
     try setup.init();
     defer setup.close();
     try setup.configure("prep-settings-config", "direct/prep-settings");
+    {
+        var update: protocol.ConfigureCommand = .{};
+        try update.key.set("prep-settings-catalog");
+        try update.session.set("direct/prep-settings");
+        update.configuration.tools.state = .value;
+        update.configuration.tools.count = 2;
+        update.configuration.tools.values[0] = .bash;
+        update.configuration.tools.values[1] = .edit;
+        try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+    }
     try setup.submit("prep-settings-file", "prep-settings-message", "direct/prep-settings", "hi");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
