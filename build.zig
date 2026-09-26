@@ -43,6 +43,29 @@ pub fn build(b: *std.Build) void {
         });
     }
     evaluator.root_module.linkSystemLibrary("m", .{});
+
+    const evaluator_driver = b.addExecutable(.{
+        .name = "rui-evaluator-boundary-test",
+        .root_module = b.createModule(.{ .target = target, .optimize = .ReleaseSafe }),
+    });
+    evaluator_driver.root_module.link_libc = true;
+    evaluator_driver.root_module.addCSourceFile(.{
+        .file = b.path("src/evaluator_parent.c"),
+        .flags = &.{"-std=gnu11"},
+    });
+    evaluator_driver.root_module.addCSourceFile(.{
+        .file = b.path("tests/integration/evaluator_driver.c"),
+        .flags = &.{"-std=gnu11"},
+    });
+    const evaluator_probe = b.addExecutable(.{
+        .name = "rui-evaluator-containment-probe",
+        .root_module = b.createModule(.{ .target = target, .optimize = .ReleaseSafe }),
+    });
+    evaluator_probe.root_module.link_libc = true;
+    evaluator_probe.root_module.addCSourceFile(.{
+        .file = b.path("tests/integration/evaluator_containment_probe.c"),
+        .flags = &.{"-std=gnu11"},
+    });
     const string_sanitizer = b.addSystemCommand(&.{"sh"});
     string_sanitizer.addFileArg(b.path("tests/integration/evaluator_string_sanitizer.sh"));
     string_sanitizer.addFileArg(quickjs_source);
@@ -55,7 +78,9 @@ pub fn build(b: *std.Build) void {
     const evaluator_integration = b.addSystemCommand(&.{"python3"});
     evaluator_integration.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     evaluator_integration.addArtifactArg(evaluator);
-    const evaluator_step = b.step("workflow-check", "Run the isolated QuickJS module worker checks");
+    evaluator_integration.addArtifactArg(evaluator_driver);
+    evaluator_integration.addArtifactArg(evaluator_probe);
+    const evaluator_step = b.step("workflow-check", "Run the isolated QuickJS evaluator boundary checks");
     evaluator_step.dependOn(&evaluator_integration.step);
 
     const test_filter = b.option([]const u8, "test-filter", "Run tests whose names contain this text");
@@ -276,6 +301,8 @@ pub fn build(b: *std.Build) void {
     const full_evaluator = b.addSystemCommand(&.{"python3"});
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     full_evaluator.addArtifactArg(evaluator);
+    full_evaluator.addArtifactArg(evaluator_driver);
+    full_evaluator.addArtifactArg(evaluator_probe);
     full_evaluator.step.dependOn(&run_full_tests.step);
     full_evaluator.step.dependOn(&string_sanitizer.step);
     process_integrations.step.dependOn(&format.step);
