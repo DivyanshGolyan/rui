@@ -70,6 +70,99 @@ pub const PermissionDecisionInput = struct {
 
 pub const ReplyBuffer = protocol.ResponseBuffer;
 
+pub const HostStatus = union(enum) {
+    ready: struct {
+        store: protocol.Bounded(protocol.max_store_bytes),
+        instance: protocol.InstanceId,
+        active_capacity: usize,
+        capabilities: @FieldType(protocol.HostInfo, "capabilities"),
+    },
+    unavailable,
+    owned_unavailable,
+    incompatible,
+    access_failure,
+};
+
+/// Observation only: never creates a Store, acquires ownership or reads SQLite.
+pub fn hostStatus(io: std.Io, store_path: []const u8) HostStatus {
+    const paths = platform.resolveClientPaths(io, store_path) catch |err| return switch (err) {
+        error.FileNotFound => .unavailable,
+        else => .access_failure,
+    };
+    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch return .access_failure;
+    defer store_dir.close(io);
+    const lock_file = store_dir.openFile(io, "host.lock", .{
+        .lock = .shared,
+        .lock_nonblocking = true,
+    }) catch |err| return switch (err) {
+        error.FileNotFound => .unavailable,
+        error.WouldBlock => readHostInfo(io, &paths),
+        else => .access_failure,
+    };
+    lock_file.close(io);
+    return .unavailable;
+}
+
+fn readHostInfo(io: std.Io, paths: *const platform.Paths) HostStatus {
+    var body: protocol.RequestBuffer = .{};
+    body.append("{\"version\":\"1\",\"kind\":\"host_info\",\"store\":") catch unreachable;
+    body.appendJsonString(paths.store.slice()) catch unreachable;
+    body.append("}") catch unreachable;
+    var reply_buffer: ReplyBuffer = .{};
+    const reply = sendBytes(io, paths, "/v1/host-info", body.slice(), null, &reply_buffer) catch |err| return switch (err) {
+        error.AccessDenied, error.PermissionDenied => .access_failure,
+        error.WrongWireVersion => .incompatible,
+        else => .owned_unavailable,
+    };
+    if (reply.status == 503) return .owned_unavailable;
+    if (reply.status != 200) return .incompatible;
+    return parseHostInfo(reply.body, paths.store.slice()) catch .incompatible;
+}
+
+fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
+    if (body.len > protocol.max_host_info_response_bytes) return error.InvalidHostInfo;
+    var parse_storage: [protocol.max_host_info_response_bytes * 2]u8 = undefined;
+    var arena = std.heap.FixedBufferAllocator.init(&parse_storage);
+    const info = try std.json.parseFromSliceLeaky(protocol.HostInfo, arena.allocator(), body, .{
+        .ignore_unknown_fields = false,
+        .allocate = .alloc_if_needed,
+    });
+    if (!std.mem.eql(u8, info.version, protocol.wire_version) or
+        !std.mem.eql(u8, info.type, "host_info") or
+        !std.mem.eql(u8, info.store, store) or
+        info.active_capacity.len == 0 or info.active_capacity.len > 20)
+        return error.InvalidHostInfo;
+    const instance = protocol.parseInstanceId(info.instance) catch return error.InvalidHostInfo;
+    const capacity = try std.fmt.parseInt(usize, info.active_capacity, 10);
+    var identity: protocol.Bounded(protocol.max_store_bytes) = .{};
+    try identity.set(info.store);
+    return .{ .ready = .{
+        .store = identity,
+        .instance = instance,
+        .active_capacity = capacity,
+        .capabilities = info.capabilities,
+    } };
+}
+
+test "Host information is bounded and rejects ambiguous identities and capacity" {
+    const golden = "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}";
+    const result = try parseHostInfo(golden, "/one");
+    try std.testing.expect(result.ready.store.eql("/one"));
+    try std.testing.expectEqual(@as(usize, 17), result.ready.active_capacity);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, &result.ready.instance);
+    try std.testing.expect(result.ready.capabilities.bash);
+    try std.testing.expect(!result.ready.capabilities.model);
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(golden, "/other"));
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
+        "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
+        "/one",
+    ));
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
+        "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
+        "/one",
+    ));
+}
+
 pub const CommandReply = struct {
     status: u16,
     // Borrowed from the caller's ReplyBuffer until that buffer is reused.
