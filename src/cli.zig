@@ -5,6 +5,7 @@ const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
 const model_adapter = @import("model_adapter.zig");
 const platform = @import("platform.zig");
+const preferences = @import("preferences.zig");
 const provider = @import("provider.zig");
 const protocol = @import("protocol.zig");
 const server = @import("server.zig");
@@ -25,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
         return serve(init, args[2..]);
     }
     if (std.mem.eql(u8, command, "login")) return login(init, args[2..]);
-    if (std.mem.eql(u8, command, "session")) try enterSession(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init.io, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init.io, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init.io, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init.io, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init.io, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, args[2..], false) else return usage();
+    if (std.mem.eql(u8, command, "setup")) try setup(init, args[2..]) else if (std.mem.eql(u8, command, "session")) try enterSession(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init.io, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init.io, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init.io, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init.io, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init.io, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, args[2..], false) else return usage();
     try postCommandHold(init);
 }
 
@@ -90,6 +91,41 @@ fn credentialPath(init: std.process.Init, buffer: []u8, create: bool) ![]const u
         opened.close(init.io);
     }
     return std.fmt.bufPrint(buffer, "{s}/.config/rui/codex.json", .{home});
+}
+
+fn setup(init: std.process.Init, args: []const []const u8) !void {
+    const home = init.environ_map.get("HOME") orelse {
+        std.debug.print("rui: setup needs an absolute HOME; no preferences saved.\n", .{});
+        return error.HomeUnavailable;
+    };
+    var store: ?[]const u8 = null;
+    var selected_provider: ?[]const u8 = null;
+    var model: ?[]const u8 = null;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const flag = args[index];
+        if (std.mem.eql(u8, flag, "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, flag, "--provider")) selected_provider = try takeValue(args, &index) else if (std.mem.eql(u8, flag, "--model")) model = try takeValue(args, &index) else return usage();
+    }
+    const changed = store != null or selected_provider != null or model != null;
+    const values = (if (changed) preferences.update(home, store, selected_provider, model) else preferences.load(home)) catch |err| {
+        if (err == error.PreferenceDirectorySyncFailed) {
+            std.debug.print("rui: setup save durability unconfirmed; inspect HOME/.config/rui/preferences before another update. No Session changed.\n", .{});
+        } else if (err == error.UnsupportedPreferenceProvider or err == error.PreferenceProviderRequired) {
+            std.debug.print("rui: setup needs --provider codex with a model; no preferences saved.\n", .{});
+        } else if (err == error.InvalidPreferenceModel) {
+            std.debug.print("rui: setup model must be 1–256 printable non-space ASCII bytes; no preferences saved.\n", .{});
+        } else if (err == error.InvalidPreferenceStore or err == error.FileNotFound) {
+            std.debug.print("rui: setup Store must be an existing private, canonicalizable absolute directory; no alternate Store selected.\n", .{});
+        } else std.debug.print("rui: setup {s}: {s}; inspect HOME/.config/rui/preferences and its private directory before retrying. No alternate Store selected.\n", .{ if (changed) "save failed" else "read failed", @errorName(err) });
+        return err;
+    };
+    var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const fallback = try preferences.defaultStore(home, &fallback_buffer);
+    // Preferences are local hints, not Session settings or Host facts.
+    try std.Io.File.stdout().writeStreamingAll(init.io, if (changed) "Saved defaults for future Sessions. Active Session unchanged.\n" else "Defaults (read only):\n");
+    var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
+    const report = try std.fmt.bufPrint(&output, "Store: {s} ({s})\nProvider: {s}\nModel: {s}\n", .{ if (values.store.len != 0) values.store.slice() else fallback, if (values.store.len != 0) "saved" else "HOME fallback", if (values.provider.len != 0) values.provider.slice() else "not selected", if (values.model.len != 0) values.model.slice() else "not selected" });
+    try std.Io.File.stdout().writeStreamingAll(init.io, report);
 }
 
 fn login(init: std.process.Init, args: []const []const u8) !void {
@@ -534,12 +570,28 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
     while (index < args.len) : (index += 1) {
         if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session")) session_ref = try takeValue(args, &index) else return error.UnknownArgument;
     }
-    const destination = store orelse return usage();
     const reference = session_ref orelse return usage();
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
         std.debug.print("rui session needs terminal input and output; use one-shot commands for scripts\n", .{});
         return error.InteractiveTerminalRequired;
     }
+    var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var saved_defaults: preferences.Values = .{};
+    const chosen = if (store) |explicit| explicit else blk: {
+        const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+        saved_defaults = preferences.load(home) catch |err| {
+            std.debug.print("rui: cannot read private setup defaults ({s}); use rui setup to inspect or repair them. No Store selected.\n", .{@errorName(err)});
+            return err;
+        };
+        break :blk if (saved_defaults.store.len != 0) saved_defaults.store.slice() else try preferences.defaultStore(home, &fallback_buffer);
+    };
+    // Resolve aliases and enforce the Store's existing private/canonical selector
+    // before any Session request. Explicit --store does not read preferences.
+    const paths = platform.resolveClientPaths(init.io, chosen) catch |err| {
+        std.debug.print("rui: selected Store unavailable ({s}); check --store or rui setup; no alternate Store selected.\n", .{@errorName(err)});
+        return err;
+    };
+    const destination = paths.store.slice();
     showSessionStatus(init, destination, reference, true) catch |err| {
         if (err == error.SessionNotConfigured) std.debug.print("rui: configure this Session before entering it\n", .{});
         return err;
@@ -562,10 +614,27 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         if (text.len == 0) continue;
         if (std.mem.eql(u8, text, "/exit")) break;
         if (std.mem.eql(u8, text, "/help")) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: /help  /status  /wait  /requests  /result KEY  /configure [settings]  /exit\n/help shows these commands; /status inspects this Session; /wait follows selected work; /requests lists local recovery handles; /result KEY reads a saved answer. /configure changes this Session; /exit detaches without stopping work.\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: /help  /status  /wait  /requests  /result KEY  /setup [--store PATH] [--provider codex] [--model MODEL]  /configure [settings]  /exit\n/help shows these commands; /status inspects this Session; /wait follows selected work; /requests lists local recovery handles; /result KEY reads a saved answer. /setup saves defaults for future Sessions only; /configure changes this Session; /exit detaches without stopping work.\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
             continue;
         }
-        const attention: ?Attention = if (std.mem.eql(u8, text, "/status")) blk: {
+        const attention: ?Attention = if (std.mem.eql(u8, text, "/setup") or std.mem.startsWith(u8, text, "/setup ")) blk: {
+            var setup_args: [6][]const u8 = undefined;
+            var count: usize = 0;
+            var tokens = std.mem.tokenizeScalar(u8, text["/setup".len..], ' ');
+            var overflow = false;
+            while (tokens.next()) |token| {
+                if (count == setup_args.len) {
+                    overflow = true;
+                    break;
+                }
+                setup_args[count] = token;
+                count += 1;
+            }
+            if (overflow or count % 2 != 0) {
+                try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /setup [--store PATH] [--provider codex] [--model MODEL]; no changes saved.\n");
+            } else setup(init, setup_args[0..count]) catch |err| std.debug.print("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+            break :blk null;
+        } else if (std.mem.eql(u8, text, "/status")) blk: {
             showSessionStatus(init, destination, reference, false) catch |err| std.debug.print("rui: status: {s}\n", .{@errorName(err)});
             break :blk null;
         } else if (std.mem.eql(u8, text, "/requests")) blk: {
@@ -1652,11 +1721,15 @@ fn usage() error{InvalidArguments} {
     std.debug.print(
         \\usage:
         \\  rui login codex
+        \\  rui setup [--store PATH] [--provider codex] [--model MODEL]
+        \\    Inspect without arguments; save private defaults for future interactive Sessions.
+        \\    Selected Store must exist and pass canonical/private checks; scripts still require --store.
         \\  rui serve --store PATH [--active-capacity N] [--codex | --provider-endpoint URL] [--provider-ca-file PATH] [--fault NAME]
         \\  rui configure --store PATH --session REF [settings] [--json]
         \\    First configuration requires --workspace PATH --provider codex --model MODEL.
-        \\  rui session --store PATH --session REF
-        \\    Enter a configured Session on a terminal; type /help for in-Session commands.
+        \\  rui session [--store PATH] --session REF
+        \\    Enter a configured Session on a terminal; otherwise use saved Store or HOME/.local/share/rui/store.
+        \\    Type /help for in-Session commands (including /setup).
         \\  One-shot commands (never prompt or change meaning on redirection):
         \\  rui message --store PATH --session REF TEXT|- [--json]
         \\    --text FILE|- also captures a file or stdin before sending.

@@ -114,10 +114,95 @@ def main():
     completed = False
     try:
         host = fixture.start_host(store, url)
+        preferences_home = state / "preferences-home"
+        preferences_home.mkdir()
+        fallback = preferences_home / ".local/share/rui/store"
+        assert f"Store: {fallback} (HOME fallback)" in run(preferences_home, "setup")
+        assert not (preferences_home / ".config").exists(), "inspection created private state"
+        assert "HomeUnavailable" in subprocess.run([str(fixture.RUI), "setup"],
+            env={key: value for key, value in os.environ.items() if key != "HOME"},
+            capture_output=True, text=True).stderr
+        alias = state / "store-alias"
+        alias.symlink_to(store, target_is_directory=True)
+        assert "Saved defaults" in run(preferences_home, "setup", "--store", alias,
+            "--provider", "codex", "--model", "gpt-6-luna")
+        saved = preferences_home / ".config/rui/preferences"
+        assert saved.read_text() == f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
+        assert saved.stat().st_mode & 0o777 == 0o600
+        assert saved.parent.stat().st_mode & 0o777 == 0o700
+        assert str(store.resolve()) in run(preferences_home, "setup")
+        assert run(preferences_home, "setup", "--provider", "other", success=False) == ""
+        assert run(preferences_home, "setup", "--store", state / "missing", success=False) == ""
+        assert saved.read_text().endswith("model=gpt-6-luna\n")
+        # A directory in the temporary-file slot is an honest save failure;
+        # no partial replacement may appear as a saved preference.
+        temp = saved.parent / "preferences.tmp"
+        temp.mkdir()
+        assert run(preferences_home, "setup", "--model", "another-model", success=False) == ""
+        assert saved.read_text().endswith("model=gpt-6-luna\n")
+        temp.rmdir()
+        saved.write_text("version=9\n")
+        assert run(preferences_home, "setup", success=False) == ""
+        assert run(preferences_home, "setup", "--model", "another-model", success=False) == ""
+        saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
+        saved.chmod(0o644)
+        assert run(preferences_home, "setup", success=False) == ""
+        saved.chmod(0o600)
+        saved.rename(saved.parent / "real-preferences")
+        saved.symlink_to("real-preferences")
+        assert run(preferences_home, "setup", success=False) == ""
+        saved.unlink()
+        (saved.parent / "real-preferences").rename(saved)
+        assert run(preferences_home, "setup", "--model", "bad\nmodel", success=False) == ""
+        assert saved.read_text().endswith("model=gpt-6-luna\n")
+        assert run(preferences_home, "message", "--session", session, "script", success=False) == "", "scripts must still name --store"
         config = admit(home, "configure", "--store", store, "--session", session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a",
             "--tools", "bash", "--permission-mode", "ask")
         assert config["admission"]["answer"]["status"] == "accepted", config
+        saved.write_text("version=9\n")
+        master, slave = pty.openpty()
+        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+            "--session", session], env={**os.environ, "HOME": str(preferences_home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            assert f"Session: {session}" in read_terminal(master, "rui> ")
+            terminal_step(master, "/exit", "Detached.")
+            assert entered.wait(timeout=5) == 0
+        finally:
+            if entered.poll() is None:
+                entered.kill()
+                entered.wait(timeout=5)
+            os.close(master)
+        saved.unlink()
+        fallback.parent.mkdir(parents=True)
+        fallback.symlink_to(store, target_is_directory=True)
+        master, slave = pty.openpty()
+        entered = subprocess.Popen([str(fixture.RUI), "session", "--session", session],
+            env={**os.environ, "HOME": str(preferences_home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            assert f"Session: {session}" in read_terminal(master, "rui> ")
+            terminal_step(master, "/exit", "Detached.")
+            assert entered.wait(timeout=5) == 0
+        finally:
+            if entered.poll() is None:
+                entered.kill()
+                entered.wait(timeout=5)
+            os.close(master)
+        fallback.unlink()
+        saved.write_text(f"version=1\nstore={state / 'missing'}\nprovider=codex\nmodel=gpt-6-luna\n")
+        saved.chmod(0o600)
+        master, slave = pty.openpty()
+        entered = subprocess.run([str(fixture.RUI), "session", "--session", session],
+            env={**os.environ, "HOME": str(preferences_home)}, stdin=slave,
+            stdout=slave, stderr=subprocess.PIPE, timeout=5)
+        os.close(slave)
+        os.close(master)
+        assert entered.returncode != 0 and b"FileNotFound" in entered.stderr, entered.stderr
+        saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
         assert json.loads(run(home, "wait-session", "--store", store, "--session", session,
             "--json")) == {"return": "idle"}
         initial = fixture.command("inspect-session", "--store", store, "--session", session)
@@ -214,8 +299,8 @@ def main():
         assert json.loads(run(home, "wait-session", "--store", store, "--session", session,
             "--json")) == {"return": "idle"}
         master, slave = pty.openpty()
-        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", session], env={**os.environ, "HOME": str(fresh_home)},
+        entered = subprocess.Popen([str(fixture.RUI), "session", "--session", session],
+            env={**os.environ, "HOME": str(preferences_home)},
             stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         try:
@@ -233,6 +318,11 @@ def main():
             assert "Local recovery handles" in terminal_step(master, "/requests")
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             assert "No work to wait for." in terminal_step(master, "/wait")
+            assert "gpt-6-luna" in terminal_step(master, "/setup")
+            assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model later-model")
+            assert "Permission: ask" in terminal_step(master, "/status")
+            assert fixture.command("inspect-session", "--store", store,
+                "--session", session)["session"]["model"] == "model-a"
             assert "Usage: /configure" in terminal_step(master, "/configure --session human/other")
             assert "Use a file for" in terminal_step(master, "/configure --instructions -")
             assert "Use a file for" in terminal_step(master, "/configure --output-schema -")
