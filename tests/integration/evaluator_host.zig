@@ -633,18 +633,19 @@ pub fn main(init: std.process.Init) !void {
         }.consume,
     ));
     if (scratch_used.load(.acquire) != 0) return error.ConsumerFailureChargeLeaked;
+    var recovered_delivered = false;
     try owner.evaluate(
         source,
         prepared,
         evaluator.Cancellation.never(),
-        &partial_delivered,
+        &recovered_delivered,
         struct {
             fn consume(observed: *bool, _: *std.Io.File) !void {
                 observed.* = true;
             }
         }.consume,
     );
-    if (!partial_delivered) return error.ConsumerFailureFencedReuse;
+    if (!recovered_delivered) return error.ConsumerFailureFencedReuse;
     try owner.finish();
     if (scratch_used.load(.acquire) != 0) return error.EvaluatorScratchChargeLeaked;
     var iterator = tmp.iterate();
