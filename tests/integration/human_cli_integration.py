@@ -103,6 +103,7 @@ def main():
     host = None
     failure_release = None
     stop_release = None
+    observation_release = None
     race_predecessor_release = threading.Event()
     race_message_release = threading.Event()
     race_follower = None
@@ -332,9 +333,28 @@ def main():
         attention = run(home, "follow", sibling_key, "--json")
         assert json.loads(attention) == {"return": "attention", "status": "in_flight", "action": pending}, attention
         assert run(home, "result", sibling_key) == "result: processing\n"
-        run(home, "deny-action", "--store", store, "--session", sibling_session,
-            "--action", pending)
-        sibling_release.touch()
+        master, slave = pty.openpty()
+        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+            "--session", sibling_session], env={**os.environ, "HOME": str(home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            read_terminal(master, "rui> ")
+            os.write(master, b"/wait\n")
+            waiting = read_terminal(master, "An Action needs your choice while other work remains in flight.")
+            assert "Allow once, deny, or later?" not in waiting, waiting
+            run(home, "deny-action", "--store", store, "--session", sibling_session,
+                "--action", pending)
+            sibling_release.touch()
+            assert "Assistant: siblings done" in read_terminal(master, "rui> ")
+            terminal_step(master, "/exit", "Detached.")
+            assert entered.wait(timeout=5) == 0
+        finally:
+            sibling_release.touch()
+            if entered.poll() is None:
+                entered.kill()
+                entered.wait(timeout=5)
+            os.close(master)
         fixture.wait_for(lambda: fixture.completed_observation(store, sibling_key), "sibling outcome")
         assert run(home, "result", sibling_key) == "result: completed\nsiblings done\n"
         assert sibling_effect.read_text() == "y" and counter.read_text() == "x"
@@ -365,6 +385,24 @@ def main():
         assert run(home, "result", failed_key) == "result: failed\ncode: provider_http_422\n"
         fixture.wait_for(lambda: fixture.completed_observation(store, queued_key), "queued successor")
         assert run(home, "result", queued_key) == "result: completed\nsuccessor done\n"
+        master, slave = pty.openpty()
+        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+            "--session", failure_session], env={**os.environ, "HOME": str(home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            read_terminal(master, "rui> ")
+            failed = terminal_step(master, f"/result {failed_key}")
+            assert "Rui: This saved Message failed; no answer was produced." in failed, failed
+            assert "Rui: Code: provider_http_422" in failed and "successor done" not in failed, failed
+            assert "Assistant: successor done" in terminal_step(master, f"/result {queued_key}")
+            terminal_step(master, "/exit", "Detached.")
+            assert entered.wait(timeout=5) == 0
+        finally:
+            if entered.poll() is None:
+                entered.kill()
+                entered.wait(timeout=5)
+            os.close(master)
 
         stop_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("stopped-answer", "stopped-reason",
@@ -516,6 +554,7 @@ def main():
             time.sleep(0.2)
             assert counter.read_text() == "x", "pasted typeahead approved an unseen Action"
             assert "You: interactive request" in proposal, proposal
+            assert "Rui: Work needs your decision." in proposal, proposal
             assert "call ID:" not in proposal and "request:" not in proposal and "return:" not in proposal, proposal
             assert json.loads(proposal.split("Bash arguments: ", 1)[1].splitlines()[0]) == padded_arguments, proposal
             assert "\\u00e9" in proposal
@@ -852,6 +891,46 @@ def main():
                     entered.kill()
                     entered.wait(timeout=5)
                 os.close(master)
+        observation_release = threading.Event()
+        endpoint.responses.append((fixture.sse_answer("observed-later", "observed-later-reason",
+            "observed-later-message", "observed later")[0], observation_release))
+        observation_gate = state / "accepted-before-observation-loss"
+        master, slave = pty.openpty()
+        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+            "--session", empty_session], env={**os.environ, "HOME": str(home),
+                "RUI_TEST_FOLLOW_GATE": str(observation_gate)}, stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            read_terminal(master, "rui> ")
+            before = set(run(home, "requests").splitlines())
+            os.write(master, b"observe after Host loss\n")
+            fixture.wait_for(lambda: pathlib.Path(f"{observation_gate}.ready").exists(),
+                "accepted Message observed before Host crash")
+            after = set(run(home, "requests").splitlines())
+            assert len(after - before) == 1, (before, after)
+            saved_key = (after - before).pop()
+            assert fixture.command("observe-command", "--store", store,
+                "--key", saved_key)["observation"]["status"] == "accepted"
+            fixture.crash_host(host, state, "accepted-before-observation-loss")
+            pathlib.Path(f"{observation_gate}.release").touch()
+            lost = read_terminal(master, "rui> ")
+            assert "Message accepted, but later observation or presentation failed" in lost, lost
+            assert f"rui result {saved_key}" in lost, lost
+            assert "admission may be uncertain" not in lost and "do not resubmit it" in lost, lost
+            assert entered.poll() is None and set(run(home, "requests").splitlines()) == after
+            terminal_step(master, "/exit", "Detached.")
+            assert entered.wait(timeout=5) == 0
+            endpoint.responses.append(fixture.sse_answer("observed-recovery", "observed-recovery-reason",
+                "observed-recovery-message", "observed after recovery")[0])
+            host = fixture.start_host(store, url)
+            assert fixture.command("observe-command", "--store", store,
+                "--key", saved_key)["observation"]["status"] == "accepted"
+        finally:
+            observation_release.set()
+            if entered.poll() is None:
+                entered.kill()
+                entered.wait(timeout=5)
+            os.close(master)
         completed = True
         print("human CLI: saved recovery, Session wait/re-entry, exact PTY approval, bounded input and Host restart passed")
     finally:
@@ -860,6 +939,8 @@ def main():
             failure_release.set()
         if stop_release is not None:
             stop_release.set()
+        if observation_release is not None:
+            observation_release.set()
         race_predecessor_release.set()
         race_message_release.set()
         if terminal_waiter is not None and terminal_waiter.poll() is None:

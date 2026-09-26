@@ -4,13 +4,16 @@
 import json
 import os
 import pathlib
+import pty
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
 
 import bash_integration as bash
 import dispatch_integration as fixture
+import human_cli_integration as human
 from host_process import HostDiagnostics
 
 
@@ -102,18 +105,40 @@ def prove_effect_without_result_becomes_indeterminate(state):
     case = start_case(state, "effect-before-result", "action_result_ready", f"printf x >> {marker}")
     store, _, endpoint, thread, keeper, original_host, original_diagnostics, session = case
     recovered_host = None
+    continuation_release = threading.Event()
     try:
         original_diagnostics.wait("action_result_ready", action="1", attempt="1")
         assert marker.read_text() == "x"
         crash = fixture.crash_host(original_host, state, "effect-before-result-crash", original_diagnostics)
         assert crash["returncode"] == -signal.SIGKILL, crash
+        endpoint.responses[0] = (endpoint.responses[0], continuation_release)
         recovered_host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         fixture.wait_for(lambda: bash.resolution(store, session) == "indeterminate", "indeterminate effect")
         result = bash.result_text(store, session)
+        home = state / "effect-before-result-home"
+        home.mkdir()
+        master, slave = pty.openpty()
+        entered = subprocess.Popen([str(RUI), "session", "--store", str(store), "--session", session],
+            env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            human.read_terminal(master, "rui> ")
+            status = human.terminal_step(master, "/status")
+            assert "Indeterminate Action: 1" in status, status
+            assert "The command may have run; Rui did not replay it." in status, status
+            human.terminal_step(master, "/exit", "Detached.")
+            assert entered.wait(timeout=5) == 0
+        finally:
+            if entered.poll() is None:
+                entered.kill()
+                entered.wait(timeout=5)
+            os.close(master)
+        continuation_release.set()
         fixture.wait_for(lambda: fixture.completed_observation(store, "effect-before-result-message"), "continuation")
         assert marker.read_text() == "x"
         assert_continuation(endpoint, "effect-before-result", result)
     finally:
+        continuation_release.set()
         finish_case(original_host, recovered_host, original_diagnostics, keeper, endpoint, thread)
 
 
