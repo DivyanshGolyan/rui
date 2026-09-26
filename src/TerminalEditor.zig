@@ -61,7 +61,9 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
     while (true) {
         if (editor.escape != .none or editor.paste or editor.partial_length != 0) {
             var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
-            if (try std.posix.poll(&fds, if (editor.escape != .none) 80 else 2000) == 0) {
+            // Only bare ESC is ambiguous with a standalone key. Once CSI or
+            // SS3 is recognized, allow a fragmented sequence to complete.
+            if (try std.posix.poll(&fds, if (editor.escape == .esc) 80 else 2000) == 0) {
                 if (editor.paste or editor.partial_length != 0) {
                     try output.writeStreamingAll(io, "\n");
                     return error.IncompleteTerminalInput;
