@@ -704,6 +704,10 @@ def main():
                     repaint = read_terminal(master, "rui> A中e\u0301")
                     assert "\x1b[0J" in repaint, repaint
                     observed = terminal_step(master, "", f"edited {index}")
+                elif typed == "abc\x1b[D\x1b[DZ":
+                    os.write(master, b"abc\x1b[")
+                    time.sleep(0.2)  # A recognized CSI must outlive the bare-ESC ambiguity timeout.
+                    observed = terminal_step(master, "D\x1b[DZ", f"edited {index}")
                 else:
                     observed = terminal_step(master, typed, f"edited {index}")
                 assert f"edited {index}" in observed, observed
