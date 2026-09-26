@@ -963,6 +963,65 @@ fn stringField(value: std.json.Value, name: []const u8) ![]const u8 {
 
 const SavedRequest = client.CapturedIdentity;
 
+const SavedMessageObservation = struct {
+    parsed: std.json.Parsed(std.json.Value),
+    // Borrowed from parsed; valid until parsed.deinit().
+    value: std.json.Value,
+    state: State,
+
+    const State = enum {
+        accepted,
+        queued,
+        processing,
+        rejected,
+        completed,
+        failed,
+        cancelled,
+
+        fn terminal(self: State) bool {
+            return switch (self) {
+                .rejected, .completed, .failed, .cancelled => true,
+                else => false,
+            };
+        }
+    };
+};
+
+fn readSavedMessage(init: std.process.Init, saved: *const SavedRequest) !SavedMessageObservation {
+    var buffer: client.ReplyBuffer = .{};
+    const reply = try client.observeCommand(init.io, saved.store.slice(), saved.key.slice(), &buffer);
+    return parseSavedMessage(reply, saved);
+}
+
+fn parseSavedMessage(reply: client.CommandReply, saved: *const SavedRequest) !SavedMessageObservation {
+    if (reply.status != 200) return error.ObservationFailed;
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
+    errdefer parsed.deinit();
+    const observation = try objectField(parsed.value, "observation");
+    const status = try stringField(observation, "status");
+    if (std.mem.eql(u8, status, "absent")) return error.RequestNotAdmitted;
+    if (!std.mem.eql(u8, try stringField(observation, "kind"), "message") or
+        !std.mem.eql(u8, try stringField(observation, "target"), saved.session.slice())) return error.RequestBindingMismatch;
+
+    const state: SavedMessageObservation.State = if (std.mem.eql(u8, status, "rejected")) .rejected else if (std.mem.eql(u8, status, "accepted")) blk: {
+        if (observation.object.get("result")) |terminal_result| {
+            const outcome = try stringField(terminal_result, "status");
+            if (std.mem.eql(u8, outcome, "completed")) break :blk .completed;
+            if (std.mem.eql(u8, outcome, "failed")) break :blk .failed;
+            if (std.mem.eql(u8, outcome, "cancelled")) break :blk .cancelled;
+            return error.InvalidObservation;
+        }
+        if (observation.object.get("queue")) |queue| {
+            const queued = try stringField(queue, "status");
+            if (std.mem.eql(u8, queued, "queued")) break :blk .queued;
+            if (std.mem.eql(u8, queued, "processing")) break :blk .processing;
+            return error.InvalidObservation;
+        }
+        break :blk .accepted;
+    } else return error.InvalidObservation;
+    return .{ .parsed = parsed, .value = observation, .state = state };
+}
+
 fn requestPath(init: std.process.Init, handle: []const u8, buffer: []u8) ![]const u8 {
     if (handle.len != 36) return error.InvalidRequestHandle;
     for (handle, 0..) |byte, index| {
@@ -1039,24 +1098,17 @@ fn result(init: std.process.Init, args: []const []const u8) !void {
 
 fn showResult(init: std.process.Init, saved: *const SavedRequest, presentation: Presentation) !void {
     const json = presentation == .json;
-    var buffer: client.ReplyBuffer = .{};
-    const reply = try client.observeCommand(init.io, saved.store.slice(), saved.key.slice(), &buffer);
-    if (reply.status != 200) return error.ObservationFailed;
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
-    defer parsed.deinit();
-    const observation = try objectField(parsed.value, "observation");
-    const status = try stringField(observation, "status");
-    if (std.mem.eql(u8, status, "absent")) return error.RequestNotAdmitted;
-    if (!std.mem.eql(u8, try stringField(observation, "kind"), "message") or
-        !std.mem.eql(u8, try stringField(observation, "target"), saved.session.slice())) return error.RequestBindingMismatch;
+    var observed = try readSavedMessage(init, saved);
+    defer observed.parsed.deinit();
+    const observation = observed.value;
+    const state = observed.state;
     const observation_json = if (json) try std.json.Stringify.valueAlloc(std.heap.c_allocator, observation, .{}) else "";
     defer if (json) std.heap.c_allocator.free(observation_json);
     const result_value = observation.object.get("result");
-    const state = if (std.mem.eql(u8, status, "rejected")) "rejected" else if (result_value) |value| try stringField(value, "status") else if (observation.object.get("queue")) |queue| try stringField(queue, "status") else "accepted";
-    if (!json and (presentation != .interactive or !std.mem.eql(u8, state, "completed"))) {
+    if (!json and (presentation != .interactive or state != .completed)) {
         var line: [256]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "result: {s}\n", .{state}));
-        const details = if (std.mem.eql(u8, state, "rejected")) observation else result_value;
+        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "result: {s}\n", .{@tagName(state)}));
+        const details = if (state == .rejected) observation else result_value;
         if (details) |value| {
             if (value.object.get("code")) |code| {
                 if (code != .string) return error.InvalidObservation;
@@ -1064,7 +1116,7 @@ fn showResult(init: std.process.Init, saved: *const SavedRequest, presentation: 
             }
         }
     }
-    if (!std.mem.eql(u8, state, "completed")) {
+    if (state != .completed) {
         if (json) {
             try std.Io.File.stdout().writeStreamingAll(init.io, "{\"observation\":");
             try std.Io.File.stdout().writeStreamingAll(init.io, observation_json);
@@ -1308,7 +1360,7 @@ fn showActionable(io: std.Io, file: std.Io.File, json: bool) !void {
     }
 }
 
-fn writeFollowOutcome(init: std.process.Init, observation: std.json.Value, presentation: Presentation) !void {
+fn writeFollowOutcome(init: std.process.Init, observation: std.json.Value, state: SavedMessageObservation.State, presentation: Presentation) !void {
     if (presentation == .interactive) return;
     if (presentation == .json) {
         const observation_json = try std.json.Stringify.valueAlloc(std.heap.c_allocator, observation, .{});
@@ -1317,10 +1369,8 @@ fn writeFollowOutcome(init: std.process.Init, observation: std.json.Value, prese
         try std.Io.File.stdout().writeStreamingAll(init.io, observation_json);
         try std.Io.File.stdout().writeStreamingAll(init.io, "}\n");
     } else {
-        const status = try stringField(observation, "status");
-        const state = if (std.mem.eql(u8, status, "rejected")) "rejected" else try stringField(try objectField(observation, "result"), "status");
         var line: [128]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "return: outcome\nstatus: {s}\n", .{state}));
+        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "return: outcome\nstatus: {s}\n", .{@tagName(state)}));
     }
 }
 
@@ -1336,21 +1386,13 @@ fn follow(init: std.process.Init, args: []const []const u8) !void {
 // to inspect and decide against the Host's exact current target.
 fn followMessage(init: std.process.Init, saved: *const SavedRequest, presentation: Presentation, session_wait: bool, terminal_only: bool) !?Work {
     while (true) {
-        var response: client.ReplyBuffer = .{};
-        const reply = try client.observeCommand(init.io, saved.store.slice(), saved.key.slice(), &response);
-        if (reply.status != 200) return error.ObservationFailed;
-        var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
-        defer parsed.deinit();
-        const observation = try objectField(parsed.value, "observation");
-        const status = try stringField(observation, "status");
-        if (std.mem.eql(u8, status, "absent")) return error.RequestNotAdmitted;
-        if (!std.mem.eql(u8, try stringField(observation, "kind"), "message") or
-            !std.mem.eql(u8, try stringField(observation, "target"), saved.session.slice())) return error.RequestBindingMismatch;
-        if (std.mem.eql(u8, status, "rejected") or observation.object.contains("result")) {
-            try writeFollowOutcome(init, observation, presentation);
+        var observed = try readSavedMessage(init, saved);
+        defer observed.parsed.deinit();
+        if (observed.state.terminal()) {
+            try writeFollowOutcome(init, observed.value, observed.state, presentation);
             return null;
         }
-        const progress = try objectField(observation, "progress");
+        const progress = try objectField(observed.value, "progress");
         const state = try stringField(progress, "status");
         const action = try objectField(progress, "action");
         // Test-only pause after capturing the Message's coherent observation.
@@ -1486,6 +1528,32 @@ fn usage() error{InvalidArguments} {
         \\
     , .{});
     return error.InvalidArguments;
+}
+
+test "saved Message classification retains original binding and terminal outcomes" {
+    var saved: SavedRequest = .{};
+    try saved.session.set("original/session");
+    const prefix = "{\"observation\":{\"kind\":\"message\",\"target\":\"original/session\",";
+    const cases = .{
+        .{ "\"status\":\"accepted\"}}", SavedMessageObservation.State.accepted },
+        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"queued\"},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"7\"}}}", SavedMessageObservation.State.queued },
+        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"processing\"}}}", SavedMessageObservation.State.processing },
+        .{ "\"status\":\"rejected\",\"code\":\"unknown_session\"}}", SavedMessageObservation.State.rejected },
+        .{ "\"status\":\"accepted\",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}}}", SavedMessageObservation.State.failed },
+        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"excluded\"},\"result\":{\"status\":\"cancelled\"}}}", SavedMessageObservation.State.cancelled },
+        .{ "\"status\":\"accepted\",\"result\":{\"status\":\"completed\"}}}", SavedMessageObservation.State.completed },
+    };
+    inline for (cases) |case| {
+        var observed = try parseSavedMessage(.{ .status = 200, .body = prefix ++ case[0] }, &saved);
+        defer observed.parsed.deinit();
+        try std.testing.expectEqual(case[1], observed.state);
+        try std.testing.expectEqualStrings("original/session", try stringField(observed.value, "target"));
+    }
+    try std.testing.expectError(error.ObservationFailed, parseSavedMessage(.{ .status = 503, .body = "" }, &saved));
+    try std.testing.expectError(error.RequestNotAdmitted, parseSavedMessage(.{ .status = 200, .body = "{\"observation\":{\"status\":\"absent\"}}" }, &saved));
+    try std.testing.expectError(error.RequestBindingMismatch, parseSavedMessage(.{ .status = 200, .body = "{\"observation\":{\"status\":\"accepted\",\"kind\":\"configure\",\"target\":\"original/session\"}}" }, &saved));
+    try std.testing.expectError(error.RequestBindingMismatch, parseSavedMessage(.{ .status = 200, .body = "{\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"later/session\",\"result\":{\"status\":\"completed\"}}}" }, &saved));
+    try std.testing.expectError(error.InvalidObservation, parseSavedMessage(.{ .status = 200, .body = prefix ++ "\"status\":\"accepted\",\"result\":{\"status\":\"mystery\"}}}" }, &saved));
 }
 
 test "post-command hold signals only after work and exits on release" {
