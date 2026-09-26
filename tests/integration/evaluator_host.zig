@@ -389,22 +389,28 @@ pub fn main(init: std.process.Init) !void {
     if (!large.called or scratch_used.load(.acquire) != 0) return error.LargeEvaluatorOutputNotDelivered;
     source.close(io);
     source = try replaceSource(tmp, io, "B");
-    var siblings = struct { io: std.Io, called: bool = false }{ .io = io };
+    var siblings = struct { io: std.Io, used: *std.atomic.Value(u64), called: bool = false }{
+        .io = io, .used = &scratch_used,
+    };
     try owner.evaluate(source, prepared, evaluator.Cancellation.never(), &siblings, struct {
         fn consume(observed: *@TypeOf(siblings), output: *std.Io.File) !void {
             if (try output.length(observed.io) != 800001) return error.UnexpectedEvaluatorOutput;
+            if (observed.used.load(.acquire) != 800001) return error.EvaluatorIndexChargedDuringConsumption;
             observed.called = true;
         }
     }.consume);
     if (!siblings.called or scratch_used.load(.acquire) != 0) return error.SiblingObjectOutputNotDelivered;
     source.close(io);
     source = try replaceSource(tmp, io, "W");
-    var wide = struct { io: std.Io, called: bool = false }{ .io = io };
+    var wide = struct { io: std.Io, used: *std.atomic.Value(u64), called: bool = false }{
+        .io = io, .used = &scratch_used,
+    };
     try owner.evaluate(source, prepared, evaluator.Cancellation.never(), &wide, struct {
         fn consume(observed: *@TypeOf(wide), output: *std.Io.File) !void {
             // 50,000 entries each contribute six fixed bytes plus their
             // decimal index width; opening brace replaces the final comma.
             if (try output.length(observed.io) != 538891) return error.UnexpectedEvaluatorOutput;
+            if (observed.used.load(.acquire) != 538891) return error.EvaluatorIndexChargedDuringConsumption;
             observed.called = true;
         }
     }.consume);

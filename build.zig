@@ -10,7 +10,8 @@ pub fn build(b: *std.Build) void {
     b.installFile("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md");
 
     const quickjs = b.dependency("quickjs", .{});
-    const evaluator = addEvaluator(b, target, optimize, quickjs, "rui-evaluator");
+    const string_sanitizer_step = b.step("evaluator-string-sanitizer", "Check the current QuickJS string extension with ASan/UBSan and allocation faults");
+    const evaluator = addEvaluator(b, target, optimize, quickjs, "rui-evaluator", string_sanitizer_step);
     b.installArtifact(evaluator);
 
     const evaluator_driver = b.addExecutable(.{
@@ -287,7 +288,7 @@ pub fn build(b: *std.Build) void {
     full_evaluator.addArtifactArg(evaluator_driver);
     full_evaluator.addArtifactArg(evaluator_probe);
     full_evaluator.step.dependOn(&run_full_tests.step);
-    full_evaluator.step.dependOn(&string_sanitizer.step);
+    full_evaluator.step.dependOn(string_sanitizer_step);
     const full_evaluator_host = b.addRunArtifact(evaluator_host);
     full_evaluator_host.addArtifactArg(evaluator);
     full_evaluator_host.step.dependOn(&full_evaluator.step);
@@ -360,6 +361,7 @@ pub fn build(b: *std.Build) void {
                 @tagName(resolved.result.cpu.arch),
                 @tagName(resolved.result.os.tag),
             }),
+            null,
         );
         switch (resolved.result.os.tag) {
             .linux => {
@@ -502,6 +504,7 @@ fn addEvaluator(
     optimize: std.builtin.OptimizeMode,
     quickjs: *std.Build.Dependency,
     name: []const u8,
+    sanitizer_step: ?*std.Build.Step,
 ) *std.Build.Step.Compile {
     const evaluator = b.addExecutable(.{
         .name = name,
@@ -522,15 +525,14 @@ fn addEvaluator(
     extended_quickjs.addFileInput(b.path("src/evaluator_string_reader.inc"));
     extended_quickjs.addFileInput(b.path("src/evaluator_string_reader.h"));
     extended_quickjs.addFileInput(b.path("src/evaluator_policy.inc"));
-    if (std.mem.eql(u8, name, "rui-evaluator")) {
+    if (sanitizer_step) |step| {
         const string_sanitizer = b.addSystemCommand(&.{"sh"});
         string_sanitizer.addFileArg(b.path("tests/integration/evaluator_string_sanitizer.sh"));
         string_sanitizer.addFileArg(quickjs_source);
         string_sanitizer.addFileArg(quickjs.path("quickjs.c"));
         string_sanitizer.addFileArg(b.path("tests/integration/evaluator_string_probe.c"));
         string_sanitizer.addFileArg(b.path("src/evaluator_string_reader.h"));
-        const string_sanitizer_step = b.step("evaluator-string-sanitizer", "Check the current QuickJS string extension with ASan/UBSan and allocation faults");
-        string_sanitizer_step.dependOn(&string_sanitizer.step);
+        step.dependOn(&string_sanitizer.step);
     }
     evaluator.root_module.addCSourceFile(.{
         .file = quickjs_source,
