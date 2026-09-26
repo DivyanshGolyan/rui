@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Public one-shot caller recovery and exact Bash authorization."""
 import json
+import fcntl
 import os
 import pathlib
 import pty
@@ -8,6 +9,7 @@ import select
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -44,7 +46,8 @@ def read_terminal(master, marker, timeout=15):
         assert select.select([master], [], [], remaining)[0], (marker, output.decode(errors="replace"))
         output += os.read(master, 65536)
         assert len(output) < 1024 * 1024, "unexpected unbounded terminal output"
-    return output.decode(errors="replace").replace("\r\n", "\n")
+    return (output.decode(errors="replace").replace("\r\n", "\n")
+        .replace("\x1b[?2004h", "").replace("\x1b[?2004l", ""))
 
 
 def terminal_step(master, command, marker="rui> "):
@@ -217,22 +220,17 @@ def main():
         try:
             greeting = read_terminal(master, "rui> ")
             assert f"Session: {session}" in greeting and f"Workspace (Bash cwd): {workspace.resolve()}" in greeting, greeting
-            assert "Permission: ask" in greeting and queued in greeting and first in greeting, greeting
-            before = len(endpoint.requests)
-            os.write(master, b"abc\x04def\n")
-            rejected = read_terminal(master, "rui> ")
-            assert "InvalidTerminalInput" in rejected and "nothing sent" in rejected, rejected
-            assert len(endpoint.requests) == before, "Ctrl-D draft reached Host"
+            assert "Permission: ask" in greeting and "Store:" not in greeting and "Work: completed" not in greeting and queued not in greeting, greeting
             assert "first answer" in terminal_step(master, f"/result {queued}")
             assert "Local recovery handles" in terminal_step(master, "/requests")
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
-            assert "return: idle" in terminal_step(master, "/wait")
+            assert "No work to wait for." in terminal_step(master, "/wait")
             assert "Usage: /configure" in terminal_step(master, "/configure --session human/other")
             assert "Use a file for" in terminal_step(master, "/configure --instructions -")
             assert "Use a file for" in terminal_step(master, "/configure --output-schema -")
             assert f"Session: {session}" in terminal_step(master, "/status")
             configured = terminal_step(master, "/configure --model model-a")
-            assert "admitted: accepted" in configured, configured
+            assert "Configured." in configured and "request:" not in configured, configured
             assert f"Session: {session}" in terminal_step(master, "/status")
             assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
@@ -505,16 +503,18 @@ def main():
             stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         try:
-            assert "Work: idle" in read_terminal(master, "rui> ")
+            assert "Permission: ask" in read_terminal(master, "rui> ")
             os.write(master, b"interactive request\na\n")
             proposal = read_terminal(master, "Allow once, deny, or later?")
             time.sleep(0.2)
             assert counter.read_text() == "x", "pasted typeahead approved an unseen Action"
-            assert json.loads(proposal.split("call ID: ", 1)[1].splitlines()[0]) == control_call, proposal
+            assert "call ID:" not in proposal and "request:" not in proposal and "return:" not in proposal, proposal
             assert json.loads(proposal.split("Bash arguments: ", 1)[1].splitlines()[0]) == padded_arguments, proposal
-            assert "\\u001b" in proposal and "\\u202e" in proposal and "\\u00e9" in proposal
+            assert "\\u00e9" in proposal
             assert "\\r  " in proposal and "\x1b" not in proposal and "\u202e" not in proposal, proposal
-            interactive_key = proposal.split("request: ", 1)[1].splitlines()[0]
+            interactive_key = fixture.command("inspect-session", "--store", store, "--session", interactive)["selected_message"]
+            assert interactive_key is not None, proposal
+            assert interactive_key in run(home, "requests").splitlines(), "hidden receipt must remain recoverable"
             action_id = proposal.split("Action ", 1)[1].splitlines()[0]
             current_action = fixture.command("inspect-session", "--store", store, "--session", interactive)
             assert [item["action"] for item in current_action["actionable_permissions"]] == [action_id], current_action
@@ -523,9 +523,18 @@ def main():
             assert mismatch["admission"]["answer"]["status"] == "rejected", mismatch
             assert mismatch["admission"]["answer"]["code"] == "target_mismatch", mismatch
             assert "No decision sent" in terminal_step(master, "l")
-            assert "interactive-bash" in terminal_step(master, "/wait", "Allow once, deny, or later?")
+            assert "Bash arguments:" in terminal_step(master, "/wait", "Allow once, deny, or later?")
+            os.write(master, b" a \n")
+            assert "No decision sent" in read_terminal(master, "Allow once, deny, or later?")
+            assert counter.read_text() == "x", "padded choice approved an Action"
+            assert "No decision sent" in terminal_step(master, "l")
+            assert "Bash arguments:" in terminal_step(master, "/wait", "Allow once, deny, or later?")
+            rejected_choice = terminal_step(master, "\x1b[200~a\x1b[201~")
+            assert "InvalidTerminalInput" in rejected_choice, rejected_choice
+            assert counter.read_text() == "x", "marked paste approved an Action"
+            assert "Bash arguments:" in terminal_step(master, "/wait", "Allow once, deny, or later?")
             completed_turn = terminal_step(master, "a")
-            assert "interactive complete" in completed_turn and "result: completed" in completed_turn, completed_turn
+            assert "interactive complete" in completed_turn and "result:" not in completed_turn and "request:" not in completed_turn, completed_turn
             assert "interactive complete" in terminal_step(master, "/result " + interactive_key)
             assert "Recent messages" in terminal_step(master, "/status")
             assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
@@ -585,8 +594,10 @@ def main():
         os.close(slave)
         try:
             greeting = read_terminal(master, "rui> ")
-            assert "message\\n\\u001b[2J\\u202e: completed" in greeting, greeting
-            assert "\x1b[2J" not in greeting and "\u202e" not in greeting, greeting
+            assert "Session: human/unsafe-key" in greeting, greeting
+            status = terminal_step(master, "/status")
+            assert "message\\n\\u001b[2J\\u202e: completed" in status, status
+            assert "\x1b[2J" not in status and "\u202e" not in status, status
             assert "Detached." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
@@ -634,7 +645,7 @@ def main():
             stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         try:
-            assert "Work: idle" in read_terminal(master, "rui> ")
+            assert "Permission: bypass (Bash runs without approval)" in read_terminal(master, "rui> ")
             before = len(endpoint.requests)
             long_text = "X" * 5000
             answer = terminal_bulk(master, long_text)
@@ -643,10 +654,125 @@ def main():
             body = json.loads(endpoint.requests[-1])
             assert next(item["content"][0]["text"] for item in reversed(body["input"])
                 if item.get("role") == "user") == long_text
-            rejected = terminal_bulk(master, "Y" * (64 * 1024 + 1))
-            assert "StreamTooLong" in rejected and "nothing sent" in rejected, rejected[-1000:]
+            rejected = terminal_bulk(master, "Y" * (64 * 1024 + 1) + "\x7f")
+            assert "input too long" in rejected and "nothing sent" in rejected, rejected[-1000:]
             assert len(endpoint.requests) == before + 1, "oversized input reached Host"
+            rejected = terminal_step(master, "invalid\x00x")
+            assert "InvalidTerminalInput" in rejected and "--text FILE" not in rejected, rejected
+            assert len(endpoint.requests) == before + 1, "unsupported control reached Host"
             assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
+            assert entered.wait(timeout=5) == 0
+            assert termios.tcgetattr(master)[3] & termios.ICANON
+        finally:
+            if entered.poll() is None:
+                entered.kill()
+                entered.wait(timeout=5)
+            os.close(master)
+        editor_session = "human/editor"
+        run(home, "configure", "--store", store, "--session", editor_session,
+            "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+        cases = [
+            ("first second\x1b\x7fZ", "first Z"),
+            ("A中e\u0301🧑‍🌾\x7f", "A中e\u0301"),
+            ("\x1b[200~line1\nline2\x1b[201~", "line1\nline2"),
+            ("\x1b[200~a\n\u0301\x1b[201~\x01\x7f\x7fZ", "Z"),
+            ("ab\x01\x04\x05\x04", "b"),
+            ("ask src/foo-bar\x17", "ask "),
+            ("\x1b[123;4~Z", "Z"),
+            ("\x1bZ", "Z"),
+            ("abc\x1b[D\x1b[DZ", "aZbc"),
+            ("\x1b[200~line1\nline2\x1b[201~\x1b[A\x01X", "Xline1\nline2"),
+        ]
+        endpoint.responses.extend(fixture.sse_answer(f"editor-answer-{i}", f"editor-reason-{i}",
+            f"editor-message-{i}", f"edited {i}")[0] for i in range(len(cases)))
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
+        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+            "--session", editor_session], env={**os.environ, "HOME": str(home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            read_terminal(master, "rui> ")
+            for index, (typed, expected) in enumerate(cases):
+                if index == 0:
+                    os.write(master, b"first second\x1b\x7f")
+                    repaint = read_terminal(master, "rui> first ")
+                    assert "\x1b[0J" in repaint, repaint
+                    observed = terminal_step(master, "Z", f"edited {index}")
+                elif index == 1:
+                    os.write(master, typed.encode())
+                    repaint = read_terminal(master, "rui> A中e\u0301")
+                    assert "\x1b[0J" in repaint, repaint
+                    observed = terminal_step(master, "", f"edited {index}")
+                elif typed == "abc\x1b[D\x1b[DZ":
+                    os.write(master, b"abc\x1b[")
+                    time.sleep(0.2)  # A recognized CSI must outlive the bare-ESC ambiguity timeout.
+                    observed = terminal_step(master, "D\x1b[DZ", f"edited {index}")
+                else:
+                    observed = terminal_step(master, typed, f"edited {index}")
+                assert f"edited {index}" in observed, observed
+                if "rui> " not in observed.split(f"edited {index}", 1)[1]:
+                    read_terminal(master, "rui> ")
+                body = json.loads(endpoint.requests[-1])
+                actual = next(item["content"][0]["text"] for item in reversed(body["input"])
+                    if item.get("role") == "user")
+                assert actual == expected, (typed, expected, actual)
+            for index, (cluster, count) in enumerate((("a", 1000), ("e\u0301", 500))):
+                marker = f"burst edited {index}"
+                endpoint.responses.append(fixture.sse_answer(f"burst-answer-{index}",
+                    f"burst-reason-{index}", f"burst-message-{index}", marker)[0])
+                observed = terminal_bulk(master, cluster * count + "\x7f" * count + "Z", marker)
+                assert len(observed.encode()) < 100_000, "tail deletion repainted the whole draft per key"
+                body = json.loads(endpoint.requests[-1])
+                actual = next(item["content"][0]["text"] for item in reversed(body["input"])
+                    if item.get("role") == "user")
+                assert actual == "Z", actual
+                if "rui> " not in observed.split(marker, 1)[1]:
+                    read_terminal(master, "rui> ")
+            endpoint.responses.append(fixture.sse_answer("paced-answer", "paced-reason",
+                "paced-message", "paced edited")[0])
+            os.write(master, b"a" * 100)
+            read_terminal(master, "a" * 100)
+            for _ in range(100):
+                os.write(master, b"\x7f")
+                time.sleep(0.025)  # Longer than the editor's repaint window.
+            observed = terminal_step(master, "Z", "paced edited")
+            assert len(observed.encode()) < 3000, "paced ASCII deletion repainted the whole draft"
+            body = json.loads(endpoint.requests[-1])
+            actual = next(item["content"][0]["text"] for item in reversed(body["input"])
+                if item.get("role") == "user")
+            assert actual == "Z", actual
+            if "rui> " not in observed.split("paced edited", 1)[1]:
+                read_terminal(master, "rui> ")
+            before = len(endpoint.requests)
+            rejected = terminal_bulk(master, "a" * 2050 + "\x7f" * 2048,
+                "cannot place the terminal cursor reliably")
+            assert "nothing sent" in rejected, rejected[-1000:]
+            assert len(endpoint.requests) == before, "a batch made an originally wrapped draft editable"
+            if "rui> " not in rejected.split("cannot place the terminal cursor reliably", 1)[1]:
+                read_terminal(master, "rui> ")
+            for invalid in (b"\xc3(\n", b"\xc3\n"):
+                os.write(master, invalid)
+                rejected = read_terminal(master, "rui> ")
+                assert "InvalidTerminalInput" in rejected, rejected
+            assert len(endpoint.requests) == before, "malformed UTF-8 reached Host"
+            endpoint.responses.append(fixture.sse_answer("editor-limit-answer", "editor-limit-reason",
+                "editor-limit-message", "limit accepted")[0])
+            at_limit = "a" * (64 * 1024 - 2) + "é"
+            accepted = terminal_bulk(master, at_limit, "limit accepted")
+            assert "limit accepted" in accepted, accepted[-1000:]
+            body = json.loads(endpoint.requests[-1])
+            assert next(item["content"][0]["text"] for item in reversed(body["input"])
+                if item.get("role") == "user") == at_limit
+            if "rui> " not in accepted.split("limit accepted", 1)[1]:
+                read_terminal(master, "rui> ")
+            before = len(endpoint.requests)
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 12, 0, 0))
+            rejected = terminal_step(master, "A中e\u0301\x1b[D")
+            assert "cannot place the terminal cursor reliably" in rejected and "--text FILE" in rejected, rejected
+            assert len(endpoint.requests) == before, "uncertain display submitted a Message"
+            os.write(master, b"\x04")
+            assert "Detached. Host work continues." in read_terminal(master, "Detached.")
             assert entered.wait(timeout=5) == 0
             assert termios.tcgetattr(master)[3] & termios.ICANON
         finally:
@@ -660,7 +786,7 @@ def main():
             stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         try:
-            assert "Recent messages" in read_terminal(master, "rui> ")
+            assert "Recent messages" not in read_terminal(master, "rui> ")
             fixture.wait_for(lambda: not termios.tcgetattr(master)[3] & termios.ICANON,
                 "terminal ready for Ctrl+C")
             os.write(master, b"\x03")
@@ -672,6 +798,25 @@ def main():
                 entered.kill()
                 entered.wait(timeout=5)
             os.close(master)
+        for incomplete in (b"\xc3", b"\x1b[200~unfinished", b"\x1b[", b"\x1bO"):
+            master, slave = pty.openpty()
+            entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+                "--session", empty_session], env={**os.environ, "HOME": str(fresh_home)},
+                stdin=slave, stdout=slave, stderr=slave)
+            os.close(slave)
+            try:
+                read_terminal(master, "rui> ")
+                before = len(endpoint.requests)
+                os.write(master, incomplete)
+                assert "IncompleteTerminalInput" in read_terminal(master, "IncompleteTerminalInput", timeout=7)
+                assert entered.wait(timeout=5) != 0
+                assert termios.tcgetattr(master)[3] & termios.ICANON
+                assert len(endpoint.requests) == before, "incomplete terminal input reached Host"
+            finally:
+                if entered.poll() is None:
+                    entered.kill()
+                    entered.wait(timeout=5)
+                os.close(master)
         completed = True
         print("human CLI: saved recovery, Session wait/re-entry, exact PTY approval, bounded input and Host restart passed")
     finally:
