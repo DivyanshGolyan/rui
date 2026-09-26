@@ -19,6 +19,7 @@ allow_paste: bool = true,
 paste_prefix: [6]u8 = undefined,
 paste_prefix_length: usize = 0,
 rejected: ?Event = null,
+plain_ascii: bool = true,
 
 const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow };
 const paste_end = "\x1b[201~";
@@ -58,6 +59,10 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
     }
     var editor: Editor = .{ .buffer = buffer, .allow_paste = allow_paste };
     const initial_size = windowSize();
+    var plain_prompt = true;
+    for (prompt) |char| {
+        if (char < 32 or char > 126) plain_prompt = false;
+    }
     var backspaces: usize = 0;
     var repaint_deadline: i96 = 0;
     while (true) {
@@ -100,6 +105,18 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
         if ((byte[0] == 8 or byte[0] == 127) and editor.escape == .none and !editor.paste and
             editor.partial_length == 0 and editor.rejected == null and editor.cursor == editor.length and editor.length != 0)
         {
+            // The last printable ASCII cell has a known width. Clear it in
+            // place even when key repeats arrive slower than the batch window.
+            const current_size = windowSize();
+            if (backspaces == 0 and plain_prompt and editor.plain_ascii and initial_size.row >= 2 and
+                prompt.len + editor.length < initial_size.col and
+                current_size.col == initial_size.col and current_size.row == initial_size.row)
+            {
+                editor.length -= 1;
+                editor.cursor -= 1;
+                try output.writeStreamingAll(io, "\x08\x1b[0K");
+                continue;
+            }
             if (backspaces == 0) repaint_deadline = std.Io.Clock.awake.now(io).nanoseconds + 16_000_000;
             backspaces += 1;
             continue;
@@ -338,6 +355,7 @@ fn insert(self: *Editor, byte: u8, pasted_input: bool) Event {
         self.partial_length = 0;
         return .none;
     }
+    if (codepoint < 32 or codepoint > 126) self.plain_ascii = false;
     const at_end = self.cursor == self.length;
     std.mem.copyBackwards(u8, self.buffer[self.cursor + self.partial_length .. self.length + self.partial_length], self.buffer[self.cursor..self.length]);
     @memcpy(self.buffer[self.cursor .. self.cursor + self.partial_length], self.partial[0..self.partial_length]);
