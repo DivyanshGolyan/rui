@@ -729,6 +729,21 @@ def main():
                 assert actual == "Z", actual
                 if "rui> " not in observed.split(marker, 1)[1]:
                     read_terminal(master, "rui> ")
+            endpoint.responses.append(fixture.sse_answer("paced-answer", "paced-reason",
+                "paced-message", "paced edited")[0])
+            os.write(master, b"a" * 100)
+            read_terminal(master, "a" * 100)
+            for _ in range(100):
+                os.write(master, b"\x7f")
+                time.sleep(0.025)  # Longer than the editor's repaint window.
+            observed = terminal_step(master, "Z", "paced edited")
+            assert len(observed.encode()) < 3000, "paced ASCII deletion repainted the whole draft"
+            body = json.loads(endpoint.requests[-1])
+            actual = next(item["content"][0]["text"] for item in reversed(body["input"])
+                if item.get("role") == "user")
+            assert actual == "Z", actual
+            if "rui> " not in observed.split("paced edited", 1)[1]:
+                read_terminal(master, "rui> ")
             before = len(endpoint.requests)
             rejected = terminal_bulk(master, "a" * 2050 + "\x7f" * 2048,
                 "cannot place the terminal cursor reliably")
