@@ -124,29 +124,39 @@ pub const Owner = struct {
         context: Context,
         comptime consume: fn (Context, *std.Io.File) anyerror!void,
     ) !void {
-        var scratch = try std.Io.Dir.cwd().openDir(self.io, self.scratch_path, .{});
-        defer scratch.close(self.io);
+        var executable_buffer: [std.fs.max_path_bytes:0]u8 = undefined;
+        const executable_length = try std.process.executablePath(self.io, &executable_buffer);
+        const executable_dir = std.fs.path.dirname(executable_buffer[0..executable_length]) orelse return error.InvalidExecutablePath;
+        var child_buffer: [std.fs.max_path_bytes:0]u8 = undefined;
+        const child = if (std.fs.path.isAbsolute(self.child_name))
+            try std.fmt.bufPrintZ(&child_buffer, "{s}", .{self.child_name})
+        else
+            try std.fmt.bufPrintZ(&child_buffer, "{s}/{s}", .{ executable_dir, self.child_name });
+
+        var scratch: ?std.Io.Dir = null;
+        defer if (scratch) |*dir| dir.close(self.io);
         var name_buffer: [64]u8 = undefined;
-        var random: u64 = undefined;
-        self.io.random(@ptrCast(&random));
-        const name = try std.fmt.bufPrint(&name_buffer, "evaluator-{x}.tmp", .{random});
-        const output = try scratch.createFile(self.io, name, .{
-            .read = true,
-            .exclusive = true,
-            .permissions = .fromMode(0o600),
-        });
-        self.pending = .{
-            .output = .{
-                .file = output,
-                .name = name_buffer,
-                .name_len = @intCast(name.len),
-                .charge = .{ .budget = self.budget },
-            },
-        };
         if (!compile_only) {
+            scratch = try std.Io.Dir.cwd().openDir(self.io, self.scratch_path, .{});
+            var random: u64 = undefined;
+            self.io.random(@ptrCast(&random));
+            const name = try std.fmt.bufPrint(&name_buffer, "evaluator-{x}.tmp", .{random});
+            const output = try scratch.?.createFile(self.io, name, .{
+                .read = true,
+                .exclusive = true,
+                .permissions = .fromMode(0o600),
+            });
+            self.pending = .{
+                .output = .{
+                    .file = output,
+                    .name = name_buffer,
+                    .name_len = @intCast(name.len),
+                    .charge = .{ .budget = self.budget },
+                },
+            };
             var index_name_buffer: [64]u8 = undefined;
             const index_name = try std.fmt.bufPrint(&index_name_buffer, "evaluator-{x}.index", .{random});
-            const index = try scratch.createFile(self.io, index_name, .{
+            const index = try scratch.?.createFile(self.io, index_name, .{
                 .read = true,
                 .exclusive = true,
                 .permissions = .fromMode(0o600),
@@ -158,28 +168,17 @@ pub const Owner = struct {
                 .charge = .{ .budget = self.budget },
             };
         }
-        const pending = &self.pending.?;
-        const owned_output = &pending.output.?.file;
-
-        var executable_buffer: [std.fs.max_path_bytes:0]u8 = undefined;
-        const executable_length = try std.process.executablePath(self.io, &executable_buffer);
-        const executable_dir = std.fs.path.dirname(executable_buffer[0..executable_length]) orelse return error.InvalidExecutablePath;
-        var child_buffer: [std.fs.max_path_bytes:0]u8 = undefined;
-        const child = if (std.fs.path.isAbsolute(self.child_name))
-            try std.fmt.bufPrintZ(&child_buffer, "{s}", .{self.child_name})
-        else
-            try std.fmt.bufPrintZ(&child_buffer, "{s}/{s}", .{ executable_dir, self.child_name });
         const result = c.rui_evaluate(
             child.ptr,
             source.handle,
             if (prepared_input) |input| input.handle else -1,
-            owned_output.handle,
+            if (compile_only) -1 else self.pending.?.output.?.file.handle,
             self.budget.limit,
             @intFromBool(compile_only),
             cancellation.cancelled,
             cancellation.context,
             OutputCharge.reserve,
-            &pending.output.?.charge,
+            if (compile_only) null else &self.pending.?.output.?.charge,
             if (diagnostic) |result| &result.bytes else null,
             if (diagnostic) |result| result.bytes.len else 0,
             if (diagnostic) |result| &result.length else null,
@@ -189,9 +188,11 @@ pub const Owner = struct {
         if (cancellation.isCancelled()) return error.EvaluationCancelled;
         if (compile_only) return;
 
+        const pending = &self.pending.?;
+        const owned_output = &pending.output.?.file;
         // Child and pipe custody is complete. Hand validation and the consumer
         // only a read-only descriptor; neither can mutate the charged result.
-        const sealed_output = try scratch.openFile(self.io, name, .{
+        const sealed_output = try scratch.?.openFile(self.io, name_buffer[0..pending.output.?.name_len], .{
             .mode = .read_only,
             .follow_symlinks = false,
         });
