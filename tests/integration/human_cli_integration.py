@@ -299,6 +299,28 @@ def main():
 
         report = fixture.wait_for(two_actions, "two actionable siblings")
         pending, running = [row["action"] for row in report["actionable_permissions"]]
+        selection, permissions, attention = map(json.loads, run(home, "wait-session", "--store", store,
+            "--session", sibling_session, "--json").splitlines())
+        assert selection["message"] == sibling_key, selection
+        assert permissions == {"event": "actionable_permissions", "actions": [pending, running]}, permissions
+        assert attention["return"] == "attention" and attention["action"] == pending, attention
+        master, slave = pty.openpty()
+        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+            "--session", sibling_session], env={**os.environ, "HOME": str(fresh_home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            read_terminal(master, "rui> ")
+            status = terminal_step(master, "/status")
+            assert status.count("Action requiring attention: ") == 2, status
+            assert f"Action requiring attention: {pending}" in status and f"Action requiring attention: {running}" in status, status
+            terminal_step(master, "/exit", "Detached.")
+            assert entered.wait(timeout=5) == 0
+        finally:
+            if entered.poll() is None:
+                entered.kill()
+                entered.wait(timeout=5)
+            os.close(master)
         run(home, "allow-action", "--store", store, "--session", sibling_session,
             "--action", running)
         fixture.wait_for(lambda: sibling_started.exists(), "approved sibling in flight")

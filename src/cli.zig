@@ -360,27 +360,32 @@ fn waitSession(init: std.process.Init, args: []const []const u8) !void {
 }
 
 fn waitForSession(init: std.process.Init, store: []const u8, session_ref: []const u8, json: bool, terminal_only: bool) !?Attention {
-    const work = try inspectWork(init, store, session_ref);
-    if (work.workspace.len == 0) return error.SessionNotConfigured;
-    const selected = if (work.selected_message) |key| key.slice() else {
+    const saved = blk: {
+        const report = try inspectWork(init, store, session_ref);
+        defer report.file.close(init.io);
+        const work = report.work;
+        if (work.workspace.len == 0) return error.SessionNotConfigured;
+        const selected = if (work.selected_message) |key| key.slice() else {
+            if (json) {
+                try std.Io.File.stdout().writeStreamingAll(init.io, "{\"return\":\"idle\"}\n");
+            } else try std.Io.File.stdout().writeStreamingAll(init.io, "return: idle (no active or queued message)\n");
+            return null;
+        };
         if (json) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "{\"return\":\"idle\"}\n");
-        } else try std.Io.File.stdout().writeStreamingAll(init.io, "return: idle (no active or queued message)\n");
-        return null;
+            const selection = try std.json.Stringify.valueAlloc(std.heap.c_allocator, .{
+                .event = "selection",
+                .session = session_ref,
+                .message = selected,
+            }, .{});
+            defer std.heap.c_allocator.free(selection);
+            try std.Io.File.stdout().writeStreamingAll(init.io, selection);
+            try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+        } else {
+            try writeSafeField(init.io, "selected message: ", selected);
+        }
+        if (!terminal_only and work.action_count > 1) try showActionable(init.io, report.file, json);
+        break :blk try selectedRequest(store, session_ref, selected);
     };
-    if (json) {
-        const selection = try std.json.Stringify.valueAlloc(std.heap.c_allocator, .{
-            .event = "selection",
-            .session = session_ref,
-            .message = selected,
-        }, .{});
-        defer std.heap.c_allocator.free(selection);
-        try std.Io.File.stdout().writeStreamingAll(init.io, selection);
-        try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
-    } else {
-        try writeSafeField(init.io, "selected message: ", selected);
-    }
-    const saved = try selectedRequest(store, session_ref, selected);
     if (try followMessage(init, &saved, json, true, terminal_only)) |attention|
         return .{ .work = attention, .message = saved.key };
     if (!json) try showResult(init, &saved, false);
@@ -388,7 +393,9 @@ fn waitForSession(init: std.process.Init, store: []const u8, session_ref: []cons
 }
 
 fn showSessionStatus(init: std.process.Init, store: []const u8, session_ref: []const u8) !void {
-    const work = try inspectWork(init, store, session_ref);
+    const report = try inspectWork(init, store, session_ref);
+    defer report.file.close(init.io);
+    const work = report.work;
     if (work.workspace.len == 0) return error.SessionNotConfigured;
     try writeSafeField(init.io, "Session: ", session_ref);
     try writeSafeField(init.io, "Store: ", store);
@@ -397,8 +404,7 @@ fn showSessionStatus(init: std.process.Init, store: []const u8, session_ref: []c
     try writeSafeField(init.io, "Work: ", work.status.slice());
     if (work.selected_message) |selected|
         try writeSafeField(init.io, "Current message: ", selected.slice());
-    if (work.action.len != 0)
-        try writeSafeField(init.io, "Action requiring attention: ", work.action.slice());
+    if (work.action_count != 0) try showActionable(init.io, report.file, false);
     if (work.recent_count != 0) {
         try std.Io.File.stdout().writeStreamingAll(init.io, "Recent messages (use /result KEY for an answer):\n");
         for (work.recent[0..work.recent_count]) |recent| {
@@ -1144,6 +1150,7 @@ const Work = struct {
     status: protocol.Bounded(32) = .{},
     turn: protocol.Bounded(32) = .{},
     action: protocol.Bounded(32) = .{},
+    action_count: usize = 0,
     workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
     permission_mode: protocol.Bounded(16) = .{},
     selected_message: ?protocol.Bounded(protocol.max_key_bytes) = null,
@@ -1269,6 +1276,7 @@ fn readWork(reader: *std.json.Reader) !Work {
                         const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 32);
                         defer freeToken(value);
                         if (work.action.len == 0) try work.action.set(try tokenString(value));
+                        work.action_count += 1;
                     } else try reader.skipValue();
                 }
             }
@@ -1278,9 +1286,16 @@ fn readWork(reader: *std.json.Reader) !Work {
     return work;
 }
 
-fn inspectWork(init: std.process.Init, store: []const u8, session_ref: []const u8) !Work {
+const SessionObservation = struct {
+    work: Work,
+    // The complete Current capture remains owned until all its permissions
+    // have been displayed; no per-Action resident list is needed.
+    file: std.Io.File,
+};
+
+fn inspectWork(init: std.process.Init, store: []const u8, session_ref: []const u8) !SessionObservation {
     const file = try renderScratch(init);
-    defer file.close(init.io);
+    errdefer file.close(init.io);
     var response: client.ReplyBuffer = .{};
     const reply = try client.inspectSession(init.io, store, session_ref, .current, file, &response);
     switch (reply) {
@@ -1291,7 +1306,54 @@ fn inspectWork(init: std.process.Init, store: []const u8, session_ref: []const u
     var file_reader = file.reader(init.io, &input_buffer);
     var json_reader = std.json.Reader.init(std.heap.c_allocator, &file_reader.interface);
     defer json_reader.deinit();
-    return readWork(&json_reader);
+    return .{ .work = try readWork(&json_reader), .file = file };
+}
+
+fn showActionable(io: std.Io, file: std.Io.File, json: bool) !void {
+    var input_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var file_reader = file.reader(io, &input_buffer);
+    var reader = std.json.Reader.init(std.heap.c_allocator, &file_reader.interface);
+    defer reader.deinit();
+    if ((try reader.next()) != .object_begin) return error.InvalidObservation;
+    while (true) {
+        const name = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 64);
+        defer freeToken(name);
+        if (name == .object_end) return error.InvalidObservation;
+        if (!std.mem.eql(u8, try tokenString(name), "actionable_permissions")) {
+            try reader.skipValue();
+            continue;
+        }
+        if ((try reader.next()) != .array_begin) return error.InvalidObservation;
+        if (json) try std.Io.File.stdout().writeStreamingAll(io, "{\"event\":\"actionable_permissions\",\"actions\":[");
+        var first = true;
+        while (true) {
+            const item = try reader.next();
+            if (item == .array_end) break;
+            if (item != .object_begin) return error.InvalidObservation;
+            var action: protocol.Bounded(32) = .{};
+            while (true) {
+                const field = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 64);
+                defer freeToken(field);
+                if (field == .object_end) break;
+                if (std.mem.eql(u8, try tokenString(field), "action")) {
+                    const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 32);
+                    defer freeToken(value);
+                    try action.set(try tokenString(value));
+                } else try reader.skipValue();
+            }
+            if (action.len == 0) return error.InvalidObservation;
+            _ = std.fmt.parseInt(u64, action.slice(), 10) catch return error.InvalidObservation;
+            if (json) {
+                if (!first) try std.Io.File.stdout().writeStreamingAll(io, ",");
+                try std.Io.File.stdout().writeStreamingAll(io, "\"");
+                try std.Io.File.stdout().writeStreamingAll(io, action.slice());
+                try std.Io.File.stdout().writeStreamingAll(io, "\"");
+            } else try writeSafeField(io, "Action requiring attention: ", action.slice());
+            first = false;
+        }
+        if (json) try std.Io.File.stdout().writeStreamingAll(io, "]}\n");
+        return;
+    }
 }
 
 fn writeFollowOutcome(init: std.process.Init, observation: std.json.Value, json: bool) !void {
