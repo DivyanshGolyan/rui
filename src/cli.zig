@@ -372,6 +372,40 @@ fn login(init: std.process.Init, args: []const []const u8) !void {
     try std.Io.File.stdout().writeStreamingAll(init.io, "Codex login installed.\n");
 }
 
+/// A fresh terminal choice authorizes login; reading setup status alone does not.
+fn guideProviderLogin(init: std.process.Init) !void {
+    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Supported integration: Codex. Login stores Rui-owned credentials; defer leaves this Session and Host work unchanged.\n");
+    var choice_buffer: [16]u8 = undefined;
+    const choice = (try TerminalEditor.readLine(init.io, &choice_buffer, "Provider: [c] Codex login, [d] defer > ", false)) orelse {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Login deferred. Inspect saved work with /status or /result.\n");
+        return;
+    };
+    if (std.mem.eql(u8, choice, "d")) {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Login deferred. Inspect saved work with /status or /result.\n");
+        return;
+    }
+    if (!std.mem.eql(u8, choice, "c")) {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Choose c or d. No login or preference change.\n");
+        return;
+    }
+    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Starting Codex device login. The printed code is for the provider page only; waiting for its answer.\n");
+    login(init, &.{"codex"}) catch |err| {
+        const advice: []const u8 = switch (err) {
+            error.LoginDenied => "Rui: Login denied. No provider preference changed; retry /login if intended.\n",
+            error.LoginExpired => "Rui: Login expired. No provider preference changed; retry /login for a fresh code.\n",
+            else => "Rui: Login failed or credential save unconfirmed. Inspect rui setup before retrying; no Session binding changed.\n",
+        };
+        try std.Io.File.stdout().writeStreamingAll(init.io, advice);
+        return;
+    };
+    const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+    _ = preferences.update(home, null, "codex", "gpt-6-luna") catch |err| {
+        std.debug.print("rui: credential installed, but prospective preference save failed or is uncertain ({s}). Inspect rui setup; active Session unchanged.\n", .{@errorName(err)});
+        return;
+    };
+    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Codex selected for future Sessions (gpt-6-luna). Local credentials installed; remote model acceptance is not established. Current Session unchanged.\n");
+}
+
 fn serve(init: std.process.Init, args: []const []const u8) !void {
     const io = init.io;
     var store_path: ?[]const u8 = null;
@@ -821,7 +855,14 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         if (text.len == 0) continue;
         if (std.mem.eql(u8, text, "/exit")) break;
         if (std.mem.eql(u8, text, "/help")) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: /help  /status  /wait  /requests  /result KEY  /setup [--store PATH] [--provider codex] [--model gpt-6-luna]  /configure [settings]  /exit\n/help shows these commands; /status inspects this Session; /wait follows selected work; /requests lists local recovery handles; /result KEY reads a saved answer. /setup reads local credential/Host status and saves defaults for future Sessions only; /configure changes this Session; /exit detaches without stopping work.\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: /help  /status  /wait  /requests  /result KEY  /setup [--store PATH] [--provider codex] [--model gpt-6-luna]  /login  /configure [settings]  /exit\n/help shows these commands; /status inspects this Session; /wait follows selected work; /requests lists local recovery handles; /result KEY reads a saved answer. /setup reads local credential/Host status and saves defaults for future Sessions only; /login chooses Codex login or defers; /configure changes this Session; /exit detaches without stopping work.\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
+            continue;
+        }
+        if (std.mem.eql(u8, text, "/login")) {
+            guideProviderLogin(init) catch |err| {
+                if (err != error.InteractiveInterrupted) return err;
+                try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Login deferred. Inspect saved work with /status or /result.\n");
+            };
             continue;
         }
         const attention: ?Attention = if (std.mem.eql(u8, text, "/setup") or std.mem.startsWith(u8, text, "/setup ")) blk: {
