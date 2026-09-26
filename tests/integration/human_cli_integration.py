@@ -686,7 +686,7 @@ def main():
         endpoint.responses.extend(fixture.sse_answer(f"editor-answer-{i}", f"editor-reason-{i}",
             f"editor-message-{i}", f"edited {i}")[0] for i in range(len(cases)))
         master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", editor_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
@@ -717,7 +717,25 @@ def main():
                 actual = next(item["content"][0]["text"] for item in reversed(body["input"])
                     if item.get("role") == "user")
                 assert actual == expected, (typed, expected, actual)
+            for index, (cluster, count) in enumerate((("a", 1000), ("e\u0301", 500))):
+                marker = f"burst edited {index}"
+                endpoint.responses.append(fixture.sse_answer(f"burst-answer-{index}",
+                    f"burst-reason-{index}", f"burst-message-{index}", marker)[0])
+                observed = terminal_bulk(master, cluster * count + "\x7f" * count + "Z", marker)
+                assert len(observed.encode()) < 100_000, "tail deletion repainted the whole draft per key"
+                body = json.loads(endpoint.requests[-1])
+                actual = next(item["content"][0]["text"] for item in reversed(body["input"])
+                    if item.get("role") == "user")
+                assert actual == "Z", actual
+                if "rui> " not in observed.split(marker, 1)[1]:
+                    read_terminal(master, "rui> ")
             before = len(endpoint.requests)
+            rejected = terminal_bulk(master, "a" * 2050 + "\x7f" * 2048,
+                "cannot place the terminal cursor reliably")
+            assert "nothing sent" in rejected, rejected[-1000:]
+            assert len(endpoint.requests) == before, "a batch made an originally wrapped draft editable"
+            if "rui> " not in rejected.split("cannot place the terminal cursor reliably", 1)[1]:
+                read_terminal(master, "rui> ")
             for invalid in (b"\xc3(\n", b"\xc3\n"):
                 os.write(master, invalid)
                 rejected = read_terminal(master, "rui> ")
