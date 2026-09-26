@@ -37,6 +37,16 @@ pub fn main(init: std.process.Init) !void {
     var diagnostic = evaluator.Diagnostic{};
     try owner.validate(source, evaluator.Cancellation.never(), &diagnostic);
     if (diagnostic.text().len != 0) return error.UnexpectedCompilerDiagnostic;
+    var missing_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const missing = try std.fmt.bufPrint(&missing_buffer, "{s}/unavailable", .{owner.scratch_path});
+    const scratch_path = owner.scratch_path;
+    owner.scratch_path = missing;
+    owner.output_removal = .injected_failure;
+    try owner.validate(source, evaluator.Cancellation.never(), &diagnostic);
+    try owner.finish();
+    if (used.load(.acquire) != 0) return error.CompileOnlyScratchCharged;
+    owner.scratch_path = scratch_path;
+    owner.output_removal = .native;
 
     writer = try scratch.createFile(io, "prepared", .{});
     try writer.writeStreamingAll(io, &.{ 5, 1, 0, 0, 0, 2 });

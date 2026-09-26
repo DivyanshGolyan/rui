@@ -606,7 +606,7 @@ V1 completes canonical input preparation before child execution. This eager copy
 
 Runtime owns prepared input and captured output through the evaluation lifecycle. Preparation streams into charged scratch with no descriptor/file per visible result or call. Derive a bounded descriptor set for the selected representation; traverse ranges/metadata through windows as result count grows.
 
-Finish input writes/integrity checks and recheck cancellation/staleness before spawning with completed read-only input. Partial preparation releases its artifacts and starts no child. Preparation time is measured separately; the child elapsed deadline starts only after successful spawn.
+Finish input writes/integrity checks and recheck cancellation/staleness before spawning with completed read-only input. Partial preparation releases its artifacts and starts no child. Compile-only validation uses the same serialized supervision without output/index scratch; any child stdout is an error. Preparation time is measured separately; the child elapsed deadline starts only after successful spawn.
 
 Parent-owned output remains untrusted until protocol/exit checks and full validation succeed; child exit, pipe closure or apparent root value alone cannot publish success. Keep output and validation ranges through the last intent and dependency/outcome transaction. On cancellation, stale generation, failure or shutdown, terminate/reap as needed and close pipes/input/output/metadata after pending I/O ends. Restart discards abandoned artifacts and evaluates fresh saved facts.
 
