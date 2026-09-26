@@ -16,6 +16,7 @@ pub const Provider = enum { codex };
 pub const max_provider_bytes = 16;
 pub const max_header_bytes = 16 * 1024;
 pub const content_window_bytes = 4096;
+pub const public_conversation_page_items = 16;
 pub const max_json_depth = 64;
 pub const max_sqlite_content_bytes: u64 = 1024 * 1024 * 1024 - 4096;
 pub const session_list_page_size: usize = 8;
@@ -96,6 +97,8 @@ pub const Kind = enum {
     read_action_arguments,
     inspect_session,
     list_sessions,
+    conversation_page,
+    conversation_content,
 };
 
 pub const ConfigureCommand = struct {
@@ -269,6 +272,24 @@ pub const ListSessions = struct {
     ceiling: u64 = 0,
 };
 
+// Positions are immutable within a Session. The zero end/cursor requests the
+// first (newest) page; subsequent requests carry the returned fixed end.
+pub const ConversationPage = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    end: u64 = 0,
+    before_position: u64 = 0,
+    before_ordinal: u64 = 0,
+};
+
+pub const ConversationContent = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    position: u64 = 0,
+    ordinal: u64 = 0,
+    start: u64 = 0,
+};
+
 pub const Request = union(Kind) {
     host_info: struct { store: Bounded(max_store_bytes) = .{} },
     host_stop: struct { store: Bounded(max_store_bytes) = .{} },
@@ -283,12 +304,14 @@ pub const Request = union(Kind) {
     read_action_arguments: ReadActionArguments,
     inspect_session: InspectSession,
     list_sessions: ListSessions,
+    conversation_page: ConversationPage,
+    conversation_content: ConversationContent,
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions => {},
+            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content => {},
         }
     }
 
@@ -442,6 +465,10 @@ const Parser = struct {
             .inspect_session
         else if (kind_text.eql("list_sessions"))
             .list_sessions
+        else if (kind_text.eql("conversation_page"))
+            .conversation_page
+        else if (kind_text.eql("conversation_content"))
+            .conversation_content
         else
             return error.UnknownCommand;
 
@@ -464,6 +491,8 @@ const Parser = struct {
             .read_action_arguments => .{ .read_action_arguments = try self.parseReadActionArguments(store) },
             .inspect_session => .{ .inspect_session = try self.parseInspect(store) },
             .list_sessions => .{ .list_sessions = try self.parseListSessions(store) },
+            .conversation_page => .{ .conversation_page = try self.parseConversationPage(store) },
+            .conversation_content => .{ .conversation_content = try self.parseConversationContent(store) },
         };
         errdefer request.removeTemporaryContent(self.options.io) catch {
             self.options.cleanup_failed.* = true;
@@ -668,6 +697,44 @@ const Parser = struct {
         if (request.after > std.math.maxInt(i64) or request.ceiling > std.math.maxInt(i64) or
             (request.after == 0 and request.ceiling != 0) or
             (request.after != 0 and request.after > request.ceiling)) return error.InvalidCursor;
+        return request;
+    }
+
+    fn parseConversationPage(self: *Parser, store: Bounded(max_store_bytes)) !ConversationPage {
+        var request = ConversationPage{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("end");
+        request.end = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("before_position");
+        request.before_position = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("before_ordinal");
+        request.before_ordinal = try self.readCanonicalU64();
+        if ((request.end == 0) != (request.before_position == 0) or
+            (request.before_position == 0 and request.before_ordinal != 0) or
+            (request.end != 0 and request.before_position > request.end)) return error.InvalidCursor;
+        return request;
+    }
+
+    fn parseConversationContent(self: *Parser, store: Bounded(max_store_bytes)) !ConversationContent {
+        var request = ConversationContent{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("position");
+        request.position = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("ordinal");
+        request.ordinal = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("start");
+        request.start = try self.readCanonicalU64();
+        if (request.position == 0) return error.InvalidCursor;
         return request;
     }
 
@@ -1051,11 +1118,25 @@ pub const max_read_action_call_id_request_bytes =
     maximumJsonStringBytes(max_store_bytes) +
     ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
     ",\"action\":\"".len + 20 + "\"}".len;
+pub const max_conversation_content_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"conversation_content\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) + ",\"session\":".len +
+    maximumJsonStringBytes(max_session_bytes) +
+    ",\"position\":\"".len + 20 +
+    "\",\"ordinal\":\"".len + 20 +
+    "\",\"start\":\"".len + 20 + "\"}".len;
+pub const max_conversation_page_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"conversation_page\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) + ",\"session\":".len +
+    maximumJsonStringBytes(max_session_bytes) +
+    ",\"end\":\"".len + 20 +
+    "\",\"before_position\":\"".len + 20 +
+    "\",\"before_ordinal\":\"".len + 20 + "\"}".len;
 pub const max_client_request_bytes = @max(
     @max(@max(max_observe_command_request_bytes, max_read_result_request_bytes), @max(max_host_info_request_bytes, max_host_stop_request_bytes)),
     @max(
         @max(max_inspect_session_request_bytes, max_list_sessions_request_bytes),
-        @max(max_read_action_arguments_request_bytes, max_read_action_call_id_request_bytes),
+        @max(@max(max_read_action_arguments_request_bytes, max_read_action_call_id_request_bytes), @max(max_conversation_page_request_bytes, max_conversation_content_request_bytes)),
     ),
 );
 
@@ -1185,6 +1266,13 @@ pub const max_host_info_response_bytes =
     "\",\"capabilities\":{\"bash\":true,\"model\":true,\"managed_authentication\":true}}".len;
 pub const host_stop_ack = "{\"version\":\"1\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), host_stop_ack.len);
+pub const max_conversation_page_response_bytes =
+    "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"".len + 20 +
+    "\",\"items\":[".len + public_conversation_page_items * ("{\"position\":\"".len + 20 + "\",\"ordinal\":\"".len + 20 +
+        "\",\"kind\":\"tool_result\",\"content\":{\"bytes\":\"".len + 20 +
+        "\",\"sha256\":\"".len + 64 + "\",\"display\":\"omitted\"}},".len) +
+    "],\"more\":true,\"before_position\":\"".len + 20 +
+    "\",\"before_ordinal\":\"".len + 20 + "\"}".len;
 
 pub fn FixedJsonBuffer(comptime capacity: usize) type {
     return struct {
@@ -1503,6 +1591,33 @@ test "observation needs no scratch at a full budget" {
     const request = try parser.parse();
     try std.testing.expect(request == .observe_command);
     try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
+}
+
+test "conversation cursor parser rejects unfixed and malformed continuations" {
+    const cases = [_]struct { body: []const u8, failure: ?anyerror = null }{
+        .{ .body = "\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"0\"" },
+        .{ .body = "\"end\":\"25\",\"before_position\":\"10\",\"before_ordinal\":\"2\"" },
+        .{ .body = "\"end\":\"0\",\"before_position\":\"10\",\"before_ordinal\":\"0\"", .failure = error.InvalidCursor },
+        .{ .body = "\"end\":\"25\",\"before_position\":\"0\",\"before_ordinal\":\"0\"", .failure = error.InvalidCursor },
+        .{ .body = "\"end\":\"25\",\"before_position\":\"26\",\"before_ordinal\":\"0\"", .failure = error.InvalidCursor },
+        .{ .body = "\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"1\"", .failure = error.InvalidCursor },
+        .{ .body = "\"end\":\"025\",\"before_position\":\"10\",\"before_ordinal\":\"0\"", .failure = error.InvalidIdentity },
+    };
+    for (cases) |case| {
+        var buffer: [512]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"1\",\"kind\":\"conversation_page\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.body});
+        var source = SocketBody.init(-1, 0);
+        @memcpy(source.buffer[0..json.len], json);
+        source.end = json.len;
+        var cleanup_failed = false;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .cleanup_failed = &cleanup_failed } };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parser.parse());
+        } else {
+            const request = try parser.parse();
+            try std.testing.expect(request == .conversation_page);
+        }
+    }
 }
 
 test "configuration provider envelope preserves exact spelling and omission" {

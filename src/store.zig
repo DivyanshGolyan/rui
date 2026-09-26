@@ -294,6 +294,21 @@ pub const ContentReference = struct {
     digest: [32]u8,
 };
 
+pub const PublicConversationItem = struct {
+    position: u64,
+    ordinal: u64, // Zero for User/Assistant; one-based call ordinal in a completed Tool Result group.
+    kind: enum { user, assistant, tool_result },
+    content: ContentReference,
+};
+
+pub const PublicConversationPage = struct {
+    pub const capacity = protocol.public_conversation_page_items;
+    end: u64,
+    items: [capacity]PublicConversationItem = undefined,
+    count: usize = 0,
+    more: bool = false,
+};
+
 pub const MessageObservation = struct {
     content: ContentReference,
     queue: ?AcceptedMessageQueue = null,
@@ -2476,6 +2491,119 @@ pub const Store = struct {
         observation.rejected_call_count = self.countRejectedCalls(session_ref) catch |err|
             return self.fenceReadFailure(err);
         return observation;
+    }
+
+    // Reverse chronological, with call order breaking ties at a completed
+    // group's final acceptance position. No transaction survives this call.
+    // The fixed end is the last committed position at the first read, not a
+    // count of visible rows; a private-only append cannot become public later.
+    pub fn publicConversationPage(self: *Store, request: protocol.ConversationPage) !PublicConversationPage {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        return self.publicConversationPageLocked(request) catch |err| switch (err) {
+            error.SessionNotFound, error.InvalidCursor => err,
+            else => self.fenceReadFailure(err),
+        };
+    }
+
+    fn publicConversationPageLocked(self: *Store, request: protocol.ConversationPage) !PublicConversationPage {
+        const current = (try self.readSession(request.session.slice())) orelse return error.SessionNotFound;
+        const end = if (request.end == 0) current.next_position - 1 else request.end;
+        if (request.end != 0 and (request.before_position == 0 or request.before_position > end or
+            end >= current.next_position or end > std.math.maxInt(i64))) return error.InvalidCursor;
+        var page = PublicConversationPage{ .end = end };
+        if (end == 0) return page;
+        // Tool outcomes enter public Conversation only when the entire group
+        // settles. Position is then its last acceptance; call ordinal is the
+        // stable tie breaker. Private model items/instructions never enter it.
+        const statement = try prepare(self.database, "WITH groups AS (SELECT op.operation_id,max(coalesce(call.acceptance_position,action.acceptance_position)) AS position " ++
+            "FROM model_operation op JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
+            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+            "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' GROUP BY op.operation_id " ++
+            "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
+            "AND min(coalesce(call.acceptance_position,action.acceptance_position)) IS NOT NULL " ++
+            "AND count(coalesce(call.rejection_content_id,action.resolution_content_id))=count(*)), " ++
+            "public AS (SELECT e.session_position AS position,0 AS ordinal,e.entry_kind AS kind,e.content_id " ++
+            "FROM conversation_entry e WHERE e.session_ref=?1 AND e.entry_kind IN (1,3) AND e.session_position<=?2 " ++
+            "UNION ALL SELECT groups.position,call.call_ordinal+1,4,coalesce(call.rejection_content_id,action.resolution_content_id) " ++
+            "FROM groups JOIN model_tool_call call ON call.operation_id=groups.operation_id " ++
+            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+            "WHERE groups.position<=?2) " ++
+            "SELECT position,ordinal,kind,content_id FROM public WHERE (?3=0 OR position<?3 OR (position=?3 AND ordinal<?4)) " ++
+            "ORDER BY position DESC,ordinal DESC LIMIT 17");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, request.session.slice());
+        try bindU64(statement, 2, end);
+        try bindU64(statement, 3, request.before_position);
+        try bindU64(statement, 4, request.before_ordinal);
+        while (true) {
+            const result = c.sqlite3_step(statement);
+            if (result == c.SQLITE_DONE) break;
+            if (result != c.SQLITE_ROW) return error.ConversationReadFailed;
+            if (page.count == page.items.len) {
+                page.more = true;
+                break;
+            }
+            const position = c.sqlite3_column_int64(statement, 0);
+            const ordinal = c.sqlite3_column_int64(statement, 1);
+            const kind = c.sqlite3_column_int(statement, 2);
+            const content_id = c.sqlite3_column_int64(statement, 3);
+            if (position <= 0 or ordinal < 0 or content_id <= 0 or
+                (kind != 1 and kind != 3 and kind != 4) or
+                (kind == 4) != (ordinal > 0)) return error.CorruptStore;
+            const metadata = try self.readContentMetadata(content_id);
+            page.items[page.count] = .{ .position = @intCast(position), .ordinal = @intCast(ordinal), .kind = switch (kind) {
+                1 => .user,
+                3 => .assistant,
+                4 => .tool_result,
+                else => unreachable,
+            }, .content = .{ .length = metadata.length, .digest = metadata.digest } };
+            page.count += 1;
+        }
+        return page;
+    }
+
+    // Resolve the public identity again, rather than accepting a global digest:
+    // another Session's content or private provider material is not authority.
+    pub fn openPublicConversationContent(self: *Store, request: protocol.ConversationContent) !ContentReader {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        return self.openPublicConversationContentLocked(request) catch |err| switch (err) {
+            error.ContentNotFound, error.RangeOutOfBounds => err,
+            else => self.fenceReadFailure(err),
+        };
+    }
+
+    fn openPublicConversationContentLocked(self: *Store, request: protocol.ConversationContent) !ContentReader {
+        if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
+        const statement = if (request.ordinal == 0)
+            try prepare(self.database, "SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND session_position=?2 AND entry_kind IN (1,3)")
+        else
+            try prepare(self.database, "SELECT coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_operation op " ++
+                "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
+                "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+                "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' AND call.call_ordinal+1=?3 " ++
+                "AND (SELECT max(coalesce(c.acceptance_position,a.acceptance_position)) FROM model_tool_call c " ++
+                "LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id)=?2 " ++
+                "AND (SELECT count(*) FROM model_tool_call c WHERE c.operation_id=op.operation_id)=" ++
+                "(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
+                "AND NOT EXISTS (SELECT 1 FROM model_tool_call c LEFT JOIN action_operation a " ++
+                "ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id " ++
+                "AND (coalesce(c.acceptance_position,a.acceptance_position) IS NULL OR coalesce(c.rejection_content_id,a.resolution_content_id) IS NULL))");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, request.session.slice());
+        try bindU64(statement, 2, request.position);
+        if (request.ordinal != 0) try bindU64(statement, 3, request.ordinal);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.ContentNotFound;
+        const content_id = c.sqlite3_column_int64(statement, 0);
+        if (content_id <= 0) return error.CorruptStore;
+        const metadata = try self.readContentMetadata(content_id);
+        if (request.start > metadata.length) return error.RangeOutOfBounds;
+        return .{ .store = self, .content_id = content_id, .reference = .{ .length = metadata.length, .digest = metadata.digest }, .representation = if (try self.contentIsRaw(content_id, metadata.length)) .raw else .{ .projection = .{} } };
     }
 
     pub fn captureSessionReport(
@@ -7346,6 +7474,18 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleTwoActionsForTesting(&storage, &tmp, binding, "action-metadata");
 
+    var public_request = protocol.ConversationPage{};
+    try public_request.session.set("direct/actions");
+    const proposed = try storage.publicConversationPage(public_request);
+    try std.testing.expectEqual(@as(usize, 1), proposed.count);
+    try std.testing.expect(proposed.items[0].kind == .user);
+    // The provider's complete proposal, including its call arguments, is not
+    // addressable as a public content position.
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{
+        .session = public_request.session,
+        .position = proposed.end,
+    }));
+
     const first_action_id = first: {
         const report_bytes = try testingSessionReport(&storage, &tmp, "direct/actions", 1024 * 1024);
         defer std.testing.allocator.free(report_bytes);
@@ -7370,6 +7510,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     try deny.session.set("direct/actions");
     const accepted = storage.denyPermission(&deny, .{});
     try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
+    try std.testing.expectEqual(@as(usize, 1), (try storage.publicConversationPage(public_request)).count);
     try std.testing.expect(storage.denyPermission(&deny, .{}).accepted.replayed);
     deny.action_id += 1;
     try std.testing.expect(storage.denyPermission(&deny, .{}) == .conflict);
@@ -7398,6 +7539,18 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     const action_stop = storage.stopSession(&stop, .{});
     try std.testing.expect(action_stop == .accepted);
     try std.testing.expectEqual(SessionStopCompletion.completed, action_stop.accepted.completion);
+    const settled_page = try storage.publicConversationPage(public_request);
+    try std.testing.expectEqual(@as(usize, 3), settled_page.count);
+    try std.testing.expect(settled_page.items[0].kind == .tool_result);
+    try std.testing.expectEqual(settled_page.items[0].position, settled_page.items[1].position);
+    try std.testing.expectEqual(@as(u64, 2), settled_page.items[0].ordinal);
+    try std.testing.expectEqual(@as(u64, 1), settled_page.items[1].ordinal);
+    var result_reader = try storage.openPublicConversationContent(.{
+        .session = public_request.session,
+        .position = settled_page.items[0].position,
+        .ordinal = 2,
+    });
+    result_reader.close();
     var stale: protocol.PermissionDecisionCommand = .{ .action_id = second_action_id };
     try stale.key.set("stale-denial");
     try stale.session.set("direct/actions");
@@ -10768,6 +10921,187 @@ test "large raw content opens without materializing its payload" {
     for (last) |byte| try std.testing.expectEqual(@as(u8, 'q'), byte);
 }
 
+test "public conversation owner fixes end, filters settings and bounds content" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var configuration = try completeConfiguration("public-config", "direct/public", workspace, "model-a");
+    try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+    var request = protocol.ConversationPage{};
+    try request.session.set("direct/public");
+    try std.testing.expectEqual(@as(usize, 0), (try storage.publicConversationPage(request)).count);
+
+    // A large first input and nineteen small ones expose both the item and
+    // content bound; no answer is invented for queued, unapplied input.
+    for (0..20) |index| {
+        var name_buffer: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "public-{d}", .{index});
+        var command: protocol.MessageCommand = .{};
+        try command.key.set(name);
+        try command.session.set("direct/public");
+        command.text = if (index == 19)
+            try testingBytesContent(&tmp, name, "é中")
+        else
+            try testingContent(&tmp, name, 'x', if (index == 0) 1024 * 1024 else 3);
+        try std.testing.expect(storage.submitMessage(&command, .{}) == .accepted);
+        try command.removeTemporaryContent(std.testing.io);
+    }
+    try std.testing.expectEqual(@as(usize, 0), (try storage.publicConversationPage(request)).count);
+    var instruction: protocol.ConfigureCommand = .{};
+    try instruction.key.set("public-instruction-before-selection");
+    try instruction.session.set("direct/public");
+    instruction.configuration.instructions = try testingContent(&tmp, "public-instruction-before", 's', 7);
+    defer instruction.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&instruction, .{}) == .accepted);
+    const active = (try storage.admitNextModelAttempt(.{})).?;
+    const first = try storage.publicConversationPage(request);
+    try std.testing.expectEqual(@as(usize, 16), first.count);
+    try std.testing.expect(first.more);
+    try std.testing.expectEqual(@as(u64, 20), first.items[0].position);
+    try std.testing.expectEqual(@as(u64, 5), first.items[15].position);
+    for (first.items[0..first.count]) |item| try std.testing.expect(item.kind == .user);
+    try std.testing.expectEqual(@as(u64, 5), first.items[0].content.length);
+    var unicode_reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = 20 });
+    var lead: [1]u8 = undefined;
+    var rest: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try unicode_reader.read(0, &lead));
+    try std.testing.expectEqual(@as(usize, 4), try unicode_reader.read(1, &rest));
+    try std.testing.expectEqual("é中"[0], lead[0]);
+    try std.testing.expectEqualStrings("é中"[1..], &rest);
+    unicode_reader.close();
+
+    var later: protocol.ConfigureCommand = .{};
+    try later.key.set("public-instructions");
+    try later.session.set("direct/public");
+    later.configuration.instructions = try testingContent(&tmp, "public-private-settings", 'p', 16);
+    defer later.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&later, .{}) == .accepted);
+    try submitTestMessage(&storage, &tmp, "after-page", "after-page-key", "direct/public", "later public input");
+    try storage.settleModelAttemptFailure(active.permit.binding, "fixture_failure", .terminal, .{});
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    request.end = first.end;
+    request.before_position = first.items[15].position;
+    const older = try storage.publicConversationPage(request);
+    try std.testing.expectEqual(@as(usize, 4), older.count);
+    try std.testing.expect(!older.more);
+    try std.testing.expectEqual(@as(u64, 4), older.items[0].position);
+    try std.testing.expectEqual(@as(u64, 1), older.items[3].position);
+    try std.testing.expectEqual(@as(u64, 1024 * 1024), older.items[3].content.length);
+    const fresh = try storage.publicConversationPage(.{ .session = request.session });
+    try std.testing.expectEqual(@as(usize, 16), fresh.count);
+    try std.testing.expect(fresh.items[0].position > first.end);
+    try std.testing.expect(fresh.items[0].kind == .user);
+    var read = protocol.ConversationContent{ .session = request.session, .position = older.items[3].position, .start = 1024 * 1024 - 2 };
+    var reader = try storage.openPublicConversationContent(read);
+    var tail: [2]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), try reader.read(read.start, &tail));
+    try std.testing.expectEqualStrings("xx", &tail);
+    reader.close();
+    read.position = 21; // the applied instruction is not public content
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(read));
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{ .session = .{}, .position = 1 }));
+    try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(.{ .session = request.session, .position = 1, .start = 1024 * 1024 + 1 }));
+    try std.testing.expectError(error.InvalidCursor, storage.publicConversationPage(.{ .session = request.session, .end = first.end + 100, .before_position = 1 }));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "private-only model output never becomes public conversation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "private-config", "direct/private");
+    try submitTestMessage(&storage, &tmp, "private-input", "private-message", "direct/private", "hi");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // Keep a successor queued: a terminal text Turn requires an answer, while
+    // this intermediate accepted output contains only opaque continuation.
+    try submitTestMessage(&storage, &tmp, "private-next", "private-next-message", "direct/private", "later");
+    const bytes = "private continuation";
+    const source = try tmp.dir.createFile(std.testing.io, "private-output", .{ .read = true });
+    defer source.close(std.testing.io);
+    try source.writeStreamingAll(std.testing.io, bytes);
+    try source.sync(std.testing.io);
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..root_length], "private-metadata", .{ .used = &used, .limit = 1024 }, false, &retained);
+    defer metadata.deinit();
+    try metadata.append(.{ .tag = .item, .kind = .reasoning, .start = 0, .length = bytes.len, .content_digest = protocol.contentDigest(bytes) });
+    try metadata.sealForRead();
+    try storage.settleModelSuccess(binding, &.{
+        .source = source,
+        .source_length = bytes.len,
+        .metadata = metadata.file,
+        .item_count = 1,
+        .call_count = 0,
+        .answer_length = 0,
+        .answer_digest = protocol.contentDigest(""),
+        .response_id = .{},
+        .body_model = .{},
+        .openai_model = .{},
+        .x_openai_model = .{},
+        .request_id = .{},
+    }, .{});
+    var request = protocol.ConversationPage{};
+    try request.session.set("direct/private");
+    const page = try storage.publicConversationPage(request);
+    try std.testing.expectEqual(@as(usize, 1), page.count);
+    try std.testing.expect(page.items[0].kind == .user);
+    try std.testing.expect(page.end > page.items[0].position);
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{
+        .session = request.session,
+        .position = page.end,
+    }));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "public tool-result cursor crosses a completed group boundary" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "group-config", "direct/group-page");
+    try submitTestMessage(&storage, &tmp, "group-input", "group-message", "direct/group-page", "run tools");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var ids: [17][16]u8 = undefined;
+    var names: [17][16]u8 = undefined;
+    var calls: [17]TestingCall = undefined;
+    for (&calls, 0..) |*call, index| {
+        const id = try std.fmt.bufPrint(&ids[index], "item-{d}", .{index});
+        const call_id = try std.fmt.bufPrint(&names[index], "call-{d}", .{index});
+        call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = call_id, .decoded_call_id = call_id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+    }
+    try settleCallsForTesting(&storage, &tmp, binding, "group-metadata", &calls);
+    var cursor = protocol.ConversationPage{};
+    try cursor.session.set("direct/group-page");
+    const newest = try storage.publicConversationPage(cursor);
+    try std.testing.expectEqual(@as(usize, 16), newest.count);
+    try std.testing.expect(newest.more);
+    for (newest.items[0..newest.count], 0..) |item, index| {
+        try std.testing.expect(item.kind == .tool_result);
+        try std.testing.expectEqual(newest.items[0].position, item.position);
+        try std.testing.expectEqual(@as(u64, 17) - index, item.ordinal);
+    }
+    cursor.end = newest.end;
+    cursor.before_position = newest.items[15].position;
+    cursor.before_ordinal = newest.items[15].ordinal;
+    const older = try storage.publicConversationPage(cursor);
+    try std.testing.expectEqual(@as(usize, 2), older.count);
+    try std.testing.expect(!older.more);
+    try std.testing.expectEqual(@as(u64, 1), older.items[0].ordinal);
+    try std.testing.expect(older.items[0].kind == .tool_result);
+    try std.testing.expect(older.items[1].kind == .user);
+    var reader = try storage.openPublicConversationContent(.{ .session = cursor.session, .position = older.items[0].position, .ordinal = 1 });
+    defer reader.close();
+    var result: [64]u8 = undefined;
+    const size = try reader.read(0, &result);
+    try std.testing.expectEqualStrings("Unknown tool: unknown.", result[0..size]);
+}
+
 test "definite rejections retain decisions without retaining payloads" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -11074,6 +11408,16 @@ test "continued accepted output keeps model immutable" {
         .request_id = .{},
     };
     try storage.settleModelSuccess(binding, &output, .{});
+    var public_request = protocol.ConversationPage{};
+    try public_request.session.set("direct/continued-output");
+    const public_page = try storage.publicConversationPage(public_request);
+    try std.testing.expectEqual(@as(usize, 2), public_page.count);
+    try std.testing.expect(public_page.items[0].kind == .assistant);
+    var public_reader = try storage.openPublicConversationContent(.{ .session = public_request.session, .position = public_page.items[0].position });
+    var decoded: [6]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 6), try public_reader.read(0, &decoded));
+    try std.testing.expectEqualStrings("answer", &decoded);
+    public_reader.close();
     {
         const resolution = try prepare(
             storage.database,
