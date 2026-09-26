@@ -150,8 +150,7 @@ pub fn main(init: std.process.Init) !void {
     });
     const real_child = owner.child_name;
 
-    var source = try replaceSource(tmp, io,
-        "throw Error('compile-only must not execute'); export default async function workflow() {}");
+    var source = try replaceSource(tmp, io, "throw Error('compile-only must not execute'); export default async function workflow() {}");
     defer source.close(io);
     var diagnostic = evaluator.Diagnostic{};
     owner.validate(source, evaluator.Cancellation.never(), &diagnostic) catch return error.CompileOnlyFailed;
@@ -220,16 +219,19 @@ pub fn main(init: std.process.Init) !void {
     if (!consumption.observed) return error.EvaluatorNotReusable;
 
     owner.output_removal = .injected_failure;
-    try owner.evaluate(
+    var prelaunch_delivered = false;
+    try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.evaluate(
         source,
         prepared,
         evaluator.Cancellation.never(),
-        &consumption,
+        &prelaunch_delivered,
         struct {
-            fn consume(_: *@TypeOf(consumption), _: *std.Io.File) !void {}
+            fn consume(observed: *bool, _: *std.Io.File) !void {
+                observed.* = true;
+            }
         }.consume,
-    );
-    if (scratch_used.load(.acquire) != 4) return error.EvaluatorScratchChargeDropped;
+    ));
+    if (prelaunch_delivered or scratch_used.load(.acquire) != 0) return error.PrelaunchOutputDelivered;
     var retained_iterator = tmp.iterate();
     var retained_names: usize = 0;
     while (try retained_iterator.next(io)) |entry| {
@@ -237,6 +239,17 @@ pub fn main(init: std.process.Init) !void {
     }
     if (retained_names != 1) return error.EvaluatorScratchCustodyDropped;
     try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.finish());
+    try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.evaluate(
+        source,
+        prepared,
+        evaluator.Cancellation.never(),
+        &prelaunch_delivered,
+        struct {
+            fn consume(observed: *bool, _: *std.Io.File) !void {
+                observed.* = true;
+            }
+        }.consume,
+    ));
     owner.output_removal = .native;
     try owner.finish(); // Idle/shutdown reclamation needs no next evaluation.
     if (scratch_used.load(.acquire) != 0) return error.EvaluatorScratchChargeLeaked;
@@ -292,8 +305,7 @@ pub fn main(init: std.process.Init) !void {
     }.consume);
 
     source.close(io);
-    source = try replaceSource(tmp, io,
-        "export default async function workflow() { return 'a'.repeat(600) + 'b'.repeat(600); }");
+    source = try replaceSource(tmp, io, "export default async function workflow() { return 'a'.repeat(600) + 'b'.repeat(600); }");
     try owner.evaluate(source, prepared, evaluator.Cancellation.never(), &consumption, struct {
         fn consume(result: *@TypeOf(consumption), output: *std.Io.File) !void {
             var bytes: [1202]u8 = undefined;
@@ -311,29 +323,35 @@ pub fn main(init: std.process.Init) !void {
     source.close(io);
     source = try replaceSource(tmp, io, "P");
     owner.budget.limit = 3; // First chunk fits; the second must not grow output.
-    owner.output_removal = .injected_failure;
     var partial_delivered = false;
     try std.testing.expectError(error.EvaluationFailed, owner.evaluate(
-        source, prepared, evaluator.Cancellation.never(), &partial_delivered,
+        source,
+        prepared,
+        evaluator.Cancellation.never(),
+        &partial_delivered,
         struct {
-            fn consume(observed: *bool, _: *std.Io.File) !void { observed.* = true; }
+            fn consume(observed: *bool, _: *std.Io.File) !void {
+                observed.* = true;
+            }
         }.consume,
     ));
-    if (partial_delivered or scratch_used.load(.acquire) != 3) return error.PartialChargeNotRetained;
-    try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.finish());
+    if (partial_delivered or scratch_used.load(.acquire) != 0) return error.PartialChargeLeaked;
     source.close(io);
     source = try replaceSource(tmp, io, "F");
-    try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.evaluate(
-        source, prepared, evaluator.Cancellation.never(), &partial_delivered,
-        struct {
-            fn consume(observed: *bool, _: *std.Io.File) !void { observed.* = true; }
-        }.consume,
-    ));
-    if (partial_delivered or scratch_used.load(.acquire) != 3) return error.UnreclaimedEvaluatorReused;
-    owner.output_removal = .native;
-    try owner.finish();
-    if (scratch_used.load(.acquire) != 0) return error.PartialChargeLeaked;
     owner.budget.limit = 32 * 1024 * 1024;
+    try owner.evaluate(
+        source,
+        prepared,
+        evaluator.Cancellation.never(),
+        &partial_delivered,
+        struct {
+            fn consume(observed: *bool, _: *std.Io.File) !void {
+                observed.* = true;
+            }
+        }.consume,
+    );
+    if (!partial_delivered or scratch_used.load(.acquire) != 0) return error.PartialFailureFencedReuse;
+    try owner.finish();
     for ([_][]const u8{ "D", "E", "N", "S", "X", "Q", "{" }) |fake_output| {
         source.close(io);
         source = try replaceSource(tmp, io, fake_output);
@@ -353,7 +371,7 @@ pub fn main(init: std.process.Init) !void {
         if (scratch_used.load(.acquire) != 0) return error.EvaluatorScratchChargeLeaked;
     }
     owner.index_removal = .injected_failure;
-    try std.testing.expectError(error.MalformedEvaluatorOutput, owner.evaluate(
+    try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.evaluate(
         source,
         prepared,
         evaluator.Cancellation.never(),
@@ -364,7 +382,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }.consume,
     ));
-    if (scratch_used.load(.acquire) == 0) return error.EvaluatorIndexChargeDropped;
+    if (scratch_used.load(.acquire) != 0) return error.EvaluatorPrelaunchChargeLeaked;
     var index_iterator = tmp.iterate();
     var index_names: usize = 0;
     while (try index_iterator.next(io)) |entry| {
@@ -375,6 +393,17 @@ pub fn main(init: std.process.Init) !void {
     }
     if (index_names != 1) return error.EvaluatorIndexCustodyDropped;
     try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.finish());
+    try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.evaluate(
+        source,
+        prepared,
+        evaluator.Cancellation.never(),
+        {},
+        struct {
+            fn consume(_: void, _: *std.Io.File) !void {
+                return error.InvalidEvaluatorOutputDelivered;
+            }
+        }.consume,
+    ));
     owner.index_removal = .native;
     try owner.finish();
     if (scratch_used.load(.acquire) != 0) return error.EvaluatorIndexChargeLeaked;
@@ -422,7 +451,8 @@ pub fn main(init: std.process.Init) !void {
     source = try replaceSource(tmp, io, "B");
     owner.budget.limit = 800500; // 800001 output plus one live object's index.
     var siblings = struct { io: std.Io, used: *std.atomic.Value(u64), called: bool = false }{
-        .io = io, .used = &scratch_used,
+        .io = io,
+        .used = &scratch_used,
     };
     try owner.evaluate(source, prepared, evaluator.Cancellation.never(), &siblings, struct {
         fn consume(observed: *@TypeOf(siblings), output: *std.Io.File) !void {
@@ -436,7 +466,8 @@ pub fn main(init: std.process.Init) !void {
     source.close(io);
     source = try replaceSource(tmp, io, "W");
     var wide = struct { io: std.Io, used: *std.atomic.Value(u64), called: bool = false }{
-        .io = io, .used = &scratch_used,
+        .io = io,
+        .used = &scratch_used,
     };
     try owner.evaluate(source, prepared, evaluator.Cancellation.never(), &wide, struct {
         fn consume(observed: *@TypeOf(wide), output: *std.Io.File) !void {
@@ -481,7 +512,6 @@ pub fn main(init: std.process.Init) !void {
         }
     }{};
     cancelled_delivered = false;
-    owner.output_removal = .injected_failure;
     try std.testing.expectError(error.EvaluationCancelled, owner.evaluate(
         source,
         prepared,
@@ -495,8 +525,6 @@ pub fn main(init: std.process.Init) !void {
     ));
     if (cancel_live.checks < 5 or cancelled_delivered or scratch_used.load(.acquire) != 0)
         return error.LiveCancellationNotReclaimed;
-    try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.finish());
-    owner.output_removal = .native;
     try owner.finish();
     const cpu_start = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
     var cpu_delivered = false;
@@ -515,8 +543,7 @@ pub fn main(init: std.process.Init) !void {
         std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - cpu_start > 4 * 1_000_000_000)
         return error.EvaluatorCpuLimitNotEnforced;
     source.close(io);
-    source = try replaceSource(tmp, io,
-        "export default async function workflow() { function recurse() { return recurse(); } return recurse(); }");
+    source = try replaceSource(tmp, io, "export default async function workflow() { function recurse() { return recurse(); } return recurse(); }");
     var stack_delivered = false;
     try std.testing.expectError(error.EvaluationFailed, owner.evaluate(
         source,
@@ -540,6 +567,29 @@ pub fn main(init: std.process.Init) !void {
         }
     }.consume);
     if (scratch_used.load(.acquire) != 0) return error.EvaluatorScratchChargeLeaked;
+    // The consumer runs with anonymous scratch. Even if later name removals
+    // become unavailable, publication and final closure remain independent.
+    var removal_blocked = std.atomic.Value(bool).init(false);
+    owner.output_removal = .{ .gated = &removal_blocked };
+    const publication = .{ .io = io, .dir = tmp, .gate = &removal_blocked, .used = &scratch_used };
+    try owner.evaluate(source, prepared, evaluator.Cancellation.never(), &publication, struct {
+        fn consume(state: *const @TypeOf(publication), output: *std.Io.File) !void {
+            var iterator = state.dir.iterate();
+            while (try iterator.next(state.io)) |entry| {
+                if (std.mem.startsWith(u8, entry.name, "evaluator-")) return error.EvaluatorNameVisibleAtPublication;
+            }
+            if (state.used.load(.acquire) != 2) return error.EvaluatorOutputNotChargedAtPublication;
+            var bytes: [2]u8 = undefined;
+            if (try output.readPositionalAll(state.io, &bytes, 0) != 2 or
+                !std.mem.eql(u8, &bytes, "42")) return error.UnexpectedEvaluatorOutput;
+            state.gate.store(true, .release);
+        }
+    }.consume);
+    if (!removal_blocked.load(.acquire) or scratch_used.load(.acquire) != 0)
+        return error.PostPublicationRemovalRetainedCustody;
+    try owner.finish();
+    removal_blocked.store(false, .release);
+    owner.output_removal = .native;
     owner.child_name = self_buffer[0..self_length];
     source.close(io);
     source = try replaceSource(tmp, io, "!exit");
@@ -552,23 +602,10 @@ pub fn main(init: std.process.Init) !void {
             fn consume(_: void, _: *std.Io.File) !void {}
         }.consume,
     ));
-    owner.output_removal = .injected_failure;
-    try std.testing.expectError(error.EvaluationFailed, owner.evaluate(
-        source,
-        prepared,
-        evaluator.Cancellation.never(),
-        {},
-        struct {
-            fn consume(_: void, _: *std.Io.File) !void {}
-        }.consume,
-    ));
-    try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.finish());
-    owner.output_removal = .native;
     try owner.finish();
 
     source.close(io);
     source = try replaceSource(tmp, io, "X");
-    owner.index_removal = .injected_failure;
     try std.testing.expectError(error.MalformedEvaluatorOutput, owner.evaluate(
         source,
         prepared,
@@ -580,13 +617,10 @@ pub fn main(init: std.process.Init) !void {
             }
         }.consume,
     ));
-    try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.finish());
-    owner.index_removal = .native;
     try owner.finish();
 
     source.close(io);
     source = try replaceSource(tmp, io, "F");
-    owner.output_removal = .injected_failure;
     try std.testing.expectError(error.CanonicalPublicationFailed, owner.evaluate(
         source,
         prepared,
@@ -598,20 +632,19 @@ pub fn main(init: std.process.Init) !void {
             }
         }.consume,
     ));
-    if (scratch_used.load(.acquire) == 0) return error.EvaluatorScratchChargeDropped;
-    try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.evaluate(
+    if (scratch_used.load(.acquire) != 0) return error.ConsumerFailureChargeLeaked;
+    try owner.evaluate(
         source,
         prepared,
         evaluator.Cancellation.never(),
-        {},
+        &partial_delivered,
         struct {
-            fn consume(_: void, _: *std.Io.File) !void {
-                return error.InvalidEvaluatorOutputDelivered;
+            fn consume(observed: *bool, _: *std.Io.File) !void {
+                observed.* = true;
             }
         }.consume,
-    ));
-    try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.finish());
-    owner.output_removal = .native;
+    );
+    if (!partial_delivered) return error.ConsumerFailureFencedReuse;
     try owner.finish();
     if (scratch_used.load(.acquire) != 0) return error.EvaluatorScratchChargeLeaked;
     var iterator = tmp.iterate();
