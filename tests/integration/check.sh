@@ -33,6 +33,7 @@ if [ "${3:-}" = parallel ]; then
     run_case control python3 "$directory/control_integration.py" "$release_safe"
     run_case descriptor-capacity python3 "$directory/descriptor_capacity_integration.py" "$release_safe"
     run_case host-status python3 "$directory/host_status_integration.py" "$release_safe" "$host_status_actor"
+    run_case host-stop python3 "$directory/host_stop_integration.py" "$release_safe" "$host_status_actor"
 
     set -- $pids
     failed=0
@@ -82,6 +83,7 @@ python3 "$directory/control_integration.py" "$release_safe"
 python3 "$directory/descriptor_capacity_integration.py" "$release_safe"
 python3 "$directory/host_status_integration.py" "$release_safe" "$host_status_actor"
 python3 "$directory/host_launch_integration.py" "$release_safe"
+python3 "$directory/host_stop_integration.py" "$release_safe" "$host_status_actor"
 sh "$directory/admission_integration.sh" "$debug" artifact-smoke
 python3 "$directory/host_process_test.py"
 python3 "$directory/host_allocator_test.py" "$release_safe"

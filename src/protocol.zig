@@ -83,6 +83,7 @@ pub const Configuration = struct {
 
 pub const Kind = enum {
     host_info,
+    host_stop,
     configure,
     message,
     session_stop,
@@ -258,6 +259,7 @@ pub const HostInfo = struct {
 
 pub const Request = union(Kind) {
     host_info: struct { store: Bounded(max_store_bytes) = .{} },
+    host_stop: struct { store: Bounded(max_store_bytes) = .{} },
     configure: ConfigureCommand,
     message: MessageCommand,
     session_stop: SessionStopCommand,
@@ -273,7 +275,7 @@ pub const Request = union(Kind) {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session => {},
+            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session => {},
         }
     }
 
@@ -403,6 +405,8 @@ const Parser = struct {
         try self.readSmallString(&kind_text);
         const kind: Kind = if (kind_text.eql("host_info"))
             .host_info
+        else if (kind_text.eql("host_stop"))
+            .host_stop
         else if (kind_text.eql("configure"))
             .configure
         else if (kind_text.eql("message"))
@@ -433,6 +437,7 @@ const Parser = struct {
 
         var request: Request = switch (kind) {
             .host_info => .{ .host_info = .{ .store = store } },
+            .host_stop => .{ .host_stop = .{ .store = store } },
             .configure => .{ .configure = try self.parseConfigure(store) },
             .message => .{ .message = try self.parseMessage(store) },
             .session_stop => .{ .session_stop = try self.parseSessionStop(store) },
@@ -966,6 +971,9 @@ pub const max_observe_command_request_bytes =
 pub const max_host_info_request_bytes =
     "{\"version\":\"1\",\"kind\":\"host_info\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) + "}".len;
+pub const max_host_stop_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"host_stop\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) + "}".len;
 pub const max_read_result_request_bytes =
     "{\"version\":\"1\",\"kind\":\"read_result\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) +
@@ -986,7 +994,7 @@ pub const max_read_action_call_id_request_bytes =
     ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
     ",\"action\":\"".len + 20 + "\"}".len;
 pub const max_client_request_bytes = @max(
-    @max(@max(max_observe_command_request_bytes, max_read_result_request_bytes), max_host_info_request_bytes),
+    @max(@max(max_observe_command_request_bytes, max_read_result_request_bytes), @max(max_host_info_request_bytes, max_host_stop_request_bytes)),
     @max(
         max_inspect_session_request_bytes,
         @max(max_read_action_arguments_request_bytes, max_read_action_call_id_request_bytes),
@@ -1117,7 +1125,8 @@ pub const max_host_info_response_bytes =
     ",\"instance\":\"".len + 32 +
     "\",\"active_capacity\":\"".len + 20 +
     "\",\"capabilities\":{\"bash\":true,\"model\":true,\"managed_authentication\":true}}".len;
-pub const max_response_bytes = @max(max_control_response_bytes, max_host_info_response_bytes);
+pub const host_stop_ack = "{\"version\":\"1\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
+pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), host_stop_ack.len);
 
 pub fn FixedJsonBuffer(comptime capacity: usize) type {
     return struct {
