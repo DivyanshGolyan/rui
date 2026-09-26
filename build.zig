@@ -277,6 +277,7 @@ pub fn build(b: *std.Build) void {
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     full_evaluator.addArtifactArg(evaluator);
     full_evaluator.step.dependOn(&run_full_tests.step);
+    full_evaluator.step.dependOn(&string_sanitizer.step);
     process_integrations.step.dependOn(&format.step);
     process_integrations.step.dependOn(&full_evaluator.step);
     process_integrations.step.dependOn(&release.step);
