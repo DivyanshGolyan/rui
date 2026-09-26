@@ -58,7 +58,23 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
     }
     var editor: Editor = .{ .buffer = buffer, .allow_paste = allow_paste };
     const initial_size = windowSize();
+    var backspaces: usize = 0;
+    var repaint_deadline: i96 = 0;
     while (true) {
+        if (backspaces != 0) {
+            const remaining = repaint_deadline - std.Io.Clock.awake.now(io).nanoseconds;
+            if (remaining <= 0 or backspaces == editor.length) {
+                try paintTailDeletion(io, &editor, backspaces, prompt, initial_size);
+                backspaces = 0;
+                continue;
+            }
+            var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
+            if (try std.posix.poll(&fds, @intCast(@divTrunc(remaining + 999_999, 1_000_000))) == 0) {
+                try paintTailDeletion(io, &editor, backspaces, prompt, initial_size);
+                backspaces = 0;
+                continue;
+            }
+        }
         if (editor.escape != .none or editor.paste or editor.partial_length != 0) {
             var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
             // Only bare ESC is ambiguous with a standalone key. Once CSI or
@@ -77,7 +93,21 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
             }
         }
         var byte: [1]u8 = undefined;
-        if (try std.posix.read(0, &byte) == 0) return if (editor.length == 0) null else error.IncompleteTerminalLine;
+        if (try std.posix.read(0, &byte) == 0) {
+            if (backspaces != 0) try paintTailDeletion(io, &editor, backspaces, prompt, initial_size);
+            return if (editor.length == 0) null else error.IncompleteTerminalLine;
+        }
+        if ((byte[0] == 8 or byte[0] == 127) and editor.escape == .none and !editor.paste and
+            editor.partial_length == 0 and editor.rejected == null and editor.cursor == editor.length and editor.length != 0)
+        {
+            if (backspaces == 0) repaint_deadline = std.Io.Clock.awake.now(io).nanoseconds + 16_000_000;
+            backspaces += 1;
+            continue;
+        }
+        if (backspaces != 0) {
+            try paintTailDeletion(io, &editor, backspaces, prompt, initial_size);
+            backspaces = 0;
+        }
         const may_edit = editor.cursor != editor.length or editor.escape != .none or
             std.mem.indexOfScalar(u8, "\x01\x04\x05\x08\x0b\x15\x17\x7f", byte[0]) != null;
         const old_row = if (may_edit) visibleRow(&editor, prompt.len, initial_size) else null;
@@ -86,25 +116,7 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
         switch (event) {
             .none => {},
             .append => try output.writeStreamingAll(io, editor.buffer[old_length..editor.length]),
-            .redraw => {
-                if (old_row == null or windowSize().col != initial_size.col or windowSize().row != initial_size.row or
-                    visibleRow(&editor, prompt.len, initial_size) == null)
-                {
-                    try output.writeStreamingAll(io, "\n");
-                    return error.UncertainTerminalCursor;
-                }
-                // Repaint only while each row is known not to wrap. The
-                // terminal positions the cursor when it paints Unicode; we
-                // never substitute scalar or grapheme counts for cells.
-                var control: [32]u8 = undefined;
-                if (old_row.? != 0) try output.writeStreamingAll(io, try std.fmt.bufPrint(&control, "\x1b[{d}A", .{old_row.?}));
-                try output.writeStreamingAll(io, "\r\x1b[0J");
-                try output.writeStreamingAll(io, prompt);
-                try output.writeStreamingAll(io, editor.buffer[0..editor.cursor]);
-                try output.writeStreamingAll(io, "\x1b7");
-                try output.writeStreamingAll(io, editor.buffer[editor.cursor..editor.length]);
-                try output.writeStreamingAll(io, "\x1b8");
-            },
+            .redraw => try redraw(io, &editor, prompt, initial_size, old_row),
             .submit => {
                 try output.writeStreamingAll(io, "\n");
                 return editor.buffer[0..editor.length];
@@ -127,6 +139,32 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
             },
         }
     }
+}
+
+fn paintTailDeletion(io: std.Io, editor: *Editor, count: usize, prompt: []const u8, size: std.posix.winsize) !void {
+    const old_row = visibleRow(editor, prompt.len, size);
+    editor.deleteTail(count);
+    try redraw(io, editor, prompt, size, old_row);
+}
+
+fn redraw(io: std.Io, editor: *const Editor, prompt: []const u8, size: std.posix.winsize, old_row: ?usize) !void {
+    const output = std.Io.File.stdout();
+    if (old_row == null or windowSize().col != size.col or windowSize().row != size.row or
+        visibleRow(editor, prompt.len, size) == null)
+    {
+        try output.writeStreamingAll(io, "\n");
+        return error.UncertainTerminalCursor;
+    }
+    // Repaint only while each row is known not to wrap. The terminal positions
+    // the cursor when it paints Unicode; grapheme counts are not cell counts.
+    var control: [32]u8 = undefined;
+    if (old_row.? != 0) try output.writeStreamingAll(io, try std.fmt.bufPrint(&control, "\x1b[{d}A", .{old_row.?}));
+    try output.writeStreamingAll(io, "\r\x1b[0J");
+    try output.writeStreamingAll(io, prompt);
+    try output.writeStreamingAll(io, editor.buffer[0..editor.cursor]);
+    try output.writeStreamingAll(io, "\x1b7");
+    try output.writeStreamingAll(io, editor.buffer[editor.cursor..editor.length]);
+    try output.writeStreamingAll(io, "\x1b8");
 }
 
 fn windowSize() std.posix.winsize {
@@ -377,6 +415,45 @@ fn deletePrevious(self: *Editor) Event {
     return self.erase(self.previous(self.cursor), self.cursor);
 }
 
+// Consecutive tail deletions cannot change the segmentation of the retained
+// prefix. Count clusters, then find the retained boundary in one forward scan.
+fn deleteTail(self: *Editor, count: usize) void {
+    std.debug.assert(self.cursor == self.length and count != 0);
+    var offset: usize = 0;
+    var prior: ?c_int = null;
+    var state: c_int = 0;
+    var clusters: usize = 0;
+    while (offset < self.length) {
+        const scalar = self.decodeScalar(&offset);
+        if (prior == null or utf8proc_grapheme_break_stateful(prior.?, scalar, &state) != 0) clusters += 1;
+        prior = scalar;
+    }
+    const keep = clusters -| count;
+    if (keep == 0) {
+        self.length = 0;
+        self.cursor = 0;
+        return;
+    }
+    offset = 0;
+    prior = null;
+    state = 0;
+    clusters = 0;
+    while (offset < self.length) {
+        const start = offset;
+        const scalar = self.decodeScalar(&offset);
+        if (prior == null or utf8proc_grapheme_break_stateful(prior.?, scalar, &state) != 0) {
+            if (clusters == keep) {
+                self.length = start;
+                self.cursor = start;
+                return;
+            }
+            clusters += 1;
+        }
+        prior = scalar;
+    }
+    unreachable;
+}
+
 fn deleteNext(self: *Editor) Event {
     return self.erase(self.cursor, self.next(self.cursor));
 }
@@ -516,6 +593,28 @@ test "grapheme deletion, distinct word bindings and multiline paste" {
         if (byte == '\n' and !editor.paste) try std.testing.expectEqual(Event.submit, event);
     }
     try std.testing.expectEqualStrings("line1\nline2", storage[0..editor.length]);
+}
+
+test "batched tail deletion retains exact Unicode clusters and following input" {
+    const cases = .{
+        .{ "first second", 6, "first " },
+        .{ "A中e\u{301}🧑‍🌾", 1, "A中e\u{301}" },
+        .{ "A中e\u{301}🧑‍🌾", 2, "A中" },
+        .{ "🇺🇸🇨🇦", 1, "🇺🇸" },
+        .{ "⌚\u{fe0f}🇺🇸", 2, "" },
+        .{ "a\u{301}", 9, "" },
+    };
+    inline for (cases) |case| {
+        var storage: [100]u8 = undefined;
+        var editor: Editor = .{ .buffer = &storage };
+        for (case[0]) |byte| _ = editor.feed(byte);
+        editor.deleteTail(case[1]);
+        try std.testing.expectEqualStrings(case[2], storage[0..editor.length]);
+        try std.testing.expectEqual(editor.length, editor.cursor);
+        try std.testing.expectEqual(Event.append, editor.feed('Z'));
+        try std.testing.expectEqual(Event.submit, editor.feed('\n'));
+        try std.testing.expectEqualStrings(case[2] ++ "Z", storage[0..editor.length]);
+    }
 }
 
 test "exact UTF-8 bound and sticky rejection after backspace" {
