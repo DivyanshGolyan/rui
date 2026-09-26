@@ -19,17 +19,38 @@ pub fn build(b: *std.Build) void {
     });
     evaluator.root_module.link_libc = true;
     evaluator.root_module.addIncludePath(quickjs.path("."));
+    evaluator.root_module.addIncludePath(b.path("src"));
     evaluator.root_module.addCSourceFile(.{
         .file = b.path("src/evaluator_child.c"),
         .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE", "-DQUICKJS_NG_BUILD=1" },
     });
-    for ([_][]const u8{ "quickjs.c", "dtoa.c", "libregexp.c", "libunicode.c" }) |file| {
+    const extended_quickjs = b.addSystemCommand(&.{"sh"});
+    extended_quickjs.addFileArg(b.path("src/build_evaluator.sh"));
+    extended_quickjs.addFileArg(quickjs.path("quickjs.c"));
+    const quickjs_source = extended_quickjs.addOutputFileArg("quickjs.c");
+    extended_quickjs.addFileArg(b.path("src/evaluator_policy.patch"));
+    extended_quickjs.addFileInput(b.path("src/evaluator_string_reader.inc"));
+    extended_quickjs.addFileInput(b.path("src/evaluator_string_reader.h"));
+    extended_quickjs.addFileInput(b.path("src/evaluator_policy.inc"));
+    evaluator.root_module.addCSourceFile(.{
+        .file = quickjs_source,
+        .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE", "-DQUICKJS_NG_BUILD=1" },
+    });
+    for ([_][]const u8{ "dtoa.c", "libregexp.c", "libunicode.c" }) |file| {
         evaluator.root_module.addCSourceFile(.{
             .file = quickjs.path(file),
             .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE", "-DQUICKJS_NG_BUILD=1" },
         });
     }
     evaluator.root_module.linkSystemLibrary("m", .{});
+    const string_sanitizer = b.addSystemCommand(&.{"sh"});
+    string_sanitizer.addFileArg(b.path("tests/integration/evaluator_string_sanitizer.sh"));
+    string_sanitizer.addFileArg(quickjs_source);
+    string_sanitizer.addFileArg(quickjs.path("quickjs.c"));
+    string_sanitizer.addFileArg(b.path("tests/integration/evaluator_string_probe.c"));
+    string_sanitizer.addFileArg(b.path("src/evaluator_string_reader.h"));
+    const string_sanitizer_step = b.step("evaluator-string-sanitizer", "Check the current QuickJS string extension with ASan/UBSan and allocation faults");
+    string_sanitizer_step.dependOn(&string_sanitizer.step);
 
     const evaluator_integration = b.addSystemCommand(&.{"python3"});
     evaluator_integration.addFileArg(b.path("tests/integration/evaluator_integration.py"));
@@ -256,6 +277,7 @@ pub fn build(b: *std.Build) void {
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     full_evaluator.addArtifactArg(evaluator);
     full_evaluator.step.dependOn(&run_full_tests.step);
+    full_evaluator.step.dependOn(&string_sanitizer.step);
     process_integrations.step.dependOn(&format.step);
     process_integrations.step.dependOn(&full_evaluator.step);
     process_integrations.step.dependOn(&release.step);
