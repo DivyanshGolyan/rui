@@ -385,7 +385,8 @@ def main():
         prior_receipt = run(home, "message", "--store", store, "--session", race_session, "prior")
         prior = prior_receipt.split("request: ", 1)[1].splitlines()[0]
         assert f"message: {race_session} in {store}" in prior_receipt
-        assert f"next: rui follow {prior}" in prior_receipt
+        assert "next: rui session (same Store and Session)" in prior_receipt
+        assert "next: rui follow" not in prior_receipt
         fixture.wait_for(lambda: len(endpoint.requests) == 10, "held predecessor request")
         message_a = admit(home, "message", "--store", store, "--session", race_session, "A")["request"]
         assert run(home, "result", message_a) == "result: queued\n"
@@ -449,7 +450,8 @@ def main():
         try:
             assert "Work: idle" in read_terminal(master, "rui> ")
             proposal = terminal_step(master, "interactive request", "Allow once, deny, or later?")
-            assert "interactive-bash" in proposal and arguments in proposal, proposal
+            assert "interactive-bash" in proposal, proposal
+            assert json.loads(proposal.split("Bash arguments: ", 1)[1].splitlines()[0]) == arguments, proposal
             interactive_key = proposal.split("request: ", 1)[1].splitlines()[0]
             action_id = proposal.split("Action ", 1)[1].splitlines()[0]
             mismatch = admit(home, "allow-action", "--store", store, "--session", session,

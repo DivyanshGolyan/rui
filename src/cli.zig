@@ -316,9 +316,9 @@ fn message(init: std.process.Init, args: []const []const u8) !void {
     const reply = try client.message(io, input, &reply_buffer);
     if (human) try writeAdmission(io, reply, if (json) input.record else null) else try writeCommandReply(io, reply);
     if (human and !json) {
-        var line: [protocol.max_store_bytes + protocol.max_session_bytes + 112]u8 = undefined;
+        var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "message: {s} in {s}\n", .{ input.session, input.store }));
-        if (try acceptedReply(reply)) try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "next: rui follow {s}\n", .{input.key}));
+        if (try acceptedReply(reply)) try std.Io.File.stdout().writeStreamingAll(io, "next: rui session (same Store and Session)\n");
     }
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
