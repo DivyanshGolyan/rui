@@ -17,6 +17,7 @@ test {
     _ = @import("named_scratch.zig");
     _ = @import("output_retention.zig");
     _ = @import("provider.zig");
+    _ = @import("provider_selection.zig");
     _ = @import("provider_output.zig");
     _ = @import("request_encoding.zig");
     _ = @import("tools.zig");

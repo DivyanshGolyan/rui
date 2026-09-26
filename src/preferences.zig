@@ -5,6 +5,7 @@ const c = @cImport({
 });
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const provider_selection = @import("provider_selection.zig");
 
 const io = std.Io.Threaded.global_single_threaded.io();
 const max_file_bytes = 1024;
@@ -31,14 +32,16 @@ fn validateHome(home: []const u8) !void {
     for (home) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidHome;
 }
 
+/// File syntax and Store custody are valid independently of current provider support.
 pub fn validate(values: *const Values) !void {
     if (values.store.len != 0) {
         if (!std.fs.path.isAbsolute(values.store.slice())) return error.InvalidPreferenceStore;
         for (values.store.slice()) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidPreferenceStore;
         _ = try platform.resolveClientPaths(io, values.store.slice());
     }
-    if (values.provider.len != 0 and !std.mem.eql(u8, values.provider.slice(), "codex"))
-        return error.UnsupportedPreferenceProvider;
+    for (values.provider.slice()) |byte| {
+        if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return error.InvalidPreferenceProvider;
+    }
     for (values.model.slice()) |byte| {
         if (byte < 0x21 or byte > 0x7e) return error.InvalidPreferenceModel;
     }
@@ -95,6 +98,9 @@ pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model
     if (model) |value| {
         if (value.len == 0 or value.len > protocol.max_model_bytes) return error.InvalidPreferenceModel;
         for (value) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidPreferenceModel;
+        const supported = provider_selection.codex(.missing);
+        _ = provider_selection.resolve(&.{supported}, "codex", value, null, null) catch
+            return error.UnsupportedPreferenceModel;
     }
     if (store) |value| {
         if (!std.fs.path.isAbsolute(value)) return error.InvalidPreferenceStore;
@@ -143,6 +149,13 @@ pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model
     // A provider/model-only edit must not publish defaults whose fallback
     // Store cannot be selected by the very next setup or Session caller.
     if (values.store.len == 0) _ = try defaultStore(home, &path);
+    if (values.provider.len != 0) {
+        const supported = provider_selection.codex(.missing);
+        _ = provider_selection.resolve(&.{supported}, null, null, values.provider.slice(), if (values.model.len != 0) values.model.slice() else null) catch |err| switch (err) {
+            error.UnsupportedSelectionProvider => return error.UnsupportedPreferenceProvider,
+            error.UnsupportedSelectionModel => return error.UnsupportedPreferenceModel,
+        };
+    }
 
     if (openPreferenceFile(dir, "preferences.tmp")) |stale| {
         defer stale.close(io);

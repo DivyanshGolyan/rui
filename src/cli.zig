@@ -7,6 +7,7 @@ const model_adapter = @import("model_adapter.zig");
 const platform = @import("platform.zig");
 const preferences = @import("preferences.zig");
 const provider = @import("provider.zig");
+const provider_selection = @import("provider_selection.zig");
 const protocol = @import("protocol.zig");
 const server = @import("server.zig");
 
@@ -117,8 +118,12 @@ fn setup(init: std.process.Init, args: []const []const u8) !void {
     const values = (if (changed) preferences.update(home, store, selected_provider, model) else preferences.load(home)) catch |err| {
         if (err == error.PreferenceDirectorySyncFailed) {
             std.debug.print("rui: setup save durability unconfirmed; inspect HOME/.config/rui/preferences before another update. No Session changed.\n", .{});
-        } else if (err == error.UnsupportedPreferenceProvider or err == error.PreferenceProviderRequired) {
-            std.debug.print("rui: setup needs --provider codex with a model; no preferences saved.\n", .{});
+        } else if (err == error.UnsupportedPreferenceProvider) {
+            std.debug.print("rui: setup supports only --provider codex; no preferences saved.\n", .{});
+        } else if (err == error.PreferenceProviderRequired) {
+            std.debug.print("rui: setup needs --provider codex with --model; no preferences saved.\n", .{});
+        } else if (err == error.UnsupportedPreferenceModel) {
+            std.debug.print("rui: setup supports only exact model gpt-6-luna for Codex; no preferences saved. Existing Sessions are unchanged.\n", .{});
         } else if (err == error.InvalidPreferenceModel) {
             std.debug.print("rui: setup model must be 1–256 printable non-space ASCII bytes; no preferences saved.\n", .{});
         } else if (err == error.InvalidPreferenceStore or err == error.FileNotFound) {
@@ -135,6 +140,58 @@ fn setup(init: std.process.Init, args: []const []const u8) !void {
     try std.Io.File.stdout().writeStreamingAll(init.io, if (values.store.len != 0) " (saved)\n" else " (HOME fallback)\n");
     try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) values.provider.slice() else "not selected");
     try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
+    var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
+    var credential_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
+    const readiness: provider_selection.Readiness = blk: {
+        const path = credentialPath(init, &credential_buffer, false) catch break :blk .credential_error;
+        break :blk if (codex_credentials.localStatus(path, now)) |state| switch (state) {
+            .missing => .missing,
+            .configured => .configured,
+            .refresh_required => .refresh_required,
+        } else |_| .credential_error;
+    };
+    const codex = provider_selection.codex(readiness);
+    const local_status = switch (readiness) {
+        .configured => "Codex credential: configured locally (remote acceptance not checked).\n",
+        .missing => "Codex credential: missing.\n",
+        .refresh_required => "Codex credential: refresh required; a pending refresh may require login.\n",
+        .credential_error => "Codex credential: error reading private Rui credential; inspect it before use.\n",
+    };
+    try std.Io.File.stdout().writeStreamingAll(init.io, local_status);
+    const selection: ?provider_selection.Selection = provider_selection.resolve(&.{codex}, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch |err| blk: {
+        const advice: []const u8 = switch (err) {
+            error.UnsupportedSelectionProvider => "Next Session: saved provider is unsupported; no fallback. Repair with `rui setup --provider codex --model gpt-6-luna`.\n",
+            error.UnsupportedSelectionModel => "Next Session: saved model is unsupported; no fallback. Repair with `rui setup --provider codex --model gpt-6-luna`.\n",
+        };
+        try std.Io.File.stdout().writeStreamingAll(init.io, advice);
+        break :blk null;
+    };
+    if (selection) |choice| switch (choice) {
+        .chooser => try std.Io.File.stdout().writeStreamingAll(init.io, "Next Session: choose a supported provider; Codex login: `rui login codex`.\n"),
+        .selected => |selected| {
+            const note: []const u8 = switch (selected.readiness) {
+                .configured => "local credential configured; remote acceptance not checked",
+                .missing => "credential missing; run `rui login codex`. No fallback",
+                .refresh_required => "credential refresh required; login may be required. No fallback",
+                .credential_error => "credential error; inspect private Rui credential or log in. No fallback",
+            };
+            const line = try std.fmt.bufPrint(&output, "Next Session: {s} / {s} ({s}).\n", .{ selected.provider, selected.model, note });
+            try std.Io.File.stdout().writeStreamingAll(init.io, line);
+        },
+    };
+    // Host capabilities are startup facts, not credential or Session state.
+    const host_details: []const u8 = switch (client.hostStatus(init.io, if (values.store.len != 0) values.store.slice() else fallback)) {
+        .ready => |current| if (current.capabilities.managed_authentication and current.capabilities.model)
+            "Host: managed Codex enabled (credentials checked locally, not by status).\n"
+        else
+            "Host: ready without managed Codex; use `rui serve --codex` for new managed work.\n",
+        .unavailable => "Host: unavailable; setup does not start it.\n",
+        .owned_unavailable => "Host: owned but unavailable; inspect before submitting work.\n",
+        .incompatible => "Host: incompatible; inspect before submitting work.\n",
+        .access_failure => "Host: access failure; inspect Store permissions.\n",
+    };
+    try std.Io.File.stdout().writeStreamingAll(init.io, host_details);
 }
 
 // The caller owns buffer. Explicit destinations never consult preferences;
@@ -764,17 +821,17 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         if (text.len == 0) continue;
         if (std.mem.eql(u8, text, "/exit")) break;
         if (std.mem.eql(u8, text, "/help")) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: /help  /status  /wait  /requests  /result KEY  /setup [--store PATH] [--provider codex] [--model MODEL]  /configure [settings]  /exit\n/help shows these commands; /status inspects this Session; /wait follows selected work; /requests lists local recovery handles; /result KEY reads a saved answer. /setup saves defaults for future Sessions only; /configure changes this Session; /exit detaches without stopping work.\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: /help  /status  /wait  /requests  /result KEY  /setup [--store PATH] [--provider codex] [--model gpt-6-luna]  /configure [settings]  /exit\n/help shows these commands; /status inspects this Session; /wait follows selected work; /requests lists local recovery handles; /result KEY reads a saved answer. /setup reads local credential/Host status and saves defaults for future Sessions only; /configure changes this Session; /exit detaches without stopping work.\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
             continue;
         }
         const attention: ?Attention = if (std.mem.eql(u8, text, "/setup") or std.mem.startsWith(u8, text, "/setup ")) blk: {
             var setup_args: [6][]const u8 = undefined;
             const count = interactiveTokens(input_buffer["/setup".len..text.len], &setup_args) catch {
-                try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /setup [--store PATH] [--provider codex] [--model MODEL]; no changes saved.\n");
+                try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /setup [--store PATH] [--provider codex] [--model gpt-6-luna]; no changes saved.\n");
                 break :blk null;
             };
             if (count % 2 != 0) {
-                try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /setup [--store PATH] [--provider codex] [--model MODEL]; no changes saved.\n");
+                try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /setup [--store PATH] [--provider codex] [--model gpt-6-luna]; no changes saved.\n");
             } else setup(init, setup_args[0..count]) catch |err| std.debug.print("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
             break :blk null;
         } else if (std.mem.eql(u8, text, "/status")) blk: {
@@ -1866,8 +1923,8 @@ fn usage() error{InvalidArguments} {
         \\    Attach or detach a capacity-8 managed Host; existing Host settings win.
         \\  rui host stop [--store PATH] [--instance HEX]
         \\    Stop the observed Host, affecting all Store work; retry a lost reply only with the same instance.
-        \\  rui setup [--store PATH] [--provider codex] [--model MODEL]
-        \\    Inspect without arguments; save private defaults for future interactive Sessions.
+        \\  rui setup [--store PATH] [--provider codex] [--model gpt-6-luna]
+        \\    Inspect prospective selection, local credential and Host status; save defaults only with flags.
         \\    Selected Store must exist and pass canonical/private checks.
         \\  rui serve [--store PATH] [--active-capacity N] [--codex | --provider-endpoint URL] [--provider-ca-file PATH] [--fault NAME]
         \\  rui configure [--store PATH] --session REF [settings] [--json]

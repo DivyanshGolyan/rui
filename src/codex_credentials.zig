@@ -96,6 +96,26 @@ pub fn loadInto(path: []const u8, destination: *Record) !void {
     try owner.syncDirectory();
 }
 
+pub const LocalStatus = enum { missing, configured, refresh_required };
+
+/// Inspect only the atomic credential snapshot. Do not create a lock, refresh,
+/// contact the provider or claim that a locally present token works remotely.
+pub fn localStatus(path: []const u8, now_seconds: i64) !LocalStatus {
+    var owner = Owner.open(path) catch |err| switch (err) {
+        error.FileNotFound => return .missing,
+        else => return err,
+    };
+    defer owner.close();
+    var record: Record = undefined;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+    owner.readRecordInto(&record) catch |err| switch (err) {
+        error.FileNotFound => return .missing,
+        else => return err,
+    };
+    if (record.state == .refresh_pending or record.expires_at <= now_seconds) return .refresh_required;
+    return .configured;
+}
+
 /// `expected_generation == null` is an explicit login. It may replace an
 /// existing login and advances its generation. A non-null value is a refresh
 /// compare-and-swap and must preserve the account binding.
@@ -429,6 +449,29 @@ fn testPath(tmp: *std.testing.TmpDir, name: []const u8, buffer: []u8) ![]const u
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(io, &root);
     return std.fmt.bufPrint(buffer, "{s}/private/{s}", .{ root[0..len], name });
+}
+
+test "local credential status is observational at expiry and pending refresh" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try testPath(&tmp, "auth", &path_buffer);
+    try std.testing.expectEqual(LocalStatus.missing, try localStatus(path, 1233));
+    var private = try tmp.dir.openDir(io, "private", .{});
+    defer private.close(io);
+    try std.testing.expectError(error.FileNotFound, private.openFile(io, ".auth.lock", .{}));
+    var record = try testRecord("acct", 0);
+    try install(path, &record, null);
+    try std.testing.expectEqual(LocalStatus.configured, try localStatus(path, 1233));
+    try std.testing.expectEqual(LocalStatus.refresh_required, try localStatus(path, 1234));
+    try std.testing.expectError(error.InjectedRefreshFailure, exchangeRefresh(path, 1, {}, struct {
+        fn fail(_: void, _: *const Record) error{InjectedRefreshFailure}!Record {
+            return error.InjectedRefreshFailure;
+        }
+    }.fail));
+    try std.testing.expectEqual(LocalStatus.refresh_required, try localStatus(path, 1233));
+    const unchanged = try load(path);
+    try std.testing.expectEqual(State.refresh_pending, unchanged.state);
 }
 
 test "successive login, generation compare, pending restart, and privacy" {
