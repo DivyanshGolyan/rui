@@ -1,6 +1,6 @@
 # Working on Rui
 
-Build the smallest complete runtime users can explain through ordinary work, failure and recovery. Ground design in concrete caller behavior. Keep independent concerns independent; familiarity and line/module counts do not establish simplicity. Justify machinery by required behavior or demonstrated cost.
+Build the simplest complete runtime users can explain through ordinary work, failure and recovery. Prefer the simplest coherent final design over the smallest diff. Ground design in concrete caller behavior. Keep independent concerns independent; familiarity and line/module counts do not establish simplicity. Justify machinery by required behavior or demonstrated cost.
 
 ## Read and maintain the contract
 
@@ -14,7 +14,13 @@ Inspect source before claiming implementation. Distinguish accepted behavior, pr
 
 ## Make changes
 
-Inspect the working-tree diff first; preserve concurrent work. Keep reviews read-only unless fixes are requested. Complete authorized work within scope without reopening settled choices.
+Inspect the working-tree diff first; preserve concurrent work. Keep reviews read-only unless fixes are requested. Infer intent from the request and conversation; carry authorized work through implementation, applicable verification and issue acceptance criteria without reopening settled choices or stopping at a scaffold.
+
+Resolve routine reversible choices from the contract and code. Ask only for unresolved consequential product/architecture choices, missing access or authorization. Before asking, complete already-authorized independent work so the question is concrete and reviewable; give bounded options, a recommendation and their machinery/failure consequences.
+
+Implementation approval does not authorize pushing, creating/updating PRs or issues, closing issues, merging, deploying or other shared/irreversible effects. Obtain specific authorization unless already granted; prepare the local result first.
+
+Delegate bounded independent investigations when they save time or improve evidence, and obtain independent opinions on material design questions. Parallelize independent work where tools allow; continue settled work while it runs. Retain ownership of the core task, validate returned evidence and integrate results.
 
 Follow the [Zig 0.16 style guide](https://ziglang.org/documentation/0.16.0/#Style-Guide) and installed standard-library APIs: `TitleCase` for types/type-producing functions and files with top-level instance fields, `camelCase` for other functions, `snake_case` for values and namespace files. Name declarations in their full namespace without redundant prefixes or miscellaneous utility buckets. Keep helpers with their consumer until a shared responsibility warrants extraction.
 
@@ -53,8 +59,12 @@ For a new owner-boundary regression, show that the counterexample goes red on th
 
 For fast development feedback, keep Zig caches warm and run the narrowest relevant build step (`test-logic` for portable owner/turn logic, or a focused native/integration step for its boundary). A test filter may trigger a distinct compilation; a narrow step never replaces applicable canonical gates. Before changing the build graph or enabling experimental incremental compilation for speed, measure comparable edit-rebuild cycles with `--summary all` and preserve non-incremental, empty-cache evidence where required. See [development build latency research](research/build-times-sources.md) for measured costs and Zig 0.16 caveats.
 
-For documentation, check contract preservation, references and `git diff --check`. Report changes, passed checks and material limits, including pre-existing failures and interrupted/unrun checks. Keep prototype, compile and process-crash evidence distinct from production and power-loss qualification.
+For documentation, check contract preservation, references and `git diff --check`. Report changes, passed checks and material limits, including pre-existing failures and interrupted/unrun checks. State the actual delivery state: local, committed, published or deployed. Keep prototype, compile and process-crash evidence distinct from production and power-loss qualification.
+
+Lead with the main point in concise, concrete paragraphs; use lists only when they help. Distinguish observations, recommendations, decisions and evidence limits. Explain unfamiliar designs through concrete caller flows in small steps. Report meaningful findings or blockers rather than routine progress narration or canned summaries.
 
 ## Documentation and repository tools
+
+Explicit user instructions take precedence over skill guidelines; Rui's owning documentation governs repository policy where generic skills conflict. Apply this to confirmation checkpoints, test scope, publication steps and document layout. Skills supply techniques, not authorization or new contract homes. If a skill would pause or divert requested work, link its exact file/instruction, distinguish its requirement from your interpretation, and resolve the conflict using these priorities before asking.
 
 Use the `writing-for-agents` skill when editing skills, `AGENTS.md` or Markdown reached from `AGENTS.md`; use `visual-pr` for pull request descriptions. Issues are tracked in GitHub; see [issue-tracker guidance](docs/agents/issue-tracker.md) and [triage labels](docs/agents/triage-labels.md). [Domain guidance](docs/agents/domain.md) routes terminology and decision work to its owning contract.
