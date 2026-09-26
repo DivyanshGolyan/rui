@@ -55,6 +55,10 @@ assert value('({answer: "中😀", missing: typeof process})') == {
 assert value('input.answer', b'\x05\x01\x00\x00\x00\x06\x01\x00\x00\x00'
              + struct.pack('<Q', 6) + b'answer\x03' + struct.pack('<d', 42)) == 42
 assert value('"\\u0001".repeat(3*1024*1024)') == '\x01' * (3 * 1024 * 1024)
+assert value('(()=>{let leaf={answer:42};return [leaf,leaf,{nested:[3,1]}]})()') == [
+    {'answer': 42}, {'answer': 42}, {'nested': [3, 1]}]
+assert value('({letter:"中😀", escaped:"\\ud83d\\ude00", finite:1.25})') == {
+    'letter': '中😀', 'escaped': '😀', 'finite': 1.25}
 detached = 'Promise.resolve().then(function again() { Promise.resolve().then(again) });'
 # A settled module/returned root does not wait for unrelated continuations.
 module = invoke('run-prepared', detached + 'export default async function workflow() { return 42 }')
@@ -66,7 +70,18 @@ assert invoke('run-prepared', expression('Promise.resolve().then(function again(
               ' return Promise.resolve().then(again) })')).returncode != 0
 for invalid in ('({get secret(){return 42}})', '[1,,3]',
                 '(()=>{let x={}; x.self=x; return x})()',
+                '(()=>{let x=[1];x.extra=2;return x})()',
+                '(()=>{let x={a:1};Object.defineProperty(x,"hidden",{value:2});return x})()',
+                '(()=>{let x={a:1};x[Symbol("hidden")]=2;return x})()',
+                '(()=>{let x=[1];Object.setPrototypeOf(x,{0:2});return x})()',
+                '({bad:undefined})', '({bad:Infinity})',
                 '(()=>{}).constructor("return 1")()'):
     assert invoke('run-prepared', expression(invalid)).returncode != 0
+# A late invalid property may leave framed data, but never a terminal frame:
+# the parent must refuse it rather than publishing the valid prefix.
+partial = invoke('run-prepared', expression(
+    '({prefix:"x".repeat(20000), invalid:{get value(){throw Error("getter ran")}}})'))
+assert partial.returncode != 0 and len(partial.stdout) >= 16388
+assert not partial.stdout.endswith(b'\x00\x00\x00\x00')
 assert value('13') == 13
 print('evaluator worker: module policy, prepared arguments and streamed output passed')
