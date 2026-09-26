@@ -163,7 +163,7 @@ pub const Owner = struct {
             scratch = try std.Io.Dir.cwd().openDir(self.io, self.scratch_path, .{});
             var random: u64 = undefined;
             self.io.random(@ptrCast(&random));
-            const name = try std.fmt.bufPrint(&name_buffer, "evaluator-{x}.tmp", .{random});
+            const name = try named_scratch.EvaluatorName.format(&name_buffer, random);
             const output = try scratch.?.createFile(self.io, name, .{
                 .read = true,
                 .exclusive = true,

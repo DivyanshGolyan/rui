@@ -1,5 +1,6 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const named_scratch = @import("named_scratch.zig");
 
 pub const database_suffix = "/rui.sqlite3";
 pub const scratch_suffix = "/scratch";
@@ -148,21 +149,7 @@ fn isOwnedIngressName(name: []const u8) bool {
         isOwnedNumericScratch(name, "bash-stdout-") or
         isOwnedNumericScratch(name, "bash-stderr-") or
         isOwnedNumericScratch(name, "report-") or
-        isOwnedEvaluatorScratch(name);
-}
-
-fn isOwnedEvaluatorScratch(name: []const u8) bool {
-    const prefix = "evaluator-";
-    const suffix = ".tmp";
-    if (!std.mem.endsWith(u8, name, suffix)) return false;
-    if (!std.mem.startsWith(u8, name, prefix)) return false;
-    const value = name[prefix.len .. name.len - suffix.len];
-    if (value.len == 0 or value.len > 16 or (value.len > 1 and value[0] == '0')) return false;
-    for (value) |byte| {
-        if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false;
-    }
-    _ = std.fmt.parseInt(u64, value, 16) catch return false;
-    return true;
+        named_scratch.EvaluatorName.isOwned(name);
 }
 
 fn isOwnedNumericScratch(name: []const u8, prefix: []const u8) bool {
@@ -368,6 +355,10 @@ test "startup cleanup recognizes only owned ingress names" {
     try std.testing.expect(isOwnedIngressName("report-12-2.tmp"));
     try std.testing.expect(isOwnedIngressName("evaluator-0.tmp"));
     try std.testing.expect(isOwnedIngressName("evaluator-ffffffffffffffff.tmp"));
+    for ([_]u64{ 0, 0x1a2b3c, std.math.maxInt(u64) }) |id| {
+        var buffer: [64]u8 = undefined;
+        try std.testing.expect(isOwnedIngressName(try named_scratch.EvaluatorName.format(&buffer, id)));
+    }
     inline for (.{ "request-", "response-", "response-metadata-", "bash-input-", "bash-stdout-", "bash-stderr-", "report-" }) |prefix| {
         var name_buffer: [64]u8 = undefined;
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}-2.tmp", .{prefix})));
@@ -404,6 +395,7 @@ test "startup cleanup recognizes only owned ingress names" {
 test "startup cleanup removes owned files and preserves lookalikes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var output_buffer: [64]u8 = undefined;
     const owned = [_][]const u8{
         "request-0-1.tmp",
         "response-1-1.tmp",
@@ -412,7 +404,7 @@ test "startup cleanup removes owned files and preserves lookalikes" {
         "bash-stdout-3-1.tmp",
         "bash-stderr-3-1.tmp",
         "report-0-1.tmp",
-        "evaluator-0.tmp",
+        try named_scratch.EvaluatorName.format(&output_buffer, 0),
     };
     const preserved = [_][]const u8{
         "request-00-1.tmp",
@@ -447,7 +439,9 @@ test "startup cleanup removes owned files and preserves lookalikes" {
 test "startup cleanup refuses an owned name with the wrong type" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.createDir(std.testing.io, "request-1-1.tmp", .default_dir);
+    var name_buffer: [64]u8 = undefined;
+    const name = try named_scratch.EvaluatorName.format(&name_buffer, 17);
+    try tmp.dir.createDir(std.testing.io, name, .default_dir);
     var root = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer root.close(std.testing.io);
     try std.testing.expectError(
@@ -456,7 +450,7 @@ test "startup cleanup refuses an owned name with the wrong type" {
     );
     try std.testing.expectEqual(
         std.Io.File.Kind.directory,
-        (try tmp.dir.statFile(std.testing.io, "request-1-1.tmp", .{})).kind,
+        (try tmp.dir.statFile(std.testing.io, name, .{})).kind,
     );
 }
 
