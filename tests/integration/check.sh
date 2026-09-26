@@ -4,11 +4,11 @@ set -eu
 directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 release_safe=$1
 debug=$2
-host_status_actor=${4:-${3:-}}
 
 if [ "${3:-}" = parallel ]; then
     test_binary=$4
     host_status_actor=$5
+    session_list_client=$6
     output=$(mktemp -d "${TMPDIR:-/tmp}/rui-check.XXXXXX")
     trap 'rm -rf "$output"' EXIT
     pids=
@@ -31,6 +31,7 @@ if [ "${3:-}" = parallel ]; then
     run_case bash-recovery python3 "$directory/bash_recovery_integration.py" "$release_safe"
     run_case codex python3 "$directory/codex_integration.py" "$release_safe"
     run_case control python3 "$directory/control_integration.py" "$release_safe"
+    run_case session-list python3 "$directory/session_list_integration.py" "$release_safe" "$session_list_client"
     run_case descriptor-capacity python3 "$directory/descriptor_capacity_integration.py" "$release_safe"
     run_case host-status python3 "$directory/host_status_integration.py" "$release_safe" "$host_status_actor"
     run_case host-stop python3 "$directory/host_stop_integration.py" "$release_safe" "$host_status_actor"
@@ -71,6 +72,8 @@ if [ "${3:-}" = parallel ]; then
     exit "$failed"
 fi
 
+host_status_actor=$3
+session_list_client=$4
 sh "$directory/admission_integration.sh" "$release_safe"
 python3 "$directory/dispatch_integration.py" "$release_safe"
 python3 "$directory/bash_owner_integration.py" "$release_safe"
@@ -80,6 +83,7 @@ python3 "$directory/bash_lifecycle_integration.py" "$release_safe"
 python3 "$directory/bash_recovery_integration.py" "$release_safe"
 python3 "$directory/codex_integration.py" "$release_safe"
 python3 "$directory/control_integration.py" "$release_safe"
+python3 "$directory/session_list_integration.py" "$release_safe" "$session_list_client"
 python3 "$directory/descriptor_capacity_integration.py" "$release_safe"
 python3 "$directory/host_status_integration.py" "$release_safe" "$host_status_actor"
 python3 "$directory/host_launch_integration.py" "$release_safe"

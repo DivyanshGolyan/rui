@@ -2865,6 +2865,7 @@ const Route = enum {
     read_action_call_id,
     read_action_arguments,
     inspect,
+    list_sessions,
     unsupported_control,
 
     fn isControl(self: Route) bool {
@@ -2955,6 +2956,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
         .read_action_call_id => header.route == .read_action_call_id,
         .read_action_arguments => header.route == .read_action_arguments,
         .inspect_session => header.route == .inspect,
+        .list_sessions => header.route == .list_sessions,
     };
     if (!route_matches) {
         return respondStatic(host.io, fd, 400, "invocation_error", "route_kind_mismatch");
@@ -3165,6 +3167,26 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
             }
             deliverReport(host.io, fd, &report) catch {};
         },
+        .list_sessions => |request_value| {
+            var page = host.store.captureSessionList(request_value, .{
+                .scratch_path = host.lease.paths.scratch.slice(),
+                .scratch_budget = host.retention.sharedBudget(),
+                .request_number = request_number,
+                .fail_unlink = host.faults.report_unlink,
+            }) catch |err| {
+                if (err == error.ReportScratchCleanupFailed) {
+                    fenceDispatch(host, "Session list scratch cleanup", err);
+                    return respondStatic(host.io, fd, 500, "observation_error", "report_scratch_cleanup_failed");
+                }
+                if (host.store.isFenced()) {
+                    fenceDispatch(host, "Session list", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                }
+                return respondStatic(host.io, fd, if (err == error.ReportScratchExhausted) 507 else 500, "observation_error", @errorName(err));
+            };
+            defer page.deinit();
+            deliverReport(host.io, fd, &page) catch {};
+        },
     }
 }
 
@@ -3249,6 +3271,8 @@ const HeaderReader = struct {
             .read_action_arguments
         else if (std.mem.eql(u8, path, "/v1/inspect-session"))
             .inspect
+        else if (std.mem.eql(u8, path, "/v1/list-sessions"))
+            .list_sessions
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
             .unsupported_control
         else

@@ -18,6 +18,7 @@ pub const max_header_bytes = 16 * 1024;
 pub const content_window_bytes = 4096;
 pub const max_json_depth = 64;
 pub const max_sqlite_content_bytes: u64 = 1024 * 1024 * 1024 - 4096;
+pub const session_list_page_size: usize = 8;
 
 pub fn Bounded(comptime capacity: usize) type {
     return struct {
@@ -94,6 +95,7 @@ pub const Kind = enum {
     read_action_call_id,
     read_action_arguments,
     inspect_session,
+    list_sessions,
 };
 
 pub const ConfigureCommand = struct {
@@ -259,6 +261,14 @@ pub const HostInfo = struct {
     },
 };
 
+pub const ListSessions = struct {
+    store: Bounded(max_store_bytes) = .{},
+    workspace: ?Bounded(max_workspace_bytes) = null,
+    // Zero/zero begins a traversal. A continuation carries both values.
+    after: u64 = 0,
+    ceiling: u64 = 0,
+};
+
 pub const Request = union(Kind) {
     host_info: struct { store: Bounded(max_store_bytes) = .{} },
     host_stop: struct { store: Bounded(max_store_bytes) = .{} },
@@ -272,12 +282,13 @@ pub const Request = union(Kind) {
     read_action_call_id: ReadActionArguments,
     read_action_arguments: ReadActionArguments,
     inspect_session: InspectSession,
+    list_sessions: ListSessions,
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session => {},
+            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions => {},
         }
     }
 
@@ -429,6 +440,8 @@ const Parser = struct {
             .read_action_arguments
         else if (kind_text.eql("inspect_session"))
             .inspect_session
+        else if (kind_text.eql("list_sessions"))
+            .list_sessions
         else
             return error.UnknownCommand;
 
@@ -450,6 +463,7 @@ const Parser = struct {
             .read_action_call_id => .{ .read_action_call_id = try self.parseReadActionArguments(store) },
             .read_action_arguments => .{ .read_action_arguments = try self.parseReadActionArguments(store) },
             .inspect_session => .{ .inspect_session = try self.parseInspect(store) },
+            .list_sessions => .{ .list_sessions = try self.parseListSessions(store) },
         };
         errdefer request.removeTemporaryContent(self.options.io) catch {
             self.options.cleanup_failed.* = true;
@@ -629,6 +643,31 @@ const Parser = struct {
             try self.readSmallString(&profile);
             request.profile = if (profile.eql("full")) .full else return error.UnknownReportProfile;
         }
+        return request;
+    }
+
+    fn parseListSessions(self: *Parser, store: Bounded(max_store_bytes)) !ListSessions {
+        var request = ListSessions{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("workspace");
+        if (!try self.consumeIf('n')) {
+            var workspace: Bounded(max_workspace_bytes) = .{};
+            try self.readSmallString(&workspace);
+            request.workspace = workspace;
+        } else {
+            try self.expectByte('u');
+            try self.expectByte('l');
+            try self.expectByte('l');
+        }
+        try self.expectByte(',');
+        try self.expectKey("after");
+        request.after = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("ceiling");
+        request.ceiling = try self.readCanonicalU64();
+        if (request.after > std.math.maxInt(i64) or request.ceiling > std.math.maxInt(i64) or
+            (request.after == 0 and request.ceiling != 0) or
+            (request.after != 0 and request.after > request.ceiling)) return error.InvalidCursor;
         return request;
     }
 
@@ -997,6 +1036,11 @@ pub const max_inspect_session_request_bytes =
     maximumJsonStringBytes(max_store_bytes) +
     ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
     ",\"profile\":\"full\"}".len;
+pub const max_list_sessions_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) +
+    ",\"workspace\":".len + maximumJsonStringBytes(max_workspace_bytes) +
+    ",\"after\":\"".len + 20 + ",\"ceiling\":\"".len + 20 + "\"}".len;
 pub const max_read_action_arguments_request_bytes =
     "{\"version\":\"1\",\"kind\":\"read_action_arguments\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) +
@@ -1010,7 +1054,7 @@ pub const max_read_action_call_id_request_bytes =
 pub const max_client_request_bytes = @max(
     @max(@max(max_observe_command_request_bytes, max_read_result_request_bytes), @max(max_host_info_request_bytes, max_host_stop_request_bytes)),
     @max(
-        max_inspect_session_request_bytes,
+        @max(max_inspect_session_request_bytes, max_list_sessions_request_bytes),
         @max(max_read_action_arguments_request_bytes, max_read_action_call_id_request_bytes),
     ),
 );
@@ -1551,5 +1595,34 @@ test "Session report profile is closed and omission selects Current" {
         } else {
             try std.testing.expectError(error.UnknownReportProfile, parser.parse());
         }
+    }
+}
+
+test "Session listing wire distinguishes all, exact workspace, continuation and invalid cursor" {
+    const cases = [_]struct { json: []const u8, workspace: ?[]const u8, after: u64, ceiling: u64, valid: bool }{
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"}", .workspace = null, .after = 0, .ceiling = 0, .valid = true },
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\\u0001b\",\"after\":\"8\",\"ceiling\":\"12\"}", .workspace = "/a\x01b", .after = 8, .ceiling = 12, .valid = true },
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"12\"}", .workspace = null, .after = 0, .ceiling = 12, .valid = false },
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"13\",\"ceiling\":\"12\"}", .workspace = null, .after = 13, .ceiling = 12, .valid = false },
+    };
+    for (cases) |case| {
+        var source = SocketBody.init(-1, 0);
+        @memcpy(source.buffer[0..case.json.len], case.json);
+        source.end = case.json.len;
+        var cleanup_failed = false;
+        var parser = Parser{ .source = &source, .options = .{
+            .io = std.testing.io,
+            .fd = -1,
+            .content_length = case.json.len,
+            .scratch_path = "unused",
+            .request_number = 0,
+            .cleanup_failed = &cleanup_failed,
+        } };
+        if (case.valid) {
+            const request = (try parser.parse()).list_sessions;
+            try std.testing.expectEqual(case.after, request.after);
+            try std.testing.expectEqual(case.ceiling, request.ceiling);
+            if (case.workspace) |workspace| try std.testing.expectEqualStrings(workspace, request.workspace.?.slice()) else try std.testing.expect(request.workspace == null);
+        } else try std.testing.expectError(error.InvalidCursor, parser.parse());
     }
 }

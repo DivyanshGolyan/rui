@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, command, "login")) return login(init, args[2..], false);
     if (std.mem.eql(u8, command, "host")) return host(init, args[2..]);
-    if (std.mem.eql(u8, command, "setup")) try setup(init, args[2..]) else if (std.mem.eql(u8, command, "session")) try enterSession(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, args[2..], false) else return usage();
+    if (std.mem.eql(u8, command, "setup")) try setup(init, args[2..]) else if (std.mem.eql(u8, command, "sessions")) try sessions(init, args[2..]) else if (std.mem.eql(u8, command, "session")) try enterSession(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, args[2..], false) else return usage();
     try postCommandHold(init);
 }
 
@@ -1561,6 +1561,162 @@ fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
     return captured.identity().*;
 }
 
+const SessionPage = struct {
+    references: [protocol.session_list_page_size]protocol.Bounded(protocol.max_session_bytes) = [_]protocol.Bounded(protocol.max_session_bytes){.{}} ** protocol.session_list_page_size,
+    count: usize = 0,
+    next: ?client.SessionListCursor = null,
+};
+
+fn parseSessionPage(init: std.process.Init, file: std.Io.File, show: bool) !SessionPage {
+    var input_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var file_reader = file.reader(init.io, &input_buffer);
+    var reader = std.json.Reader.init(std.heap.c_allocator, &file_reader.interface);
+    defer reader.deinit();
+    if ((try reader.next()) != .object_begin) return error.InvalidSessionPage;
+    var page: SessionPage = .{};
+    var valid_type = false;
+    var found_sessions = false;
+    while (true) {
+        const field = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 64);
+        defer freeToken(field);
+        if (field == .object_end) break;
+        const name = try tokenString(field);
+        if (std.mem.eql(u8, name, "type")) {
+            const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 32);
+            defer freeToken(value);
+            valid_type = std.mem.eql(u8, try tokenString(value), "session_list");
+        } else if (std.mem.eql(u8, name, "sessions")) {
+            if ((try reader.next()) != .array_begin) return error.InvalidSessionPage;
+            found_sessions = true;
+            while (true) {
+                const item = try reader.next();
+                if (item == .array_end) break;
+                if (item != .object_begin or page.count == page.references.len) return error.InvalidSessionPage;
+                var reference: protocol.Bounded(protocol.max_session_bytes) = .{};
+                var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+                var provider_name: protocol.Bounded(32) = .{};
+                var model: protocol.Bounded(protocol.max_model_bytes) = .{};
+                var permission: protocol.Bounded(16) = .{};
+                var bash = false;
+                var edit = false;
+                while (true) {
+                    const item_field = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 64);
+                    defer freeToken(item_field);
+                    if (item_field == .object_end) break;
+                    const item_name = try tokenString(item_field);
+                    if (std.mem.eql(u8, item_name, "reference") or std.mem.eql(u8, item_name, "workspace") or
+                        std.mem.eql(u8, item_name, "provider") or std.mem.eql(u8, item_name, "model") or
+                        std.mem.eql(u8, item_name, "permission_mode"))
+                    {
+                        const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, protocol.max_workspace_bytes);
+                        defer freeToken(value);
+                        const text = try tokenString(value);
+                        if (std.mem.eql(u8, item_name, "reference")) try reference.set(text) else if (std.mem.eql(u8, item_name, "workspace")) try workspace.set(text) else if (std.mem.eql(u8, item_name, "provider")) try provider_name.set(text) else if (std.mem.eql(u8, item_name, "model")) try model.set(text) else try permission.set(text);
+                    } else if (std.mem.eql(u8, item_name, "tools")) {
+                        if ((try reader.next()) != .array_begin) return error.InvalidSessionPage;
+                        while (true) {
+                            const tool = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 16);
+                            defer freeToken(tool);
+                            if (tool == .array_end) break;
+                            const name_text = try tokenString(tool);
+                            if (std.mem.eql(u8, name_text, "bash")) bash = true else if (std.mem.eql(u8, name_text, "edit")) edit = true else return error.InvalidSessionPage;
+                        }
+                    } else try reader.skipValue();
+                }
+                if (reference.len == 0 or workspace.len == 0 or provider_name.len == 0 or model.len == 0 or permission.len == 0) return error.InvalidSessionPage;
+                page.references[page.count] = reference;
+                page.count += 1;
+                if (show) {
+                    try writeSafeField(init.io, "Session: ", reference.slice());
+                    try writeSafeField(init.io, "  Workspace: ", workspace.slice());
+                    try writeSafeField(init.io, "  Provider: ", provider_name.slice());
+                    try writeSafeField(init.io, "  Model: ", model.slice());
+                    try std.Io.File.stdout().writeStreamingAll(init.io, if (bash and edit) "  Tools: Bash, Edit\n" else if (bash) "  Tools: Bash\n" else if (edit) "  Tools: Edit\n" else "  Tools: none\n");
+                    try writeSafeField(init.io, "  Permission: ", permission.slice());
+                    if (permission.eql("bypass")) try std.Io.File.stdout().writeStreamingAll(init.io, "  Rui: Bash runs without approval.\n");
+                }
+            }
+        } else if (std.mem.eql(u8, name, "next")) {
+            const next = try reader.next();
+            if (next == .null) continue;
+            if (next != .object_begin) return error.InvalidSessionPage;
+            var cursor: client.SessionListCursor = .{};
+            while (true) {
+                const cursor_field = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 64);
+                defer freeToken(cursor_field);
+                if (cursor_field == .object_end) break;
+                const cursor_name = try tokenString(cursor_field);
+                if (std.mem.eql(u8, cursor_name, "after") or std.mem.eql(u8, cursor_name, "ceiling")) {
+                    const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 20);
+                    defer freeToken(value);
+                    const number = try std.fmt.parseInt(u64, try tokenString(value), 10);
+                    if (std.mem.eql(u8, cursor_name, "after")) cursor.after = number else cursor.ceiling = number;
+                } else try reader.skipValue();
+            }
+            if (cursor.after == 0 or cursor.ceiling < cursor.after) return error.InvalidSessionPage;
+            page.next = cursor;
+        } else try reader.skipValue();
+    }
+    if (!valid_type or !found_sessions or (try reader.next()) != .end_of_document or
+        (page.next != null and page.count == 0)) return error.InvalidSessionPage;
+    return page;
+}
+
+fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, cursor: client.SessionListCursor, presentation: Presentation) !SessionPage {
+    const file = try renderScratch(init);
+    defer file.close(init.io);
+    var buffer: client.ReplyBuffer = .{};
+    const reply = try client.listSessions(init.io, store, workspace, cursor, file, &buffer);
+    if (reply != .report) return error.SessionListUnavailable;
+    const page = try parseSessionPage(init, file, false);
+    if (presentation == .json) {
+        var bytes: [protocol.content_window_bytes]u8 = undefined;
+        var offset: u64 = 0;
+        while (offset < reply.report.bytes) {
+            const count = try file.readPositionalAll(init.io, bytes[0..@intCast(@min(reply.report.bytes - offset, bytes.len))], offset);
+            if (count == 0) return error.TruncatedSessionPage;
+            try std.Io.File.stdout().writeStreamingAll(init.io, bytes[0..count]);
+            offset += count;
+        }
+        try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+    } else if (presentation == .human) {
+        _ = try parseSessionPage(init, file, true);
+    }
+    return page;
+}
+
+fn sessions(init: std.process.Init, args: []const []const u8) !void {
+    var explicit: ?[]const u8 = null;
+    var all = false;
+    var json = false;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--store") and explicit == null) explicit = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--all") and !all) all = true else if (std.mem.eql(u8, args[index], "--json") and !json) json = true else return usage();
+    }
+    var saved: preferences.Values = .{};
+    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = if (explicit) |value| value else blk: {
+        const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+        saved = try preferences.load(home);
+        break :blk if (saved.store.len != 0) saved.store.slice() else try preferences.defaultStore(home, &fallback);
+    };
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace: ?[]const u8 = if (all) null else blk: {
+        var directory = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
+        defer directory.close(init.io);
+        const length = try directory.realPath(init.io, &workspace_buffer);
+        break :blk workspace_buffer[0..length];
+    };
+    var cursor: client.SessionListCursor = .{};
+    var found = false;
+    while (true) {
+        const page = try sessionPage(init, store, workspace, cursor, if (json) .json else .human);
+        found = found or page.count != 0;
+        cursor = page.next orelse break;
+    }
+    if (!found and !json) try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No configured Sessions in this scope. Use rui to start a new one, or --all to inspect every Workspace.\n");
+}
+
 fn requests(init: std.process.Init, args: []const []const u8) !void {
     const json = args.len == 1 and std.mem.eql(u8, args[0], "--json");
     if (args.len != 0 and !json) return usage();
@@ -2145,6 +2301,8 @@ fn usage() error{InvalidArguments} {
         \\  rui setup [--store PATH] [--provider codex] [--model gpt-6-luna]
         \\    Inspect prospective selection, local credential and Host status; save defaults only with flags.
         \\    Selected Store must exist and pass canonical/private checks.
+        \\  rui sessions [--store PATH] [--all] [--json]
+        \\    List configured Sessions here or in all Workspaces; --json emits one bounded page per line.
         \\  rui serve [--store PATH] [--active-capacity N] [--codex | --provider-endpoint URL] [--provider-ca-file PATH] [--fault NAME]
         \\  rui configure [--store PATH] --session REF [settings] [--json]
         \\    First configuration requires --workspace PATH --provider codex --model MODEL.
