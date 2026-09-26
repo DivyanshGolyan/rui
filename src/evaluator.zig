@@ -43,6 +43,7 @@ pub const Owner = struct {
 
     const Pending = struct {
         output: ?Scratch,
+        sealed_output: ?std.Io.File = null,
     };
 
     const Scratch = struct {
@@ -65,7 +66,10 @@ pub const Owner = struct {
         }
 
         fn reclaim(self: *Scratch, path: []const u8, removal: named_scratch.Removal) !void {
-            _ = try named_scratch.removeNameWith(self.io, path, self.name[0..self.name_len], removal);
+            // A zero length records a confirmed pre-launch unlink. Closing the
+            // final handle, not retrying a name, then releases its charge.
+            if (self.name_len != 0)
+                _ = try named_scratch.removeNameWith(self.io, path, self.name[0..self.name_len], removal);
             self.file.close(self.io);
             self.budget.release(self.charged);
         }
@@ -129,11 +133,9 @@ pub const Owner = struct {
             self.reclaimPending() catch {};
             return err;
         };
-        // Validation has not published anything; failed cleanup prevents
-        // admission. Evaluation may already have committed its outcome, so
-        // retain failed cleanup without changing that published success.
-        if (compile_only) return self.reclaimPending();
-        self.reclaimPending() catch {};
+        // Successful evaluation has no remaining name to remove. Compilation
+        // never acquires scratch; neither path can fail during final closure.
+        self.reclaimPending() catch unreachable;
     }
 
     fn runOwned(
@@ -178,6 +180,16 @@ pub const Owner = struct {
                     .budget = self.budget,
                 },
             };
+            // Keep a read-only alias for publication. Acquire
+            // it before unlinking, since no name remains during child work.
+            self.pending.?.sealed_output = try scratch.?.openFile(self.io, name, .{
+                .mode = .read_only,
+                .follow_symlinks = false,
+            });
+            _ = try named_scratch.removeNameWith(self.io, self.scratch_path, name, self.output_removal);
+            self.pending.?.output.?.name_len = 0;
+            scratch.?.close(self.io);
+            scratch = null;
         }
         const result = c.rui_evaluate(
             child.ptr,
@@ -201,12 +213,9 @@ pub const Owner = struct {
         const owned_output = &pending.output.?.file;
         // Child and pipe custody is complete. The consumer receives only a
         // read-only descriptor and cannot mutate the charged result.
-        const sealed_output = try scratch.?.openFile(self.io, name_buffer[0..pending.output.?.name_len], .{
-            .mode = .read_only,
-            .follow_symlinks = false,
-        });
         owned_output.close(self.io);
-        pending.output.?.file = sealed_output;
+        pending.output.?.file = pending.sealed_output.?;
+        pending.sealed_output = null;
         if (cancellation.isCancelled()) return error.EvaluationCancelled;
         if (c.lseek(owned_output.handle, 0, c.SEEK_SET) < 0) return error.EvaluatorOutputSeekFailed;
         try consume(context, owned_output);
@@ -215,6 +224,10 @@ pub const Owner = struct {
     fn reclaimPending(self: *Owner) !void {
         const pending = &(self.pending orelse return);
         var removal_error: ?anyerror = null;
+        if (pending.sealed_output) |sealed| {
+            sealed.close(self.io);
+            pending.sealed_output = null;
+        }
         if (pending.output) |*output| {
             if (output.reclaim(self.scratch_path, self.output_removal)) |_| {
                 pending.output = null;
