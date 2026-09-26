@@ -218,6 +218,11 @@ def main():
             greeting = read_terminal(master, "rui> ")
             assert f"Session: {session}" in greeting and f"Workspace (Bash cwd): {workspace.resolve()}" in greeting, greeting
             assert "Permission: ask" in greeting and queued in greeting and first in greeting, greeting
+            before = len(endpoint.requests)
+            os.write(master, b"abc\x04def\n")
+            rejected = read_terminal(master, "rui> ")
+            assert "InvalidTerminalInput" in rejected and "nothing sent" in rejected, rejected
+            assert len(endpoint.requests) == before, "Ctrl-D draft reached Host"
             assert "first answer" in terminal_step(master, f"/result {queued}")
             assert "Local recovery handles" in terminal_step(master, "/requests")
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"

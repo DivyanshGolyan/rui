@@ -470,6 +470,7 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
     while (true) {
         const line = (readTerminalLine(init.io, &input_buffer, "rui> ") catch |err| {
             if (err == error.InteractiveInterrupted) break;
+            if (err == error.TerminalRestoreFailed) return err;
             std.debug.print("rui: input rejected ({s}); nothing sent. Use rui message --text FILE for longer input.\n", .{@errorName(err)});
             continue;
         }) orelse break;
@@ -548,6 +549,7 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         };
         if (attention) |action| interactiveAction(init, destination, reference, action) catch |err| {
             if (err == error.InteractiveInterrupted) break;
+            if (err == error.TerminalRestoreFailed) return err;
             std.debug.print("rui: Action observation or decision failed: {s}; check /requests and /status\n", .{@errorName(err)});
         };
     }
@@ -571,8 +573,15 @@ fn readTerminalLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
     // that had not yet been shown. Changing modes with FLUSH is atomic with
     // discarding unread input, including lines buffered in canonical mode.
     try std.posix.tcsetattr(0, .FLUSH, mode);
-    defer std.posix.tcsetattr(0, .NOW, original) catch |err|
-        std.debug.print("rui: could not restore terminal: {s}\n", .{@errorName(err)});
+    const line = readTerminalDraft(io, buffer, prompt) catch |err| {
+        std.posix.tcsetattr(0, .NOW, original) catch return error.TerminalRestoreFailed;
+        return err;
+    };
+    std.posix.tcsetattr(0, .NOW, original) catch return error.TerminalRestoreFailed;
+    return line;
+}
+
+fn readTerminalDraft(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
     try std.Io.File.stdout().writeStreamingAll(io, prompt);
     var length: usize = 0;
     var invalid = false;
@@ -585,7 +594,11 @@ fn readTerminalLine(io: std.Io, buffer: []u8, prompt: []const u8) !?[]const u8 {
                 try std.Io.File.stdout().writeStreamingAll(io, "^C\n");
                 return error.InteractiveInterrupted;
             },
-            4 => if (length == 0) {
+            4 => {
+                if (length != 0) {
+                    invalid = true; // This reader has no forward-delete editing contract.
+                    continue;
+                }
                 try std.Io.File.stdout().writeStreamingAll(io, "\n");
                 return null;
             },
