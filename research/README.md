@@ -36,6 +36,8 @@ Maintained executable checks and recorded qualification live in [tests/qualifica
 
 [Instruction updates under prompt caching](instruction-update-prompt-caching.md) compares current OpenAI and Anthropic prefix matching, later authoritative messages and same-level precedence. It supports the accepted separation between append-only canonical instruction history and adapter-owned provider projection; primary-source decision evidence only, with no provider qualification.
 
+[Codex reasoning effort](codex-reasoning-effort.md) pins first-party request grammar, default selection and continuation/compaction construction against Rui's omitted-effort live journey. It distinguishes client defaults from unknown backend defaults and identifies unqualified explicit model/effort pairs; no live effort test was run for this note.
+
 [Output retention prior art](output-retention-prior-art.md) compares byte/count budgets, disk-backed FIFO bookkeeping and cleanup behavior in primary sources; design evidence only, with no accepted contract change or runtime qualification.
 
 [Session identity evidence](session-identity-evidence.md) records SQLite integer-allocation guarantees and JavaScript integer/JSON representation limits from primary sources; no runtime qualification.
