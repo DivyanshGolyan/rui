@@ -66,6 +66,10 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
                     try output.writeStreamingAll(io, "\n");
                     return error.IncompleteTerminalInput;
                 }
+                if (editor.escape == .csi or editor.escape == .ss3) {
+                    try output.writeStreamingAll(io, "\n");
+                    return error.IncompleteTerminalInput;
+                }
                 editor.escape = .none;
                 continue;
             }
