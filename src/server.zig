@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const HostDiagnostics = @import("HostDiagnostics.zig");
 const trace_native = @cImport({
     @cInclude("unistd.h");
 });
@@ -230,6 +231,13 @@ pub fn serve(
     };
     var lease = try platform.StoreLease.acquire(io, store_path);
     defer lease.release();
+    var diagnostics: ?HostDiagnostics = HostDiagnostics.open(io, lease.store_dir, HostDiagnostics.default_cap_bytes) catch |err| blk: {
+        std.debug.print("rui: startup diagnostics unavailable ({s}); continuing under Store lease\n", .{@errorName(err)});
+        break :blk null;
+    };
+    defer if (diagnostics) |*writer| writer.close();
+    if (diagnostics) |*writer| writer.record("begin", "lease_acquired");
+    errdefer if (diagnostics) |*writer| writer.record("failed", "startup_error");
     var storage = try store_module.Store.openWithOptions(
         io,
         lease.paths.database.slice(),
@@ -339,6 +347,11 @@ pub fn serve(
         try ready.appendFmt(" curl={s} openssl={s}", .{ provider.curl_version, provider.openssl_version });
     }
     try ready.append("\n");
+    if (diagnostics) |*writer| {
+        writer.record("ready", "serving");
+        writer.close();
+        diagnostics = null;
+    }
     try std.Io.File.stdout().writeStreamingAll(io, ready.slice());
 
     while (true) {

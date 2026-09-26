@@ -16,6 +16,12 @@ pub const std_options: std.Options = .{
     .signal_stack_size = if (std.debug.default_enable_segfault_handler) 1 << 18 else null,
 };
 
+extern "c" fn rui_launch_detached(executable: [*:0]const u8, store: [*:0]const u8) c_int;
+
+test "detached launcher reports exec failure before claiming Host readiness" {
+    try std.testing.expectEqual(@as(c_int, 2), rui_launch_detached("/rui-no-such-executable", "/rui-no-such-store"));
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const args = try init.minimal.args.toSlice(allocator);
@@ -151,7 +157,9 @@ fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![
 }
 
 fn host(init: std.process.Init, args: []const []const u8) !void {
-    if (args.len == 0 or !std.mem.eql(u8, args[0], "status")) return usage();
+    if (args.len == 0) return usage();
+    const start = std.mem.eql(u8, args[0], "start");
+    if (!start and !std.mem.eql(u8, args[0], "status")) return usage();
     var explicit: ?[]const u8 = null;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
@@ -161,6 +169,7 @@ fn host(init: std.process.Init, args: []const []const u8) !void {
     }
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, explicit, &fallback);
+    if (start) return startHost(init, selected);
     switch (client.hostStatus(init.io, selected)) {
         .ready => |ready| {
             try std.Io.File.stdout().writeStreamingAll(init.io, "Host: ready\n");
@@ -174,6 +183,53 @@ fn host(init: std.process.Init, args: []const []const u8) !void {
         .incompatible => try std.Io.File.stdout().writeStreamingAll(init.io, "Host: incompatible (protected reply or wire version)\n"),
         .access_failure => try std.Io.File.stdout().writeStreamingAll(init.io, "Host: access failure (selected Store or protected Host endpoint)\n"),
     }
+}
+
+fn startHost(init: std.process.Init, selected: []const u8) !void {
+    const io = init.io;
+    switch (client.hostStatus(io, selected)) {
+        .ready => {
+            try std.Io.File.stdout().writeStreamingAll(io, "Rui: Attached to the ready Host; its existing capacity and capabilities win.\n");
+            return;
+        },
+        .incompatible => return error.IncompatibleHost,
+        .access_failure => return error.StoreAccessFailed,
+        .unavailable, .owned_unavailable => {},
+    }
+    // Only the serving Host obtains the exclusive lease; this creates the
+    // candidate Store path without claiming an owner or touching SQLite.
+    var dir = try std.Io.Dir.cwd().createDirPathOpen(io, selected, .{ .permissions = .fromMode(0o700) });
+    dir.close(io);
+    const paths = try platform.resolveClientPaths(io, selected);
+    var executable_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
+    const length = try std.process.executablePath(io, &executable_buffer);
+    if (length == executable_buffer.len) return error.ExecutablePathTooLong;
+    executable_buffer[length] = 0;
+    var store_buffer: [protocol.max_store_bytes + 1]u8 = undefined;
+    const store_z = try std.fmt.bufPrintZ(&store_buffer, "{s}", .{paths.store.slice()});
+    const launched = rui_launch_detached(@ptrCast(&executable_buffer), store_z.ptr);
+    if (launched != 0) {
+        std.debug.print("rui: detached Host could not execute (OS error {d}); Store ownership was not inferred.\n", .{launched});
+        return error.HostLaunchFailed;
+    }
+    const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 10 * std.time.ns_per_s;
+    while (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < until) {
+        switch (client.hostStatus(io, paths.store.slice())) {
+            .ready => |ready| {
+                var line: [100]u8 = undefined;
+                try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "Rui: Host ready (active capacity {d}); existing settings win.\n", .{ready.active_capacity}));
+                var location: [protocol.max_store_bytes + "/diagnostics".len]u8 = undefined;
+                try writeSafeField(io, "Diagnostics: ", try std.fmt.bufPrint(&location, "{s}/diagnostics", .{paths.store.slice()}));
+                return;
+            },
+            .incompatible => return error.IncompatibleHost,
+            .access_failure => return error.StoreAccessFailed,
+            .unavailable, .owned_unavailable => {},
+        }
+        try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+    }
+    std.debug.print("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
+    return error.HostReadinessUnconfirmed;
 }
 
 fn login(init: std.process.Init, args: []const []const u8) !void {
@@ -1836,6 +1892,8 @@ fn usage() error{InvalidArguments} {
         \\  rui login codex
         \\  rui host status [--store PATH]
         \\    Read the selected Store's protected Host readiness, capacity and capabilities without starting it.
+        \\  rui host start [--store PATH]
+        \\    Attach or detach a capacity-8 managed Host; existing Host settings win.
         \\  rui setup [--store PATH] [--provider codex] [--model MODEL]
         \\    Inspect without arguments; save private defaults for future interactive Sessions.
         \\    Selected Store must exist and pass canonical/private checks.
