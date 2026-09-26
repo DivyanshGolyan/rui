@@ -1386,16 +1386,20 @@ fn inspectAction(init: std.process.Init, args: []const []const u8, interactive: 
     const file = try renderScratch(init);
     defer file.close(io);
     var buffer: client.ReplyBuffer = .{};
-    const call = try client.readActionCallId(io, store orelse return usage(), session orelse return usage(), target, file, &buffer);
-    if (call != .answer) return error.ActionReadFailed;
-    const arguments = try client.readActionArguments(io, store.?, session.?, target, file, &buffer);
+    var call_bytes: u64 = 0;
+    if (!interactive) {
+        const call = try client.readActionCallId(io, store orelse return usage(), session orelse return usage(), target, file, &buffer);
+        if (call != .answer) return error.ActionReadFailed;
+        call_bytes = call.answer.bytes;
+    }
+    const arguments = try client.readActionArguments(io, store orelse return usage(), session orelse return usage(), target, file, &buffer);
     if (arguments != .answer) return error.ActionReadFailed;
     var line: [96]u8 = undefined;
     if (json) {
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"action\":\"{d}\",\"call_id\":\"", .{target}));
-        try writeJsonFileAt(io, file, 0, call.answer.bytes, false);
+        try writeJsonFileAt(io, file, 0, call_bytes, false);
         try std.Io.File.stdout().writeStreamingAll(io, "\",\"arguments\":\"");
-        try writeJsonFileAt(io, file, call.answer.bytes, arguments.answer.bytes, false);
+        try writeJsonFileAt(io, file, call_bytes, arguments.answer.bytes, false);
         return std.Io.File.stdout().writeStreamingAll(io, "\"}\n");
     }
     // Quote provider-controlled fields so control and bidi bytes cannot alter the
@@ -1403,11 +1407,11 @@ fn inspectAction(init: std.process.Init, args: []const []const u8, interactive: 
     try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "Action {d}\n", .{target}));
     if (!interactive) {
         try std.Io.File.stdout().writeStreamingAll(io, "call ID: \"");
-        try writeJsonFileAt(io, file, 0, call.answer.bytes, true);
+        try writeJsonFileAt(io, file, 0, call_bytes, true);
         try std.Io.File.stdout().writeStreamingAll(io, "\"\n");
     }
     try std.Io.File.stdout().writeStreamingAll(io, "Bash arguments: \"");
-    try writeJsonFileAt(io, file, call.answer.bytes, arguments.answer.bytes, true);
+    try writeJsonFileAt(io, file, call_bytes, arguments.answer.bytes, true);
     try std.Io.File.stdout().writeStreamingAll(io, "\"\n");
 }
 

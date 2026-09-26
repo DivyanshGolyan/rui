@@ -594,8 +594,10 @@ def main():
         os.close(slave)
         try:
             greeting = read_terminal(master, "rui> ")
-            assert "message\\n\\u001b[2J\\u202e: completed" in greeting, greeting
-            assert "\x1b[2J" not in greeting and "\u202e" not in greeting, greeting
+            assert "Session: human/unsafe-key" in greeting, greeting
+            status = terminal_step(master, "/status")
+            assert "message\\n\\u001b[2J\\u202e: completed" in status, status
+            assert "\x1b[2J" not in status and "\u202e" not in status, status
             assert "Detached." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
@@ -680,7 +682,6 @@ def main():
             ("\x1bZ", "Z"),
             ("abc\x1b[D\x1b[DZ", "aZbc"),
             ("\x1b[200~line1\nline2\x1b[201~\x1b[A\x01X", "Xline1\nline2"),
-            ("\x1b[", "Z"),
         ]
         endpoint.responses.extend(fixture.sse_answer(f"editor-answer-{i}", f"editor-reason-{i}",
             f"editor-message-{i}", f"edited {i}")[0] for i in range(len(cases)))
@@ -703,10 +704,6 @@ def main():
                     repaint = read_terminal(master, "rui> A中e\u0301")
                     assert "\x1b[0J" in repaint, repaint
                     observed = terminal_step(master, "", f"edited {index}")
-                elif typed == "\x1b[":
-                    os.write(master, typed.encode())
-                    time.sleep(0.2)  # incomplete CSI must expire before the next ordinary key
-                    observed = terminal_step(master, "Z", f"edited {index}")
                 else:
                     observed = terminal_step(master, typed, f"edited {index}")
                 assert f"edited {index}" in observed, observed
@@ -764,7 +761,7 @@ def main():
                 entered.kill()
                 entered.wait(timeout=5)
             os.close(master)
-        for incomplete in (b"\xc3", b"\x1b[200~unfinished"):
+        for incomplete in (b"\xc3", b"\x1b[200~unfinished", b"\x1b[", b"\x1bO"):
             master, slave = pty.openpty()
             entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
                 "--session", empty_session], env={**os.environ, "HOME": str(fresh_home)},
