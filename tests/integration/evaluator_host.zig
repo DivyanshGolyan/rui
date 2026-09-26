@@ -85,6 +85,11 @@ pub fn main(init: std.process.Init) !void {
             _ = c.sleep(20); // Parent's five-second watchdog must terminate us.
             return error.EvaluatorDeadlineNotEnforced;
         }
+        if (marker[0] == 'P') {
+            try stdout.writeStreamingAll(io, &.{ 3, 0, 0, 0, 't', 'r', 'u' });
+            try stdout.writeStreamingAll(io, &.{ 1, 0, 0, 0, 'e', 0, 0, 0, 0 });
+            return;
+        }
         const json = switch (marker[0]) {
             'D' => "{\"answer\":1,\"answer\":2}",
             'E' => "{\"a\":1,\"\\u0061\":2}",
@@ -303,6 +308,32 @@ pub fn main(init: std.process.Init) !void {
     var self_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const self_length = try std.process.executablePath(io, &self_buffer);
     owner.child_name = self_buffer[0..self_length];
+    source.close(io);
+    source = try replaceSource(tmp, io, "P");
+    owner.budget.limit = 3; // First chunk fits; the second must not grow output.
+    owner.output_removal = .injected_failure;
+    var partial_delivered = false;
+    try std.testing.expectError(error.EvaluationFailed, owner.evaluate(
+        source, prepared, evaluator.Cancellation.never(), &partial_delivered,
+        struct {
+            fn consume(observed: *bool, _: *std.Io.File) !void { observed.* = true; }
+        }.consume,
+    ));
+    if (partial_delivered or scratch_used.load(.acquire) != 3) return error.PartialChargeNotRetained;
+    try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.finish());
+    source.close(io);
+    source = try replaceSource(tmp, io, "F");
+    try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.evaluate(
+        source, prepared, evaluator.Cancellation.never(), &partial_delivered,
+        struct {
+            fn consume(observed: *bool, _: *std.Io.File) !void { observed.* = true; }
+        }.consume,
+    ));
+    if (partial_delivered or scratch_used.load(.acquire) != 3) return error.UnreclaimedEvaluatorReused;
+    owner.output_removal = .native;
+    try owner.finish();
+    if (scratch_used.load(.acquire) != 0) return error.PartialChargeLeaked;
+    owner.budget.limit = 32 * 1024 * 1024;
     for ([_][]const u8{ "D", "E", "N", "S", "X", "Q", "{" }) |fake_output| {
         source.close(io);
         source = try replaceSource(tmp, io, fake_output);
@@ -389,6 +420,7 @@ pub fn main(init: std.process.Init) !void {
     if (!large.called or scratch_used.load(.acquire) != 0) return error.LargeEvaluatorOutputNotDelivered;
     source.close(io);
     source = try replaceSource(tmp, io, "B");
+    owner.budget.limit = 800500; // 800001 output plus one live object's index.
     var siblings = struct { io: std.Io, used: *std.atomic.Value(u64), called: bool = false }{
         .io = io, .used = &scratch_used,
     };
@@ -400,6 +432,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }.consume);
     if (!siblings.called or scratch_used.load(.acquire) != 0) return error.SiblingObjectOutputNotDelivered;
+    owner.budget.limit = 32 * 1024 * 1024;
     source.close(io);
     source = try replaceSource(tmp, io, "W");
     var wide = struct { io: std.Io, used: *std.atomic.Value(u64), called: bool = false }{

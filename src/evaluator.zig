@@ -48,10 +48,48 @@ pub const Owner = struct {
     };
 
     const Scratch = struct {
+        io: std.Io,
         file: std.Io.File,
         name: [64]u8,
         name_len: u8,
-        charge: OutputCharge,
+        budget: ScratchBudget,
+        length: u64 = 0,
+        charged: u64 = 0,
+
+        fn append(self: *Scratch, bytes: []const u8) !void {
+            const end = try std.math.add(u64, self.length, bytes.len);
+            if (!self.budget.reserve(bytes.len)) return error.EvaluatorOutputBudgetExceeded;
+            // A failed positional write may have changed an unknown prefix.
+            // Keep the full reservation until a confirmed shrink or removal.
+            self.charged += bytes.len;
+            try self.file.writePositionalAll(self.io, bytes, self.length);
+            self.length = end;
+        }
+
+        fn overwrite(self: *Scratch, position: u64, bytes: []const u8) !void {
+            std.debug.assert(position <= self.length and bytes.len <= self.length - position);
+            try self.file.writePositionalAll(self.io, bytes, position);
+        }
+
+        fn shrink(self: *Scratch, length: u64) !void {
+            std.debug.assert(length <= self.length);
+            if (c.ftruncate(self.file.handle, @intCast(length)) != 0) return error.EvaluatorIndexTruncateFailed;
+            self.budget.release(self.charged - length);
+            self.length = length;
+            self.charged = length;
+        }
+
+        fn reclaim(self: *Scratch, path: []const u8, removal: named_scratch.Removal) !void {
+            _ = try named_scratch.removeNameWith(self.io, path, self.name[0..self.name_len], removal);
+            self.file.close(self.io);
+            self.budget.release(self.charged);
+        }
+
+        fn appendOutput(context: ?*anyopaque, bytes: [*c]const u8, length: usize) callconv(.c) c_int {
+            const self: *Scratch = @ptrCast(@alignCast(context orelse unreachable));
+            self.append(bytes[0..length]) catch return -1;
+            return 0;
+        }
     };
 
     pub fn init(io: std.Io, scratch_path: []const u8, budget: ScratchBudget) Owner {
@@ -148,10 +186,11 @@ pub const Owner = struct {
             });
             self.pending = .{
                 .output = .{
+                    .io = self.io,
                     .file = output,
                     .name = name_buffer,
                     .name_len = @intCast(name.len),
-                    .charge = .{ .budget = self.budget },
+                    .budget = self.budget,
                 },
             };
             var index_name_buffer: [64]u8 = undefined;
@@ -162,23 +201,22 @@ pub const Owner = struct {
                 .permissions = .fromMode(0o600),
             });
             self.pending.?.index = .{
+                .io = self.io,
                 .file = index,
                 .name = index_name_buffer,
                 .name_len = @intCast(index_name.len),
-                .charge = .{ .budget = self.budget },
+                .budget = self.budget,
             };
         }
         const result = c.rui_evaluate(
             child.ptr,
             source.handle,
             if (prepared_input) |input| input.handle else -1,
-            if (compile_only) -1 else self.pending.?.output.?.file.handle,
-            self.budget.limit,
             @intFromBool(compile_only),
             cancellation.cancelled,
             cancellation.context,
-            OutputCharge.reserve,
-            if (compile_only) null else &self.pending.?.output.?.charge,
+            Scratch.appendOutput,
+            if (compile_only) null else &self.pending.?.output.?,
             if (diagnostic) |result| &result.bytes else null,
             if (diagnostic) |result| result.bytes.len else 0,
             if (diagnostic) |result| &result.length else null,
@@ -198,7 +236,7 @@ pub const Owner = struct {
         });
         owned_output.close(self.io);
         pending.output.?.file = sealed_output;
-        try validateJson(self.io, owned_output, &pending.index.?.file, &pending.index.?.charge, cancellation);
+        try validateJson(self.io, owned_output, &pending.index.?, cancellation);
         if (cancellation.isCancelled()) return error.EvaluationCancelled;
         if (c.lseek(owned_output.handle, 0, c.SEEK_SET) < 0) return error.EvaluatorOutputSeekFailed;
         try consume(context, owned_output);
@@ -208,26 +246,12 @@ pub const Owner = struct {
         const pending = &(self.pending orelse return);
         var removal_error: ?anyerror = null;
         if (pending.output) |*output| {
-            if (named_scratch.removeNameWith(
-                self.io,
-                self.scratch_path,
-                output.name[0..output.name_len],
-                self.output_removal,
-            )) |_| {
-                output.file.close(self.io);
-                output.charge.budget.release(output.charge.bytes);
+            if (output.reclaim(self.scratch_path, self.output_removal)) |_| {
                 pending.output = null;
             } else |err| removal_error = err;
         }
         if (pending.index) |*index| {
-            if (named_scratch.removeNameWith(
-                self.io,
-                self.scratch_path,
-                index.name[0..index.name_len],
-                self.index_removal,
-            )) |_| {
-                index.file.close(self.io);
-                index.charge.budget.release(index.charge.bytes);
+            if (index.reclaim(self.scratch_path, self.index_removal)) |_| {
                 pending.index = null;
             } else |err| removal_error = err;
         }
@@ -236,18 +260,6 @@ pub const Owner = struct {
     }
 
     fn consumeNothing(_: void, _: *std.Io.File) !void {}
-};
-
-const OutputCharge = struct {
-    budget: ScratchBudget,
-    bytes: u64 = 0,
-
-    fn reserve(context: ?*anyopaque, amount: u64) callconv(.c) c_int {
-        const self: *OutputCharge = @ptrCast(@alignCast(context orelse unreachable));
-        if (!self.budget.reserve(amount)) return -1;
-        self.bytes += amount;
-        return 0;
-    }
 };
 
 const Container = struct {
@@ -338,22 +350,14 @@ const NumberState = struct {
 };
 
 const KeyIndex = struct {
-    io: std.Io,
-    file: *std.Io.File,
-    charge: *OutputCharge,
-    length: u64 = 0,
+    scratch: *Owner.Scratch,
 
     fn append(self: *KeyIndex, bytes: []const u8) !void {
-        if (!self.charge.budget.reserve(bytes.len)) return error.EvaluatorOutputBudgetExceeded;
-        self.charge.bytes += bytes.len;
-        // A failed write may be partial. Keep its entire reservation until
-        // removal and final closure, not merely the known complete prefix.
-        try self.file.writePositionalAll(self.io, bytes, self.length);
-        self.length += bytes.len;
+        try self.scratch.append(bytes);
     }
 
     fn allocate(self: *KeyIndex, capacity: u64, cancellation: Cancellation) !u64 {
-        const start = self.length;
+        const start = self.scratch.length;
         const zeros: [4096]u8 = @splat(0);
         var remaining = try std.math.mul(u64, capacity, 8);
         while (remaining != 0) {
@@ -367,14 +371,14 @@ const KeyIndex = struct {
 
     fn slot(self: *KeyIndex, table: u64, bucket: u64) !u64 {
         var bytes: [8]u8 = undefined;
-        _ = try self.file.readPositionalAll(self.io, &bytes, table + bucket * 8);
+        _ = try self.scratch.file.readPositionalAll(self.scratch.io, &bytes, table + bucket * 8);
         return std.mem.readInt(u64, &bytes, .little);
     }
 
     fn setSlot(self: *KeyIndex, table: u64, bucket: u64, value: u64) !void {
         var bytes: [8]u8 = undefined;
         std.mem.writeInt(u64, &bytes, value, .little);
-        try self.file.writePositionalAll(self.io, &bytes, table + bucket * 8);
+        try self.scratch.overwrite(table + bucket * 8, &bytes);
     }
 
     fn grow(self: *KeyIndex, object: *Container, cancellation: Cancellation) !void {
@@ -385,7 +389,7 @@ const KeyIndex = struct {
             const entry = try self.slot(object.table, old_bucket);
             if (entry == 0) continue;
             var header: [16]u8 = undefined;
-            _ = try self.file.readPositionalAll(self.io, &header, entry - 1);
+            _ = try self.scratch.file.readPositionalAll(self.scratch.io, &header, entry - 1);
             const hash = std.mem.readInt(u64, header[8..16], .little);
             var bucket = hash % next_capacity;
             while (try self.slot(next_table, bucket) != 0) {
@@ -399,16 +403,12 @@ const KeyIndex = struct {
     }
 
     fn pop(self: *KeyIndex, base: u64) !void {
-        std.debug.assert(base <= self.length);
-        if (c.ftruncate(self.file.handle, @intCast(base)) != 0) return error.EvaluatorIndexTruncateFailed;
-        const released = self.length - base;
-        self.length = base;
-        self.charge.bytes -= released;
-        self.charge.budget.release(released);
+        try self.scratch.shrink(base);
     }
 };
 
-fn validateJson(io: std.Io, output: *std.Io.File, index: *std.Io.File, charge: *OutputCharge, cancellation: Cancellation) !void {
+fn validateJson(io: std.Io, output: *std.Io.File, index_scratch: *Owner.Scratch, cancellation: Cancellation) !void {
+    const index = &index_scratch.file;
     var window: [16 * 1024]u8 = undefined;
     const output_length = try output.length(io);
     var position: u64 = 0;
@@ -422,7 +422,7 @@ fn validateJson(io: std.Io, output: *std.Io.File, index: *std.Io.File, charge: *
     var next_object_id: u64 = 1;
     var key_start: ?u64 = null;
     var key_length: u64 = 0;
-    var keys = KeyIndex{ .io = io, .file = index, .charge = charge };
+    var keys = KeyIndex{ .scratch = index_scratch };
     // A live object's table grows with its keys in charged scratch. Closing
     // the object shrinks this stack arena, so sibling objects retain no index.
     var seed: u64 = undefined;
@@ -457,7 +457,7 @@ fn validateJson(io: std.Io, output: *std.Io.File, index: *std.Io.File, charge: *
             },
             .object_begin => {
                 if (depth == stack.len) return error.MalformedEvaluatorOutput;
-                const base = keys.length;
+                const base = keys.scratch.length;
                 const table = try keys.allocate(16, cancellation);
                 stack[depth] = .{
                     .object_id = next_object_id,
@@ -503,7 +503,7 @@ fn validateJson(io: std.Io, output: *std.Io.File, index: *std.Io.File, charge: *
                     if (key_start == null) {
                         const object = &stack[depth - 1];
                         if (object.count >= object.capacity / 2) try keys.grow(object, cancellation);
-                        key_start = keys.length;
+                        key_start = keys.scratch.length;
                         key_hash = std.hash.Wyhash.init(seed ^ stack[depth - 1].object_id);
                         const header: [16]u8 = @splat(0);
                         try keys.append(&header);
@@ -521,7 +521,7 @@ fn validateJson(io: std.Io, output: *std.Io.File, index: *std.Io.File, charge: *
                         var metadata: [16]u8 = undefined;
                         std.mem.writeInt(u64, metadata[0..8], key_length, .little);
                         std.mem.writeInt(u64, metadata[8..16], hash, .little);
-                        try index.writePositionalAll(io, &metadata, current);
+                        try index_scratch.overwrite(current, &metadata);
                         var bucket = hash % object.capacity;
                         var left: [4096]u8 = undefined;
                         var right: [4096]u8 = undefined;
