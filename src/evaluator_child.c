@@ -165,63 +165,98 @@ static int json_string(JsonOutput *output, JSValueConst value) {
     return 0;
 }
 
-static int serialize_json(JSContext *ctx, JsonOutput *output,
-                          JSValueConst value, unsigned depth) {
-    if (depth > 128) return -1;
+/* Inspect each own data descriptor as it is emitted. Failed output is only a
+ * partial frame: the parent requires the end marker, normal exit, and its own
+ * complete JSON validation before handing any bytes to the consumer. */
+static int encode_data(JSContext *ctx, JsonOutput *output, JSValueConst value,
+                       JSValueConst *ancestors, unsigned depth) {
     if (JS_IsNull(value)) return json_write(output, "null", 4);
     if (JS_IsBool(value)) return JS_ToBool(ctx, value) ?
         json_write(output, "true", 4) : json_write(output, "false", 5);
     if (JS_IsString(value)) return json_string(output, value);
     if (JS_IsNumber(value)) {
+        double number;
+        if (JS_ToFloat64(ctx, &number, value) || !isfinite(number)) return -1;
         size_t length;
-        const char *number = JS_ToCStringLen(ctx, &length, value);
-        if (!number) return -1;
-        int failed = json_write(output, number, length);
-        JS_FreeCString(ctx, number);
+        const char *text = JS_ToCStringLen(ctx, &length, value);
+        if (!text) return -1;
+        int failed = json_write(output, text, length);
+        JS_FreeCString(ctx, text);
         return failed;
     }
-    if (!JS_IsObject(value)) return -1;
-    if (JS_IsArray(value)) {
-        int64_t length;
-        if (JS_GetLength(ctx, value, &length) || json_byte(output, '[')) return -1;
-        for (int64_t i = 0; i < length; i++) {
-            if (i && json_byte(output, ',')) return -1;
-            JSValue item = JS_GetPropertyUint32(ctx, value, (uint32_t)i);
-            if (JS_IsException(item)) return -1;
-            int failed = serialize_json(ctx, output, item, depth + 1);
-            JS_FreeValue(ctx, item);
-            if (failed) return -1;
-        }
-        return json_byte(output, ']');
+    if (!JS_IsObject(value) || JS_IsProxy(value) || depth >= 128 ||
+        JS_IsFunction(ctx, value)) return -1;
+    for (unsigned i = 0; i < depth; i++) {
+        if (JS_IsStrictEqual(ctx, ancestors[i], value)) return -1;
     }
+    const int array = JS_IsArray(value);
+    JSValue original_proto = JS_GetPrototype(ctx, value);
+    JSValue ordinary = array ? JS_NewArray(ctx) : JS_NewObject(ctx);
+    if (JS_IsException(original_proto) || JS_IsException(ordinary)) {
+        JS_FreeValue(ctx, original_proto);
+        JS_FreeValue(ctx, ordinary);
+        return -1;
+    }
+    JSValue standard_proto = JS_GetPrototype(ctx, ordinary);
+    int valid_proto = JS_GetClassID(value) == JS_GetClassID(ordinary) &&
+        (JS_IsNull(original_proto) ||
+         JS_IsStrictEqual(ctx, original_proto, standard_proto));
+    JS_FreeValue(ctx, original_proto);
+    JS_FreeValue(ctx, standard_proto);
+    JS_FreeValue(ctx, ordinary);
+    if (!valid_proto) return -1;
+
     JSPropertyEnum *keys = NULL;
     uint32_t count = 0;
     if (JS_GetOwnPropertyNames(ctx, &keys, &count, value,
-                              JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0) return -1;
-    if (json_byte(output, '{')) {
-        JS_FreePropertyEnum(ctx, keys, count);
-        return -1;
-    }
+                              JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK |
+                              JS_GPN_SET_ENUM) < 0) return -1;
+    ancestors[depth] = value;
+    int64_t array_length = 0;
+    JSAtom length_atom = JS_ATOM_NULL;
     int failed = 0;
+    if (array) {
+        if (JS_GetLength(ctx, value, &array_length) || array_length < 0 ||
+            (length_atom = JS_NewAtom(ctx, "length")) == JS_ATOM_NULL) failed = 1;
+    }
+    if (!failed && json_byte(output, array ? '[' : '{')) failed = 1;
+    uint32_t items = 0;
     for (uint32_t i = 0; i < count && !failed; i++) {
+        if (array && !keys[i].is_enumerable && keys[i].atom == length_atom)
+            continue;
         JSValue key = JS_AtomToValue(ctx, keys[i].atom);
-        JSPropertyDescriptor property;
-        if (JS_IsException(key) ||
-            JS_GetOwnProperty(ctx, &property, value, keys[i].atom) != 1) {
+        if (!JS_IsString(key) || !keys[i].is_enumerable) {
             JS_FreeValue(ctx, key);
             failed = 1;
             break;
         }
-        failed = (i && json_byte(output, ',')) || json_string(output, key) ||
-                 json_byte(output, ':') ||
-                 serialize_json(ctx, output, property.value, depth + 1);
+        if (array) {
+            JSAtom expected = JS_NewAtomUInt32(ctx, items);
+            failed = expected == JS_ATOM_NULL || keys[i].atom != expected;
+            JS_FreeAtom(ctx, expected);
+        }
+        JSPropertyDescriptor property;
+        if (!failed && JS_GetOwnProperty(ctx, &property, value, keys[i].atom) != 1)
+            failed = 1;
+        if (!failed) {
+            if ((property.flags & JS_PROP_GETSET) || JS_IsUndefined(property.value))
+                failed = 1;
+            else {
+                failed = (items && json_byte(output, ',')) ||
+                    (!array && (json_string(output, key) || json_byte(output, ':'))) ||
+                    encode_data(ctx, output, property.value, ancestors, depth + 1);
+            }
+            JS_FreeValue(ctx, property.value);
+            JS_FreeValue(ctx, property.getter);
+            JS_FreeValue(ctx, property.setter);
+        }
         JS_FreeValue(ctx, key);
-        JS_FreeValue(ctx, property.value);
-        JS_FreeValue(ctx, property.getter);
-        JS_FreeValue(ctx, property.setter);
+        items++;
     }
+    JS_FreeAtom(ctx, length_atom);
     JS_FreePropertyEnum(ctx, keys, count);
-    return failed || json_byte(output, '}') ? -1 : 0;
+    if (failed || (array && items != (uint64_t)array_length)) return -1;
+    return json_byte(output, array ? ']' : '}');
 }
 
 static int descriptor_read(void *opaque, uint64_t offset,
@@ -350,108 +385,6 @@ engine_error:
 fail:
     JS_FreeValue(ctx, result);
     return JS_EXCEPTION;
-}
-
-/* Validate before serialization, which reads only own data descriptors and
- * never calls getters or toJSON. Keep the original graph: copying a shared
- * subtree for each reference could exhaust the engine before streaming it. */
-static JSValue strict_data(JSContext *ctx, JSValueConst value,
-                           JSValueConst *ancestors, unsigned depth) {
-    if (JS_IsNull(value) || JS_IsBool(value) || JS_IsString(value))
-        return JS_DupValue(ctx, value);
-    if (JS_IsNumber(value)) {
-        double number;
-        if (JS_ToFloat64(ctx, &number, value) || !isfinite(number))
-            return JS_ThrowTypeError(ctx, "nonfinite number");
-        return JS_DupValue(ctx, value);
-    }
-    if (!JS_IsObject(value) || JS_IsProxy(value) || depth >= 128)
-        return JS_ThrowTypeError(ctx, "unsupported data value");
-    for (unsigned i = 0; i < depth; i++) {
-        if (JS_IsStrictEqual(ctx, ancestors[i], value))
-            return JS_ThrowTypeError(ctx, "cyclic data");
-    }
-    if (JS_IsFunction(ctx, value))
-        return JS_ThrowTypeError(ctx, "function is not data");
-    JSValue original_proto = JS_GetPrototype(ctx, value);
-    JSValue ordinary = JS_IsArray(value) ? JS_NewArray(ctx) : JS_NewObject(ctx);
-    if (JS_IsException(original_proto) || JS_IsException(ordinary)) {
-        JS_FreeValue(ctx, original_proto);
-        JS_FreeValue(ctx, ordinary);
-        return JS_EXCEPTION;
-    }
-    JSValue standard_proto = JS_GetPrototype(ctx, ordinary);
-    int valid_class = JS_GetClassID(value) == JS_GetClassID(ordinary);
-    int valid_proto = valid_class && (JS_IsNull(original_proto) ||
-        JS_IsStrictEqual(ctx, original_proto, standard_proto));
-    JS_FreeValue(ctx, original_proto);
-    JS_FreeValue(ctx, standard_proto);
-    JS_FreeValue(ctx, ordinary);
-    if (!valid_proto) {
-        return JS_ThrowTypeError(ctx, "unsupported prototype");
-    }
-    JSPropertyEnum *keys = NULL;
-    uint32_t count = 0;
-    if (JS_GetOwnPropertyNames(ctx, &keys, &count, value,
-                               JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK | JS_GPN_SET_ENUM) < 0) {
-        return JS_EXCEPTION;
-    }
-    ancestors[depth] = value;
-    int failed = 0;
-    int64_t array_length = 0;
-    uint64_t array_items = 0;
-    JSAtom length_atom = JS_ATOM_NULL;
-    if (JS_IsArray(value) &&
-        (JS_GetLength(ctx, value, &array_length) || array_length < 0)) failed = 1;
-    if (JS_IsArray(value) && !failed) {
-        length_atom = JS_NewAtom(ctx, "length");
-        if (length_atom == JS_ATOM_NULL) failed = 1;
-    }
-    for (uint32_t i = 0; i < count && !failed; i++) {
-        JSValue key = JS_AtomToValue(ctx, keys[i].atom);
-        if (!JS_IsString(key)) failed = 1;
-        if (!failed && !keys[i].is_enumerable &&
-            !(JS_IsArray(value) && keys[i].atom == length_atom)) failed = 1;
-        if (!failed && JS_IsArray(value) && keys[i].is_enumerable) array_items++;
-        JS_FreeValue(ctx, key);
-        if (failed || !keys[i].is_enumerable) continue;
-        JSPropertyDescriptor property;
-        if (JS_GetOwnProperty(ctx, &property, value, keys[i].atom) != 1) {
-            failed = 1;
-            continue;
-        }
-        if ((property.flags & JS_PROP_GETSET) ||
-            JS_IsUndefined(property.value)) {
-            failed = 1;
-        } else {
-            JSValue item = strict_data(ctx, property.value, ancestors, depth + 1);
-            if (JS_IsException(item)) failed = 1;
-            else JS_FreeValue(ctx, item);
-        }
-        JS_FreeValue(ctx, property.value);
-        JS_FreeValue(ctx, property.getter);
-        JS_FreeValue(ctx, property.setter);
-    }
-    JS_FreeAtom(ctx, length_atom);
-    if (JS_IsArray(value) && array_items != (uint64_t)array_length) failed = 1;
-    /* JSON.stringify would silently turn sparse array entries into null. */
-    for (int64_t i = 0; i < array_length && !failed; i++) {
-        JSAtom atom = JS_NewAtomUInt32(ctx, (uint32_t)i);
-        JSPropertyDescriptor property;
-        if (atom == JS_ATOM_NULL) { failed = 1; break; }
-        int found = JS_GetOwnProperty(ctx, &property, value, atom);
-        JS_FreeAtom(ctx, atom);
-        if (found != 1) { failed = 1; break; }
-        if (!(property.flags & JS_PROP_ENUMERABLE)) failed = 1;
-        JS_FreeValue(ctx, property.value);
-        JS_FreeValue(ctx, property.getter);
-        JS_FreeValue(ctx, property.setter);
-    }
-    JS_FreePropertyEnum(ctx, keys, count);
-    if (failed) {
-        return JS_ThrowTypeError(ctx, "non-data property");
-    }
-    return JS_DupValue(ctx, value);
 }
 
 /* Only the module or returned root is completion authority. Detached jobs
@@ -597,12 +530,9 @@ int main(int argc, char **argv) {
         root = value;
     }
     JSValueConst ancestors[128];
-    JSValue data = strict_data(ctx, root, ancestors, 0);
-    JS_FreeValue(ctx, root);
-    if (JS_IsException(data)) return 5;
     JsonOutput output = {0};
-    int status = serialize_json(ctx, &output, data, 0) || json_flush(&output);
-    JS_FreeValue(ctx, data);
+    int status = encode_data(ctx, &output, root, ancestors, 0) || json_flush(&output);
+    JS_FreeValue(ctx, root);
     uint8_t end[4] = {0};
     if (!status) status = write_all(end, sizeof(end));
     JS_FreeContext(ctx);
