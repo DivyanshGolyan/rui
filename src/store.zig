@@ -2511,13 +2511,13 @@ pub const Store = struct {
     fn publicConversationPageLocked(self: *Store, request: protocol.ConversationPage) !PublicConversationPage {
         if (request.end > std.math.maxInt(i64) or request.before_position > std.math.maxInt(i64) or
             request.before_ordinal > std.math.maxInt(i64) or
-            (request.end == 0) != (request.before_position == 0) or
+            (request.end == 0 and request.before_position != 0) or
             (request.before_position == 0 and request.before_ordinal != 0) or
             (request.end != 0 and request.before_position > request.end)) return error.InvalidCursor;
         const current = (try self.readSession(request.session.slice())) orelse return error.SessionNotFound;
         const end = if (request.end == 0) current.next_position - 1 else request.end;
-        if (request.end != 0 and (request.before_position == 0 or request.before_position > end or
-            end >= current.next_position or end > std.math.maxInt(i64))) return error.InvalidCursor;
+        if (request.end != 0 and (request.before_position > end or end >= current.next_position or
+            end > std.math.maxInt(i64))) return error.InvalidCursor;
         if (request.before_position != 0) {
             _ = self.publicConversationContentIdLocked(request.session.slice(), request.before_position, request.before_ordinal) catch |err| switch (err) {
                 error.ContentNotFound => return error.InvalidCursor,
@@ -11010,6 +11010,13 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     try submitTestMessage(&storage, &tmp, "after-page", "after-page-key", "direct/public", "later public input");
     try storage.settleModelAttemptFailure(active.permit.binding, "fixture_failure", .terminal, .{});
     _ = (try storage.admitNextModelAttempt(.{})).?;
+    const fixed_first = try storage.publicConversationPage(.{ .session = request.session, .end = first.end });
+    try std.testing.expectEqual(first.end, fixed_first.end);
+    try std.testing.expectEqual(first.count, fixed_first.count);
+    for (first.items[0..first.count], fixed_first.items[0..fixed_first.count]) |expected, actual| {
+        try std.testing.expectEqual(expected.position, actual.position);
+        try std.testing.expectEqual(expected.ordinal, actual.ordinal);
+    }
     request.end = first.end;
     request.before_position = first.items[15].position;
     const older = try storage.publicConversationPage(request);
