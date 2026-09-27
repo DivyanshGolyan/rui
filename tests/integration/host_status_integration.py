@@ -78,6 +78,14 @@ def main():
         assert not store.exists(), "observation created a Store"
         store.mkdir(mode=0o700)
         assert status(store) == "unavailable"
+        fifo_lock = store / "host.lock"
+        os.mkfifo(fifo_lock, mode=0o600)
+        try:
+            probe = subprocess.run([ACTOR, store], capture_output=True, text=True, timeout=2)
+            assert probe.returncode == 0 and probe.stdout.strip() == "access_failure", probe
+            assert cli_status(home, "--store", store).startswith("Host: access failure")
+        finally:
+            fifo_lock.unlink()
         stale = socket_path(store)
         stale.parent.mkdir(mode=0o700, exist_ok=True)
         with socket.socket(socket.AF_UNIX) as endpoint:

@@ -96,16 +96,26 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) Host
     };
     var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch return .access_failure;
     defer store_dir.close(io);
-    const lock_file = store_dir.openFile(io, "host.lock", .{
-        .lock = .shared,
-        .lock_nonblocking = true,
-    }) catch |err| return switch (err) {
+    // A replaced lock node may be a FIFO: open must not wait for a writer
+    // before the nonblocking lock probe can classify the selected Store.
+    const fd = std.posix.openat(store_dir.handle, "host.lock", .{
+        .ACCMODE = .RDONLY,
+        .NONBLOCK = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0) catch |err| return switch (err) {
         error.FileNotFound => .unavailable,
-        error.WouldBlock => readHostInfo(io, &paths, deadline),
         else => .access_failure,
     };
-    lock_file.close(io);
-    return .unavailable;
+    const lock_file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+    defer lock_file.close(io);
+    const stat = lock_file.stat(io) catch return .access_failure;
+    if (stat.kind != .file) return .access_failure;
+    return switch (std.posix.errno(std.posix.system.flock(fd, std.posix.LOCK.SH | std.posix.LOCK.NB))) {
+        .SUCCESS => .unavailable,
+        .AGAIN => readHostInfo(io, &paths, deadline),
+        else => .access_failure,
+    };
 }
 
 fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) HostStatus {
