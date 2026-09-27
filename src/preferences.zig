@@ -27,7 +27,7 @@ pub fn defaultStore(home: []const u8, buffer: []u8) ![]const u8 {
 }
 
 fn validateHome(home: []const u8) !void {
-    if (!std.fs.path.isAbsolute(home)) return error.InvalidHome;
+    if (!std.fs.path.isAbsolute(home) or !std.unicode.utf8ValidateSlice(home)) return error.InvalidHome;
     for (home) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidHome;
 }
 
