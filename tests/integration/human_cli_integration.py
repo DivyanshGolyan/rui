@@ -320,6 +320,19 @@ def main():
             assert "No work to wait for." in terminal_step(master, "/wait")
             assert "gpt-6-luna" in terminal_step(master, "/setup")
             assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model later-model")
+            spaced_store = state / "spaced store"
+            spaced_store.mkdir(mode=0o700)
+            assert "Saved defaults for future Sessions" in terminal_step(master, f'/setup --store "{spaced_store}"')
+            assert str(spaced_store.resolve()) in run(preferences_home, "setup")
+            quoted_store = state / 'quoted "store"'
+            quoted_store.mkdir(mode=0o700)
+            escaped_store = str(quoted_store).replace('"', r'\"')
+            assert "Saved defaults for future Sessions" in terminal_step(
+                master, f'/setup --store "{escaped_store}"')
+            assert str(quoted_store.resolve()) in run(preferences_home, "setup")
+            assert "Usage: /setup" in terminal_step(master, '/setup --store "unfinished')
+            assert str(quoted_store.resolve()) in run(preferences_home, "setup")
+            assert "Saved defaults for future Sessions" in terminal_step(master, f'/setup --store "{store}"')
             assert "Permission: ask" in terminal_step(master, "/status")
             assert fixture.command("inspect-session", "--store", store,
                 "--session", session)["session"]["model"] == "model-a"
@@ -327,7 +340,7 @@ def main():
             assert "Use a file for" in terminal_step(master, "/configure --instructions -")
             assert "Use a file for" in terminal_step(master, "/configure --output-schema -")
             assert f"Session: {session}" in terminal_step(master, "/status")
-            configured = terminal_step(master, "/configure --model model-a")
+            configured = terminal_step(master, '/configure --model "model-a"')
             assert "Configured." in configured and "request:" not in configured, configured
             assert f"Session: {session}" in terminal_step(master, "/status")
             assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")

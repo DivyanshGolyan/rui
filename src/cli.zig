@@ -619,18 +619,11 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         }
         const attention: ?Attention = if (std.mem.eql(u8, text, "/setup") or std.mem.startsWith(u8, text, "/setup ")) blk: {
             var setup_args: [6][]const u8 = undefined;
-            var count: usize = 0;
-            var tokens = std.mem.tokenizeScalar(u8, text["/setup".len..], ' ');
-            var overflow = false;
-            while (tokens.next()) |token| {
-                if (count == setup_args.len) {
-                    overflow = true;
-                    break;
-                }
-                setup_args[count] = token;
-                count += 1;
-            }
-            if (overflow or count % 2 != 0) {
+            const count = interactiveTokens(input_buffer["/setup".len..text.len], &setup_args) catch {
+                try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /setup [--store PATH] [--provider codex] [--model MODEL]; no changes saved.\n");
+                break :blk null;
+            };
+            if (count % 2 != 0) {
                 try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /setup [--store PATH] [--provider codex] [--model MODEL]; no changes saved.\n");
             } else setup(init, setup_args[0..count]) catch |err| std.debug.print("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
             break :blk null;
@@ -656,9 +649,16 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
             var config_args: [24][]const u8 = undefined;
             config_args[0..4].* = .{ "--store", destination, "--session", reference };
             var count: usize = 4;
-            var tokens = std.mem.tokenizeScalar(u8, text["/configure".len..], ' ');
+            var arguments: [20][]const u8 = undefined;
+            const argument_count = interactiveTokens(input_buffer["/configure".len..text.len], &arguments) catch {
+                try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Usage: /configure --model MODEL [--tools bash] [--permission-mode ask|bypass] (settings for this Session only)\n");
+                break :blk null;
+            };
+            var next: usize = 0;
             var valid = true;
-            while (tokens.next()) |flag| {
+            while (next < argument_count) {
+                const flag = arguments[next];
+                next += 1;
                 const takes_value = std.mem.eql(u8, flag, "--workspace") or std.mem.eql(u8, flag, "--provider") or
                     std.mem.eql(u8, flag, "--model") or std.mem.eql(u8, flag, "--instructions") or
                     std.mem.eql(u8, flag, "--tools") or std.mem.eql(u8, flag, "--permission-mode") or
@@ -667,7 +667,8 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
                     valid = false;
                     break;
                 }
-                const value = if (takes_value) tokens.next() else null;
+                const value = if (takes_value and next < argument_count) arguments[next] else null;
+                if (takes_value and value != null) next += 1;
                 if ((takes_value and value == null) or count + (if (takes_value) @as(usize, 2) else 1) > config_args.len) {
                     valid = false;
                     break;
@@ -746,6 +747,41 @@ fn interactiveAction(init: std.process.Init, store: []const u8, session_ref: []c
         pending = try followMessage(init, &saved, .interactive, false, false);
         if (pending == null) try showResult(init, &saved, .interactive);
     }
+}
+
+// Decode command arguments into the editor's borrowed line. Removing quotes
+// and escapes only shrinks it, so each returned slice remains valid until the
+// next prompt reuses the input buffer. This is not shell expansion.
+fn interactiveTokens(input: []u8, tokens: [][]const u8) !usize {
+    var read: usize = 0;
+    var write: usize = 0;
+    var count: usize = 0;
+    while (read < input.len) {
+        while (read < input.len and input[read] == ' ') : (read += 1) {}
+        if (read == input.len) break;
+        if (count == tokens.len) return error.TooManyInteractiveArguments;
+        const start = write;
+        var quoted = false;
+        while (read < input.len) {
+            const byte = input[read];
+            if (!quoted and byte == ' ') break;
+            if (byte == '"') {
+                quoted = !quoted;
+                read += 1;
+                continue;
+            }
+            if (byte == '\\' and read + 1 < input.len and
+                (input[read + 1] == '"' or input[read + 1] == '\\' or input[read + 1] == ' ')) read += 1;
+            if (input[read] < 0x20 or input[read] == 0x7f) return error.InvalidInteractiveArguments;
+            input[write] = input[read];
+            write += 1;
+            read += 1;
+        }
+        if (quoted) return error.InvalidInteractiveArguments;
+        tokens[count] = input[start..write];
+        count += 1;
+    }
+    return count;
 }
 
 fn sessionRequests(init: std.process.Init, store: []const u8, session_ref: []const u8) !void {
