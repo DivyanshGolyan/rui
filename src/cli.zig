@@ -518,7 +518,10 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     if (selection == .chooser or selection.selected.readiness != .configured) {
         try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No locally ready provider for a new Session. Choose Codex login or defer; saved work remains inspectable.\n");
         try guideProviderLogin(init);
-        defaults = try preferences.load(home);
+        // Explicit destination and binding never depend on the preference file,
+        // including after a login whose future-default save failed.
+        if (store == null or explicit_provider == null or explicit_model == null)
+            defaults = try preferences.load(home);
         const updated = codex_credentials.localStatus(credential, now) catch |err| {
             std.debug.print("rui: credential still unreadable ({s}); inspect rui setup. No Session created.\n", .{@errorName(err)});
             return err;
