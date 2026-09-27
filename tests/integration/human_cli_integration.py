@@ -533,6 +533,39 @@ def main():
                 explicit.kill()
                 explicit.wait(timeout=5)
             os.close(master)
+        longer_store = state / "another-longer-store-selector"
+        other_host = fixture.start_host(longer_store, url)
+        try:
+            for index, (before, after) in enumerate(((store, longer_store), (longer_store, store))):
+                changing_home = state / f"changing-home-{index}"
+                changing_home.mkdir()
+                assert "Saved defaults" in run(changing_home, "setup", "--store", before,
+                    "--provider", "codex", "--model", "gpt-6-luna")
+                master, slave = pty.openpty()
+                changing = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+                    env={**os.environ, "HOME": str(changing_home)},
+                    stdin=slave, stdout=slave, stderr=slave)
+                os.close(slave)
+                try:
+                    assert "No locally ready provider" in read_terminal(master, "Provider: [c]")
+                    assert "Saved defaults" in run(changing_home, "setup", "--store", after)
+                    codex_fixture.credentials(changing_home / ".config/rui/codex.json")
+                    welcome = terminal_step(master, "d")
+                    assert f"Diagnostics: {after.resolve()}/diagnostics" in welcome, welcome
+                    handle = next(line.split("request: ", 1)[1].strip() for line in welcome.splitlines()
+                        if line.startswith("request: "))
+                    current = fixture.command("inspect-session", "--store", after,
+                        "--session", f"rui/{handle}")
+                    assert current["session"]["model"] == "gpt-6-luna", current
+                    assert "Detached." in terminal_step(master, "/exit", "Detached.")
+                    assert changing.wait(timeout=5) == 0
+                finally:
+                    if changing.poll() is None:
+                        changing.kill()
+                        changing.wait(timeout=5)
+                    os.close(master)
+        finally:
+            fixture.stop_host(other_host)
         codex_fixture.credentials(credential)
         created = []
         for _ in range(2):

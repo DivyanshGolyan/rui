@@ -501,8 +501,6 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
             return err;
         };
     };
-    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const selected_store = store orelse (if (defaults.store.len != 0) defaults.store.slice() else try preferences.defaultStore(home, &fallback));
     var credential_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const credential = try credentialPath(init, &credential_buffer, false);
     const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
@@ -540,6 +538,8 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
         }
     }
     const selected = selection.selected;
+    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const selected_store = store orelse (if (defaults.store.len != 0) defaults.store.slice() else try preferences.defaultStore(home, &fallback));
     try startHost(init, selected_store);
     const paths = try platform.resolveClientPaths(init.io, selected_store);
     const destination = paths.store.slice();
