@@ -68,7 +68,6 @@ fn read(dir: std.Io.Dir) !Values {
     }
     if (!std.mem.eql(u8, lines.next() orelse return error.InvalidPreferences, "") or lines.next() != null)
         return error.InvalidPreferences;
-    try validate(&result);
     return result;
 }
 
@@ -80,7 +79,9 @@ pub fn load(home: []const u8) !Values {
         else => return err,
     };
     defer dir.close(io);
-    return read(dir);
+    const values = try read(dir);
+    try validate(&values);
+    return values;
 }
 
 /// Serializes read/modify/write for competing setup callers. A failed write or

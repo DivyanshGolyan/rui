@@ -131,6 +131,13 @@ def main():
         assert saved.stat().st_mode & 0o777 == 0o600
         assert saved.parent.stat().st_mode & 0o777 == 0o700
         assert str(store.resolve()) in run(preferences_home, "setup")
+        retired_store = state / "retired-store"
+        retired_store.mkdir(mode=0o700)
+        assert "Saved defaults" in run(preferences_home, "setup", "--store", retired_store)
+        retired_store.rmdir()
+        assert run(preferences_home, "setup", success=False) == ""
+        assert "Saved defaults" in run(preferences_home, "setup", "--store", store)
+        assert f"store={store.resolve()}\n" in saved.read_text()
         assert run(preferences_home, "setup", "--provider", "other", success=False) == ""
         assert run(preferences_home, "setup", "--store", state / "missing", success=False) == ""
         assert saved.read_text().endswith("model=gpt-6-luna\n")
