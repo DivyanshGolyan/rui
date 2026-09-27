@@ -74,6 +74,9 @@ def main():
             cursor[field] = str(2**64 - 1)
             head, _ = request(socket_path, store, "/v1/conversation-page", "conversation_page", "direct/page", **cursor)
             assert head.startswith(b"HTTP/1.1 400 "), head
+        head, _ = request(socket_path, store, "/v1/conversation-page", "conversation_page", "direct/page",
+            end=page["end"], before_position=item["position"], before_ordinal="1")
+        assert head.startswith(b"HTTP/1.1 409 "), head
         for field in ("position", "ordinal"):
             identity = {"position": item["position"], "ordinal": "0", "start": "0"}
             identity[field] = str(2**64 - 1)

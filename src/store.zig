@@ -2518,6 +2518,12 @@ pub const Store = struct {
         const end = if (request.end == 0) current.next_position - 1 else request.end;
         if (request.end != 0 and (request.before_position == 0 or request.before_position > end or
             end >= current.next_position or end > std.math.maxInt(i64))) return error.InvalidCursor;
+        if (request.before_position != 0) {
+            _ = self.publicConversationContentIdLocked(request.session.slice(), request.before_position, request.before_ordinal) catch |err| switch (err) {
+                error.ContentNotFound => return error.InvalidCursor,
+                else => return err,
+            };
+        }
         var page = PublicConversationPage{ .end = end };
         if (end == 0) return page;
         // Tool outcomes enter public Conversation only when the entire group
@@ -2586,7 +2592,14 @@ pub const Store = struct {
     fn openPublicConversationContentLocked(self: *Store, request: protocol.ConversationContent) !ContentReader {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or
             request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
-        const statement = if (request.ordinal == 0)
+        const content_id = try self.publicConversationContentIdLocked(request.session.slice(), request.position, request.ordinal);
+        const metadata = try self.readContentMetadata(content_id);
+        if (request.start > metadata.length) return error.RangeOutOfBounds;
+        return .{ .store = self, .content_id = content_id, .reference = .{ .length = metadata.length, .digest = metadata.digest }, .representation = if (try self.contentIsRaw(content_id, metadata.length)) .raw else .{ .projection = .{} } };
+    }
+
+    fn publicConversationContentIdLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !i64 {
+        const statement = if (ordinal == 0)
             try prepare(self.database, "SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND session_position=?2 AND entry_kind IN (1,3)")
         else
             try prepare(self.database, "SELECT coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_operation op " ++
@@ -2601,9 +2614,9 @@ pub const Store = struct {
                 "ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id " ++
                 "AND (coalesce(c.acceptance_position,a.acceptance_position) IS NULL OR coalesce(c.rejection_content_id,a.resolution_content_id) IS NULL))");
         defer _ = c.sqlite3_finalize(statement);
-        try bindText(statement, 1, request.session.slice());
-        try bindU64(statement, 2, request.position);
-        if (request.ordinal != 0) try bindU64(statement, 3, request.ordinal);
+        try bindText(statement, 1, session);
+        try bindU64(statement, 2, position);
+        if (ordinal != 0) try bindU64(statement, 3, ordinal);
         switch (c.sqlite3_step(statement)) {
             c.SQLITE_ROW => {},
             c.SQLITE_DONE => return error.ContentNotFound,
@@ -2611,9 +2624,7 @@ pub const Store = struct {
         }
         const content_id = c.sqlite3_column_int64(statement, 0);
         if (content_id <= 0) return error.CorruptStore;
-        const metadata = try self.readContentMetadata(content_id);
-        if (request.start > metadata.length) return error.RangeOutOfBounds;
-        return .{ .store = self, .content_id = content_id, .reference = .{ .length = metadata.length, .digest = metadata.digest }, .representation = if (try self.contentIsRaw(content_id, metadata.length)) .raw else .{ .projection = .{} } };
+        return content_id;
     }
 
     pub fn captureSessionReport(
@@ -10974,6 +10985,13 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     try std.testing.expectEqual(@as(u64, 5), first.items[15].position);
     for (first.items[0..first.count]) |item| try std.testing.expect(item.kind == .user);
     try std.testing.expectEqual(@as(u64, 5), first.items[0].content.length);
+    try std.testing.expectError(error.InvalidCursor, storage.publicConversationPage(.{
+        .session = request.session,
+        .end = first.end,
+        .before_position = first.items[15].position,
+        .before_ordinal = 1,
+    }));
+    try std.testing.expect(!storage.isFenced());
     var unicode_reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = 20 });
     var lead: [1]u8 = undefined;
     var rest: [4]u8 = undefined;
@@ -11120,6 +11138,9 @@ test "public tool-result cursor crosses a completed group boundary" {
     }
     cursor.end = newest.end;
     cursor.before_position = newest.items[15].position;
+    cursor.before_ordinal = 18; // No such completed call in this group.
+    try std.testing.expectError(error.InvalidCursor, storage.publicConversationPage(cursor));
+    try std.testing.expect(!storage.isFenced());
     cursor.before_ordinal = newest.items[15].ordinal;
     const older = try storage.publicConversationPage(cursor);
     try std.testing.expectEqual(@as(usize, 2), older.count);
