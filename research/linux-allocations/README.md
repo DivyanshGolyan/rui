@@ -237,10 +237,22 @@ Preserved failed runs exposed two measurement races, not evidence of production
 leaks. After custody was observed at zero, a second inspection could see the
 temporary reserve-before-no-work check. Separately, a completed inspection
 reply can precede release of its report file and accepted socket, adding 2 FDs.
-The fixture now checks custody and scratch in one observation, and waits for
-FDs to return to the lowest previously observed drained population. Deadlines
-are unchanged. This still detects persistent growth above that population;
-as before, it does not prove the initial baseline contains no retained resource.
+The fixture checks custody and scratch in one observation. After PR review,
+it also waits for that inspection's socket EOF before sampling any wave,
+including the first baseline: the server releases the report before closing
+the socket. Later samples must return to the lowest previously observed
+population. EOF proves cleanup of this inspection, not all earlier independent
+callers or absence of every retained resource. No production protocol or
+descriptor allowance changed.
+
+A deterministic reply-before-cleanup counterexample starts with 10 steady
+and 2 transient inspection FDs. Removing the EOF wait makes its first-baseline
+assertion fail; that inflated baseline would otherwise accept 2 retained FDs
+on the next wave. The full Linux H2 suite passed with the corrected oracle.
+The macOS size-shaped suite also passed, including both stalled-capture cases;
+its descriptor listing still warns about an unrelated mounted filesystem.
+Earlier experiment hashes and results retain their original fixture;
+the review correction does not retrospectively qualify those measurements.
 
 The original counterexample fails at the second-read assertion. The corrected
 predicate accepts that interleaving; a persistent FD increase still times out.

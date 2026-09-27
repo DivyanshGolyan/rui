@@ -20,6 +20,7 @@ import h2.events
 import h2.errors
 import h2.settings
 
+import control_integration as control
 import dispatch_integration as dispatch
 from host_process import HostDiagnostics
 
@@ -383,14 +384,50 @@ def assert_round_trip_history(streams, capacity, rounds, answers):
             expected.extend((reasoning, message))
 
 
+def inspection_drained(connection):
+    head, body = control.read_http_response(connection, timeout=15)
+    assert b" 200 " in head, (head, body)
+    # connectionMain closes only after the inspection report is released.
+    # A complete response body alone does not establish that boundary.
+    assert connection.recv(1) == b"", "inspection must close after its response"
+    observation = json.loads(body)["execution"]
+    return (observation["custody_occupied"] == "0"
+            and observation["scratch_used_bytes"] == "0")
+
+
+def assert_inspection_cleanup_boundary():
+    class ReplyBeforeCleanup:
+        released = False
+
+        def settimeout(self, timeout):
+            pass
+
+        def recv(self, size):
+            if size == 1:
+                self.released = True
+                return b""
+            body = b'{"execution":{"custody_occupied":"0","scratch_used_bytes":"0"}}'
+            return b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+
+    reply = ReplyBeforeCleanup()
+    assert inspection_drained(reply)
+    baseline = 10 + (0 if reply.released else 2)
+    assert baseline == 10, "inspection resources contaminated the first FD baseline"
+    # The unqualified count of 12 would wrongly accept two retained FDs.
+    assert not 12 <= baseline
+
+
 def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
     store = root / f"store-{capacity}"
-    host = dispatch.start_host(
-        store,
-        f"https://localhost:{endpoint.server_address[1]}/responses",
-        "--provider-ca-file",
-        str(ca_file),
-        active_capacity=capacity,
+    host, ready = dispatch.start_ready_process(
+        dispatch.host_arguments(
+            store,
+            f"https://localhost:{endpoint.server_address[1]}/responses",
+            "--provider-ca-file",
+            str(ca_file),
+            active_capacity=capacity,
+        ),
+        required_fields={"execution": "enabled", "curl": "8.22.0"},
     )
     try:
         idle_fds = []
@@ -424,18 +461,18 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
             # Require both drain facts in one observation, not a second read
             # after wait_for has already witnessed drainage.
             def drained():
-                observation = dispatch.command(
-                    "inspect-session", "--store", store, "--session", f"direct/h2-{capacity}-0"
-                )["execution"]
-                return (observation["custody_occupied"] == "0"
-                        and observation["scratch_used_bytes"] == "0")
+                with control.open_complete_inspection(
+                    ready["socket"], store.resolve(), f"direct/h2-{capacity}-0", "default"
+                ) as connection:
+                    return inspection_drained(connection)
 
             dispatch.wait_for(
                 drained,
                 f"H2 custody drainage after round {round_number}", timeout=20,
             )
-            # The inspection reply can precede closing its report and socket.
-            # Record the qualifying sample rather than racing another read.
+            # The inspection report and socket are now released, including
+            # before the first baseline. Other callers may still be closing;
+            # later samples must return to the lowest observed population.
             descriptors = open_descriptors(host.pid)
             if idle_fds:
                 def descriptors_released():
@@ -1056,6 +1093,7 @@ def main():
     observed_only = len(sys.argv) == 3 and sys.argv[2] == "--observed-shape-only"
     churn = len(sys.argv) == 3 and sys.argv[2] == "--observed-shape-churn"
     assert len(sys.argv) == 2 or observed_only or churn
+    assert_inspection_cleanup_boundary()
     if churn and sys.platform != "darwin":
         raise RuntimeError("Observed-shape churn footprint qualification requires macOS")
     with tempfile.TemporaryDirectory(prefix="rui-h2-") as tmp:
