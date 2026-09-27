@@ -43,17 +43,16 @@ def sample(pid):
 
 
 def system_snapshot():
-    result = {"cgroup_scope": "mounted cgroup root; ancestor/system diagnostics, not Host-only",
-              "sampler_cgroup": Path("/proc/self/cgroup").read_text()}
+    result = {"cgroup_scope": "mounted cgroup root; ancestor/system diagnostics, not Host-only"}
+    paths = {"sampler_cgroup": Path("/proc/self/cgroup"),
+             "meminfo": Path("/proc/meminfo"), "vmstat": Path("/proc/vmstat")}
     for name in ("memory.events", "memory.current", "memory.swap.current", "memory.pressure", "cpu.stat", "cpu.max", "memory.max"):
+        paths[name] = Path("/sys/fs/cgroup", name)
+    for name, path in paths.items():
         try:
-            result[name] = Path("/sys/fs/cgroup", name).read_text()
-        except FileNotFoundError:
-            if name != "memory.pressure":
-                raise
-            result[name] = {"status": "unavailable", "reason": "kernel does not expose PSI"}
-    result["meminfo"] = Path("/proc/meminfo").read_text()
-    result["vmstat"] = Path("/proc/vmstat").read_text()
+            result[name] = path.read_text()
+        except OSError as error:
+            result[name] = {"status": "unavailable", "reason": str(error)}
     return result
 
 
@@ -73,15 +72,9 @@ def main():
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
     fixture.dispatch.RUI = binary
     result = {"status": "failed", "scope": "Linux diagnostic; no macOS physical-footprint verdict",
-              "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-              "platform": list(os.uname()), "glibc": os.confstr("CS_GNU_LIBC_VERSION"),
               "requested_glibc_tunables": args.tunables, "capacity": args.capacity, "rounds": args.rounds,
               "sampling_interval_seconds": 0.1, "instrumented": args.probe is not None,
-              "before": system_snapshot(), "drains": []}
-    sources = [Path(__file__), Path(fixture.__file__), Path(fixture.dispatch.__file__), Path(__file__).with_name("malloc_probe.c")]
-    if args.probe:
-        sources.append(args.probe.resolve())
-    result["source_sha256"] = {str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}
+              "drains": []}
     result["probe_scope"] = "perturbed glibc accounting; does not isolate tcache; not additive with RSS/PSS" if args.probe else "not loaded"
     stopped = threading.Event()
     worker = None
@@ -153,6 +146,13 @@ def main():
             return original(*positional, **keywords)
 
     try:
+        result.update(platform=list(os.uname()), glibc=os.confstr("CS_GNU_LIBC_VERSION"),
+                      binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest())
+        result["before"] = system_snapshot()
+        sources = [Path(__file__), Path(fixture.__file__), Path(fixture.dispatch.__file__), Path(__file__).with_name("malloc_probe.c")]
+        if args.probe:
+            sources.append(args.probe.resolve())
+        result["source_sha256"] = {str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}
         with tempfile.TemporaryDirectory(prefix="rui-linux-memory-", dir="/tmp") as temporary:
             root = Path(temporary)
             subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(root / "key.pem"),

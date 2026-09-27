@@ -13,7 +13,7 @@ python3 tests/qualification/linux-memory/run.py /absolute/path/to/rui --output /
 python3 tests/qualification/linux-memory/run.py /absolute/path/to/rui --output /tmp/new-nocache --tunables glibc.malloc.arena_max=1:glibc.malloc.tcache_count=0
 ```
 
-Use new output directories; failed runs must not be overwritten. Repeat promising comparisons in reverse order. The setting applies only to the Host, not the provider fixture or CLI.
+Use new output directories; failed runs must not be overwritten. Repeat promising comparisons in reverse order. The setting applies only to the Host, not the provider fixture or CLI. Test the collector with `python3 -m unittest discover -s tests/qualification/linux-memory -v` in the same Python environment.
 
 For a separate allocator diagnostic:
 
@@ -37,7 +37,7 @@ Repeat with the candidate setting. Output preserves exact result audits and the 
 
 - RSS counts resident pages fully; PSS apportions shared pages. `Pss_Anon`, `Pss_File` and `Pss_Shmem` describe backing, not Rui ownership. File-backed code and libraries are not allocator waste.
 - Peaks from the 100 ms sampler are sampled peaks, not guaranteed lifetime maxima. Raw per-wave `status` files also retain approximate Linux `VmHWM`; there is no kernel lifetime PSS maximum. Neither metric equals macOS physical footprint.
-- Mounted-root cgroup counters describe the ancestor/system scope, including fixture work; they are not Host-only memory or CPU. Record the actual cgroup path, limits, throttling, swap and pressure availability. Global VM pressure can also affect timing and file-backed residency.
+- Mounted-root cgroup counters describe the ancestor/system scope, including fixture work; they are not Host-only memory or CPU. Record the actual cgroup path, limits, throttling, swap and pressure availability. Missing or inaccessible optional system counters are independently unavailable, never zero; Host `/proc` counters remain required. Initial capture failures preserve a failed `result.json`. Global VM pressure can also affect timing and file-backed residency.
 - Requested `GLIBC_TUNABLES` is provenance, not proof every setting took effect. Probe XML verifies observed arena counts. See the [glibc 2.39 tunables documentation](https://sourceware.org/glibc/manual/2.39/html_node/Memory-Allocation-Tunables.html): `arena_max` limits arenas; `tcache_count=0` disables per-thread caches. These are glibc-specific, not generic Linux controls.
 - A finite repeated-work test neither proves absence of all leaks nor qualifies Linux x86-64, musl, other glibc versions, a live-provider journey, tools or the complete 1,000-operation workload. Do not change networking libraries or allocators based on these counters alone.
 
