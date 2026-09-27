@@ -1,3 +1,5 @@
 * linguist-detectable=false
 src/** linguist-detectable=true
 *.json.gz binary
+# Unified patches use a single space for blank context lines.
+research/linux-allocations/*.patch whitespace=-blank-at-eol

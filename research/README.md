@@ -6,6 +6,8 @@ Maintained executable checks and recorded qualification live in [tests/qualifica
 
 [Host memory explanation](memory-trial/README.md) reproduces a small ReleaseSafe macOS workload with native heap/VM tools and optional Instruments. Includes field/population arithmetic, ownership gaps and an interactive recorded explanation; no new runtime policy or demo qualification.
 
+[Linux allocation origins](linux-allocations/README.md) attributes live heap to SQLite, TLS, HTTP/H2 and Rui across 100 concurrent requests and 1/2/20 waves. Includes a validated Heaptrack canary, Linux/macOS SQLite-flag comparisons, capture-queue experiments and preserved gate failures; synthetic evidence, not a whole-footprint decomposition or live-provider qualification.
+
 [Proportionate testing evidence](testing-practices-sources.md) compares primary-source guidance on product goals, failure checks, noisy measurements and explicit assumptions; recommendations only, with no qualification-contract change.
 
 [Measurement synchronization](measurement-synchronization.md) derives a postcondition-rechecking wall wait and separate deterministic Store-transaction exclusion versus ungated latency evidence for two issue #168 measurement defects; primary-source recommendations only, with no runner or contract change.

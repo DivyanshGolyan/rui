@@ -1,0 +1,382 @@
+{
+  "scope": "Single matched macOS CPU diagnostic, not memory qualification",
+  "runs": {
+    "baseline": {
+      "status": "behavior_passed",
+      "scope": "macOS CPU diagnostic; not memory qualification",
+      "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+      "binary_sha256": "d0718e37d7f4216b7d2b78996999336aea79023acd20580e7acf13a09eb52b64",
+      "source_sha256": {
+        "/Users/divyanshgolyan/code/personal/rui/research/linux-allocations/macos.py": "ca519e4a69b49d05cfdb363d7032968d9f2d621d21d737e1b2e268dc02e19ae4",
+        "/Users/divyanshgolyan/code/personal/rui/tests/integration/transport_h2_integration.py": "c53f9b92b31fe1beb237d1c87eef9a22cb24655c1f9413a1a715468bf5f69d19",
+        "/Users/divyanshgolyan/code/personal/rui/tests/integration/dispatch_integration.py": "7fdd70f2a6b92279d13d8707e0abe45b1492f08f086809a166ca2efb19cf8c26"
+      },
+      "drains": [
+        {
+          "wave": 0,
+          "query_start_ns": 628056371850083,
+          "query_end_ns": 628056388000416,
+          "ps_cpu_time": "0:00.02",
+          "cpu_seconds": 0.02
+        },
+        {
+          "wave": 1,
+          "query_start_ns": 628067422329250,
+          "query_end_ns": 628067440046333,
+          "ps_cpu_time": "0:01.55",
+          "cpu_seconds": 1.55
+        },
+        {
+          "wave": 2,
+          "query_start_ns": 628076230759083,
+          "query_end_ns": 628076244823833,
+          "ps_cpu_time": "0:02.97",
+          "cpu_seconds": 2.97
+        },
+        {
+          "wave": 3,
+          "query_start_ns": 628086550764666,
+          "query_end_ns": 628086558585625,
+          "ps_cpu_time": "0:04.63",
+          "cpu_seconds": 4.63
+        },
+        {
+          "wave": 4,
+          "query_start_ns": 628096739544250,
+          "query_end_ns": 628096747641541,
+          "ps_cpu_time": "0:06.23",
+          "cpu_seconds": 6.23
+        },
+        {
+          "wave": 5,
+          "query_start_ns": 628106307163791,
+          "query_end_ns": 628106315568625,
+          "ps_cpu_time": "0:07.84",
+          "cpu_seconds": 7.84
+        },
+        {
+          "wave": 6,
+          "query_start_ns": 628116531329541,
+          "query_end_ns": 628116544324708,
+          "ps_cpu_time": "0:09.63",
+          "cpu_seconds": 9.63
+        },
+        {
+          "wave": 7,
+          "query_start_ns": 628126880157416,
+          "query_end_ns": 628126888816375,
+          "ps_cpu_time": "0:11.38",
+          "cpu_seconds": 11.38
+        },
+        {
+          "wave": 8,
+          "query_start_ns": 628137201428166,
+          "query_end_ns": 628137213939583,
+          "ps_cpu_time": "0:13.21",
+          "cpu_seconds": 13.21
+        },
+        {
+          "wave": 9,
+          "query_start_ns": 628149769811791,
+          "query_end_ns": 628149778557208,
+          "ps_cpu_time": "0:15.10",
+          "cpu_seconds": 15.1
+        },
+        {
+          "wave": 10,
+          "query_start_ns": 628160170212708,
+          "query_end_ns": 628160180344500,
+          "ps_cpu_time": "0:17.11",
+          "cpu_seconds": 17.11
+        },
+        {
+          "wave": 11,
+          "query_start_ns": 628170477942166,
+          "query_end_ns": 628170493391750,
+          "ps_cpu_time": "0:19.23",
+          "cpu_seconds": 19.23
+        },
+        {
+          "wave": 12,
+          "query_start_ns": 628181351081750,
+          "query_end_ns": 628181364986833,
+          "ps_cpu_time": "0:21.45",
+          "cpu_seconds": 21.45
+        },
+        {
+          "wave": 13,
+          "query_start_ns": 628191813550625,
+          "query_end_ns": 628191821974541,
+          "ps_cpu_time": "0:23.69",
+          "cpu_seconds": 23.69
+        },
+        {
+          "wave": 14,
+          "query_start_ns": 628202586100750,
+          "query_end_ns": 628202600642458,
+          "ps_cpu_time": "0:26.01",
+          "cpu_seconds": 26.01
+        },
+        {
+          "wave": 15,
+          "query_start_ns": 628213762699000,
+          "query_end_ns": 628213770484958,
+          "ps_cpu_time": "0:28.45",
+          "cpu_seconds": 28.45
+        },
+        {
+          "wave": 16,
+          "query_start_ns": 628225164430166,
+          "query_end_ns": 628225185887291,
+          "ps_cpu_time": "0:30.77",
+          "cpu_seconds": 30.77
+        },
+        {
+          "wave": 17,
+          "query_start_ns": 628236652258791,
+          "query_end_ns": 628236664805000,
+          "ps_cpu_time": "0:33.13",
+          "cpu_seconds": 33.13
+        },
+        {
+          "wave": 18,
+          "query_start_ns": 628248085886375,
+          "query_end_ns": 628248093391625,
+          "ps_cpu_time": "0:35.71",
+          "cpu_seconds": 35.71
+        },
+        {
+          "wave": 19,
+          "query_start_ns": 628260076799375,
+          "query_end_ns": 628260085329250,
+          "ps_cpu_time": "0:38.26",
+          "cpu_seconds": 38.26
+        },
+        {
+          "wave": 20,
+          "query_start_ns": 628272434785833,
+          "query_end_ns": 628272451662041,
+          "ps_cpu_time": "0:40.96",
+          "cpu_seconds": 40.96
+        }
+      ],
+      "reported_footprint_peak_bytes": 9634560,
+      "complete_work_cpu_seconds": 40.94
+    },
+    "candidate": {
+      "status": "behavior_passed",
+      "scope": "macOS CPU diagnostic; not memory qualification",
+      "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+      "binary_sha256": "ad91e0eb29326b423fb34589fbd977d3deb7d7f6a50f835e07c91fc2783173c4",
+      "source_sha256": {
+        "/Users/divyanshgolyan/code/personal/rui/research/linux-allocations/macos.py": "ca519e4a69b49d05cfdb363d7032968d9f2d621d21d737e1b2e268dc02e19ae4",
+        "/Users/divyanshgolyan/code/personal/rui/tests/integration/transport_h2_integration.py": "c53f9b92b31fe1beb237d1c87eef9a22cb24655c1f9413a1a715468bf5f69d19",
+        "/Users/divyanshgolyan/code/personal/rui/tests/integration/dispatch_integration.py": "7fdd70f2a6b92279d13d8707e0abe45b1492f08f086809a166ca2efb19cf8c26"
+      },
+      "drains": [
+        {
+          "wave": 0,
+          "query_start_ns": 628274899046333,
+          "query_end_ns": 628274906034666,
+          "ps_cpu_time": "0:00.02",
+          "cpu_seconds": 0.02
+        },
+        {
+          "wave": 1,
+          "query_start_ns": 628288466891625,
+          "query_end_ns": 628288477866833,
+          "ps_cpu_time": "0:01.43",
+          "cpu_seconds": 1.43
+        },
+        {
+          "wave": 2,
+          "query_start_ns": 628297861748708,
+          "query_end_ns": 628297879657958,
+          "ps_cpu_time": "0:02.72",
+          "cpu_seconds": 2.72
+        },
+        {
+          "wave": 3,
+          "query_start_ns": 628307890699166,
+          "query_end_ns": 628307898002083,
+          "ps_cpu_time": "0:04.14",
+          "cpu_seconds": 4.14
+        },
+        {
+          "wave": 4,
+          "query_start_ns": 628317666328833,
+          "query_end_ns": 628317673634500,
+          "ps_cpu_time": "0:05.65",
+          "cpu_seconds": 5.65
+        },
+        {
+          "wave": 5,
+          "query_start_ns": 628327950637166,
+          "query_end_ns": 628327963563750,
+          "ps_cpu_time": "0:07.19",
+          "cpu_seconds": 7.19
+        },
+        {
+          "wave": 6,
+          "query_start_ns": 628338371579500,
+          "query_end_ns": 628338380637208,
+          "ps_cpu_time": "0:08.84",
+          "cpu_seconds": 8.84
+        },
+        {
+          "wave": 7,
+          "query_start_ns": 628348673808708,
+          "query_end_ns": 628348687853541,
+          "ps_cpu_time": "0:10.49",
+          "cpu_seconds": 10.49
+        },
+        {
+          "wave": 8,
+          "query_start_ns": 628359528448583,
+          "query_end_ns": 628359538710000,
+          "ps_cpu_time": "0:12.30",
+          "cpu_seconds": 12.3
+        },
+        {
+          "wave": 9,
+          "query_start_ns": 628370282083541,
+          "query_end_ns": 628370293760375,
+          "ps_cpu_time": "0:14.03",
+          "cpu_seconds": 14.03
+        },
+        {
+          "wave": 10,
+          "query_start_ns": 628381755170375,
+          "query_end_ns": 628381762641041,
+          "ps_cpu_time": "0:15.89",
+          "cpu_seconds": 15.89
+        },
+        {
+          "wave": 11,
+          "query_start_ns": 628392593051083,
+          "query_end_ns": 628392604274666,
+          "ps_cpu_time": "0:17.78",
+          "cpu_seconds": 17.78
+        },
+        {
+          "wave": 12,
+          "query_start_ns": 628403576266166,
+          "query_end_ns": 628403584615125,
+          "ps_cpu_time": "0:19.78",
+          "cpu_seconds": 19.78
+        },
+        {
+          "wave": 13,
+          "query_start_ns": 628414439497500,
+          "query_end_ns": 628414448040041,
+          "ps_cpu_time": "0:21.87",
+          "cpu_seconds": 21.87
+        },
+        {
+          "wave": 14,
+          "query_start_ns": 628425771735833,
+          "query_end_ns": 628425780463958,
+          "ps_cpu_time": "0:23.96",
+          "cpu_seconds": 23.96
+        },
+        {
+          "wave": 15,
+          "query_start_ns": 628437284464750,
+          "query_end_ns": 628437294600500,
+          "ps_cpu_time": "0:26.18",
+          "cpu_seconds": 26.18
+        },
+        {
+          "wave": 16,
+          "query_start_ns": 628449036966125,
+          "query_end_ns": 628449045421708,
+          "ps_cpu_time": "0:28.43",
+          "cpu_seconds": 28.43
+        },
+        {
+          "wave": 17,
+          "query_start_ns": 628460520028708,
+          "query_end_ns": 628460534172916,
+          "ps_cpu_time": "0:30.73",
+          "cpu_seconds": 30.73
+        },
+        {
+          "wave": 18,
+          "query_start_ns": 628472446685458,
+          "query_end_ns": 628472454743625,
+          "ps_cpu_time": "0:33.10",
+          "cpu_seconds": 33.1
+        },
+        {
+          "wave": 19,
+          "query_start_ns": 628483868021416,
+          "query_end_ns": 628483881538958,
+          "ps_cpu_time": "0:35.52",
+          "cpu_seconds": 35.52
+        },
+        {
+          "wave": 20,
+          "query_start_ns": 628493449880416,
+          "query_end_ns": 628493462973666,
+          "ps_cpu_time": "0:37.75",
+          "cpu_seconds": 37.75
+        }
+      ],
+      "reported_footprint_peak_bytes": 9077568,
+      "complete_work_cpu_seconds": 37.73
+    }
+  },
+  "canonical_repeat_work_baseline_failure": {
+    "active_capacity_growth": [],
+    "answer_byte_growth": [],
+    "artifacts": "/tmp/rui-output-measure-2613406074",
+    "binary": "/Users/divyanshgolyan/code/personal/rui/.amp/in/mac-sqlite-baseline/bin/rui",
+    "binary_sha256": "d0718e37d7f4216b7d2b78996999336aea79023acd20580e7acf13a09eb52b64",
+    "elapsed_seconds": 16.957955292,
+    "error": "lifetime peak below current beyond rounding tolerance: \"======================================================================\\nrui [19903]: 64-bit    Footprint: 5137 KB (16384 bytes per page)\\n======================================================================\\n\\n  Dirty      Clean  Reclaimable    Regions    Category\\n    ---        ---          ---        ---    ---\\n 992 KB        0 B          0 B          9    stack\\n 976 KB        0 B          0 B        276    __DATA\\n 896 KB        0 B        64 KB          1    MALLOC_TINY\\n 656 KB        0 B          0 B          1    MALLOC_MEDIUM\\n 640 KB        0 B      1520 KB          1    MALLOC_SMALL\\n 225 KB        0 B          0 B          1    page table\\n 195 KB        0 B          0 B         88    __DATA_DIRTY\\n 124 KB        0 B          0 B        631    unused dyld shared cache area\\n  97 KB        0 B          0 B        161    __AUTH\\n  96 KB        0 B          0 B         12    MALLOC metadata\\n  80 KB        0 B          0 B          4    untagged (VM_ALLOCATE)\\n  64 KB        0 B          0 B          1    libdispatch\\n  48 KB        0 B          0 B          2    __TPRO_CONST\\n  16 KB        0 B          0 B        296    __DATA_CONST\\n  16 KB        0 B          0 B          1    os_alloc_once\\n  16 KB        0 B          0 B          1    Activity Tracing\\n    0 B    4128 KB          0 B        305    __TEXT\\n    0 B     352 KB          0 B          3    __LINKEDIT\\n    0 B      80 KB          0 B          2    mapped file\\n    0 B        0 B          0 B        295    __AUTH_CONST\\n    0 B        0 B          0 B          1    __FONT_DATA\\n    ---        ---          ---        ---    ---\\n5137 KB    4560 KB      1584 KB       2094    TOTAL\\n\\nAuxiliary data:\\n    phys_footprint: 5169 KB\\n    phys_footprint_peak: 4865 KB\\n\\n\"",
+    "format": "rui-model-output-v8-go",
+    "item_count_growth": [],
+    "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+    "measurement_runtime": {
+      "go_arch": "arm64",
+      "go_os": "darwin",
+      "go_version": "go1.27.1",
+      "gopsutil_version": "v4.26.7",
+      "logical_cpus": 10,
+      "module_path": "rui.local/qualification",
+      "physical_memory_bytes": 17179869184
+    },
+    "platform": "Darwin 1993-X2 24.6.0 Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000 arm64",
+    "repeat_work": {
+      "active_capacity": 100,
+      "error": "lifetime peak below current beyond rounding tolerance: \"======================================================================\\nrui [19903]: 64-bit    Footprint: 5137 KB (16384 bytes per page)\\n======================================================================\\n\\n  Dirty      Clean  Reclaimable    Regions    Category\\n    ---        ---          ---        ---    ---\\n 992 KB        0 B          0 B          9    stack\\n 976 KB        0 B          0 B        276    __DATA\\n 896 KB        0 B        64 KB          1    MALLOC_TINY\\n 656 KB        0 B          0 B          1    MALLOC_MEDIUM\\n 640 KB        0 B      1520 KB          1    MALLOC_SMALL\\n 225 KB        0 B          0 B          1    page table\\n 195 KB        0 B          0 B         88    __DATA_DIRTY\\n 124 KB        0 B          0 B        631    unused dyld shared cache area\\n  97 KB        0 B          0 B        161    __AUTH\\n  96 KB        0 B          0 B         12    MALLOC metadata\\n  80 KB        0 B          0 B          4    untagged (VM_ALLOCATE)\\n  64 KB        0 B          0 B          1    libdispatch\\n  48 KB        0 B          0 B          2    __TPRO_CONST\\n  16 KB        0 B          0 B        296    __DATA_CONST\\n  16 KB        0 B          0 B          1    os_alloc_once\\n  16 KB        0 B          0 B          1    Activity Tracing\\n    0 B    4128 KB          0 B        305    __TEXT\\n    0 B     352 KB          0 B          3    __LINKEDIT\\n    0 B      80 KB          0 B          2    mapped file\\n    0 B        0 B          0 B        295    __AUTH_CONST\\n    0 B        0 B          0 B          1    __FONT_DATA\\n    ---        ---          ---        ---    ---\\n5137 KB    4560 KB      1584 KB       2094    TOTAL\\n\\nAuxiliary data:\\n    phys_footprint: 5169 KB\\n    phys_footprint_peak: 4865 KB\\n\\n\"",
+      "events_per_second_per_stream": 100,
+      "last_retained_delta_from_first": {
+        "status": "unavailable"
+      },
+      "process_identity": {
+        "all_distinct": true,
+        "controller_pid": 19888,
+        "host_pid": 19903,
+        "provider_pid": 19900
+      },
+      "rounds": [],
+      "same_host_rounds": 20,
+      "same_sessions": true,
+      "status": "failed"
+    },
+    "scope": "assembled model-path capacity and same-Host repeated-work qualification",
+    "sqlite_cache_spill_comparison": null,
+    "status": "failed",
+    "tested_revision": "2b60daec180365220b43dedc3284b2a4bad6292a",
+    "working_tree_dirty": true,
+    "zig": "0.16.0"
+  },
+  "verification": {
+    "check_full": "failed: standalone evaluator exits 3 when macOS rejects its 1 MiB RLIMIT_STACK; native tests 276 passed, 1 skipped",
+    "process_suites": "admission, dispatch, Bash owner, Bash, human CLI, Bash lifecycle, Bash recovery, Codex and control passed before descriptor fixture failure",
+    "descriptor_capacity": "baseline and candidate both fail expected required=72 versus observed required=73 inherited=4",
+    "remaining_suites": "Debug admission, host_process_test.py and host_allocator_test.py passed when run individually",
+    "linux": "full transport_h2_integration.py passed on measured flags-zero binary"
+  }
+}

@@ -6153,7 +6153,8 @@ fn nextIdentity(database: *c.sqlite3, comptime table: []const u8, comptime colum
 
 fn prepare(database: *c.sqlite3, sql: [:0]const u8) !*c.sqlite3_stmt {
     var statement: ?*c.sqlite3_stmt = null;
-    if (c.sqlite3_prepare_v3(database, sql, -1, c.SQLITE_PREPARE_PERSISTENT, &statement, null) != c.SQLITE_OK) {
+    // Callers finalize these short-lived statements; allow SQLite lookaside.
+    if (c.sqlite3_prepare_v3(database, sql, -1, 0, &statement, null) != c.SQLITE_OK) {
         return error.StatementPrepareFailed;
     }
     return statement orelse error.StatementPrepareFailed;
