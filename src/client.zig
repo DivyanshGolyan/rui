@@ -956,9 +956,12 @@ fn readResponseHeadUntil(io: std.Io, fd: std.posix.fd_t, inactivity_ms: i32, unt
     } else return error.ResponseHeaderTooLarge;
     var lines = std.mem.splitSequence(u8, header_buffer[0..used], "\r\n");
     const status_line = lines.next() orelse return error.InvalidResponse;
-    var parts = std.mem.splitScalar(u8, status_line, ' ');
-    if (!std.mem.eql(u8, parts.next() orelse return error.InvalidResponse, "HTTP/1.1")) return error.InvalidResponse;
-    const status = try std.fmt.parseInt(u16, parts.next() orelse return error.InvalidResponse, 10);
+    if (!std.mem.startsWith(u8, status_line, "HTTP/1.1 ") or status_line.len < "HTTP/1.1 200 X".len or
+        status_line[12] != ' ' or std.mem.trim(u8, status_line[13..], " \t").len == 0) return error.InvalidResponse;
+    const code = status_line[9..12];
+    for (code) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidResponse;
+    for (status_line[13..]) |byte| if ((byte < ' ' and byte != '\t') or byte == 0x7f) return error.InvalidResponse;
+    const status = try std.fmt.parseInt(u16, code, 10);
     var length: ?u64 = null;
     var wire_ok: ?bool = null;
     var kind: ?ResponseKind = null;

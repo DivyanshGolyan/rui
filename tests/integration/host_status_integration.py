@@ -142,8 +142,9 @@ def main():
                 peer.join(timeout=3)
                 assert not peer.is_alive()
             stale.unlink()
-            if sys.platform == "linux":
-                # Linux enforces mode bits on the Unix socket itself.
+            if sys.platform == "linux" and os.geteuid() != 0:
+                # Linux enforces socket mode bits for unprivileged callers;
+                # root may bypass this denial with CAP_DAC_OVERRIDE.
                 with socket.socket(socket.AF_UNIX) as endpoint:
                     endpoint.bind(str(stale))
                     endpoint.listen(1)
@@ -166,6 +167,10 @@ def main():
             )
             for response in (
                 b"HTTP/1.1 bogus OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
+                (f"HTTP/1.1 200\r\nContent-Type: application/json\r\nContent-Length: {len(valid_body)}\r\n"
+                 "X-Rui-Wire-Version: 1\r\n\r\n").encode() + valid_body,
+                (f"HTTP/1.1 0200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(valid_body)}\r\n"
+                 "X-Rui-Wire-Version: 1\r\n\r\n").encode() + valid_body,
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 999999999\r\nX-Rui-Wire-Version: 1\r\n\r\n",
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
