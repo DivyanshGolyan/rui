@@ -120,11 +120,11 @@ fn setup(init: std.process.Init, args: []const []const u8) !void {
         return err;
     };
     var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const fallback = try preferences.defaultStore(home, &fallback_buffer);
+    const selected_store = if (values.store.len != 0) values.store.slice() else try preferences.defaultStore(home, &fallback_buffer);
     // Preferences are local hints, not Session settings or Host facts.
     try std.Io.File.stdout().writeStreamingAll(init.io, if (changed) "Saved defaults for future Sessions. Active Session unchanged.\n" else "Defaults (read only):\n");
     var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
-    const report = try std.fmt.bufPrint(&output, "Store: {s} ({s})\nProvider: {s}\nModel: {s}\n", .{ if (values.store.len != 0) values.store.slice() else fallback, if (values.store.len != 0) "saved" else "HOME fallback", if (values.provider.len != 0) values.provider.slice() else "not selected", if (values.model.len != 0) values.model.slice() else "not selected" });
+    const report = try std.fmt.bufPrint(&output, "Store: {s} ({s})\nProvider: {s}\nModel: {s}\n", .{ selected_store, if (values.store.len != 0) "saved" else "HOME fallback", if (values.provider.len != 0) values.provider.slice() else "not selected", if (values.model.len != 0) values.model.slice() else "not selected" });
     try std.Io.File.stdout().writeStreamingAll(init.io, report);
 }
 
