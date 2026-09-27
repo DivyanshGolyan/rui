@@ -1,12 +1,16 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <stddef.h>
-#include <sys/resource.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#include <spawn.h>
+extern char **environ;
+#endif
 
 /* Only async-signal-safe operations run after fork. The parent owns the
  * CLOEXEC pipe until exec succeeds or a fixed-size errno is returned. */
@@ -15,21 +19,39 @@ static void fail_child(int report, int code) {
     _exit(127);
 }
 
+#if defined(__APPLE__)
+/* The spawn action gives the helper only /dev/null stdio and descriptor 3.
+ * After exec the helper restores CLOEXEC before making its final child. */
+int rui_launch_helper(const char *executable, const char *store) {
+    if (fcntl(3, F_SETFD, FD_CLOEXEC) < 0) fail_child(3, errno);
+    if (setsid() < 0) fail_child(3, errno);
+    pid_t child = fork();
+    if (child < 0) fail_child(3, errno);
+    if (child > 0) _exit(0);
+    const char *argv[] = {executable, "serve", "--store", store,
+        "--active-capacity", "8", "--codex", NULL};
+    execv(executable, (char *const *)argv);
+    fail_child(3, errno);
+    return 127;
+}
+
+/* Run before Zig's process initialization can open descriptors. The spawn
+ * boundary already discarded every caller descriptor except the report pipe. */
+__attribute__((constructor)) static void early_launch_helper(void) {
+    if (*_NSGetArgc() != 4) return;
+    char **args = *_NSGetArgv();
+    if (strcmp(args[1], "--launch-helper") != 0) return;
+    _exit(rui_launch_helper(args[2], args[3]));
+}
+#endif
+
 /* Returns zero after exec, or an errno-style failure. The grandchild has no
  * terminal/session or inherited descriptor; its lifetime is independent of
  * this caller. Readiness and ownership are established separately by Rui. */
 int rui_launch_detached(const char *executable, const char *store) {
-#if defined(__APPLE__)
-    /* Darwin has no closefrom; the hard limit still covers descriptors
-     * opened before a caller lowers only its soft limit. */
-    struct rlimit limit;
-    if (getrlimit(RLIMIT_NOFILE, &limit) != 0) return errno;
-    if (limit.rlim_max == RLIM_INFINITY || limit.rlim_max > INT_MAX) return ENOTSUP;
-    int last_fd = (int)limit.rlim_max;
-#endif
     int channel[2];
     if (pipe(channel) != 0) return errno;
-    int report = fcntl(channel[1], F_DUPFD_CLOEXEC, 3);
+    int report = fcntl(channel[1], F_DUPFD_CLOEXEC, 4);
     if (report < 0) {
         int err = errno;
         close(channel[0]);
@@ -37,6 +59,35 @@ int rui_launch_detached(const char *executable, const char *store) {
         return err;
     }
     close(channel[1]);
+#if defined(__APPLE__)
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    int err = posix_spawn_file_actions_init(&actions);
+    if (err != 0) goto spawn_done;
+    err = posix_spawnattr_init(&attributes);
+    if (err != 0) goto actions_done;
+    err = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
+    if (err != 0) goto attributes_done;
+    for (int fd = 0; fd < 3; fd++) {
+        err = posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", O_RDWR, 0);
+        if (err != 0) goto attributes_done;
+    }
+    err = posix_spawn_file_actions_adddup2(&actions, report, 3);
+    if (err != 0) goto attributes_done;
+    const char *helper[] = {executable, "--launch-helper", executable, store, NULL};
+    pid_t child = -1;
+    err = posix_spawn(&child, executable, &actions, &attributes, (char *const *)helper, environ);
+attributes_done:
+    posix_spawnattr_destroy(&attributes);
+actions_done:
+    posix_spawn_file_actions_destroy(&actions);
+spawn_done:
+    close(report);
+    if (err != 0) {
+        close(channel[0]);
+        return err;
+    }
+#else
     pid_t child = fork();
     if (child < 0) {
         int err = errno;
@@ -64,17 +115,14 @@ int rui_launch_detached(const char *executable, const char *store) {
             report = 3;
         }
         if (fcntl(report, F_SETFD, FD_CLOEXEC) < 0) fail_child(report, errno);
-#if defined(__APPLE__)
-        for (int fd = 4; fd < last_fd; fd++) close(fd);
-#else
         closefrom(4);
-#endif
         const char *argv[] = {executable, "serve", "--store", store,
             "--active-capacity", "8", "--codex", NULL};
         execv(executable, (char *const *)argv);
         fail_child(report, errno);
     }
     close(report);
+#endif
     int error_code = 0;
     ssize_t count;
     do {
@@ -86,6 +134,9 @@ int rui_launch_detached(const char *executable, const char *store) {
     int status;
     while (waitpid(child, &status, 0) < 0) {
         if (errno != EINTR) return errno;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        if (read_error == 0) return EIO;
     }
     return read_error;
 }

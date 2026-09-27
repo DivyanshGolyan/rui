@@ -215,7 +215,7 @@ fn startHost(init: std.process.Init, selected: []const u8) !void {
     }
     const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 10 * std.time.ns_per_s;
     while (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < until) {
-        switch (client.hostStatus(io, paths.store.slice())) {
+        switch (client.hostStatusUntil(io, paths.store.slice(), until)) {
             .ready => |ready| {
                 var line: [100]u8 = undefined;
                 try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "Rui: Host ready (active capacity {d}); existing settings win.\n", .{ready.active_capacity}));
@@ -226,7 +226,8 @@ fn startHost(init: std.process.Init, selected: []const u8) !void {
             .access_failure => return error.StoreAccessFailed,
             .unavailable, .owned_unavailable => {},
         }
-        try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+        const remaining = until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+        if (remaining > 0) try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 100 * std.time.ns_per_ms))), .awake);
     }
     std.debug.print("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
     return error.HostReadinessUnconfirmed;

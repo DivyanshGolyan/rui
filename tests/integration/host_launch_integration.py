@@ -2,6 +2,7 @@
 """Public-CLI evidence for detached Host launch and convergence."""
 
 import json
+import fcntl
 import os
 import pathlib
 import re
@@ -223,16 +224,17 @@ def main():
         # by the launcher; the detached Host must not hold its pipe open.
         inherited_store = root / "inherited-fd"
         read_fd, write_fd = os.pipe()
+        inherited_fd = fcntl.fcntl(write_fd, fcntl.F_DUPFD, 200)
         try:
             def inherited_above_limit():
-                os.dup2(write_fd, 200)
                 soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
                 resource.setrlimit(resource.RLIMIT_NOFILE, (128, hard))
 
-            inherited = run_start(inherited_store, env, pass_fds=(write_fd,),
+            inherited = run_start(inherited_store, env, pass_fds=(inherited_fd,),
                 preexec_fn=inherited_above_limit)
             assert inherited.returncode == 0, inherited.stderr
         finally:
+            os.close(inherited_fd)
             os.close(write_fd)
             try:
                 ready, _, _ = select.select([read_fd], [], [], 1)
