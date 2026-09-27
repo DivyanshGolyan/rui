@@ -185,6 +185,8 @@ const Connection = struct {
     accepted_at_ns: u64,
 };
 
+pub extern "c" fn rui_serve_readiness_output_present() c_int;
+
 pub fn serve(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -197,10 +199,9 @@ pub fn serve(
     bash_path: []const u8,
     bash_timeout_ms: u64,
 ) !void {
-    // Capture this before descriptor enumeration or Store setup can reuse a
-    // missing stdout slot. A later successful write to fd 1 would then be a
-    // socket write, not a readiness acknowledgement to the launching caller.
-    const readiness_output_present = std.c.fcntl(1, std.c.F.GETFD) >= 0;
+    // C captured this before Zig initialization could reuse a missing fd 1.
+    // A later write to a reused slot is not readiness for the launching caller.
+    const readiness_output_present = rui_serve_readiness_output_present() != 0;
     const descriptor_observation = try descriptor_limit.observe(io);
     const descriptor_requirement = try descriptor_capacity.calculate(
         descriptor_observation.open_descriptors,
