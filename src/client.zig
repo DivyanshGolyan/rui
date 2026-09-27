@@ -148,10 +148,12 @@ fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
     if (!std.mem.eql(u8, info.version, protocol.wire_version) or
         !std.mem.eql(u8, info.type, "host_info") or
         !std.mem.eql(u8, info.store, store) or
-        info.active_capacity.len == 0 or info.active_capacity.len > 20)
+        info.active_capacity.len == 0 or info.active_capacity.len > 20 or
+        (info.active_capacity.len > 1 and info.active_capacity[0] == '0'))
         return error.InvalidHostInfo;
+    for (info.active_capacity) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidHostInfo;
     const instance = protocol.parseInstanceId(info.instance) catch return error.InvalidHostInfo;
-    const capacity = try std.fmt.parseInt(usize, info.active_capacity, 10);
+    const capacity = std.fmt.parseInt(usize, info.active_capacity, 10) catch return error.InvalidHostInfo;
     var identity: protocol.Bounded(protocol.max_store_bytes) = .{};
     try identity.set(info.store);
     return .{ .ready = .{
@@ -177,6 +179,10 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
     ));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
         "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
+        "/one",
+    ));
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
+        "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
         "/one",
     ));
 }

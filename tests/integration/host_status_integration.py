@@ -154,12 +154,19 @@ def main():
                     finally:
                         stale.chmod(0o600)
                 stale.unlink()
+            noncanonical = json.dumps({
+                "version": "1", "type": "host_info", "store": str(store.resolve()),
+                "instance": "0" * 32, "active_capacity": "01",
+                "capabilities": {"bash": True, "model": False, "managed_authentication": False},
+            }).encode()
             for response in (
                 b"HTTP/1.1 bogus OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 999999999\r\nX-Rui-Wire-Version: 1\r\n\r\n",
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
+                (f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(noncanonical)}\r\n"
+                 "X-Rui-Wire-Version: 1\r\n\r\n").encode() + noncanonical,
             ):
                 with socket.socket(socket.AF_UNIX) as endpoint:
                     endpoint.bind(str(stale))
