@@ -244,15 +244,25 @@ def main():
                 forced_crash_cleanup(inherited_store)
 
         # A failed final stdout readiness handshake must not claim ready.
-        broken_store = root / "broken-stdout"
-        broken = subprocess.run([RUI, "serve", "--store", broken_store], env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=COMMAND_TIMEOUT,
-            preexec_fn=lambda: os.close(1))
-        assert broken.returncode != 0
-        records = [json.loads(line) for file in (broken_store / "diagnostics").glob("host-*.jsonl")
-            for line in file.read_text().splitlines()]
-        assert any(record.get("phase") == "failed" for record in records), records
-        assert not any(record.get("phase") == "ready" for record in records), records
+        # With explicit Apple allocator settings, startup skips its re-exec;
+        # Darwin may still reuse fd 1 before the entry-time snapshot.
+        clean_env = {key: value for key, value in env.items()
+            if key not in ("MallocMaxMagazines", "MallocSpaceEfficient", "RUI_HOST_MALLOC_DEFAULTS")}
+        for suffix, additions in (("default", {}), ("explicit-malloc", {
+            "MallocMaxMagazines": "1", "MallocSpaceEfficient": "1",
+        })):
+            broken_store = root / f"broken-stdout-{suffix}"
+            try:
+                broken = subprocess.run([RUI, "serve", "--store", broken_store],
+                    env={**clean_env, **additions}, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, timeout=COMMAND_TIMEOUT, preexec_fn=lambda: os.close(1))
+                assert broken.returncode != 0, broken
+                records = [json.loads(line) for file in (broken_store / "diagnostics").glob("host-*.jsonl")
+                    for line in file.read_text().splitlines()]
+                assert any(record.get("phase") == "failed" for record in records), records
+                assert not any(record.get("phase") == "ready" for record in records), records
+            finally:
+                forced_crash_cleanup(broken_store)
 
         # A detached Host that cannot satisfy its inherited descriptor budget
         # exits; the CLI bounds uncertainty and points at owner diagnostics.

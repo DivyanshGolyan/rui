@@ -264,6 +264,9 @@ pub fn serve(
             std.debug.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
     }
+    // On Darwin, a library can briefly reuse a closed stdout before our
+    // entry-time constructor runs. Never announce readiness to our own socket.
+    if (listener.socket.handle == 1) return error.HostReadinessOutputUnavailable;
     var socket_path: [257:0]u8 = undefined;
     const socket_z = try std.fmt.bufPrintZ(&socket_path, "{s}", .{lease.paths.socket.slice()});
     if (std.c.chmod(socket_z, 0o600) != 0) return error.SocketProtectionFailed;
