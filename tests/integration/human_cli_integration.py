@@ -131,6 +131,12 @@ def main():
         assert saved.stat().st_mode & 0o777 == 0o600
         assert saved.parent.stat().st_mode & 0o777 == 0o700
         assert str(store.resolve()) in run(preferences_home, "setup")
+        linked_home = state / "linked-home"
+        (linked_home / ".config").mkdir(parents=True)
+        (linked_home / ".config/rui").symlink_to(saved.parent, target_is_directory=True)
+        assert run(linked_home, "setup", "--store", store,
+            "--provider", "codex", "--model", "gpt-6-luna", success=False) == ""
+        assert saved.read_text() == f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
         retired_store = state / "retired-store"
         retired_store.mkdir(mode=0o700)
         assert "Saved defaults" in run(preferences_home, "setup", "--store", retired_store)

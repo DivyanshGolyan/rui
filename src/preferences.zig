@@ -103,7 +103,7 @@ pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model
     }
     var dir = try std.Io.Dir.cwd().createDirPathOpen(io, directory, .{
         .permissions = .fromMode(0o700),
-        .open_options = .{ .iterate = true },
+        .open_options = .{ .iterate = true, .follow_symlinks = false },
     });
     defer dir.close(io);
     try privateDirectory(dir);
