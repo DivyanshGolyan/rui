@@ -359,6 +359,11 @@ func sample(host *measurement.Host, directory, name string) (measurement.Process
 	return measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-"+name+".txt"))
 }
 func delta(before, after measurement.ProcessSample) map[string]any {
+	if before.LinuxMemory != nil && after.LinuxMemory != nil {
+		return map[string]any{"rss_bytes": int64(after.RSSBytes) - int64(before.RSSBytes),
+			"pss_bytes":        int64(after.LinuxMemory.RollupBytes["Pss"]) - int64(before.LinuxMemory.RollupBytes["Pss"]),
+			"open_descriptors": after.OpenDescriptors - before.OpenDescriptors}
+	}
 	return map[string]any{"rss_bytes": int64(after.RSSBytes) - int64(before.RSSBytes), "virtual_bytes": int64(after.VirtualBytes) - int64(before.VirtualBytes), "physical_footprint_bytes": int64(after.Footprint.PhysicalBytes) - int64(before.Footprint.PhysicalBytes), "open_descriptor_rows": after.OpenDescriptorRows - before.OpenDescriptorRows}
 }
 
@@ -464,8 +469,8 @@ func headroom(binary, root, url string) (result map[string]any, resultError erro
 	if err != nil {
 		return nil, err
 	}
-	if drainedFirst.OpenDescriptorRows != idle.OpenDescriptorRows {
-		return nil, fmt.Errorf("first drain retained %d descriptor rows over idle", drainedFirst.OpenDescriptorRows-idle.OpenDescriptorRows)
+	if drainedFirst.OpenDescriptors != idle.OpenDescriptors {
+		return nil, fmt.Errorf("first drain retained %d descriptors over idle", drainedFirst.OpenDescriptors-idle.OpenDescriptors)
 	}
 	held, err = fillOrdinary(socket)
 	if err != nil {
@@ -485,8 +490,8 @@ func headroom(binary, root, url string) (result map[string]any, resultError erro
 	if err != nil {
 		return nil, err
 	}
-	if drainedSecond.OpenDescriptorRows != idle.OpenDescriptorRows {
-		return nil, fmt.Errorf("second drain retained %d descriptor rows over idle", drainedSecond.OpenDescriptorRows-idle.OpenDescriptorRows)
+	if drainedSecond.OpenDescriptors != idle.OpenDescriptors {
+		return nil, fmt.Errorf("second drain retained %d descriptors over idle", drainedSecond.OpenDescriptors-idle.OpenDescriptors)
 	}
 	p95MS := p95(latencies)
 	return map[string]any{"scope": "two rounds of 10 ordinary clients stopped after partial request bodies", "status": latencyStatus(1000, p95MS), "ordinary_connections_per_round": ordinaryClients, "saturation_rounds": 2, "control_commands": len(latencies), "p95_acknowledgment_ms": p95MS, "maximum_acknowledgment_ms": slicesMax(latencies), "qualification_limit_ms": 1000, "idle": idle, "before_controls": before, "after_controls": after, "resource_delta_from_idle": delta(idle, before), "retained_after_first_drain": drainedFirst, "second_saturation_round": secondSaturation, "retained_after_second_drain": drainedSecond, "retained_delta_from_idle": delta(idle, drainedSecond), "second_drain_delta_from_first": delta(drainedFirst, drainedSecond)}, nil
@@ -1472,12 +1477,12 @@ func run() (exitCode int) {
 		fmt.Fprintln(os.Stderr, "usage: measure-model-control [--output path] /absolute/path/to/rui")
 		os.Exit(2)
 	}
-	if err := measurement.RequireRuntime(); err != nil {
+	if err := measurement.RequireProcessRuntime(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	binary, _ := filepath.Abs(flag.Arg(0))
-	root, err := os.MkdirTemp("/private/tmp", "rui-control-measure-")
+	root, err := os.MkdirTemp("/tmp", "rui-control-measure-")
 	if err != nil {
 		panic(err)
 	}

@@ -1,0 +1,2213 @@
+{
+  "source_base": "499140169e8d7864160aba183152eeec7fcac4cd",
+  "scope": "Linux ARM64 glibc2.39 OrbStack diagnostics; unchanged production defaults; MB is decimal",
+  "raw_archive_sha256": "75ce49a5b2581123b4e76b9f4e2772701921304446e69e53d0d7e9ae4f463082",
+  "runs": {
+    "churn-arena1": {
+      "status": "behavior_passed",
+      "binary_sha256": "c907cbc16b173f66df28a289941947245224cf04115c408cdde4a07d9091ac03",
+      "requested_glibc_tunables": "glibc.malloc.arena_max=1",
+      "capacity": 100,
+      "rounds": 20,
+      "instrumented": false,
+      "sampled_peak_bytes": {
+        "Rss": 15761408,
+        "Pss": 14585856,
+        "Pss_Anon": 8339456,
+        "Pss_File": 6246400,
+        "Swap": 0
+      },
+      "streams": 2000,
+      "connections": 1,
+      "sampling_errors": [],
+      "drained_pss_bytes": [
+        5499904,
+        11128832,
+        13479936,
+        13492224,
+        13492224,
+        13492224,
+        13492224,
+        13492224,
+        13492224,
+        13492224,
+        13492224,
+        13492224,
+        13492224,
+        13492224,
+        13492224,
+        13492224,
+        13492224,
+        13492224,
+        13492224,
+        13492224,
+        13492224
+      ],
+      "drained_cpu_seconds": [
+        0.0,
+        0.78,
+        1.6,
+        2.46,
+        3.37,
+        4.34,
+        5.24,
+        6.22,
+        7.19,
+        8.23,
+        9.34,
+        10.46,
+        11.61,
+        12.81,
+        14.09,
+        15.43,
+        16.8,
+        18.23,
+        19.73,
+        21.24,
+        22.84
+      ],
+      "approximate_rss_high_water_bytes": 15704064,
+      "composition_at_max_sampled_pss": {
+        "Rss": 15761408,
+        "Pss": 14585856,
+        "Pss_Dirty": 8339456,
+        "Pss_Anon": 8339456,
+        "Pss_File": 6246400,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 1548288,
+        "Shared_Dirty": 0,
+        "Private_Clean": 5873664,
+        "Private_Dirty": 8339456,
+        "Referenced": 15761408,
+        "Anonymous": 8339456,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "ancestor_memory_events_unchanged": true,
+      "ancestor_swap_before_after": [
+        "0\n",
+        "0\n"
+      ],
+      "ancestor_cpu_stat_before_after": [
+        "usage_usec 113038909\nuser_usec 79218760\nsystem_usec 33820148\nnice_usec 0\nnr_periods 2587\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n",
+        "usage_usec 147325444\nuser_usec 105446377\nsystem_usec 41879067\nnice_usec 0\nnr_periods 2910\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n"
+      ]
+    },
+    "churn-arena2": {
+      "status": "behavior_passed",
+      "binary_sha256": "c907cbc16b173f66df28a289941947245224cf04115c408cdde4a07d9091ac03",
+      "requested_glibc_tunables": "glibc.malloc.arena_max=2",
+      "capacity": 100,
+      "rounds": 20,
+      "instrumented": false,
+      "sampled_peak_bytes": {
+        "Rss": 15978496,
+        "Pss": 14809088,
+        "Pss_Anon": 8556544,
+        "Pss_File": 6252544,
+        "Swap": 0
+      },
+      "streams": 2000,
+      "connections": 1,
+      "sampling_errors": [],
+      "drained_pss_bytes": [
+        5579776,
+        11360256,
+        12503040,
+        12507136,
+        12507136,
+        12507136,
+        12503040,
+        12503040,
+        12503040,
+        12511232,
+        12511232,
+        12515328,
+        12519424,
+        12515328,
+        12519424,
+        12519424,
+        12517376,
+        12517376,
+        12525568,
+        12525568,
+        12509184
+      ],
+      "drained_cpu_seconds": [
+        0.0,
+        0.7,
+        1.41,
+        2.15,
+        3.01,
+        3.85,
+        4.9,
+        5.87,
+        6.93,
+        8.1,
+        9.77,
+        11.71,
+        13.07,
+        14.71,
+        16.13,
+        17.61,
+        19.14,
+        20.68,
+        22.27,
+        23.94,
+        25.81
+      ],
+      "approximate_rss_high_water_bytes": 15982592,
+      "composition_at_max_sampled_pss": {
+        "Rss": 15978496,
+        "Pss": 14809088,
+        "Pss_Dirty": 8556544,
+        "Pss_Anon": 8556544,
+        "Pss_File": 6252544,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 1548288,
+        "Shared_Dirty": 0,
+        "Private_Clean": 5873664,
+        "Private_Dirty": 8556544,
+        "Referenced": 15978496,
+        "Anonymous": 8556544,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "ancestor_memory_events_unchanged": true,
+      "ancestor_swap_before_after": [
+        "0\n",
+        "0\n"
+      ],
+      "ancestor_cpu_stat_before_after": [
+        "usage_usec 72302548\nuser_usec 48990827\nsystem_usec 23311721\nnice_usec 0\nnr_periods 2205\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n",
+        "usage_usec 112842506\nuser_usec 79116016\nsystem_usec 33726489\nnice_usec 0\nnr_periods 2585\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n"
+      ]
+    },
+    "churn-default": {
+      "status": "behavior_passed",
+      "binary_sha256": "c907cbc16b173f66df28a289941947245224cf04115c408cdde4a07d9091ac03",
+      "requested_glibc_tunables": "",
+      "capacity": 100,
+      "rounds": 20,
+      "instrumented": false,
+      "sampled_peak_bytes": {
+        "Rss": 16191488,
+        "Pss": 15022080,
+        "Pss_Anon": 8769536,
+        "Pss_File": 6252544,
+        "Swap": 0
+      },
+      "streams": 2000,
+      "connections": 1,
+      "sampling_errors": [],
+      "drained_pss_bytes": [
+        5755904,
+        11458560,
+        11921408,
+        12179456,
+        11925504,
+        11917312,
+        11929600,
+        11925504,
+        11929600,
+        11937792,
+        11913216,
+        11925504,
+        11933696,
+        11913216,
+        11913216,
+        11925504,
+        12257280,
+        11921408,
+        11921408,
+        11921408,
+        11937792
+      ],
+      "drained_cpu_seconds": [
+        0.0,
+        0.71,
+        1.38,
+        2.11,
+        2.88,
+        3.71,
+        4.59,
+        5.59,
+        6.76,
+        7.85,
+        9.41,
+        11.04,
+        12.25,
+        13.93,
+        15.66,
+        17.02,
+        18.4,
+        19.87,
+        21.37,
+        22.87,
+        24.43
+      ],
+      "approximate_rss_high_water_bytes": 16297984,
+      "composition_at_max_sampled_pss": {
+        "Rss": 16191488,
+        "Pss": 15022080,
+        "Pss_Dirty": 8769536,
+        "Pss_Anon": 8769536,
+        "Pss_File": 6252544,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 1548288,
+        "Shared_Dirty": 0,
+        "Private_Clean": 5873664,
+        "Private_Dirty": 8769536,
+        "Referenced": 12845056,
+        "Anonymous": 8769536,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "ancestor_memory_events_unchanged": true,
+      "ancestor_swap_before_after": [
+        "0\n",
+        "0\n"
+      ],
+      "ancestor_cpu_stat_before_after": [
+        "usage_usec 34880603\nuser_usec 20701883\nsystem_usec 14178719\nnice_usec 0\nnr_periods 1856\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n",
+        "usage_usec 72207746\nuser_usec 48920504\nsystem_usec 23287241\nnice_usec 0\nnr_periods 2204\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n"
+      ]
+    },
+    "churn-nocache": {
+      "status": "behavior_passed",
+      "binary_sha256": "c907cbc16b173f66df28a289941947245224cf04115c408cdde4a07d9091ac03",
+      "requested_glibc_tunables": "glibc.malloc.arena_max=1:glibc.malloc.tcache_count=0",
+      "capacity": 100,
+      "rounds": 20,
+      "instrumented": false,
+      "sampled_peak_bytes": {
+        "Rss": 15708160,
+        "Pss": 14533632,
+        "Pss_Anon": 8286208,
+        "Pss_File": 6247424,
+        "Swap": 0
+      },
+      "streams": 2000,
+      "connections": 1,
+      "sampling_errors": [],
+      "drained_pss_bytes": [
+        5226496,
+        10908672,
+        11879424,
+        11891712,
+        11891712,
+        11891712,
+        11891712,
+        11891712,
+        11891712,
+        11891712,
+        11891712,
+        11891712,
+        11891712,
+        11891712,
+        11891712,
+        11891712,
+        11891712,
+        11891712,
+        11891712,
+        11891712,
+        11891712
+      ],
+      "drained_cpu_seconds": [
+        0.0,
+        0.72,
+        1.69,
+        2.49,
+        3.33,
+        4.18,
+        5.1,
+        6.06,
+        7.19,
+        8.37,
+        9.5,
+        10.67,
+        11.86,
+        13.09,
+        14.37,
+        15.68,
+        17.18,
+        18.88,
+        20.43,
+        21.96,
+        23.57
+      ],
+      "approximate_rss_high_water_bytes": 15601664,
+      "composition_at_max_sampled_pss": {
+        "Rss": 15708160,
+        "Pss": 14533632,
+        "Pss_Dirty": 8286208,
+        "Pss_Anon": 8286208,
+        "Pss_File": 6247424,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 1548288,
+        "Shared_Dirty": 0,
+        "Private_Clean": 5873664,
+        "Private_Dirty": 8286208,
+        "Referenced": 15708160,
+        "Anonymous": 8286208,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "ancestor_memory_events_unchanged": true,
+      "ancestor_swap_before_after": [
+        "0\n",
+        "0\n"
+      ],
+      "ancestor_cpu_stat_before_after": [
+        "usage_usec 147421322\nuser_usec 105523753\nsystem_usec 41897569\nnice_usec 0\nnr_periods 2911\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n",
+        "usage_usec 182678246\nuser_usec 132532759\nsystem_usec 50145486\nnice_usec 0\nnr_periods 3238\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n"
+      ]
+    },
+    "final-instrumentation-pilot": {
+      "status": "behavior_passed",
+      "binary_sha256": "c907cbc16b173f66df28a289941947245224cf04115c408cdde4a07d9091ac03",
+      "requested_glibc_tunables": "",
+      "capacity": 2,
+      "rounds": 2,
+      "instrumented": true,
+      "sampled_peak_bytes": {
+        "Rss": 10182656,
+        "Pss": 8971264,
+        "Pss_Anon": 2752512,
+        "Pss_File": 6218752,
+        "Swap": 0
+      },
+      "streams": 4,
+      "connections": 1,
+      "sampling_errors": [],
+      "drained_pss_bytes": [
+        5416960,
+        8860672,
+        8971264
+      ],
+      "drained_cpu_seconds": [
+        0.0,
+        0.03,
+        0.09
+      ],
+      "approximate_rss_high_water_bytes": 10182656,
+      "composition_at_max_sampled_pss": {
+        "Rss": 10182656,
+        "Pss": 8971264,
+        "Pss_Dirty": 2752512,
+        "Pss_Anon": 2752512,
+        "Pss_File": 6218752,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 1548288,
+        "Shared_Dirty": 0,
+        "Private_Clean": 5881856,
+        "Private_Dirty": 2752512,
+        "Referenced": 10182656,
+        "Anonymous": 2752512,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "drained_malloc": [
+        {
+          "arena_bytes": 901120,
+          "mmap_bytes": 0,
+          "in_use_bytes": 684480,
+          "free_arena_bytes": 216640,
+          "top_releasable_bytes": 102512,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 1994752,
+          "mmap_bytes": 0,
+          "in_use_bytes": 1460944,
+          "free_arena_bytes": 533808,
+          "top_releasable_bytes": 102512,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 2101248,
+          "mmap_bytes": 0,
+          "in_use_bytes": 1498320,
+          "free_arena_bytes": 602928,
+          "top_releasable_bytes": 102512,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 84
+        }
+      ],
+      "trim": {
+        "before": {
+          "monotonic_ns": 590982751682687,
+          "memory_bytes": {
+            "Rss": 10182656,
+            "Pss": 8971264,
+            "Pss_Dirty": 2752512,
+            "Pss_Anon": 2752512,
+            "Pss_File": 6218752,
+            "Pss_Shmem": 0,
+            "Shared_Clean": 1548288,
+            "Shared_Dirty": 0,
+            "Private_Clean": 5881856,
+            "Private_Dirty": 2752512,
+            "Referenced": 10182656,
+            "Anonymous": 2752512,
+            "KSM": 0,
+            "LazyFree": 0,
+            "AnonHugePages": 0,
+            "ShmemPmdMapped": 0,
+            "FilePmdMapped": 0,
+            "Shared_Hugetlb": 0,
+            "Private_Hugetlb": 0,
+            "Swap": 0,
+            "SwapPss": 0,
+            "Locked": 0
+          },
+          "approximate_rss_high_water_bytes": 10182656,
+          "cpu_seconds": 0.09,
+          "fds": 11
+        },
+        "malloc": {
+          "arena_bytes": 1998848,
+          "mmap_bytes": 0,
+          "in_use_bytes": 1498320,
+          "free_arena_bytes": 500528,
+          "top_releasable_bytes": 112,
+          "trim_requested": true,
+          "trim_return": 1,
+          "trim_elapsed_ns": 33958
+        },
+        "after": {
+          "monotonic_ns": 590982765266426,
+          "memory_bytes": {
+            "Rss": 10108928,
+            "Pss": 8897536,
+            "Pss_Dirty": 2678784,
+            "Pss_Anon": 2678784,
+            "Pss_File": 6218752,
+            "Pss_Shmem": 0,
+            "Shared_Clean": 1548288,
+            "Shared_Dirty": 0,
+            "Private_Clean": 5881856,
+            "Private_Dirty": 2678784,
+            "Referenced": 10108928,
+            "Anonymous": 2678784,
+            "KSM": 0,
+            "LazyFree": 0,
+            "AnonHugePages": 0,
+            "ShmemPmdMapped": 0,
+            "FilePmdMapped": 0,
+            "Shared_Hugetlb": 0,
+            "Private_Hugetlb": 0,
+            "Swap": 0,
+            "SwapPss": 0,
+            "Locked": 0
+          },
+          "approximate_rss_high_water_bytes": 10108928,
+          "cpu_seconds": 0.09,
+          "fds": 11
+        }
+      },
+      "final_probe_arena_count": 4,
+      "ancestor_memory_events_unchanged": true,
+      "ancestor_swap_before_after": [
+        "0\n",
+        "0\n"
+      ],
+      "ancestor_cpu_stat_before_after": [
+        "usage_usec 482001979\nuser_usec 363324216\nsystem_usec 118677763\nnice_usec 0\nnr_periods 8581\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n",
+        "usage_usec 482390837\nuser_usec 363650237\nsystem_usec 118740599\nnice_usec 0\nnr_periods 8590\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n"
+      ]
+    },
+    "pilot-churn-2": {
+      "status": "behavior_passed",
+      "binary_sha256": "c907cbc16b173f66df28a289941947245224cf04115c408cdde4a07d9091ac03",
+      "requested_glibc_tunables": "",
+      "capacity": 1,
+      "rounds": 2,
+      "instrumented": false,
+      "sampled_peak_bytes": {
+        "Rss": 10051584,
+        "Pss": 8819712,
+        "Pss_Anon": 2629632,
+        "Pss_File": 6190080,
+        "Swap": 0
+      },
+      "streams": 2,
+      "connections": 1,
+      "sampling_errors": [],
+      "drained_pss_bytes": [
+        5386240,
+        8688640,
+        8819712
+      ],
+      "drained_cpu_seconds": [
+        0.0,
+        0.03,
+        0.07
+      ],
+      "approximate_rss_high_water_bytes": 10051584,
+      "composition_at_max_sampled_pss": {
+        "Rss": 10051584,
+        "Pss": 8819712,
+        "Pss_Dirty": 2629632,
+        "Pss_Anon": 2629632,
+        "Pss_File": 6190080,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 1548288,
+        "Shared_Dirty": 0,
+        "Private_Clean": 5873664,
+        "Private_Dirty": 2629632,
+        "Referenced": 10051584,
+        "Anonymous": 2629632,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "ancestor_memory_events_unchanged": true,
+      "ancestor_swap_before_after": [
+        "0\n",
+        "0\n"
+      ],
+      "ancestor_cpu_stat_before_after": [
+        "usage_usec 33340468\nuser_usec 19602151\nsystem_usec 13738317\nnice_usec 0\nnr_periods 1812\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n",
+        "usage_usec 33884421\nuser_usec 20075790\nsystem_usec 13808630\nnice_usec 0\nnr_periods 1825\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n"
+      ]
+    },
+    "pilot-probe": {
+      "status": "behavior_passed",
+      "binary_sha256": "c907cbc16b173f66df28a289941947245224cf04115c408cdde4a07d9091ac03",
+      "requested_glibc_tunables": "",
+      "capacity": 1,
+      "rounds": 2,
+      "instrumented": true,
+      "sampled_peak_bytes": {
+        "Rss": 10141696,
+        "Pss": 8909824,
+        "Pss_Anon": 2711552,
+        "Pss_File": 6198272,
+        "Swap": 0
+      },
+      "streams": 2,
+      "connections": 1,
+      "sampling_errors": [],
+      "drained_pss_bytes": [
+        5693440,
+        8770560,
+        8909824
+      ],
+      "drained_cpu_seconds": [
+        0.0,
+        0.03,
+        0.09
+      ],
+      "approximate_rss_high_water_bytes": 10141696,
+      "composition_at_max_sampled_pss": {
+        "Rss": 10141696,
+        "Pss": 8909824,
+        "Pss_Dirty": 2711552,
+        "Pss_Anon": 2711552,
+        "Pss_File": 6198272,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 1548288,
+        "Shared_Dirty": 0,
+        "Private_Clean": 5881856,
+        "Private_Dirty": 2711552,
+        "Referenced": 10141696,
+        "Anonymous": 2711552,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "drained_malloc": [
+        {
+          "arena_bytes": 901120,
+          "mmap_bytes": 0,
+          "in_use_bytes": 682864,
+          "free_arena_bytes": 218256,
+          "top_releasable_bytes": 102512,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 1945600,
+          "mmap_bytes": 0,
+          "in_use_bytes": 1438096,
+          "free_arena_bytes": 507504,
+          "top_releasable_bytes": 102512,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 83
+        },
+        {
+          "arena_bytes": 2080768,
+          "mmap_bytes": 0,
+          "in_use_bytes": 1458208,
+          "free_arena_bytes": 622560,
+          "top_releasable_bytes": 102512,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        }
+      ],
+      "trim": {
+        "before": {
+          "monotonic_ns": 590160148266061,
+          "memory_bytes": {
+            "Rss": 10141696,
+            "Pss": 8909824,
+            "Pss_Dirty": 2711552,
+            "Pss_Anon": 2711552,
+            "Pss_File": 6198272,
+            "Pss_Shmem": 0,
+            "Shared_Clean": 1548288,
+            "Shared_Dirty": 0,
+            "Private_Clean": 5881856,
+            "Private_Dirty": 2711552,
+            "Referenced": 10141696,
+            "Anonymous": 2711552,
+            "KSM": 0,
+            "LazyFree": 0,
+            "AnonHugePages": 0,
+            "ShmemPmdMapped": 0,
+            "FilePmdMapped": 0,
+            "Shared_Hugetlb": 0,
+            "Private_Hugetlb": 0,
+            "Swap": 0,
+            "SwapPss": 0,
+            "Locked": 0
+          },
+          "cpu_seconds": 0.09,
+          "fds": 11
+        },
+        "malloc": {
+          "arena_bytes": 1978368,
+          "mmap_bytes": 0,
+          "in_use_bytes": 1458208,
+          "free_arena_bytes": 520160,
+          "top_releasable_bytes": 112,
+          "trim_requested": true,
+          "trim_return": 1,
+          "trim_elapsed_ns": 38250
+        },
+        "after": {
+          "monotonic_ns": 590160168463331,
+          "memory_bytes": {
+            "Rss": 10076160,
+            "Pss": 8844288,
+            "Pss_Dirty": 2646016,
+            "Pss_Anon": 2646016,
+            "Pss_File": 6198272,
+            "Pss_Shmem": 0,
+            "Shared_Clean": 1548288,
+            "Shared_Dirty": 0,
+            "Private_Clean": 5881856,
+            "Private_Dirty": 2646016,
+            "Referenced": 10076160,
+            "Anonymous": 2646016,
+            "KSM": 0,
+            "LazyFree": 0,
+            "AnonHugePages": 0,
+            "ShmemPmdMapped": 0,
+            "FilePmdMapped": 0,
+            "Shared_Hugetlb": 0,
+            "Private_Hugetlb": 0,
+            "Swap": 0,
+            "SwapPss": 0,
+            "Locked": 0
+          },
+          "cpu_seconds": 0.09,
+          "fds": 11
+        }
+      },
+      "final_probe_arena_count": 4,
+      "ancestor_memory_events_unchanged": true,
+      "ancestor_swap_before_after": [
+        "0\n",
+        "0\n"
+      ],
+      "ancestor_cpu_stat_before_after": [
+        "usage_usec 34024111\nuser_usec 20195468\nsystem_usec 13828642\nnice_usec 0\nnr_periods 1826\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n",
+        "usage_usec 34455260\nuser_usec 20541399\nsystem_usec 13913861\nnice_usec 0\nnr_periods 1838\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n"
+      ]
+    },
+    "probe-default": {
+      "status": "behavior_passed",
+      "binary_sha256": "c907cbc16b173f66df28a289941947245224cf04115c408cdde4a07d9091ac03",
+      "requested_glibc_tunables": "",
+      "capacity": 100,
+      "rounds": 20,
+      "instrumented": true,
+      "sampled_peak_bytes": {
+        "Rss": 16076800,
+        "Pss": 14873600,
+        "Pss_Anon": 8646656,
+        "Pss_File": 6226944,
+        "Swap": 0
+      },
+      "streams": 2000,
+      "connections": 1,
+      "sampling_errors": [],
+      "drained_pss_bytes": [
+        5727232,
+        11375616,
+        11801600,
+        12002304,
+        11990016,
+        12166144,
+        12002304,
+        12010496,
+        12014592,
+        12223488,
+        12018688,
+        12006400,
+        12035072,
+        12022784,
+        12145664,
+        11998208,
+        12010496,
+        12014592,
+        12030976,
+        12018688,
+        12157952
+      ],
+      "drained_cpu_seconds": [
+        0.0,
+        0.67,
+        1.37,
+        2.17,
+        3.05,
+        3.89,
+        4.77,
+        5.65,
+        6.59,
+        7.54,
+        8.55,
+        9.61,
+        10.71,
+        11.87,
+        13.09,
+        14.41,
+        15.74,
+        17.08,
+        18.45,
+        20.0,
+        21.52
+      ],
+      "approximate_rss_high_water_bytes": 16080896,
+      "composition_at_max_sampled_pss": {
+        "Rss": 16076800,
+        "Pss": 14873600,
+        "Pss_Dirty": 8646656,
+        "Pss_Anon": 8646656,
+        "Pss_File": 6226944,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 1548288,
+        "Shared_Dirty": 0,
+        "Private_Clean": 5881856,
+        "Private_Dirty": 8646656,
+        "Referenced": 15888384,
+        "Anonymous": 8646656,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "drained_malloc": [
+        {
+          "arena_bytes": 901120,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 688288,
+          "free_arena_bytes": 212832,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4304896,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2035568,
+          "free_arena_bytes": 2269328,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 41
+        },
+        {
+          "arena_bytes": 4730880,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2456384,
+          "free_arena_bytes": 2274496,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4923392,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2470784,
+          "free_arena_bytes": 2452608,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 41
+        },
+        {
+          "arena_bytes": 4915200,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2480592,
+          "free_arena_bytes": 2434608,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 5091328,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2484720,
+          "free_arena_bytes": 2606608,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4919296,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2486064,
+          "free_arena_bytes": 2433232,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4919296,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2490384,
+          "free_arena_bytes": 2428912,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 41
+        },
+        {
+          "arena_bytes": 4919296,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2490352,
+          "free_arena_bytes": 2428944,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 5136384,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2490384,
+          "free_arena_bytes": 2646000,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4919296,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2490416,
+          "free_arena_bytes": 2428880,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4919296,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2490288,
+          "free_arena_bytes": 2429008,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4952064,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2490288,
+          "free_arena_bytes": 2461776,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 83
+        },
+        {
+          "arena_bytes": 4927488,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2490384,
+          "free_arena_bytes": 2437104,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 0
+        },
+        {
+          "arena_bytes": 5054464,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2490320,
+          "free_arena_bytes": 2564144,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4919296,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2490384,
+          "free_arena_bytes": 2428912,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4919296,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2490384,
+          "free_arena_bytes": 2428912,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4919296,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2490320,
+          "free_arena_bytes": 2428976,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4919296,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2490320,
+          "free_arena_bytes": 2428976,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 0
+        },
+        {
+          "arena_bytes": 4919296,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2490288,
+          "free_arena_bytes": 2429008,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 41
+        },
+        {
+          "arena_bytes": 5074944,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2490448,
+          "free_arena_bytes": 2584496,
+          "top_releasable_bytes": 95296,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 84
+        }
+      ],
+      "trim": {
+        "before": {
+          "monotonic_ns": 590762110763044,
+          "memory_bytes": {
+            "Rss": 13361152,
+            "Pss": 12157952,
+            "Pss_Dirty": 5931008,
+            "Pss_Anon": 5931008,
+            "Pss_File": 6226944,
+            "Pss_Shmem": 0,
+            "Shared_Clean": 1548288,
+            "Shared_Dirty": 0,
+            "Private_Clean": 5881856,
+            "Private_Dirty": 5931008,
+            "Referenced": 13172736,
+            "Anonymous": 5931008,
+            "KSM": 0,
+            "LazyFree": 0,
+            "AnonHugePages": 0,
+            "ShmemPmdMapped": 0,
+            "FilePmdMapped": 0,
+            "Shared_Hugetlb": 0,
+            "Private_Hugetlb": 0,
+            "Swap": 0,
+            "SwapPss": 0,
+            "Locked": 0
+          },
+          "cpu_seconds": 21.52,
+          "fds": 11
+        },
+        "malloc": {
+          "arena_bytes": 4980736,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2490448,
+          "free_arena_bytes": 2490288,
+          "top_releasable_bytes": 1088,
+          "trim_requested": true,
+          "trim_return": 1,
+          "trim_elapsed_ns": 132706
+        },
+        "after": {
+          "monotonic_ns": 590762125860122,
+          "memory_bytes": {
+            "Rss": 11714560,
+            "Pss": 10511360,
+            "Pss_Dirty": 4284416,
+            "Pss_Anon": 4284416,
+            "Pss_File": 6226944,
+            "Pss_Shmem": 0,
+            "Shared_Clean": 1548288,
+            "Shared_Dirty": 0,
+            "Private_Clean": 5881856,
+            "Private_Dirty": 4284416,
+            "Referenced": 11526144,
+            "Anonymous": 4284416,
+            "KSM": 0,
+            "LazyFree": 0,
+            "AnonHugePages": 0,
+            "ShmemPmdMapped": 0,
+            "FilePmdMapped": 0,
+            "Shared_Hugetlb": 0,
+            "Private_Hugetlb": 0,
+            "Swap": 0,
+            "SwapPss": 0,
+            "Locked": 0
+          },
+          "cpu_seconds": 21.52,
+          "fds": 11
+        }
+      },
+      "final_probe_arena_count": 4,
+      "ancestor_memory_events_unchanged": true,
+      "ancestor_swap_before_after": [
+        "0\n",
+        "0\n"
+      ],
+      "ancestor_cpu_stat_before_after": [
+        "usage_usec 367438384\nuser_usec 274731549\nsystem_usec 92706835\nnice_usec 0\nnr_periods 6239\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n",
+        "usage_usec 399569044\nuser_usec 299594854\nsystem_usec 99974190\nnice_usec 0\nnr_periods 6550\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n"
+      ]
+    },
+    "probe-nocache": {
+      "status": "behavior_passed",
+      "binary_sha256": "c907cbc16b173f66df28a289941947245224cf04115c408cdde4a07d9091ac03",
+      "requested_glibc_tunables": "glibc.malloc.arena_max=1:glibc.malloc.tcache_count=0",
+      "capacity": 100,
+      "rounds": 20,
+      "instrumented": true,
+      "sampled_peak_bytes": {
+        "Rss": 15671296,
+        "Pss": 14487552,
+        "Pss_Anon": 8257536,
+        "Pss_File": 6250496,
+        "Swap": 0
+      },
+      "streams": 2000,
+      "connections": 1,
+      "sampling_errors": [],
+      "drained_pss_bytes": [
+        5716992,
+        10969088,
+        11427840,
+        11427840,
+        11427840,
+        11427840,
+        11427840,
+        11427840,
+        11427840,
+        11427840,
+        11427840,
+        11427840,
+        11427840,
+        11427840,
+        11427840,
+        11427840,
+        11427840,
+        11427840,
+        11427840,
+        11427840,
+        11427840
+      ],
+      "drained_cpu_seconds": [
+        0.0,
+        0.73,
+        1.47,
+        2.28,
+        3.16,
+        4.02,
+        4.96,
+        5.99,
+        6.98,
+        8.03,
+        9.12,
+        10.25,
+        11.51,
+        12.77,
+        14.05,
+        15.38,
+        16.79,
+        18.21,
+        19.72,
+        21.25,
+        22.85
+      ],
+      "approximate_rss_high_water_bytes": 15421440,
+      "composition_at_max_sampled_pss": {
+        "Rss": 15659008,
+        "Pss": 14487552,
+        "Pss_Dirty": 8245248,
+        "Pss_Anon": 8245248,
+        "Pss_File": 6242304,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 1531904,
+        "Shared_Dirty": 0,
+        "Private_Clean": 5881856,
+        "Private_Dirty": 8245248,
+        "Referenced": 15659008,
+        "Anonymous": 8245248,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "drained_malloc": [
+        {
+          "arena_bytes": 720896,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 609744,
+          "free_arena_bytes": 111152,
+          "top_releasable_bytes": 92976,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 41
+        },
+        {
+          "arena_bytes": 3637248,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 1803072,
+          "free_arena_bytes": 1834176,
+          "top_releasable_bytes": 132032,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193248,
+          "free_arena_bytes": 1902752,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193248,
+          "free_arena_bytes": 1902752,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193248,
+          "free_arena_bytes": 1902752,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193248,
+          "free_arena_bytes": 1902752,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 41
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1902592,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1902592,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1902592,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 41
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1902592,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1902592,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1902592,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 41
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1902592,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 0
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1902592,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1902592,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1902592,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 83
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1902592,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1902592,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1902592,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 0
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1902592,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 42
+        },
+        {
+          "arena_bytes": 4096000,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1902592,
+          "top_releasable_bytes": 135120,
+          "trim_requested": false,
+          "trim_return": 0,
+          "trim_elapsed_ns": 41
+        }
+      ],
+      "trim": {
+        "before": {
+          "monotonic_ns": 590495621971994,
+          "memory_bytes": {
+            "Rss": 12591104,
+            "Pss": 11427840,
+            "Pss_Dirty": 5177344,
+            "Pss_Anon": 5177344,
+            "Pss_File": 6250496,
+            "Pss_Shmem": 0,
+            "Shared_Clean": 1531904,
+            "Shared_Dirty": 0,
+            "Private_Clean": 5881856,
+            "Private_Dirty": 5177344,
+            "Referenced": 12591104,
+            "Anonymous": 5177344,
+            "KSM": 0,
+            "LazyFree": 0,
+            "AnonHugePages": 0,
+            "ShmemPmdMapped": 0,
+            "FilePmdMapped": 0,
+            "Shared_Hugetlb": 0,
+            "Private_Hugetlb": 0,
+            "Swap": 0,
+            "SwapPss": 0,
+            "Locked": 0
+          },
+          "cpu_seconds": 22.85,
+          "fds": 11
+        },
+        "malloc": {
+          "arena_bytes": 3964928,
+          "mmap_bytes": 172032,
+          "in_use_bytes": 2193408,
+          "free_arena_bytes": 1771520,
+          "top_releasable_bytes": 4048,
+          "trim_requested": true,
+          "trim_return": 1,
+          "trim_elapsed_ns": 109827
+        },
+        "after": {
+          "monotonic_ns": 590495635607285,
+          "memory_bytes": {
+            "Rss": 10932224,
+            "Pss": 9768960,
+            "Pss_Dirty": 3518464,
+            "Pss_Anon": 3518464,
+            "Pss_File": 6250496,
+            "Pss_Shmem": 0,
+            "Shared_Clean": 1531904,
+            "Shared_Dirty": 0,
+            "Private_Clean": 5881856,
+            "Private_Dirty": 3518464,
+            "Referenced": 10932224,
+            "Anonymous": 3518464,
+            "KSM": 0,
+            "LazyFree": 0,
+            "AnonHugePages": 0,
+            "ShmemPmdMapped": 0,
+            "FilePmdMapped": 0,
+            "Shared_Hugetlb": 0,
+            "Private_Hugetlb": 0,
+            "Swap": 0,
+            "SwapPss": 0,
+            "Locked": 0
+          },
+          "cpu_seconds": 22.85,
+          "fds": 11
+        }
+      },
+      "final_probe_arena_count": 1,
+      "ancestor_memory_events_unchanged": true,
+      "ancestor_swap_before_after": [
+        "0\n",
+        "0\n"
+      ],
+      "ancestor_cpu_stat_before_after": [
+        "usage_usec 217546886\nuser_usec 159390425\nsystem_usec 58156461\nnice_usec 0\nnr_periods 3574\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n",
+        "usage_usec 251713117\nuser_usec 185699484\nsystem_usec 66013633\nnice_usec 0\nnr_periods 3904\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n"
+      ]
+    },
+    "repeat-default": {
+      "status": "behavior_passed",
+      "binary_sha256": "c907cbc16b173f66df28a289941947245224cf04115c408cdde4a07d9091ac03",
+      "requested_glibc_tunables": "",
+      "capacity": 100,
+      "rounds": 20,
+      "instrumented": false,
+      "sampled_peak_bytes": {
+        "Rss": 15273984,
+        "Pss": 14103552,
+        "Pss_Anon": 7852032,
+        "Pss_File": 6255616,
+        "Swap": 0
+      },
+      "streams": 2000,
+      "connections": 1,
+      "sampling_errors": [],
+      "drained_pss_bytes": [
+        5548032,
+        11269120,
+        12866560,
+        12899328,
+        12903424,
+        12903424,
+        12907520,
+        13001728,
+        13001728,
+        13001728,
+        13001728,
+        13001728,
+        13001728,
+        13001728,
+        13001728,
+        13009920,
+        13009920,
+        13005824,
+        13005824,
+        13005824,
+        13005824
+      ],
+      "drained_cpu_seconds": [
+        0.0,
+        0.69,
+        1.46,
+        2.36,
+        3.14,
+        3.93,
+        4.76,
+        5.66,
+        6.61,
+        7.58,
+        8.63,
+        9.74,
+        10.87,
+        12.06,
+        13.32,
+        14.57,
+        15.87,
+        17.23,
+        18.64,
+        20.07,
+        21.57
+      ],
+      "approximate_rss_high_water_bytes": 15155200,
+      "composition_at_max_sampled_pss": {
+        "Rss": 15269888,
+        "Pss": 14103552,
+        "Pss_Dirty": 7847936,
+        "Pss_Anon": 7847936,
+        "Pss_File": 6255616,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 1548288,
+        "Shared_Dirty": 0,
+        "Private_Clean": 5873664,
+        "Private_Dirty": 7847936,
+        "Referenced": 15269888,
+        "Anonymous": 7847936,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "ancestor_memory_events_unchanged": true,
+      "ancestor_swap_before_after": [
+        "0\n",
+        "0\n"
+      ],
+      "ancestor_cpu_stat_before_after": [
+        "usage_usec 335155660\nuser_usec 249924410\nsystem_usec 85231249\nnice_usec 0\nnr_periods 5930\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n",
+        "usage_usec 367300171\nuser_usec 274633642\nsystem_usec 92666528\nnice_usec 0\nnr_periods 6238\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n"
+      ]
+    },
+    "repeat-nocache": {
+      "status": "behavior_passed",
+      "binary_sha256": "c907cbc16b173f66df28a289941947245224cf04115c408cdde4a07d9091ac03",
+      "requested_glibc_tunables": "glibc.malloc.arena_max=1:glibc.malloc.tcache_count=0",
+      "capacity": 100,
+      "rounds": 20,
+      "instrumented": false,
+      "sampled_peak_bytes": {
+        "Rss": 15093760,
+        "Pss": 13918208,
+        "Pss_Anon": 7671808,
+        "Pss_File": 6246400,
+        "Swap": 0
+      },
+      "streams": 2000,
+      "connections": 1,
+      "sampling_errors": [],
+      "drained_pss_bytes": [
+        5614592,
+        11878400,
+        11878400,
+        11882496,
+        11882496,
+        11882496,
+        11882496,
+        11882496,
+        11882496,
+        11882496,
+        11882496,
+        11882496,
+        11882496,
+        11882496,
+        11882496,
+        11882496,
+        11882496,
+        11882496,
+        11882496,
+        11882496,
+        11882496
+      ],
+      "drained_cpu_seconds": [
+        0.0,
+        0.72,
+        1.46,
+        2.23,
+        3.14,
+        3.98,
+        4.96,
+        5.95,
+        7.01,
+        8.17,
+        9.27,
+        10.47,
+        11.67,
+        12.9,
+        14.19,
+        15.54,
+        16.94,
+        18.39,
+        19.9,
+        21.48,
+        23.13
+      ],
+      "approximate_rss_high_water_bytes": 15085568,
+      "composition_at_max_sampled_pss": {
+        "Rss": 15093760,
+        "Pss": 13918208,
+        "Pss_Dirty": 7671808,
+        "Pss_Anon": 7671808,
+        "Pss_File": 6246400,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 1548288,
+        "Shared_Dirty": 0,
+        "Private_Clean": 5873664,
+        "Private_Dirty": 7671808,
+        "Referenced": 15093760,
+        "Anonymous": 7671808,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "ancestor_memory_events_unchanged": true,
+      "ancestor_swap_before_after": [
+        "0\n",
+        "0\n"
+      ],
+      "ancestor_cpu_stat_before_after": [
+        "usage_usec 182878308\nuser_usec 132637395\nsystem_usec 50240912\nnice_usec 0\nnr_periods 3247\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n",
+        "usage_usec 217453934\nuser_usec 159309906\nsystem_usec 58144028\nnice_usec 0\nnr_periods 3573\nnr_throttled 1\nthrottled_usec 23425\nnr_bursts 0\nburst_usec 0\n"
+      ]
+    }
+  },
+  "sustained": {
+    "default": {
+      "status": "incomplete",
+      "error": null,
+      "rounds": [
+        {
+          "round": 1,
+          "all_results_audited": true,
+          "cleanup_observation_complete": true,
+          "cpu": {
+            "at_most_2_average_cores": true,
+            "average_cores_conservative": 0.48925577629608863,
+            "bracket_valid": true,
+            "complete_work_at_most_120_cpu_seconds": true,
+            "complete_work_cpu_seconds": 33.48,
+            "cpu_seconds": 19.59,
+            "earliest_stream_final_completion_unix_ns": 1790506113097162346,
+            "first_query": {
+              "finish_unix_ns": 1790506063108031015,
+              "host_cpu_seconds": 5.23,
+              "start_unix_ns": 1790506063107648979
+            },
+            "maximum_sample_window_seconds": 40.041256191,
+            "minimum_sample_window_seconds": 40.040406162,
+            "provider_offer_qualified": true,
+            "second_query": {
+              "finish_unix_ns": 1790506103148905129,
+              "host_cpu_seconds": 24.82,
+              "start_unix_ns": 1790506103148437177
+            },
+            "status": "passed"
+          },
+          "observed_offer": {
+            "events_per_second": 10001.257288057453,
+            "seconds": 59.99245722,
+            "status": "observed"
+          },
+          "retained": {
+            "host": {
+              "rss_bytes": 12632064,
+              "virtual_bytes": 180752384,
+              "cpu_user_seconds": 26.4,
+              "cpu_system_seconds": 7.1,
+              "threads": 3,
+              "live_descendant_processes": 0,
+              "open_descriptors": 10,
+              "disk_read_bytes": 0,
+              "disk_write_bytes": 0,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 5210112,
+                  "Private_Clean": 5931008,
+                  "Private_Dirty": 5210112,
+                  "Pss": 11565056,
+                  "Pss_Anon": 5210112,
+                  "Pss_File": 6354944,
+                  "Pss_Shmem": 0,
+                  "Rss": 12632064,
+                  "Shared_Clean": 1490944,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 12632064,
+                "requested_glibc_tunables": ""
+              }
+            },
+            "whole_rui": {
+              "host_processes": 1,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 5210112,
+                  "Private_Clean": 5931008,
+                  "Private_Dirty": 5210112,
+                  "Pss": 11565056,
+                  "Pss_Anon": 5210112,
+                  "Pss_File": 6354944,
+                  "Pss_Shmem": 0,
+                  "Rss": 12632064,
+                  "Shared_Clean": 1490944,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 12632064,
+                "requested_glibc_tunables": ""
+              },
+              "measurement_basis": "Linux /proc diagnostics cannot establish macOS physical footprint",
+              "rss_bytes": 12632064,
+              "status": "unavailable"
+            }
+          }
+        },
+        {
+          "round": 2,
+          "all_results_audited": true,
+          "cleanup_observation_complete": true,
+          "cpu": {
+            "at_most_2_average_cores": true,
+            "average_cores_conservative": 0.502727974949982,
+            "bracket_valid": true,
+            "complete_work_at_most_120_cpu_seconds": true,
+            "complete_work_cpu_seconds": 33.73,
+            "cpu_seconds": 20.13000000000001,
+            "earliest_stream_final_completion_unix_ns": 1790506177712021221,
+            "first_query": {
+              "finish_unix_ns": 1790506127722195492,
+              "host_cpu_seconds": 38.41,
+              "start_unix_ns": 1790506127721529041
+            },
+            "maximum_sample_window_seconds": 40.044105862,
+            "minimum_sample_window_seconds": 40.041535389,
+            "provider_offer_qualified": true,
+            "second_query": {
+              "finish_unix_ns": 1790506167765634903,
+              "host_cpu_seconds": 58.540000000000006,
+              "start_unix_ns": 1790506167763730923
+            },
+            "status": "passed"
+          },
+          "observed_offer": {
+            "events_per_second": 10001.33343111348,
+            "seconds": 59.99200048,
+            "status": "observed"
+          },
+          "retained": {
+            "host": {
+              "rss_bytes": 9891840,
+              "virtual_bytes": 180752384,
+              "cpu_user_seconds": 53.11,
+              "cpu_system_seconds": 14.14,
+              "threads": 3,
+              "live_descendant_processes": 0,
+              "open_descriptors": 10,
+              "disk_read_bytes": 0,
+              "disk_write_bytes": 0,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 5574656,
+                  "Private_Clean": 2826240,
+                  "Private_Dirty": 5574656,
+                  "Pss": 8824832,
+                  "Pss_Anon": 5574656,
+                  "Pss_File": 3250176,
+                  "Pss_Shmem": 0,
+                  "Rss": 9891840,
+                  "Shared_Clean": 1490944,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 12775424,
+                "requested_glibc_tunables": ""
+              }
+            },
+            "whole_rui": {
+              "host_processes": 1,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 5574656,
+                  "Private_Clean": 2826240,
+                  "Private_Dirty": 5574656,
+                  "Pss": 8824832,
+                  "Pss_Anon": 5574656,
+                  "Pss_File": 3250176,
+                  "Pss_Shmem": 0,
+                  "Rss": 9891840,
+                  "Shared_Clean": 1490944,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 12775424,
+                "requested_glibc_tunables": ""
+              },
+              "measurement_basis": "Linux /proc diagnostics cannot establish macOS physical footprint",
+              "rss_bytes": 9891840,
+              "status": "unavailable"
+            }
+          }
+        }
+      ]
+    },
+    "nocache": {
+      "status": "incomplete",
+      "error": null,
+      "rounds": [
+        {
+          "round": 1,
+          "all_results_audited": true,
+          "cleanup_observation_complete": true,
+          "cpu": {
+            "at_most_2_average_cores": true,
+            "average_cores_conservative": 0.5029605104358902,
+            "bracket_valid": true,
+            "complete_work_at_most_120_cpu_seconds": true,
+            "complete_work_cpu_seconds": 34.14,
+            "cpu_seconds": 20.14,
+            "earliest_stream_final_completion_unix_ns": 1790505846781557797,
+            "first_query": {
+              "finish_unix_ns": 1790505796794651751,
+              "host_cpu_seconds": 5.39,
+              "start_unix_ns": 1790505796794198608
+            },
+            "maximum_sample_window_seconds": 40.044173265,
+            "minimum_sample_window_seconds": 40.042905123,
+            "provider_offer_qualified": true,
+            "second_query": {
+              "finish_unix_ns": 1790505836838371874,
+              "host_cpu_seconds": 25.53,
+              "start_unix_ns": 1790505836837556874
+            },
+            "status": "passed"
+          },
+          "observed_offer": {
+            "events_per_second": 10001.532312762267,
+            "seconds": 59.990807532,
+            "status": "observed"
+          },
+          "retained": {
+            "host": {
+              "rss_bytes": 12197888,
+              "virtual_bytes": 50573312,
+              "cpu_user_seconds": 26.67,
+              "cpu_system_seconds": 7.5,
+              "threads": 3,
+              "live_descendant_processes": 0,
+              "open_descriptors": 10,
+              "disk_read_bytes": 0,
+              "disk_write_bytes": 0,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 4788224,
+                  "Private_Clean": 5873664,
+                  "Private_Dirty": 4788224,
+                  "Pss": 11174912,
+                  "Pss_Anon": 4788224,
+                  "Pss_File": 6386688,
+                  "Pss_Shmem": 0,
+                  "Rss": 12197888,
+                  "Shared_Clean": 1536000,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 12197888,
+                "requested_glibc_tunables": "glibc.malloc.arena_max=1:glibc.malloc.tcache_count=0"
+              }
+            },
+            "whole_rui": {
+              "host_processes": 1,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 4788224,
+                  "Private_Clean": 5873664,
+                  "Private_Dirty": 4788224,
+                  "Pss": 11174912,
+                  "Pss_Anon": 4788224,
+                  "Pss_File": 6386688,
+                  "Pss_Shmem": 0,
+                  "Rss": 12197888,
+                  "Shared_Clean": 1536000,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 12197888,
+                "requested_glibc_tunables": "glibc.malloc.arena_max=1:glibc.malloc.tcache_count=0"
+              },
+              "measurement_basis": "Linux /proc diagnostics cannot establish macOS physical footprint",
+              "rss_bytes": 12197888,
+              "status": "unavailable"
+            }
+          }
+        },
+        {
+          "round": 2,
+          "all_results_audited": true,
+          "cleanup_observation_complete": true,
+          "cpu": {
+            "at_most_2_average_cores": true,
+            "average_cores_conservative": 0.4917530599656394,
+            "bracket_valid": true,
+            "complete_work_at_most_120_cpu_seconds": true,
+            "complete_work_cpu_seconds": 33.519999999999996,
+            "cpu_seconds": 19.690000000000005,
+            "earliest_stream_final_completion_unix_ns": 1790505911350343214,
+            "first_query": {
+              "finish_unix_ns": 1790505861361539871,
+              "host_cpu_seconds": 39.43,
+              "start_unix_ns": 1790505861361442582
+            },
+            "maximum_sample_window_seconds": 40.041152688,
+            "minimum_sample_window_seconds": 40.040421917,
+            "provider_offer_qualified": true,
+            "second_query": {
+              "finish_unix_ns": 1790505901402595270,
+              "host_cpu_seconds": 59.120000000000005,
+              "start_unix_ns": 1790505901401961830
+            },
+            "status": "passed"
+          },
+          "observed_offer": {
+            "events_per_second": 10001.423913890878,
+            "seconds": 59.991457733,
+            "status": "observed"
+          },
+          "retained": {
+            "host": {
+              "rss_bytes": 9252864,
+              "virtual_bytes": 50978816,
+              "cpu_user_seconds": 53.17,
+              "cpu_system_seconds": 14.55,
+              "threads": 3,
+              "live_descendant_processes": 0,
+              "open_descriptors": 10,
+              "disk_read_bytes": 0,
+              "disk_write_bytes": 0,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 5193728,
+                  "Private_Clean": 2580480,
+                  "Private_Dirty": 5193728,
+                  "Pss": 8258560,
+                  "Pss_Anon": 5193728,
+                  "Pss_File": 3064832,
+                  "Pss_Shmem": 0,
+                  "Rss": 9252864,
+                  "Shared_Clean": 1478656,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 12652544,
+                "requested_glibc_tunables": "glibc.malloc.arena_max=1:glibc.malloc.tcache_count=0"
+              }
+            },
+            "whole_rui": {
+              "host_processes": 1,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 5193728,
+                  "Private_Clean": 2580480,
+                  "Private_Dirty": 5193728,
+                  "Pss": 8258560,
+                  "Pss_Anon": 5193728,
+                  "Pss_File": 3064832,
+                  "Pss_Shmem": 0,
+                  "Rss": 9252864,
+                  "Shared_Clean": 1478656,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 12652544,
+                "requested_glibc_tunables": "glibc.malloc.arena_max=1:glibc.malloc.tcache_count=0"
+              },
+              "measurement_basis": "Linux /proc diagnostics cannot establish macOS physical footprint",
+              "rss_bytes": 9252864,
+              "status": "unavailable"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "controls": {
+    "default": {
+      "status": "passed",
+      "configurations": {
+        "control_first_settlement_race": {
+          "status": "passed",
+          "total_durable_acknowledgment": {
+            "maximum_ms": 8.889,
+            "p95_ms": 8.889
+          }
+        },
+        "live_model_cancellation": {
+          "exact_interruption_acknowledgment_ms": 1.037,
+          "session_stop_p95_acknowledgment_ms": 1.632,
+          "status": "passed"
+        },
+        "real_settlement_import_workload": {
+          "blocked_result_control_acknowledgment_ms": 2.324,
+          "status": "passed",
+          "total_durable_acknowledgment": {
+            "interpretation": "two observations only; nearest-rank p95 equals the maximum and does not describe a general latency distribution",
+            "maximum_ms": 3.919,
+            "p95_ms": 3.919,
+            "sample_count": 2,
+            "samples_ms": {
+              "settlement-later-interrupt": 1.309,
+              "settlement-later-stop-1": 3.919
+            }
+          }
+        },
+        "stalled_incomplete_ingress_diagnostic": {
+          "maximum_acknowledgment_ms": 4.968,
+          "p95_acknowledgment_ms": 2.479,
+          "status": "passed"
+        }
+      }
+    },
+    "nocache": {
+      "status": "passed",
+      "configurations": {
+        "control_first_settlement_race": {
+          "status": "passed",
+          "total_durable_acknowledgment": {
+            "maximum_ms": 7.183,
+            "p95_ms": 7.183
+          }
+        },
+        "live_model_cancellation": {
+          "exact_interruption_acknowledgment_ms": 0.888,
+          "session_stop_p95_acknowledgment_ms": 3.725,
+          "status": "passed"
+        },
+        "real_settlement_import_workload": {
+          "blocked_result_control_acknowledgment_ms": 2.066,
+          "status": "passed",
+          "total_durable_acknowledgment": {
+            "interpretation": "two observations only; nearest-rank p95 equals the maximum and does not describe a general latency distribution",
+            "maximum_ms": 0.766,
+            "p95_ms": 0.766,
+            "sample_count": 2,
+            "samples_ms": {
+              "settlement-later-interrupt": 0.766,
+              "settlement-later-stop-1": 0.632
+            }
+          }
+        },
+        "stalled_incomplete_ingress_diagnostic": {
+          "maximum_acknowledgment_ms": 6.278,
+          "p95_acknowledgment_ms": 3.188,
+          "status": "passed"
+        }
+      }
+    }
+  },
+  "original_harness_sha256": {
+    "tests/qualification/linux-memory/measured_run.py": "10eb077432b7e7da0c51da5c5d7fde38566f61a8760b82d36a18ac8daa06a472",
+    "tests/integration/transport_h2_integration.py": "38ca1cba70147a4d3139d65862c38526c887731f1691bb89da4e5bac5c2929ef",
+    "tests/integration/dispatch_integration.py": "7fdd70f2a6b92279d13d8707e0abe45b1492f08f086809a166ca2efb19cf8c26"
+  },
+  "measured_probe": {
+    "runs": ["pilot-probe", "probe-default", "probe-nocache", "final-instrumentation-pilot"],
+    "source": "tests/qualification/linux-memory/malloc_probe.c",
+    "source_sha256": "9987c34b571850e11d3ee918c6d0d040b60e30471a5b765fe7e290e43e2446b7",
+    "object_sha256": "ea263fd4f21be72cad3439737077bb31d10d1807b29cbf1c302d344f28bc366d",
+    "compiler": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "command": "cc -shared -fPIC -pthread -Wall -Wextra -Werror tests/qualification/linux-memory/malloc_probe.c -o bin/malloc_probe.so",
+    "verification": "Retained object rehashed in the measurement VM after review; matches the original recorded hash. Binary remains local."
+  }
+}

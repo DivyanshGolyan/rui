@@ -45,6 +45,12 @@ func TestMemoryEvidenceBoundsOnlyHostAndRequiresMeasuredPeak(t *testing.T) {
 	}
 }
 
+func TestMissingPhysicalFootprintCannotQualifyPortableSample(t *testing.T) {
+	if got := memoryEvidenceStatus(wholeRui(measurement.ProcessSample{RSSBytes: 1024})); got != "incomplete" {
+		t.Fatalf("RSS without physical footprint qualified as %s", got)
+	}
+}
+
 func TestExpectedCapacityRequestDigest(t *testing.T) {
 	bytes, digest := expectedCapacityRequests([]string{"capacity-1-0"})
 	if bytes != 200 || digest != "3ba8f89953b1f1cbc2a36d18c3dd7cb8f5a4a4bd6860d23bcb24e79c2069c8d8" {

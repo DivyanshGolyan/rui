@@ -162,6 +162,11 @@ func StartHost(
 	}
 	arguments = append(arguments, extra...)
 	cmd := exec.Command(binary, arguments...)
+	// Tunable comparisons affect only the Host. Probe activation and collection
+	// belong to the separate linux-memory diagnostic, not qualification.
+	if value, set := os.LookupEnv("RUI_MEASURE_GLIBC_TUNABLES"); set {
+		cmd.Env = append(os.Environ(), "GLIBC_TUNABLES="+value)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -448,7 +453,7 @@ func ClassifyFootprint(footprint Footprint, target uint64) FootprintVerdict {
 		upper = footprint.LifetimePeakBytes + footprint.LifetimePeakTolerance
 	}
 	status := "unavailable"
-	if overflow {
+	if overflow || footprint.LifetimePeakBytes == 0 {
 		status = "unavailable"
 	} else if upper <= target {
 		status = "passed"
@@ -577,17 +582,18 @@ func pow10(exponent int) uint64 {
 }
 
 type ProcessSample struct {
-	RSSBytes                uint64    `json:"rss_bytes"`
-	VirtualBytes            uint64    `json:"virtual_bytes"`
-	CPUUserSeconds          float64   `json:"cpu_user_seconds"`
-	CPUSystemSeconds        float64   `json:"cpu_system_seconds"`
-	Threads                 int32     `json:"threads"`
-	LiveDescendantProcesses int       `json:"live_descendant_processes"`
-	OpenDescriptorRows      int       `json:"open_descriptor_rows"`
-	OpenDescriptors         int32     `json:"open_descriptors"`
-	DiskReadBytes           uint64    `json:"disk_read_bytes"`
-	DiskWriteBytes          uint64    `json:"disk_write_bytes"`
-	Footprint               Footprint `json:"footprint"`
+	RSSBytes                uint64       `json:"rss_bytes"`
+	VirtualBytes            uint64       `json:"virtual_bytes"`
+	CPUUserSeconds          float64      `json:"cpu_user_seconds"`
+	CPUSystemSeconds        float64      `json:"cpu_system_seconds"`
+	Threads                 int32        `json:"threads"`
+	LiveDescendantProcesses int          `json:"live_descendant_processes"`
+	OpenDescriptorRows      int          `json:"open_descriptor_rows,omitempty"`
+	OpenDescriptors         int32        `json:"open_descriptors"`
+	DiskReadBytes           uint64       `json:"disk_read_bytes"`
+	DiskWriteBytes          uint64       `json:"disk_write_bytes"`
+	Footprint               Footprint    `json:"footprint,omitzero"`
+	LinuxMemory             *LinuxMemory `json:"linux_memory,omitempty"`
 }
 
 type PortableProcessSample struct {
@@ -669,6 +675,20 @@ func SampleProcess(target *process.Process, rawFootprintPath string) (ProcessSam
 	if err != nil {
 		return ProcessSample{}, err
 	}
+	result := ProcessSample{
+		RSSBytes: core.memory.RSS, VirtualBytes: core.memory.VMS,
+		CPUUserSeconds: core.times.User, CPUSystemSeconds: core.times.System,
+		Threads: core.threads, LiveDescendantProcesses: len(core.children),
+		OpenDescriptors: core.descriptors,
+		DiskReadBytes:   core.ioCounters.DiskReadBytes, DiskWriteBytes: core.ioCounters.DiskWriteBytes,
+	}
+	if runtime.GOOS == "linux" {
+		result.LinuxMemory, err = sampleLinuxMemory(target.Pid, rawFootprintPath)
+		return result, err
+	}
+	if runtime.GOOS != "darwin" {
+		return ProcessSample{}, fmt.Errorf("unsupported process sampling platform %s", runtime.GOOS)
+	}
 	pid := strconv.Itoa(int(target.Pid))
 	footprintContext, cancelFootprint := context.WithTimeout(context.Background(), TeardownAllowance)
 	defer cancelFootprint()
@@ -694,19 +714,8 @@ func SampleProcess(target *process.Process, rawFootprintPath string) (ProcessSam
 	if rows < 0 {
 		rows = 0
 	}
-	return ProcessSample{
-		RSSBytes:                core.memory.RSS,
-		VirtualBytes:            core.memory.VMS,
-		CPUUserSeconds:          core.times.User,
-		CPUSystemSeconds:        core.times.System,
-		Threads:                 core.threads,
-		LiveDescendantProcesses: len(core.children),
-		OpenDescriptorRows:      rows,
-		OpenDescriptors:         core.descriptors,
-		DiskReadBytes:           core.ioCounters.DiskReadBytes,
-		DiskWriteBytes:          core.ioCounters.DiskWriteBytes,
-		Footprint:               footprint,
-	}, nil
+	result.OpenDescriptorRows, result.Footprint = rows, footprint
+	return result, nil
 }
 
 func (s ProcessSample) Portable() PortableProcessSample {
@@ -768,6 +777,13 @@ func RequireGoRuntime() error {
 func RequireRuntime() error {
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("measurement requires macOS; got %s", runtime.GOOS)
+	}
+	return RequireGoRuntime()
+}
+
+func RequireProcessRuntime() error {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return fmt.Errorf("measurement requires macOS or Linux; got %s", runtime.GOOS)
 	}
 	return RequireGoRuntime()
 }
