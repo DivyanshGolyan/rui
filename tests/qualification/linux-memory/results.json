@@ -2197,8 +2197,17 @@
     }
   },
   "original_harness_sha256": {
-    ".amp/in/artifacts/linux-audit/tests/qualification/linux-memory/run.py": "10eb077432b7e7da0c51da5c5d7fde38566f61a8760b82d36a18ac8daa06a472",
+    "tests/qualification/linux-memory/measured_run.py": "10eb077432b7e7da0c51da5c5d7fde38566f61a8760b82d36a18ac8daa06a472",
     "tests/integration/transport_h2_integration.py": "38ca1cba70147a4d3139d65862c38526c887731f1691bb89da4e5bac5c2929ef",
     "tests/integration/dispatch_integration.py": "7fdd70f2a6b92279d13d8707e0abe45b1492f08f086809a166ca2efb19cf8c26"
+  },
+  "measured_probe": {
+    "runs": ["pilot-probe", "probe-default", "probe-nocache", "final-instrumentation-pilot"],
+    "source": "tests/qualification/linux-memory/malloc_probe.c",
+    "source_sha256": "9987c34b571850e11d3ee918c6d0d040b60e30471a5b765fe7e290e43e2446b7",
+    "object_sha256": "ea263fd4f21be72cad3439737077bb31d10d1807b29cbf1c302d344f28bc366d",
+    "compiler": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "command": "cc -shared -fPIC -pthread -Wall -Wextra -Werror tests/qualification/linux-memory/malloc_probe.c -o bin/malloc_probe.so",
+    "verification": "Retained object rehashed in the measurement VM after review; matches the original recorded hash. Binary remains local."
   }
 }

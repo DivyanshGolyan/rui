@@ -22,7 +22,7 @@ cc -shared -fPIC -pthread -Wall -Wextra -Werror tests/qualification/linux-memory
 python3 tests/qualification/linux-memory/run.py /absolute/path/to/rui --output /tmp/new-probe --probe /tmp/rui-malloc-probe.so --trim-after
 ```
 
-The probe adds a thread, FIFO, stack and allocations. Its `mallinfo2` and `malloc_info` snapshots report glibc accounting, not semantic live data, allocation-origin attribution or isolated tcache usage. They overlap RSS/PSS and must not be added to them. The final one-off `malloc_trim` tests reclaimability; it is not a proposed production cleanup timer.
+The probe adds a thread, FIFO, stack and allocations. Its `mallinfo2` and `malloc_info` snapshots report glibc accounting, not semantic live data, allocation-origin attribution or isolated tcache usage. They overlap RSS/PSS and must not be added to them. The final one-off `malloc_trim` tests reclaimability; it is not a proposed production cleanup timer. Probe injection belongs only to this diagnostic; shared Go qualification runners have no probe-loading option.
 
 Run sustained output and protected-control measurements separately with the existing Go runners:
 
@@ -42,6 +42,8 @@ Repeat with the candidate setting. Output preserves exact result audits and the 
 - A finite repeated-work test neither proves absence of all leaks nor qualifies Linux x86-64, musl, other glibc versions, a live-provider journey, tools or the complete 1,000-operation workload. Do not change networking libraries or allocators based on these counters alone.
 
 ## Recorded experiment
+
+The byte-identical [measured harness](measured_run.py) preserves the original comparison workload; use `run.py` for new measurements. `results.json` records its hash, the measured probe source and object hashes, compiler and build command. The retained object was rehashed in the original VM during review. The historical harness is evidence, not a second maintained implementation.
 
 The local 2026-09-27 experiment uses the unchanged production source at [4991401](https://github.com/DivyanshGolyan/rui/commit/499140169e8d7864160aba183152eeec7fcac4cd), cross-built for aarch64-linux-gnu in ReleaseSmall. The source export has no Git metadata; the Go runner honestly records that absence. The uncommitted measurement overlay, raw results and hashes are retained locally under `.amp/in/artifacts/linux-audit/`; the compact derived measurements are in [results.json](results.json) beside this file. The full comparisons preceded the final metadata-only collector changes; the final two-agent/two-wave instrumented pilot verifies those additions. Earlier raw status snapshots supply the derived RSS high-water values.
 

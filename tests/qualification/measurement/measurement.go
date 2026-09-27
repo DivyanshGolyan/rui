@@ -162,14 +162,10 @@ func StartHost(
 	}
 	arguments = append(arguments, extra...)
 	cmd := exec.Command(binary, arguments...)
-	// Experiment controls affect only the Host, never the fixture or CLI.
-	for _, pair := range [][2]string{{"RUI_MEASURE_GLIBC_TUNABLES", "GLIBC_TUNABLES"}, {"RUI_MEASURE_MALLOC_PROBE", "LD_PRELOAD"}} {
-		if value, set := os.LookupEnv(pair[0]); set {
-			if cmd.Env == nil {
-				cmd.Env = os.Environ()
-			}
-			cmd.Env = append(cmd.Env, pair[1]+"="+value)
-		}
+	// Tunable comparisons affect only the Host. Probe activation and collection
+	// belong to the separate linux-memory diagnostic, not qualification.
+	if value, set := os.LookupEnv("RUI_MEASURE_GLIBC_TUNABLES"); set {
+		cmd.Env = append(os.Environ(), "GLIBC_TUNABLES="+value)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
