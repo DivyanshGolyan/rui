@@ -2604,7 +2604,11 @@ pub const Store = struct {
         try bindText(statement, 1, request.session.slice());
         try bindU64(statement, 2, request.position);
         if (request.ordinal != 0) try bindU64(statement, 3, request.ordinal);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.ContentNotFound;
+        switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => {},
+            c.SQLITE_DONE => return error.ContentNotFound,
+            else => return error.PublicContentReadFailed,
+        }
         const content_id = c.sqlite3_column_int64(statement, 0);
         if (content_id <= 0) return error.CorruptStore;
         const metadata = try self.readContentMetadata(content_id);
@@ -11012,6 +11016,28 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(.{ .session = request.session, .position = 1, .start = 1024 * 1024 + 1 }));
     try std.testing.expectError(error.InvalidCursor, storage.publicConversationPage(.{ .session = request.session, .end = first.end + 100, .before_position = 1 }));
     try std.testing.expect(!storage.isFenced());
+}
+
+test "public content SQL failure fences Store instead of reporting absence" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "public-read-config", "direct/read-failure");
+    try submitTestMessage(&storage, &tmp, "public-read-text", "public-read-key", "direct/read-failure", "text");
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    var request: protocol.ConversationContent = .{ .position = 1 };
+    try request.session.set("direct/read-failure");
+    const Interrupt = struct {
+        fn progress(_: ?*anyopaque) callconv(.c) c_int {
+            return 1;
+        }
+    };
+    c.sqlite3_progress_handler(storage.database, 1, Interrupt.progress, null);
+    defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+    try std.testing.expectError(error.PublicContentReadFailed, storage.openPublicConversationContent(request));
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectError(error.StoreFenced, storage.openPublicConversationContent(request));
 }
 
 test "private-only model output never becomes public conversation" {
