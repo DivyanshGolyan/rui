@@ -47,7 +47,7 @@ func TestMemoryEvidenceBoundsOnlyHostAndRequiresMeasuredPeak(t *testing.T) {
 
 func TestExpectedCapacityRequestDigest(t *testing.T) {
 	bytes, digest := expectedCapacityRequests([]string{"capacity-1-0"})
-	if bytes != 244 || digest != "358881c8b33611579e786d84931f25c3d22b8289a4ed926d0bb5759c050ab89d" {
+	if bytes != 200 || digest != "3ba8f89953b1f1cbc2a36d18c3dd7cb8f5a4a4bd6860d23bcb24e79c2069c8d8" {
 		t.Fatalf("unexpected independent request oracle: %d %s", bytes, digest)
 	}
 }
@@ -235,6 +235,41 @@ func TestSpillDiagnosticsRequireEffectiveConfiguration(t *testing.T) {
 	}
 }
 
+func TestProductionDiagnosticsRejectOldCacheAndChangedGuarantees(t *testing.T) {
+	const valid = `{"cache_size_setting":-1024,"hard_heap_limit_bytes":16777216,"cache_spill_threshold":247,"synchronous":3,"journal_mode":"delete","mmap_size_bytes":0,"temp_store":1,"busy_timeout_ms":0}`
+	var record sqliteDiagnostic
+	if err := json.Unmarshal([]byte(valid), &record); err != nil {
+		t.Fatal(err)
+	}
+	if !productionDiagnosticsValid([]sqliteDiagnostic{record}) || productionDiagnosticsValid(nil) {
+		t.Fatal("invalid production diagnostic baseline")
+	}
+	for field, wrong := range map[string]any{
+		"cache_size_setting": -4096, "hard_heap_limit_bytes": 33554432,
+		"cache_spill_threshold": 0, "synchronous": 2, "journal_mode": "wal",
+		"mmap_size_bytes": 4096, "temp_store": 2, "busy_timeout_ms": 100,
+	} {
+		for _, value := range []any{wrong, nil} {
+			var fields map[string]any
+			if err := json.Unmarshal([]byte(valid), &fields); err != nil {
+				t.Fatal(err)
+			}
+			fields[field] = value
+			encoded, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var bad sqliteDiagnostic
+			if err := json.Unmarshal(encoded, &bad); err != nil {
+				t.Fatal(err)
+			}
+			if productionDiagnosticsValid([]sqliteDiagnostic{record, bad}) {
+				t.Fatalf("accepted %s=%v", field, value)
+			}
+		}
+	}
+}
+
 func TestSpillDiagnosticCacheSizeSettingPreservesRawPragmaMeaning(t *testing.T) {
 	decode := func(value string) sqliteDiagnostic {
 		t.Helper()
@@ -403,20 +438,20 @@ func TestCapacityCPUWindowUsesConservativeQueryBrackets(t *testing.T) {
 	first := bracketedCPUSample{QueryStart: start.Add(10 * time.Second), QueryEnd: start.Add(10*time.Second + 5*time.Millisecond)}
 	second := bracketedCPUSample{QueryStart: first.QueryEnd.Add(40 * time.Second), QueryEnd: first.QueryEnd.Add(40*time.Second + 5*time.Millisecond)}
 	final := second.QueryEnd
-	if !capacityCPUWindowValid(start, first, second, final) {
+	if !capacityCPUWindowValid(start, 60*time.Second, first, second, final) {
 		t.Fatal("inclusive 40-second and final-completion boundaries were rejected")
 	}
 	tooShort := second
 	tooShort.QueryStart = first.QueryEnd.Add(40*time.Second - time.Nanosecond)
-	if capacityCPUWindowValid(start, first, tooShort, final) {
+	if capacityCPUWindowValid(start, 60*time.Second, first, tooShort, final) {
 		t.Fatal("short conservative interval was accepted")
 	}
 	afterWork := second
 	afterWork.QueryEnd = final.Add(time.Nanosecond)
-	if capacityCPUWindowValid(start, first, afterWork, final) {
+	if capacityCPUWindowValid(start, 60*time.Second, first, afterWork, final) {
 		t.Fatal("query extending past simultaneous work was accepted")
 	}
-	if capacityCPUWindowValid(start, first, second, time.Time{}) {
+	if capacityCPUWindowValid(start, 60*time.Second, first, second, time.Time{}) {
 		t.Fatal("missing provider completion boundary was accepted")
 	}
 	if status := sustainedCPUQualificationStatus(false, true, 1); status != "unavailable" {
@@ -478,10 +513,31 @@ func TestOfflineCapacityAuditsRunOnlyAfterHostStopAndCoverBothRounds(t *testing.
 	if len(results) != 2 || !results[0].complete || !results[1].complete {
 		t.Fatalf("offline audit results = %+v", results)
 	}
-	first := capacityAuditIdentity(2, 1)
-	second := capacityAuditIdentity(2, 2)
+	first := capacityAuditIdentity(2, 1, false)
+	second := capacityAuditIdentity(2, 2, false)
 	if strings.Join(first.keys, ",") != "capacity-2-round-1-0,capacity-2-round-1-1" || strings.Join(second.keys, ",") != "capacity-2-round-2-0,capacity-2-round-2-1" {
 		t.Fatalf("round-specific audit identities first=%v second=%v", first.keys, second.keys)
+	}
+	repeated := capacityAuditIdentity(2, 2, true)
+	if strings.Join(repeated.sessions, ",") != "measure/repeat-2/0,measure/repeat-2/1" {
+		t.Fatalf("repeat-work sessions are not stable: %v", repeated.sessions)
+	}
+}
+
+func TestQualificationExitCodeRejectsNonPassingJSONStatuses(t *testing.T) {
+	for _, status := range []string{"failed", "target_miss", "incomplete", "unavailable", ""} {
+		if qualificationExitCode(status) == 0 {
+			t.Fatalf("status %q produced a successful process exit", status)
+		}
+	}
+	for _, status := range []string{"passed", "smoke_passed"} {
+		if qualificationExitCode(status) != 0 {
+			t.Fatalf("status %q produced a failed process exit", status)
+		}
+	}
+	encoded, code, err := encodedQualificationResult(map[string]any{"status": "failed", "evidence": "retained"})
+	if err != nil || code == 0 || !strings.Contains(string(encoded), `"status": "failed"`) || !strings.Contains(string(encoded), `"evidence": "retained"`) {
+		t.Fatalf("failed result was not preserved before nonzero exit: code=%d err=%v json=%s", code, err, encoded)
 	}
 }
 

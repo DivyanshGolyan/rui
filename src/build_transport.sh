@@ -123,7 +123,8 @@ cp -R "$curl_source" "$curl_patched"
         --disable-pop3 --disable-imap --disable-smb --disable-smtp --disable-gopher \
         --disable-mqtt --without-zlib --without-brotli --without-zstd --without-libpsl \
         --without-libidn2 \
-        --disable-docs --disable-manual --disable-libcurl-option --disable-dependency-tracking
+        --disable-docs --disable-manual --disable-libcurl-option --disable-dependency-tracking \
+        --disable-headers-api
     make -C lib -j4
     mkdir -p "$prefix/include/curl" "$prefix/lib"
     cp "$curl_patched"/include/curl/*.h "$prefix/include/curl/"

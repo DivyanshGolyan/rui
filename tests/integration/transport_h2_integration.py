@@ -345,7 +345,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
                 self.server.ready.set()
 
 
-def round_trip(root, endpoint, capacity, ca_file):
+def round_trip(root, endpoint, capacity, ca_file, rounds=2):
     store = root / f"store-{capacity}"
     host = dispatch.start_host(
         store,
@@ -356,7 +356,8 @@ def round_trip(root, endpoint, capacity, ca_file):
     )
     try:
         idle_fds = []
-        for round_number in range(2):
+        physical_peaks = []
+        for round_number in range(rounds):
             for index in range(capacity):
                 session = f"direct/h2-{capacity}-{index}"
                 if round_number == 0:
@@ -391,26 +392,31 @@ def round_trip(root, endpoint, capacity, ca_file):
             assert observation["custody_occupied"] == "0", observation
             assert observation["scratch_used_bytes"] == "0", observation
             idle_fds.append(open_descriptors(host.pid))
-        assert idle_fds[1] <= idle_fds[0], idle_fds
+            if endpoint.observed_shape:
+                physical_peaks.append(host_physical_peak(host.pid))
+        assert all(count <= idle_fds[0] for count in idle_fds), idle_fds
         streams = list(endpoint.streams)
-        assert len(streams) == 2 * capacity
+        assert len(streams) == rounds * capacity
         assert len({(address, stream) for address, stream, _, _ in streams}) == len(streams)
         assert {text for _, _, text, _ in streams} == {
             f"h2-{capacity}-{round_number}-{index}"
-            for round_number in range(2) for index in range(capacity)
+            for round_number in range(rounds) for index in range(capacity)
         }
         assert len(endpoint.connections) == 1, endpoint.connections
         if endpoint.observed_shape:
-            assert endpoint.offered_bytes >= 2 * capacity * (37_217 + 37_221 + 39_316 + 48 * 218)
+            assert endpoint.offered_bytes >= rounds * capacity * (37_217 + 37_221 + 39_316 + 48 * 218)
+        peak = physical_peaks[-1] if physical_peaks else None
         print(json.dumps({
             "case": "observed_shape" if endpoint.observed_shape else "round_trip",
-            "capacity": capacity, "rounds": 2, "alpn": "h2",
+            "capacity": capacity, "rounds": rounds, "alpn": "h2",
             "tcp_connections": len(endpoint.connections), "streams": len(streams),
             "request_bytes": sum(len(body) for _, _, _, body in streams),
             "offered_sse_bytes": endpoint.offered_bytes,
-            "host_physical_peak_bytes": host_physical_peak(host.pid) if endpoint.observed_shape else None,
+            "host_physical_peak_bytes": peak,
+            "host_physical_peaks_by_round": physical_peaks,
             "completed_idle_fds": idle_fds,
         }), flush=True)
+        return peak
     finally:
         dispatch.stop_host(host)
 
@@ -982,10 +988,13 @@ def observed_shape_cases(root, tls):
 
 def main():
     observed_only = len(sys.argv) == 3 and sys.argv[2] == "--observed-shape-only"
-    assert len(sys.argv) == 2 or observed_only
+    churn = len(sys.argv) == 3 and sys.argv[2] == "--observed-shape-churn"
+    assert len(sys.argv) == 2 or observed_only or churn
+    if churn and sys.platform != "darwin":
+        raise RuntimeError("Observed-shape churn footprint qualification requires macOS")
     with tempfile.TemporaryDirectory(prefix="rui-h2-") as tmp:
         root = pathlib.Path(tmp)
-        if not observed_only:
+        if not observed_only and not churn:
             queued_h1(root)
             queued_h1_inactivity(root)
         subprocess.run([
@@ -996,6 +1005,18 @@ def main():
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(root / "cert.pem", root / "key.pem")
         tls.set_alpn_protocols(["h2"])
+        if churn:
+            endpoint = Endpoint(tls, 100, sse=True, observed_shape=True)
+            thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+            thread.start()
+            try:
+                peak = round_trip(root, endpoint, 100, root / "cert.pem", rounds=20)
+                assert peak is not None and peak <= 25_000_000, f"Host footprint target miss: {peak} bytes"
+            finally:
+                endpoint.shutdown()
+                endpoint.server_close()
+                thread.join(timeout=5)
+            return
         if observed_only:
             observed_shape_cases(root, tls)
             return

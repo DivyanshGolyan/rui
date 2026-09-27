@@ -9,6 +9,12 @@ const provider = @import("provider.zig");
 const protocol = @import("protocol.zig");
 const server = @import("server.zig");
 
+// Zig otherwise reserves an alternate signal stack on every thread even when
+// the release build has no default crash handler to use it.
+pub const std_options: std.Options = .{
+    .signal_stack_size = if (std.debug.default_enable_segfault_handler) 1 << 18 else null,
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const args = try init.minimal.args.toSlice(allocator);

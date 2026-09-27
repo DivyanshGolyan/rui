@@ -1299,7 +1299,7 @@ fn planConfigurationUpdate(
 
 pub const OpenOptions = struct {
     cache_spill: bool = true,
-    cache_kib: u32 = 4096,
+    cache_kib: u32 = 1024,
 };
 
 pub const SqliteDiagnostic = struct {
@@ -10075,7 +10075,7 @@ test "production Store applies finite durable SQLite settings" {
     const diagnostic = storage.sqliteDiagnostic();
     try std.testing.expectEqual(@as(?u64, sqlite_heap_bytes), diagnostic.hard_heap_limit_bytes);
     try std.testing.expectEqual(@as(?u64, 4096), diagnostic.page_size_bytes);
-    try std.testing.expectEqual(@as(?i64, -4096), diagnostic.cache_size_setting);
+    try std.testing.expectEqual(@as(?i64, -1024), diagnostic.cache_size_setting);
     try std.testing.expect(diagnostic.cache_spill_threshold.? > 0);
     try std.testing.expectEqual(@as(?u64, 0), diagnostic.mmap_size_bytes);
     try std.testing.expectEqual(@as(?i64, 3), diagnostic.synchronous);
@@ -10136,7 +10136,7 @@ test "measurement Store can disable cache spill without changing other limits" {
     const diagnostic = storage.sqliteDiagnostic();
     try std.testing.expectEqual(@as(?i64, 0), diagnostic.cache_spill_threshold);
     try std.testing.expectEqual(@as(?u64, sqlite_heap_bytes), diagnostic.hard_heap_limit_bytes);
-    try std.testing.expectEqual(@as(?i64, -4096), diagnostic.cache_size_setting);
+    try std.testing.expectEqual(@as(?i64, -1024), diagnostic.cache_size_setting);
     try std.testing.expectEqual(@as(?i64, 3), diagnostic.synchronous);
     try std.testing.expectEqualStrings("delete", diagnostic.journal_mode.?.slice());
 }

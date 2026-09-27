@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -38,6 +39,7 @@ type stream struct {
 	id            string
 	requestBytes  int
 	requestSHA256 string
+	historyValid  bool
 	delivery      deliveryEvidence
 	terminalBytes int
 	offerError    string
@@ -55,6 +57,8 @@ type fixture struct {
 	perStreamWork    workExpectation
 	totalWork        workExpectation
 	artifactDir      string
+	historyAware     bool
+	round            int
 	facts            *os.File
 	streams          map[string]*stream
 	h2Peers          map[string]struct{}
@@ -82,6 +86,7 @@ type Config struct {
 	ArtifactDir     string
 	Rounds          int
 	TLS             bool
+	HistoryAware    bool
 }
 
 type Server struct {
@@ -157,6 +162,7 @@ type Summary struct {
 	TerminalBytes                 int                      `json:"terminal_bytes"`
 	RequestBytes                  int                      `json:"request_bytes"`
 	RequestSetSHA256              string                   `json:"request_set_sha256"`
+	HistoryValidStreams           int                      `json:"history_valid_streams"`
 	StartUnixNS                   int64                    `json:"start_unix_ns,omitempty"`
 	OfferHorizonUnixNS            int64                    `json:"offer_horizon_unix_ns,omitempty"`
 	HardDeadlineUnixNS            int64                    `json:"hard_deadline_unix_ns,omitempty"`
@@ -406,7 +412,7 @@ func (e *deliveryEvidence) fact(start time.Time) deliveryEvidenceFact {
 	return result
 }
 
-func newFixture(expected int, duration time.Duration, eventsPerSecond int, artifactDir string, facts *os.File) (*fixture, error) {
+func newFixture(expected int, duration time.Duration, eventsPerSecond int, historyAware bool, artifactDir string, facts *os.File) (*fixture, error) {
 	if duration%time.Second != 0 || eventsPerSecond <= 0 {
 		return nil, errors.New("event rate requires a whole-second duration and positive rate")
 	}
@@ -433,6 +439,7 @@ func newFixture(expected int, duration time.Duration, eventsPerSecond int, artif
 		perStreamWork:   perStreamWork,
 		totalWork:       totalWork,
 		artifactDir:     artifactDir,
+		historyAware:    historyAware,
 		facts:           facts,
 		streams:         make(map[string]*stream, expected),
 		h2Peers:         make(map[string]struct{}),
@@ -474,17 +481,71 @@ func requestID(body []byte) (string, error) {
 	if err := json.Unmarshal(body, &value); err != nil {
 		return "", err
 	}
+	result := ""
 	for _, item := range value.Input {
 		if item.Role != "user" {
 			continue
 		}
 		for _, content := range item.Content {
 			if content.Type == "input_text" && content.Text != "" {
-				return content.Text, nil
+				result = content.Text
 			}
 		}
 	}
-	return "", errors.New("request has no nonempty user input_text")
+	if result == "" {
+		return "", errors.New("request has no nonempty user input_text")
+	}
+	return result, nil
+}
+
+func requestHistoryValid(body []byte, current string) bool {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(body, &envelope) != nil || len(envelope) != 7 {
+		return false
+	}
+	for field, expected := range map[string]string{
+		"model": `"model-a"`, "store": `false`, "stream": `true`,
+		"include": `["reasoning.encrypted_content"]`, "instructions": `""`, "tools": `[]`,
+	} {
+		var compact bytes.Buffer
+		if json.Compact(&compact, envelope[field]) != nil || compact.String() != expected {
+			return false
+		}
+	}
+	var value requestBody
+	if json.Unmarshal(body, &value) != nil {
+		return false
+	}
+	var capacity, round, index int
+	if _, err := fmt.Sscanf(current, "capacity-%d-round-%d-%d", &capacity, &round, &index); err != nil || capacity < 1 || round < 1 || index < 0 || index >= capacity {
+		return false
+	}
+	if len(value.Input) != round*2-1 {
+		return false
+	}
+	for prior := 1; prior <= round; prior++ {
+		key := fmt.Sprintf("capacity-%d-round-%d-%d", capacity, prior, index)
+		user := value.Input[(prior-1)*2]
+		if user.Role != "user" || len(user.Content) != 1 || user.Content[0].Type != "input_text" || user.Content[0].Text != key {
+			return false
+		}
+		if prior == round {
+			continue
+		}
+		assistant := value.Input[(prior-1)*2+1]
+		if assistant.Role != "assistant" || len(assistant.Content) != 1 || assistant.Content[0].Type != "output_text" || assistant.Content[0].Text != "capacity answer "+key {
+			return false
+		}
+	}
+	return true
+}
+
+func requestRoundIdentityValid(current string, capacity, round int) bool {
+	var observedCapacity, observedRound, index int
+	if _, err := fmt.Sscanf(current, "capacity-%d-round-%d-%d", &observedCapacity, &observedRound, &index); err != nil {
+		return false
+	}
+	return observedCapacity == capacity && observedRound == round && index >= 0 && index < capacity
 }
 
 func terminal(id string) string {
@@ -616,7 +677,7 @@ func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	digest := sha256.Sum256(body)
-	current := &stream{id: id, requestBytes: len(body), requestSHA256: hex.EncodeToString(digest[:])}
+	current := &stream{id: id, requestBytes: len(body), requestSHA256: hex.EncodeToString(digest[:]), historyValid: !f.historyAware || requestRoundIdentityValid(id, f.expected, f.round) && requestHistoryValid(body, id)}
 	f.mu.Lock()
 	if f.started || len(f.streams) >= f.expected || f.streams[id] != nil {
 		f.mu.Unlock()
@@ -786,6 +847,9 @@ func (f *fixture) factsSnapshot() ([]streamFact, Summary) {
 	requestSet := sha256.New()
 	for _, row := range rows {
 		result.RequestBytes += row.RequestBytes
+		if f.streams[row.ID].historyValid {
+			result.HistoryValidStreams++
+		}
 		fmt.Fprintf(requestSet, "%s\n", row.RequestSHA256)
 		result.CompletedBatches += row.Delivery.CompletedBatches
 		result.CompletedEvents += row.Delivery.CompletedEvents
@@ -1021,11 +1085,12 @@ func (s *Server) Reset() error {
 	if err != nil {
 		return err
 	}
-	prepared, err := newFixture(s.config.Streams, s.config.Duration, s.config.EventsPerSecond, artifactDir, facts)
+	prepared, err := newFixture(s.config.Streams, s.config.Duration, s.config.EventsPerSecond, s.config.HistoryAware, artifactDir, facts)
 	if err != nil {
 		facts.Close()
 		return err
 	}
+	prepared.round = nextRound
 	s.fixtureMu.Lock()
 	defer s.fixtureMu.Unlock()
 	old.handlers.Wait()
@@ -1061,11 +1126,12 @@ func Start(config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	fixture, err := newFixture(config.Streams, config.Duration, config.EventsPerSecond, fixtureDir, facts)
+	fixture, err := newFixture(config.Streams, config.Duration, config.EventsPerSecond, config.HistoryAware, fixtureDir, facts)
 	if err != nil {
 		facts.Close()
 		return nil, err
 	}
+	fixture.round = 1
 	mux := http.NewServeMux()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

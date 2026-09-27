@@ -371,6 +371,18 @@ pub fn build(b: *std.Build) void {
     );
     measure_output_step.dependOn(&measure_output.step);
 
+    const measure_repeat_work = b.addSystemCommand(&.{
+        "go", "run", "-mod=readonly", "./model-output", "--repeat-work",
+    });
+    measure_repeat_work.setCwd(b.path("tests/qualification"));
+    measure_repeat_work.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    measure_repeat_work.addArtifactArg(release);
+    const measure_repeat_work_step = b.step(
+        "measure-repeat-work",
+        "Measure 20 same-Host waves across 100 stable Sessions with growing history",
+    );
+    measure_repeat_work_step.dependOn(&measure_repeat_work.step);
+
     const measure_retry = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./model-retry",
     });
