@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 from host_process import start_ready_process, stop_process
 
@@ -88,6 +89,24 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             assert status(store) == "owned_unavailable"
             assert cli_status(home, "--store", store).startswith("Host: owned but unavailable")
+            with socket.socket(socket.AF_UNIX) as endpoint:
+                endpoint.bind(str(stale))
+                endpoint.listen(1)
+
+                def silent_peer():
+                    connection, _ = endpoint.accept()
+                    with connection:
+                        connection.recv(4096)
+                        time.sleep(5)
+
+                peer = threading.Thread(target=silent_peer, daemon=True)
+                peer.start()
+                began = time.monotonic()
+                assert status(store) == "owned_unavailable"
+                assert time.monotonic() - began < 3, "Host-info waited for an unresponsive owner"
+                peer.join(timeout=6)
+                assert not peer.is_alive()
+            stale.unlink()
             with socket.socket(socket.AF_UNIX) as endpoint:
                 endpoint.bind(str(stale))
                 endpoint.listen(1)

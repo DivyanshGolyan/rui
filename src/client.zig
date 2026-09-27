@@ -109,7 +109,7 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths) HostStatus {
     body.appendJsonString(paths.store.slice()) catch unreachable;
     body.append("}") catch unreachable;
     var reply_buffer: ReplyBuffer = .{};
-    const reply = sendBytes(io, paths, "/v1/host-info", body.slice(), null, &reply_buffer) catch |err| return switch (err) {
+    const reply = sendSource(io, paths, "/v1/host-info", body.len, null, body.slice(), null, &reply_buffer, 1_000) catch |err| return switch (err) {
         error.AccessDenied, error.PermissionDenied => .access_failure,
         error.WrongWireVersion, error.InvalidResponse, error.ResponseHeaderTooLarge,
         error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,
@@ -766,7 +766,7 @@ fn sendRecord(
     var file = try std.Io.Dir.cwd().openFile(io, record, .{});
     defer file.close(io);
     const length = try file.length(io);
-    return sendSource(io, paths, route, length, &file, null, drop_reply, reply_buffer);
+    return sendSource(io, paths, route, length, &file, null, drop_reply, reply_buffer, null);
 }
 
 fn sendBytes(
@@ -777,7 +777,7 @@ fn sendBytes(
     drop_reply: ?[]const u8,
     reply_buffer: *ReplyBuffer,
 ) !CommandReply {
-    return sendSource(io, paths, route, body.len, null, body, drop_reply, reply_buffer);
+    return sendSource(io, paths, route, body.len, null, body, drop_reply, reply_buffer, null);
 }
 
 fn sendSource(
@@ -789,6 +789,7 @@ fn sendSource(
     bytes: ?[]const u8,
     drop_reply: ?[]const u8,
     reply_buffer: *ReplyBuffer,
+    first_byte_timeout_ms: ?i32,
 ) !CommandReply {
     const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
     const stream = try address.connect(io);
@@ -811,7 +812,7 @@ fn sendSource(
             sent += count;
         }
     } else try writeAll(fd, bytes.?);
-    return readCommandResponse(fd, reply_buffer);
+    return readCommandResponseWithFirstByteTimeout(fd, reply_buffer, first_byte_timeout_ms);
 }
 
 const ResponseKind = enum { command_json, result_text };
@@ -827,7 +828,14 @@ fn readResponseHead(fd: std.posix.fd_t) !ResponseHead {
 }
 
 fn readResponseHeadWithInactivity(fd: std.posix.fd_t, inactivity_ms: i32) !ResponseHead {
+    return readResponseHeadWithFirstByteTimeout(fd, inactivity_ms, null);
+}
+
+fn readResponseHeadWithFirstByteTimeout(fd: std.posix.fd_t, inactivity_ms: i32, first_byte_timeout_ms: ?i32) !ResponseHead {
     var header_buffer: [protocol.max_header_bytes]u8 = undefined;
+    if (first_byte_timeout_ms) |timeout| {
+        if (!try waitReadable(fd, timeout)) return error.ResponseInactive;
+    }
     const first_count = try std.posix.read(fd, header_buffer[0..1]);
     if (first_count == 0) return error.TruncatedResponse;
     var used: usize = first_count;
@@ -875,8 +883,12 @@ fn readResponseHeadWithInactivity(fd: std.posix.fd_t, inactivity_ms: i32) !Respo
 }
 
 fn readCommandResponse(fd: std.posix.fd_t, reply_buffer: *ReplyBuffer) !CommandReply {
+    return readCommandResponseWithFirstByteTimeout(fd, reply_buffer, null);
+}
+
+fn readCommandResponseWithFirstByteTimeout(fd: std.posix.fd_t, reply_buffer: *ReplyBuffer, first_byte_timeout_ms: ?i32) !CommandReply {
     reply_buffer.len = 0;
-    const head = try readResponseHead(fd);
+    const head = try readResponseHeadWithFirstByteTimeout(fd, 60_000, first_byte_timeout_ms);
     if (head.kind != .command_json) return error.InvalidResponse;
     return readCommandBody(fd, head, reply_buffer);
 }
@@ -1007,6 +1019,20 @@ test "Host processing wait starts inactivity only after the first response byte"
     defer writer.join();
     const head = try readResponseHeadWithInactivity(sockets[0], 10);
     try std.testing.expectEqual(@as(u16, 200), head.status);
+}
+
+test "Host-info first byte is bounded independently of normal processing waits" {
+    const sockets = try socketPair();
+    defer closeTestDescriptor(sockets[0]);
+    const writer = try std.Thread.spawn(.{}, delayedResponse, .{
+        std.testing.io,
+        sockets[1],
+        std.Io.Duration.fromMilliseconds(50),
+        empty_test_response,
+    });
+    defer writer.join();
+    var buffer: ReplyBuffer = .{};
+    try std.testing.expectError(error.ResponseInactive, readCommandResponseWithFirstByteTimeout(sockets[0], &buffer, 10));
 }
 
 test "Host processing wait does not consume response transfer inactivity" {
