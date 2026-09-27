@@ -197,6 +197,10 @@ pub fn serve(
     bash_path: []const u8,
     bash_timeout_ms: u64,
 ) !void {
+    // Capture this before descriptor enumeration or Store setup can reuse a
+    // missing stdout slot. A later successful write to fd 1 would then be a
+    // socket write, not a readiness acknowledgement to the launching caller.
+    const readiness_output_present = std.c.fcntl(1, std.c.F.GETFD) >= 0;
     const descriptor_observation = try descriptor_limit.observe(io);
     const descriptor_requirement = try descriptor_capacity.calculate(
         descriptor_observation.open_descriptors,
@@ -238,6 +242,7 @@ pub fn serve(
     defer if (diagnostics) |*writer| writer.close();
     if (diagnostics) |*writer| writer.record("begin", "lease_acquired");
     errdefer if (diagnostics) |*writer| writer.record("failed", "startup_error");
+    if (!readiness_output_present) return error.HostReadinessOutputUnavailable;
     var storage = try store_module.Store.openWithOptions(
         io,
         lease.paths.database.slice(),
