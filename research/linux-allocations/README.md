@@ -237,18 +237,21 @@ Preserved failed runs exposed two measurement races, not evidence of production
 leaks. After custody was observed at zero, a second inspection could see the
 temporary reserve-before-no-work check. Separately, a completed inspection
 reply can precede release of its report file and accepted socket, adding 2 FDs.
-The fixture checks custody and scratch in one observation. After PR review,
-it also waits for that inspection's socket EOF before sampling any wave,
-including the first baseline: the server releases the report before closing
-the socket. Later samples must return to the lowest previously observed
-population. EOF proves cleanup of this inspection, not all earlier independent
-callers or absence of every retained resource. No production protocol or
-descriptor allowance changed.
+Other CLI calls also return at Content-Length before the Host closes their
+sockets, so qualifying only inspection was insufficient. The fixture now sends
+all five request kinds through one public-wire helper that waits for EOF.
+The server releases request content and reports before closing each socket.
+After observing custody and scratch zero together, the fixture samples FDs
+once per wave and rejects growth; the previous descriptor polling is removed.
+No production protocol, CLI behavior or descriptor allowance changed.
 
 A deterministic reply-before-cleanup counterexample starts with 10 steady
-and 2 transient inspection FDs. Removing the EOF wait makes its first-baseline
-assertion fail; that inflated baseline would otherwise accept 2 retained FDs
-on the next wave. The full Linux H2 suite passed with the corrected oracle.
+and 1 transient caller FD, for each of the five request kinds. Removing the
+EOF wait makes every first-baseline assertion fail; an inflated baseline
+would otherwise accept 1 retained FD on the next wave. The full Linux H2
+suite passed with the corrected oracle. A fresh 100-session/20-wave Linux run
+validated all 2,000 histories and exact results on one H2 connection, with
+10 completed-idle descriptors in every wave.
 The complete macOS `zig build transport-h2-integration` gate also passed,
 including its five oracle tests and stalled-capture/recovery cases. The oracle
 tests also pass with a nonexistent binary path, keeping their simulated
@@ -256,9 +259,11 @@ later-wave failure isolated from real Host startup. The macOS descriptor
 listing still warns about an unrelated mounted filesystem.
 Earlier experiment hashes and results retain their original fixture;
 the review correction does not retrospectively qualify those measurements.
+Switching from CLI subprocesses to direct public-wire requests changes caller
+overhead and pacing; new runs must not be compared as if the harness were unchanged.
 
 The original counterexample fails at the second-read assertion. The corrected
-predicate accepts that interleaving; a persistent FD increase still times out.
+predicate accepts that interleaving; a persistent FD increase fails comparison.
 The successful 20-wave run recorded 13 FDs each wave; the control recorded 10.
 Earlier failed traces and logs remain under the VM's `~/rui/audit/` and local
 `.amp/in/artifacts/`, rather than being relabelled as passes. Python compilation,

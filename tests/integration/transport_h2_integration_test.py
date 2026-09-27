@@ -13,11 +13,21 @@ from unittest.mock import patch
 import transport_h2_integration as transport
 
 
-class InspectionReply:
+class HostReply:
     sent = False
     released = False
 
+    def __init__(self, body=b"{}", content_type=b"application/json"):
+        self.body = body
+        self.content_type = content_type
+
     def settimeout(self, timeout):
+        pass
+
+    def connect(self, path):
+        pass
+
+    def sendall(self, data):
         pass
 
     def recv(self, size):
@@ -25,8 +35,8 @@ class InspectionReply:
             self.released = True
             return b""
         self.sent = True
-        body = b'{"execution":{"custody_occupied":"0","scratch_used_bytes":"0"}}'
-        return b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+        return (b"HTTP/1.1 200 OK\r\nContent-Type: " + self.content_type
+                + b"\r\nContent-Length: " + str(len(self.body)).encode() + b"\r\n\r\n" + self.body)
 
     def __enter__(self):
         return self
@@ -85,13 +95,16 @@ class RoundTripHistoryTests(unittest.TestCase):
 
 
 class ShapedWorkTests(unittest.TestCase):
-    def test_inspection_cleanup_precedes_first_fd_baseline(self):
-        reply = InspectionReply()
-        self.assertTrue(transport.inspection_drained(reply))
-        baseline = 10 + (0 if reply.released else 2)
-        self.assertEqual(baseline, 10, "inspection resources contaminated the first FD baseline")
-        # The unqualified count of 12 would wrongly accept two retained FDs.
-        self.assertGreater(12, baseline)
+    def test_all_caller_cleanup_precedes_first_fd_baseline(self):
+        for kind in ("configure", "message", "observe_command", "read_result", "inspect_session"):
+            with self.subTest(kind=kind):
+                reply = HostReply(content_type=b"text/plain" if kind == "read_result" else b"application/json")
+                with patch.object(transport.socket, "socket", return_value=reply):
+                    transport.closed_host_request("/fixture/socket", pathlib.Path("/fixture"), kind)
+                baseline = 10 + (0 if reply.released else 1)
+                self.assertEqual(baseline, 10, "caller resources contaminated the first FD baseline")
+                # An inflated baseline would wrongly accept a later retained FD.
+                self.assertGreater(11, baseline)
 
     def test_per_stream_shape_rejects_compensated_event_loss(self):
         payload, _ = transport.observed_shape_sse(1, "h2-2-0-0")
@@ -110,23 +123,35 @@ class ShapedWorkTests(unittest.TestCase):
     def test_later_wave_failure_preserves_completed_evidence(self):
         endpoint = SimpleNamespace(server_address=("localhost", 1), streams=[("connection", 1, "h2-1-0-0", b"")],
                                    answers={"h2-1-0-0": b"answer"}, observed_shape=True)
+        calls = []
+
+        def request(socket_path, store, kind, **fields):
+            calls.append(kind)
+            if kind == "message" and calls.count(kind) == 2:
+                raise RuntimeError("wave 2 failed")
+            return {
+                "configure": {"answer": {"status": "accepted"}},
+                "message": {"answer": {"status": "accepted"}},
+                "observe_command": {"observation": {"result": {"status": "completed"}}},
+                "read_result": b"answer",
+                "inspect_session": {"execution": {"custody_occupied": "0", "scratch_used_bytes": "0"}},
+            }[kind]
+
         output = io.StringIO()
         with contextlib.ExitStack() as stack:
             stack.enter_context(contextlib.redirect_stdout(output))
             stack.enter_context(patch.object(transport.dispatch, "start_ready_process",
                                             return_value=(SimpleNamespace(pid=123), {"socket": "/fixture/socket"})))
             stop = stack.enter_context(patch.object(transport.dispatch, "stop_host"))
-            stack.enter_context(patch.object(transport.dispatch, "configure"))
-            stack.enter_context(patch.object(transport.dispatch, "message", side_effect=[None, RuntimeError("wave 2 failed")]))
+            stack.enter_context(patch.object(transport, "closed_host_request", side_effect=request))
             stack.enter_context(patch.object(transport.dispatch, "wait_for", side_effect=lambda predicate, *args, **kwargs: predicate()))
-            stack.enter_context(patch.object(transport.dispatch, "observe", return_value={"result": {"status": "completed"}}))
-            stack.enter_context(patch.object(transport.dispatch, "read_result", return_value=b"answer"))
-            stack.enter_context(patch.object(transport.control, "open_complete_inspection", return_value=InspectionReply()))
             stack.enter_context(patch.object(transport, "open_descriptors", return_value=12))
             stack.enter_context(patch.object(transport, "host_physical_peak", return_value=123456))
             with self.assertRaisesRegex(RuntimeError, "wave 2 failed"):
                 transport.round_trip(pathlib.Path("/fixture"), endpoint, 1, pathlib.Path("/fixture/ca"))
             stop.assert_called_once()
+        self.assertEqual(calls, ["configure", "message", "observe_command", "observe_command",
+                                 "read_result", "inspect_session", "message"])
         rows = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(len(rows), 2, "completed wave and failure evidence must both survive")
         self.assertEqual(rows[0]["round"], 1)

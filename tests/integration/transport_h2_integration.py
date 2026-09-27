@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import re
+import socket
 import socketserver
 import sqlite3
 import ssl
@@ -384,15 +385,27 @@ def assert_round_trip_history(streams, capacity, rounds, answers):
             expected.extend((reasoning, message))
 
 
-def inspection_drained(connection):
-    head, body = control.read_http_response(connection, timeout=15)
-    assert b" 200 " in head, (head, body)
-    # connectionMain closes only after the inspection report is released.
-    # A complete response body alone does not establish that boundary.
-    assert connection.recv(1) == b"", "inspection must close after its response"
-    observation = json.loads(body)["execution"]
-    return (observation["custody_occupied"] == "0"
-            and observation["scratch_used_bytes"] == "0")
+def closed_host_request(socket_path, store, kind, **fields):
+    payload = json.dumps({"version": "1", "kind": kind, "store": str(store.resolve()),
+                          **fields}, separators=(",", ":")).encode()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(15)
+        connection.connect(socket_path)
+        connection.sendall(
+            f"POST /v1/{kind.replace('_', '-')} HTTP/1.1\r\n".encode()
+            + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\n"
+            + f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload
+        )
+        head, body = control.read_http_response(connection, timeout=15)
+        assert b" 200 " in head, (head, body)
+        headers = dict(line.lower().split(b":", 1) for line in head.split(b"\r\n")[1:])
+        assert len(body) == int(headers[b"content-length"]), "truncated Host response"
+        expected_type = b"text/plain" if kind == "read_result" else b"application/json"
+        assert headers[b"content-type"].strip().startswith(expected_type), head
+        # Every caller, not just inspection, must release its server-side
+        # content/report handles and socket before an idle FD sample.
+        assert connection.recv(1) == b"", "Host must close after its response"
+    return body if kind == "read_result" else json.loads(body)
 
 
 def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
@@ -416,11 +429,24 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
             for index in range(capacity):
                 session = f"direct/h2-{capacity}-{index}"
                 if round_number == 0:
-                    dispatch.configure(root, store, f"config-{capacity}-{index}", session, "model-a")
-                dispatch.message(
-                    root, store, f"message-{capacity}-{round_number}-{index}", session,
-                    f"h2-{capacity}-{round_number}-{index}",
+                    configured = closed_host_request(
+                        ready["socket"], store, "configure", key=f"config-{capacity}-{index}",
+                        session=session, configuration={
+                            "workspace": {"state": "value", "value": str(dispatch.ROOT)},
+                            "provider": {"state": "value", "value": "codex"},
+                            "model": {"state": "value", "value": "model-a"},
+                            "instructions": {"state": "omitted"},
+                            "tools": {"state": "value", "value": ["bash", "edit"]},
+                            "permission_mode": {"state": "value", "value": "ask"},
+                            "output_schema": {"state": "omitted"},
+                        },
+                    )
+                    assert configured["answer"]["status"] == "accepted", configured
+                submitted = closed_host_request(
+                    ready["socket"], store, "message", key=f"message-{capacity}-{round_number}-{index}",
+                    session=session, text={"state": "value", "value": f"h2-{capacity}-{round_number}-{index}"},
                 )
+                assert submitted["answer"]["status"] == "accepted", submitted
             expected = (round_number + 1) * capacity
             dispatch.wait_for(
                 lambda: len(endpoint.streams) == expected,
@@ -429,40 +455,31 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
             for index in range(capacity):
                 key = f"message-{capacity}-{round_number}-{index}"
                 dispatch.wait_for(
-                    lambda key=key: dispatch.observe(store, key).get("result"),
+                    lambda key=key: closed_host_request(
+                        ready["socket"], store, "observe_command", key=key
+                    )["observation"].get("result"),
                     f"H2 result {key}", timeout=45,
                 )
-                assert dispatch.observe(store, key)["result"]["status"] == "completed"
-                assert dispatch.read_result(store, key) == endpoint.answers[f"h2-{capacity}-{round_number}-{index}"]
+                assert closed_host_request(ready["socket"], store, "observe_command", key=key)["observation"]["result"]["status"] == "completed"
+                assert closed_host_request(ready["socket"], store, "read_result", key=key) == endpoint.answers[f"h2-{capacity}-{round_number}-{index}"]
             # Store settlement precedes the execution owner's custody release.
             # Admission can transiently reserve an unused slot even when idle.
             # Require both drain facts in one observation, not a second read
             # after wait_for has already witnessed drainage.
             def drained():
-                with control.open_complete_inspection(
-                    ready["socket"], store.resolve(), f"direct/h2-{capacity}-0", "default"
-                ) as connection:
-                    return inspection_drained(connection)
+                observation = closed_host_request(
+                    ready["socket"], store, "inspect_session", session=f"direct/h2-{capacity}-0"
+                )["execution"]
+                return (observation["custody_occupied"] == "0"
+                        and observation["scratch_used_bytes"] == "0")
 
             dispatch.wait_for(
                 drained,
                 f"H2 custody drainage after round {round_number}", timeout=20,
             )
-            # The inspection report and socket are now released, including
-            # before the first baseline. Other callers may still be closing;
-            # later samples must return to the lowest observed population.
-            descriptors = open_descriptors(host.pid)
-            if idle_fds:
-                def descriptors_released():
-                    nonlocal descriptors
-                    descriptors = open_descriptors(host.pid)
-                    return descriptors <= min(idle_fds)
-
-                dispatch.wait_for(
-                    descriptors_released,
-                    f"H2 descriptor drainage after round {round_number}", timeout=20,
-                )
-            idle_fds.append(descriptors)
+            # Every preceding request reached EOF; no caller socket or report
+            # can inflate the first baseline or mask later retained FDs.
+            idle_fds.append(open_descriptors(host.pid))
             if endpoint.observed_shape:
                 physical_peaks.append(host_physical_peak(host.pid))
                 # Flush completed-wave evidence before starting work that can fail.
