@@ -85,6 +85,11 @@ pub const HostStatus = union(enum) {
 
 /// Observation only: never creates a Store, acquires ownership or reads SQLite.
 pub fn hostStatus(io: std.Io, store_path: []const u8) HostStatus {
+    return hostStatusUntil(io, store_path, null);
+}
+
+/// Startup callers can bound the entire readiness loop, including each probe.
+pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) HostStatus {
     const paths = platform.resolveClientPaths(io, store_path) catch |err| return switch (err) {
         error.FileNotFound => .unavailable,
         else => .access_failure,
@@ -96,20 +101,22 @@ pub fn hostStatus(io: std.Io, store_path: []const u8) HostStatus {
         .lock_nonblocking = true,
     }) catch |err| return switch (err) {
         error.FileNotFound => .unavailable,
-        error.WouldBlock => readHostInfo(io, &paths),
+        error.WouldBlock => readHostInfo(io, &paths, deadline),
         else => .access_failure,
     };
     lock_file.close(io);
     return .unavailable;
 }
 
-fn readHostInfo(io: std.Io, paths: *const platform.Paths) HostStatus {
+fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) HostStatus {
     var body: protocol.RequestBuffer = .{};
     body.append("{\"version\":\"1\",\"kind\":\"host_info\",\"store\":") catch unreachable;
     body.appendJsonString(paths.store.slice()) catch unreachable;
     body.append("}") catch unreachable;
     var reply_buffer: ReplyBuffer = .{};
-    const reply = sendSource(io, paths, "/v1/host-info", body.len, null, body.slice(), null, &reply_buffer, 1_000) catch |err| return switch (err) {
+    const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
+    const until = @min(probe_end, deadline orelse probe_end);
+    const reply = sendSource(io, paths, "/v1/host-info", body.len, null, body.slice(), null, &reply_buffer, until) catch |err| return switch (err) {
         error.AccessDenied, error.PermissionDenied => .access_failure,
         error.WrongWireVersion, error.InvalidResponse, error.ResponseHeaderTooLarge,
         error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,
@@ -789,18 +796,20 @@ fn sendSource(
     bytes: ?[]const u8,
     drop_reply: ?[]const u8,
     reply_buffer: *ReplyBuffer,
-    first_byte_timeout_ms: ?i32,
+    until: ?i128,
 ) !CommandReply {
     const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
-    const stream = try address.connect(io);
-    defer stream.close(io);
-    const fd = stream.socket.handle;
+    const stream = if (until == null) try address.connect(io) else null;
+    const fd = if (stream) |connected| connected.socket.handle else try connectUntil(io, address.path, until.?);
+    defer {
+        if (stream) |connected| connected.close(io) else _ = std.c.close(fd);
+    }
     var header_buffer: [512]u8 = undefined;
     const header = if (drop_reply) |drop|
         try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\nX-Rui-Test-Drop-Reply: {s}\r\n\r\n", .{ route, length, drop })
     else
         try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ route, length });
-    try writeAll(fd, header);
+    try writeAllUntil(io, fd, header, until);
     if (file) |source| {
         var buffer: [protocol.content_window_bytes]u8 = undefined;
         var sent: u64 = 0;
@@ -808,11 +817,44 @@ fn sendSource(
             const wanted: usize = @intCast(@min(length - sent, buffer.len));
             const count = try source.readStreaming(io, &.{buffer[0..wanted]});
             if (count != wanted) return error.RecordChangedDuringSend;
-            try writeAll(fd, buffer[0..count]);
+            try writeAllUntil(io, fd, buffer[0..count], until);
             sent += count;
         }
-    } else try writeAll(fd, bytes.?);
-    return readCommandResponseWithFirstByteTimeout(fd, reply_buffer, first_byte_timeout_ms);
+    } else try writeAllUntil(io, fd, bytes.?, until);
+    return readCommandResponseUntil(io, fd, reply_buffer, until);
+}
+
+fn connectUntil(io: std.Io, path: []const u8, deadline: i128) !std.posix.fd_t {
+    if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= deadline) return error.TransferInactive;
+    const fd = std.posix.system.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+    if (std.posix.errno(fd) != .SUCCESS) return error.UnixConnectFailed;
+    const socket: std.posix.fd_t = @intCast(fd);
+    errdefer _ = std.c.close(socket);
+    if (std.c.fcntl(socket, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return error.UnixConnectFailed;
+    const flags = std.c.fcntl(socket, std.c.F.GETFL);
+    const nonblocking: u32 = @bitCast(std.c.O{ .NONBLOCK = true });
+    if (flags < 0 or std.c.fcntl(socket, std.c.F.SETFL, flags | @as(c_int, @intCast(nonblocking))) < 0) return error.UnixConnectFailed;
+    var address: std.posix.sockaddr.un = .{ .path = undefined };
+    @memcpy(address.path[0..path.len], path);
+    address.path[path.len] = 0;
+    const size: std.posix.socklen_t = @intCast(@offsetOf(std.posix.sockaddr.un, "path") + path.len + 1);
+    if (@hasField(std.posix.sockaddr.un, "len")) address.len = @intCast(size);
+    switch (std.posix.errno(std.c.connect(socket, @ptrCast(&address), size))) {
+        .SUCCESS => {},
+        .INPROGRESS, .AGAIN => {
+            const left = deadline - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+            if (left <= 0) return error.TransferInactive;
+            var poll_fd = [_]std.posix.pollfd{.{ .fd = socket, .events = std.posix.POLL.OUT, .revents = 0 }};
+            const milliseconds: i32 = @intCast(@min(std.math.maxInt(i32), @divTrunc(left + std.time.ns_per_ms - 1, std.time.ns_per_ms)));
+            if (try std.posix.poll(&poll_fd, milliseconds) == 0) return error.TransferInactive;
+            var result: c_int = 0;
+            var result_len: std.posix.socklen_t = @sizeOf(c_int);
+            if (std.c.getsockopt(socket, std.posix.SOL.SOCKET, std.posix.SO.ERROR, &result, &result_len) < 0 or result_len != @sizeOf(c_int) or result != 0) return error.UnixConnectFailed;
+        },
+        else => return error.UnixConnectFailed,
+    }
+    if (std.c.fcntl(socket, std.c.F.SETFL, flags) < 0) return error.UnixConnectFailed;
+    return socket;
 }
 
 const ResponseKind = enum { command_json, result_text };
@@ -828,20 +870,20 @@ fn readResponseHead(fd: std.posix.fd_t) !ResponseHead {
 }
 
 fn readResponseHeadWithInactivity(fd: std.posix.fd_t, inactivity_ms: i32) !ResponseHead {
-    return readResponseHeadWithFirstByteTimeout(fd, inactivity_ms, null);
+    return readResponseHeadUntil(std.Io.Threaded.global_single_threaded.io(), fd, inactivity_ms, null);
 }
 
-fn readResponseHeadWithFirstByteTimeout(fd: std.posix.fd_t, inactivity_ms: i32, first_byte_timeout_ms: ?i32) !ResponseHead {
+fn readResponseHeadUntil(io: std.Io, fd: std.posix.fd_t, inactivity_ms: i32, until: ?i128) !ResponseHead {
     var header_buffer: [protocol.max_header_bytes]u8 = undefined;
-    if (first_byte_timeout_ms) |timeout| {
-        if (!try waitReadable(fd, timeout)) return error.ResponseInactive;
-    }
+    // Ordinary requests start their inactivity window after the first byte;
+    // Host readiness alone has an absolute deadline that includes this wait.
+    if (until != null and !try waitReadableUntil(io, fd, inactivity_ms, until)) return error.ResponseInactive;
     const first_count = try std.posix.read(fd, header_buffer[0..1]);
     if (first_count == 0) return error.TruncatedResponse;
     var used: usize = first_count;
     while (used < header_buffer.len) {
         if (used >= 4 and std.mem.eql(u8, header_buffer[used - 4 .. used], "\r\n\r\n")) break;
-        if (!try waitReadable(fd, inactivity_ms)) return error.ResponseInactive;
+        if (!try waitReadableUntil(io, fd, inactivity_ms, until)) return error.ResponseInactive;
         const count = try std.posix.read(fd, header_buffer[used .. used + 1]);
         if (count == 0) return error.TruncatedResponse;
         used += count;
@@ -883,14 +925,14 @@ fn readResponseHeadWithFirstByteTimeout(fd: std.posix.fd_t, inactivity_ms: i32, 
 }
 
 fn readCommandResponse(fd: std.posix.fd_t, reply_buffer: *ReplyBuffer) !CommandReply {
-    return readCommandResponseWithFirstByteTimeout(fd, reply_buffer, null);
+    return readCommandResponseUntil(std.Io.Threaded.global_single_threaded.io(), fd, reply_buffer, null);
 }
 
-fn readCommandResponseWithFirstByteTimeout(fd: std.posix.fd_t, reply_buffer: *ReplyBuffer, first_byte_timeout_ms: ?i32) !CommandReply {
+fn readCommandResponseUntil(io: std.Io, fd: std.posix.fd_t, reply_buffer: *ReplyBuffer, until: ?i128) !CommandReply {
     reply_buffer.len = 0;
-    const head = try readResponseHeadWithFirstByteTimeout(fd, 60_000, first_byte_timeout_ms);
+    const head = try readResponseHeadUntil(io, fd, 60_000, until);
     if (head.kind != .command_json) return error.InvalidResponse;
-    return readCommandBody(fd, head, reply_buffer);
+    return readCommandBodyUntil(io, fd, head, reply_buffer, until);
 }
 
 fn readResultResponse(
@@ -946,13 +988,17 @@ fn readReportResponse(
 }
 
 fn readCommandBody(fd: std.posix.fd_t, head: ResponseHead, reply_buffer: *ReplyBuffer) !CommandReply {
+    return readCommandBodyUntil(std.Io.Threaded.global_single_threaded.io(), fd, head, reply_buffer, null);
+}
+
+fn readCommandBodyUntil(io: std.Io, fd: std.posix.fd_t, head: ResponseHead, reply_buffer: *ReplyBuffer, until: ?i128) !CommandReply {
     reply_buffer.len = 0;
     errdefer reply_buffer.len = 0;
     if (head.content_length > protocol.max_response_bytes) return error.ResponseTooLarge;
     const body_length: usize = @intCast(head.content_length);
     var offset: usize = 0;
     while (offset < body_length) {
-        if (!try waitReadable(fd, 60_000)) return error.ResponseInactive;
+        if (!try waitReadableUntil(io, fd, 60_000, until)) return error.ResponseInactive;
         const count = try std.posix.read(fd, reply_buffer.bytes[offset..body_length]);
         if (count == 0) return error.TruncatedResponse;
         offset += count;
@@ -970,15 +1016,34 @@ fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) !bool {
     return try std.posix.poll(&poll_fd, timeout_ms) != 0;
 }
 
+fn waitReadableUntil(io: std.Io, fd: std.posix.fd_t, timeout_ms: i32, until: ?i128) !bool {
+    if (until) |deadline| {
+        const left = deadline - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+        if (left <= 0) return false;
+        const milliseconds: i32 = @intCast(@min(timeout_ms, @divTrunc(left + std.time.ns_per_ms - 1, std.time.ns_per_ms)));
+        return waitReadable(fd, milliseconds);
+    }
+    return waitReadable(fd, timeout_ms);
+}
+
 fn writeAll(fd: std.posix.fd_t, value: []const u8) !void {
+    return writeAllUntil(std.Io.Threaded.global_single_threaded.io(), fd, value, null);
+}
+
+fn writeAllUntil(io: std.Io, fd: std.posix.fd_t, value: []const u8, until: ?i128) !void {
     var offset: usize = 0;
     while (offset < value.len) {
+        const timeout = if (until) |deadline| blk: {
+            const left = deadline - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+            if (left <= 0) return error.TransferInactive;
+            break :blk @as(i32, @intCast(@min(60_000, @divTrunc(left + std.time.ns_per_ms - 1, std.time.ns_per_ms))));
+        } else 60_000;
         var poll_fd = [_]std.posix.pollfd{.{
             .fd = fd,
             .events = std.posix.POLL.OUT,
             .revents = 0,
         }};
-        if (try std.posix.poll(&poll_fd, 60_000) == 0) return error.TransferInactive;
+        if (try std.posix.poll(&poll_fd, timeout) == 0) return error.TransferInactive;
         const count = std.c.write(fd, value[offset..].ptr, value.len - offset);
         if (count < 0) return error.WriteFailed;
         if (count == 0) return error.ConnectionClosed;
@@ -1032,7 +1097,8 @@ test "Host-info first byte is bounded independently of normal processing waits" 
     });
     defer writer.join();
     var buffer: ReplyBuffer = .{};
-    try std.testing.expectError(error.ResponseInactive, readCommandResponseWithFirstByteTimeout(sockets[0], &buffer, 10));
+    const until = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
+    try std.testing.expectError(error.ResponseInactive, readCommandResponseUntil(std.testing.io, sockets[0], &buffer, until));
 }
 
 test "Host processing wait does not consume response transfer inactivity" {

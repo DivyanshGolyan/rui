@@ -89,28 +89,34 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             assert status(store) == "owned_unavailable"
             assert cli_status(home, "--store", store).startswith("Host: owned but unavailable")
+            for partial in (b"", b"HTTP/1.1 200 OK\r\n", b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{"):
+                with socket.socket(socket.AF_UNIX) as endpoint:
+                    endpoint.bind(str(stale))
+                    endpoint.listen(1)
+                    release = threading.Event()
+
+                    def stalled_peer():
+                        connection, _ = endpoint.accept()
+                        with connection:
+                            connection.recv(4096)
+                            if partial:
+                                connection.sendall(partial)
+                            release.wait(timeout=4)
+
+                    stalled = threading.Thread(target=stalled_peer)
+                    stalled.start()
+                    try:
+                        started = time.monotonic()
+                        assert status(store) == "owned_unavailable"
+                        assert time.monotonic() - started < 2.5, "stalled Host-info peer exceeded deadline"
+                    finally:
+                        release.set()
+                        stalled.join(timeout=3)
+                    assert not stalled.is_alive()
+                stale.unlink()
             with socket.socket(socket.AF_UNIX) as endpoint:
                 endpoint.bind(str(stale))
                 endpoint.listen(1)
-
-                def silent_peer():
-                    connection, _ = endpoint.accept()
-                    with connection:
-                        connection.recv(4096)
-                        time.sleep(5)
-
-                peer = threading.Thread(target=silent_peer, daemon=True)
-                peer.start()
-                began = time.monotonic()
-                assert status(store) == "owned_unavailable"
-                assert time.monotonic() - began < 3, "Host-info waited for an unresponsive owner"
-                peer.join(timeout=6)
-                assert not peer.is_alive()
-            stale.unlink()
-            with socket.socket(socket.AF_UNIX) as endpoint:
-                endpoint.bind(str(stale))
-                endpoint.listen(1)
-
                 def incompatible_peer():
                     for _ in range(2):
                         connection, _ = endpoint.accept()
