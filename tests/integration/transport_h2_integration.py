@@ -383,7 +383,7 @@ def assert_round_trip_history(streams, capacity, rounds, answers):
             expected.extend((reasoning, message))
 
 
-def round_trip(root, endpoint, capacity, ca_file, rounds=2):
+def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
     store = root / f"store-{capacity}"
     host = dispatch.start_host(
         store,
@@ -395,6 +395,8 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2):
     try:
         idle_fds = []
         physical_peaks = []
+        if observe is not None:
+            observe(host.pid, 0)
         for round_number in range(rounds):
             for index in range(capacity):
                 session = f"direct/h2-{capacity}-{index}"
@@ -436,6 +438,8 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2):
                 print(json.dumps({"case": "observed_shape_wave", "round": round_number + 1,
                                   "capacity": capacity, "host_physical_peak_bytes": physical_peaks[-1],
                                   "completed_idle_fds": idle_fds[-1]}), flush=True)
+            if observe is not None:
+                observe(host.pid, round_number + 1)
         assert all(count <= idle_fds[0] for count in idle_fds), idle_fds
         streams = list(endpoint.streams)
         assert len(streams) == rounds * capacity

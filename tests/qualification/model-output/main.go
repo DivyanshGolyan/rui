@@ -305,6 +305,11 @@ func (e *payloadEndpoint) lastRequestBytes() int {
 func (e *payloadEndpoint) Close() error { return e.server.Close() }
 
 func wholeRui(sample measurement.ProcessSample) map[string]any {
+	if sample.Footprint.LifetimePeakBytes == 0 {
+		return map[string]any{"status": "unavailable", "host_processes": 1,
+			"linux_memory": sample.LinuxMemory, "rss_bytes": sample.RSSBytes,
+			"measurement_basis": "Linux /proc diagnostics cannot establish macOS physical footprint"}
+	}
 	upper := sample.Footprint.LifetimePeakBytes + sample.Footprint.LifetimePeakTolerance
 	return map[string]any{
 		"status": "complete", "host_processes": 1, "descendant_processes_diagnostic": sample.LiveDescendantProcesses,
@@ -349,7 +354,11 @@ func readResult(deadline measurement.Deadline, binary, store, key, destination s
 		return nil, err
 	}
 	var stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "/usr/bin/time", "-l", binary, "read-result", "--store", store, "--key", key)
+	timeOption := "-l"
+	if runtime.GOOS == "linux" {
+		timeOption = "-v"
+	}
+	cmd := exec.CommandContext(ctx, "/usr/bin/time", timeOption, binary, "read-result", "--store", store, "--key", key)
 	cmd.Stdout, cmd.Stderr = file, &stderr
 	runError := cmd.Run()
 	closeError := file.Close()
@@ -1021,6 +1030,12 @@ func processDelta(firstValue, secondValue any) map[string]any {
 	if !firstOuterOK || !secondOuterOK || !firstOK || !secondOK {
 		return map[string]any{"status": "unavailable"}
 	}
+	if first.LinuxMemory != nil && second.LinuxMemory != nil {
+		return map[string]any{"status": "observed",
+			"rss_bytes":        int64(second.RSSBytes) - int64(first.RSSBytes),
+			"pss_bytes":        int64(second.LinuxMemory.RollupBytes["Pss"]) - int64(first.LinuxMemory.RollupBytes["Pss"]),
+			"open_descriptors": second.OpenDescriptors - first.OpenDescriptors}
+	}
 	return map[string]any{
 		"status":                   "observed",
 		"rss_bytes":                int64(second.RSSBytes) - int64(first.RSSBytes),
@@ -1635,6 +1650,23 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 // They neither add to footprint nor replace its independently sampled peak.
 func memoryComposition(pid int, directory string) map[string]any {
 	result := map[string]any{"status": "unavailable", "scope": "retained idle; sequential external snapshots, not allocation-origin attribution or simultaneous peaks"}
+	if runtime.GOOS == "linux" {
+		for _, name := range []string{"smaps", "status"} {
+			data, err := os.ReadFile(fmt.Sprintf("/proc/%d/%s", pid, name))
+			if err != nil {
+				result["error"] = err.Error()
+				return result
+			}
+			path := filepath.Join(directory, "host-"+name+".txt")
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				result["error"] = err.Error()
+				return result
+			}
+			result[name] = path
+		}
+		result["status"] = "observed"
+		return result
+	}
 	if runtime.GOOS != "darwin" {
 		result["reason"] = "heap/vmmap collection requires macOS"
 		return result
@@ -1744,7 +1776,7 @@ func main() {
 	providerArtifacts := flag.String("provider-artifacts", "", "provider child artifact directory")
 	flag.Parse()
 	if *providerChild {
-		if err := measurement.RequireRuntime(); err != nil {
+		if err := measurement.RequireProcessRuntime(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -1767,7 +1799,7 @@ func main() {
 		result, _ := finalizeQualification(map[string]any{"format": "rui-model-output-v8-go", "artifacts": ""}, errors.New("usage: measure-model-output [--output path] [--capacity N | --growth-only | --projection] /absolute/path/to/rui"))
 		os.Exit(publishQualification(*output, result))
 	}
-	if err := measurement.RequireRuntime(); err != nil {
+	if err := measurement.RequireProcessRuntime(); err != nil {
 		result, _ := finalizeQualification(map[string]any{"format": "rui-model-output-v8-go", "artifacts": ""}, err)
 		os.Exit(publishQualification(*output, result))
 	}
@@ -1810,7 +1842,7 @@ func measureOutput(binary, output string, capacityOnly int, repeatWork, growthOn
 	if err != nil {
 		return result, err
 	}
-	root, err := os.MkdirTemp("/private/tmp", "rui-output-measure-")
+	root, err := os.MkdirTemp("/tmp", "rui-output-measure-")
 	if err != nil {
 		return result, err
 	}
@@ -1913,6 +1945,6 @@ func measureOutput(binary, output string, capacityOnly int, repeatWork, growthOn
 			return result, err
 		}
 	}
-	result["limits"] = []string{"macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only", "repeat-work uses one Host and 100 stable Sessions for 20 six-second waves with growing durable history; its short CPU window is diagnostic rather than the canonical sustained gate, while complete-work CPU remains assessed", "growth/spill and capacity 1 use loopback H1; concurrent capacities 8/16/100 use trusted local TLS/H2, not a live provider", "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second", "canonical capacity CPU samples retain the conservative 40-second bracket wholly inside 60 seconds of simultaneous complete offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds", "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after all rounds and confirmed Host stop/reap", "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 1 MiB cache"}
+	result["limits"] = []string{"runtime evidence applies only to the recorded platform; Linux RSS/PSS do not qualify the macOS physical-footprint target", "repeat-work uses one Host and 100 stable Sessions for 20 six-second waves with growing durable history; its short CPU window is diagnostic rather than the canonical sustained gate, while complete-work CPU remains assessed", "growth/spill and capacity 1 use loopback H1; concurrent capacities 8/16/100 use trusted local TLS/H2, not a live provider", "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second", "canonical capacity CPU samples retain the conservative 40-second bracket wholly inside 60 seconds of simultaneous complete offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds", "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after all rounds and confirmed Host stop/reap", "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 1 MiB cache"}
 	return result, nil
 }

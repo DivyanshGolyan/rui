@@ -2,6 +2,8 @@
 
 ## Current checks and qualification
 
+[Linux allocator measurements](linux-memory/README.md): native ARM64 Linux in an isolated Mac-hosted VM, with default/arena/tcache comparisons, repeated TLS/H2 work, allocator diagnostics and sustained output/control checks. Linux RSS/PSS remain separate from the accepted macOS physical-footprint target; production Linux defaults are unchanged.
+
 [Issue #272 native Codex journey and allocation witness](issue-272/README.md): exact `gpt-6-luna` public-caller qualification on Linux x86-64 and macOS arm64, plus a reproducible disposable curl/OpenSSL allocator overlay for synthetic H2 and live managed transfers. [VERIFICATION.md](../../VERIFICATION.md#context-provider-output-and-compaction) owns the accepted proof and remaining live-refresh, ALPN-direct-observation and broader-resource limits.
 
 [Rui #263 native macOS Host-only model milestone](issue-263/rui263-macos-evidence-provenance.txt): retained successful model-output capacity 1/8/16/100, model-control, model-dispatch, queue-population and call-classification summaries, plus source/build provenance and check logs. [VERIFICATION.md](../../VERIFICATION.md#transport) owns the 25,000,000-byte verdict, reproduction and limits. The disposable Mac checkout supplied evidence for the matching runtime source; the entire dirty overlay is not claimed identical to the Linux commit. This is not the assembled 1,000-operation model/Bash/Edit workload.
