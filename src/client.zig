@@ -913,7 +913,7 @@ fn readResponseHeadUntil(io: std.Io, fd: std.posix.fd_t, inactivity_ms: i32, unt
     if (!std.mem.eql(u8, parts.next() orelse return error.InvalidResponse, "HTTP/1.1")) return error.InvalidResponse;
     const status = try std.fmt.parseInt(u16, parts.next() orelse return error.InvalidResponse, 10);
     var length: ?u64 = null;
-    var wire_ok = false;
+    var wire_ok: ?bool = null;
     var kind: ?ResponseKind = null;
     while (lines.next()) |line| {
         if (line.len == 0) break;
@@ -924,6 +924,7 @@ fn readResponseHeadUntil(io: std.Io, fd: std.posix.fd_t, inactivity_ms: i32, unt
             if (length != null) return error.InvalidResponse;
             length = try std.fmt.parseInt(u64, value, 10);
         } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Wire-Version")) {
+            if (wire_ok != null) return error.InvalidResponse;
             wire_ok = std.mem.eql(u8, value, protocol.wire_version);
         } else if (std.ascii.eqlIgnoreCase(name, "Content-Type")) {
             if (kind != null) return error.InvalidResponse;
@@ -935,7 +936,7 @@ fn readResponseHeadUntil(io: std.Io, fd: std.posix.fd_t, inactivity_ms: i32, unt
                 return error.InvalidResponse;
         }
     }
-    if (!wire_ok) return error.WrongWireVersion;
+    if (wire_ok != true) return error.WrongWireVersion;
     return .{
         .status = status,
         .content_length = length orelse return error.InvalidResponse,
