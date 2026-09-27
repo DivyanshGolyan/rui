@@ -111,7 +111,8 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths) HostStatus {
     var reply_buffer: ReplyBuffer = .{};
     const reply = sendBytes(io, paths, "/v1/host-info", body.slice(), null, &reply_buffer) catch |err| return switch (err) {
         error.AccessDenied, error.PermissionDenied => .access_failure,
-        error.WrongWireVersion => .incompatible,
+        error.WrongWireVersion, error.InvalidResponse, error.ResponseHeaderTooLarge,
+        error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,
         else => .owned_unavailable,
     };
     if (reply.status == 503) return .owned_unavailable;

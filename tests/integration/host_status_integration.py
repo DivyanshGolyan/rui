@@ -109,6 +109,29 @@ def main():
                 peer.join(timeout=3)
                 assert not peer.is_alive()
             stale.unlink()
+            for response in (
+                b"HTTP/1.1 bogus OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 999999999\r\nX-Rui-Wire-Version: 1\r\n\r\n",
+            ):
+                with socket.socket(socket.AF_UNIX) as endpoint:
+                    endpoint.bind(str(stale))
+                    endpoint.listen(2)
+
+                    def malformed_peer():
+                        for _ in range(2):
+                            connection, _ = endpoint.accept()
+                            with connection:
+                                connection.recv(4096)
+                                connection.sendall(response)
+
+                    peer = threading.Thread(target=malformed_peer, daemon=True)
+                    peer.start()
+                    assert status(store) == "incompatible"
+                    assert cli_status(home, "--store", store).startswith("Host: incompatible")
+                    peer.join(timeout=3)
+                    assert not peer.is_alive()
+                stale.unlink()
             fcntl.flock(lock, fcntl.LOCK_UN)
         assert status(store) == "unavailable"
 
