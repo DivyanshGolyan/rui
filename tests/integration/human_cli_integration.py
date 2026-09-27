@@ -632,6 +632,8 @@ def main():
             after = set(run(preferences_home, "requests").splitlines())
             assert len(after - before) == 1, (before, after)
             handle = (after - before).pop()
+            captured = json.loads((preferences_home / ".config/rui/requests" / f"{handle}.json").read_text())
+            assert captured["require_model"] is True, captured
             interrupted.kill()
             interrupted.wait(timeout=5)
             recovered = json.loads(run(preferences_home, "recover", handle, "--json"))
