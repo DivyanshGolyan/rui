@@ -40,7 +40,7 @@ pub fn validate(values: *const Values) !void {
     if (values.provider.len != 0 and !std.mem.eql(u8, values.provider.slice(), "codex"))
         return error.UnsupportedPreferenceProvider;
     for (values.model.slice()) |byte| {
-        if (byte < 0x21 or byte > 0x7e or byte == '=') return error.InvalidPreferenceModel;
+        if (byte < 0x21 or byte > 0x7e) return error.InvalidPreferenceModel;
     }
     if (values.model.len != 0 and values.provider.len == 0) return error.PreferenceProviderRequired;
 }
@@ -94,7 +94,7 @@ pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model
     }
     if (model) |value| {
         if (value.len == 0 or value.len > protocol.max_model_bytes) return error.InvalidPreferenceModel;
-        for (value) |byte| if (byte < 0x21 or byte > 0x7e or byte == '=') return error.InvalidPreferenceModel;
+        for (value) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidPreferenceModel;
     }
     if (store) |value| {
         if (!std.fs.path.isAbsolute(value)) return error.InvalidPreferenceStore;

@@ -141,6 +141,11 @@ def main():
             "--provider", "codex", "--model", "gpt-6-luna")
         saved = preferences_home / ".config/rui/preferences"
         assert saved.read_text() == f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
+        original_preferences = saved.read_text()
+        saved.write_text(original_preferences.replace("model=gpt-6-luna", "model=family=variant"))
+        assert saved.read_text().endswith("provider=codex\nmodel=family=variant\n")
+        assert "Model: family=variant" in run(preferences_home, "setup")
+        saved.write_text(original_preferences)
         assert saved.stat().st_mode & 0o777 == 0o600
         assert saved.parent.stat().st_mode & 0o777 == 0o700
         assert str(store.resolve()) in run(preferences_home, "setup")
