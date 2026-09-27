@@ -438,7 +438,7 @@ func churn(binary, root string, e *retryEndpoint) (map[string]any, error) {
 	return map[string]any{"status": idleStatus(idleCPU), "active_capacity": capacity, "operations_per_round": operationsPerRound, "rounds": rows, "baseline": baseline, "custody_record_bytes": host.Ready["custody_record_bytes"], "execution_slot_bytes": host.Ready["execution_slot_bytes"], "idle_cpu_percent_one_core": idleCPU, "idle_cpu_sample_seconds": idleElapsed, "idle_cpu_qualification_limit_percent_one_core": 1, "retained_idle": retained, "attempt_fact_groups": groups}, nil
 }
 
-func main() {
+func run() (exitCode int) {
 	output := flag.String("output", "", "write JSON to path")
 	flag.Parse()
 	if flag.NArg() != 1 {
@@ -458,7 +458,14 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	defer e.Close()
+	defer func() {
+		if e != nil {
+			if err := e.Close(); err != nil {
+				fmt.Fprintln(os.Stderr, "endpoint cleanup:", err)
+				exitCode = 1
+			}
+		}
+	}()
 	started := time.Now()
 	timingResult, err := timing(binary, root, e)
 	if err != nil {
@@ -473,6 +480,10 @@ func main() {
 		panic(err)
 	}
 	result := map[string]any{"format": "rui-model-retry-v3-go", "scope": "issue-174 production retry discovery and custody churn", "status": retryStatus(timingResult, historyResult, churnResult), "artifacts": root, "timing": timingResult, "unresolved_history": historyResult, "churn_and_delayed_cleanup": churnResult, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only", "deterministic loopback HTTP classifies no live-provider behavior", "a 250 ms fixture delay separates committed retry discovery from provider launch", "waiting retry backlog and churn are qualified through the current 100-operation stress scale, not a product quota", "process termination evidence is not power-loss qualification"}}
+	if err := e.Close(); err != nil {
+		result["status"], result["error"] = "failed", err.Error()
+	}
+	e = nil
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
 	if err != nil {
 		panic(err)
@@ -480,13 +491,12 @@ func main() {
 	for name, value := range evidence {
 		result[name] = value
 	}
-	if *output != "" {
-		if err := measurement.WriteJSON(*output, result); err != nil {
-			panic(err)
-		}
-	} else {
-		if err := measurement.EncodeJSON(os.Stdout, result); err != nil {
-			panic(err)
-		}
+	if err := measurement.PublishQualification(*output, result); err != nil {
+		panic(err)
 	}
+	return measurement.QualificationExitCode(result)
+}
+
+func main() {
+	os.Exit(run())
 }

@@ -638,3 +638,40 @@ func TestApplyingMissingOfflineAuditEvidenceFailsRound(t *testing.T) {
 		t.Fatalf("successful offline audit did not preserve qualification: %v", passed)
 	}
 }
+
+func TestFailureAfterCompletedCapacityRoundRetainsEvidenceWithoutAuditClaim(t *testing.T) {
+	row := map[string]any{
+		"status":                         "passed",
+		"durable_audit_prerequisite_met": true,
+		"host_dimensions":                map[string]any{},
+		"retained":                       map[string]any{},
+	}
+	unavailableOfflineCapacityAudit(row)
+	result := capacityResult(8, 30, 2, false, []map[string]any{row}, 101, 102)
+	result, err := finalizeQualification(result, errors.New("round 2 failed"))
+	if err == nil || result["status"] != "failed" || len(result["rounds"].([]map[string]any)) != 1 {
+		t.Fatalf("partial capacity evidence was lost: result=%v err=%v", result, err)
+	}
+	dimensions := row["host_dimensions"].(map[string]any)
+	if dimensions["durable_audit"] != "unavailable" || row["all_results_audited"] != false || row["offline_audit_after_host_reaped"] != false {
+		t.Fatalf("partial row claimed a durable audit: %v", row)
+	}
+	if row["status"] != "incomplete" {
+		t.Fatalf("unaudited row status = %v", row["status"])
+	}
+}
+
+func TestCleanupOnlyFailureChangesFinalVerdictAndJoinsErrors(t *testing.T) {
+	result := map[string]any{"status": "passed", "artifacts": "/tmp/evidence", "rows": []any{"complete"}}
+	result, err := finalizeQualification(result, nil,
+		func() error { return errors.New("Host cleanup failed") },
+		func() error { return errors.New("fact log close failed") },
+	)
+	if err == nil || result["status"] != "failed" || result["artifacts"] != "/tmp/evidence" {
+		t.Fatalf("cleanup failure did not retain failed evidence: result=%v err=%v", result, err)
+	}
+	message, _ := result["error"].(string)
+	if !strings.Contains(message, "Host cleanup failed") || !strings.Contains(message, "fact log close failed") {
+		t.Fatalf("cleanup errors were not joined: %q", message)
+	}
+}

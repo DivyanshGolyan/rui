@@ -891,6 +891,26 @@ func WriteJSON(path string, value any) error {
 	return os.Rename(temporary, path)
 }
 
+// PublishQualification writes the complete verdict before its caller
+// decides the process exit status.
+func PublishQualification(path string, result map[string]any) error {
+	if path != "" {
+		return WriteJSON(path, result)
+	}
+	return EncodeJSON(os.Stdout, result)
+}
+
+// QualificationExitCode keeps process success as strict as the published
+// qualification reducers. Smoke-only runners use their established success
+// vocabulary; every missing or non-success verdict fails the process.
+func QualificationExitCode(result map[string]any) int {
+	status, ok := result["status"].(string)
+	if ok && (status == "passed" || status == "smoke_passed") {
+		return 0
+	}
+	return 1
+}
+
 var readVirtualMemory = mem.VirtualMemory
 
 func RuntimeManifest() (map[string]any, error) {

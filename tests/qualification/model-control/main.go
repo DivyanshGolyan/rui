@@ -1465,7 +1465,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	}, nil
 }
 
-func main() {
+func run() (exitCode int) {
 	output := flag.String("output", "", "write JSON to path")
 	flag.Parse()
 	if flag.NArg() != 1 {
@@ -1485,21 +1485,43 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	defer func() {
+		if endpoint != nil {
+			if err := endpoint.Close(); err != nil {
+				fmt.Fprintln(os.Stderr, "endpoint cleanup:", err)
+				exitCode = 1
+			}
+		}
+	}()
 	started := time.Now()
 	headroomResult, err := headroom(binary, root, endpoint.URL())
 	if err != nil {
 		panic(err)
 	}
-	_ = endpoint.Close()
+	if err := endpoint.Close(); err != nil {
+		panic(err)
+	}
+	endpoint = nil
 	activeEndpoint, err := startStreamEndpoint(true, root)
 	if err != nil {
 		panic(err)
 	}
+	defer func() {
+		if activeEndpoint != nil {
+			if err := activeEndpoint.Close(); err != nil {
+				fmt.Fprintln(os.Stderr, "active endpoint cleanup:", err)
+				exitCode = 1
+			}
+		}
+	}()
 	activeResult, err := activeCancellation(binary, root, activeEndpoint.URL(), activeEndpoint)
 	if err != nil {
 		panic(err)
 	}
-	_ = activeEndpoint.Close()
+	if err := activeEndpoint.Close(); err != nil {
+		panic(err)
+	}
+	activeEndpoint = nil
 	controlFirstResult, err := controlFirst(binary, root)
 	if err != nil {
 		panic(err)
@@ -1516,13 +1538,12 @@ func main() {
 	for name, value := range evidence {
 		result[name] = value
 	}
-	if *output != "" {
-		if err := measurement.WriteJSON(*output, result); err != nil {
-			panic(err)
-		}
-	} else {
-		if err := measurement.EncodeJSON(os.Stdout, result); err != nil {
-			panic(err)
-		}
+	if err := measurement.PublishQualification(*output, result); err != nil {
+		panic(err)
 	}
+	return measurement.QualificationExitCode(result)
+}
+
+func main() {
+	os.Exit(run())
 }

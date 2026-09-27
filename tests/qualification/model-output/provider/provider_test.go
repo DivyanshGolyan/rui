@@ -23,9 +23,40 @@ func TestRequestIDSelectsLatestUserTurnFromGrowingHistory(t *testing.T) {
 
 func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *testing.T) {
 	const envelope = `{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":"","tools":[],`
-	valid := []byte(envelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-0"}]},{"role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-0"}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
+	valid := []byte(envelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-0"}]},{"type":"message","id":"capacity-response-capacity-2-round-1-0-message","role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-0","annotations":[]}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
 	if !requestHistoryValid(valid, "capacity-2-round-2-0") {
 		t.Fatal("valid asymmetric stream-zero history was rejected")
+	}
+	for name, mutate := range map[string]func(map[string]any){
+		"missing assistant type": func(body map[string]any) { delete(body["input"].([]any)[1].(map[string]any), "type") },
+		"missing assistant id":   func(body map[string]any) { delete(body["input"].([]any)[1].(map[string]any), "id") },
+		"wrong assistant id": func(body map[string]any) {
+			body["input"].([]any)[1].(map[string]any)["id"] = "capacity-response-capacity-2-round-1-1-message"
+		},
+		"altered annotations": func(body map[string]any) {
+			body["input"].([]any)[1].(map[string]any)["content"].([]any)[0].(map[string]any)["annotations"] = []any{"unexpected"}
+		},
+		"extra assistant field": func(body map[string]any) { body["input"].([]any)[1].(map[string]any)["extra"] = true },
+		"extra content field": func(body map[string]any) {
+			body["input"].([]any)[1].(map[string]any)["content"].([]any)[0].(map[string]any)["extra"] = true
+		},
+		"altered user field": func(body map[string]any) { body["input"].([]any)[0].(map[string]any)["role"] = "developer" },
+		"extra user field":   func(body map[string]any) { body["input"].([]any)[0].(map[string]any)["extra"] = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			var mutated map[string]any
+			if err := json.Unmarshal(valid, &mutated); err != nil {
+				t.Fatal(err)
+			}
+			mutate(mutated)
+			body, err := json.Marshal(mutated)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if requestHistoryValid(body, "capacity-2-round-2-0") {
+				t.Fatal("corrupt history was accepted")
+			}
+		})
 	}
 	for _, field := range []string{"model", "store", "stream", "include", "instructions", "tools"} {
 		var mutated map[string]json.RawMessage

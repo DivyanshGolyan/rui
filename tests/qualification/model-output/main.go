@@ -714,7 +714,7 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 	}, nil
 }
 
-func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bool) (map[string]any, error) {
+func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bool) (result map[string]any, resultError error) {
 	name := "spill-on"
 	if !enabled {
 		name = "spill-off"
@@ -737,24 +737,26 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 	if err != nil {
 		return nil, err
 	}
+	hostNeedsStop := true
+	defer func() {
+		if hostNeedsStop {
+			measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
+		}
+	}()
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
 	if err := client.Configure("spill", "measure/spill", "--tools", "none"); err != nil {
-		host.Stop(measurement.TeardownAllowance)
 		return nil, err
 	}
 	initialInspection, err := client.Inspect("measure/spill")
 	if err != nil {
-		host.Stop(measurement.TeardownAllowance)
 		return nil, err
 	}
 	initial, err := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-initial.txt"))
 	if err != nil {
-		host.Stop(measurement.TeardownAllowance)
 		return nil, err
 	}
 	started := time.Now()
 	if err := client.Message("spill", "measure/spill", "spill comparison"); err != nil {
-		host.Stop(measurement.TeardownAllowance)
 		return nil, err
 	}
 	outcome := "timeout"
@@ -787,27 +789,24 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 	if completed {
 		delivery, err = readResult(deadline, binary, store, "spill", filepath.Join(directory, "answer.bin"))
 		if err != nil {
-			host.Stop(measurement.TeardownAllowance)
 			return nil, err
 		}
 		digest := sha256.Sum256([]byte(answer))
 		if delivery["destination_bytes"] != int64(len(answer)) || delivery["destination_sha256"] != hex.EncodeToString(digest[:]) {
-			host.Stop(measurement.TeardownAllowance)
 			return nil, errors.New("spill result differed")
 		}
 		inspection, err = client.Inspect("measure/spill")
 		if err != nil {
-			host.Stop(measurement.TeardownAllowance)
 			return nil, err
 		}
 		value, err := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-final.txt"))
 		if err != nil {
-			host.Stop(measurement.TeardownAllowance)
 			return nil, err
 		}
 		final = &value
 	}
 	hostExit, stopError := host.StopWithExit(measurement.TeardownAllowance)
+	hostNeedsStop = false
 	stderr, readStderrError := os.ReadFile(filepath.Join(directory, "host-stderr.log"))
 	offline, offlineError := readSpillFacts(deadline, store)
 	if err := errors.Join(stopError, readStderrError, offlineError); err != nil {
@@ -851,7 +850,7 @@ func spillComparison(binary, root string, endpoint *payloadEndpoint) (map[string
 	}
 	off, err := measureSpillCase(binary, root, endpoint, false)
 	if err != nil {
-		return nil, err
+		return map[string]any{"status": "failed", "rows": []map[string]any{on}, "error": err.Error()}, err
 	}
 	status := spillComparisonStatus(on["status"], off["status"])
 	return map[string]any{"status": status, "rows": []map[string]any{on, off}, "write_sync_qualification": map[string]any{"status": "unavailable", "sync_calls": nil, "reason": "Darwin exposes per-process disk-write bytes but no direct per-process sync-call oracle; effective Host SQLite settings are recorded separately in Host diagnostics"}}, nil
@@ -1485,8 +1484,46 @@ func applyOfflineCapacityAudit(row map[string]any, audit capacityAuditResult) er
 	return nil
 }
 
+func unavailableOfflineCapacityAudit(row map[string]any) {
+	dimensions, ok := row["host_dimensions"].(map[string]any)
+	if ok {
+		dimensions["durable_audit"] = "unavailable"
+	}
+	row["all_results_audited"] = false
+	row["offline_audit_after_host_reaped"] = false
+	if row["status"] == "passed" {
+		row["status"] = "incomplete"
+	}
+}
+
+func capacityResult(capacity, eventsPerSecond, roundCount int, sameSessions bool, rounds []map[string]any, fixturePID, hostPID int) map[string]any {
+	result := map[string]any{
+		"status": reduceStatuses(rounds), "active_capacity": capacity, "events_per_second_per_stream": eventsPerSecond, "same_host_rounds": roundCount, "same_sessions": sameSessions, "rounds": rounds,
+		"process_identity": map[string]any{"controller_pid": os.Getpid(), "provider_pid": fixturePID, "host_pid": hostPID, "all_distinct": true},
+	}
+	if len(rounds) > 0 {
+		result["last_retained_delta_from_first"] = processDelta(rounds[0]["retained"], rounds[len(rounds)-1]["retained"])
+	} else {
+		result["last_retained_delta_from_first"] = map[string]any{"status": "unavailable"}
+	}
+	return result
+}
+
 func measureCapacity(binary, root string, scenario capacityScenario, duration time.Duration, roundCount int, sameSessions, diagnostics bool) (result map[string]any, resultError error) {
 	capacity := scenario.Capacity
+	var rounds []map[string]any
+	// Registered before resource cleanup so it sees every cleanup failure.
+	defer func() {
+		if resultError != nil && result != nil {
+			for _, row := range rounds {
+				if row["offline_audit_after_host_reaped"] != true {
+					unavailableOfflineCapacityAudit(row)
+				}
+			}
+			result["status"] = "failed"
+			result["error"] = resultError.Error()
+		}
+	}()
 	directory := filepath.Join(root, fmt.Sprintf("capacity-%d", capacity))
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		return nil, err
@@ -1530,21 +1567,25 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 	if os.Getpid() == fixture.cmd.Process.Pid || host.Cmd.Process.Pid == fixture.cmd.Process.Pid || os.Getpid() == host.Cmd.Process.Pid {
 		return nil, errors.New("controller, provider fixture and Host must have distinct process identities")
 	}
-	rounds := make([]map[string]any, 0, roundCount)
+	rounds = make([]map[string]any, 0, roundCount)
+	result = capacityResult(capacity, scenario.EventsPerSecond, roundCount, sameSessions, rounds, fixture.cmd.Process.Pid, host.Cmd.Process.Pid)
 	for round := 1; round <= roundCount; round++ {
-		diagnosticOffset := int64(0)
-		if info, statError := os.Stat(filepath.Join(directory, "host-stderr.log")); statError == nil {
-			diagnosticOffset = info.Size()
+		info, statError := os.Stat(filepath.Join(directory, "host-stderr.log"))
+		if statError != nil {
+			return result, statError
 		}
+		diagnosticOffset := info.Size()
 		row, err := measureCapacityRound(binary, directory, store, round, capacity, scenario.EventsPerSecond, duration, sameSessions, deadline, host, fixture, facts)
 		if err != nil {
-			return nil, err
+			return result, err
 		}
+		rounds = append(rounds, row)
+		result = capacityResult(capacity, scenario.EventsPerSecond, roundCount, sameSessions, rounds, fixture.cmd.Process.Pid, host.Cmd.Process.Pid)
 		if diagnostics {
 			row["retained_memory_composition"] = memoryComposition(host.Cmd.Process.Pid, filepath.Join(directory, fmt.Sprintf("round-%d", round)))
 			log, openError := os.Open(filepath.Join(directory, "host-stderr.log"))
 			if openError != nil {
-				return nil, openError
+				return result, openError
 			}
 			_, seekError := log.Seek(diagnosticOffset, io.SeekStart)
 			var report []byte
@@ -1553,18 +1594,17 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 				report, readError = io.ReadAll(log)
 			}
 			if err := errors.Join(seekError, readError, log.Close()); err != nil {
-				return nil, fmt.Errorf("read per-round SQLite diagnostics: %w", err)
+				return result, fmt.Errorf("read per-round SQLite diagnostics: %w", err)
 			}
 			records, parseError := sqliteDiagnosticRecords(report)
 			if parseError != nil {
-				return nil, parseError
+				return result, parseError
 			}
 			row["host_sqlite_diagnostics"] = records
 			status := productionDiagnosticsStatus(records)
 			row["sqlite_diagnostics_status"] = status
 			row["status"] = reduceStatuses([]map[string]any{row, {"status": status}})
 		}
-		rounds = append(rounds, row)
 	}
 	auditRequests := make([]capacityAuditRequest, 0, roundCount)
 	for round := 1; round <= roundCount; round++ {
@@ -1578,21 +1618,17 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 		return err
 	}, auditRequests, auditCapacity, deadline, store)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	for index, audit := range audits {
 		if err := applyOfflineCapacityAudit(rounds[index], audit); err != nil {
-			return nil, err
+			return result, err
 		}
 		if err := facts.Write("offline_capacity_audit", map[string]any{"round": index + 1, "host_reaped": true, "complete": audit.complete, "rows": audit.rows}); err != nil {
-			return nil, err
+			return result, err
 		}
 	}
-	return map[string]any{
-		"status": reduceStatuses(rounds), "active_capacity": capacity, "events_per_second_per_stream": scenario.EventsPerSecond, "same_host_rounds": roundCount, "same_sessions": sameSessions, "rounds": rounds,
-		"process_identity":               map[string]any{"controller_pid": os.Getpid(), "provider_pid": fixture.cmd.Process.Pid, "host_pid": host.Cmd.Process.Pid, "all_distinct": true},
-		"last_retained_delta_from_first": processDelta(rounds[0]["retained"], rounds[len(rounds)-1]["retained"]),
-	}, nil
+	return capacityResult(capacity, scenario.EventsPerSecond, roundCount, sameSessions, rounds, fixture.cmd.Process.Pid, host.Cmd.Process.Pid), nil
 }
 
 // These sequential snapshots explain live heap versus allocator-resident pages.
@@ -1626,10 +1662,7 @@ func memoryComposition(pid int, directory string) map[string]any {
 }
 
 func qualificationExitCode(status any) int {
-	if status == "passed" || status == "smoke_passed" {
-		return 0
-	}
-	return 1
+	return measurement.QualificationExitCode(map[string]any{"status": status})
 }
 
 func encodedQualificationResult(result map[string]any) ([]byte, int, error) {
@@ -1638,6 +1671,23 @@ func encodedQualificationResult(result map[string]any) ([]byte, int, error) {
 		return nil, 1, err
 	}
 	return append(encoded, '\n'), qualificationExitCode(result["status"]), nil
+}
+
+// finalizeQualification is the single ownership boundary between collected
+// evidence and process termination. Cleanup failures are evidence too: they
+// cannot erase completed rows or leave a successful verdict behind.
+func finalizeQualification(result map[string]any, runError error, cleanup ...func() error) (map[string]any, error) {
+	for _, close := range cleanup {
+		runError = errors.Join(runError, close())
+	}
+	if result == nil {
+		result = map[string]any{}
+	}
+	if runError != nil {
+		result["status"] = "failed"
+		result["error"] = runError.Error()
+	}
+	return result, runError
 }
 
 func runProviderChild(streams, eventsPerSecond int, duration time.Duration, rounds int, historyAware bool, artifacts string) error {
@@ -1651,6 +1701,32 @@ func runProviderChild(streams, eventsPerSecond int, duration time.Duration, roun
 	}
 	<-server.ShutdownRequested()
 	return server.Close()
+}
+
+func publishQualification(output string, result map[string]any) int {
+	encoded, exitCode, err := encodedQualificationResult(result)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if output != "" {
+		if err := measurement.WriteJSON(output, result); err == nil {
+			return exitCode
+		} else {
+			result["status"] = "failed"
+			writeError := fmt.Errorf("write final JSON: %w", err)
+			if prior, ok := result["error"].(string); ok {
+				writeError = errors.Join(errors.New(prior), writeError)
+			}
+			result["error"] = writeError.Error()
+			encoded, _, _ = encodedQualificationResult(result)
+		}
+	}
+	if err := measurement.WriteAll(os.Stdout, encoded); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return qualificationExitCode(result["status"])
 }
 
 func main() {
@@ -1684,163 +1760,159 @@ func main() {
 		*growthOnly = true
 	}
 	if *repeatWork && (*capacityOnly != 0 || *growthOnly || *projection) {
-		fmt.Fprintln(os.Stderr, "--repeat-work cannot be combined with another measurement mode")
-		os.Exit(2)
+		result, _ := finalizeQualification(map[string]any{"format": "rui-model-output-v8-go", "artifacts": ""}, errors.New("--repeat-work cannot be combined with another measurement mode"))
+		os.Exit(publishQualification(*output, result))
 	}
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: measure-model-output [--output path] [--capacity N | --growth-only | --projection] /absolute/path/to/rui")
-		os.Exit(2)
+		result, _ := finalizeQualification(map[string]any{"format": "rui-model-output-v8-go", "artifacts": ""}, errors.New("usage: measure-model-output [--output path] [--capacity N | --growth-only | --projection] /absolute/path/to/rui"))
+		os.Exit(publishQualification(*output, result))
 	}
 	if err := measurement.RequireRuntime(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		result, _ := finalizeQualification(map[string]any{"format": "rui-model-output-v8-go", "artifacts": ""}, err)
+		os.Exit(publishQualification(*output, result))
 	}
-	binary, err := filepath.Abs(flag.Arg(0))
-	if err != nil {
-		panic(err)
-	}
-	root, err := os.MkdirTemp("/private/tmp", "rui-output-measure-")
-	if err != nil {
-		panic(err)
-	}
-	facts, err := measurement.NewFactLog(filepath.Join(root, "facts.jsonl"))
-	if err != nil {
-		panic(err)
-	}
-	factsOpen := true
-	defer func() {
-		if factsOpen {
-			_ = facts.Close()
-		}
-	}()
+	result, _ := measureOutput(flag.Arg(0), *output, *capacityOnly, *repeatWork, *growthOnly, *projection)
+	os.Exit(publishQualification(*output, result))
+}
+
+func measureOutput(binary, output string, capacityOnly int, repeatWork, growthOnly, projection bool) (result map[string]any, runError error) {
 	started := time.Now()
-	endpoint, err := startPayloadEndpoint()
-	if err != nil {
-		panic(err)
-	}
-	defer endpoint.Close()
 	byteRows := []map[string]any{}
 	itemRows := []map[string]any{}
 	var spillRows map[string]any
-	if *capacityOnly == 0 && !*repeatWork {
+	capacityRows := []map[string]any{}
+	var repeatWorkRow map[string]any
+	result = map[string]any{"format": "rui-model-output-v8-go", "scope": "assembled model-path capacity and same-Host repeated-work qualification"}
+	// This finalizer runs after every resource owner's deferred cleanup.
+	defer func() {
+		result["answer_byte_growth"], result["item_count_growth"] = byteRows, itemRows
+		result["sqlite_cache_spill_comparison"], result["active_capacity_growth"] = spillRows, capacityRows
+		result["repeat_work"], result["elapsed_seconds"] = repeatWorkRow, time.Since(started).Seconds()
+		supplemental := []map[string]any{}
+		if spillRows != nil {
+			supplemental = append(supplemental, spillRows)
+		}
+		if repeatWorkRow != nil {
+			supplemental = append(supplemental, repeatWorkRow)
+		}
+		result["status"] = reduceStatuses(byteRows, itemRows, capacityRows, supplemental)
+		evidence, evidenceError := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, output)
+		for name, value := range evidence {
+			result[name] = value
+		}
+		result, runError = finalizeQualification(result, errors.Join(runError, evidenceError))
+		if growthOnly && result["status"] == "passed" {
+			result["status"] = "smoke_passed"
+		}
+	}()
+	var err error
+	binary, err = filepath.Abs(binary)
+	if err != nil {
+		return result, err
+	}
+	root, err := os.MkdirTemp("/private/tmp", "rui-output-measure-")
+	if err != nil {
+		return result, err
+	}
+	result["artifacts"] = root
+	facts, err := measurement.NewFactLog(filepath.Join(root, "facts.jsonl"))
+	if err != nil {
+		return result, err
+	}
+	defer measurement.JoinCleanup(&runError, facts.Close)
+	endpoint, err := startPayloadEndpoint()
+	if err != nil {
+		return result, err
+	}
+	defer measurement.JoinCleanup(&runError, endpoint.Close)
+	if capacityOnly == 0 && !repeatWork {
 		for _, size := range answerSizes {
 			row, err := measureCase(binary, root, endpoint, fmt.Sprintf("bytes-%d", size), 1, strings.Repeat("x", size))
-			if err != nil {
-				panic(err)
+			if row != nil {
+				byteRows = append(byteRows, row)
 			}
-			byteRows = append(byteRows, row)
-			if *projection {
+			if err != nil {
+				return result, err
+			}
+			if projection {
 				escaped, err := measureCase(binary, root, endpoint, fmt.Sprintf("escaped-%d", size), 1, strings.Repeat("\n", size))
-				if err != nil {
-					panic(err)
+				if escaped != nil {
+					escaped["escaped"] = true
+					byteRows = append(byteRows, escaped)
 				}
-				escaped["escaped"] = true
-				byteRows = append(byteRows, escaped)
+				if err != nil {
+					return result, err
+				}
 				if err := facts.Write("answer_growth", escaped); err != nil {
-					panic(err)
+					return result, err
 				}
 			}
 			if err := facts.Write("answer_growth", row); err != nil {
-				panic(err)
+				return result, err
 			}
 		}
 		for _, count := range reasoningCounts {
 			row, err := measureCase(binary, root, endpoint, fmt.Sprintf("items-%d", count), count, "answer")
-			if err != nil {
-				panic(err)
+			if row != nil {
+				itemRows = append(itemRows, row)
 			}
-			itemRows = append(itemRows, row)
+			if err != nil {
+				return result, err
+			}
 			if err := facts.Write("item_growth", row); err != nil {
-				panic(err)
+				return result, err
 			}
 		}
-		if !*projection {
+		if !projection {
 			spillRows, err = spillComparison(binary, root, endpoint)
 			if err != nil {
-				panic(err)
+				return result, err
 			}
 			if err := facts.Write("spill", spillRows); err != nil {
-				panic(err)
+				return result, err
 			}
 		}
 	}
 	scenarios := capacityScenarios
-	if *repeatWork {
+	if repeatWork {
 		scenarios = nil
 	}
-	if *capacityOnly > 0 {
+	if capacityOnly > 0 {
 		scenarios = nil
 		for _, scenario := range capacityScenarios {
-			if scenario.Capacity == *capacityOnly {
+			if scenario.Capacity == capacityOnly {
 				scenarios = append(scenarios, scenario)
 			}
 		}
 		if len(scenarios) == 0 {
-			panic(fmt.Errorf("unsupported capacity %d", *capacityOnly))
+			return result, fmt.Errorf("unsupported capacity %d", capacityOnly)
 		}
 	}
-	if *growthOnly {
+	if growthOnly {
 		scenarios = nil
 	}
-	capacityRows := make([]map[string]any, 0, len(scenarios))
+	capacityRows = make([]map[string]any, 0, len(scenarios))
 	for _, scenario := range scenarios {
 		row, err := measureCapacity(binary, root, scenario, 60*time.Second, 2, false, false)
-		if err != nil {
-			panic(err)
+		if row != nil {
+			capacityRows = append(capacityRows, row)
 		}
-		capacityRows = append(capacityRows, row)
+		if err != nil {
+			return result, err
+		}
 		if err := facts.Write("capacity", row); err != nil {
-			panic(err)
+			return result, err
 		}
 	}
-	var repeatWorkRow map[string]any
-	if *repeatWork {
+	if repeatWork {
 		repeatWorkRow, err = measureCapacity(binary, root, capacityScenario{Capacity: 100, EventsPerSecond: 100}, 6*time.Second, 20, true, true)
 		if err != nil {
-			panic(err)
+			return result, err
 		}
 		if err := facts.Write("repeat_work", repeatWorkRow); err != nil {
-			panic(err)
+			return result, err
 		}
 	}
-	if err := facts.Close(); err != nil {
-		panic(err)
-	}
-	factsOpen = false
-	spillStatusRows := []map[string]any{}
-	if spillRows != nil {
-		spillStatusRows = append(spillStatusRows, spillRows)
-	}
-	repeatStatusRows := []map[string]any{}
-	if repeatWorkRow != nil {
-		repeatStatusRows = append(repeatStatusRows, repeatWorkRow)
-	}
-	overallStatus := reduceStatuses(byteRows, itemRows, spillStatusRows, capacityRows, repeatStatusRows)
-	result := map[string]any{"format": "rui-model-output-v8-go", "scope": "assembled model-path capacity and same-Host repeated-work qualification", "status": overallStatus, "artifacts": root, "answer_byte_growth": byteRows, "item_count_growth": itemRows, "sqlite_cache_spill_comparison": spillRows, "active_capacity_growth": capacityRows, "repeat_work": repeatWorkRow, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only", "repeat-work uses one Host and 100 stable Sessions for 20 six-second waves with growing durable history; its short CPU window is diagnostic rather than the canonical sustained gate, while complete-work CPU remains assessed", "growth/spill and capacity 1 use loopback H1; concurrent capacities 8/16/100 use trusted local TLS/H2, not a live provider", "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second", "canonical capacity CPU samples retain the conservative 40-second bracket wholly inside 60 seconds of simultaneous complete offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds", "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after all rounds and confirmed Host stop/reap", "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 1 MiB cache"}}
-	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
-	if err != nil {
-		panic(err)
-	}
-	for name, value := range evidence {
-		result[name] = value
-	}
-	if *growthOnly && result["status"] == "passed" {
-		result["status"] = "smoke_passed"
-	}
-	encoded, exitCode, err := encodedQualificationResult(result)
-	if err != nil {
-		panic(err)
-	}
-	if *output != "" {
-		if err := measurement.WriteJSON(*output, result); err != nil {
-			panic(err)
-		}
-	} else {
-		if err := measurement.WriteAll(os.Stdout, encoded); err != nil {
-			panic(err)
-		}
-	}
-	if exitCode != 0 {
-		os.Exit(exitCode)
-	}
+	result["limits"] = []string{"macOS Apple Silicon runtime evidence only; Linux and x86 targets are compile-only", "repeat-work uses one Host and 100 stable Sessions for 20 six-second waves with growing durable history; its short CPU window is diagnostic rather than the canonical sustained gate, while complete-work CPU remains assessed", "growth/spill and capacity 1 use loopback H1; concurrent capacities 8/16/100 use trusted local TLS/H2, not a live provider", "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second", "canonical capacity CPU samples retain the conservative 40-second bracket wholly inside 60 seconds of simultaneous complete offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds", "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after all rounds and confirmed Host stop/reap", "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 1 MiB cache"}
+	return result, nil
 }

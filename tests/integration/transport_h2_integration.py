@@ -158,6 +158,21 @@ def observed_shape_sse(stream, text):
     return dispatch.encode_sse([created, progress, *events[:3], *deltas, *events[3:]]), answer
 
 
+def assert_observed_shape_work(payload):
+    records = payload.split(b"\n\n")
+    assert records[-2:] == [b"data: [DONE]", b""], "shape terminal framing"
+    values = [record.removeprefix(b"data: ") for record in records[:-2]]
+    events = [json.loads(value) for value in values]
+    expected = ["response.created", "response.in_progress", "response.output_item.added",
+                "response.output_item.done", "response.output_item.added"]
+    expected += ["response.output_text.delta"] * 48
+    expected += ["response.output_item.done", "response.completed"]
+    assert [event["type"] for event in events] == expected, "shape per-stream event sequence"
+    for index, size in [(0, 37_217), (1, 37_221), (54, 39_316)]:
+        assert len(values[index]) == size, "shape lifecycle bytes"
+    assert all(len(value) == 218 for value in values[5:53]), "shape delta bytes"
+
+
 def host_physical_peak(pid):
     if sys.platform != "darwin":
         return None
@@ -291,6 +306,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
                                 if self.server.observed_shape:
                                     payload, answer = observed_shape_sse(stream, text)
                                     assert answer.encode() == self.server.answers[text]
+                                    assert_observed_shape_work(payload)
                                 else:
                                     payload, _, _ = dispatch.sse_answer(
                                         f"response-{stream}", f"reasoning-{stream}",
@@ -345,6 +361,28 @@ class StreamHandler(socketserver.BaseRequestHandler):
                 self.server.ready.set()
 
 
+def assert_round_trip_history(streams, capacity, rounds, answers):
+    assert len(streams) == rounds * capacity, "history request population"
+    assert {text for _, _, text, _ in streams} == {
+        f"h2-{capacity}-{round_number}-{index}"
+        for round_number in range(rounds) for index in range(capacity)
+    }, "history request identities"
+    requests = {text: (stream, body) for _, stream, text, body in streams}
+    for index in range(capacity):
+        expected = []
+        for wave in range(rounds):
+            text = f"h2-{capacity}-{wave}-{index}"
+            stream, body = requests[text]
+            expected.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
+            assert json.loads(body)["input"] == expected, f"complete request history for {text}"
+            # Reconstruct fixture emissions, never expectations from Host input.
+            _, reasoning, message = dispatch.sse_answer(
+                f"response-{stream}", f"reasoning-{stream}", f"message-{stream}", answers[text].decode(),
+            )
+            del reasoning["created_by"]  # Response-only provenance is not replayed.
+            expected.extend((reasoning, message))
+
+
 def round_trip(root, endpoint, capacity, ca_file, rounds=2):
     store = root / f"store-{capacity}"
     host = dispatch.start_host(
@@ -394,14 +432,15 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2):
             idle_fds.append(open_descriptors(host.pid))
             if endpoint.observed_shape:
                 physical_peaks.append(host_physical_peak(host.pid))
+                # Flush completed-wave evidence before starting work that can fail.
+                print(json.dumps({"case": "observed_shape_wave", "round": round_number + 1,
+                                  "capacity": capacity, "host_physical_peak_bytes": physical_peaks[-1],
+                                  "completed_idle_fds": idle_fds[-1]}), flush=True)
         assert all(count <= idle_fds[0] for count in idle_fds), idle_fds
         streams = list(endpoint.streams)
         assert len(streams) == rounds * capacity
         assert len({(address, stream) for address, stream, _, _ in streams}) == len(streams)
-        assert {text for _, _, text, _ in streams} == {
-            f"h2-{capacity}-{round_number}-{index}"
-            for round_number in range(rounds) for index in range(capacity)
-        }
+        assert_round_trip_history(streams, capacity, rounds, endpoint.answers)
         assert len(endpoint.connections) == 1, endpoint.connections
         if endpoint.observed_shape:
             assert endpoint.offered_bytes >= rounds * capacity * (37_217 + 37_221 + 39_316 + 48 * 218)
@@ -410,6 +449,7 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2):
             "case": "observed_shape" if endpoint.observed_shape else "round_trip",
             "capacity": capacity, "rounds": rounds, "alpn": "h2",
             "tcp_connections": len(endpoint.connections), "streams": len(streams),
+            "complete_request_histories_validated": len(streams),
             "request_bytes": sum(len(body) for _, _, _, body in streams),
             "offered_sse_bytes": endpoint.offered_bytes,
             "host_physical_peak_bytes": peak,
@@ -417,6 +457,12 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2):
             "completed_idle_fds": idle_fds,
         }), flush=True)
         return peak
+    except Exception as error:
+        print(json.dumps({"case": "observed_shape" if endpoint.observed_shape else "round_trip",
+                          "status": "failed", "error": str(error),
+                          "host_physical_peaks_by_round": physical_peaks,
+                          "completed_idle_fds": idle_fds}), flush=True)
+        raise
     finally:
         dispatch.stop_host(host)
 

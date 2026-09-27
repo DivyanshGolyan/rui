@@ -1,7 +1,9 @@
 package measurement
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -14,6 +16,51 @@ import (
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/process"
 )
+
+func TestQualificationPublisherProcess(t *testing.T) {
+	if os.Getenv("RUI_TEST_QUALIFICATION_CHILD") == "1" {
+		status := os.Getenv("RUI_TEST_QUALIFICATION_STATUS")
+		output := os.Getenv("RUI_TEST_QUALIFICATION_OUTPUT")
+		result := map[string]any{"status": status, "marker": "published"}
+		if err := PublishQualification(output, result); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		os.Exit(QualificationExitCode(result))
+	}
+	for _, test := range []struct {
+		status string
+		code   int
+	}{
+		{status: "passed", code: 0},
+		{status: "smoke_passed", code: 0},
+		{status: "failed", code: 1},
+		{status: "incomplete", code: 1},
+		{status: "target_miss", code: 1},
+		{status: "", code: 1},
+	} {
+		t.Run(test.status, func(t *testing.T) {
+			output := filepath.Join(t.TempDir(), "result.json")
+			command := exec.Command(os.Args[0], "-test.run=^TestQualificationPublisherProcess$")
+			command.Env = append(os.Environ(), "RUI_TEST_QUALIFICATION_CHILD=1", "RUI_TEST_QUALIFICATION_STATUS="+test.status, "RUI_TEST_QUALIFICATION_OUTPUT="+output)
+			err := command.Run()
+			if got := command.ProcessState.ExitCode(); got != test.code {
+				t.Fatalf("exit code = %d, want %d: %v", got, test.code, err)
+			}
+			contents, readErr := os.ReadFile(output)
+			if readErr != nil {
+				t.Fatalf("published result unreadable: %v", readErr)
+			}
+			var result map[string]any
+			if err := json.Unmarshal(contents, &result); err != nil {
+				t.Fatalf("published result invalid: %v", err)
+			}
+			if result["status"] != test.status || result["marker"] != "published" {
+				t.Fatalf("published result = %v", result)
+			}
+		})
+	}
+}
 
 type closeErrorReader struct {
 	io.Reader

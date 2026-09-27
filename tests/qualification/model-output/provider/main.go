@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -499,45 +499,34 @@ func requestID(body []byte) (string, error) {
 }
 
 func requestHistoryValid(body []byte, current string) bool {
-	var envelope map[string]json.RawMessage
-	if json.Unmarshal(body, &envelope) != nil || len(envelope) != 7 {
-		return false
-	}
-	for field, expected := range map[string]string{
-		"model": `"model-a"`, "store": `false`, "stream": `true`,
-		"include": `["reasoning.encrypted_content"]`, "instructions": `""`, "tools": `[]`,
-	} {
-		var compact bytes.Buffer
-		if json.Compact(&compact, envelope[field]) != nil || compact.String() != expected {
-			return false
-		}
-	}
-	var value requestBody
-	if json.Unmarshal(body, &value) != nil {
-		return false
-	}
 	var capacity, round, index int
 	if _, err := fmt.Sscanf(current, "capacity-%d-round-%d-%d", &capacity, &round, &index); err != nil || capacity < 1 || round < 1 || index < 0 || index >= capacity {
 		return false
 	}
-	if len(value.Input) != round*2-1 {
-		return false
-	}
+	expectedInput := make([]any, 0, round*2-1)
 	for prior := 1; prior <= round; prior++ {
 		key := fmt.Sprintf("capacity-%d-round-%d-%d", capacity, prior, index)
-		user := value.Input[(prior-1)*2]
-		if user.Role != "user" || len(user.Content) != 1 || user.Content[0].Type != "input_text" || user.Content[0].Text != key {
-			return false
-		}
+		expectedInput = append(expectedInput, map[string]any{
+			"role":    "user",
+			"content": []any{map[string]any{"type": "input_text", "text": key}},
+		})
 		if prior == round {
 			continue
 		}
-		assistant := value.Input[(prior-1)*2+1]
-		if assistant.Role != "assistant" || len(assistant.Content) != 1 || assistant.Content[0].Type != "output_text" || assistant.Content[0].Text != "capacity answer "+key {
-			return false
-		}
+		expectedInput = append(expectedInput, map[string]any{
+			"type": "message", "id": "capacity-response-" + key + "-message", "role": "assistant",
+			"content": []any{map[string]any{
+				"type": "output_text", "text": "capacity answer " + key, "annotations": []any{},
+			}},
+		})
 	}
-	return true
+	expected := map[string]any{
+		"model": "model-a", "store": false, "stream": true,
+		"include": []any{"reasoning.encrypted_content"}, "instructions": "", "tools": []any{},
+		"input": expectedInput,
+	}
+	var observed any
+	return json.Unmarshal(body, &observed) == nil && reflect.DeepEqual(observed, expected)
 }
 
 func requestRoundIdentityValid(current string, capacity, round int) bool {
