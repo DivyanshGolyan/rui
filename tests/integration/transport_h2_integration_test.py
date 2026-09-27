@@ -13,6 +13,28 @@ from unittest.mock import patch
 import transport_h2_integration as transport
 
 
+class InspectionReply:
+    sent = False
+    released = False
+
+    def settimeout(self, timeout):
+        pass
+
+    def recv(self, size):
+        if self.sent:
+            self.released = True
+            return b""
+        self.sent = True
+        body = b'{"execution":{"custody_occupied":"0","scratch_used_bytes":"0"}}'
+        return b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+
 class RoundTripHistoryTests(unittest.TestCase):
     def setUp(self):
         self.streams = []
@@ -63,6 +85,14 @@ class RoundTripHistoryTests(unittest.TestCase):
 
 
 class ShapedWorkTests(unittest.TestCase):
+    def test_inspection_cleanup_precedes_first_fd_baseline(self):
+        reply = InspectionReply()
+        self.assertTrue(transport.inspection_drained(reply))
+        baseline = 10 + (0 if reply.released else 2)
+        self.assertEqual(baseline, 10, "inspection resources contaminated the first FD baseline")
+        # The unqualified count of 12 would wrongly accept two retained FDs.
+        self.assertGreater(12, baseline)
+
     def test_per_stream_shape_rejects_compensated_event_loss(self):
         payload, _ = transport.observed_shape_sse(1, "h2-2-0-0")
         transport.assert_observed_shape_work(payload)
@@ -83,14 +113,15 @@ class ShapedWorkTests(unittest.TestCase):
         output = io.StringIO()
         with contextlib.ExitStack() as stack:
             stack.enter_context(contextlib.redirect_stdout(output))
-            stack.enter_context(patch.object(transport.dispatch, "start_host", return_value=SimpleNamespace(pid=123)))
+            stack.enter_context(patch.object(transport.dispatch, "start_ready_process",
+                                            return_value=(SimpleNamespace(pid=123), {"socket": "/fixture/socket"})))
             stop = stack.enter_context(patch.object(transport.dispatch, "stop_host"))
             stack.enter_context(patch.object(transport.dispatch, "configure"))
             stack.enter_context(patch.object(transport.dispatch, "message", side_effect=[None, RuntimeError("wave 2 failed")]))
             stack.enter_context(patch.object(transport.dispatch, "wait_for", side_effect=lambda predicate, *args, **kwargs: predicate()))
             stack.enter_context(patch.object(transport.dispatch, "observe", return_value={"result": {"status": "completed"}}))
             stack.enter_context(patch.object(transport.dispatch, "read_result", return_value=b"answer"))
-            stack.enter_context(patch.object(transport.dispatch, "command", return_value={"execution": {"custody_occupied": "0", "scratch_used_bytes": "0"}}))
+            stack.enter_context(patch.object(transport.control, "open_complete_inspection", return_value=InspectionReply()))
             stack.enter_context(patch.object(transport, "open_descriptors", return_value=12))
             stack.enter_context(patch.object(transport, "host_physical_peak", return_value=123456))
             with self.assertRaisesRegex(RuntimeError, "wave 2 failed"):

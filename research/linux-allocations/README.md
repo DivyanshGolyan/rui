@@ -249,8 +249,11 @@ A deterministic reply-before-cleanup counterexample starts with 10 steady
 and 2 transient inspection FDs. Removing the EOF wait makes its first-baseline
 assertion fail; that inflated baseline would otherwise accept 2 retained FDs
 on the next wave. The full Linux H2 suite passed with the corrected oracle.
-The macOS size-shaped suite also passed, including both stalled-capture cases;
-its descriptor listing still warns about an unrelated mounted filesystem.
+The complete macOS `zig build transport-h2-integration` gate also passed,
+including its five oracle tests and stalled-capture/recovery cases. The oracle
+tests also pass with a nonexistent binary path, keeping their simulated
+later-wave failure isolated from real Host startup. The macOS descriptor
+listing still warns about an unrelated mounted filesystem.
 Earlier experiment hashes and results retain their original fixture;
 the review correction does not retrospectively qualify those measurements.
 

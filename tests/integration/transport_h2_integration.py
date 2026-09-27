@@ -395,28 +395,6 @@ def inspection_drained(connection):
             and observation["scratch_used_bytes"] == "0")
 
 
-def assert_inspection_cleanup_boundary():
-    class ReplyBeforeCleanup:
-        released = False
-
-        def settimeout(self, timeout):
-            pass
-
-        def recv(self, size):
-            if size == 1:
-                self.released = True
-                return b""
-            body = b'{"execution":{"custody_occupied":"0","scratch_used_bytes":"0"}}'
-            return b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
-
-    reply = ReplyBeforeCleanup()
-    assert inspection_drained(reply)
-    baseline = 10 + (0 if reply.released else 2)
-    assert baseline == 10, "inspection resources contaminated the first FD baseline"
-    # The unqualified count of 12 would wrongly accept two retained FDs.
-    assert not 12 <= baseline
-
-
 def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
     store = root / f"store-{capacity}"
     host, ready = dispatch.start_ready_process(
@@ -1093,7 +1071,6 @@ def main():
     observed_only = len(sys.argv) == 3 and sys.argv[2] == "--observed-shape-only"
     churn = len(sys.argv) == 3 and sys.argv[2] == "--observed-shape-churn"
     assert len(sys.argv) == 2 or observed_only or churn
-    assert_inspection_cleanup_boundary()
     if churn and sys.platform != "darwin":
         raise RuntimeError("Observed-shape churn footprint qualification requires macOS")
     with tempfile.TemporaryDirectory(prefix="rui-h2-") as tmp:
