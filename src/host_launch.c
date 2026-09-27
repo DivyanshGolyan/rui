@@ -31,6 +31,7 @@ int rui_launch_helper(const char *executable, const char *store) {
     pid_t child = fork();
     if (child < 0) fail_child(3, errno);
     if (child > 0) _exit(0);
+    if (chdir("/") < 0) fail_child(3, errno);
     const char *argv[] = {executable, "serve", "--store", store,
         "--active-capacity", "8", "--codex", NULL};
     execv(executable, (char *const *)argv);
@@ -166,6 +167,7 @@ spawn_done:
         }
         if (fcntl(report, F_SETFD, FD_CLOEXEC) < 0) fail_child(report, errno);
         closefrom(4);
+        if (chdir("/") < 0) fail_child(report, errno);
         const char *argv[] = {executable, "serve", "--store", store,
             "--active-capacity", "8", "--codex", NULL};
         execv(executable, (char *const *)argv);

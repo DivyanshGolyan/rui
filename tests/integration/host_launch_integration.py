@@ -181,6 +181,7 @@ def main():
             for selected in [store, alias, store, alias, store, alias]:
                 launchers.append(subprocess.Popen(
                     [RUI, "host", "start", "--store", selected],
+                    cwd=root,
                     env=env,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
@@ -202,6 +203,7 @@ def main():
             if sys.platform == "linux":
                 for descriptor in range(3):
                     assert os.readlink(f"/proc/{pids[0]}/fd/{descriptor}") == "/dev/null"
+                assert os.readlink(f"/proc/{pids[0]}/cwd") == "/", "detached Host retained launcher cwd"
                 assert os.getsid(pids[0]) not in launcher_pids
             assert not credential.exists(), "Host startup opened or created credentials"
             diagnostic_lines = [
