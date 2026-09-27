@@ -589,6 +589,12 @@ def main():
             invalid_prompt = terminal_step(master, "/login", "Provider: [c]")
             assert "Codex" in invalid_prompt
             assert "No login or preference change" in terminal_step(master, "x")
+            terminal_step(master, "/login", "Provider: [c]")
+            assert "No login or preference change" in terminal_step(master, "12345678901234567")
+            terminal_step(master, "/login", "Provider: [c]")
+            os.write(master, b"\xff\n")
+            assert "No login or preference change" in read_terminal(master, "rui> ")
+            assert "Permission: ask" in terminal_step(master, "/status")
             assert not credential.exists()
             assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model gpt-6-luna")
             assert "active Session unchanged" in terminal_step(master, "/setup --model other-model")
