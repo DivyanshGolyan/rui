@@ -492,6 +492,47 @@ def main():
                 deferred.kill()
                 deferred.wait(timeout=5)
             os.close(master)
+        explicit_home = state / "explicit-home"
+        explicit_config = explicit_home / ".config/rui"
+        explicit_config.mkdir(parents=True, mode=0o700)
+        malformed = explicit_config / "preferences"
+        malformed.write_text("version=9\n")
+        malformed.chmod(0o600)
+        master, slave = pty.openpty()
+        explicit = subprocess.Popen([str(fixture.RUI), "--store", str(store),
+            "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
+            env={**os.environ, "HOME": str(explicit_home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            assert "No locally ready provider" in read_terminal(master, "Provider: [c]")
+            # Another client installs a fixture credential while this caller
+            # waits for a choice. Its explicit selectors must still bypass the
+            # malformed prospective defaults when it rechecks readiness.
+            codex_fixture.credentials(explicit_config / "codex.json")
+            os.write(master, b"d\n")
+            welcome = b""
+            deadline = time.monotonic() + 10
+            while b"rui> " not in welcome and time.monotonic() < deadline:
+                if not select.select([master], [], [], max(0, deadline - time.monotonic()))[0]:
+                    break
+                try:
+                    welcome += os.read(master, 65536)
+                except OSError as err:
+                    if err.errno != errno.EIO:
+                        raise
+                    break
+            welcome = welcome.decode(errors="replace")
+            assert "Session: rui/" in welcome and "Provider: codex" in welcome, welcome
+            assert "Model: gpt-6-luna" in welcome, welcome
+            assert malformed.read_text() == "version=9\n"
+            assert "Detached." in terminal_step(master, "/exit", "Detached.")
+            assert explicit.wait(timeout=5) == 0
+        finally:
+            if explicit.poll() is None:
+                explicit.kill()
+                explicit.wait(timeout=5)
+            os.close(master)
         codex_fixture.credentials(credential)
         created = []
         for _ in range(2):
