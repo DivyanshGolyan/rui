@@ -849,12 +849,21 @@ fn connectUntil(io: std.Io, path: []const u8, deadline: i128) !std.posix.fd_t {
             if (try std.posix.poll(&poll_fd, milliseconds) == 0) return error.TransferInactive;
             var result: c_int = 0;
             var result_len: std.posix.socklen_t = @sizeOf(c_int);
-            if (std.c.getsockopt(socket, std.posix.SOL.SOCKET, std.posix.SO.ERROR, &result, &result_len) < 0 or result_len != @sizeOf(c_int) or result != 0) return error.UnixConnectFailed;
+            if (std.c.getsockopt(socket, std.posix.SOL.SOCKET, std.posix.SO.ERROR, &result, &result_len) < 0 or result_len != @sizeOf(c_int) or result < 0) return error.UnixConnectFailed;
+            if (result != 0) return connectFailure(@enumFromInt(result));
         },
-        else => return error.UnixConnectFailed,
+        else => |err| return connectFailure(err),
     }
     if (std.c.fcntl(socket, std.c.F.SETFL, flags) < 0) return error.UnixConnectFailed;
     return socket;
+}
+
+fn connectFailure(code: std.posix.E) error{ AccessDenied, PermissionDenied, UnixConnectFailed } {
+    return switch (code) {
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        else => error.UnixConnectFailed,
+    };
 }
 
 const ResponseKind = enum { command_json, result_text };

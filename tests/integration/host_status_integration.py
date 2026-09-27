@@ -134,6 +134,18 @@ def main():
                 peer.join(timeout=3)
                 assert not peer.is_alive()
             stale.unlink()
+            if sys.platform == "linux":
+                # Linux enforces mode bits on the Unix socket itself.
+                with socket.socket(socket.AF_UNIX) as endpoint:
+                    endpoint.bind(str(stale))
+                    endpoint.listen(1)
+                    stale.chmod(0)
+                    try:
+                        assert status(store) == "access_failure"
+                        assert cli_status(home, "--store", store).startswith("Host: access failure")
+                    finally:
+                        stale.chmod(0o600)
+                stale.unlink()
             for response in (
                 b"HTTP/1.1 bogus OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
