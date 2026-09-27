@@ -159,6 +159,11 @@ def main():
                 "instance": "0" * 32, "active_capacity": "01",
                 "capabilities": {"bash": True, "model": False, "managed_authentication": False},
             }).encode()
+            valid_body = noncanonical.replace(b'"active_capacity": "01"', b'"active_capacity": "1"')
+            ambiguous_bodies = (
+                valid_body.replace(b'"store": ', b'"store": "/wrong", "store": ', 1),
+                valid_body.replace(b'"bash": true', b'"bash": false, "bash": true'),
+            )
             for response in (
                 b"HTTP/1.1 bogus OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
@@ -167,6 +172,8 @@ def main():
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
                 (f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(noncanonical)}\r\n"
                  "X-Rui-Wire-Version: 1\r\n\r\n").encode() + noncanonical,
+                *((f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n"
+                   "X-Rui-Wire-Version: 1\r\n\r\n").encode() + body for body in ambiguous_bodies),
             ):
                 with socket.socket(socket.AF_UNIX) as endpoint:
                     endpoint.bind(str(stale))

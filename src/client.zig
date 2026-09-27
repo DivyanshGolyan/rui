@@ -185,6 +185,14 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
         "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
         "/one",
     ));
+    for ([_]struct { needle: []const u8, replacement: []const u8 }{
+        .{ .needle = "\"store\":\"/one\"", .replacement = "\"store\":\"/other\",\"store\":\"/one\"" },
+        .{ .needle = "\"bash\":true", .replacement = "\"bash\":false,\"bash\":true" },
+    }) |case| {
+        const duplicated = try std.mem.replaceOwned(u8, std.testing.allocator, golden, case.needle, case.replacement);
+        defer std.testing.allocator.free(duplicated);
+        try std.testing.expectError(error.DuplicateField, parseHostInfo(duplicated, "/one"));
+    }
 }
 
 pub const CommandReply = struct {
