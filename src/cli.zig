@@ -570,7 +570,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
         try announceCapture(init.io, saved.key.slice());
         try writeSafeField(init.io, "Rui: New Session intent: ", saved.session.slice());
         break :blk client.sendCaptured(init.io, &captured, null, &reply_buffer) catch |err| {
-            std.debug.print("rui: configuration may be uncertain ({s}); use rui requests and recover the original key, not a new Session intent.\n", .{@errorName(err)});
+            std.debug.print("rui: configuration not confirmed ({s}); inspect rui requests and recover only a saved original key. Do not replace uncertain work.\n", .{@errorName(err)});
             return err;
         };
     };

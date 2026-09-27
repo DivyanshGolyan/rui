@@ -620,6 +620,27 @@ def main():
                     caller.wait(timeout=5)
                 os.close(master)
         assert created[0] != created[1], "independent new intent reused a reference"
+        blocked_home = state / "blocked-capture-home"
+        blocked_config = blocked_home / ".config/rui"
+        blocked_config.mkdir(parents=True, mode=0o700)
+        (blocked_config / "preferences").write_text(
+            f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
+        (blocked_config / "preferences").chmod(0o600)
+        (blocked_config / "requests").write_text("not a directory")
+        codex_fixture.credentials(blocked_config / "codex.json")
+        master, slave = pty.openpty()
+        blocked = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+            env={**os.environ, "HOME": str(blocked_home)}, stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            output = read_terminal(master, "configuration not confirmed")
+            assert "New Session intent" not in output and "request: " not in output, output
+            assert blocked.wait(timeout=5) != 0
+        finally:
+            if blocked.poll() is None:
+                blocked.kill()
+                blocked.wait(timeout=5)
+            os.close(master)
         before = set(run(preferences_home, "requests").splitlines())
         gate = state / "new-session-capture"
         master, slave = pty.openpty()
@@ -629,6 +650,8 @@ def main():
         os.close(slave)
         try:
             fixture.wait_for(lambda: pathlib.Path(f"{gate}.ready").exists(), "fresh configuration captured")
+            early = os.read(master, 65536) if select.select([master], [], [], 0)[0] else b""
+            assert b"New Session intent" not in early, "announced before the capture callback"
             after = set(run(preferences_home, "requests").splitlines())
             assert len(after - before) == 1, (before, after)
             handle = (after - before).pop()
