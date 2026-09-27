@@ -46,7 +46,7 @@ pub fn validate(values: *const Values) !void {
 }
 
 fn read(dir: std.Io.Dir) !Values {
-    const file = dir.openFile(io, "preferences", .{ .follow_symlinks = false, .allow_directory = false }) catch |err| switch (err) {
+    const file = openPreferenceFile(dir, "preferences") catch |err| switch (err) {
         error.FileNotFound => return .{},
         else => return err,
     };
@@ -127,7 +127,7 @@ pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model
     if (model) |value| values.model.set(value) catch return error.InvalidPreferenceModel;
     try validate(&values);
 
-    if (dir.openFile(io, "preferences.tmp", .{ .follow_symlinks = false, .allow_directory = false })) |stale| {
+    if (openPreferenceFile(dir, "preferences.tmp")) |stale| {
         defer stale.close(io);
         try privateFile(stale);
         try dir.deleteFile(io, "preferences.tmp");
@@ -152,6 +152,17 @@ pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model
     published = true;
     if (std.c.fsync(dir.handle) != 0) return error.PreferenceDirectorySyncFailed;
     return values;
+}
+
+fn openPreferenceFile(dir: std.Io.Dir, name: []const u8) !std.Io.File {
+    // A private path may be a FIFO. O_NONBLOCK lets privateFile reject it
+    // rather than waiting indefinitely for a writer.
+    return .{ .handle = try std.posix.openat(dir.handle, name, .{
+        .ACCMODE = .RDONLY,
+        .NONBLOCK = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0), .flags = .{ .nonblocking = true } };
 }
 
 fn openPrivateDirectory(path: []const u8) !std.Io.Dir {

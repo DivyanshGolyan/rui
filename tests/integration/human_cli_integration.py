@@ -137,6 +137,17 @@ def main():
         assert run(linked_home, "setup", "--store", store,
             "--provider", "codex", "--model", "gpt-6-luna", success=False) == ""
         assert saved.read_text() == f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
+        backup = saved.parent / "saved-preferences"
+        saved.rename(backup)
+        os.mkfifo(saved, mode=0o600)
+        try:
+            blocked = subprocess.run([str(fixture.RUI), "setup"],
+                env={**os.environ, "HOME": str(preferences_home)},
+                capture_output=True, text=True, timeout=2)
+            assert blocked.returncode != 0, blocked
+        finally:
+            saved.unlink()
+            backup.rename(saved)
         retired_store = state / "retired-store"
         retired_store.mkdir(mode=0o700)
         assert "Saved defaults" in run(preferences_home, "setup", "--store", retired_store)
@@ -154,6 +165,15 @@ def main():
         assert run(preferences_home, "setup", "--model", "another-model", success=False) == ""
         assert saved.read_text().endswith("model=gpt-6-luna\n")
         temp.rmdir()
+        os.mkfifo(temp, mode=0o600)
+        try:
+            blocked = subprocess.run([str(fixture.RUI), "setup", "--store", str(store)],
+                env={**os.environ, "HOME": str(preferences_home)},
+                capture_output=True, text=True, timeout=2)
+            assert blocked.returncode != 0, blocked
+            assert saved.read_text().endswith("model=gpt-6-luna\n")
+        finally:
+            temp.unlink()
         saved.write_text("version=9\n")
         assert run(preferences_home, "setup", success=False) == ""
         assert run(preferences_home, "setup", "--model", "another-model", success=False) == ""
