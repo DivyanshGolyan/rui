@@ -353,7 +353,6 @@ fn login(init: std.process.Init, args: []const []const u8) !void {
         }
     }.display, loginInterrupted);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&tokens));
-    if (loginInterrupted()) return error.LoginInterrupted;
     var record: codex_credentials.Record = .{
         .generation = 0,
         .account_id = .{},
@@ -369,28 +368,39 @@ fn login(init: std.process.Init, args: []const []const u8) !void {
     try record.id_token.set(tokens.id_token.slice());
     try record.access_token.set(tokens.access_token.slice());
     try record.refresh_token.set(tokens.refresh_token.slice());
+    // Publication and SIGINT claim the same gate. Once publication wins,
+    // cancellation cannot be reported as if installation were rolled back.
+    if (login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) != null) return error.LoginInterrupted;
     try codex_credentials.install(path, &record, null);
     try std.Io.File.stdout().writeStreamingAll(init.io, "Codex login installed.\n");
 }
 
-var login_interrupted = std.atomic.Value(bool).init(false);
+const LoginState = enum(u8) { cancellable, cancelled, publishing };
+var login_state = std.atomic.Value(LoginState).init(.cancellable);
 
 fn onLoginInterrupt(_: std.posix.SIG) callconv(.c) void {
-    login_interrupted.store(true, .release);
+    _ = login_state.cmpxchgStrong(.cancellable, .cancelled, .acq_rel, .acquire);
 }
 
 fn loginInterrupted() bool {
-    return login_interrupted.load(.acquire);
+    return login_state.load(.acquire) == .cancelled;
 }
 
-test "device exchange SIGINT remains a recoverable cancellation signal" {
-    login_interrupted.store(false, .release);
+test "SIGINT and credential publication have one winner" {
     const action: std.posix.Sigaction = .{ .handler = .{ .handler = onLoginInterrupt }, .mask = std.posix.sigemptyset(), .flags = 0 };
     var previous: std.posix.Sigaction = undefined;
     std.posix.sigaction(.INT, &action, &previous);
     defer std.posix.sigaction(.INT, &previous, null);
+    defer login_state.store(.cancellable, .release);
+    login_state.store(.cancellable, .release);
     try std.posix.raise(.INT);
     try std.testing.expect(loginInterrupted());
+    try std.testing.expect(login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) != null);
+    login_state.store(.cancellable, .release);
+    try std.testing.expect(login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) == null);
+    try std.posix.raise(.INT);
+    try std.testing.expect(!loginInterrupted());
+    try std.testing.expectEqual(LoginState.publishing, login_state.load(.acquire));
 }
 
 /// A fresh terminal choice authorizes login; reading setup status alone does not.
@@ -410,12 +420,12 @@ fn guideProviderLogin(init: std.process.Init) !void {
         return;
     }
     try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Starting Codex device login. The printed code is for the provider page only; waiting for its answer.\n");
-    login_interrupted.store(false, .release);
+    login_state.store(.cancellable, .release);
     const action: std.posix.Sigaction = .{ .handler = .{ .handler = onLoginInterrupt }, .mask = std.posix.sigemptyset(), .flags = 0 };
     var previous: std.posix.Sigaction = undefined;
     std.posix.sigaction(.INT, &action, &previous);
+    defer std.posix.sigaction(.INT, &previous, null);
     const outcome = login(init, &.{"codex"});
-    std.posix.sigaction(.INT, &previous, null);
     outcome catch |err| {
         const advice: []const u8 = switch (err) {
             error.LoginInterrupted => "Rui: Login interrupted. No provider preference changed; check credentials before retrying.\n",
