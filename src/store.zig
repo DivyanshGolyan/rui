@@ -2509,6 +2509,11 @@ pub const Store = struct {
     }
 
     fn publicConversationPageLocked(self: *Store, request: protocol.ConversationPage) !PublicConversationPage {
+        if (request.end > std.math.maxInt(i64) or request.before_position > std.math.maxInt(i64) or
+            request.before_ordinal > std.math.maxInt(i64) or
+            (request.end == 0) != (request.before_position == 0) or
+            (request.before_position == 0 and request.before_ordinal != 0) or
+            (request.end != 0 and request.before_position > request.end)) return error.InvalidCursor;
         const current = (try self.readSession(request.session.slice())) orelse return error.SessionNotFound;
         const end = if (request.end == 0) current.next_position - 1 else request.end;
         if (request.end != 0 and (request.before_position == 0 or request.before_position > end or
@@ -2579,7 +2584,8 @@ pub const Store = struct {
     }
 
     fn openPublicConversationContentLocked(self: *Store, request: protocol.ConversationContent) !ContentReader {
-        if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
+        if (request.position == 0 or request.position > std.math.maxInt(i64) or
+            request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const statement = if (request.ordinal == 0)
             try prepare(self.database, "SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND session_position=?2 AND entry_kind IN (1,3)")
         else

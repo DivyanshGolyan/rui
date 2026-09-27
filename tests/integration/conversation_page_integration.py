@@ -67,6 +67,21 @@ def main():
         assert len(page["items"]) == 1, page
         item = page["items"][0]
         assert item["kind"] == "user" and item["ordinal"] == "0", item
+        # Invalid public identities must not turn a SQL bind error into a
+        # canonical Store fence. A subsequent ordinary read still succeeds.
+        for field in ("end", "before_position", "before_ordinal"):
+            cursor = {"end": page["end"], "before_position": item["position"], "before_ordinal": "0"}
+            cursor[field] = str(2**64 - 1)
+            head, _ = request(socket_path, store, "/v1/conversation-page", "conversation_page", "direct/page", **cursor)
+            assert head.startswith(b"HTTP/1.1 400 "), head
+        for field in ("position", "ordinal"):
+            identity = {"position": item["position"], "ordinal": "0", "start": "0"}
+            identity[field] = str(2**64 - 1)
+            head, _ = request(socket_path, store, "/v1/conversation-content", "conversation_content", "direct/page", **identity)
+            assert head.startswith(b"HTTP/1.1 400 "), head
+        head, _ = request(socket_path, store, "/v1/conversation-page", "conversation_page", "direct/page",
+            end="0", before_position="0", before_ordinal="0")
+        assert head.startswith(b"HTTP/1.1 200 "), head
         domain = b"rui/content/v1"
         assert item["content"] == {
             "bytes": "10005", "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + payload.encode()).hexdigest(),

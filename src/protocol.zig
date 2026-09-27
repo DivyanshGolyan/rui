@@ -714,7 +714,9 @@ const Parser = struct {
         try self.expectByte(',');
         try self.expectKey("before_ordinal");
         request.before_ordinal = try self.readCanonicalU64();
-        if ((request.end == 0) != (request.before_position == 0) or
+        if (request.end > std.math.maxInt(i64) or request.before_position > std.math.maxInt(i64) or
+            request.before_ordinal > std.math.maxInt(i64) or
+            (request.end == 0) != (request.before_position == 0) or
             (request.before_position == 0 and request.before_ordinal != 0) or
             (request.end != 0 and request.before_position > request.end)) return error.InvalidCursor;
         return request;
@@ -734,7 +736,8 @@ const Parser = struct {
         try self.expectByte(',');
         try self.expectKey("start");
         request.start = try self.readCanonicalU64();
-        if (request.position == 0) return error.InvalidCursor;
+        if (request.position == 0 or request.position > std.math.maxInt(i64) or
+            request.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
         return request;
     }
 
@@ -1600,6 +1603,8 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
         .{ .body = "\"end\":\"0\",\"before_position\":\"10\",\"before_ordinal\":\"0\"", .failure = error.InvalidCursor },
         .{ .body = "\"end\":\"25\",\"before_position\":\"0\",\"before_ordinal\":\"0\"", .failure = error.InvalidCursor },
         .{ .body = "\"end\":\"25\",\"before_position\":\"26\",\"before_ordinal\":\"0\"", .failure = error.InvalidCursor },
+        .{ .body = "\"end\":\"25\",\"before_position\":\"10\",\"before_ordinal\":\"18446744073709551615\"", .failure = error.InvalidCursor },
+        .{ .body = "\"end\":\"18446744073709551615\",\"before_position\":\"10\",\"before_ordinal\":\"0\"", .failure = error.InvalidCursor },
         .{ .body = "\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"1\"", .failure = error.InvalidCursor },
         .{ .body = "\"end\":\"025\",\"before_position\":\"10\",\"before_ordinal\":\"0\"", .failure = error.InvalidIdentity },
     };
