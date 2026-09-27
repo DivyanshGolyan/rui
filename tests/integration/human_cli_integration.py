@@ -119,6 +119,19 @@ def main():
         fallback = preferences_home / ".local/share/rui/store"
         assert f"Store: {fallback} (HOME fallback)" in run(preferences_home, "setup")
         assert not (preferences_home / ".config").exists(), "inspection created private state"
+        # The shorter preferences path fits while the unsaved Store fallback
+        # does not. A provider-only update must fail before publication.
+        max_path = os.pathconf(preferences_home, "PC_PATH_MAX")
+        long_home = str(preferences_home) + "/." * ((max_path - 16 - len(str(preferences_home))) // 2)
+        assert run(long_home, "setup", "--provider", "codex", success=False) == ""
+        assert not (preferences_home / ".config/rui/preferences").exists()
+        bidi_store = state / "store-\u202ehidden"
+        bidi_store.mkdir(mode=0o700)
+        bidi_home = state / "bidi-home"
+        bidi_home.mkdir()
+        assert "Store: " + str(bidi_store).replace("\u202e", "\\u202e") + " (saved)" in run(
+            bidi_home, "setup", "--store", bidi_store)
+        assert f"store={bidi_store}\n" in (bidi_home / ".config/rui/preferences").read_text()
         assert "HomeUnavailable" in subprocess.run([str(fixture.RUI), "setup"],
             env={key: value for key, value in os.environ.items() if key != "HOME"},
             capture_output=True, text=True).stderr
@@ -362,9 +375,9 @@ def main():
             escaped_store = str(quoted_store).replace('"', r'\"')
             assert "Saved defaults for future Sessions" in terminal_step(
                 master, f'/setup --store "{escaped_store}"')
-            assert str(quoted_store.resolve()) in run(preferences_home, "setup")
+            assert str(quoted_store.resolve()).replace('"', r'\"') in run(preferences_home, "setup")
             assert "Usage: /setup" in terminal_step(master, '/setup --store "unfinished')
-            assert str(quoted_store.resolve()) in run(preferences_home, "setup")
+            assert str(quoted_store.resolve()).replace('"', r'\"') in run(preferences_home, "setup")
             assert "Saved defaults for future Sessions" in terminal_step(master, f'/setup --store "{store}"')
             assert "Permission: ask" in terminal_step(master, "/status")
             assert fixture.command("inspect-session", "--store", store,

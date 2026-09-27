@@ -140,6 +140,9 @@ pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model
     if (provider) |value| values.provider.set(value) catch return error.UnsupportedPreferenceProvider;
     if (model) |value| values.model.set(value) catch return error.InvalidPreferenceModel;
     try validate(&values);
+    // A provider/model-only edit must not publish defaults whose fallback
+    // Store cannot be selected by the very next setup or Session caller.
+    if (values.store.len == 0) _ = try defaultStore(home, &path);
 
     if (openPreferenceFile(dir, "preferences.tmp")) |stale| {
         defer stale.close(io);
