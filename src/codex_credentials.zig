@@ -98,6 +98,12 @@ pub fn loadInto(path: []const u8, destination: *Record) !void {
 
 pub const LocalStatus = enum { missing, configured, refresh_required };
 
+/// Opaque tokens have no encoded expiry; both local inspection and runtime
+/// refresh use the last successful exchange as their clock.
+pub fn opaqueRefreshDue(refreshed_at: i64, now_seconds: i64) bool {
+    return now_seconds -| refreshed_at >= 8 * 24 * 60 * 60;
+}
+
 /// Inspect only the atomic credential snapshot. Do not create a lock, refresh,
 /// contact the provider or claim that a locally present token works remotely.
 pub fn localStatus(path: []const u8, now_seconds: i64) !LocalStatus {
@@ -112,7 +118,9 @@ pub fn localStatus(path: []const u8, now_seconds: i64) !LocalStatus {
         error.FileNotFound => return .missing,
         else => return err,
     };
-    if (record.state == .refresh_pending or record.expires_at <= now_seconds) return .refresh_required;
+    if (record.state == .refresh_pending or
+        (if (record.expires_at != 0) record.expires_at <= now_seconds else opaqueRefreshDue(record.refreshed_at, now_seconds)))
+        return .refresh_required;
     return .configured;
 }
 
@@ -464,7 +472,13 @@ test "local credential status is observational at expiry and pending refresh" {
     try install(path, &record, null);
     try std.testing.expectEqual(LocalStatus.configured, try localStatus(path, 1233));
     try std.testing.expectEqual(LocalStatus.refresh_required, try localStatus(path, 1234));
-    try std.testing.expectError(error.InjectedRefreshFailure, exchangeRefresh(path, 1, {}, struct {
+    record.expires_at = 0;
+    record.refreshed_at = 100;
+    try record.access_token.set("opaque-access");
+    try install(path, &record, null);
+    try std.testing.expectEqual(LocalStatus.configured, try localStatus(path, 100 + 8 * 24 * 60 * 60 - 1));
+    try std.testing.expectEqual(LocalStatus.refresh_required, try localStatus(path, 100 + 8 * 24 * 60 * 60));
+    try std.testing.expectError(error.InjectedRefreshFailure, exchangeRefresh(path, 2, {}, struct {
         fn fail(_: void, _: *const Record) error{InjectedRefreshFailure}!Record {
             return error.InjectedRefreshFailure;
         }

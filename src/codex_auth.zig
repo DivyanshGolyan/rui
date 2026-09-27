@@ -60,7 +60,7 @@ pub fn failureCode(err: anyerror) []const u8 {
 
 fn shouldRefresh(record: *const credentials.Record, now: i64) bool {
     if (record.expires_at != 0) return record.expires_at <= now + 60;
-    return now -| record.refreshed_at >= 8 * 24 * 60 * 60;
+    return credentials.opaqueRefreshDue(record.refreshed_at, now);
 }
 
 fn validateSelected(record: *const credentials.Record, fixture: bool) !void {

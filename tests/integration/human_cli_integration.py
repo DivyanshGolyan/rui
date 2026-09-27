@@ -357,6 +357,11 @@ def main():
         stale = run(preferences_home, "setup")
         assert "credential: configured locally" in stale and "saved provider is unsupported; no fallback" in stale
         assert saved.read_text().endswith("provider=retired\nmodel=old-model\n")
+        assert "Saved defaults" in run(preferences_home, "setup", "--store", store)
+        assert saved.read_text().endswith("provider=retired\nmodel=old-model\n")
+        assert "Saved defaults" in run(preferences_home, "setup", "--provider", "codex")
+        assert saved.read_text().endswith("provider=codex\nmodel=gpt-6-luna\n")
+        saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
         assert "Saved defaults" in run(preferences_home, "setup", "--provider", "codex", "--model", "gpt-6-luna")
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=old-model\n")
         assert "saved model is unsupported; no fallback" in run(preferences_home, "setup")

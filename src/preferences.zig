@@ -138,24 +138,30 @@ pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model
     };
     defer lock.close(io);
     try privateFile(lock);
-    var values = try read(dir);
+    const saved = try read(dir);
+    var values = saved;
     if (store) |value| {
         const paths = try platform.resolveClientPaths(io, value);
         values.store.set(paths.store.slice()) catch return error.InvalidPreferenceStore;
     }
-    if (provider) |value| values.provider.set(value) catch return error.UnsupportedPreferenceProvider;
-    if (model) |value| values.model.set(value) catch return error.InvalidPreferenceModel;
+    if (provider != null or model != null) {
+        const supported = provider_selection.codex(.missing);
+        const choice = provider_selection.resolve(&.{supported}, provider, model, if (saved.provider.len != 0) saved.provider.slice() else null, if (saved.model.len != 0) saved.model.slice() else null) catch |err| switch (err) {
+            error.UnsupportedSelectionProvider => return error.UnsupportedPreferenceProvider,
+            error.UnsupportedSelectionModel => return error.UnsupportedPreferenceModel,
+        };
+        switch (choice) {
+            .chooser => return error.PreferenceProviderRequired,
+            .selected => |selected| {
+                values.provider.set(selected.provider) catch unreachable;
+                values.model.set(selected.model) catch unreachable;
+            },
+        }
+    }
     try validate(&values);
     // A provider/model-only edit must not publish defaults whose fallback
     // Store cannot be selected by the very next setup or Session caller.
     if (values.store.len == 0) _ = try defaultStore(home, &path);
-    if (values.provider.len != 0) {
-        const supported = provider_selection.codex(.missing);
-        _ = provider_selection.resolve(&.{supported}, null, null, values.provider.slice(), if (values.model.len != 0) values.model.slice() else null) catch |err| switch (err) {
-            error.UnsupportedSelectionProvider => return error.UnsupportedPreferenceProvider,
-            error.UnsupportedSelectionModel => return error.UnsupportedPreferenceModel,
-        };
-    }
 
     if (openPreferenceFile(dir, "preferences.tmp")) |stale| {
         defer stale.close(io);
