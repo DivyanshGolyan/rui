@@ -254,10 +254,13 @@ const Owner = struct {
     }
 
     fn readRecordInto(self: *Owner, destination: *Record) !void {
-        const file = try self.parent.openFile(io, self.finalName(), .{
-            .allow_directory = false,
-            .follow_symlinks = false,
-        });
+        // Reject a private FIFO after opening it without waiting for a writer.
+        const file: std.Io.File = .{ .handle = try std.posix.openat(self.parent.handle, self.finalName(), .{
+            .ACCMODE = .RDONLY,
+            .NONBLOCK = true,
+            .NOFOLLOW = true,
+            .CLOEXEC = true,
+        }, 0), .flags = .{ .nonblocking = true } };
         defer file.close(io);
         try validatePrivateFile(file);
         const stat = try file.stat(io);

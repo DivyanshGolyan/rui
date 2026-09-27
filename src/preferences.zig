@@ -89,7 +89,7 @@ pub fn load(home: []const u8) !Values {
 
 /// Serializes read/modify/write for competing setup callers. A failed write or
 /// rename leaves the previous complete file; post-rename sync failure is uncertain.
-pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model: ?[]const u8) !Values {
+pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model: ?[]const u8, readiness: provider_selection.Readiness) !Values {
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = try directoryPath(home, &path);
     if (provider) |value| {
@@ -145,7 +145,7 @@ pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model
         values.store.set(paths.store.slice()) catch return error.InvalidPreferenceStore;
     }
     if (provider != null or model != null) {
-        const supported = provider_selection.codex(.missing);
+        const supported = provider_selection.codex(readiness);
         const choice = provider_selection.resolve(&.{supported}, provider, model, if (saved.provider.len != 0) saved.provider.slice() else null, if (saved.model.len != 0) saved.model.slice() else null) catch |err| switch (err) {
             error.UnsupportedSelectionProvider => return error.UnsupportedPreferenceProvider,
             error.UnsupportedSelectionModel => return error.UnsupportedPreferenceModel,

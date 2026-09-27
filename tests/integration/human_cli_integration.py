@@ -325,6 +325,21 @@ def main():
         configured_setup = run(preferences_home, "setup")
         assert "credential: configured locally" in configured_setup and "remote acceptance not checked" in configured_setup
         assert not lock.exists(), "status must not create a credential lock"
+        fresh_provider_home = state / "fresh-provider-home"
+        (fresh_provider_home / ".config/rui").mkdir(parents=True, mode=0o700)
+        codex_fixture.credentials(fresh_provider_home / ".config/rui/codex.json")
+        assert "Saved defaults" in run(fresh_provider_home, "setup", "--model", "gpt-6-luna")
+        assert (fresh_provider_home / ".config/rui/preferences").read_text().endswith(
+            "store=\nprovider=codex\nmodel=gpt-6-luna\n")
+        credential.unlink()
+        os.mkfifo(credential, mode=0o600)
+        try:
+            blocked = subprocess.run([str(fixture.RUI), "setup"],
+                env={**os.environ, "HOME": str(preferences_home)},
+                capture_output=True, text=True, timeout=2)
+            assert blocked.returncode == 0 and "credential: error" in blocked.stdout, blocked
+        finally:
+            credential.unlink()
         codex_fixture.credentials(credential, state="refresh_pending")
         assert "credential: refresh required" in run(preferences_home, "setup")
         assert "state=refresh_pending" in credential.read_text(), "status must not refresh"

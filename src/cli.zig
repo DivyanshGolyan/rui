@@ -114,8 +114,18 @@ fn setup(init: std.process.Init, args: []const []const u8) !void {
         const flag = args[index];
         if (std.mem.eql(u8, flag, "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, flag, "--provider")) selected_provider = try takeValue(args, &index) else if (std.mem.eql(u8, flag, "--model")) model = try takeValue(args, &index) else return usage();
     }
+    var credential_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
+    const readiness: provider_selection.Readiness = blk: {
+        const path = credentialPath(init, &credential_buffer, false) catch break :blk .credential_error;
+        break :blk if (codex_credentials.localStatus(path, now)) |state| switch (state) {
+            .missing => .missing,
+            .configured => .configured,
+            .refresh_required => .refresh_required,
+        } else |_| .credential_error;
+    };
     const changed = store != null or selected_provider != null or model != null;
-    const values = (if (changed) preferences.update(home, store, selected_provider, model) else preferences.load(home)) catch |err| {
+    const values = (if (changed) preferences.update(home, store, selected_provider, model, readiness) else preferences.load(home)) catch |err| {
         if (err == error.PreferenceDirectorySyncFailed) {
             std.debug.print("rui: setup save durability unconfirmed; inspect HOME/.config/rui/preferences before another update. No Session changed.\n", .{});
         } else if (err == error.UnsupportedPreferenceProvider) {
@@ -141,16 +151,6 @@ fn setup(init: std.process.Init, args: []const []const u8) !void {
     try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) values.provider.slice() else "not selected");
     try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
     var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
-    var credential_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
-    const readiness: provider_selection.Readiness = blk: {
-        const path = credentialPath(init, &credential_buffer, false) catch break :blk .credential_error;
-        break :blk if (codex_credentials.localStatus(path, now)) |state| switch (state) {
-            .missing => .missing,
-            .configured => .configured,
-            .refresh_required => .refresh_required,
-        } else |_| .credential_error;
-    };
     const codex = provider_selection.codex(readiness);
     const local_status = switch (readiness) {
         .configured => "Codex credential: configured locally (remote acceptance not checked).\n",
