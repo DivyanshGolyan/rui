@@ -132,9 +132,26 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) HostS
         error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,
         else => .owned_unavailable,
     };
-    if (reply.status == 503) return .owned_unavailable;
+    if (reply.status == 503) return if (validHostUnavailable(reply.body)) .owned_unavailable else .incompatible;
     if (reply.status != 200) return .incompatible;
     return parseHostInfo(reply.body, paths.store.slice()) catch .incompatible;
+}
+
+fn validHostUnavailable(body: []const u8) bool {
+    if (body.len > protocol.max_control_error_response_bytes) return false;
+    var parse_storage: [protocol.max_control_error_response_bytes * 2]u8 = undefined;
+    var arena = std.heap.FixedBufferAllocator.init(&parse_storage);
+    const reply = std.json.parseFromSliceLeaky(struct {
+        version: []const u8,
+        type: []const u8,
+        code: []const u8,
+    }, arena.allocator(), body, .{ .ignore_unknown_fields = false, .allocate = .alloc_if_needed }) catch return false;
+    if (!std.mem.eql(u8, reply.version, protocol.wire_version)) return false;
+    if (std.mem.eql(u8, reply.type, "host_unavailable")) return std.mem.eql(u8, reply.code, "dispatch_fenced");
+    if (!std.mem.eql(u8, reply.type, "busy")) return false;
+    return std.mem.eql(u8, reply.code, "connection_capacity_exhausted") or
+        std.mem.eql(u8, reply.code, "classification_capacity_exhausted") or
+        std.mem.eql(u8, reply.code, "ordinary_capacity_exhausted");
 }
 
 fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
@@ -193,6 +210,22 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
         defer std.testing.allocator.free(duplicated);
         try std.testing.expectError(error.DuplicateField, parseHostInfo(duplicated, "/one"));
     }
+}
+
+test "Host unavailable replies require a known complete error" {
+    for ([_][]const u8{
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"connection_capacity_exhausted\"}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"classification_capacity_exhausted\"}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\"}",
+        "{\"version\":\"1\",\"type\":\"host_unavailable\",\"code\":\"dispatch_fenced\"}",
+    }) |body| try std.testing.expect(validHostUnavailable(body));
+    for ([_][]const u8{
+        "{}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\"}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"dispatch_fenced\"}",
+        "{\"version\":\"1\",\"type\":\"host_unavailable\",\"code\":\"unknown\"}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\",\"code\":\"ordinary_capacity_exhausted\"}",
+    }) |body| try std.testing.expect(!validHostUnavailable(body));
 }
 
 pub const CommandReply = struct {
