@@ -6,6 +6,7 @@ import os
 import pathlib
 import re
 import resource
+import select
 import shlex
 import signal
 import subprocess
@@ -162,6 +163,7 @@ def main():
             attached = run_start(held_store, env)
             assert attached.returncode == 0, attached.stderr
             assert "Attached to the ready Host" in attached.stdout, attached.stdout
+            assert f"Diagnostics: {held_store.resolve()}/diagnostics\n" in attached.stdout
             assert instance(status(held_store, env), 3) == before
             assert wait_for_processes(held_store, 1) == [held.pid]
         finally:
@@ -216,6 +218,39 @@ def main():
                     process.kill()
                     process.wait(timeout=3)
             forced_crash_cleanup(store)
+
+        # A descriptor opened before lowering the soft limit is still owned
+        # by the launcher; the detached Host must not hold its pipe open.
+        inherited_store = root / "inherited-fd"
+        read_fd, write_fd = os.pipe()
+        try:
+            def inherited_above_limit():
+                os.dup2(write_fd, 200)
+                soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+                resource.setrlimit(resource.RLIMIT_NOFILE, (128, hard))
+
+            inherited = run_start(inherited_store, env, pass_fds=(write_fd,),
+                preexec_fn=inherited_above_limit)
+            assert inherited.returncode == 0, inherited.stderr
+        finally:
+            os.close(write_fd)
+            try:
+                ready, _, _ = select.select([read_fd], [], [], 1)
+                assert ready and os.read(read_fd, 1) == b"", "detached Host inherited fd 200"
+            finally:
+                os.close(read_fd)
+                forced_crash_cleanup(inherited_store)
+
+        # A failed final stdout readiness handshake must not claim ready.
+        broken_store = root / "broken-stdout"
+        broken = subprocess.run([RUI, "serve", "--store", broken_store], env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=COMMAND_TIMEOUT,
+            preexec_fn=lambda: os.close(1))
+        assert broken.returncode != 0
+        records = [json.loads(line) for file in (broken_store / "diagnostics").glob("host-*.jsonl")
+            for line in file.read_text().splitlines()]
+        assert any(record.get("phase") == "failed" for record in records), records
+        assert not any(record.get("phase") == "ready" for record in records), records
 
         # A detached Host that cannot satisfy its inherited descriptor budget
         # exits; the CLI bounds uncertainty and points at owner diagnostics.

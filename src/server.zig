@@ -347,12 +347,12 @@ pub fn serve(
         try ready.appendFmt(" curl={s} openssl={s}", .{ provider.curl_version, provider.openssl_version });
     }
     try ready.append("\n");
+    try std.Io.File.stdout().writeStreamingAll(io, ready.slice());
     if (diagnostics) |*writer| {
         writer.record("ready", "serving");
         writer.close();
         diagnostics = null;
     }
-    try std.Io.File.stdout().writeStreamingAll(io, ready.slice());
 
     while (true) {
         const stream = listener.accept(io) catch |err| switch (err) {

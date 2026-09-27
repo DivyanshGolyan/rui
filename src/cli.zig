@@ -188,8 +188,9 @@ fn host(init: std.process.Init, args: []const []const u8) !void {
 fn startHost(init: std.process.Init, selected: []const u8) !void {
     const io = init.io;
     switch (client.hostStatus(io, selected)) {
-        .ready => {
+        .ready => |ready| {
             try std.Io.File.stdout().writeStreamingAll(io, "Rui: Attached to the ready Host; its existing capacity and capabilities win.\n");
+            try writeHostDiagnostics(io, ready.store.slice());
             return;
         },
         .incompatible => return error.IncompatibleHost,
@@ -218,8 +219,7 @@ fn startHost(init: std.process.Init, selected: []const u8) !void {
             .ready => |ready| {
                 var line: [100]u8 = undefined;
                 try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "Rui: Host ready (active capacity {d}); existing settings win.\n", .{ready.active_capacity}));
-                var location: [protocol.max_store_bytes + "/diagnostics".len]u8 = undefined;
-                try writeSafeField(io, "Diagnostics: ", try std.fmt.bufPrint(&location, "{s}/diagnostics", .{paths.store.slice()}));
+                try writeHostDiagnostics(io, ready.store.slice());
                 return;
             },
             .incompatible => return error.IncompatibleHost,
@@ -230,6 +230,11 @@ fn startHost(init: std.process.Init, selected: []const u8) !void {
     }
     std.debug.print("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
     return error.HostReadinessUnconfirmed;
+}
+
+fn writeHostDiagnostics(io: std.Io, store: []const u8) !void {
+    var location: [protocol.max_store_bytes + "/diagnostics".len]u8 = undefined;
+    try writeSafeField(io, "Diagnostics: ", try std.fmt.bufPrint(&location, "{s}/diagnostics", .{store}));
 }
 
 fn login(init: std.process.Init, args: []const []const u8) !void {

@@ -19,10 +19,14 @@ static void fail_child(int report, int code) {
  * terminal/session or inherited descriptor; its lifetime is independent of
  * this caller. Readiness and ownership are established separately by Rui. */
 int rui_launch_detached(const char *executable, const char *store) {
+#if defined(__APPLE__)
+    /* Darwin has no closefrom; the hard limit still covers descriptors
+     * opened before a caller lowers only its soft limit. */
     struct rlimit limit;
     if (getrlimit(RLIMIT_NOFILE, &limit) != 0) return errno;
-    if (limit.rlim_cur == RLIM_INFINITY || limit.rlim_cur > INT_MAX) return ENOTSUP;
-    int last_fd = (int)limit.rlim_cur;
+    if (limit.rlim_max == RLIM_INFINITY || limit.rlim_max > INT_MAX) return ENOTSUP;
+    int last_fd = (int)limit.rlim_max;
+#endif
     int channel[2];
     if (pipe(channel) != 0) return errno;
     int report = fcntl(channel[1], F_DUPFD_CLOEXEC, 3);
@@ -52,9 +56,19 @@ int rui_launch_detached(const char *executable, const char *store) {
             if (dup2(null_fd, fd) < 0) fail_child(report, errno);
         }
         if (null_fd > 2 && null_fd != report) close(null_fd);
-        for (int fd = 3; fd < last_fd; fd++) {
-            if (fd != report) close(fd);
+        /* Preserve the exec-error channel at 3, then close every other
+         * descriptor, including ones above a subsequently lowered soft limit. */
+        if (report != 3) {
+            if (dup2(report, 3) < 0) fail_child(report, errno);
+            close(report);
+            report = 3;
         }
+        if (fcntl(report, F_SETFD, FD_CLOEXEC) < 0) fail_child(report, errno);
+#if defined(__APPLE__)
+        for (int fd = 4; fd < last_fd; fd++) close(fd);
+#else
+        closefrom(4);
+#endif
         const char *argv[] = {executable, "serve", "--store", store,
             "--active-capacity", "8", "--codex", NULL};
         execv(executable, (char *const *)argv);
