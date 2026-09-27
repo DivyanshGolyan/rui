@@ -355,7 +355,10 @@ def main():
         # no partial replacement may appear as a saved preference.
         temp = saved.parent / "preferences.tmp"
         temp.mkdir()
-        assert run(preferences_home, "setup", "--model", "another-model", success=False) == ""
+        blocked = subprocess.run([str(fixture.RUI), "setup", "--store", str(store)],
+            env={**os.environ, "HOME": str(preferences_home)},
+            capture_output=True, text=True, timeout=2)
+        assert blocked.returncode != 0 and "save failed: InsecurePreferenceFile" in blocked.stderr, blocked
         assert saved.read_text().endswith("model=gpt-6-luna\n")
         temp.rmdir()
         os.mkfifo(temp, mode=0o600)
