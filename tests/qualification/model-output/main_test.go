@@ -236,12 +236,12 @@ func TestSpillDiagnosticsRequireEffectiveConfiguration(t *testing.T) {
 }
 
 func TestProductionDiagnosticsRejectOldCacheAndChangedGuarantees(t *testing.T) {
-	const valid = `{"cache_size_setting":-1024,"hard_heap_limit_bytes":16777216,"cache_spill_threshold":247,"synchronous":3,"journal_mode":"delete","mmap_size_bytes":0,"temp_store":1,"busy_timeout_ms":0}`
+	const valid = `{"cache_size_setting":-1024,"hard_heap_limit_bytes":16777216,"cache_spill_threshold":247,"synchronous":3,"journal_mode":"delete","mmap_size_bytes":0,"temp_store":1,"busy_timeout_ms":0,"process_memory_current_bytes":0,"process_memory_highwater_bytes":0,"cache_used_bytes":0,"cache_spills":0}`
 	var record sqliteDiagnostic
 	if err := json.Unmarshal([]byte(valid), &record); err != nil {
 		t.Fatal(err)
 	}
-	if !productionDiagnosticsValid([]sqliteDiagnostic{record}) || productionDiagnosticsValid(nil) {
+	if productionDiagnosticsStatus([]sqliteDiagnostic{record}) != "passed" || productionDiagnosticsStatus(nil) != "incomplete" {
 		t.Fatal("invalid production diagnostic baseline")
 	}
 	for field, wrong := range map[string]any{
@@ -263,8 +263,43 @@ func TestProductionDiagnosticsRejectOldCacheAndChangedGuarantees(t *testing.T) {
 			if err := json.Unmarshal(encoded, &bad); err != nil {
 				t.Fatal(err)
 			}
-			if productionDiagnosticsValid([]sqliteDiagnostic{record, bad}) {
+			if productionDiagnosticsStatus([]sqliteDiagnostic{record, bad}) != "failed" {
 				t.Fatalf("accepted %s=%v", field, value)
+			}
+		}
+	}
+	for _, field := range []string{"process_memory_current_bytes", "process_memory_highwater_bytes", "cache_used_bytes", "cache_spills"} {
+		for _, omit := range []bool{false, true} {
+			var fields map[string]any
+			if err := json.Unmarshal([]byte(valid), &fields); err != nil {
+				t.Fatal(err)
+			}
+			if omit {
+				delete(fields, field)
+			} else {
+				fields[field] = nil
+			}
+			encoded, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var missing sqliteDiagnostic
+			if err := json.Unmarshal(encoded, &missing); err != nil {
+				t.Fatal(err)
+			}
+			status := productionDiagnosticsStatus([]sqliteDiagnostic{record, missing})
+			if status != "incomplete" || qualificationExitCode(status) == 0 {
+				t.Fatalf("accepted missing usage %s (omitted=%v): %s", field, omit, status)
+			}
+			bad := record
+			bad.CacheSizeSetting = nil
+			for _, records := range [][]sqliteDiagnostic{{missing, bad}, {bad, missing}} {
+				if productionDiagnosticsStatus(records) != "failed" {
+					t.Fatal("missing usage hid invalid configuration")
+				}
+			}
+			if reduceStatuses([]map[string]any{{"status": "failed"}, {"status": status}}) != "failed" {
+				t.Fatal("missing usage hid earlier failure")
 			}
 		}
 	}

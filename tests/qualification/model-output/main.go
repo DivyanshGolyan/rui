@@ -553,10 +553,11 @@ func sqliteDiagnosticRecords(report []byte) ([]sqliteDiagnostic, error) {
 	return result, scanner.Err()
 }
 
-func productionDiagnosticsValid(records []sqliteDiagnostic) bool {
+func productionDiagnosticsStatus(records []sqliteDiagnostic) string {
 	if len(records) == 0 {
-		return false
+		return "incomplete"
 	}
+	status := "passed"
 	for _, record := range records {
 		if record.CacheSizeSetting == nil || *record.CacheSizeSetting != -1024 ||
 			record.HardHeapLimitBytes == nil || *record.HardHeapLimitBytes != 16*1024*1024 ||
@@ -566,10 +567,14 @@ func productionDiagnosticsValid(records []sqliteDiagnostic) bool {
 			record.MmapSizeBytes == nil || *record.MmapSizeBytes != 0 ||
 			record.TempStore == nil || *record.TempStore != 1 ||
 			record.BusyTimeoutMS == nil || *record.BusyTimeoutMS != 0 {
-			return false
+			return "failed"
+		}
+		if record.ProcessMemoryCurrentBytes == nil || record.ProcessMemoryHighwater == nil ||
+			record.CacheUsedBytes == nil || record.CacheSpills == nil {
+			status = "incomplete"
 		}
 	}
-	return true
+	return status
 }
 
 func spillDiagnosticsValid(records []sqliteDiagnostic, enabled, completed bool) bool {
@@ -1565,13 +1570,9 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 				return nil, parseError
 			}
 			row["host_sqlite_diagnostics"] = records
-			valid := productionDiagnosticsValid(records)
-			row["sqlite_diagnostics_status"] = observationStatus(len(records) > 0, valid)
-			if len(records) == 0 {
-				row["status"] = reduceStatuses([]map[string]any{row, {"status": "incomplete"}})
-			} else if !valid {
-				row["status"] = "failed"
-			}
+			status := productionDiagnosticsStatus(records)
+			row["sqlite_diagnostics_status"] = status
+			row["status"] = reduceStatuses([]map[string]any{row, {"status": status}})
 		}
 		rounds = append(rounds, row)
 	}
