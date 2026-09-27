@@ -520,7 +520,8 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
         // including after a login whose future-default save failed.
         if (store == null or explicit_provider == null or explicit_model == null)
             defaults = try preferences.load(home);
-        const updated = codex_credentials.localStatus(credential, now) catch |err| {
+        const after_choice: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
+        const updated = codex_credentials.localStatus(credential, after_choice) catch |err| {
             std.debug.print("rui: credential still unreadable ({s}); inspect rui setup. No Session created.\n", .{@errorName(err)});
             return err;
         };

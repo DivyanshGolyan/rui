@@ -533,6 +533,31 @@ def main():
                 explicit.kill()
                 explicit.wait(timeout=5)
             os.close(master)
+        # The credential arrives while the prompt is open, then expires
+        # before the choice. Readiness must use the post-choice clock.
+        (explicit_config / "codex.json").unlink()
+        master, slave = pty.openpty()
+        expiring = subprocess.Popen([str(fixture.RUI), "--store", str(store),
+            "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
+            env={**os.environ, "HOME": str(explicit_home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            assert "No locally ready provider" in read_terminal(master, "Provider: [c]")
+            expiry = int(time.time()) + 2
+            credential_file = explicit_config / "codex.json"
+            codex_fixture.credentials(credential_file)
+            credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", f"expires_at={expiry}"))
+            while time.time() < expiry:
+                time.sleep(0.01)
+            assert "No new Session created" in terminal_step(master, "d", "No new Session created")
+            assert expiring.wait(timeout=5) == 0
+            assert malformed.read_text() == "version=9\n"
+        finally:
+            if expiring.poll() is None:
+                expiring.kill()
+                expiring.wait(timeout=5)
+            os.close(master)
         longer_store = state / "another-longer-store-selector"
         other_host = fixture.start_host(longer_store, url)
         try:
