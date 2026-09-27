@@ -181,7 +181,7 @@ fn setup(init: std.process.Init, args: []const []const u8) !void {
         },
     };
     // Host capabilities are startup facts, not credential or Session state.
-    const host_details: []const u8 = switch (client.hostStatus(init.io, if (values.store.len != 0) values.store.slice() else fallback)) {
+    const host_details: []const u8 = switch (client.hostStatus(init.io, selected_store)) {
         .ready => |current| if (current.capabilities.managed_authentication and current.capabilities.model)
             "Host: managed Codex enabled (credentials checked locally, not by status).\n"
         else
