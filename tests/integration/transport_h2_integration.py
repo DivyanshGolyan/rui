@@ -420,18 +420,34 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
                 assert dispatch.observe(store, key)["result"]["status"] == "completed"
                 assert dispatch.read_result(store, key) == endpoint.answers[f"h2-{capacity}-{round_number}-{index}"]
             # Store settlement precedes the execution owner's custody release.
-            dispatch.wait_for(
-                lambda: dispatch.command(
+            # Admission can transiently reserve an unused slot even when idle.
+            # Require both drain facts in one observation, not a second read
+            # after wait_for has already witnessed drainage.
+            def drained():
+                observation = dispatch.command(
                     "inspect-session", "--store", store, "--session", f"direct/h2-{capacity}-0"
-                )["execution"]["custody_occupied"] == "0",
+                )["execution"]
+                return (observation["custody_occupied"] == "0"
+                        and observation["scratch_used_bytes"] == "0")
+
+            dispatch.wait_for(
+                drained,
                 f"H2 custody drainage after round {round_number}", timeout=20,
             )
-            observation = dispatch.command(
-                "inspect-session", "--store", store, "--session", f"direct/h2-{capacity}-0"
-            )["execution"]
-            assert observation["custody_occupied"] == "0", observation
-            assert observation["scratch_used_bytes"] == "0", observation
-            idle_fds.append(open_descriptors(host.pid))
+            # The inspection reply can precede closing its report and socket.
+            # Record the qualifying sample rather than racing another read.
+            descriptors = open_descriptors(host.pid)
+            if idle_fds:
+                def descriptors_released():
+                    nonlocal descriptors
+                    descriptors = open_descriptors(host.pid)
+                    return descriptors <= min(idle_fds)
+
+                dispatch.wait_for(
+                    descriptors_released,
+                    f"H2 descriptor drainage after round {round_number}", timeout=20,
+                )
+            idle_fds.append(descriptors)
             if endpoint.observed_shape:
                 physical_peaks.append(host_physical_peak(host.pid))
                 # Flush completed-wave evidence before starting work that can fail.
