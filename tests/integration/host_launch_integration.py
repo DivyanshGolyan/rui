@@ -220,6 +220,15 @@ def main():
                     process.wait(timeout=3)
             forced_crash_cleanup(store)
 
+        ignored_child_store = root / "ignored-sigchld"
+        try:
+            inherited = run_start(ignored_child_store, env,
+                preexec_fn=lambda: signal.signal(signal.SIGCHLD, signal.SIG_IGN))
+            assert inherited.returncode == 0, inherited.stderr
+            assert instance(status(ignored_child_store, env), 8)
+        finally:
+            forced_crash_cleanup(ignored_child_store)
+
         # A descriptor opened before lowering the soft limit is still owned
         # by the launcher; the detached Host must not hold its pipe open.
         inherited_store = root / "inherited-fd"
@@ -263,6 +272,23 @@ def main():
                 assert not any(record.get("phase") == "ready" for record in records), records
             finally:
                 forced_crash_cleanup(broken_store)
+
+        disconnected_store = root / "disconnected-stdout"
+        disconnected = subprocess.Popen([RUI, "serve", "--store", disconnected_store],
+            env=clean_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            disconnected.stdout.close()
+            assert disconnected.wait(timeout=COMMAND_TIMEOUT) != 0
+            records = [json.loads(line) for file in (disconnected_store / "diagnostics").glob("host-*.jsonl")
+                for line in file.read_text().splitlines()]
+            assert any(record.get("phase") == "failed" for record in records), records
+            assert not any(record.get("phase") == "ready" for record in records), records
+        finally:
+            if disconnected.poll() is None:
+                disconnected.kill()
+                disconnected.wait(timeout=3)
+            disconnected.stderr.close()
+            forced_crash_cleanup(disconnected_store)
 
         # A detached Host that cannot satisfy its inherited descriptor budget
         # exits; the CLI bounds uncertainty and points at owner diagnostics.

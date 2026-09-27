@@ -186,6 +186,7 @@ const Connection = struct {
 };
 
 pub extern "c" fn rui_serve_readiness_output_present() c_int;
+extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
 
 pub fn serve(
     io: std.Io,
@@ -356,7 +357,8 @@ pub fn serve(
         try ready.appendFmt(" curl={s} openssl={s}", .{ provider.curl_version, provider.openssl_version });
     }
     try ready.append("\n");
-    try std.Io.File.stdout().writeStreamingAll(io, ready.slice());
+    if (rui_write_readiness(1, ready.slice().ptr, ready.slice().len) != 0)
+        return error.HostReadinessOutputUnavailable;
     if (diagnostics) |*writer| {
         writer.record("ready", "serving");
         writer.close();
