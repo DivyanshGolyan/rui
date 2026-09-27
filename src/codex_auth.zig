@@ -298,7 +298,8 @@ fn writeCallback(data: [*c]u8, size: usize, count: usize, context: ?*anyopaque) 
     return length;
 }
 
-fn post(url: [:0]const u8, content_type: [*:0]const u8, body: []const u8, response: *Response) !u16 {
+fn post(url: [:0]const u8, content_type: [*:0]const u8, body: []const u8, response: *Response, cancelled: ?*const fn () bool) !u16 {
+    if (cancelled) |check| if (check()) return error.LoginInterrupted;
     const easy = c.curl_easy_init() orelse return error.TransportInitializationFailed;
     defer c.curl_easy_cleanup(easy);
     response.* = .{};
@@ -321,22 +322,46 @@ fn post(url: [:0]const u8, content_type: [*:0]const u8, body: []const u8, respon
     try opt(easy, c.CURLOPT_CONNECTTIMEOUT_MS, @as(c_long, 15_000));
     try opt(easy, c.CURLOPT_TIMEOUT_MS, @as(c_long, 60_000));
     try opt(easy, c.CURLOPT_NOSIGNAL, @as(c_long, 1));
-    if (c.curl_easy_perform(easy) != c.CURLE_OK)
-        return if (response.overflow) error.ResponseTooLong else error.TransportFailed;
+    if (cancelled != null) {
+        try opt(easy, c.CURLOPT_NOPROGRESS, @as(c_long, 0));
+        try opt(easy, c.CURLOPT_XFERINFOFUNCTION, loginProgress);
+        try opt(easy, c.CURLOPT_XFERINFODATA, &cancelled);
+    }
+    const result = c.curl_easy_perform(easy);
+    if (cancelled) |check| if (check()) return error.LoginInterrupted;
+    if (result != c.CURLE_OK) return if (response.overflow) error.ResponseTooLong else error.TransportFailed;
     var status: c_long = 0;
     if (c.curl_easy_getinfo(easy, c.CURLINFO_RESPONSE_CODE, &status) != c.CURLE_OK)
         return error.TransportFailed;
     return @intCast(status);
 }
 
+fn loginProgress(context: ?*anyopaque, _: c.curl_off_t, _: c.curl_off_t, _: c.curl_off_t, _: c.curl_off_t) callconv(.c) c_int {
+    const cancelled: *const ?*const fn () bool = @ptrCast(@alignCast(context orelse return 1));
+    return if (cancelled.*) |check| @intFromBool(check()) else 0;
+}
+
+test "device login cancellation rejects before a provider request" {
+    const cancelled = struct {
+        fn yes() bool {
+            return true;
+        }
+    }.yes;
+    try std.testing.expectError(error.LoginInterrupted, login(std.testing.io, struct {
+        fn display(_: []const u8) !void {}
+    }.display, cancelled));
+    var callback: ?*const fn () bool = cancelled;
+    try std.testing.expectEqual(@as(c_int, 1), loginProgress(@ptrCast(&callback), 0, 0, 0, 0));
+}
+
 fn opt(easy: *c.CURL, option: c.CURLoption, value: anytype) !void {
     if (c.curl_easy_setopt(easy, option, value) != c.CURLE_OK) return error.TransportConfigurationFailed;
 }
 
-pub fn login(io: std.Io, callback: anytype) !Tokens {
+pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool) !Tokens {
     var begin: Response = .{};
     defer std.crypto.secureZero(u8, std.mem.asBytes(&begin));
-    const begin_status = try post(issuer ++ "/api/accounts/deviceauth/usercode", "Content-Type: application/json", "{\"client_id\":\"" ++ client_id ++ "\"}", &begin);
+    const begin_status = try post(issuer ++ "/api/accounts/deviceauth/usercode", "Content-Type: application/json", "{\"client_id\":\"" ++ client_id ++ "\"}", &begin, cancelled);
     if (begin_status == 404) return error.DeviceAuthenticationUnavailable;
     if (begin_status < 200 or begin_status >= 300) return error.LoginStartRejected;
     const Device = struct { device_auth_id: []const u8, user_code: ?[]const u8 = null, usercode: ?[]const u8 = null, interval: []const u8 };
@@ -359,15 +384,25 @@ pub fn login(io: std.Io, callback: anytype) !Tokens {
     const poll = std.fmt.bufPrint(&poll_body, "{{\"device_auth_id\":\"{s}\",\"user_code\":\"{s}\"}}", .{ parsed.value.device_auth_id, user_code }) catch return error.InvalidDeviceResponse;
     const deadline_ns = 15 * std.time.ns_per_min;
     while (true) {
+        if (cancelled()) return error.LoginInterrupted;
         const elapsed = started.durationTo(std.Io.Clock.Timestamp.now(io, .boot)).raw.nanoseconds;
         if (elapsed >= deadline_ns) return error.LoginExpired;
         var answer: Response = .{};
         defer std.crypto.secureZero(u8, std.mem.asBytes(&answer));
-        const answer_status = try post(issuer ++ "/api/accounts/deviceauth/token", "Content-Type: application/json", poll, &answer);
+        const answer_status = try post(issuer ++ "/api/accounts/deviceauth/token", "Content-Type: application/json", poll, &answer, cancelled);
         if (try pollingPending(answer_status, answer.bytes[0..answer.len])) {
             const remaining = deadline_ns - started.durationTo(std.Io.Clock.Timestamp.now(io, .boot)).raw.nanoseconds;
             if (remaining <= 0) return error.LoginExpired;
-            try io.sleep(.fromNanoseconds(@min(@as(i96, interval) * std.time.ns_per_s, remaining)), .awake);
+            var waiting = @min(@as(i96, interval) * std.time.ns_per_s, remaining);
+            while (waiting > 0) {
+                if (cancelled()) return error.LoginInterrupted;
+                const slice = @min(waiting, 100 * std.time.ns_per_ms);
+                io.sleep(.fromNanoseconds(slice), .awake) catch |err| {
+                    if (cancelled()) return error.LoginInterrupted;
+                    return err;
+                };
+                waiting -= slice;
+            }
             continue;
         }
         const Grant = struct { authorization_code: []const u8, code_challenge: []const u8, code_verifier: []const u8 };
@@ -381,7 +416,7 @@ pub fn login(io: std.Io, callback: anytype) !Tokens {
         const body = try formEncode(&form, grant.value.authorization_code, grant.value.code_verifier);
         var exchanged: Response = .{};
         defer std.crypto.secureZero(u8, std.mem.asBytes(&exchanged));
-        const exchange_status = try post(issuer ++ "/oauth/token", "Content-Type: application/x-www-form-urlencoded", body, &exchanged);
+        const exchange_status = try post(issuer ++ "/oauth/token", "Content-Type: application/x-www-form-urlencoded", body, &exchanged, cancelled);
         if (exchange_status < 200 or exchange_status >= 300) return error.TokenExchangeRejected;
         return parseTokenResponse(exchanged.bytes[0..exchanged.len]);
     }
@@ -414,7 +449,7 @@ pub fn refresh(current: *const Tokens) !Tokens {
     const json = writer.buffered();
     var answer: Response = .{};
     defer std.crypto.secureZero(u8, std.mem.asBytes(&answer));
-    const status = try post(issuer ++ "/oauth/token", "Content-Type: application/json", json, &answer);
+    const status = try post(issuer ++ "/oauth/token", "Content-Type: application/json", json, &answer, null);
     if (status < 200 or status >= 300) return error.RefreshRejected;
     return parseRefreshResponse(current, answer.bytes[0..answer.len]);
 }

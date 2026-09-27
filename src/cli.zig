@@ -351,8 +351,9 @@ fn login(init: std.process.Init, args: []const []const u8) !void {
         fn display(code: []const u8) !void {
             std.debug.print("Open https://auth.openai.com/codex/device and enter code: {s}\n", .{code});
         }
-    }.display);
+    }.display, loginInterrupted);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&tokens));
+    if (loginInterrupted()) return error.LoginInterrupted;
     var record: codex_credentials.Record = .{
         .generation = 0,
         .account_id = .{},
@@ -372,6 +373,26 @@ fn login(init: std.process.Init, args: []const []const u8) !void {
     try std.Io.File.stdout().writeStreamingAll(init.io, "Codex login installed.\n");
 }
 
+var login_interrupted = std.atomic.Value(bool).init(false);
+
+fn onLoginInterrupt(_: std.posix.SIG) callconv(.c) void {
+    login_interrupted.store(true, .release);
+}
+
+fn loginInterrupted() bool {
+    return login_interrupted.load(.acquire);
+}
+
+test "device exchange SIGINT remains a recoverable cancellation signal" {
+    login_interrupted.store(false, .release);
+    const action: std.posix.Sigaction = .{ .handler = .{ .handler = onLoginInterrupt }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    var previous: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.INT, &action, &previous);
+    defer std.posix.sigaction(.INT, &previous, null);
+    try std.posix.raise(.INT);
+    try std.testing.expect(loginInterrupted());
+}
+
 /// A fresh terminal choice authorizes login; reading setup status alone does not.
 fn guideProviderLogin(init: std.process.Init) !void {
     try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Supported integration: Codex. Login stores Rui-owned credentials; defer leaves this Session and Host work unchanged.\n");
@@ -389,8 +410,15 @@ fn guideProviderLogin(init: std.process.Init) !void {
         return;
     }
     try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Starting Codex device login. The printed code is for the provider page only; waiting for its answer.\n");
-    login(init, &.{"codex"}) catch |err| {
+    login_interrupted.store(false, .release);
+    const action: std.posix.Sigaction = .{ .handler = .{ .handler = onLoginInterrupt }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    var previous: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.INT, &action, &previous);
+    const outcome = login(init, &.{"codex"});
+    std.posix.sigaction(.INT, &previous, null);
+    outcome catch |err| {
         const advice: []const u8 = switch (err) {
+            error.LoginInterrupted => "Rui: Login interrupted. No provider preference changed; check credentials before retrying.\n",
             error.LoginDenied => "Rui: Login denied. No provider preference changed; retry /login if intended.\n",
             error.LoginExpired => "Rui: Login expired. No provider preference changed; retry /login for a fresh code.\n",
             else => "Rui: Login failed or credential save unconfirmed. Inspect rui setup before retrying; no Session binding changed.\n",
@@ -398,7 +426,7 @@ fn guideProviderLogin(init: std.process.Init) !void {
         try std.Io.File.stdout().writeStreamingAll(init.io, advice);
         return;
     };
-    const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+    const home = init.environ_map.get("HOME") orelse "";
     _ = preferences.update(home, null, "codex", "gpt-6-luna") catch |err| {
         std.debug.print("rui: credential installed, but prospective preference save failed or is uncertain ({s}). Inspect rui setup; active Session unchanged.\n", .{@errorName(err)});
         return;
