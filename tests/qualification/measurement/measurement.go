@@ -484,6 +484,31 @@ func (v SampleValidity) Status() string {
 	return "diagnostic"
 }
 
+// QualificationStatus reduces required evidence only. Optional diagnostic rows
+// must stay outside this boundary; missing or unknown verdicts cannot pass.
+func QualificationStatus(rowFamilies ...[]map[string]any) string {
+	precedence := map[string]int{"passed": 0, "target_miss": 1, "incomplete": 2, "failed": 3}
+	status := "passed"
+	count := 0
+	for _, rows := range rowFamilies {
+		for _, row := range rows {
+			count++
+			candidate, ok := row["status"].(string)
+			rank, known := precedence[candidate]
+			if !ok || !known {
+				return "failed"
+			}
+			if rank > precedence[status] {
+				status = candidate
+			}
+		}
+	}
+	if count == 0 {
+		return "incomplete"
+	}
+	return status
+}
+
 var footprintCounter = regexp.MustCompile(`^\s*(phys_footprint|phys_footprint_peak):\s+([0-9]+(?:\.[0-9]+)?)\s+(B|KB|MB|GB)\s*$`)
 
 func ParseFootprint(report string) (Footprint, error) {

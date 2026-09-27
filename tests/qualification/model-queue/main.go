@@ -83,8 +83,13 @@ func discoveryStatus(milliseconds int64, available bool) string {
 }
 
 func overallStatus(statuses ...string) string {
+	if len(statuses) == 0 {
+		return "unavailable"
+	}
 	for _, status := range statuses {
-		if status == "behavior_error" {
+		switch status {
+		case "passed", "target_miss", "unavailable":
+		default:
 			return "behavior_error"
 		}
 	}

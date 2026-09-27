@@ -37,12 +37,7 @@ func idleStatus(percentOneCore float64) string {
 }
 
 func retryStatus(results ...map[string]any) string {
-	for _, result := range results {
-		if result["status"] == "target_miss" {
-			return "target_miss"
-		}
-	}
-	return "passed"
+	return measurement.QualificationStatus(results)
 }
 
 type retryEndpoint struct {
@@ -366,12 +361,7 @@ func history(binary, root string, e *retryEndpoint) (map[string]any, error) {
 	if err := host.Stop(measurement.TeardownAllowance); err != nil {
 		return nil, err
 	}
-	historyStatus := idleStatus(idleCPU)
-	for _, row := range rows {
-		if row["status"] == "target_miss" {
-			historyStatus = "target_miss"
-		}
-	}
+	historyStatus := measurement.QualificationStatus(rows, []map[string]any{{"status": idleStatus(idleCPU)}})
 	return map[string]any{"status": historyStatus, "waiting_retry_backlog_cases": []int{1, 10, 100}, "stages": rows, "future_only_unresolved_retries": future, "future_only_idle_cpu_percent_one_core": idleCPU, "future_only_idle_cpu_sample_seconds": idleElapsed, "discovery_qualification_limit_ms": 2000, "idle_cpu_qualification_limit_percent_one_core": 1}, nil
 }
 

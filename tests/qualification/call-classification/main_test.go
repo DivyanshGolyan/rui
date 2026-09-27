@@ -72,6 +72,14 @@ func TestCombineStatusPreservesVerdictPrecedence(t *testing.T) {
 	if got := combineStatus("behavior_error", "passed"); got != "behavior_error" {
 		t.Fatalf("behavior failure overwritten: %q", got)
 	}
+	for _, bad := range []string{"", "unknown"} {
+		if got := combineStatus("passed", bad); got != "behavior_error" {
+			t.Errorf("unknown next verdict = %q", got)
+		}
+		if got := combineStatus(bad, "passed"); got != "behavior_error" {
+			t.Errorf("unknown current verdict = %q", got)
+		}
+	}
 }
 
 func TestAggregatePhysicalVerdictUsesCheckedLifetimePeakBounds(t *testing.T) {

@@ -34,6 +34,10 @@ func TestOverallStatusPrecedence(t *testing.T) {
 		{[]string{"passed", "target_miss"}, "target_miss"},
 		{[]string{"target_miss", "unavailable"}, "unavailable"},
 		{[]string{"unavailable", "behavior_error"}, "behavior_error"},
+		{nil, "unavailable"},
+		{[]string{"passed", ""}, "behavior_error"},
+		{[]string{"unknown", "passed"}, "behavior_error"},
+		{[]string{"passed", "unknown"}, "behavior_error"},
 	}
 	for _, test := range tests {
 		if got := overallStatus(test.statuses...); got != test.wantStatus {

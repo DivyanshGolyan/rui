@@ -334,24 +334,7 @@ func memoryEvidenceStatus(aggregates ...map[string]any) string {
 }
 
 func reduceStatuses(rowFamilies ...[]map[string]any) string {
-	precedence := map[string]int{"passed": 0, "target_miss": 1, "incomplete": 2, "failed": 3}
-	status := "passed"
-	for _, rows := range rowFamilies {
-		for _, row := range rows {
-			candidate, ok := row["status"].(string)
-			if !ok {
-				candidate = "failed"
-			}
-			candidateRank, known := precedence[candidate]
-			if !known {
-				candidate, candidateRank = "failed", precedence["failed"]
-			}
-			if candidateRank > precedence[status] {
-				status = candidate
-			}
-		}
-	}
-	return status
+	return measurement.QualificationStatus(rowFamilies...)
 }
 
 func readResult(deadline measurement.Deadline, binary, store, key, destination string) (map[string]any, error) {
@@ -554,19 +537,29 @@ func sqliteDiagnosticRecords(report []byte) ([]sqliteDiagnostic, error) {
 }
 
 func productionDiagnosticsStatus(records []sqliteDiagnostic) string {
+	return sqliteDiagnosticsStatus(records, -1024, true)
+}
+
+// The production and spill workloads differ only in cache size and spill mode.
+// Required effective settings and usage have one validation boundary.
+func sqliteDiagnosticsStatus(records []sqliteDiagnostic, cacheSize int64, spillEnabled bool) string {
 	if len(records) == 0 {
 		return "incomplete"
 	}
 	status := "passed"
 	for _, record := range records {
-		if record.CacheSizeSetting == nil || *record.CacheSizeSetting != -1024 ||
+		if record.CacheSizeSetting == nil || *record.CacheSizeSetting != cacheSize ||
+			record.PageSizeBytes == nil || *record.PageSizeBytes != 4096 ||
 			record.HardHeapLimitBytes == nil || *record.HardHeapLimitBytes != 16*1024*1024 ||
-			record.CacheSpillThreshold == nil || *record.CacheSpillThreshold <= 0 ||
+			record.CacheSpillThreshold == nil ||
 			record.Synchronous == nil || *record.Synchronous != 3 ||
 			record.JournalMode == nil || *record.JournalMode != "delete" ||
 			record.MmapSizeBytes == nil || *record.MmapSizeBytes != 0 ||
 			record.TempStore == nil || *record.TempStore != 1 ||
 			record.BusyTimeoutMS == nil || *record.BusyTimeoutMS != 0 {
+			return "failed"
+		}
+		if (spillEnabled && *record.CacheSpillThreshold <= 0) || (!spillEnabled && *record.CacheSpillThreshold != 0) {
 			return "failed"
 		}
 		if record.ProcessMemoryCurrentBytes == nil || record.ProcessMemoryHighwater == nil ||
@@ -582,14 +575,11 @@ func spillDiagnosticsValid(records []sqliteDiagnostic, enabled, completed bool) 
 	if completed {
 		expectedRecords = 2
 	}
-	if len(records) != expectedRecords {
+	if len(records) != expectedRecords || sqliteDiagnosticsStatus(records, -32, enabled) != "passed" {
 		return false
 	}
 	for _, record := range records {
-		if record.Subject != "measure/spill" || record.HardHeapLimitBytes == nil || *record.HardHeapLimitBytes != 16*1024*1024 || record.Synchronous == nil || *record.Synchronous != 3 || record.JournalMode == nil || *record.JournalMode != "delete" || record.CacheSizeSetting == nil || *record.CacheSizeSetting != -32 || record.CacheSizeSettingScope != "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages" || record.CacheSpillThreshold == nil || record.CacheSpills == nil {
-			return false
-		}
-		if (enabled && *record.CacheSpillThreshold <= 0) || (!enabled && *record.CacheSpillThreshold != 0) {
+		if record.Subject != "measure/spill" || record.CacheSizeSettingScope != "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages" {
 			return false
 		}
 	}

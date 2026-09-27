@@ -197,7 +197,7 @@ func TestSpillDiagnosticsRequireEffectiveConfiguration(t *testing.T) {
 	i64 := func(value int64) *int64 { return &value }
 	text := func(value string) *string { return &value }
 	diagnostic := func(spills uint64, threshold int64) sqliteDiagnostic {
-		return sqliteDiagnostic{Subject: "measure/spill", HardHeapLimitBytes: u64(16 * 1024 * 1024), Synchronous: i64(3), JournalMode: text("delete"), CacheSizeSetting: i64(-32), CacheSizeSettingScope: "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages", CacheSpillThreshold: i64(threshold), CacheSpills: u64(spills)}
+		return sqliteDiagnostic{Subject: "measure/spill", HardHeapLimitBytes: u64(16 * 1024 * 1024), Synchronous: i64(3), JournalMode: text("delete"), CacheSizeSetting: i64(-32), CacheSizeSettingScope: "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages", CacheSpillThreshold: i64(threshold), CacheSpills: u64(spills), PageSizeBytes: u64(4096), MmapSizeBytes: u64(0), TempStore: i64(1), BusyTimeoutMS: u64(0), ProcessMemoryCurrentBytes: u64(0), ProcessMemoryHighwater: u64(0), CacheUsedBytes: u64(0)}
 	}
 	valid := []sqliteDiagnostic{diagnostic(0, 991), diagnostic(1, 991)}
 	if !spillDiagnosticsValid(valid, true, true) {
@@ -236,7 +236,7 @@ func TestSpillDiagnosticsRequireEffectiveConfiguration(t *testing.T) {
 }
 
 func TestProductionDiagnosticsRejectOldCacheAndChangedGuarantees(t *testing.T) {
-	const valid = `{"cache_size_setting":-1024,"hard_heap_limit_bytes":16777216,"cache_spill_threshold":247,"synchronous":3,"journal_mode":"delete","mmap_size_bytes":0,"temp_store":1,"busy_timeout_ms":0,"process_memory_current_bytes":0,"process_memory_highwater_bytes":0,"cache_used_bytes":0,"cache_spills":0}`
+	const valid = `{"page_size_bytes":4096,"cache_size_setting":-1024,"hard_heap_limit_bytes":16777216,"cache_spill_threshold":247,"synchronous":3,"journal_mode":"delete","mmap_size_bytes":0,"temp_store":1,"busy_timeout_ms":0,"process_memory_current_bytes":0,"process_memory_highwater_bytes":0,"cache_used_bytes":0,"cache_spills":0}`
 	var record sqliteDiagnostic
 	if err := json.Unmarshal([]byte(valid), &record); err != nil {
 		t.Fatal(err)

@@ -418,3 +418,28 @@ func TestRepositoryRootFromQualificationModule(t *testing.T) {
 		t.Fatalf("RepositoryRoot() from root = %q, %v; want %q", got, err, root)
 	}
 }
+
+func TestQualificationStatusRequiresEvidenceAndPreservesPrecedence(t *testing.T) {
+	if got := QualificationStatus(nil, []map[string]any{}); got != "incomplete" {
+		t.Fatalf("empty evidence = %s", got)
+	}
+	statuses := []string{"passed", "target_miss", "incomplete", "failed"}
+	for left, a := range statuses {
+		for right, b := range statuses {
+			want := a
+			if right > left {
+				want = b
+			}
+			if got := QualificationStatus(nil, []map[string]any{{"status": a}}, []map[string]any{{"status": b}}); got != want {
+				t.Errorf("%s + %s = %s, want %s", a, b, got, want)
+			}
+		}
+		for _, bad := range []map[string]any{nil, {}, {"status": nil}, {"status": "unavailable"}, {"status": "unknown"}, {"status": 0}} {
+			for _, rows := range [][]map[string]any{{bad, {"status": a}}, {{"status": a}, bad}} {
+				if got := QualificationStatus(rows); got != "failed" {
+					t.Errorf("invalid evidence reduced to %s", got)
+				}
+			}
+		}
+	}
+}

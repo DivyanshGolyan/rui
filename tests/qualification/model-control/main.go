@@ -190,22 +190,7 @@ func requireAcceptedIdleStop(reply map[string]any) error {
 }
 
 func controlStatus(results ...map[string]any) string {
-	for _, result := range results {
-		if result["status"] == "failed" {
-			return "failed"
-		}
-	}
-	for _, result := range results {
-		if result["status"] == "incomplete" {
-			return "incomplete"
-		}
-	}
-	for _, result := range results {
-		if result["status"] == "target_miss" {
-			return "target_miss"
-		}
-	}
-	return "passed"
+	return measurement.QualificationStatus(results)
 }
 
 type expectedControlTiming struct {
