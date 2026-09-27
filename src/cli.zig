@@ -9,15 +9,45 @@ const provider = @import("provider.zig");
 const protocol = @import("protocol.zig");
 const server = @import("server.zig");
 
+// Zig otherwise reserves an alternate signal stack on every thread even when
+// the release build has no default crash handler to use it.
+pub const std_options: std.Options = .{
+    .signal_stack_size = if (std.debug.default_enable_segfault_handler) 1 << 18 else null,
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const args = try init.minimal.args.toSlice(allocator);
     if (args.len < 2) return usage();
     const command = args[1];
-    if (std.mem.eql(u8, command, "serve")) return serve(init, args[2..]);
+    if (std.mem.eql(u8, command, "serve")) {
+        try configureHostAllocator(init, args);
+        return serve(init, args[2..]);
+    }
     if (std.mem.eql(u8, command, "login")) return login(init, args[2..]);
     if (std.mem.eql(u8, command, "session")) try enterSession(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init.io, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init.io, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init.io, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init.io, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init.io, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, args[2..], false) else return usage();
     try postCommandHold(init);
+}
+
+fn configureHostAllocator(init: std.process.Init, args: []const []const u8) !void {
+    if (@import("builtin").os.tag != .macos) return;
+    if (std.mem.eql(u8, init.environ_map.get("RUI_HOST_MALLOC_DEFAULTS") orelse "", "0")) return;
+    var changed = false;
+    for ([_][]const u8{ "MallocMaxMagazines", "MallocSpaceEfficient" }) |key| {
+        if (init.environ_map.get(key) != null) continue;
+        try init.environ_map.put(key, "1");
+        changed = true;
+    }
+    if (!changed) return;
+
+    // libmalloc reads these at process startup, before main. Replace this
+    // image before acquiring Store custody; key presence prevents another exec.
+    // Explicit caller values (including empty values) always take precedence.
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try std.process.executablePath(init.io, &path_buffer);
+    const argv = try init.arena.allocator().dupe([]const u8, args);
+    argv[0] = path_buffer[0..path_len];
+    return std.process.replace(init.io, .{ .argv = argv, .environ_map = init.environ_map });
 }
 
 const Presentation = enum { human, json, interactive };

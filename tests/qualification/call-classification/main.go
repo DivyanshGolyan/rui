@@ -478,7 +478,12 @@ func latencySummary(samples []float64) map[string]any {
 
 func combineStatus(current, next string) string {
 	rank := map[string]int{"passed": 0, "unavailable": 1, "target_miss": 2, "behavior_error": 3}
-	if rank[next] > rank[current] {
+	currentRank, currentKnown := rank[current]
+	nextRank, nextKnown := rank[next]
+	if !currentKnown || !nextKnown {
+		return "behavior_error"
+	}
+	if nextRank > currentRank {
 		return next
 	}
 	return current
@@ -1333,9 +1338,8 @@ func main() {
 		if portableStatus, ok := value["portable_measurement_status"].(string); ok && portableStatus == "unavailable" {
 			status = combineStatus(status, portableStatus)
 		}
-		if caseStatus, ok := value["status"].(string); ok {
-			status = combineStatus(status, caseStatus)
-		}
+		caseStatus, _ := value["status"].(string)
+		status = combineStatus(status, caseStatus)
 		cases[candidate.Name] = value
 	}
 	physicalVerdict := measurement.FootprintVerdict{Status: "unavailable", TargetBytes: physicalFootprintTargetBytes, UpperBoundBytes: ^uint64(0)}

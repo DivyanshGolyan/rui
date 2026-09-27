@@ -13,6 +13,83 @@ import (
 	"time"
 )
 
+func TestRequestIDSelectsLatestUserTurnFromGrowingHistory(t *testing.T) {
+	body := []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"round-1"}]},{"role":"assistant","content":[{"type":"output_text","text":"answer-1"}]},{"role":"user","content":[{"type":"input_text","text":"round-2"}]}]}`)
+	got, err := requestID(body)
+	if err != nil || got != "round-2" {
+		t.Fatalf("latest request identity = %q, %v", got, err)
+	}
+}
+
+func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *testing.T) {
+	const envelope = `{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":"","tools":[],`
+	valid := []byte(envelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-0"}]},{"type":"message","id":"capacity-response-capacity-2-round-1-0-message","role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-0","annotations":[]}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
+	if !requestHistoryValid(valid, "capacity-2-round-2-0") {
+		t.Fatal("valid asymmetric stream-zero history was rejected")
+	}
+	for name, mutate := range map[string]func(map[string]any){
+		"missing assistant type": func(body map[string]any) { delete(body["input"].([]any)[1].(map[string]any), "type") },
+		"missing assistant id":   func(body map[string]any) { delete(body["input"].([]any)[1].(map[string]any), "id") },
+		"wrong assistant id": func(body map[string]any) {
+			body["input"].([]any)[1].(map[string]any)["id"] = "capacity-response-capacity-2-round-1-1-message"
+		},
+		"altered annotations": func(body map[string]any) {
+			body["input"].([]any)[1].(map[string]any)["content"].([]any)[0].(map[string]any)["annotations"] = []any{"unexpected"}
+		},
+		"extra assistant field": func(body map[string]any) { body["input"].([]any)[1].(map[string]any)["extra"] = true },
+		"extra content field": func(body map[string]any) {
+			body["input"].([]any)[1].(map[string]any)["content"].([]any)[0].(map[string]any)["extra"] = true
+		},
+		"altered user field": func(body map[string]any) { body["input"].([]any)[0].(map[string]any)["role"] = "developer" },
+		"extra user field":   func(body map[string]any) { body["input"].([]any)[0].(map[string]any)["extra"] = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			var mutated map[string]any
+			if err := json.Unmarshal(valid, &mutated); err != nil {
+				t.Fatal(err)
+			}
+			mutate(mutated)
+			body, err := json.Marshal(mutated)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if requestHistoryValid(body, "capacity-2-round-2-0") {
+				t.Fatal("corrupt history was accepted")
+			}
+		})
+	}
+	for _, field := range []string{"model", "store", "stream", "include", "instructions", "tools"} {
+		var mutated map[string]json.RawMessage
+		if err := json.Unmarshal(valid, &mutated); err != nil {
+			t.Fatal(err)
+		}
+		mutated[field] = json.RawMessage(`null`)
+		body, err := json.Marshal(mutated)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if requestHistoryValid(body, "capacity-2-round-2-0") {
+			t.Fatalf("invalid %s accepted", field)
+		}
+		delete(mutated, field)
+		body, err = json.Marshal(mutated)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if requestHistoryValid(body, "capacity-2-round-2-0") {
+			t.Fatalf("missing %s accepted", field)
+		}
+	}
+	missingPrior := []byte(envelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
+	if requestHistoryValid(missingPrior, "capacity-2-round-2-0") {
+		t.Fatal("request without its prior user and assistant turn was accepted")
+	}
+	wrongCurrent := []byte(envelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-1"}]},{"role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-1"}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
+	if requestHistoryValid(wrongCurrent, "capacity-2-round-2-1") {
+		t.Fatal("stream-one expectation accepted stream-zero current input")
+	}
+}
+
 const (
 	testFixtureDuration = time.Second
 	testFixtureRate     = 3
@@ -266,7 +343,7 @@ func TestWaitOfferPersistsBoundedDeliveryEvidenceAndResetClearsIt(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture, err := newFixture(1, testFixtureDuration, testFixtureRate, roundOne, facts)
+	fixture, err := newFixture(1, testFixtureDuration, testFixtureRate, false, roundOne, facts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +400,7 @@ func TestWaitOfferPersistsBoundedDeliveryEvidenceAndResetClearsIt(t *testing.T) 
 }
 
 func TestFactsSnapshotAggregatesPassingTimingHeadroom(t *testing.T) {
-	fixture, err := newFixture(2, testFixtureDuration, testFixtureRate, t.TempDir(), nil)
+	fixture, err := newFixture(2, testFixtureDuration, testFixtureRate, false, t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -630,7 +707,7 @@ func TestCompleteOfferMayOutliveNominalCadence(t *testing.T) {
 	if err != nil || writes != 100 || delivery.completed != 100 || delivery.late.Count == 0 {
 		t.Fatalf("late but complete offer: %+v writes=%d err=%v", delivery, writes, err)
 	}
-	fixture, err := newFixture(1, time.Second, 100, t.TempDir(), nil)
+	fixture, err := newFixture(1, time.Second, 100, false, t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

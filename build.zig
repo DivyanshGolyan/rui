@@ -99,6 +99,10 @@ pub fn build(b: *std.Build) void {
     const h2_integration = b.addSystemCommand(&.{"python3"});
     h2_integration.addFileArg(b.path("tests/integration/transport_h2_integration.py"));
     h2_integration.addArtifactArg(release_safe);
+    const h2_oracle_tests = b.addSystemCommand(&.{"python3"});
+    h2_oracle_tests.addFileArg(b.path("tests/integration/transport_h2_integration_test.py"));
+    h2_oracle_tests.addArtifactArg(release_safe);
+    h2_integration.step.dependOn(&h2_oracle_tests.step);
     const h2_integration_step = b.step(
         "transport-h2-integration",
         "Run the native TLS/H2 stream and bounded connection fixture (requires Python h2==4.3.0)",
@@ -370,6 +374,18 @@ pub fn build(b: *std.Build) void {
         "Measure macOS model-output bytes, item counts, storage, and retained memory",
     );
     measure_output_step.dependOn(&measure_output.step);
+
+    const measure_repeat_work = b.addSystemCommand(&.{
+        "go", "run", "-mod=readonly", "./model-output", "--repeat-work",
+    });
+    measure_repeat_work.setCwd(b.path("tests/qualification"));
+    measure_repeat_work.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    measure_repeat_work.addArtifactArg(release);
+    const measure_repeat_work_step = b.step(
+        "measure-repeat-work",
+        "Measure 20 same-Host waves across 100 stable Sessions with growing history",
+    );
+    measure_repeat_work_step.dependOn(&measure_repeat_work.step);
 
     const measure_retry = b.addSystemCommand(&.{
         "go", "run", "-mod=readonly", "./model-retry",

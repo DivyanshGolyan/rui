@@ -101,7 +101,7 @@ pub const Faults = struct {
     suppress_first_control_hint: bool = false,
     sqlite_diagnostics: bool = false,
     sqlite_cache_spill: bool = true,
-    sqlite_cache_kib: u32 = 4096,
+    sqlite_cache_kib: u32 = (store_module.OpenOptions{}).cache_kib,
 };
 
 const TestTransition = enum {
