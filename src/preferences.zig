@@ -88,7 +88,7 @@ pub fn load(home: []const u8) !Values {
 /// rename leaves the previous complete file; post-rename sync failure is uncertain.
 pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model: ?[]const u8) !Values {
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const directory = try directoryPath(home, &path);
+    _ = try directoryPath(home, &path);
     if (provider) |value| {
         if (!std.mem.eql(u8, value, "codex")) return error.UnsupportedPreferenceProvider;
     }
@@ -101,12 +101,26 @@ pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model
         for (value) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidPreferenceStore;
         _ = try platform.resolveClientPaths(io, value);
     }
-    var dir = try std.Io.Dir.cwd().createDirPathOpen(io, directory, .{
-        .permissions = .fromMode(0o700),
-        .open_options = .{ .iterate = true, .follow_symlinks = false },
-    });
+    var home_dir = try std.Io.Dir.openDirAbsolute(io, home, .{ .iterate = true });
+    defer home_dir.close(io);
+    home_dir.createDir(io, ".config", .fromMode(0o700)) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    var config_dir = try home_dir.openDir(io, ".config", .{ .iterate = true });
+    defer config_dir.close(io);
+    config_dir.createDir(io, "rui", .fromMode(0o700)) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    var dir = try config_dir.openDir(io, "rui", .{ .iterate = true, .follow_symlinks = false });
     defer dir.close(io);
     try privateDirectory(dir);
+    // Also persist the parent entries: syncing rui alone cannot make newly
+    // created .config/rui survive power loss. Sync both even when another
+    // setup caller created them but has not yet synced its parent.
+    if (std.c.fsync(home_dir.handle) != 0 or std.c.fsync(config_dir.handle) != 0)
+        return error.PreferenceDirectorySyncFailed;
     const lock = while (true) {
         break dir.openFile(io, ".preferences.lock", .{ .mode = .read_write, .follow_symlinks = false, .lock = .exclusive }) catch |err| switch (err) {
             error.FileNotFound => dir.createFile(io, ".preferences.lock", .{ .read = true, .exclusive = true, .lock = .exclusive, .permissions = .fromMode(0o600) }) catch |create_err| switch (create_err) {
