@@ -4,8 +4,11 @@ This file lists runtime-linked dependencies, evaluator-boundary test dependencie
 
 ## QuickJS-NG (commit 1ab8676f4b6d6d669baeb5f21790fb9734636a20)
 
-The `workflow-check` evaluator worker links this pinned QuickJS-NG source. It
-is not installed with Rui until the Host owns a complete Workflow lifecycle.
+The packaged private evaluator child links this pinned QuickJS-NG source, its
+Rui-maintained bounded string reader and a small evaluator-only compiler policy
+for Workflow modules. The build applies `src/evaluator_policy.patch` to a
+generated translation unit; the pinned dependency archive remains unchanged.
+Public durable Workflows are not yet implemented.
 
 - Source: `https://github.com/quickjs-ng/quickjs/archive/1ab8676f4b6d6d669baeb5f21790fb9734636a20.tar.gz`
 - Archive SHA-256: `c788fe4f65c95ecfa4055c8778e7cb221f68fcc3315686627b0856da5c38514e`

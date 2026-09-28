@@ -3471,14 +3471,13 @@ def main():
             )
             assert new_admitted["processing"]["attempt"] == "1", new_admitted
             wait_for(lambda: len(recovery_endpoint.requests) >= 4, "recovery new launch")
-            custody = command(
-                "inspect-session",
-                "--store",
-                recovery_store,
-                "--session",
-                "direct/recovery-new",
-            )["execution"]
-            assert custody["custody_occupied"] == "2", custody
+            # Both attempts must remain in flight while their responses are
+            # held. Global custody may also contain a transient reservation
+            # while the Host probes the Store for more work.
+            for key, attempt in (("recovery-due-message", "2"), ("recovery-new-message", "1")):
+                held = observe(recovery_store, key)
+                assert held["processing"]["attempt"] == attempt, held
+                assert "result" not in held, held
             assert "result" not in observe(
                 recovery_store, "recovery-sentinel-message"
             ), unresolved_sentinel
@@ -3519,6 +3518,19 @@ def main():
         else:
             print("exhausted recovery ordinary inspections: latency unavailable; "
                   "recovery settled before the first nonterminal observation")
+        for key in ("recovery-due-message", "recovery-new-message"):
+            wait_for(
+                lambda: observe(recovery_store, key).get("result", {}).get("code")
+                == "provider_http_422",
+                f"released {key} settlement",
+            )
+        wait_for(
+            lambda: command(
+                "inspect-session", "--store", recovery_store,
+                "--session", "direct/recovery-new",
+            )["execution"]["custody_occupied"] == "0",
+            "recovery custody drainage",
+        )
         stop_host(recovery_host)
         processes.remove(recovery_host)
         database = sqlite3.connect(recovery_store / "rui.sqlite3")
