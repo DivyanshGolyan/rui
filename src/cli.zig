@@ -383,9 +383,20 @@ fn login(init: std.process.Init, args: []const []const u8, interactive: bool) !v
     // cancellation cannot be reported as if installation were rolled back.
     if (login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) != null) return error.LoginInterrupted;
     try codex_credentials.install(path, &record, null);
-    // Interactive login reports its outcome after the independent defaults
-    // update; a failed terminal receipt cannot undo the installed credential.
-    if (!interactive) try std.Io.File.stdout().writeStreamingAll(init.io, "Codex login installed.\n");
+    const home = init.environ_map.get("HOME") orelse "";
+    // The preference attempt must run even if the terminal receipt cannot be
+    // written. Installation and future defaults have independent outcomes.
+    const default_outcome = preferences.fillProviderAfterLogin(home);
+    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Codex credential installed. Remote model acceptance is not established. Current Session unchanged.\n");
+    const added = default_outcome catch |err| {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Credential installed, but future defaults were not saved or durability is uncertain (");
+        try std.Io.File.stdout().writeStreamingAll(init.io, @errorName(err));
+        return std.Io.File.stdout().writeStreamingAll(init.io, "). Inspect rui setup; active Session unchanged.\n");
+    };
+    try std.Io.File.stdout().writeStreamingAll(init.io, if (added)
+        "Rui: No provider default existed; Codex selected for future Sessions (gpt-6-luna).\n"
+    else
+        "Rui: Existing provider default unchanged.\n");
 }
 
 const LoginState = enum(u8) { cancellable, cancelled, publishing };
@@ -459,14 +470,6 @@ fn guideProviderLogin(init: std.process.Init) !void {
         try std.Io.File.stdout().writeStreamingAll(init.io, advice);
         return;
     };
-    const home = init.environ_map.get("HOME") orelse "";
-    _ = preferences.update(home, null, "codex", "gpt-6-luna", .configured) catch |err| {
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Credential installed, but future defaults were not saved or durability is uncertain (");
-        try std.Io.File.stdout().writeStreamingAll(init.io, @errorName(err));
-        try std.Io.File.stdout().writeStreamingAll(init.io, "). Inspect rui setup; active Session unchanged.\n");
-        return;
-    };
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Codex selected for future Sessions (gpt-6-luna). Local credentials installed; remote model acceptance is not established. Current Session unchanged.\n");
 }
 
 fn serve(init: std.process.Init, args: []const []const u8) !void {
