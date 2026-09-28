@@ -1,6 +1,28 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 
+/// Format private evaluator output and recognize exactly the names startup
+/// may reclaim after a crash between creation and removal.
+pub const EvaluatorName = struct {
+    pub fn format(buffer: []u8, id: u64) ![]const u8 {
+        return std.fmt.bufPrint(buffer, "evaluator-{x}.tmp", .{id});
+    }
+
+    pub fn isOwned(name: []const u8) bool {
+        const prefix = "evaluator-";
+        const suffix = ".tmp";
+        if (!std.mem.endsWith(u8, name, suffix)) return false;
+        if (!std.mem.startsWith(u8, name, prefix)) return false;
+        const value = name[prefix.len .. name.len - suffix.len];
+        if (value.len == 0 or value.len > 16 or (value.len > 1 and value[0] == '0')) return false;
+        for (value) |byte| {
+            if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false;
+        }
+        _ = std.fmt.parseInt(u64, value, 16) catch return false;
+        return true;
+    }
+};
+
 pub const Reclamation = enum { removed, already_absent };
 pub const Removal = union(enum) {
     native,
