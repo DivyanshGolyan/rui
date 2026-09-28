@@ -133,7 +133,10 @@ fn setup(init: std.process.Init, args: []const []const u8) !void {
 // The caller owns buffer. Explicit destinations never consult preferences;
 // omitted destinations use the same saved/HOME rule in every CLI mode.
 fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![]const u8 {
-    if (explicit) |path| return path;
+    if (explicit) |path| {
+        if (path.len == 0) return error.InvalidStore;
+        return path;
+    }
     const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
     const defaults = preferences.load(home) catch |err| {
         std.debug.print("rui: cannot read private setup defaults ({s}); use rui setup to inspect or repair them. No Store selected.\n", .{@errorName(err)});
@@ -340,11 +343,12 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
         .key = "",
         .session = "",
     };
+    var explicit_store: ?[]const u8 = null;
     var key_seen = false;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) input.store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
+        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
             input.key = try takeValue(args, &index);
             key_seen = true;
         } else if (std.mem.eql(u8, arg, "--provider")) {
@@ -354,7 +358,7 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
     }
     if (input.session.len == 0 or (input.record.len == 0) != !key_seen) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    input.store = try selectedStore(init, if (input.store.len == 0) null else input.store, &selected_buffer);
+    input.store = try selectedStore(init, explicit_store, &selected_buffer);
     var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const human = !key_seen;
@@ -380,12 +384,13 @@ fn message(init: std.process.Init, args: []const []const u8) !void {
     const io = init.io;
     var json = false;
     var input = client.MessageInput{ .store = "", .record = "", .key = "", .session = "", .text_path = "" };
+    var explicit_store: ?[]const u8 = null;
     var positional: ?[]const u8 = null;
     var key_seen = false;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) input.store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
+        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
             input.key = try takeValue(args, &index);
             key_seen = true;
         } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--text")) input.text_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else if (positional == null and (arg.len == 0 or arg[0] != '-' or std.mem.eql(u8, arg, "-"))) positional = arg else return error.UnknownArgument;
@@ -397,7 +402,7 @@ fn message(init: std.process.Init, args: []const []const u8) !void {
     }
     if (input.session.len == 0 or (input.text_path.len == 0 and input.text == null) or (input.record.len == 0) != !key_seen) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    input.store = try selectedStore(init, if (input.store.len == 0) null else input.store, &selected_buffer);
+    input.store = try selectedStore(init, explicit_store, &selected_buffer);
     var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const human = !key_seen;
@@ -826,11 +831,12 @@ fn sessionRequests(init: std.process.Init, store: []const u8, session_ref: []con
 fn stopSession(init: std.process.Init, args: []const []const u8) !void {
     const io = init.io;
     var input = client.SessionStopInput{ .store = "", .record = "", .key = "", .session = "" };
+    var explicit_store: ?[]const u8 = null;
     var key_seen = false;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) input.store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
+        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
             input.key = try takeValue(args, &index);
             key_seen = true;
         } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
@@ -838,7 +844,7 @@ fn stopSession(init: std.process.Init, args: []const []const u8) !void {
     }
     if (input.record.len == 0 or input.session.len == 0 or !key_seen) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    input.store = try selectedStore(init, if (input.store.len == 0) null else input.store, &selected_buffer);
+    input.store = try selectedStore(init, explicit_store, &selected_buffer);
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.stopSession(io, input, &reply_buffer);
     try writeCommandReply(io, reply);
@@ -855,13 +861,14 @@ fn interruptModel(init: std.process.Init, args: []const []const u8) !void {
         .turn_id = 0,
         .operation_id = 0,
     };
+    var explicit_store: ?[]const u8 = null;
     var key_seen = false;
     var turn_seen = false;
     var operation_seen = false;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) input.store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
+        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
             input.key = try takeValue(args, &index);
             key_seen = true;
         } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--turn")) {
@@ -876,7 +883,7 @@ fn interruptModel(init: std.process.Init, args: []const []const u8) !void {
     if (input.record.len == 0 or input.session.len == 0 or
         !key_seen or !turn_seen or !operation_seen) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    input.store = try selectedStore(init, if (input.store.len == 0) null else input.store, &selected_buffer);
+    input.store = try selectedStore(init, explicit_store, &selected_buffer);
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.interruptModel(io, input, &reply_buffer);
     try writeCommandReply(io, reply);
@@ -894,12 +901,13 @@ fn decideAction(init: std.process.Init, args: []const []const u8, decision: @Fie
         .action_id = 0,
         .decision = decision,
     };
+    var explicit_store: ?[]const u8 = null;
     var key_seen = false;
     var action_seen = false;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) input.store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
+        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
             input.key = try takeValue(args, &index);
             key_seen = true;
         } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--action")) {
@@ -910,7 +918,7 @@ fn decideAction(init: std.process.Init, args: []const []const u8, decision: @Fie
     }
     if (input.session.len == 0 or !action_seen or (input.record.len == 0) != !key_seen) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    input.store = try selectedStore(init, if (input.store.len == 0) null else input.store, &selected_buffer);
+    input.store = try selectedStore(init, explicit_store, &selected_buffer);
     var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const human = !key_seen;

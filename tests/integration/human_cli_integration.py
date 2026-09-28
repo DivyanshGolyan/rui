@@ -277,6 +277,12 @@ def main():
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
         assert json.loads(run(home, "wait-session", "--store", store, "--session", session,
             "--json")) == {"return": "idle"}
+        before = run(preferences_home, "requests", "--json")
+        invalid_store = subprocess.run([str(fixture.RUI), "message", "--store", "",
+            "--session", session, "not sent"], env={**os.environ, "HOME": str(preferences_home)},
+            capture_output=True, text=True, timeout=5)
+        assert invalid_store.returncode != 0 and "InvalidStore" in invalid_store.stderr, invalid_store
+        assert invalid_store.stdout == "" and run(preferences_home, "requests", "--json") == before
         initial = fixture.command("inspect-session", "--store", store, "--session", session)
         assert initial["selected_message"] is None and initial["recent_messages"] == [], initial
         assert "InteractiveTerminalRequired" in subprocess.run(
