@@ -899,11 +899,7 @@ fn connectUntil(io: std.Io, path: []const u8, deadline: i128) !std.posix.fd_t {
     switch (std.posix.errno(std.c.connect(socket, @ptrCast(&address), size))) {
         .SUCCESS => {},
         .INPROGRESS, .AGAIN => {
-            const left = deadline - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-            if (left <= 0) return error.TransferInactive;
-            var poll_fd = [_]std.posix.pollfd{.{ .fd = socket, .events = std.posix.POLL.OUT, .revents = 0 }};
-            const milliseconds: i32 = @intCast(@min(std.math.maxInt(i32), @divTrunc(left + std.time.ns_per_ms - 1, std.time.ns_per_ms)));
-            if (try std.posix.poll(&poll_fd, milliseconds) == 0) return error.TransferInactive;
+            if (!try pollUntil(io, socket, std.posix.POLL.OUT, deadline)) return error.TransferInactive;
             var result: c_int = 0;
             var result_len: std.posix.socklen_t = @sizeOf(c_int);
             if (std.c.getsockopt(socket, std.posix.SOL.SOCKET, std.posix.SO.ERROR, &result, &result_len) < 0 or result_len != @sizeOf(c_int) or result < 0) return error.UnixConnectFailed;
@@ -911,7 +907,8 @@ fn connectUntil(io: std.Io, path: []const u8, deadline: i128) !std.posix.fd_t {
         },
         else => |err| return connectFailure(err),
     }
-    if (std.c.fcntl(socket, std.c.F.SETFL, flags) < 0) return error.UnixConnectFailed;
+    // The readiness probe owns this nonblocking descriptor through its final
+    // body byte; a writable/readable poll must not become an unbounded syscall.
     return socket;
 }
 
@@ -943,18 +940,31 @@ fn readResponseHeadUntil(io: std.Io, fd: std.posix.fd_t, inactivity_ms: i32, unt
     var header_buffer: [protocol.max_header_bytes]u8 = undefined;
     // Ordinary requests start their inactivity window after the first byte;
     // Host readiness alone has an absolute deadline that includes this wait.
-    if (until != null and !try waitReadableUntil(io, fd, inactivity_ms, until)) return error.ResponseInactive;
-    const first_count = try std.posix.read(fd, header_buffer[0..1]);
+    const first_count = if (until) |deadline|
+        try readUntil(io, fd, header_buffer[0..1], deadline)
+    else
+        try std.posix.read(fd, header_buffer[0..1]);
     if (first_count == 0) return error.TruncatedResponse;
     var used: usize = first_count;
     while (used < header_buffer.len) {
         if (used >= 4 and std.mem.eql(u8, header_buffer[used - 4 .. used], "\r\n\r\n")) break;
-        if (!try waitReadableUntil(io, fd, inactivity_ms, until)) return error.ResponseInactive;
-        const count = try std.posix.read(fd, header_buffer[used .. used + 1]);
+        const count = if (until) |deadline|
+            try readUntil(io, fd, header_buffer[used .. used + 1], deadline)
+        else blk: {
+            if (!try waitReadable(fd, inactivity_ms)) return error.ResponseInactive;
+            break :blk try std.posix.read(fd, header_buffer[used .. used + 1]);
+        };
         if (count == 0) return error.TruncatedResponse;
         used += count;
     } else return error.ResponseHeaderTooLarge;
-    var lines = std.mem.splitSequence(u8, header_buffer[0..used], "\r\n");
+    return parseResponseHead(header_buffer[0..used]);
+}
+
+// Rui uses Content-Length framing. Validate the entire bounded header before
+// interpreting any field; an ignored extension cannot repair invalid syntax.
+fn parseResponseHead(bytes: []const u8) !ResponseHead {
+    if (!std.mem.endsWith(u8, bytes, "\r\n\r\n")) return error.InvalidResponse;
+    var lines = std.mem.splitSequence(u8, bytes[0 .. bytes.len - 4], "\r\n");
     const status_line = lines.next() orelse return error.InvalidResponse;
     if (!std.mem.startsWith(u8, status_line, "HTTP/1.1 ") or status_line.len < "HTTP/1.1 200 X".len or
         status_line[12] != ' ' or std.mem.trim(u8, status_line[13..], " \t").len == 0) return error.InvalidResponse;
@@ -966,13 +976,23 @@ fn readResponseHeadUntil(io: std.Io, fd: std.posix.fd_t, inactivity_ms: i32, unt
     var wire_ok: ?bool = null;
     var kind: ?ResponseKind = null;
     while (lines.next()) |line| {
-        if (line.len == 0) break;
+        if (line.len == 0) return error.InvalidResponse;
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidResponse;
-        const name = std.mem.trim(u8, line[0..colon], " \t");
+        const name = line[0..colon];
+        if (name.len == 0) return error.InvalidResponse;
+        for (name) |byte| {
+            if (!std.ascii.isAlphanumeric(byte) and std.mem.indexOfScalar(u8, "!#$%&'*+-.^_`|~", byte) == null)
+                return error.InvalidResponse;
+        }
+        for (line[colon + 1 ..]) |byte| {
+            if (byte != '\t' and (byte < ' ' or byte == 0x7f)) return error.InvalidResponse;
+        }
         const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
         if (std.ascii.eqlIgnoreCase(name, "Content-Length")) {
             if (length != null) return error.InvalidResponse;
-            length = try std.fmt.parseInt(u64, value, 10);
+            if (value.len == 0) return error.InvalidResponse;
+            for (value) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidResponse;
+            length = std.fmt.parseInt(u64, value, 10) catch return error.InvalidResponse;
         } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Wire-Version")) {
             if (wire_ok != null) return error.InvalidResponse;
             wire_ok = std.mem.eql(u8, value, protocol.wire_version);
@@ -984,6 +1004,9 @@ fn readResponseHeadUntil(io: std.Io, fd: std.posix.fd_t, inactivity_ms: i32, unt
                 .result_text
             else
                 return error.InvalidResponse;
+        } else if (std.ascii.eqlIgnoreCase(name, "Transfer-Encoding") or
+            std.ascii.eqlIgnoreCase(name, "Content-Encoding")) {
+            return error.InvalidResponse;
         }
     }
     if (wire_ok != true) return error.WrongWireVersion;
@@ -1068,8 +1091,12 @@ fn readCommandBodyUntil(io: std.Io, fd: std.posix.fd_t, head: ResponseHead, repl
     const body_length: usize = @intCast(head.content_length);
     var offset: usize = 0;
     while (offset < body_length) {
-        if (!try waitReadableUntil(io, fd, 60_000, until)) return error.ResponseInactive;
-        const count = try std.posix.read(fd, reply_buffer.bytes[offset..body_length]);
+        const count = if (until) |deadline|
+            try readUntil(io, fd, reply_buffer.bytes[offset..body_length], deadline)
+        else blk: {
+            if (!try waitReadable(fd, 60_000)) return error.ResponseInactive;
+            break :blk try std.posix.read(fd, reply_buffer.bytes[offset..body_length]);
+        };
         if (count == 0) return error.TruncatedResponse;
         offset += count;
     }
@@ -1086,14 +1113,31 @@ fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) !bool {
     return try std.posix.poll(&poll_fd, timeout_ms) != 0;
 }
 
-fn waitReadableUntil(io: std.Io, fd: std.posix.fd_t, timeout_ms: i32, until: ?i128) !bool {
-    if (until) |deadline| {
+// Unlike posix.poll's EINTR retry, recompute the remaining time after every
+// interruption. Only the Host-info exchange uses this absolute deadline.
+fn pollUntil(io: std.Io, fd: std.posix.fd_t, events: i16, deadline: i128) !bool {
+    while (true) {
         const left = deadline - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
         if (left <= 0) return false;
-        const milliseconds: i32 = @intCast(@min(timeout_ms, @divTrunc(left + std.time.ns_per_ms - 1, std.time.ns_per_ms)));
-        return waitReadable(fd, milliseconds);
+        const milliseconds: c_int = @intCast(@min(std.math.maxInt(c_int), @divTrunc(left + std.time.ns_per_ms - 1, std.time.ns_per_ms)));
+        var poll_fd = [_]std.c.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
+        const result = std.c.poll(&poll_fd, poll_fd.len, milliseconds);
+        switch (std.posix.errno(result)) {
+            .SUCCESS => return result != 0,
+            .INTR => continue,
+            else => return error.PollFailed,
+        }
     }
-    return waitReadable(fd, timeout_ms);
+}
+
+fn readUntil(io: std.Io, fd: std.posix.fd_t, buffer: []u8, deadline: i128) !usize {
+    while (true) {
+        if (!try pollUntil(io, fd, std.posix.POLL.IN, deadline)) return error.ResponseInactive;
+        return std.posix.read(fd, buffer) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+    }
 }
 
 fn writeAll(fd: std.posix.fd_t, value: []const u8) !void {
@@ -1103,19 +1147,17 @@ fn writeAll(fd: std.posix.fd_t, value: []const u8) !void {
 fn writeAllUntil(io: std.Io, fd: std.posix.fd_t, value: []const u8, until: ?i128) !void {
     var offset: usize = 0;
     while (offset < value.len) {
-        const timeout = if (until) |deadline| blk: {
-            const left = deadline - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-            if (left <= 0) return error.TransferInactive;
-            break :blk @as(i32, @intCast(@min(60_000, @divTrunc(left + std.time.ns_per_ms - 1, std.time.ns_per_ms))));
-        } else 60_000;
-        var poll_fd = [_]std.posix.pollfd{.{
-            .fd = fd,
-            .events = std.posix.POLL.OUT,
-            .revents = 0,
-        }};
-        if (try std.posix.poll(&poll_fd, timeout) == 0) return error.TransferInactive;
+        if (until) |deadline| {
+            if (!try pollUntil(io, fd, std.posix.POLL.OUT, deadline)) return error.TransferInactive;
+        } else {
+            var poll_fd = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
+            if (try std.posix.poll(&poll_fd, 60_000) == 0) return error.TransferInactive;
+        }
         const count = std.c.write(fd, value[offset..].ptr, value.len - offset);
-        if (count < 0) return error.WriteFailed;
+        if (count < 0) {
+            if (until != null and (std.posix.errno(count) == .AGAIN or std.posix.errno(count) == .INTR)) continue;
+            return error.WriteFailed;
+        }
         if (count == 0) return error.ConnectionClosed;
         offset += @intCast(count);
     }
@@ -1169,6 +1211,30 @@ test "Host-info first byte is bounded independently of normal processing waits" 
     var buffer: ReplyBuffer = .{};
     const until = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
     try std.testing.expectError(error.ResponseInactive, readCommandResponseUntil(std.testing.io, sockets[0], &buffer, until));
+}
+
+test "Host-info deadline includes partial header and body" {
+    const response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\nab";
+    const body_start = std.mem.indexOf(u8, response, "\r\n\r\n").? + 4;
+    for ([_]usize{ 1, body_start + 1 }) |prefix_len| {
+        const sockets = try socketPair();
+        defer closeTestDescriptor(sockets[0]);
+        const flags = std.c.fcntl(sockets[0], std.c.F.GETFL);
+        const nonblocking: u32 = @bitCast(std.c.O{ .NONBLOCK = true });
+        try std.testing.expect(flags >= 0 and std.c.fcntl(sockets[0], std.c.F.SETFL, flags | @as(c_int, @intCast(nonblocking))) == 0);
+        try writeAll(sockets[1], response[0..prefix_len]);
+        const writer = try std.Thread.spawn(.{}, delayedResponse, .{
+            std.testing.io,
+            sockets[1],
+            std.Io.Duration.fromMilliseconds(50),
+            response[prefix_len..],
+        });
+        defer writer.join();
+        var buffer: ReplyBuffer = .{};
+        const until = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
+        try std.testing.expectError(error.ResponseInactive, readCommandResponseUntil(std.testing.io, sockets[0], &buffer, until));
+        try std.testing.expectEqual(@as(usize, 0), buffer.len);
+    }
 }
 
 test "Host processing wait does not consume response transfer inactivity" {
@@ -1225,6 +1291,32 @@ test "response closure and truncation stay explicit" {
         var buffer: ReplyBuffer = .{};
         try std.testing.expectError(error.TruncatedResponse, readCommandResponse(sockets[0], &buffer));
     }
+}
+
+test "response framing rejects ambiguous or malformed fields before interpreting body" {
+    for ([_][]const u8{
+        "Content-Length : 0\r\n",
+        "Content-Length: +0\r\n",
+        "Content-Length: 0_0\r\n",
+        "Transfer-Encoding: chunked\r\nContent-Length: 0\r\n",
+        "Content-Length: 0\r\nTransfer-Encoding: identity\r\n",
+        "Bad Name: value\r\nContent-Length: 0\r\n",
+        "X-Extra: valid\x01not\r\nContent-Length: 0\r\n",
+        "X-Extra: valid\r\n folded\r\nContent-Length: 0\r\n",
+    }) |fields| {
+        const sockets = try socketPair();
+        defer closeTestDescriptor(sockets[0]);
+        defer closeTestDescriptor(sockets[1]);
+        var response: [512]u8 = undefined;
+        const bytes = try std.fmt.bufPrint(&response, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\n{s}\r\n", .{fields});
+        try writeAll(sockets[1], bytes);
+        try std.testing.expectError(error.InvalidResponse, readResponseHead(sockets[0]));
+    }
+    const sockets = try socketPair();
+    defer closeTestDescriptor(sockets[0]);
+    defer closeTestDescriptor(sockets[1]);
+    try writeAll(sockets[1], "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 00\r\nX-Rui-Wire-Version: 1\r\nX-Extra: one\r\nx-extra: two\r\n\r\n");
+    try std.testing.expectEqual(@as(u16, 200), (try readResponseHead(sockets[0])).status);
 }
 
 test "capture batches escaped file output and flushes before publication" {
