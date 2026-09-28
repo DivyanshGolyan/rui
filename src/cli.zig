@@ -310,7 +310,7 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
     const reply = try client.configure(io, input, &reply_buffer);
     const accepted = if (human and interactive) try acceptedReply(reply) else false;
     if (human and (!interactive or !accepted)) try writeAdmission(io, reply, if (json) input.record else null) else if (!human) try writeCommandReply(io, reply);
-    if (human and interactive and accepted) try std.Io.File.stdout().writeStreamingAll(io, "Configured.\n");
+    if (human and interactive and accepted) try std.Io.File.stdout().writeStreamingAll(io, "Rui: Configured.\n");
     if (human and !json and !interactive) {
         var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "configuration: {s} in {s}\n", .{ input.session, input.store }));
@@ -403,7 +403,7 @@ fn waitForSession(init: std.process.Init, store: []const u8, session_ref: []cons
         const selected = if (work.selected_message) |key| key.slice() else {
             if (presentation == .json) {
                 try std.Io.File.stdout().writeStreamingAll(init.io, "{\"return\":\"idle\"}\n");
-            } else try std.Io.File.stdout().writeStreamingAll(init.io, if (presentation == .interactive) "No work to wait for.\n" else "return: idle (no active or queued message)\n");
+            } else try std.Io.File.stdout().writeStreamingAll(init.io, if (presentation == .interactive) "Rui: No work to wait for.\n" else "return: idle (no active or queued message)\n");
             return null;
         };
         if (presentation == .json) {
@@ -435,9 +435,11 @@ fn showSessionStatus(init: std.process.Init, store: []const u8, session_ref: []c
     if (brief) {
         try writeSafeField(init.io, "Session: ", session_ref);
         try writeSafeField(init.io, "Workspace (Bash cwd): ", work.workspace.slice());
+        try writeSafeField(init.io, "Provider: ", work.provider.slice());
+        try writeSafeField(init.io, "Model: ", work.model.slice());
         try std.Io.File.stdout().writeStreamingAll(init.io, "Permission: ");
         try writeSafeText(init.io, work.permission_mode.slice());
-        try std.Io.File.stdout().writeStreamingAll(init.io, if (work.permission_mode.eql("bypass")) " (Bash runs without approval)\n" else "\n");
+        try std.Io.File.stdout().writeStreamingAll(init.io, if (work.permission_mode.eql("bypass")) " (Bash runs without approval)\nRui: Bash commands can run without asking you.\n" else "\n");
         if (work.selected_message != null) try writeSafeField(init.io, "Work: ", work.status.slice());
         if (work.action_count != 0) try showActionable(init.io, report.file, false);
         return;
@@ -493,6 +495,7 @@ fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []cons
     if (!accepted) try writeAdmission(init.io, reply, null);
     if (reply.status != 200) return error.MessageNotAdmitted;
     if (!accepted) return null;
+    try writeSafeField(init.io, "You: ", text);
     const saved = try selectedRequest(store, session_ref, &key_buffer);
     if (try followMessage(init, &saved, .interactive, false, false)) |attention|
         return .{ .work = attention, .message = saved.key };
@@ -517,7 +520,7 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         if (err == error.SessionNotConfigured) std.debug.print("rui: configure this Session before entering it\n", .{});
         return err;
     };
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Type a message or /help. /exit detaches without stopping work.\n");
+    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Type a message or /help. /exit detaches without stopping work.\n");
     var input_buffer: [64 * 1024]u8 = undefined;
     while (true) {
         const line = (TerminalEditor.readLine(init.io, &input_buffer, "rui> ", true) catch |err| {
@@ -535,7 +538,7 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         if (text.len == 0) continue;
         if (std.mem.eql(u8, text, "/exit")) break;
         if (std.mem.eql(u8, text, "/help")) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "/status  /wait  /requests  /result KEY  /configure [settings]  /exit\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: /help  /status  /wait  /requests  /result KEY  /configure [settings]  /exit\n/help shows these commands; /status inspects this Session; /wait follows selected work; /requests lists local recovery handles; /result KEY reads a saved answer. /configure changes this Session; /exit detaches without stopping work.\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
             continue;
         }
         const attention: ?Attention = if (std.mem.eql(u8, text, "/status")) blk: {
@@ -582,7 +585,7 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
                     if (std.mem.eql(u8, setting, "-") and
                         (std.mem.eql(u8, flag, "--instructions") or std.mem.eql(u8, flag, "--output-schema")))
                     {
-                        try std.Io.File.stdout().writeStreamingAll(init.io, "Use a file for /configure content; terminal stdin belongs to this Session.\n");
+                        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Use a file for /configure content; terminal stdin belongs to this Session.\n");
                         break :blk null;
                     }
                     config_args[count] = setting;
@@ -591,18 +594,17 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
             }
             if (valid and count > 4) {
                 configure(init, config_args[0..count], true) catch |err| std.debug.print("rui: configure: {s}; check /requests before retrying\n", .{@errorName(err)});
-            } else try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /configure --model MODEL [--tools bash] [--permission-mode ask|bypass] (settings for this Session only)\n");
+            } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Usage: /configure --model MODEL [--tools bash] [--permission-mode ask|bypass] (settings for this Session only)\n");
             break :blk null;
-        } else if (std.mem.startsWith(u8, text, "/")) blk: {
-            if (std.mem.startsWith(u8, text, "//")) break :blk sessionMessage(init, destination, reference, text[1..]) catch |err| {
+        } else if (std.mem.startsWith(u8, text, "/") and !std.mem.startsWith(u8, text, "//")) blk: {
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Unknown command. Type /help.\n");
+            break :blk null;
+        } else blk: {
+            const message_text = if (std.mem.startsWith(u8, text, "//")) text[1..] else text;
+            break :blk sessionMessage(init, destination, reference, message_text) catch |err| {
                 std.debug.print("rui: message: {s}; check /requests before resubmitting\n", .{@errorName(err)});
                 break :blk null;
             };
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Unknown command. Type /help.\n");
-            break :blk null;
-        } else sessionMessage(init, destination, reference, text) catch |err| blk: {
-            std.debug.print("rui: message: {s}; check /requests before resubmitting\n", .{@errorName(err)});
-            break :blk null;
         };
         if (attention) |action| interactiveAction(init, destination, reference, action) catch |err| {
             if (err == error.InteractiveInterrupted) break;
@@ -610,7 +612,7 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
             std.debug.print("rui: Action observation or decision failed: {s}; check /requests and /status\n", .{@errorName(err)});
         };
     }
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Detached. Host work continues.\n");
+    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Detached. Host work continues.\n");
 }
 
 fn interactiveAction(init: std.process.Init, store: []const u8, session_ref: []const u8, initial: Attention) !void {
@@ -623,11 +625,11 @@ fn interactiveAction(init: std.process.Init, store: []const u8, session_ref: []c
         var choice_buffer: [64]u8 = undefined;
         const choice = (try TerminalEditor.readLine(init.io, &choice_buffer, "Allow once, deny, or later? [a/d/l] ", false)) orelse return;
         if (std.mem.eql(u8, choice, "l")) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "No decision sent; use /wait to revisit.\n");
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No decision sent; use /wait to revisit.\n");
             return;
         }
         if (!std.mem.eql(u8, choice, "a") and !std.mem.eql(u8, choice, "d")) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Choose a, d, or l. No decision sent.\n");
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Choose a, d, or l. No decision sent.\n");
             continue;
         }
         const decision: protocol.PermissionDecision = if (choice[0] == 'a') .allow_once else .deny;
@@ -657,7 +659,7 @@ fn sessionRequests(init: std.process.Init, store: []const u8, session_ref: []con
     const canonical = try platform.resolveClientPaths(init.io, store);
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory = try requestDirectory(init, &path);
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Local recovery handles (not Host work status):\n");
+    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Local recovery handles (not Host work status):\n");
     var dir = std.Io.Dir.cwd().openDir(init.io, directory, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
@@ -1166,6 +1168,7 @@ fn showResult(init: std.process.Init, saved: *const SavedRequest, presentation: 
         try writeJsonFileAt(init.io, file, 0, answer.answer.bytes, false);
         return std.Io.File.stdout().writeStreamingAll(init.io, "\"}\n");
     }
+    if (presentation == .interactive) try std.Io.File.stdout().writeStreamingAll(init.io, "Assistant: ");
     var read_buffer: client.ReplyBuffer = .{};
     const answer = try client.readResult(init.io, saved.store.slice(), saved.key.slice(), std.Io.File.stdout(), &read_buffer);
     switch (answer) {
@@ -1186,6 +1189,8 @@ const Work = struct {
     action: protocol.Bounded(32) = .{},
     action_count: usize = 0,
     workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
+    provider: protocol.Bounded(32) = .{},
+    model: protocol.Bounded(protocol.max_model_bytes) = .{},
     permission_mode: protocol.Bounded(16) = .{},
     selected_message: ?protocol.Bounded(protocol.max_key_bytes) = null,
     recent: [10]Recent = [_]Recent{.{}} ** 10,
@@ -1244,10 +1249,18 @@ fn readWork(reader: *std.json.Reader) !Work {
                 defer freeToken(inner);
                 if (inner == .object_end) break;
                 const key = try tokenString(inner);
-                if (std.mem.eql(u8, key, "workspace") or std.mem.eql(u8, key, "permission_mode")) {
+                if (std.mem.eql(u8, key, "workspace") or std.mem.eql(u8, key, "permission_mode") or
+                    std.mem.eql(u8, key, "provider") or std.mem.eql(u8, key, "model"))
+                {
                     const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, protocol.max_workspace_bytes);
                     defer freeToken(value);
-                    if (std.mem.eql(u8, key, "workspace")) try work.workspace.set(try tokenString(value)) else try work.permission_mode.set(try tokenString(value));
+                    if (std.mem.eql(u8, key, "workspace")) {
+                        try work.workspace.set(try tokenString(value));
+                    } else if (std.mem.eql(u8, key, "provider")) {
+                        try work.provider.set(try tokenString(value));
+                    } else if (std.mem.eql(u8, key, "model")) {
+                        try work.model.set(try tokenString(value));
+                    } else try work.permission_mode.set(try tokenString(value));
                 } else try reader.skipValue();
             }
         } else if (std.mem.eql(u8, field, "selected_message")) {

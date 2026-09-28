@@ -220,8 +220,15 @@ def main():
         try:
             greeting = read_terminal(master, "rui> ")
             assert f"Session: {session}" in greeting and f"Workspace (Bash cwd): {workspace.resolve()}" in greeting, greeting
+            assert "Provider: codex" in greeting and "Model: model-a" in greeting, greeting
             assert "Permission: ask" in greeting and "Store:" not in greeting and "Work: completed" not in greeting and queued not in greeting, greeting
-            assert "first answer" in terminal_step(master, f"/result {queued}")
+            help_text = terminal_step(master, "/help")
+            for command in ("/help", "/status", "/wait", "/requests", "/result KEY", "/configure", "/exit"):
+                assert command in help_text, help_text
+            for explanation in ("/help shows", "/status inspects", "/wait follows", "/requests lists",
+                "/result KEY reads", "/configure changes", "/exit detaches"):
+                assert explanation in help_text, help_text
+            assert "Assistant: first answer" in terminal_step(master, f"/result {queued}")
             assert "Local recovery handles" in terminal_step(master, "/requests")
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             assert "No work to wait for." in terminal_step(master, "/wait")
@@ -508,6 +515,7 @@ def main():
             proposal = read_terminal(master, "Allow once, deny, or later?")
             time.sleep(0.2)
             assert counter.read_text() == "x", "pasted typeahead approved an unseen Action"
+            assert "You: interactive request" in proposal, proposal
             assert "call ID:" not in proposal and "request:" not in proposal and "return:" not in proposal, proposal
             assert json.loads(proposal.split("Bash arguments: ", 1)[1].splitlines()[0]) == padded_arguments, proposal
             assert "\\u00e9" in proposal
@@ -534,13 +542,32 @@ def main():
             assert counter.read_text() == "x", "marked paste approved an Action"
             assert "Bash arguments:" in terminal_step(master, "/wait", "Allow once, deny, or later?")
             completed_turn = terminal_step(master, "a")
-            assert "interactive complete" in completed_turn and "result:" not in completed_turn and "request:" not in completed_turn, completed_turn
-            assert "interactive complete" in terminal_step(master, "/result " + interactive_key)
+            assert "Assistant: interactive complete" in completed_turn and "result:" not in completed_turn and "request:" not in completed_turn, completed_turn
+            assert "Assistant: interactive complete" in terminal_step(master, "/result " + interactive_key)
             assert "Recent messages" in terminal_step(master, "/status")
             assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
             assert termios.tcgetattr(master)[3] & termios.ICANON, "terminal mode not restored"
             assert counter.read_text() == "xx", counter.read_text()
+        finally:
+            if entered.poll() is None:
+                entered.kill()
+                entered.wait(timeout=5)
+            os.close(master)
+        control_session = "human/name\n\x1b[2J\u202e"
+        run(home, "configure", "--store", store, "--session", control_session,
+            "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+        master, slave = pty.openpty()
+        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+            "--session", control_session], env={**os.environ, "HOME": str(home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            greeting = read_terminal(master, "rui> ")
+            assert "Session: human/name\\n\\u001b[2J\\u202e" in greeting, greeting
+            assert "\x1b[2J" not in greeting and "\u202e" not in greeting, greeting
+            terminal_step(master, "/exit", "Detached.")
+            assert entered.wait(timeout=5) == 0
         finally:
             if entered.poll() is None:
                 entered.kill()
@@ -640,12 +667,17 @@ def main():
         run(home, "configure", "--store", store, "--session", long_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
         master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 40, 0, 0))
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", long_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         try:
-            assert "Permission: bypass (Bash runs without approval)" in read_terminal(master, "rui> ")
+            greeting = read_terminal(master, "rui> ")
+            assert "Permission: bypass (Bash runs without approval)" in greeting, greeting
+            assert "Rui: Bash commands can run without asking you." in greeting, greeting
+            assert "Provider: codex" in greeting and "Model: model-a" in greeting, greeting
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
             before = len(endpoint.requests)
             long_text = "X" * 5000
             answer = terminal_bulk(master, long_text)
@@ -711,6 +743,9 @@ def main():
                 else:
                     observed = terminal_step(master, typed, f"edited {index}")
                 assert f"edited {index}" in observed, observed
+                if index == 2:
+                    assert "You: line1\\nline2" in observed, observed
+                    assert "Assistant: edited 2" in observed, observed
                 if "rui> " not in observed.split(f"edited {index}", 1)[1]:
                     read_terminal(master, "rui> ")
                 body = json.loads(endpoint.requests[-1])
