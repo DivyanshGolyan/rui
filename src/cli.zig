@@ -39,9 +39,6 @@ pub fn main(init: std.process.Init) !void {
 
 fn configureHostAllocator(init: std.process.Init, args: []const []const u8) !void {
     if (@import("builtin").os.tag != .macos) return;
-    // A Host without its original readiness output will fail after opening
-    // diagnostics. Re-exec would lose the entry-time descriptor observation.
-    if (server.rui_serve_readiness_output_present() == 0) return;
     if (std.mem.eql(u8, init.environ_map.get("RUI_HOST_MALLOC_DEFAULTS") orelse "", "0")) return;
     var changed = false;
     for ([_][]const u8{ "MallocMaxMagazines", "MallocSpaceEfficient" }) |key| {

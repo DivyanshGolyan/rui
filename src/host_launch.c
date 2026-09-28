@@ -12,7 +12,6 @@
 #include <crt_externs.h>
 #include <spawn.h>
 extern char **environ;
-static int serve_stdout_at_entry = 1;
 #endif
 
 /* Only async-signal-safe operations run after fork. The parent owns the
@@ -39,29 +38,13 @@ int rui_launch_helper(const char *executable, const char *store) {
     return 127;
 }
 
-/* Observe stdout before Zig initialization or allocator replacement can reuse
- * a missing fd 1. The spawn boundary already discarded every caller descriptor
- * except the helper's report pipe. */
 __attribute__((constructor(101))) static void early_launch_helper(void) {
-    if (*_NSGetArgc() < 2) return;
-    char **args = *_NSGetArgv();
-    if (strcmp(args[1], "serve") == 0) {
-        serve_stdout_at_entry = fcntl(1, F_GETFD) >= 0;
-        return;
-    }
     if (*_NSGetArgc() != 4) return;
+    char **args = *_NSGetArgv();
     if (strcmp(args[1], "--launch-helper") != 0) return;
     _exit(rui_launch_helper(args[2], args[3]));
 }
 #endif
-
-int rui_serve_readiness_output_present(void) {
-#if defined(__APPLE__)
-    return serve_stdout_at_entry;
-#else
-    return fcntl(1, F_GETFD) >= 0;
-#endif
-}
 
 /* Scope SIGPIPE suppression to the serving thread's readiness write. A
  * disconnected reader must reach Zig's failed-start diagnostic, not kill the

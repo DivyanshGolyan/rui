@@ -185,7 +185,6 @@ const Connection = struct {
     accepted_at_ns: u64,
 };
 
-pub extern "c" fn rui_serve_readiness_output_present() c_int;
 extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
 
 pub fn serve(
@@ -200,9 +199,6 @@ pub fn serve(
     bash_path: []const u8,
     bash_timeout_ms: u64,
 ) !void {
-    // C captured this before Zig initialization could reuse a missing fd 1.
-    // A later write to a reused slot is not readiness for the launching caller.
-    const readiness_output_present = rui_serve_readiness_output_present() != 0;
     const descriptor_observation = try descriptor_limit.observe(io);
     const descriptor_requirement = try descriptor_capacity.calculate(
         descriptor_observation.open_descriptors,
@@ -244,7 +240,6 @@ pub fn serve(
     defer if (diagnostics) |*writer| writer.close();
     if (diagnostics) |*writer| writer.record("begin", "lease_acquired");
     errdefer if (diagnostics) |*writer| writer.record("failed", "startup_error");
-    if (!readiness_output_present) return error.HostReadinessOutputUnavailable;
     var storage = try store_module.Store.openWithOptions(
         io,
         lease.paths.database.slice(),
@@ -265,9 +260,6 @@ pub fn serve(
             std.debug.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
     }
-    // On Darwin, a library can briefly reuse a closed stdout before our
-    // entry-time constructor runs. Never announce readiness to our own socket.
-    if (listener.socket.handle == 1) return error.HostReadinessOutputUnavailable;
     var socket_path: [257:0]u8 = undefined;
     const socket_z = try std.fmt.bufPrintZ(&socket_path, "{s}", .{lease.paths.socket.slice()});
     if (std.c.chmod(socket_z, 0o600) != 0) return error.SocketProtectionFailed;
