@@ -153,12 +153,8 @@ fn isOwnedIngressName(name: []const u8) bool {
 
 fn isOwnedEvaluatorScratch(name: []const u8) bool {
     const prefix = "evaluator-";
-    const suffix = if (std.mem.endsWith(u8, name, ".tmp"))
-        ".tmp"
-    else if (std.mem.endsWith(u8, name, ".index"))
-        ".index"
-    else
-        return false;
+    const suffix = ".tmp";
+    if (!std.mem.endsWith(u8, name, suffix)) return false;
     if (!std.mem.startsWith(u8, name, prefix)) return false;
     const value = name[prefix.len .. name.len - suffix.len];
     if (value.len == 0 or value.len > 16 or (value.len > 1 and value[0] == '0')) return false;
@@ -371,7 +367,6 @@ test "startup cleanup recognizes only owned ingress names" {
     try std.testing.expect(isOwnedIngressName("bash-stderr-12-2.tmp"));
     try std.testing.expect(isOwnedIngressName("report-12-2.tmp"));
     try std.testing.expect(isOwnedIngressName("evaluator-0.tmp"));
-    try std.testing.expect(isOwnedIngressName("evaluator-1a2b3c.index"));
     try std.testing.expect(isOwnedIngressName("evaluator-ffffffffffffffff.tmp"));
     inline for (.{ "request-", "response-", "response-metadata-", "bash-input-", "bash-stdout-", "bash-stderr-", "report-" }) |prefix| {
         var name_buffer: [64]u8 = undefined;
@@ -396,7 +391,7 @@ test "startup cleanup recognizes only owned ingress names" {
     inline for (.{
         "evaluator-.tmp",
         "evaluator-00.tmp",
-        "evaluator-01.index",
+        "evaluator-1.index",
         "evaluator-1A.tmp",
         "evaluator-g.tmp",
         "evaluator-10000000000000000.tmp",
@@ -418,7 +413,6 @@ test "startup cleanup removes owned files and preserves lookalikes" {
         "bash-stderr-3-1.tmp",
         "report-0-1.tmp",
         "evaluator-0.tmp",
-        "evaluator-deadbeef.index",
     };
     const preserved = [_][]const u8{
         "request-00-1.tmp",
@@ -428,6 +422,7 @@ test "startup cleanup removes owned files and preserves lookalikes" {
         "request-x-1.tmp",
         "request-1-1-1.tmp",
         "evaluator-00.tmp",
+        "evaluator-deadbeef.index",
         "evaluator-DEADBEEF.index",
         "evaluator-deadbeef.index.extra",
         "diagnostic.log",
