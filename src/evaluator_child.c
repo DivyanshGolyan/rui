@@ -274,119 +274,6 @@ static int descriptor_read(void *opaque, uint64_t offset,
     return 0;
 }
 
-typedef struct {
-    int fd;
-    uint64_t size;
-    uint64_t position;
-    uint8_t *workspace;
-    size_t workspace_size;
-} PreparedInput;
-
-typedef struct {
-    PreparedInput *input;
-    uint64_t base;
-} PreparedString;
-
-static int prepared_take(PreparedInput *input, void *dst, size_t length) {
-    if ((uint64_t)length > input->size - input->position ||
-        descriptor_read(&input->fd, input->position, dst, length)) return -1;
-    input->position += length;
-    return 0;
-}
-
-static uint64_t little_endian(const uint8_t *bytes, size_t length) {
-    uint64_t value = 0;
-    for (size_t i = 0; i < length; i++) value |= (uint64_t)bytes[i] << (8 * i);
-    return value;
-}
-
-static int prepared_string_read(void *opaque, uint64_t offset,
-                                uint8_t *dst, size_t length) {
-    PreparedString *string = opaque;
-    if (offset > string->input->size - string->base ||
-        (uint64_t)length > string->input->size - string->base - offset) return -1;
-    return descriptor_read(&string->input->fd, string->base + offset, dst, length);
-}
-
-static JSValue decode_string(JSContext *ctx, PreparedInput *input) {
-    uint8_t header[8];
-    if (prepared_take(input, header, sizeof(header)))
-        return JS_ThrowTypeError(ctx, "missing string length");
-    uint64_t length = little_endian(header, sizeof(header));
-    if (length > input->size - input->position)
-        return JS_ThrowRangeError(ctx, "string range");
-    PreparedString string = {input, input->position};
-    OPStringStatus status;
-    JSValue value = OP_NewStringUTF8Reader(ctx, length, prepared_string_read,
-        &string, input->workspace, input->workspace_size, &status);
-    input->position += length;
-    return value;
-}
-
-static JSValue decode_value(JSContext *ctx, PreparedInput *input, unsigned depth) {
-    if (depth > 64) return JS_ThrowRangeError(ctx, "prepared input depth");
-    uint8_t bytes[8];
-    if (prepared_take(input, bytes, 1)) return JS_ThrowTypeError(ctx, "missing tag");
-    switch (bytes[0]) {
-    case 0: return JS_NULL;
-    case 1: return JS_FALSE;
-    case 2: return JS_TRUE;
-    case 3: {
-        if (prepared_take(input, bytes, 8)) return JS_ThrowTypeError(ctx, "missing number");
-        uint64_t bits = little_endian(bytes, 8);
-        double number;
-        memcpy(&number, &bits, sizeof(number));
-        if (!isfinite(number)) return JS_ThrowTypeError(ctx, "nonfinite number");
-        return JS_NewFloat64(ctx, number == 0 ? 0 : number);
-    }
-    case 4:
-        return decode_string(ctx, input);
-    case 5:
-    case 6:
-        break;
-    default:
-        return JS_ThrowTypeError(ctx, "invalid tag");
-    }
-    unsigned tag = bytes[0];
-    if (prepared_take(input, bytes, 4)) return JS_ThrowTypeError(ctx, "missing count");
-    uint64_t count = little_endian(bytes, 4);
-    JSValue result = tag == 5 ? JS_NewArray(ctx) : JS_NewObject(ctx);
-    if (JS_IsException(result)) return result;
-    for (uint64_t i = 0; i < count; i++) {
-        JSAtom atom = JS_ATOM_NULL;
-        if (tag == 6) {
-            JSValue key = decode_string(ctx, input);
-            if (JS_IsException(key)) goto fail;
-            atom = JS_ValueToAtom(ctx, key);
-            JS_FreeValue(ctx, key);
-            if (atom == JS_ATOM_NULL) goto engine_error;
-            int exists = JS_GetOwnProperty(ctx, NULL, result, atom);
-            if (exists != 0) {
-                JS_FreeAtom(ctx, atom);
-                if (exists < 0) goto fail;
-                JS_ThrowTypeError(ctx, "duplicate key");
-                goto fail;
-            }
-        }
-        JSValue item = decode_value(ctx, input, depth + 1);
-        if (JS_IsException(item)) {
-            JS_FreeAtom(ctx, atom);
-            goto fail;
-        }
-        int defined = tag == 5 ?
-            JS_DefinePropertyValueUint32(ctx, result, (uint32_t)i, item, JS_PROP_C_W_E) :
-            JS_DefinePropertyValue(ctx, result, atom, item, JS_PROP_C_W_E);
-        JS_FreeAtom(ctx, atom);
-        if (defined < 0) goto fail;
-    }
-    return result;
-engine_error:
-    JS_ThrowOutOfMemory(ctx);
-fail:
-    JS_FreeValue(ctx, result);
-    return JS_EXCEPTION;
-}
-
 /* Only the module or returned root is completion authority. Detached jobs
  * disappear with this runtime once that Promise settles. */
 static int settle_promise(JSRuntime *rt, JSContext *ctx, JSValueConst promise) {
@@ -458,23 +345,13 @@ int main(int argc, char **argv) {
     JS_FreeValue(ctx, global);
 
     int check = prepared_check;
-    JSValue args = JS_UNDEFINED;
     if (prepared_run) {
         int input_fd = 4;
         int flags = fcntl(input_fd, F_GETFL);
         struct stat input;
-        uint8_t workspace[4096];
         if (flags < 0 || (flags & O_ACCMODE) != O_RDONLY ||
             fstat(input_fd, &input) || !S_ISREG(input.st_mode) ||
             input.st_size < 0) return 4;
-        PreparedInput prepared = {input_fd, (uint64_t)input.st_size, 0,
-                                  workspace, sizeof(workspace)};
-        args = decode_value(ctx, &prepared, 0);
-        if (JS_IsException(args) || !JS_IsArray(args) ||
-            prepared.position != prepared.size) {
-            JS_FreeValue(ctx, args);
-            return 5;
-        }
     }
     JSValue module = JS_Eval(ctx, source, size, "workflow.js",
                              JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
@@ -502,26 +379,9 @@ int main(int argc, char **argv) {
     if (!JS_IsFunction(ctx, entry)) return 5;
     JSValue capabilities = JS_NewObject(ctx);
     if (JS_IsException(capabilities)) return 5;
-    int64_t count;
-    if (JS_GetLength(ctx, args, &count) || count < 0 || count >= INT_MAX ||
-        (uint64_t)count + 1 > native_source_budget / sizeof(JSValue)) return 5;
-    /* JS_Call borrows a contiguous argument vector. Its native allocation is
-     * bounded by the same workspace budget as the now-released source. */
-    size_t call_count = (size_t)count + 1;
-    JSValue *call_args = malloc(call_count * sizeof(*call_args));
-    if (!call_args) return 5;
-    call_args[0] = capabilities;
-    size_t provided = 1;
-    for (; provided < call_count; provided++) {
-        call_args[provided] = JS_GetPropertyUint32(ctx, args, (uint32_t)(provided - 1));
-        if (JS_IsException(call_args[provided])) break;
-    }
-    JSValue root = provided == call_count ?
-        JS_Call(ctx, entry, JS_UNDEFINED, (int)call_count, call_args) : JS_EXCEPTION;
-    for (size_t i = 0; i < provided; i++) JS_FreeValue(ctx, call_args[i]);
-    free(call_args);
+    JSValue root = JS_Call(ctx, entry, JS_UNDEFINED, 1, &capabilities);
+    JS_FreeValue(ctx, capabilities);
     JS_FreeValue(ctx, entry);
-    JS_FreeValue(ctx, args);
     if (JS_IsException(root)) return 5;
     if (JS_IsPromise(root)) {
         if (settle_promise(rt, ctx, root)) return 5;

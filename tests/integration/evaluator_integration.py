@@ -11,10 +11,10 @@ binary = sys.argv[1]
 
 
 def expression(body):
-    return f'export default async function workflow(_, input) {{ return ({body}); }}'
+    return f'export default async function workflow(capabilities) {{ return ({body}); }}'
 
 
-def invoke(mode, source, prepared=b'\x05\x00\x00\x00\x00'):
+def invoke(mode, source, prepared=b''):
     with tempfile.TemporaryDirectory() as directory:
         path = pathlib.Path(directory)
         (path / 'source').write_text(source)
@@ -26,7 +26,7 @@ def invoke(mode, source, prepared=b'\x05\x00\x00\x00\x00'):
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={}, timeout=5)
 
 
-def value(body, prepared=b'\x05\x00\x00\x00\x00'):
+def value(body, prepared=b''):
     result = invoke('run-prepared', expression(body), prepared)
     assert result.returncode == 0, (body, result.returncode, result.stderr)
     chunks = []
@@ -52,8 +52,10 @@ for invalid in ('1 + 2', 'export default 42',
     assert rejected.returncode != 0 and not rejected.stdout, (invalid, rejected.stderr)
 assert value('({answer: "中😀", missing: typeof process})') == {
     'answer': '中😀', 'missing': 'undefined'}
-assert value('input.answer', b'\x05\x01\x00\x00\x00\x06\x01\x00\x00\x00'
-             + struct.pack('<Q', 6) + b'answer\x03' + struct.pack('<d', 42)) == 42
+# A nonempty prepared descriptor must not become initial positional arguments.
+assert value('[arguments.length, typeof arguments[1], Object.keys(capabilities).length]',
+             b'\x05\x02\x00\x00\x00\x03' + struct.pack('<d', 7)
+             + b'\x03' + struct.pack('<d', 31)) == [1, 'undefined', 0]
 assert value('"\\u0001".repeat(3*1024*1024)') == '\x01' * (3 * 1024 * 1024)
 assert value('(()=>{let leaf={answer:42};return [leaf,leaf,{nested:[3,1]}]})()') == [
     {'answer': 42}, {'answer': 42}, {'nested': [3, 1]}]
@@ -84,4 +86,4 @@ partial = invoke('run-prepared', expression(
 assert partial.returncode != 0 and len(partial.stdout) >= 16388
 assert not partial.stdout.endswith(b'\x00\x00\x00\x00')
 assert value('13') == 13
-print('evaluator worker: module policy, prepared arguments and streamed output passed')
+print('evaluator worker: module policy, capability-only entry and streamed output passed')
