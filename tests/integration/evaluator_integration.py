@@ -94,6 +94,28 @@ assert value('"x".repeat(600000)') == 'x' * 600000
 assert value('"a".repeat(600) + "b".repeat(600)') == 'a' * 600 + 'b' * 600
 assert value('({mixed: "a".repeat(600) + "中" + "😀", split: "\\ud83d" + "\\ude00"})') == {
     'mixed': 'a' * 600 + '中😀', 'split': '😀'}
+
+# Inspect the actual worker's complete encoding, including keys. The ordinary
+# json.loads helper would silently accept duplicate members at any depth.
+def unique_object(pairs):
+    result = {}
+    for key, value_ in pairs:
+        assert key not in result, key
+        result[key] = value_
+    return result
+
+
+encoded = invoke('run', expression(r'({["a\n\"\\中"]:{nested:[1,true,null,{"\u0061":2}]}})'))
+assert encoded.returncode == 0, encoded.stderr
+assert json.loads(encoded.stdout, object_pairs_hook=unique_object) == {
+    'a\n"\\中': {'nested': [1, True, None, {'a': 2}]}}
+assert b'\\u000a' in encoded.stdout and b'\\"' in encoded.stdout and '中'.encode() in encoded.stdout
+aliased = invoke('run', expression(r'({a:1,["\u0061"]:2})'))
+assert aliased.returncode == 0, aliased.stderr
+assert json.loads(aliased.stdout, object_pairs_hook=unique_object) == {'a': 2}
+assert value('1.7976931348623157e308') == float('1.7976931348623157e308')
+assert value('5e-324') == float('5e-324')
+assert invoke('run', expression('1e309')).returncode == 1
 shared = value('(()=>{let leaf={x:"x".repeat(1000)};return Array(5000).fill(leaf)})()')
 assert len(shared) == 5000 and shared[0] == shared[-1] == {'x': 'x' * 1000}
 assert value('Promise.resolve().then(async()=>{let x=0;for(let i=0;i<10000;i++){await 0;x++}return x})') == 10000
