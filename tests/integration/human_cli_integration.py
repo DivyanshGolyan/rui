@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Public one-shot caller recovery and exact Bash authorization."""
+import errno
 import json
 import fcntl
 import os
@@ -126,10 +127,16 @@ def main():
         assert run(long_home, "setup", "--provider", "codex", success=False) == ""
         assert not (preferences_home / ".config/rui/preferences").exists()
         invalid_home = os.fsencode(state) + b"/home-\xff"
-        os.mkdir(invalid_home, mode=0o700)
+        try:
+            os.mkdir(invalid_home, mode=0o700)
+        except OSError as err:
+            if err.errno != errno.EILSEQ:
+                raise
+            # macOS filesystems may reject this name before Rui sees HOME.
         invalid = subprocess.run([os.fsencode(fixture.RUI), b"setup", b"--provider", b"codex"],
             env={**os.environb, b"HOME": invalid_home}, capture_output=True, timeout=20)
-        assert invalid.returncode != 0 and not os.path.exists(invalid_home + b"/.config"), invalid
+        assert invalid.returncode != 0 and b"InvalidHome" in invalid.stderr, invalid
+        assert not os.path.exists(invalid_home + b"/.config"), invalid
         bidi_store = state / "store-\u202ehidden"
         bidi_store.mkdir(mode=0o700)
         bidi_home = state / "bidi-home"
