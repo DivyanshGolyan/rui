@@ -218,12 +218,19 @@ def main():
         (saved.parent / "real-preferences").rename(saved)
         assert run(preferences_home, "setup", "--model", "bad\nmodel", success=False) == ""
         assert saved.read_text().endswith("model=gpt-6-luna\n")
-        assert run(preferences_home, "message", "--session", session, "script", success=False) == "", "scripts must still name --store"
         config = admit(home, "configure", "--store", store, "--session", session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a",
             "--tools", "bash", "--permission-mode", "ask")
         assert config["admission"]["answer"]["status"] == "accepted", config
+        # A one-shot read selects the saved Store; explicit targeting bypasses
+        # even corrupt preferences, and an invalid saved destination never falls back.
+        assert json.loads(run(preferences_home, "wait-session", "--session", session,
+            "--json")) == {"return": "idle"}
         saved.write_text("version=9\n")
+        assert run(preferences_home, "wait-session", "--session", session,
+            "--json", success=False) == ""
+        assert json.loads(run(preferences_home, "wait-session", "--store", store,
+            "--session", session, "--json")) == {"return": "idle"}
         master, slave = pty.openpty()
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", session], env={**os.environ, "HOME": str(preferences_home)},
@@ -258,6 +265,8 @@ def main():
         fallback.unlink()
         saved.write_text(f"version=1\nstore={state / 'missing'}\nprovider=codex\nmodel=gpt-6-luna\n")
         saved.chmod(0o600)
+        assert run(preferences_home, "wait-session", "--session", session,
+            "--json", success=False) == ""
         master, slave = pty.openpty()
         entered = subprocess.run([str(fixture.RUI), "session", "--session", session],
             env={**os.environ, "HOME": str(preferences_home)}, stdin=slave,

@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
         return serve(init, args[2..]);
     }
     if (std.mem.eql(u8, command, "login")) return login(init, args[2..]);
-    if (std.mem.eql(u8, command, "setup")) try setup(init, args[2..]) else if (std.mem.eql(u8, command, "session")) try enterSession(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init.io, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init.io, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init.io, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init.io, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init.io, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init.io, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, args[2..], false) else return usage();
+    if (std.mem.eql(u8, command, "setup")) try setup(init, args[2..]) else if (std.mem.eql(u8, command, "session")) try enterSession(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, args[2..], false) else return usage();
     try postCommandHold(init);
 }
 
@@ -128,6 +128,22 @@ fn setup(init: std.process.Init, args: []const []const u8) !void {
     try std.Io.File.stdout().writeStreamingAll(init.io, if (values.store.len != 0) " (saved)\n" else " (HOME fallback)\n");
     try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) values.provider.slice() else "not selected");
     try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
+}
+
+// The caller owns buffer. Explicit destinations never consult preferences;
+// omitted destinations use the same saved/HOME rule in every CLI mode.
+fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![]const u8 {
+    if (explicit) |path| return path;
+    const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+    const defaults = preferences.load(home) catch |err| {
+        std.debug.print("rui: cannot read private setup defaults ({s}); use rui setup to inspect or repair them. No Store selected.\n", .{@errorName(err)});
+        return err;
+    };
+    if (defaults.store.len != 0) {
+        @memcpy(buffer[0..defaults.store.len], defaults.store.slice());
+        return buffer[0..defaults.store.len];
+    }
+    return preferences.defaultStore(home, buffer);
 }
 
 fn login(init: std.process.Init, args: []const []const u8) !void {
@@ -288,10 +304,11 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
         return error.FixtureCredentialPathRequired;
     var credential_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const credential_path: ?[]const u8 = if (managed or fixture_endpoint != null) try credentialPath(init, &credential_path_buffer, false) else null;
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     return server.serve(
         io,
         std.heap.c_allocator,
-        store_path orelse return usage(),
+        try selectedStore(init, store_path, &selected_buffer),
         active_capacity,
         faults,
         if (managed) model_adapter.managed_endpoint else fixture_endpoint orelse provider_endpoint,
@@ -335,7 +352,9 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
         } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--workspace")) input.workspace = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--model")) input.model = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--instructions")) input.instructions = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--tools")) input.tools = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--permission-mode")) input.permission_mode = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--output-schema")) input.output_schema = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--text-output")) input.output_schema = .{ .state = .explicit_null } else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
-    if (input.store.len == 0 or input.session.len == 0 or (input.record.len == 0) != !key_seen) return usage();
+    if (input.session.len == 0 or (input.record.len == 0) != !key_seen) return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    input.store = try selectedStore(init, if (input.store.len == 0) null else input.store, &selected_buffer);
     var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const human = !key_seen;
@@ -376,7 +395,9 @@ fn message(init: std.process.Init, args: []const []const u8) !void {
         if (key_seen or input.text_path.len != 0) return usage();
         if (std.mem.eql(u8, value, "-")) input.text_path = "-" else input.text = value;
     }
-    if (input.store.len == 0 or input.session.len == 0 or (input.text_path.len == 0 and input.text == null) or (input.record.len == 0) != !key_seen) return usage();
+    if (input.session.len == 0 or (input.text_path.len == 0 and input.text == null) or (input.record.len == 0) != !key_seen) return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    input.store = try selectedStore(init, if (input.store.len == 0) null else input.store, &selected_buffer);
     var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const human = !key_seen;
@@ -426,7 +447,9 @@ fn waitSession(init: std.process.Init, args: []const []const u8) !void {
     while (index < args.len) : (index += 1) {
         if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session")) session_ref = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--terminal")) terminal_only = true else if (std.mem.eql(u8, args[index], "--json")) json = true else return error.UnknownArgument;
     }
-    _ = waitForSession(init, store orelse return usage(), session_ref orelse return usage(), if (json) .json else .human, terminal_only) catch |err| {
+    const reference = session_ref orelse return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    _ = waitForSession(init, try selectedStore(init, store, &selected_buffer), reference, if (json) .json else .human, terminal_only) catch |err| {
         if (err == error.SessionNotConfigured) std.debug.print("rui: configure this Session before waiting for it\n", .{});
         return err;
     };
@@ -578,15 +601,7 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         return error.InteractiveTerminalRequired;
     }
     var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var saved_defaults: preferences.Values = .{};
-    const chosen = if (store) |explicit| explicit else blk: {
-        const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
-        saved_defaults = preferences.load(home) catch |err| {
-            std.debug.print("rui: cannot read private setup defaults ({s}); use rui setup to inspect or repair them. No Store selected.\n", .{@errorName(err)});
-            return err;
-        };
-        break :blk if (saved_defaults.store.len != 0) saved_defaults.store.slice() else try preferences.defaultStore(home, &fallback_buffer);
-    };
+    const chosen = try selectedStore(init, store, &fallback_buffer);
     // Resolve aliases and enforce the Store's existing private/canonical selector
     // before any Session request. Explicit --store does not read preferences.
     const paths = platform.resolveClientPaths(init.io, chosen) catch |err| {
@@ -808,7 +823,8 @@ fn sessionRequests(init: std.process.Init, store: []const u8, session_ref: []con
     }
 }
 
-fn stopSession(io: std.Io, args: []const []const u8) !void {
+fn stopSession(init: std.process.Init, args: []const []const u8) !void {
+    const io = init.io;
     var input = client.SessionStopInput{ .store = "", .record = "", .key = "", .session = "" };
     var key_seen = false;
     var index: usize = 0;
@@ -820,14 +836,17 @@ fn stopSession(io: std.Io, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
-    if (input.store.len == 0 or input.record.len == 0 or input.session.len == 0 or !key_seen) return usage();
+    if (input.record.len == 0 or input.session.len == 0 or !key_seen) return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    input.store = try selectedStore(init, if (input.store.len == 0) null else input.store, &selected_buffer);
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.stopSession(io, input, &reply_buffer);
     try writeCommandReply(io, reply);
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
-fn interruptModel(io: std.Io, args: []const []const u8) !void {
+fn interruptModel(init: std.process.Init, args: []const []const u8) !void {
+    const io = init.io;
     var input = client.ModelInterruptionInput{
         .store = "",
         .record = "",
@@ -854,8 +873,10 @@ fn interruptModel(io: std.Io, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
-    if (input.store.len == 0 or input.record.len == 0 or input.session.len == 0 or
+    if (input.record.len == 0 or input.session.len == 0 or
         !key_seen or !turn_seen or !operation_seen) return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    input.store = try selectedStore(init, if (input.store.len == 0) null else input.store, &selected_buffer);
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.interruptModel(io, input, &reply_buffer);
     try writeCommandReply(io, reply);
@@ -887,7 +908,9 @@ fn decideAction(init: std.process.Init, args: []const []const u8, decision: @Fie
         } else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
-    if (input.store.len == 0 or input.session.len == 0 or !action_seen or (input.record.len == 0) != !key_seen) return usage();
+    if (input.session.len == 0 or !action_seen or (input.record.len == 0) != !key_seen) return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    input.store = try selectedStore(init, if (input.store.len == 0) null else input.store, &selected_buffer);
     var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const human = !key_seen;
@@ -918,7 +941,8 @@ fn retry(io: std.Io, args: []const []const u8) !void {
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
-fn observe(io: std.Io, args: []const []const u8) !void {
+fn observe(init: std.process.Init, args: []const []const u8) !void {
+    const io = init.io;
     var store_path: ?[]const u8 = null;
     var key: ?[]const u8 = null;
     var index: usize = 0;
@@ -928,12 +952,15 @@ fn observe(io: std.Io, args: []const []const u8) !void {
         index += 1;
     }
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try client.observeCommand(io, store_path orelse return usage(), key orelse return usage(), &reply_buffer);
+    const target = key orelse return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const reply = try client.observeCommand(io, try selectedStore(init, store_path, &selected_buffer), target, &reply_buffer);
     try writeCommandReply(io, reply);
     if (reply.status != 200) return error.HostInvocationFailed;
 }
 
-fn inspect(io: std.Io, args: []const []const u8) !void {
+fn inspect(init: std.process.Init, args: []const []const u8) !void {
+    const io = init.io;
     var store_path: ?[]const u8 = null;
     var session: ?[]const u8 = null;
     var profile: protocol.ReportProfile = .current;
@@ -955,11 +982,13 @@ fn inspect(io: std.Io, args: []const []const u8) !void {
         } else return error.UnknownArgument;
         index += 1;
     }
+    const reference = session orelse return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.inspectSession(
         io,
-        store_path orelse return usage(),
-        session orelse return usage(),
+        try selectedStore(init, store_path, &selected_buffer),
+        reference,
         profile,
         std.Io.File.stdout(),
         &reply_buffer,
@@ -973,7 +1002,8 @@ fn inspect(io: std.Io, args: []const []const u8) !void {
     }
 }
 
-fn readResult(io: std.Io, args: []const []const u8) !void {
+fn readResult(init: std.process.Init, args: []const []const u8) !void {
+    const io = init.io;
     var store_path: ?[]const u8 = null;
     var key: ?[]const u8 = null;
     var index: usize = 0;
@@ -982,11 +1012,13 @@ fn readResult(io: std.Io, args: []const []const u8) !void {
         if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) key = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
+    const target = key orelse return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.readResult(
         io,
-        store_path orelse return usage(),
-        key orelse return usage(),
+        try selectedStore(init, store_path, &selected_buffer),
+        target,
         std.Io.File.stdout(),
         &reply_buffer,
     );
@@ -999,11 +1031,12 @@ fn readResult(io: std.Io, args: []const []const u8) !void {
     }
 }
 
-fn readActionArguments(io: std.Io, args: []const []const u8) !void {
-    return readActionContent(io, args, .arguments);
+fn readActionArguments(init: std.process.Init, args: []const []const u8) !void {
+    return readActionContent(init, args, .arguments);
 }
 
-fn readActionContent(io: std.Io, args: []const []const u8, field: enum { call_id, arguments }) !void {
+fn readActionContent(init: std.process.Init, args: []const []const u8, field: enum { call_id, arguments }) !void {
+    const io = init.io;
     var store_path: ?[]const u8 = null;
     var session: ?[]const u8 = null;
     var action: ?u64 = null;
@@ -1013,10 +1046,14 @@ fn readActionContent(io: std.Io, args: []const []const u8, field: enum { call_id
         if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--action")) action = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else return error.UnknownArgument;
         index += 1;
     }
+    const reference = session orelse return usage();
+    const target = action orelse return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const selected = try selectedStore(init, store_path, &selected_buffer);
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = switch (field) {
-        .call_id => try client.readActionCallId(io, store_path orelse return usage(), session orelse return usage(), action orelse return usage(), std.Io.File.stdout(), &reply_buffer),
-        .arguments => try client.readActionArguments(io, store_path orelse return usage(), session orelse return usage(), action orelse return usage(), std.Io.File.stdout(), &reply_buffer),
+        .call_id => try client.readActionCallId(io, selected, reference, target, std.Io.File.stdout(), &reply_buffer),
+        .arguments => try client.readActionArguments(io, selected, reference, target, std.Io.File.stdout(), &reply_buffer),
     };
     switch (reply) {
         .answer => {},
@@ -1691,16 +1728,19 @@ fn inspectAction(init: std.process.Init, args: []const []const u8, interactive: 
         if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--action")) action = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else if (std.mem.eql(u8, args[index], "--json")) json = true else return error.UnknownArgument;
     }
     const target = action orelse return usage();
+    const reference = session orelse return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const selected = try selectedStore(init, store, &selected_buffer);
     const file = try renderScratch(init);
     defer file.close(io);
     var buffer: client.ReplyBuffer = .{};
     var call_bytes: u64 = 0;
     if (!interactive) {
-        const call = try client.readActionCallId(io, store orelse return usage(), session orelse return usage(), target, file, &buffer);
+        const call = try client.readActionCallId(io, selected, reference, target, file, &buffer);
         if (call != .answer) return error.ActionReadFailed;
         call_bytes = call.answer.bytes;
     }
-    const arguments = try client.readActionArguments(io, store orelse return usage(), session orelse return usage(), target, file, &buffer);
+    const arguments = try client.readActionArguments(io, selected, reference, target, file, &buffer);
     if (arguments != .answer) return error.ActionReadFailed;
     var line: [96]u8 = undefined;
     if (json) {
@@ -1761,17 +1801,17 @@ fn usage() error{InvalidArguments} {
         \\  rui login codex
         \\  rui setup [--store PATH] [--provider codex] [--model MODEL]
         \\    Inspect without arguments; save private defaults for future interactive Sessions.
-        \\    Selected Store must exist and pass canonical/private checks; scripts still require --store.
-        \\  rui serve --store PATH [--active-capacity N] [--codex | --provider-endpoint URL] [--provider-ca-file PATH] [--fault NAME]
-        \\  rui configure --store PATH --session REF [settings] [--json]
+        \\    Selected Store must exist and pass canonical/private checks.
+        \\  rui serve [--store PATH] [--active-capacity N] [--codex | --provider-endpoint URL] [--provider-ca-file PATH] [--fault NAME]
+        \\  rui configure [--store PATH] --session REF [settings] [--json]
         \\    First configuration requires --workspace PATH --provider codex --model MODEL.
         \\  rui session [--store PATH] --session REF
-        \\    Enter a configured Session on a terminal; otherwise use saved Store or HOME/.local/share/rui/store.
+        \\    All new commands use --store, then saved Store, then HOME/.local/share/rui/store.
         \\    Type /help for in-Session commands (including /setup).
         \\  One-shot commands (never prompt or change meaning on redirection):
-        \\  rui message --store PATH --session REF TEXT|- [--json]
+        \\  rui message [--store PATH] --session REF TEXT|- [--json]
         \\    --text FILE|- also captures a file or stdin before sending.
-        \\  rui wait-session --store PATH --session REF [--terminal] [--json]
+        \\  rui wait-session [--store PATH] --session REF [--terminal] [--json]
         \\    Select active/oldest queued work once; return idle if neither exists.
         \\  rui inspect-action --store PATH --session REF --action ID [--json]
         \\  rui allow-action --store PATH --session REF --action ID [--json]
