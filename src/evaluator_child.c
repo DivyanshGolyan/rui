@@ -166,8 +166,8 @@ static int json_string(JsonOutput *output, JSValueConst value) {
 }
 
 /* Inspect each own data descriptor as it is emitted. Failed output is only a
- * partial frame: the parent requires the end marker, normal exit, and its own
- * complete JSON validation before handing any bytes to the consumer. */
+ * partial frame: the parent requires the end marker and normal exit before
+ * handing any bytes to the consumer. */
 static int encode_data(JSContext *ctx, JsonOutput *output, JSValueConst value,
                        JSValueConst *ancestors, unsigned depth) {
     if (JS_IsNull(value)) return json_write(output, "null", 4);
