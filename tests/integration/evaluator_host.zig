@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
     });
 
     var writer = try scratch.createFile(io, "source", .{});
-    try writer.writeStreamingAll(io, "export default async function workflow(_, input) { return input; }");
+    try writer.writeStreamingAll(io, "export default async function workflow(capabilities) { return arguments.length === 1 && Object.keys(capabilities).length === 0; }");
     writer.close(io);
     const source = try scratch.openFile(io, "source", .{});
     defer source.close(io);
@@ -49,6 +49,7 @@ pub fn main(init: std.process.Init) !void {
     owner.output_removal = .native;
 
     writer = try scratch.createFile(io, "prepared", .{});
+    // This read-only descriptor remains reserved for saved results, not entry arguments.
     try writer.writeStreamingAll(io, &.{ 5, 1, 0, 0, 0, 2 });
     writer.close(io);
     const prepared = try scratch.openFile(io, "prepared", .{});
