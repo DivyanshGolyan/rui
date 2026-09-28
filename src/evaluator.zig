@@ -46,10 +46,35 @@ pub const Owner = struct {
     };
 
     const Scratch = struct {
+        io: std.Io,
         file: std.Io.File,
         name: [64]u8,
         name_len: u8,
-        charge: OutputCharge,
+        budget: ScratchBudget,
+        length: u64 = 0,
+        charged: u64 = 0,
+
+        fn append(self: *Scratch, bytes: []const u8) !void {
+            const end = try std.math.add(u64, self.length, bytes.len);
+            if (!self.budget.reserve(bytes.len)) return error.EvaluatorOutputBudgetExceeded;
+            // A failed positional write may have changed an unknown prefix.
+            // Keep the full reservation until confirmed removal and closure.
+            self.charged += bytes.len;
+            try self.file.writePositionalAll(self.io, bytes, self.length);
+            self.length = end;
+        }
+
+        fn reclaim(self: *Scratch, path: []const u8, removal: named_scratch.Removal) !void {
+            _ = try named_scratch.removeNameWith(self.io, path, self.name[0..self.name_len], removal);
+            self.file.close(self.io);
+            self.budget.release(self.charged);
+        }
+
+        fn appendOutput(context: ?*anyopaque, bytes: [*c]const u8, length: usize) callconv(.c) c_int {
+            const self: *Scratch = @ptrCast(@alignCast(context orelse unreachable));
+            self.append(bytes[0..length]) catch return -1;
+            return 0;
+        }
     };
 
     pub fn init(io: std.Io, scratch_path: []const u8, budget: ScratchBudget) Owner {
@@ -146,10 +171,11 @@ pub const Owner = struct {
             });
             self.pending = .{
                 .output = .{
+                    .io = self.io,
                     .file = output,
                     .name = name_buffer,
                     .name_len = @intCast(name.len),
-                    .charge = .{ .budget = self.budget },
+                    .budget = self.budget,
                 },
             };
         }
@@ -157,13 +183,11 @@ pub const Owner = struct {
             child.ptr,
             source.handle,
             if (prepared_input) |input| input.handle else -1,
-            if (compile_only) -1 else self.pending.?.output.?.file.handle,
-            self.budget.limit,
             @intFromBool(compile_only),
             cancellation.cancelled,
             cancellation.context,
-            OutputCharge.reserve,
-            if (compile_only) null else &self.pending.?.output.?.charge,
+            Scratch.appendOutput,
+            if (compile_only) null else &self.pending.?.output.?,
             if (diagnostic) |result| &result.bytes else null,
             if (diagnostic) |result| result.bytes.len else 0,
             if (diagnostic) |result| &result.length else null,
@@ -192,14 +216,7 @@ pub const Owner = struct {
         const pending = &(self.pending orelse return);
         var removal_error: ?anyerror = null;
         if (pending.output) |*output| {
-            if (named_scratch.removeNameWith(
-                self.io,
-                self.scratch_path,
-                output.name[0..output.name_len],
-                self.output_removal,
-            )) |_| {
-                output.file.close(self.io);
-                output.charge.budget.release(output.charge.bytes);
+            if (output.reclaim(self.scratch_path, self.output_removal)) |_| {
                 pending.output = null;
             } else |err| removal_error = err;
         }
@@ -208,16 +225,4 @@ pub const Owner = struct {
     }
 
     fn consumeNothing(_: void, _: *std.Io.File) !void {}
-};
-
-const OutputCharge = struct {
-    budget: ScratchBudget,
-    bytes: u64 = 0,
-
-    fn reserve(context: ?*anyopaque, amount: u64) callconv(.c) c_int {
-        const self: *OutputCharge = @ptrCast(@alignCast(context orelse unreachable));
-        if (!self.budget.reserve(amount)) return -1;
-        self.bytes += amount;
-        return 0;
-    }
 };

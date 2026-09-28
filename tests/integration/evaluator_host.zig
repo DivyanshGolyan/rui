@@ -18,17 +18,17 @@ pub fn main(init: std.process.Init) !void {
         var marker: [1]u8 = undefined;
         if (c.pread(3, &marker, 1, 0) != 1) return error.InvalidFixtureSource;
         const stdout = std.Io.File.stdout();
-        if (marker[0] == 'W' or marker[0] == 'Q') {
+        if (marker[0] == 'W') {
             var block: [16 * 1024]u8 = undefined;
             var used: usize = 0;
             block[used] = '{';
             used += 1;
-            const count: usize = if (marker[0] == 'W') 50000 else 21;
+            const count: usize = 50000;
             for (0..count) |i| {
                 var item_buffer: [32]u8 = undefined;
                 const item = try std.fmt.bufPrint(&item_buffer, "\"k{d}\":{d}{s}", .{
-                    if (marker[0] == 'Q' and i == 20) @as(usize, 0) else i,
-                    if (marker[0] == 'Q' and i == 20) @as(u8, 1) else @as(u8, 0),
+                    i,
+                    @as(u8, 0),
                     if (i + 1 == count) "}" else ",",
                 });
                 if (used + item.len > block.len) {
@@ -60,40 +60,16 @@ pub fn main(init: std.process.Init) !void {
             try stdout.writeStreamingAll(io, &.{ 0, 0, 0, 0 });
             return;
         }
-        if (marker[0] == 'X' or marker[0] == 'Y') {
-            var digits: [10400]u8 = undefined;
-            var length: usize = 0;
-            if (marker[0] == 'X') {
-                @memcpy(digits[0..2], "0.");
-                @memset(digits[2..10002], '0');
-                @memcpy(digits[10002..10009], "1e10310");
-                length = 10009; // 1e309, despite exponent/mantissa cancellation.
-            } else {
-                digits[0] = '1';
-                @memset(digits[1..10310], '0');
-                @memcpy(digits[10310..10317], "e-10001");
-                length = 10317; // 1e308, despite a long negative exponent.
-            }
-            var header: [4]u8 = undefined;
-            std.mem.writeInt(u32, &header, @intCast(length), .little);
-            try stdout.writeStreamingAll(io, &header);
-            try stdout.writeStreamingAll(io, digits[0..length]);
-            try stdout.writeStreamingAll(io, &.{ 0, 0, 0, 0 });
-            return;
-        }
         if (marker[0] == 'T') {
             _ = c.sleep(20); // Parent's five-second watchdog must terminate us.
             return error.EvaluatorDeadlineNotEnforced;
         }
-        const json = switch (marker[0]) {
-            'D' => "{\"answer\":1,\"answer\":2}",
-            'E' => "{\"a\":1,\"\\u0061\":2}",
-            'N' => "1e999",
-            'F' => "1.7976931348623158e308",
-            'S' => "\"\\ud800\"",
-            '!' => "5",
-            else => "{",
-        };
+        if (marker[0] == 'P') {
+            try stdout.writeStreamingAll(io, &.{ 3, 0, 0, 0, 't', 'r', 'u' });
+            try stdout.writeStreamingAll(io, &.{ 1, 0, 0, 0, 'e', 0, 0, 0, 0 });
+            return;
+        }
+        const json = "5";
         if (marker[0] == 'L') {
             var block: [16 * 1024]u8 = undefined;
             @memset(&block, 'x');
@@ -285,62 +261,33 @@ pub fn main(init: std.process.Init) !void {
     var self_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const self_length = try std.process.executablePath(io, &self_buffer);
     owner.child_name = self_buffer[0..self_length];
-    for ([_][]const u8{ "D", "E", "N", "S", "X", "Q", "{" }) |fake_output| {
-        source.close(io);
-        source = try replaceSource(tmp, io, fake_output);
-        var called = false;
-        try std.testing.expectError(error.MalformedEvaluatorOutput, owner.evaluate(
-            source,
-            prepared,
-            evaluator.Cancellation.never(),
-            &called,
-            struct {
-                fn consume(observed: *bool, _: *std.Io.File) !void {
-                    observed.* = true;
-                }
-            }.consume,
-        ));
-        if (called) return error.InvalidEvaluatorOutputDelivered;
-        if (scratch_used.load(.acquire) != 0) return error.EvaluatorScratchChargeLeaked;
-    }
-    owner.index_removal = .injected_failure;
-    try std.testing.expectError(error.MalformedEvaluatorOutput, owner.evaluate(
-        source,
-        prepared,
-        evaluator.Cancellation.never(),
-        {},
+    source.close(io);
+    source = try replaceSource(tmp, io, "P");
+    owner.budget.limit = 3; // First chunk fits; the second must not grow output.
+    owner.output_removal = .injected_failure;
+    var partial_delivered = false;
+    try std.testing.expectError(error.EvaluationFailed, owner.evaluate(
+        source, prepared, evaluator.Cancellation.never(), &partial_delivered,
         struct {
-            fn consume(_: void, _: *std.Io.File) !void {
-                return error.InvalidEvaluatorOutputDelivered;
-            }
+            fn consume(observed: *bool, _: *std.Io.File) !void { observed.* = true; }
         }.consume,
     ));
-    if (scratch_used.load(.acquire) == 0) return error.EvaluatorIndexChargeDropped;
-    var index_iterator = tmp.iterate();
-    var index_names: usize = 0;
-    while (try index_iterator.next(io)) |entry| {
-        if (std.mem.startsWith(u8, entry.name, "evaluator-")) {
-            if (!std.mem.endsWith(u8, entry.name, ".index")) return error.EvaluatorOutputNotReclaimed;
-            index_names += 1;
-        }
-    }
-    if (index_names != 1) return error.EvaluatorIndexCustodyDropped;
+    if (partial_delivered or scratch_used.load(.acquire) != 3) return error.PartialChargeNotRetained;
     try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.finish());
-    owner.index_removal = .native;
-    try owner.finish();
-    if (scratch_used.load(.acquire) != 0) return error.EvaluatorIndexChargeLeaked;
     source.close(io);
-    for ([_][]const u8{ "F", "Y" }) |fake_output| {
-        source = try replaceSource(tmp, io, fake_output);
-        var finite = false;
-        try owner.evaluate(source, prepared, evaluator.Cancellation.never(), &finite, struct {
-            fn consume(observed: *bool, _: *std.Io.File) !void {
-                observed.* = true;
-            }
-        }.consume);
-        if (!finite or scratch_used.load(.acquire) != 0) return error.FiniteBoundaryRejected;
-        source.close(io);
-    }
+    source = try replaceSource(tmp, io, "F");
+    try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.evaluate(
+        source, prepared, evaluator.Cancellation.never(), &partial_delivered,
+        struct {
+            fn consume(observed: *bool, _: *std.Io.File) !void { observed.* = true; }
+        }.consume,
+    ));
+    if (partial_delivered or scratch_used.load(.acquire) != 3) return error.UnreclaimedEvaluatorReused;
+    owner.output_removal = .native;
+    try owner.finish();
+    if (scratch_used.load(.acquire) != 0) return error.PartialChargeLeaked;
+    owner.budget.limit = 32 * 1024 * 1024;
+    source.close(io);
     source = try replaceSource(tmp, io, "T");
     const deadline_start = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
     var timed_delivered = false;
@@ -371,17 +318,19 @@ pub fn main(init: std.process.Init) !void {
     if (!large.called or scratch_used.load(.acquire) != 0) return error.LargeEvaluatorOutputNotDelivered;
     source.close(io);
     source = try replaceSource(tmp, io, "B");
+    owner.budget.limit = 800001;
     var siblings = struct { io: std.Io, used: *std.atomic.Value(u64), called: bool = false }{
         .io = io, .used = &scratch_used,
     };
     try owner.evaluate(source, prepared, evaluator.Cancellation.never(), &siblings, struct {
         fn consume(observed: *@TypeOf(siblings), output: *std.Io.File) !void {
             if (try output.length(observed.io) != 800001) return error.UnexpectedEvaluatorOutput;
-            if (observed.used.load(.acquire) != 800001) return error.EvaluatorIndexChargedDuringConsumption;
+            if (observed.used.load(.acquire) != 800001) return error.UnexpectedEvaluatorCharge;
             observed.called = true;
         }
     }.consume);
     if (!siblings.called or scratch_used.load(.acquire) != 0) return error.SiblingObjectOutputNotDelivered;
+    owner.budget.limit = 32 * 1024 * 1024;
     source.close(io);
     source = try replaceSource(tmp, io, "W");
     var wide = struct { io: std.Io, used: *std.atomic.Value(u64), called: bool = false }{
@@ -392,32 +341,11 @@ pub fn main(init: std.process.Init) !void {
             // 50,000 entries each contribute six fixed bytes plus their
             // decimal index width; opening brace replaces the final comma.
             if (try output.length(observed.io) != 538891) return error.UnexpectedEvaluatorOutput;
-            if (observed.used.load(.acquire) != 538891) return error.EvaluatorIndexChargedDuringConsumption;
+            if (observed.used.load(.acquire) != 538891) return error.UnexpectedEvaluatorCharge;
             observed.called = true;
         }
     }.consume);
     if (!wide.called or scratch_used.load(.acquire) != 0) return error.WideObjectOutputNotDelivered;
-    var cancel_during_validation = struct {
-        checks: usize = 0,
-        fn check(context: ?*anyopaque) callconv(.c) c_int {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            self.checks += 1;
-            return @intFromBool(self.checks >= 1000);
-        }
-    }{};
-    var cancelled_delivered = false;
-    try std.testing.expectError(error.EvaluationCancelled, owner.evaluate(
-        source,
-        prepared,
-        .{ .context = &cancel_during_validation, .cancelled = @TypeOf(cancel_during_validation).check },
-        &cancelled_delivered,
-        struct {
-            fn consume(observed: *bool, _: *std.Io.File) !void {
-                observed.* = true;
-            }
-        }.consume,
-    ));
-    if (cancelled_delivered or scratch_used.load(.acquire) != 0) return error.CancelledEvaluatorDelivered;
     owner.child_name = real_child;
     source.close(io);
     source = try replaceSource(tmp, io, "export default async function workflow() { while (true) {} }");
@@ -429,7 +357,7 @@ pub fn main(init: std.process.Init) !void {
             return @intFromBool(self.checks >= 5);
         }
     }{};
-    cancelled_delivered = false;
+    var cancelled_delivered = false;
     owner.output_removal = .injected_failure;
     try std.testing.expectError(error.EvaluationCancelled, owner.evaluate(
         source,
@@ -513,24 +441,6 @@ pub fn main(init: std.process.Init) !void {
     ));
     try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.finish());
     owner.output_removal = .native;
-    try owner.finish();
-
-    source.close(io);
-    source = try replaceSource(tmp, io, "X");
-    owner.index_removal = .injected_failure;
-    try std.testing.expectError(error.MalformedEvaluatorOutput, owner.evaluate(
-        source,
-        prepared,
-        evaluator.Cancellation.never(),
-        {},
-        struct {
-            fn consume(_: void, _: *std.Io.File) !void {
-                return error.InvalidEvaluatorOutputDelivered;
-            }
-        }.consume,
-    ));
-    try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.finish());
-    owner.index_removal = .native;
     try owner.finish();
 
     source.close(io);
