@@ -128,8 +128,7 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) HostS
     const until = @min(probe_end, deadline orelse probe_end);
     const reply = sendSource(io, paths, "/v1/host-info", body.len, null, body.slice(), null, &reply_buffer, until) catch |err| return switch (err) {
         error.AccessDenied, error.PermissionDenied => .access_failure,
-        error.WrongWireVersion, error.InvalidResponse, error.ResponseHeaderTooLarge,
-        error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,
+        error.WrongWireVersion, error.InvalidResponse, error.ResponseHeaderTooLarge, error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,
         else => .owned_unavailable,
     };
     if (reply.status == 503) return if (validHostUnavailable(reply.body)) .owned_unavailable else .incompatible;
@@ -1005,7 +1004,8 @@ fn parseResponseHead(bytes: []const u8) !ResponseHead {
             else
                 return error.InvalidResponse;
         } else if (std.ascii.eqlIgnoreCase(name, "Transfer-Encoding") or
-            std.ascii.eqlIgnoreCase(name, "Content-Encoding")) {
+            std.ascii.eqlIgnoreCase(name, "Content-Encoding"))
+        {
             return error.InvalidResponse;
         }
     }
