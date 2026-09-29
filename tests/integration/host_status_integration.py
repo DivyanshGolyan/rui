@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-from host_process import start_ready_process, stop_process
+from host_process import HostDiagnostics, start_ready_process, stop_process
 
 
 RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
@@ -108,6 +108,21 @@ def raw_info(sock, store, instance=None, *, kind="host_info", route="host-info",
             response.extend(chunk)
             assert len(response) < 8192
     return bytes(response)
+
+
+def wait_for_descriptors(pid, expected=None, timeout=5):
+    directory = pathlib.Path(f"/proc/{pid}/fd")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            observed = {entry.name: os.readlink(entry) for entry in directory.iterdir()}
+        except FileNotFoundError:
+            # Retry the whole snapshot if a connection closes during enumeration.
+            observed = None
+        if observed is not None and (expected is None or observed == expected):
+            return observed
+        assert time.monotonic() < deadline, (expected, observed)
+        time.sleep(.01)
 
 
 def main():
@@ -283,12 +298,25 @@ def main():
         # open or refresh its deliberately absent credential file.
         credential = pathlib.Path(root) / "missing-credential.json"
         first = None
+        diagnostics = None
+        before_fd = after_fd = None
         # start_ready_process inherits this test's environment.
         old = os.environ.get("RUI_CODEX_CREDENTIAL_FILE")
         os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
         try:
-            first, fields = start(store, 3, "--codex")
+            trace_options = ("--test-phase-trace",) if sys.platform == "linux" else ()
+            first, fields = start(store, 3, "--codex", *trace_options)
             assert fields["execution"] == "enabled"
+            if sys.platform == "linux":
+                # Readiness precedes execution-thread initialization. Its first
+                # boundary proves reactor wake descriptors have been created.
+                diagnostics = HostDiagnostics(first)
+                diagnostics.wait("lifecycle_boundary")
+                # No other client has connected. EOF proves this warm-up socket
+                # closed, unlike framed response completion in hostStatus.
+                assert b'"type":"host_info"' in raw_info(stale, store.resolve())
+                before = wait_for_descriptors(first.pid)
+                before_fd = len(before)
             first_status = status(store)
             match = re.fullmatch(r"ready ([0-9a-f]{32}) 3 true true true", first_status)
             assert match, first_status
@@ -304,12 +332,12 @@ def main():
             assert f"Instance: {match.group(1)}\n" in selected, selected
             assert cli_status(home, "--store", alias) == selected
             assert not credential.exists()
-            before_fd = len(os.listdir(f"/proc/{first.pid}/fd")) if sys.platform == "linux" else None
             for _ in range(40):
                 assert status(alias) == first_status
-            after_fd = len(os.listdir(f"/proc/{first.pid}/fd")) if sys.platform == "linux" else None
             if before_fd is not None:
-                assert after_fd == before_fd, (before_fd, after_fd)
+                # The last framed reply may precede its owner's close. Require
+                # exact descriptor identities after drain, not an extra allowance.
+                after_fd = len(wait_for_descriptors(first.pid, before))
             assert list((store / "scratch").iterdir()) == []
             head, body = raw_info(stale, store.resolve()).split(b"\r\n\r\n", 1)
             assert head.startswith(b"HTTP/1.1 200 OK\r\n")
@@ -331,6 +359,8 @@ def main():
         finally:
             if first is not None:
                 stop_process(first)
+            if diagnostics is not None:
+                diagnostics.close()
             if old is None:
                 os.environ.pop("RUI_CODEX_CREDENTIAL_FILE", None)
             else:
