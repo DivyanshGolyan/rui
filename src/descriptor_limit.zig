@@ -90,13 +90,16 @@ test "native limit conversion rejects invalid queries and values" {
     }
 }
 
-test "finite-limit scan observes the test process without procfs" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+test "descriptor enumeration agrees with independent finite-limit scan" {
+    if (builtin.os.tag != .linux and builtin.os.tag != .macos) return error.SkipZigTest;
     const observation = try observe(std.testing.io);
     if (observation.soft_limit) |limit| {
-        try std.testing.expectEqual(
-            observation.open_descriptors,
-            try countOpenDescriptors(std.testing.io, "/rui-test-missing-procfs", limit),
-        );
+        try std.testing.expectEqual(observation.open_descriptors, try countFiniteLimit(limit));
+        if (builtin.os.tag == .linux) {
+            try std.testing.expectEqual(
+                observation.open_descriptors,
+                try countOpenDescriptors(std.testing.io, "/rui-test-missing-procfs", limit),
+            );
+        }
     }
 }

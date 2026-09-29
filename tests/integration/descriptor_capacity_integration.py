@@ -3,6 +3,7 @@ import http.server
 import json
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import socket
@@ -374,11 +375,24 @@ def main():
     documented = None
     diagnostics = None
     try:
-        required = 72 if sys.platform == "darwin" else 70
+        # Keep allocator defaults enabled. macOS libmalloc may itself open a
+        # socket before Host ownership begins; it belongs in inherited, not
+        # in the independently calculated Host population below.
+        if sys.platform == "darwin":
+            assert os.environ.get("RUI_HOST_MALLOC_DEFAULTS") != "0"
+            for name in ("MallocMaxMagazines", "MallocSpaceEfficient"):
+                assert os.environ.get(name, "1") == "1", (name, os.environ.get(name))
+        # Lease(2), SQLite(4), listener(1), and curl wake objects: two
+        # pipes on macOS, two eventfds on Linux. Two execution slots need
+        # one steady population(5) plus the serial Bash spawn peak(10).
+        fixed_host = 2 + 4 + 1 + (4 if sys.platform == "darwin" else 2)
+        execution = 5 + 10
+        fixed = fixed_host + 42 + execution + 0 + 1
+        minimum_required = fixed + 3
         rejected_store = state / "rejected-store"
         rejected = subprocess.run(
             limited_host(
-                required - 1,
+                minimum_required - 1,
                 "serve",
                 "--store",
                 rejected_store,
@@ -395,9 +409,25 @@ def main():
         assert not rejected.stdout.startswith("ready "), rejected.stdout
         assert "descriptor capacity insufficient" in rejected.stderr, rejected.stderr
         assert "active_capacity=2" in rejected.stderr, rejected.stderr
-        assert f"required={required}" in rejected.stderr, rejected.stderr
-        assert f"soft_limit={required - 1}" in rejected.stderr, rejected.stderr
+        fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", rejected.stderr)}
+        assert fields["inherited"] in ({3, 4} if sys.platform == "darwin" else {3}), fields
+        required = fixed + fields["inherited"]
+        expected = dict(active_capacity=2, required=required, soft_limit=minimum_required - 1,
+            inherited=fields["inherited"], fixed_host=fixed_host, clients=42, execution=execution,
+            authentication=0, self_wake=1)
+        assert fields == expected, (fields, expected)
         assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
+        if required != minimum_required:
+            rejected = subprocess.run(
+                limited_host(required - 1, "serve", "--store", rejected_store,
+                    "--active-capacity", "2", "--provider-endpoint",
+                    f"http://127.0.0.1:{endpoint.server_port}/responses"),
+                text=True, capture_output=True, timeout=10)
+            assert rejected.returncode != 0 and "descriptor capacity insufficient" in rejected.stderr, rejected
+            assert not rejected.stdout.startswith("ready "), rejected.stdout
+            fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", rejected.stderr)}
+            assert fields == {**expected, "soft_limit": required - 1}, fields
+            assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
 
         store = state / "adequate-store"
         host, ready = start_ready_process(

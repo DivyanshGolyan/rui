@@ -557,6 +557,9 @@ fn addEvaluator(
         .name = name,
         .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
     });
+    // Darwin creates this bounded stack and its guard at exec; it cannot
+    // resize an LC_MAIN custom stack through RLIMIT_STACK afterward.
+    if (target.result.os.tag == .macos) evaluator.stack_size = 1024 * 1024;
     evaluator.root_module.link_libc = true;
     evaluator.root_module.addIncludePath(quickjs.path("."));
     evaluator.root_module.addIncludePath(b.path("src"));

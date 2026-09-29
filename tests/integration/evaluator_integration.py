@@ -226,9 +226,9 @@ with tempfile.TemporaryDirectory() as directory:
     fake.chmod(0o700)
     assert owned(fake, 'cancel').returncode == 1
     assert not marker.exists()  # a committed cancellation never launches code
-    fake.write_text(f'#!/bin/sh\ntouch "{marker}"\nwhile :; do :; done\n')
+    fake.write_text(f'#!/bin/sh\n: > "{marker}"\nwhile :; do :; done\n')
     start = time.monotonic()
-    assert owned(fake, 'live-cancel').returncode == 1
+    assert owned(fake, 'live-cancel', extra=marker).returncode == 1
     assert marker.exists()  # cancellation was observed after successful spawn
     assert time.monotonic() - start < 1
     # Block the parent's synchronous output reservation callback rather than a
@@ -265,14 +265,14 @@ while :; do :; done
     assert process.wait(timeout=8) == 1
     if sys.platform == 'linux':
         assert not pathlib.Path(f'/proc/{pid}').exists()  # joined, then reaped
-    # Cancellation is independently observed while framed output keeps arriving.
+    # Cancel only after the parent has received a nonempty framed payload.
     marker.unlink(missing_ok=True)
     fake.write_text(f'''#!/bin/sh
 echo $$ > "{marker}"
 while :; do printf "\\001\\000\\000\\000x"; done
 ''')
     start = time.monotonic()
-    assert owned(fake, 'live-cancel').returncode == 1
+    assert owned(fake, 'output-cancel').returncode == 1
     assert marker.exists()
     assert time.monotonic() - start < 1
     if sys.platform == 'linux':

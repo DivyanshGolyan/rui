@@ -2563,14 +2563,29 @@ fn testTransition(host: *Host, transition: TestTransition, binding: store_module
 }
 
 fn waitAtTestGate(host: *Host, path: []const u8) void {
-    // A releasing fixture unlinks the FIFO and closes its sole writer. An
-    // opener that already resolved the name must not wait for a new writer.
+    // Release is a byte or persistent EOF after unlink/sole-writer close.
+    // macOS does not broadcast EOF to all already-blocked FIFO reads. Keep
+    // reads nonblocking so every waiter observes the shared release fact,
+    // including an opener that resolved the name before it was unlinked.
     const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0) catch return;
-    var gate: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    var gate: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
     defer gate.close(host.io);
-    if (std.c.fcntl(fd, std.c.F.SETFL, @as(c_int, 0)) == -1) return;
     var release: [1]u8 = undefined;
-    _ = gate.readStreaming(host.io, &.{&release}) catch return;
+    var waiting_traced = false;
+    while (true) {
+        _ = std.posix.read(fd, &release) catch |err| switch (err) {
+            error.WouldBlock => {
+                if (!waiting_traced) {
+                    traceSubject(host, "test_gate_waiting", "path", path);
+                    waiting_traced = true;
+                }
+                std.Io.sleep(host.io, .fromMilliseconds(10), .awake) catch return;
+                continue;
+            },
+            else => return,
+        };
+        return;
+    }
 }
 
 fn testGateActive(host: *Host, path: []const u8) bool {

@@ -985,6 +985,10 @@ def prove_delivery_and_settlement_contention(
             timeout=10,
             subject=sessions[0],
         )
+        milestones.wait(
+            "test_gate_waiting", count=ORDINARY_CLIENTS, timeout=10,
+            subject=str(inspection_gate.path),
+        )
         assert_ordinary_capacity_busy(fields["socket"])
         if sample_host is not None:
             resource_samples["reports_captured_and_responses_held"] = sample_host(
@@ -1156,6 +1160,10 @@ def prove_real_settlement_contention(
             count=ORDINARY_CLIENTS,
             timeout=10,
             subject=session,
+        )
+        milestones.wait(
+            "test_gate_waiting", count=ORDINARY_CLIENTS, timeout=10,
+            subject=str(inspection_gate.path),
         )
         if sample_host is not None:
             resource_samples["reports_captured_before_settlement"] = sample_host(

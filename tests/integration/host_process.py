@@ -35,7 +35,8 @@ class ReleaseGate:
     def release(self):
         if self.fd is not None:
             self.path.unlink()
-            # Closing the sole writer broadcasts EOF to every held reader.
+            # Native nonblocking readers observe persistent EOF on their next
+            # check; closing a FIFO does not wake every blocked read on macOS.
             os.close(self.fd)
             self.fd = None
 

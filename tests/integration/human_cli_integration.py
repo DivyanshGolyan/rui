@@ -146,9 +146,10 @@ def main():
         bidi_store.mkdir(mode=0o700)
         bidi_home = state / "bidi-home"
         bidi_home.mkdir()
-        assert "Store: " + str(bidi_store).replace("\u202e", "\\u202e") + " (saved)" in run(
+        canonical_bidi_store = bidi_store.resolve()
+        assert "Store: " + str(canonical_bidi_store).replace("\u202e", "\\u202e") + " (saved)" in run(
             bidi_home, "setup", "--store", bidi_store)
-        assert f"store={bidi_store}\n" in (bidi_home / ".config/rui/preferences").read_text()
+        assert f"store={canonical_bidi_store}\n" in (bidi_home / ".config/rui/preferences").read_text()
         assert "HomeUnavailable" in subprocess.run([str(fixture.RUI), "setup"],
             env={key: value for key, value in os.environ.items() if key != "HOME"},
             capture_output=True, text=True).stderr

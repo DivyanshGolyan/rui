@@ -14,6 +14,9 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <pthread.h>
+#endif
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
@@ -288,9 +291,18 @@ int main(int argc, char **argv) {
     int prepared_check = argc == 2 && !strcmp(argv[1], "check-prepared");
     int prepared_run = argc == 2 && !strcmp(argv[1], "run-prepared");
     if (!prepared_check && !prepared_run) return 2;
-    struct rlimit core = {0, 0}, cpu = {1, 2}, stack = {1024 * 1024, 1024 * 1024};
-    if (setrlimit(RLIMIT_CORE, &core) || setrlimit(RLIMIT_CPU, &cpu) ||
-        setrlimit(RLIMIT_STACK, &stack)) return 3;
+    struct rlimit core = {0, 0}, cpu = {1, 2};
+    if (setrlimit(RLIMIT_CORE, &core) || setrlimit(RLIMIT_CPU, &cpu)) return 3;
+#ifdef __APPLE__
+    /* Darwin enforces the Mach-O stack reservation and guard at exec.
+     * RLIMIT_STACK rejects custom stacks; verify the actual main stack
+     * instead of ignoring a failed setter or trusting limit readback. */
+    if (!pthread_main_np() ||
+        pthread_get_stacksize_np(pthread_self()) != 1024 * 1024) return 3;
+#else
+    struct rlimit stack = {1024 * 1024, 1024 * 1024};
+    if (setrlimit(RLIMIT_STACK, &stack)) return 3;
+#endif
 #ifdef __linux__
     if (prctl(PR_SET_DUMPABLE, 0) != 0) return 3;
 #endif
