@@ -1,6 +1,11 @@
 set -eu
 
 rui=$1
+mode=${2:-full}
+case "$mode" in
+    full|artifact-smoke) ;;
+    *) echo "unknown admission mode: $mode" >&2; exit 1 ;;
+esac
 root=$(pwd -P)
 state=$(mktemp -d "${TMPDIR:-/tmp}/rui-admission.XXXXXX")
 chmod 700 "$state"
@@ -128,6 +133,41 @@ if "$rui" serve --store "$store" >"$state/competing.out" 2>"$state/competing.err
     exit 1
 fi
 contains "$(cat "$state/competing.err")" "StoreAlreadyOwned"
+
+# The alternate build mode needs a real artifact/recovery witness, not a
+# second copy of the complete ReleaseSafe fault matrix. Keep `full` opt-in.
+if [ "$mode" = artifact-smoke ]; then
+    printf 'original message\n' >"$state/message.txt"
+    if "$rui" message --store "$store" --record "$records/smoke-message.json" --key smoke-message --session direct/capture-recovery --text "$state/message.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
+        echo "lost message reply unexpectedly completed" >&2
+        exit 1
+    fi
+    printf 'replacement input\n' >"$state/message.txt"
+    stop_host
+    start_host
+    replayed=$($rui retry --store "$store" --record "$records/capture-recovery.json" --kind configure)
+    contains "$replayed" '"status":"accepted"'
+    contains "$replayed" '"replayed":true'
+    replayed=$($rui retry --store "$store" --record "$records/smoke-message.json" --kind message)
+    python3 - "$replayed" <<'PYSMOKE'
+import hashlib, json, sys
+reply = json.loads(sys.argv[1])
+assert reply['answer']['status'] == 'accepted', reply
+assert reply['answer']['replayed'] is True, reply
+assert reply['queue']['status'] == 'queued', reply
+assert reply['queue']['admission'] == '1', reply
+payload = b'original message\n'
+domain = b'rui/content/v1'
+digest = hashlib.sha256(len(domain).to_bytes(8, 'big') + domain + payload).hexdigest()
+assert reply['input']['bytes'] == str(len(payload)), reply
+assert reply['input']['sha256'] == digest, reply
+PYSMOKE
+    inspected=$($rui inspect-session --store "$store" --session direct/capture-recovery)
+    contains "$inspected" '"pending_messages":"1"'
+    stop_host
+    echo 'admission artifact smoke passed: capture errors, Store lease, lost reply and restart replay'
+    exit 0
+fi
 
 # A listener failure stops new dispatch but keeps the Store lock and Host stack
 # alive until a transferred client finishes its body read.

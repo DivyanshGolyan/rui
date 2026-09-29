@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Focused disposable QuickJS worker checks (not a Workflow/Host integration)."""
+import argparse
 import json
 import pathlib
 import resource
@@ -9,9 +10,16 @@ import sys
 import tempfile
 import time
 
-binary = sys.argv[1]
-driver = sys.argv[2]
-probe = sys.argv[3]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('binary')
+parser.add_argument('driver')
+parser.add_argument('probe', nargs='?')
+parser.add_argument('--churn-only', action='store_true',
+                    help='Run only the 1,000-evaluation native reuse witness')
+args = parser.parse_args()
+if not args.churn_only and args.probe is None:
+    parser.error('probe is required for boundary checks')
+binary, driver, probe = args.binary, args.driver, args.probe
 
 
 def invoke(mode, source):
@@ -19,11 +27,24 @@ def invoke(mode, source):
         path = pathlib.Path(directory)
         (path / 'source').write_text(source)
         return subprocess.run([driver, binary, str(path / 'source'), mode, str(64 * 1024 * 1024)],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=7)
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=300 if mode == 'churn' else 7)
 
 
 def expression(source):
     return f'export default async function workflow(capabilities) {{ return ({source}); }}'
+
+
+def check_repetition(mode):
+    result = invoke(mode, expression('2+3'))
+    assert result.returncode == 0, (mode, result.returncode, result.stderr)
+    assert result.stdout == b'5', (mode, result.stdout)
+
+
+if args.churn_only:
+    check_repetition('churn')
+    print(f'evaluator churn: 1,000 same-parent exact results and descriptor balance passed on {sys.platform}')
+    sys.exit(0)
 
 
 def reject_check(source, reason):
@@ -154,8 +175,7 @@ with tempfile.TemporaryDirectory() as directory:
         if extra is not None:
             args.append(str(extra))
         return subprocess.run(args,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              timeout=30 if mode == 'repeat' else 7)
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=7)
 
     source.write_text('throw Error("must never execute"); export default async function workflow() {}')
     assert owned(binary, 'check').returncode == 0
@@ -181,7 +201,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert owned(binary, 'check').returncode == 1  # native allocation bound, no truncated success
     source.write_text(expression('2+3'))
     assert owned(binary, 'run').stdout == b'5'  # next lifecycle reuses no VM
-    assert owned(binary, 'repeat').stdout == b'5'  # 1,000 calls in one parent
+    check_repetition('repeat')  # Ten real calls in one parent; long churn is separate.
     prepared = pathlib.Path(directory) / 'prepared'
     # The descriptor is passed read-only but its bytes are not entry arguments.
     prepared.write_bytes(b'\x05\x02\x00\x00\x00\x03' + struct.pack('<d', 7)
@@ -206,9 +226,9 @@ with tempfile.TemporaryDirectory() as directory:
     fake.chmod(0o700)
     assert owned(fake, 'cancel').returncode == 1
     assert not marker.exists()  # a committed cancellation never launches code
-    fake.write_text(f'#!/bin/sh\ntouch "{marker}"\nwhile :; do :; done\n')
+    fake.write_text(f'#!/bin/sh\n: > "{marker}"\nwhile :; do :; done\n')
     start = time.monotonic()
-    assert owned(fake, 'live-cancel').returncode == 1
+    assert owned(fake, 'live-cancel', extra=marker).returncode == 1
     assert marker.exists()  # cancellation was observed after successful spawn
     assert time.monotonic() - start < 1
     # Block the parent's synchronous output reservation callback rather than a
@@ -245,14 +265,14 @@ while :; do :; done
     assert process.wait(timeout=8) == 1
     if sys.platform == 'linux':
         assert not pathlib.Path(f'/proc/{pid}').exists()  # joined, then reaped
-    # Cancellation is independently observed while framed output keeps arriving.
+    # Cancel only after the parent has received a nonempty framed payload.
     marker.unlink(missing_ok=True)
     fake.write_text(f'''#!/bin/sh
 echo $$ > "{marker}"
 while :; do printf "\\001\\000\\000\\000x"; done
 ''')
     start = time.monotonic()
-    assert owned(fake, 'live-cancel').returncode == 1
+    assert owned(fake, 'output-cancel').returncode == 1
     assert marker.exists()
     assert time.monotonic() - start < 1
     if sys.platform == 'linux':

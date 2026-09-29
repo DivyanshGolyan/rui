@@ -15,7 +15,7 @@ import threading
 import time
 
 import dispatch_integration as fixture
-from host_process import HostDiagnostics
+from host_process import HostDiagnostics, ReleaseGate
 
 
 def detached_shell(command):
@@ -1054,6 +1054,8 @@ def main():
     observed_exit_gate = None
     observed_exit_gate_keeper = None
     stopped_pipes_stop = None
+    settlement_gate = None
+    settlement_cleanup_gate = state / "settlement-cleanup-gate"
     completed = False
     resource_samples = []
     try:
@@ -1457,13 +1459,17 @@ def main():
             ("cancelled",)
         ]
 
+        settlement_gate = ReleaseGate(state / "settlement-result-gate")
+        settlement_cleanup_gate.touch()
         host = fixture.start_host(
             store,
             endpoint_url,
-            "--test-before-result-delay-ms",
-            "5000",
-            "--test-cleanup-delay-ms",
-            "1000",
+            "--test-transition",
+            "action-result-ready",
+            "--test-transition-gate-path",
+            settlement_gate.path,
+            "--test-bash-cleanup-gate-path",
+            settlement_cleanup_gate,
             "--test-phase-trace",
         )
         milestones = HostDiagnostics(host)
@@ -1487,7 +1493,7 @@ def main():
             settlement_stop_action["action"],
         )
         milestones.wait(
-            "sealed_before_settlement",
+            "action_result_ready",
             action=str(settlement_stop_action["action"]),
         )
         fixture.command(
@@ -1501,6 +1507,7 @@ def main():
             "--session",
             "direct/settlement-stop",
         )
+        settlement_gate.release()
         fixture.wait_for(
             lambda: resolution(store, "direct/settlement-stop") == "cancelled",
             "stop winning sealed Bash settlement",
@@ -1511,6 +1518,7 @@ def main():
                 "inspect-session", "--store", store, "--session", "direct/settlement-stop"
             )["execution"]["custody_occupied"]
         ) > 0
+        settlement_cleanup_gate.unlink()
         fixture.wait_for(
             lambda: int(
                 fixture.command(
@@ -2036,6 +2044,9 @@ def main():
             os.close(observed_exit_gate_keeper)
         if observed_exit_gate is not None:
             observed_exit_gate.unlink(missing_ok=True)
+        if settlement_gate is not None:
+            settlement_gate.release()
+        settlement_cleanup_gate.unlink(missing_ok=True)
         if host is not None:
             fixture.stop_host(host)
         if milestones is not None:

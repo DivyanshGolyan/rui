@@ -56,6 +56,11 @@ def terminal_step(master, command, marker="rui> "):
     return read_terminal(master, marker)
 
 
+def action_ready(descriptor):
+    assert select.select([descriptor], [], [], 15)[0], "Action input flush did not finish"
+    assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
+
+
 def terminal_bulk(master, command, marker="rui> "):
     fixture.wait_for(lambda: not termios.tcgetattr(master)[3] & termios.ICANON,
         "noncanonical terminal input")
@@ -141,9 +146,10 @@ def main():
         bidi_store.mkdir(mode=0o700)
         bidi_home = state / "bidi-home"
         bidi_home.mkdir()
-        assert "Store: " + str(bidi_store).replace("\u202e", "\\u202e") + " (saved)" in run(
+        canonical_bidi_store = bidi_store.resolve()
+        assert "Store: " + str(canonical_bidi_store).replace("\u202e", "\\u202e") + " (saved)" in run(
             bidi_home, "setup", "--store", bidi_store)
-        assert f"store={bidi_store}\n" in (bidi_home / ".config/rui/preferences").read_text()
+        assert f"store={canonical_bidi_store}\n" in (bidi_home / ".config/rui/preferences").read_text()
         assert "HomeUnavailable" in subprocess.run([str(fixture.RUI), "setup"],
             env={key: value for key, value in os.environ.items() if key != "HOME"},
             capture_output=True, text=True).stderr
@@ -724,15 +730,24 @@ def main():
             "--workspace", workspace, "--provider", "codex", "--model", "model-a",
             "--tools", "bash", "--permission-mode", "ask")
         master, slave = pty.openpty()
-        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", interactive], env={**os.environ, "HOME": str(home)},
-            stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
+        ready_read, ready_write = os.pipe()
+        try:
+            entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+                "--session", interactive], env={**os.environ, "HOME": str(home),
+                    "RUI_TEST_ACTION_READY_FD": str(ready_write)},
+                pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+        except BaseException:
+            os.close(master)
+            os.close(ready_read)
+            raise
+        finally:
+            os.close(slave)
+            os.close(ready_write)
         try:
             assert "Permission: ask" in read_terminal(master, "rui> ")
             os.write(master, b"interactive request\na\n")
             proposal = read_terminal(master, "Allow once, deny, or later?")
-            time.sleep(0.2)
+            action_ready(ready_read)
             assert counter.read_text() == "x", "pasted typeahead approved an unseen Action"
             assert "You: interactive request" in proposal, proposal
             assert "Rui: Work needs your decision." in proposal, proposal
@@ -752,15 +767,19 @@ def main():
             assert mismatch["admission"]["answer"]["code"] == "target_mismatch", mismatch
             assert "No decision sent" in terminal_step(master, "l")
             assert "Bash arguments:" in terminal_step(master, "/wait", "Allow once, deny, or later?")
+            action_ready(ready_read)
             os.write(master, b" a \n")
             assert "No decision sent" in read_terminal(master, "Allow once, deny, or later?")
+            action_ready(ready_read)
             assert counter.read_text() == "x", "padded choice approved an Action"
             assert "No decision sent" in terminal_step(master, "l")
             assert "Bash arguments:" in terminal_step(master, "/wait", "Allow once, deny, or later?")
+            action_ready(ready_read)
             rejected_choice = terminal_step(master, "\x1b[200~a\x1b[201~")
             assert "InvalidTerminalInput" in rejected_choice, rejected_choice
             assert counter.read_text() == "x", "marked paste approved an Action"
             assert "Bash arguments:" in terminal_step(master, "/wait", "Allow once, deny, or later?")
+            action_ready(ready_read)
             completed_turn = terminal_step(master, "a")
             assert "Assistant: interactive complete" in completed_turn and "result:" not in completed_turn and "request:" not in completed_turn, completed_turn
             assert "Assistant: interactive complete" in terminal_step(master, "/result " + interactive_key)
@@ -773,6 +792,7 @@ def main():
             if entered.poll() is None:
                 entered.kill()
                 entered.wait(timeout=5)
+            os.close(ready_read)
             os.close(master)
         control_session = "human/name\n\x1b[2J\u202e"
         run(home, "configure", "--store", store, "--session", control_session,
@@ -1053,21 +1073,32 @@ def main():
                 entered.kill()
                 entered.wait(timeout=5)
             os.close(master)
-        for incomplete in (b"\xc3", b"\x1b[200~unfinished", b"\x1b[", b"\x1bO"):
-            master, slave = pty.openpty()
-            entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-                "--session", empty_session], env={**os.environ, "HOME": str(fresh_home)},
-                stdin=slave, stdout=slave, stderr=slave)
-            os.close(slave)
-            try:
+        # Independent read-only callers can wait for the same production
+        # deadline together; keep every input class and restoration assertion.
+        incomplete_callers = []
+        before = len(endpoint.requests)
+        try:
+            for incomplete in (b"\xc3", b"\x1b[200~unfinished", b"\x1b[", b"\x1bO"):
+                master, slave = pty.openpty()
+                try:
+                    entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+                        "--session", empty_session], env={**os.environ, "HOME": str(fresh_home)},
+                        stdin=slave, stdout=slave, stderr=slave)
+                except BaseException:
+                    os.close(master)
+                    raise
+                finally:
+                    os.close(slave)
+                incomplete_callers.append((master, entered))
                 read_terminal(master, "rui> ")
-                before = len(endpoint.requests)
                 os.write(master, incomplete)
+            for master, entered in incomplete_callers:
                 assert "IncompleteTerminalInput" in read_terminal(master, "IncompleteTerminalInput", timeout=7)
                 assert entered.wait(timeout=5) != 0
                 assert termios.tcgetattr(master)[3] & termios.ICANON
-                assert len(endpoint.requests) == before, "incomplete terminal input reached Host"
-            finally:
+            assert len(endpoint.requests) == before, "incomplete terminal input reached Host"
+        finally:
+            for master, entered in incomplete_callers:
                 if entered.poll() is None:
                     entered.kill()
                     entered.wait(timeout=5)

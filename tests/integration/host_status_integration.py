@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-from host_process import start_ready_process, stop_process
+from host_process import HostDiagnostics, start_ready_process, stop_process
 
 
 RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
@@ -31,6 +31,48 @@ def cli_status(home, *args):
         env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     return result.stdout
+
+
+def read_request(connection):
+    # Closing with an unread request can reset the connection, replacing the
+    # response classification under test with a transport failure.
+    connection.settimeout(5)
+    request = b""
+    while b"\r\n\r\n" not in request:
+        chunk = connection.recv(4096)
+        assert chunk, "truncated fixture request headers"
+        request += chunk
+        assert len(request) <= 16 * 1024, "fixture request headers exceeded bound"
+    head, body = request.split(b"\r\n\r\n", 1)
+    lengths = [line.split(b":", 1)[1].strip() for line in head.split(b"\r\n")[1:]
+        if line.lower().startswith(b"content-length:")]
+    assert len(lengths) == 1 and lengths[0].isdigit(), head
+    length = int(lengths[0])
+    assert len(body) <= length <= 8192, "fixture request body exceeded bound"
+    while len(body) < length:
+        chunk = connection.recv(length - len(body))
+        assert chunk, "truncated fixture request body"
+        body += chunk
+    return body
+
+
+def prove_fragmented_request():
+    class FragmentedRequest:
+        chunks = iter((
+            b"POST /v1/host-info HTTP/1.1\r\nContent-Length: 8\r\n\r\n",
+            b'{"x":',
+            b'17}',
+        ))
+
+        def settimeout(self, timeout):
+            assert timeout > 0
+
+        def recv(self, limit):
+            chunk = next(self.chunks)
+            assert len(chunk) <= limit
+            return chunk
+
+    assert read_request(FragmentedRequest()) == b'{"x":17}'
 
 
 def start(store, capacity, *options):
@@ -68,7 +110,23 @@ def raw_info(sock, store, instance=None, *, kind="host_info", route="host-info",
     return bytes(response)
 
 
+def wait_for_descriptors(pid, expected=None, timeout=5):
+    directory = pathlib.Path(f"/proc/{pid}/fd")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            observed = {entry.name: os.readlink(entry) for entry in directory.iterdir()}
+        except FileNotFoundError:
+            # Retry the whole snapshot if a connection closes during enumeration.
+            observed = None
+        if observed is not None and (expected is None or observed == expected):
+            return observed
+        assert time.monotonic() < deadline, (expected, observed)
+        time.sleep(.01)
+
+
 def main():
+    prove_fragmented_request()
     with tempfile.TemporaryDirectory(prefix="rui-host-info-") as root:
         store = pathlib.Path(root) / "store"
         home = pathlib.Path(root) / "home"
@@ -106,7 +164,7 @@ def main():
                     def stalled_peer():
                         connection, _ = endpoint.accept()
                         with connection:
-                            connection.recv(4096)
+                            read_request(connection)
                             if partial:
                                 connection.sendall(partial)
                             release.wait(timeout=4)
@@ -129,7 +187,7 @@ def main():
                     for _ in range(2):
                         connection, _ = endpoint.accept()
                         with connection:
-                            connection.recv(4096)
+                            read_request(connection)
                             connection.sendall(
                                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
                                 b"Content-Length: 2\r\nX-Rui-Wire-Version: 2\r\n\r\n{}"
@@ -193,13 +251,15 @@ def main():
                         for _ in range(2):
                             connection, _ = endpoint.accept()
                             with connection:
-                                connection.recv(4096)
+                                read_request(connection)
                                 connection.sendall(response)
 
                     peer = threading.Thread(target=malformed_peer, daemon=True)
                     peer.start()
-                    assert status(store) == "incompatible"
-                    assert cli_status(home, "--store", store).startswith("Host: incompatible")
+                    observed = status(store)
+                    assert observed == "incompatible", (response, observed)
+                    observed = cli_status(home, "--store", store)
+                    assert observed.startswith("Host: incompatible"), (response, observed)
                     peer.join(timeout=3)
                     assert not peer.is_alive()
                 stale.unlink()
@@ -216,7 +276,7 @@ def main():
                         for _ in range(2):
                             connection, _ = endpoint.accept()
                             with connection:
-                                connection.recv(4096)
+                                read_request(connection)
                                 connection.sendall(response)
 
                     peer = threading.Thread(target=unavailable_peer, daemon=True)
@@ -238,12 +298,25 @@ def main():
         # open or refresh its deliberately absent credential file.
         credential = pathlib.Path(root) / "missing-credential.json"
         first = None
+        diagnostics = None
+        before_fd = after_fd = None
         # start_ready_process inherits this test's environment.
         old = os.environ.get("RUI_CODEX_CREDENTIAL_FILE")
         os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
         try:
-            first, fields = start(store, 3, "--codex")
+            trace_options = ("--test-phase-trace",) if sys.platform == "linux" else ()
+            first, fields = start(store, 3, "--codex", *trace_options)
             assert fields["execution"] == "enabled"
+            if sys.platform == "linux":
+                # Readiness precedes execution-thread initialization. Its first
+                # boundary proves reactor wake descriptors have been created.
+                diagnostics = HostDiagnostics(first)
+                diagnostics.wait("lifecycle_boundary")
+                # No other client has connected. EOF proves this warm-up socket
+                # closed, unlike framed response completion in hostStatus.
+                assert b'"type":"host_info"' in raw_info(stale, store.resolve())
+                before = wait_for_descriptors(first.pid)
+                before_fd = len(before)
             first_status = status(store)
             match = re.fullmatch(r"ready ([0-9a-f]{32}) 3 true true true", first_status)
             assert match, first_status
@@ -259,12 +332,12 @@ def main():
             assert f"Instance: {match.group(1)}\n" in selected, selected
             assert cli_status(home, "--store", alias) == selected
             assert not credential.exists()
-            before_fd = len(os.listdir(f"/proc/{first.pid}/fd")) if sys.platform == "linux" else None
             for _ in range(40):
                 assert status(alias) == first_status
-            after_fd = len(os.listdir(f"/proc/{first.pid}/fd")) if sys.platform == "linux" else None
             if before_fd is not None:
-                assert after_fd == before_fd, (before_fd, after_fd)
+                # The last framed reply may precede its owner's close. Require
+                # exact descriptor identities after drain, not an extra allowance.
+                after_fd = len(wait_for_descriptors(first.pid, before))
             assert list((store / "scratch").iterdir()) == []
             head, body = raw_info(stale, store.resolve()).split(b"\r\n\r\n", 1)
             assert head.startswith(b"HTTP/1.1 200 OK\r\n")
@@ -286,6 +359,8 @@ def main():
         finally:
             if first is not None:
                 stop_process(first)
+            if diagnostics is not None:
+                diagnostics.close()
             if old is None:
                 os.environ.pop("RUI_CODEX_CREDENTIAL_FILE", None)
             else:

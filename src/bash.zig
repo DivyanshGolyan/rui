@@ -1343,6 +1343,146 @@ test "service acts on its service-time observation rather than an earlier one" {
     try std.testing.expect(witnessed.process == .grace);
 }
 
+test "cleanup deadline cuts off unresolved pipe custody exactly once" {
+    const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
+    const deadline = addMilliseconds(started, 100);
+    const before = addMilliseconds(started, 99);
+    const after = addMilliseconds(started, 101);
+    const phases = [_]enum { grace, reaping, checking_group }{ .grace, .reaping, .checking_group };
+    const observations = [_]struct { now: std.Io.Clock.Timestamp, cutoff: bool }{
+        .{ .now = before, .cutoff = false },
+        .{ .now = deadline, .cutoff = true },
+        .{ .now = after, .cutoff = true },
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 0 };
+    var old_sigpipe: std.posix.Sigaction = undefined;
+    const ignore_sigpipe: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.PIPE, &ignore_sigpipe, &old_sigpipe);
+    defer std.posix.sigaction(.PIPE, &old_sigpipe, null);
+
+    for (phases) |phase| for (observations) |observation| {
+        var stdout_fds: [2]std.c.fd_t = undefined;
+        var stderr_fds: [2]std.c.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&stdout_fds));
+        var stdout_read_owned = true;
+        errdefer {
+            if (stdout_read_owned) _ = std.c.close(stdout_fds[0]);
+        }
+        defer _ = std.c.close(stdout_fds[1]);
+        try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&stderr_fds));
+        var stderr_read_owned = true;
+        errdefer {
+            if (stderr_read_owned) _ = std.c.close(stderr_fds[0]);
+        }
+        defer _ = std.c.close(stderr_fds[1]);
+        var execution = Execution{
+            .io = std.testing.io,
+            .process = undefined,
+            .stdout_pipe = .{ .reading = .{ .handle = stdout_fds[0], .flags = .{ .nonblocking = false } } },
+            .stderr_pipe = .{ .reading = .{ .handle = stderr_fds[0], .flags = .{ .nonblocking = false } } },
+            .stdout_capture = undefined,
+            .stderr_capture = undefined,
+            .script = undefined,
+            .scratch_path = root,
+            .started = started,
+            .faults = .{},
+        };
+        stdout_read_owned = false;
+        stderr_read_owned = false;
+        defer execution.closePipe(&execution.stdout_pipe, .failed);
+        defer execution.closePipe(&execution.stderr_pipe, .failed);
+        execution.stdout_capture = try createOwnedFile(std.testing.io, root, budget, "deadline-stdout", @intFromEnum(phase), @intFromBool(observation.cutoff), .none);
+        defer execution.stdout_capture.cleanup(root) catch {};
+        execution.stderr_capture = try createOwnedFile(std.testing.io, root, budget, "deadline-stderr", @intFromEnum(phase), @intFromBool(observation.cutoff), .none);
+        defer execution.stderr_capture.cleanup(root) catch {};
+        execution.script = try createOwnedFile(std.testing.io, root, budget, "deadline-script", @intFromEnum(phase), @intFromBool(observation.cutoff), .none);
+        defer execution.script.cleanup(root) catch {};
+        switch (phase) {
+            .grace => execution.process = .{ .grace = .{
+                .anchor = .{ .child = undefined, .pgid = 1 },
+                .kill_at = addMilliseconds(after, 1),
+                .cleanup_deadline = deadline,
+            } },
+            .reaping => {
+                execution.process = .{ .reaping = .{
+                    .owner = .{ .child = undefined, .pgid = 1, .observed = null },
+                    .cleanup_deadline = deadline,
+                } };
+                execution.faults.lifecycle = .reap_watchdog;
+            },
+            .checking_group => {
+                execution.process = .{ .checking_group = .{
+                    .pgid = 1,
+                    .term = .{ .exited = 0 },
+                    .cleanup_deadline = deadline,
+                } };
+                execution.faults.lifecycle = .cleanup_watchdog;
+            },
+        }
+        var window: [copy_window_bytes]u8 = undefined;
+        const result = execution.serviceAt(&window, observation.now, .none);
+        try std.testing.expectEqual(observation.cutoff, pipeClosed(execution.stdout_pipe));
+        try std.testing.expectEqual(observation.cutoff, pipeClosed(execution.stderr_pipe));
+        try std.testing.expect(!result.retired);
+        try std.testing.expectError(error.BashNotRetired, execution.checkRetired());
+        if (observation.cutoff) {
+            try std.testing.expect(result.fault.? == error.BashCleanupUnconfirmed);
+            try std.testing.expectEqual(@as(isize, -1), std.c.write(stdout_fds[1], "x", 1));
+            try std.testing.expectEqual(std.c.E.PIPE, std.c.errno(-1));
+            const repeated = execution.serviceAt(&window, after, .none);
+            try std.testing.expect(!repeated.made_progress);
+            try std.testing.expect(repeated.fault.? == error.BashCleanupUnconfirmed);
+        } else {
+            try std.testing.expect(result.fault == null);
+            try std.testing.expectEqual(@as(isize, 1), std.c.write(stdout_fds[1], "x", 1));
+        }
+    };
+
+    var gone_fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&gone_fds));
+    var gone_read_owned = true;
+    errdefer {
+        if (gone_read_owned) _ = std.c.close(gone_fds[0]);
+    }
+    defer _ = std.c.close(gone_fds[1]);
+    var gone = Execution{
+        .io = std.testing.io,
+        .process = .{ .gone = .{ .exited = 0 } },
+        .stdout_pipe = .{ .reading = .{ .handle = gone_fds[0], .flags = .{ .nonblocking = false } } },
+        .stderr_pipe = .{ .closed = .eof },
+        .stdout_capture = undefined,
+        .stderr_capture = undefined,
+        .script = undefined,
+        .scratch_path = root,
+        .started = started,
+        .faults = .{},
+    };
+    gone_read_owned = false;
+    defer gone.closePipe(&gone.stdout_pipe, .failed);
+    gone.stdout_capture = try createOwnedFile(std.testing.io, root, budget, "gone-stdout", 1, 1, .none);
+    defer gone.stdout_capture.cleanup(root) catch {};
+    gone.stderr_capture = try createOwnedFile(std.testing.io, root, budget, "gone-stderr", 1, 1, .none);
+    defer gone.stderr_capture.cleanup(root) catch {};
+    gone.script = try createOwnedFile(std.testing.io, root, budget, "gone-script", 1, 1, .none);
+    defer gone.script.cleanup(root) catch {};
+    var window: [copy_window_bytes]u8 = undefined;
+    const gone_result = gone.serviceAt(&window, before, .none);
+    try std.testing.expect(gone_result.fault == null);
+    try std.testing.expect(gone_result.retired);
+    const gone_repeated = gone.serviceAt(&window, after, .none);
+    try std.testing.expect(!gone_repeated.made_progress);
+    try std.testing.expect(gone_repeated.retired);
+}
+
 test "cleanup ownership transfers consume their source" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

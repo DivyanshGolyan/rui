@@ -3,21 +3,19 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
-struct cancellation { int immediate; struct timespec start; };
+struct cancellation { int immediate; const char *ready; atomic_int output_seen; };
 
 static int cancelled(void *context) {
     struct cancellation *state = context;
-    if (state->immediate) return 1;
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return (now.tv_sec - state->start.tv_sec) * 1000000000LL +
-        now.tv_nsec - state->start.tv_nsec >= 100000000LL;
+    return state->immediate || atomic_load(&state->output_seen) ||
+        (state->ready && access(state->ready, F_OK) == 0);
 }
 
 static int descriptor_count(void) {
@@ -29,7 +27,10 @@ static int descriptor_count(void) {
     return count;
 }
 
-struct output_sink { int fd; uint64_t budget, length; int stall; };
+struct output_sink {
+    int fd; uint64_t budget, length; int stall;
+    struct cancellation *cancel_on_output;
+};
 
 static int append_output(void *context, const unsigned char *bytes, size_t length) {
     struct output_sink *sink = context;
@@ -47,6 +48,8 @@ static int append_output(void *context, const unsigned char *bytes, size_t lengt
         remaining -= (size_t)count;
     }
     sink->length += length;
+    if (length && sink->cancel_on_output)
+        atomic_store(&sink->cancel_on_output->output_seen, 1);
     return 0;
 }
 
@@ -70,15 +73,22 @@ int main(int argc, char **argv) {
         unlink(prepared_path);
         if (prepared < 0) return 3;
     }
-    int repeat = !strcmp(argv[3], "repeat") ? 1000 : 1;
+    int repeat = !strcmp(argv[3], "churn") ? 1000 : !strcmp(argv[3], "repeat") ? 10 : 1;
     struct cancellation cancellation = {.immediate = !strcmp(argv[3], "cancel")};
-    clock_gettime(CLOCK_MONOTONIC, &cancellation.start);
-    int use_cancel = cancellation.immediate || !strcmp(argv[3], "live-cancel");
+    atomic_init(&cancellation.output_seen, 0);
+    if (!strcmp(argv[3], "live-cancel")) {
+        if (argc != 6 || access(argv[5], F_OK) == 0) return 2;
+        cancellation.ready = argv[5];
+    }
+    int cancel_on_output = !strcmp(argv[3], "output-cancel");
+    int use_cancel = cancellation.immediate || cancellation.ready || cancel_on_output;
     struct output_sink sink = {
         .fd = output, .budget = strtoull(argv[4], NULL, 10),
         .stall = !strcmp(argv[3], "stall-write"),
+        .cancel_on_output = cancel_on_output ? &cancellation : NULL,
     };
     int baseline = descriptor_count();
+    if (baseline < 0) return 7;
     int result = 0;
     if (!strcmp(argv[3], "run-input-rw") && write(output, "partial", 7) != 7)
         return 4;
@@ -93,10 +103,18 @@ int main(int argc, char **argv) {
                               append_output, &sink,
                               check ? diagnostic : NULL, check ? sizeof(diagnostic) : 0,
                               check ? &diagnostic_length : NULL);
+        if (descriptor_count() != baseline) return 7;
+        if (repeat > 1 && result == 0) {
+            /* Both reuse witnesses evaluate 2+3; a later success must not hide
+               corrupt output from an earlier lifecycle. */
+            struct stat state;
+            char value;
+            if (fstat(output, &state) || state.st_size != 1 ||
+                pread(output, &value, 1, 0) != 1 || value != '5') return 8;
+        }
     }
     if (result && ftruncate(output, 0)) return 4;
     if (use_cancel && result != 1) return 6;
-    if (descriptor_count() != baseline) return 7;
     if (result && check && diagnostic_length &&
         write(STDERR_FILENO, diagnostic, diagnostic_length) != (ssize_t)diagnostic_length)
         return 4;

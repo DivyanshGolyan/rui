@@ -385,8 +385,10 @@ def main():
                 endpoint.server_close()
                 thread.join(timeout=5)
 
-        for fault in ("reap", "reap-watchdog", "group-probe", "cleanup-watchdog"):
-            prove_faulted_cleanup_cuts_off_pipe(root, fault)
+        # The owner-level deadline table covers every unresolved lifecycle
+        # phase. Keep one native watchdog witness for the production pipe,
+        # FIONREAD snapshot, retained custody, and recovery handoff.
+        prove_faulted_cleanup_cuts_off_pipe(root, "cleanup-watchdog")
 
         name = "lifecycle-forced-reap"
         state = root / name
