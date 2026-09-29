@@ -14,7 +14,7 @@ Maintained executable checks and recorded qualification live in [tests/qualifica
 
 [Resource profiling sources](resource-profiling-sources.md) evaluates reusable CPU, memory, waiting and I/O evidence, platform tools and measurement validity; recommendations only, with no runtime or qualification change.
 
-[Development build latency](build-times-sources.md) maps Zig 0.16 build/cache controls onto Rui's steps and records bounded Linux timings for initially uncached steps and warm-cache runs; recommendations only, not edit-rebuild or clean-cache qualification.
+[Development build latency](build-times-sources.md) maps Zig 0.16 build/cache controls onto Rui's steps and records historical timings plus the measured routine/long-gate split, retained counterexamples and qualification limits; no compiler-speedup claim.
 
 [CLI guideline evidence](cli-guidelines-rui.md) compares primary clig.dev guidance with Rui's explicit Host, exact request recovery, acceptance/completion, Action approval and uncertain-effect boundaries; research input only, with no interface-model choice or human-use study.
 
