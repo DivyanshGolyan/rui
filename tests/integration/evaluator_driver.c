@@ -70,7 +70,7 @@ int main(int argc, char **argv) {
         unlink(prepared_path);
         if (prepared < 0) return 3;
     }
-    int repeat = !strcmp(argv[3], "repeat") ? 1000 : 1;
+    int repeat = !strcmp(argv[3], "churn") ? 1000 : !strcmp(argv[3], "repeat") ? 10 : 1;
     struct cancellation cancellation = {.immediate = !strcmp(argv[3], "cancel")};
     clock_gettime(CLOCK_MONOTONIC, &cancellation.start);
     int use_cancel = cancellation.immediate || !strcmp(argv[3], "live-cancel");
@@ -79,6 +79,7 @@ int main(int argc, char **argv) {
         .stall = !strcmp(argv[3], "stall-write"),
     };
     int baseline = descriptor_count();
+    if (baseline < 0) return 7;
     int result = 0;
     if (!strcmp(argv[3], "run-input-rw") && write(output, "partial", 7) != 7)
         return 4;
@@ -93,10 +94,18 @@ int main(int argc, char **argv) {
                               append_output, &sink,
                               check ? diagnostic : NULL, check ? sizeof(diagnostic) : 0,
                               check ? &diagnostic_length : NULL);
+        if (descriptor_count() != baseline) return 7;
+        if (repeat > 1 && result == 0) {
+            /* Both reuse witnesses evaluate 2+3; a later success must not hide
+               corrupt output from an earlier lifecycle. */
+            struct stat state;
+            char value;
+            if (fstat(output, &state) || state.st_size != 1 ||
+                pread(output, &value, 1, 0) != 1 || value != '5') return 8;
+        }
     }
     if (result && ftruncate(output, 0)) return 4;
     if (use_cancel && result != 1) return 6;
-    if (descriptor_count() != baseline) return 7;
     if (result && check && diagnostic_length &&
         write(STDERR_FILENO, diagnostic, diagnostic_length) != (ssize_t)diagnostic_length)
         return 4;

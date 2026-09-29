@@ -44,6 +44,14 @@ pub fn build(b: *std.Build) void {
     const evaluator_step = b.step("workflow-check", "Run the isolated QuickJS evaluator boundary checks");
     evaluator_step.dependOn(&evaluator_integration.step);
 
+    const evaluator_churn = b.addSystemCommand(&.{"python3"});
+    evaluator_churn.addFileArg(b.path("tests/integration/evaluator_integration.py"));
+    evaluator_churn.addArtifactArg(evaluator);
+    evaluator_churn.addArtifactArg(evaluator_driver);
+    evaluator_churn.addArg("--churn-only");
+    const evaluator_churn_step = b.step("evaluator-churn", "Qualify 1,000 same-parent evaluator lifecycles (not a routine gate)");
+    evaluator_churn_step.dependOn(&evaluator_churn.step);
+
     const evaluator_host = b.addExecutable(.{
         .name = "rui-evaluator-host-test",
         .root_module = b.createModule(.{
@@ -280,7 +288,7 @@ pub fn build(b: *std.Build) void {
 
     const full_check_step = b.step(
         "check-full",
-        "Run native exact-timeout evidence and process integrations serially without unrelated load",
+        "Run routine native tests, sanitizer and process integrations serially (long witnesses are separate)",
     );
     const process_integrations = b.addSystemCommand(&.{"sh"});
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
@@ -291,7 +299,7 @@ pub fn build(b: *std.Build) void {
     full_evaluator.addArtifactArg(evaluator);
     full_evaluator.addArtifactArg(evaluator_driver);
     full_evaluator.addArtifactArg(evaluator_probe);
-    full_evaluator.step.dependOn(&run_full_tests.step);
+    full_evaluator.step.dependOn(&run_tests.step);
     full_evaluator.step.dependOn(string_sanitizer_step);
     const full_evaluator_host = b.addRunArtifact(evaluator_host);
     full_evaluator_host.addArtifactArg(evaluator);
