@@ -103,6 +103,7 @@ The runnable #260 slice and native [Codex path](https://github.com/DivyanshGolya
 ## Read next
 
 - To explain ordinary work, recovery, ownership or resource policy, read [Architecture](ARCHITECTURE.md).
+- To locate the source that owns a behavior, use the [implementation map](ARCHITECTURE.md#finding-the-implementation).
 - To change Session behavior or verify an implementation slice, find the owning behavior in Architecture and its required evidence in [Verification](VERIFICATION.md).
 - To run or interpret qualification, start with [current qualification](tests/qualification/README.md#current-checks-and-qualification); it records revision-specific observations and their limits.
 - To inspect design evidence or archived experiments, read [Research](research/README.md).
