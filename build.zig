@@ -280,6 +280,13 @@ pub fn build(b: *std.Build) void {
     const host_launch_step = b.step("host-launch-integration", "Run detached Host launch, alias convergence and startup-failure cases");
     host_launch_step.dependOn(&host_launch_integration.step);
 
+    const host_stop_integration = b.addSystemCommand(&.{"python3"});
+    host_stop_integration.addFileArg(b.path("tests/integration/host_stop_integration.py"));
+    host_stop_integration.addArtifactArg(release_safe);
+    host_stop_integration.addArtifactArg(host_status_actor);
+    const host_stop_step = b.step("host-stop-integration", "Run native exact-instance Host shutdown and custody drain");
+    host_stop_step.dependOn(&host_stop_integration.step);
+
     const debug = addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
     const debug_integration = b.addSystemCommand(&.{"sh"});
     debug_integration.addFileArg(b.path("tests/integration/admission_integration.sh"));

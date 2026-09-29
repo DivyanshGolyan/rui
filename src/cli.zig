@@ -159,17 +159,22 @@ fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![
 fn host(init: std.process.Init, args: []const []const u8) !void {
     if (args.len == 0) return usage();
     const start = std.mem.eql(u8, args[0], "start");
-    if (!start and !std.mem.eql(u8, args[0], "status")) return usage();
+    const stop = std.mem.eql(u8, args[0], "stop");
+    if (!start and !stop and !std.mem.eql(u8, args[0], "status")) return usage();
     var explicit: ?[]const u8 = null;
+    var target: ?protocol.InstanceId = null;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
         if (std.mem.eql(u8, args[index], "--store") and explicit == null) {
             explicit = try takeValue(args, &index);
+        } else if (stop and std.mem.eql(u8, args[index], "--instance") and target == null) {
+            target = try protocol.parseInstanceId(try takeValue(args, &index));
         } else return usage();
     }
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, explicit, &fallback);
     if (start) return startHost(init, selected);
+    if (stop) return stopHost(init.io, selected, target);
     switch (client.hostStatus(init.io, selected)) {
         .ready => |ready| {
             try std.Io.File.stdout().writeStreamingAll(init.io, "Host: ready\n");
@@ -182,6 +187,40 @@ fn host(init: std.process.Init, args: []const []const u8) !void {
         .owned_unavailable => try std.Io.File.stdout().writeStreamingAll(init.io, "Host: owned but unavailable (starting or draining; completion unconfirmed)\n"),
         .incompatible => try std.Io.File.stdout().writeStreamingAll(init.io, "Host: incompatible (protected reply or wire version)\n"),
         .access_failure => try std.Io.File.stdout().writeStreamingAll(init.io, "Host: access failure (selected Store or protected Host endpoint)\n"),
+    }
+}
+
+fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.InstanceId) !void {
+    const target = explicit_instance orelse switch (client.hostStatus(io, selected)) {
+        .ready => |ready| ready.instance,
+        .unavailable, .owned_unavailable => {
+            std.debug.print("rui: no ready Host identity to stop. Ownership or completion is unconfirmed; inspect rui host status.\n", .{});
+            return error.HostStopUnconfirmed;
+        },
+        .incompatible => return error.IncompatibleHost,
+        .access_failure => return error.StoreAccessFailed,
+    };
+    const paths = try platform.resolveClientPaths(io, selected);
+    const hex = std.fmt.bytesToHex(target, .lower);
+    try std.Io.File.stdout().writeStreamingAll(io, "Rui: Stop affects all work in this Store. Retain this exact target if the reply is lost.\n");
+    try writeSafeField(io, "Store: ", paths.store.slice());
+    var target_line: [128]u8 = undefined;
+    try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&target_line, "Host instance: {s} (retry with --instance {s})\n", .{ &hex, &hex }));
+    var reply: client.ReplyBuffer = .{};
+    const outcome = client.stopHost(io, .{ .store = paths.store.slice(), .instance = target }, &reply) catch |err| {
+        std.debug.print("rui: stop reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@errorName(err)});
+        return err;
+    };
+    switch (outcome) {
+        .acknowledged => try std.Io.File.stdout().writeStreamingAll(io, "Rui: Stop acknowledged; completion and lease release are not confirmed. Inspect rui host status.\n"),
+        .instance_changed => {
+            std.debug.print("rui: Host instance changed; replacement was not stopped. Inspect rui host status before any new intent.\n", .{});
+            return error.HostInstanceChanged;
+        },
+        .unavailable => {
+            std.debug.print("rui: Host stop unavailable; shutdown/completion unconfirmed. Inspect rui host status; do not switch the retry target.\n", .{});
+            return error.HostStopUnconfirmed;
+        },
     }
 }
 
@@ -1904,6 +1943,8 @@ fn usage() error{InvalidArguments} {
         \\    Read the selected Store's protected Host readiness, capacity and capabilities without starting it.
         \\  rui host start [--store PATH]
         \\    Attach or detach a capacity-8 managed Host; existing Host settings win.
+        \\  rui host stop [--store PATH] [--instance HEX]
+        \\    Stop the observed Host, affecting all Store work; retry a lost reply only with the same instance.
         \\  rui setup [--store PATH] [--provider codex] [--model MODEL]
         \\    Inspect without arguments; save private defaults for future interactive Sessions.
         \\    Selected Store must exist and pass canonical/private checks.

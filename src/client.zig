@@ -83,6 +83,43 @@ pub const HostStatus = union(enum) {
     access_failure,
 };
 
+pub const HostStopInput = struct {
+    store: []const u8,
+    // Retain the instance from the original observation across every retry.
+    instance: protocol.InstanceId,
+    drop_reply: ?[]const u8 = null,
+};
+
+pub const HostStopResult = enum { acknowledged, instance_changed, unavailable };
+
+/// Acknowledgement means the matching Host fenced dispatch, not that it drained.
+/// Retry with the same input after a lost reply; never rediscover a new target.
+pub fn stopHost(io: std.Io, input: HostStopInput, reply_buffer: *ReplyBuffer) !HostStopResult {
+    reply_buffer.len = 0;
+    const paths = try platform.resolveClientPaths(io, input.store);
+    var body: protocol.RequestBuffer = .{};
+    try body.append("{\"version\":\"1\",\"kind\":\"host_stop\",\"store\":");
+    try body.appendJsonString(paths.store.slice());
+    try body.append("}");
+    const reply = sendSource(io, &paths, "/v1/control/host-stop", body.len, null, body.slice(), input.drop_reply, &input.instance, reply_buffer, null);
+    const result = reply catch |err| return if (err == error.FileNotFound or err == error.ConnectionRefused)
+        .unavailable
+    else
+        err;
+    if (result.status == 200 and std.mem.eql(u8, result.body, protocol.host_stop_ack)) return .acknowledged;
+    if (result.status == 409) {
+        const Failure = struct { version: []const u8, type: []const u8, code: []const u8 };
+        var parse_storage: [protocol.max_control_error_response_bytes * 2]u8 = undefined;
+        var arena = std.heap.FixedBufferAllocator.init(&parse_storage);
+        const failure = std.json.parseFromSliceLeaky(Failure, arena.allocator(), result.body, .{ .ignore_unknown_fields = false }) catch return error.InvalidHostStopResponse;
+        if (std.mem.eql(u8, failure.version, protocol.wire_version) and
+            std.mem.eql(u8, failure.type, "invocation_error") and
+            std.mem.eql(u8, failure.code, "host_instance_changed")) return .instance_changed;
+    }
+    if (result.status == 503) return .unavailable;
+    return error.InvalidHostStopResponse;
+}
+
 /// Observation only: never creates a Store, acquires ownership or reads SQLite.
 pub fn hostStatus(io: std.Io, store_path: []const u8) HostStatus {
     return hostStatusUntil(io, store_path, null);
@@ -126,7 +163,7 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) HostS
     var reply_buffer: ReplyBuffer = .{};
     const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
     const until = @min(probe_end, deadline orelse probe_end);
-    const reply = sendSource(io, paths, "/v1/host-info", body.len, null, body.slice(), null, &reply_buffer, until) catch |err| return switch (err) {
+    const reply = sendSource(io, paths, "/v1/host-info", body.len, null, body.slice(), null, null, &reply_buffer, until) catch |err| return switch (err) {
         error.AccessDenied, error.PermissionDenied => .access_failure,
         error.WrongWireVersion, error.InvalidResponse, error.ResponseHeaderTooLarge, error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,
         else => .owned_unavailable,
@@ -829,7 +866,7 @@ fn sendRecord(
     var file = try std.Io.Dir.cwd().openFile(io, record, .{});
     defer file.close(io);
     const length = try file.length(io);
-    return sendSource(io, paths, route, length, &file, null, drop_reply, reply_buffer, null);
+    return sendSource(io, paths, route, length, &file, null, drop_reply, null, reply_buffer, null);
 }
 
 fn sendBytes(
@@ -840,7 +877,7 @@ fn sendBytes(
     drop_reply: ?[]const u8,
     reply_buffer: *ReplyBuffer,
 ) !CommandReply {
-    return sendSource(io, paths, route, body.len, null, body, drop_reply, reply_buffer, null);
+    return sendSource(io, paths, route, body.len, null, body, drop_reply, null, reply_buffer, null);
 }
 
 fn sendSource(
@@ -851,6 +888,7 @@ fn sendSource(
     file: ?*std.Io.File,
     bytes: ?[]const u8,
     drop_reply: ?[]const u8,
+    instance: ?*const protocol.InstanceId,
     reply_buffer: *ReplyBuffer,
     until: ?i128,
 ) !CommandReply {
@@ -861,11 +899,15 @@ fn sendSource(
         if (stream) |connected| connected.close(io) else _ = std.c.close(fd);
     }
     var header_buffer: [512]u8 = undefined;
-    const header = if (drop_reply) |drop|
-        try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\nX-Rui-Test-Drop-Reply: {s}\r\n\r\n", .{ route, length, drop })
-    else
-        try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ route, length });
-    try writeAllUntil(io, fd, header, until);
+    var used = (try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n", .{ route, length })).len;
+    if (instance) |id| {
+        used += (try std.fmt.bufPrint(header_buffer[used..], "X-Rui-Host-Instance: {s}\r\n", .{std.fmt.bytesToHex(id.*, .lower)})).len;
+    }
+    if (drop_reply) |drop| {
+        used += (try std.fmt.bufPrint(header_buffer[used..], "X-Rui-Test-Drop-Reply: {s}\r\n", .{drop})).len;
+    }
+    used += (try std.fmt.bufPrint(header_buffer[used..], "\r\n", .{})).len;
+    try writeAllUntil(io, fd, header_buffer[0..used], until);
     if (file) |source| {
         var buffer: [protocol.content_window_bytes]u8 = undefined;
         var sent: u64 = 0;

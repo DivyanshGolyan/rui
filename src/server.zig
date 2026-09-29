@@ -2322,6 +2322,10 @@ fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
     host.launch_mutex.unlock(host.io);
     if (already_shutting_down) return;
     std.debug.print("rui: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
+    wakeListener(host);
+}
+
+fn wakeListener(host: *Host) void {
     // Waking accept transfers shutdown to serve's owner. That owner stops new
     // connections, joins the execution thread (which detaches any active
     // effects under custody), drains existing clients, then releases Store.
@@ -2845,6 +2849,7 @@ fn connectionMain(connection: *Connection) void {
 
 const Route = enum {
     host_info,
+    host_stop,
     configure,
     message,
     session_stop,
@@ -2858,7 +2863,7 @@ const Route = enum {
     unsupported_control,
 
     fn isControl(self: Route) bool {
-        return self == .session_stop or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
+        return self == .host_stop or self == .session_stop or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
     }
 };
 const DropMode = enum { none, before_admission, during_admission, after_commit };
@@ -2898,6 +2903,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
         return respondStatic(host.io, fd, 501, "unsupported", "control_surface_enters_in_later_slice");
     }
     const control_limit: u64 = switch (header.route) {
+        .host_stop => protocol.max_host_stop_request_bytes,
         .session_stop => protocol.max_session_stop_request_bytes,
         .model_interruption => protocol.max_model_interruption_request_bytes,
         .permission_decision => protocol.max_permission_decision_request_bytes,
@@ -2933,6 +2939,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
     }
     const route_matches = switch (request) {
         .host_info => header.route == .host_info,
+        .host_stop => header.route == .host_stop,
         .configure => header.route == .configure,
         .message => header.route == .message,
         .session_stop => header.route == .session_stop,
@@ -2951,6 +2958,9 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
         if (!std.mem.eql(u8, &instance, &host.instance)) {
             return respondStatic(host.io, fd, 409, "invocation_error", "host_instance_changed");
         }
+    }
+    if (header.route == .host_stop and header.instance == null) {
+        return respondStatic(host.io, fd, 400, "invocation_error", "host_instance_required");
     }
     if (header.drop == .before_admission) return;
     if (header.drop == .during_admission and std.c.shutdown(fd, std.c.SHUT.RDWR) != 0) {
@@ -2973,6 +2983,14 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
                 if (host.provider_endpoint != null and host.authentication != null) "true" else "false",
             });
             deliverResponse(host.io, fd, 200, response.slice());
+        },
+        .host_stop => {
+            host.launch_mutex.lockUncancelable(host.io);
+            const first = !host.effect_shutdown.swap(true, .acq_rel);
+            host.dispatch_fenced.store(true, .release);
+            host.launch_mutex.unlock(host.io);
+            if (first) wakeListener(host);
+            if (header.drop != .after_commit) deliverResponse(host.io, fd, 200, protocol.host_stop_ack);
         },
         .configure => |*command| {
             const result = host.store.configure(command, .{
@@ -3203,6 +3221,8 @@ const HeaderReader = struct {
         }
         return if (std.mem.eql(u8, path, "/v1/host-info"))
             .host_info
+        else if (std.mem.eql(u8, path, "/v1/control/host-stop"))
+            .host_stop
         else if (std.mem.eql(u8, path, "/v1/configure"))
             .configure
         else if (std.mem.eql(u8, path, "/v1/message"))
