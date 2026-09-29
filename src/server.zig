@@ -1585,7 +1585,7 @@ fn admitNewAttempt(
     }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         if (err == error.InjectedAttemptCommitFailure) {
-            traceSubject(host, "attempt_admission_rolled_back", "attempt_kind", "model");
+            traceAttemptRollback(host);
         } else {
             fenceDispatch(host, "Attempt admission", err);
         }
@@ -2384,6 +2384,18 @@ fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subjec
     trace.append(",\"subject\":") catch return;
     trace.appendJsonString(subject) catch return;
     trace.append("}") catch return;
+    writeTestTrace(host, &trace);
+}
+
+fn traceAttemptRollback(host: *Host) void {
+    if (!host.faults.test_phase_trace) return;
+    // Sample after this reservation is released, before another owner turn
+    // can reserve it again. A later inspection is not this boundary's state.
+    var trace: protocol.ResponseBuffer = .{};
+    trace.appendFmt(
+        "{{\"rui_test_phase\":\"attempt_admission_rolled_back\",\"at_ns\":\"{d}\",\"subject_kind\":\"attempt_kind\",\"subject\":\"model\",\"custody_occupied\":\"{d}\"}}",
+        .{ nowNs(host), host.custody.occupied() },
+    ) catch return;
     writeTestTrace(host, &trace);
 }
 

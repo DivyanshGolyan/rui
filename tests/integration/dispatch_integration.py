@@ -3803,23 +3803,18 @@ def main():
         rollback_milestones = HostDiagnostics(host)
         configure(state, rollback_store, "rollback-config", "direct/rollback", "model-a")
         message(state, rollback_store, "rollback-message", "direct/rollback", "rollback")
-        rollback_milestones.wait(
+        rollback = rollback_milestones.wait(
             "attempt_admission_rolled_back",
             subject_kind="attempt_kind",
             subject="model",
-        )
+        )[0]
+        # The persistent fault leaves this Message eligible for another
+        # admission. Assert release at its owner boundary, not later idle.
+        assert rollback["custody_occupied"] == "0", rollback
         assert endpoint.requests == []
         rollback_queued = observe(rollback_store, "rollback-message")
         assert rollback_queued["queue"]["status"] == "queued", rollback_queued
         assert "processing" not in rollback_queued, rollback_queued
-        rollback_execution = command(
-            "inspect-session",
-            "--store",
-            rollback_store,
-            "--session",
-            "direct/rollback",
-        )["execution"]
-        assert rollback_execution["custody_occupied"] == "0", rollback_execution
         stop_host(host)
         processes.remove(host)
         rollback_milestones.close()
