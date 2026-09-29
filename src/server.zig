@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const HostDiagnostics = @import("HostDiagnostics.zig");
 const trace_native = @cImport({
     @cInclude("unistd.h");
 });
@@ -186,6 +187,8 @@ const Connection = struct {
     accepted_at_ns: u64,
 };
 
+extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
+
 pub fn serve(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -232,6 +235,13 @@ pub fn serve(
     };
     var lease = try platform.StoreLease.acquire(io, store_path);
     defer lease.release();
+    var diagnostics: ?HostDiagnostics = HostDiagnostics.open(io, lease.store_dir, HostDiagnostics.default_cap_bytes) catch |err| blk: {
+        std.debug.print("rui: startup diagnostics unavailable ({s}); continuing under Store lease\n", .{@errorName(err)});
+        break :blk null;
+    };
+    defer if (diagnostics) |*writer| writer.close();
+    if (diagnostics) |*writer| writer.record("begin", "lease_acquired");
+    errdefer if (diagnostics) |*writer| writer.record("failed", "startup_error");
     var storage = try store_module.Store.openWithOptions(
         io,
         lease.paths.database.slice(),
@@ -341,7 +351,13 @@ pub fn serve(
         try ready.appendFmt(" curl={s} openssl={s}", .{ provider.curl_version, provider.openssl_version });
     }
     try ready.append("\n");
-    try std.Io.File.stdout().writeStreamingAll(io, ready.slice());
+    if (rui_write_readiness(1, ready.slice().ptr, ready.slice().len) != 0)
+        return error.HostReadinessOutputUnavailable;
+    if (diagnostics) |*writer| {
+        writer.record("ready", "serving");
+        writer.close();
+        diagnostics = null;
+    }
 
     while (true) {
         const stream = listener.accept(io) catch |err| switch (err) {

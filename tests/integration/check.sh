@@ -62,6 +62,7 @@ if [ "${3:-}" = parallel ]; then
     }
     run_isolated_case host-process python3 "$directory/host_process_test.py"
     run_isolated_case host-allocator python3 "$directory/host_allocator_test.py" "$release_safe"
+    run_isolated_case host-launch python3 "$directory/host_launch_integration.py" "$release_safe"
     run_isolated_case admission-debug sh "$directory/admission_integration.sh" "$debug" artifact-smoke
     if [ "$failed" -eq 0 ]; then
         tail -n 1 "$output/native.log"
@@ -80,6 +81,7 @@ python3 "$directory/codex_integration.py" "$release_safe"
 python3 "$directory/control_integration.py" "$release_safe"
 python3 "$directory/descriptor_capacity_integration.py" "$release_safe"
 python3 "$directory/host_status_integration.py" "$release_safe" "$host_status_actor"
+python3 "$directory/host_launch_integration.py" "$release_safe"
 sh "$directory/admission_integration.sh" "$debug" artifact-smoke
 python3 "$directory/host_process_test.py"
 python3 "$directory/host_allocator_test.py" "$release_safe"
