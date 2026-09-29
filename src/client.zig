@@ -70,6 +70,163 @@ pub const PermissionDecisionInput = struct {
 
 pub const ReplyBuffer = protocol.ResponseBuffer;
 
+pub const HostStatus = union(enum) {
+    ready: struct {
+        store: protocol.Bounded(protocol.max_store_bytes),
+        instance: protocol.InstanceId,
+        active_capacity: usize,
+        capabilities: @FieldType(protocol.HostInfo, "capabilities"),
+    },
+    unavailable,
+    owned_unavailable,
+    incompatible,
+    access_failure,
+};
+
+/// Observation only: never creates a Store, acquires ownership or reads SQLite.
+pub fn hostStatus(io: std.Io, store_path: []const u8) HostStatus {
+    return hostStatusUntil(io, store_path, null);
+}
+
+/// Startup callers can bound the entire readiness loop, including each probe.
+pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) HostStatus {
+    const paths = platform.resolveClientPaths(io, store_path) catch |err| return switch (err) {
+        error.FileNotFound => .unavailable,
+        else => .access_failure,
+    };
+    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch return .access_failure;
+    defer store_dir.close(io);
+    // A replaced lock node may be a FIFO: open must not wait for a writer
+    // before the nonblocking lock probe can classify the selected Store.
+    const fd = std.posix.openat(store_dir.handle, "host.lock", .{
+        .ACCMODE = .RDONLY,
+        .NONBLOCK = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0) catch |err| return switch (err) {
+        error.FileNotFound => .unavailable,
+        else => .access_failure,
+    };
+    const lock_file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+    defer lock_file.close(io);
+    const stat = lock_file.stat(io) catch return .access_failure;
+    if (stat.kind != .file) return .access_failure;
+    return switch (std.posix.errno(std.posix.system.flock(fd, std.posix.LOCK.SH | std.posix.LOCK.NB))) {
+        .SUCCESS => .unavailable,
+        .AGAIN => readHostInfo(io, &paths, deadline),
+        else => .access_failure,
+    };
+}
+
+fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) HostStatus {
+    var body: protocol.RequestBuffer = .{};
+    body.append("{\"version\":\"1\",\"kind\":\"host_info\",\"store\":") catch unreachable;
+    body.appendJsonString(paths.store.slice()) catch unreachable;
+    body.append("}") catch unreachable;
+    var reply_buffer: ReplyBuffer = .{};
+    const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
+    const until = @min(probe_end, deadline orelse probe_end);
+    const reply = sendSource(io, paths, "/v1/host-info", body.len, null, body.slice(), null, &reply_buffer, until) catch |err| return switch (err) {
+        error.AccessDenied, error.PermissionDenied => .access_failure,
+        error.WrongWireVersion, error.InvalidResponse, error.ResponseHeaderTooLarge, error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,
+        else => .owned_unavailable,
+    };
+    if (reply.status == 503) return if (validHostUnavailable(reply.body)) .owned_unavailable else .incompatible;
+    if (reply.status != 200) return .incompatible;
+    return parseHostInfo(reply.body, paths.store.slice()) catch .incompatible;
+}
+
+fn validHostUnavailable(body: []const u8) bool {
+    if (body.len > protocol.max_control_error_response_bytes) return false;
+    var parse_storage: [protocol.max_control_error_response_bytes * 2]u8 = undefined;
+    var arena = std.heap.FixedBufferAllocator.init(&parse_storage);
+    const reply = std.json.parseFromSliceLeaky(struct {
+        version: []const u8,
+        type: []const u8,
+        code: []const u8,
+    }, arena.allocator(), body, .{ .ignore_unknown_fields = false, .allocate = .alloc_if_needed }) catch return false;
+    if (!std.mem.eql(u8, reply.version, protocol.wire_version)) return false;
+    if (std.mem.eql(u8, reply.type, "host_unavailable")) return std.mem.eql(u8, reply.code, "dispatch_fenced");
+    if (!std.mem.eql(u8, reply.type, "busy")) return false;
+    return std.mem.eql(u8, reply.code, "connection_capacity_exhausted") or
+        std.mem.eql(u8, reply.code, "classification_capacity_exhausted") or
+        std.mem.eql(u8, reply.code, "ordinary_capacity_exhausted");
+}
+
+fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
+    if (body.len > protocol.max_host_info_response_bytes) return error.InvalidHostInfo;
+    var parse_storage: [protocol.max_host_info_response_bytes * 2]u8 = undefined;
+    var arena = std.heap.FixedBufferAllocator.init(&parse_storage);
+    const info = try std.json.parseFromSliceLeaky(protocol.HostInfo, arena.allocator(), body, .{
+        .ignore_unknown_fields = false,
+        .allocate = .alloc_if_needed,
+    });
+    if (!std.mem.eql(u8, info.version, protocol.wire_version) or
+        !std.mem.eql(u8, info.type, "host_info") or
+        !std.mem.eql(u8, info.store, store) or
+        info.active_capacity.len == 0 or info.active_capacity.len > 20 or
+        (info.active_capacity.len > 1 and info.active_capacity[0] == '0'))
+        return error.InvalidHostInfo;
+    for (info.active_capacity) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidHostInfo;
+    const instance = protocol.parseInstanceId(info.instance) catch return error.InvalidHostInfo;
+    const capacity = std.fmt.parseInt(usize, info.active_capacity, 10) catch return error.InvalidHostInfo;
+    var identity: protocol.Bounded(protocol.max_store_bytes) = .{};
+    try identity.set(info.store);
+    return .{ .ready = .{
+        .store = identity,
+        .instance = instance,
+        .active_capacity = capacity,
+        .capabilities = info.capabilities,
+    } };
+}
+
+test "Host information is bounded and rejects ambiguous identities and capacity" {
+    const golden = "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}";
+    const result = try parseHostInfo(golden, "/one");
+    try std.testing.expect(result.ready.store.eql("/one"));
+    try std.testing.expectEqual(@as(usize, 17), result.ready.active_capacity);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, &result.ready.instance);
+    try std.testing.expect(result.ready.capabilities.bash);
+    try std.testing.expect(!result.ready.capabilities.model);
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(golden, "/other"));
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
+        "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
+        "/one",
+    ));
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
+        "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
+        "/one",
+    ));
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
+        "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
+        "/one",
+    ));
+    for ([_]struct { needle: []const u8, replacement: []const u8 }{
+        .{ .needle = "\"store\":\"/one\"", .replacement = "\"store\":\"/other\",\"store\":\"/one\"" },
+        .{ .needle = "\"bash\":true", .replacement = "\"bash\":false,\"bash\":true" },
+    }) |case| {
+        const duplicated = try std.mem.replaceOwned(u8, std.testing.allocator, golden, case.needle, case.replacement);
+        defer std.testing.allocator.free(duplicated);
+        try std.testing.expectError(error.DuplicateField, parseHostInfo(duplicated, "/one"));
+    }
+}
+
+test "Host unavailable replies require a known complete error" {
+    for ([_][]const u8{
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"connection_capacity_exhausted\"}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"classification_capacity_exhausted\"}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\"}",
+        "{\"version\":\"1\",\"type\":\"host_unavailable\",\"code\":\"dispatch_fenced\"}",
+    }) |body| try std.testing.expect(validHostUnavailable(body));
+    for ([_][]const u8{
+        "{}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\"}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"dispatch_fenced\"}",
+        "{\"version\":\"1\",\"type\":\"host_unavailable\",\"code\":\"unknown\"}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\",\"code\":\"ordinary_capacity_exhausted\"}",
+    }) |body| try std.testing.expect(!validHostUnavailable(body));
+}
+
 pub const CommandReply = struct {
     status: u16,
     // Borrowed from the caller's ReplyBuffer until that buffer is reused.
@@ -672,7 +829,7 @@ fn sendRecord(
     var file = try std.Io.Dir.cwd().openFile(io, record, .{});
     defer file.close(io);
     const length = try file.length(io);
-    return sendSource(io, paths, route, length, &file, null, drop_reply, reply_buffer);
+    return sendSource(io, paths, route, length, &file, null, drop_reply, reply_buffer, null);
 }
 
 fn sendBytes(
@@ -683,7 +840,7 @@ fn sendBytes(
     drop_reply: ?[]const u8,
     reply_buffer: *ReplyBuffer,
 ) !CommandReply {
-    return sendSource(io, paths, route, body.len, null, body, drop_reply, reply_buffer);
+    return sendSource(io, paths, route, body.len, null, body, drop_reply, reply_buffer, null);
 }
 
 fn sendSource(
@@ -695,17 +852,20 @@ fn sendSource(
     bytes: ?[]const u8,
     drop_reply: ?[]const u8,
     reply_buffer: *ReplyBuffer,
+    until: ?i128,
 ) !CommandReply {
     const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
-    const stream = try address.connect(io);
-    defer stream.close(io);
-    const fd = stream.socket.handle;
+    const stream = if (until == null) try address.connect(io) else null;
+    const fd = if (stream) |connected| connected.socket.handle else try connectUntil(io, address.path, until.?);
+    defer {
+        if (stream) |connected| connected.close(io) else _ = std.c.close(fd);
+    }
     var header_buffer: [512]u8 = undefined;
     const header = if (drop_reply) |drop|
         try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\nX-Rui-Test-Drop-Reply: {s}\r\n\r\n", .{ route, length, drop })
     else
         try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ route, length });
-    try writeAll(fd, header);
+    try writeAllUntil(io, fd, header, until);
     if (file) |source| {
         var buffer: [protocol.content_window_bytes]u8 = undefined;
         var sent: u64 = 0;
@@ -713,11 +873,50 @@ fn sendSource(
             const wanted: usize = @intCast(@min(length - sent, buffer.len));
             const count = try source.readStreaming(io, &.{buffer[0..wanted]});
             if (count != wanted) return error.RecordChangedDuringSend;
-            try writeAll(fd, buffer[0..count]);
+            try writeAllUntil(io, fd, buffer[0..count], until);
             sent += count;
         }
-    } else try writeAll(fd, bytes.?);
-    return readCommandResponse(fd, reply_buffer);
+    } else try writeAllUntil(io, fd, bytes.?, until);
+    return readCommandResponseUntil(io, fd, reply_buffer, until);
+}
+
+fn connectUntil(io: std.Io, path: []const u8, deadline: i128) !std.posix.fd_t {
+    if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= deadline) return error.TransferInactive;
+    const fd = std.posix.system.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+    if (std.posix.errno(fd) != .SUCCESS) return error.UnixConnectFailed;
+    const socket: std.posix.fd_t = @intCast(fd);
+    errdefer _ = std.c.close(socket);
+    if (std.c.fcntl(socket, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return error.UnixConnectFailed;
+    const flags = std.c.fcntl(socket, std.c.F.GETFL);
+    const nonblocking: u32 = @bitCast(std.c.O{ .NONBLOCK = true });
+    if (flags < 0 or std.c.fcntl(socket, std.c.F.SETFL, flags | @as(c_int, @intCast(nonblocking))) < 0) return error.UnixConnectFailed;
+    var address: std.posix.sockaddr.un = .{ .path = undefined };
+    @memcpy(address.path[0..path.len], path);
+    address.path[path.len] = 0;
+    const size: std.posix.socklen_t = @intCast(@offsetOf(std.posix.sockaddr.un, "path") + path.len + 1);
+    if (@hasField(std.posix.sockaddr.un, "len")) address.len = @intCast(size);
+    switch (std.posix.errno(std.c.connect(socket, @ptrCast(&address), size))) {
+        .SUCCESS => {},
+        .INPROGRESS, .AGAIN => {
+            if (!try pollUntil(io, socket, std.posix.POLL.OUT, deadline)) return error.TransferInactive;
+            var result: c_int = 0;
+            var result_len: std.posix.socklen_t = @sizeOf(c_int);
+            if (std.c.getsockopt(socket, std.posix.SOL.SOCKET, std.posix.SO.ERROR, &result, &result_len) < 0 or result_len != @sizeOf(c_int) or result < 0) return error.UnixConnectFailed;
+            if (result != 0) return connectFailure(@enumFromInt(result));
+        },
+        else => |err| return connectFailure(err),
+    }
+    // The readiness probe owns this nonblocking descriptor through its final
+    // body byte; a writable/readable poll must not become an unbounded syscall.
+    return socket;
+}
+
+fn connectFailure(code: std.posix.E) error{ AccessDenied, PermissionDenied, UnixConnectFailed } {
+    return switch (code) {
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        else => error.UnixConnectFailed,
+    };
 }
 
 const ResponseKind = enum { command_json, result_text };
@@ -733,34 +932,68 @@ fn readResponseHead(fd: std.posix.fd_t) !ResponseHead {
 }
 
 fn readResponseHeadWithInactivity(fd: std.posix.fd_t, inactivity_ms: i32) !ResponseHead {
+    return readResponseHeadUntil(std.Io.Threaded.global_single_threaded.io(), fd, inactivity_ms, null);
+}
+
+fn readResponseHeadUntil(io: std.Io, fd: std.posix.fd_t, inactivity_ms: i32, until: ?i128) !ResponseHead {
     var header_buffer: [protocol.max_header_bytes]u8 = undefined;
-    const first_count = try std.posix.read(fd, header_buffer[0..1]);
+    // Ordinary requests start their inactivity window after the first byte;
+    // Host readiness alone has an absolute deadline that includes this wait.
+    const first_count = if (until) |deadline|
+        try readUntil(io, fd, header_buffer[0..1], deadline)
+    else
+        try std.posix.read(fd, header_buffer[0..1]);
     if (first_count == 0) return error.TruncatedResponse;
     var used: usize = first_count;
     while (used < header_buffer.len) {
         if (used >= 4 and std.mem.eql(u8, header_buffer[used - 4 .. used], "\r\n\r\n")) break;
-        if (!try waitReadable(fd, inactivity_ms)) return error.ResponseInactive;
-        const count = try std.posix.read(fd, header_buffer[used .. used + 1]);
+        const count = if (until) |deadline|
+            try readUntil(io, fd, header_buffer[used .. used + 1], deadline)
+        else blk: {
+            if (!try waitReadable(fd, inactivity_ms)) return error.ResponseInactive;
+            break :blk try std.posix.read(fd, header_buffer[used .. used + 1]);
+        };
         if (count == 0) return error.TruncatedResponse;
         used += count;
     } else return error.ResponseHeaderTooLarge;
-    var lines = std.mem.splitSequence(u8, header_buffer[0..used], "\r\n");
+    return parseResponseHead(header_buffer[0..used]);
+}
+
+// Rui uses Content-Length framing. Validate the entire bounded header before
+// interpreting any field; an ignored extension cannot repair invalid syntax.
+fn parseResponseHead(bytes: []const u8) !ResponseHead {
+    if (!std.mem.endsWith(u8, bytes, "\r\n\r\n")) return error.InvalidResponse;
+    var lines = std.mem.splitSequence(u8, bytes[0 .. bytes.len - 4], "\r\n");
     const status_line = lines.next() orelse return error.InvalidResponse;
-    var parts = std.mem.splitScalar(u8, status_line, ' ');
-    if (!std.mem.eql(u8, parts.next() orelse return error.InvalidResponse, "HTTP/1.1")) return error.InvalidResponse;
-    const status = try std.fmt.parseInt(u16, parts.next() orelse return error.InvalidResponse, 10);
+    if (!std.mem.startsWith(u8, status_line, "HTTP/1.1 ") or status_line.len < "HTTP/1.1 200 X".len or
+        status_line[12] != ' ' or std.mem.trim(u8, status_line[13..], " \t").len == 0) return error.InvalidResponse;
+    const code = status_line[9..12];
+    for (code) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidResponse;
+    for (status_line[13..]) |byte| if ((byte < ' ' and byte != '\t') or byte == 0x7f) return error.InvalidResponse;
+    const status = try std.fmt.parseInt(u16, code, 10);
     var length: ?u64 = null;
-    var wire_ok = false;
+    var wire_ok: ?bool = null;
     var kind: ?ResponseKind = null;
     while (lines.next()) |line| {
-        if (line.len == 0) break;
+        if (line.len == 0) return error.InvalidResponse;
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidResponse;
-        const name = std.mem.trim(u8, line[0..colon], " \t");
+        const name = line[0..colon];
+        if (name.len == 0) return error.InvalidResponse;
+        for (name) |byte| {
+            if (!std.ascii.isAlphanumeric(byte) and std.mem.indexOfScalar(u8, "!#$%&'*+-.^_`|~", byte) == null)
+                return error.InvalidResponse;
+        }
+        for (line[colon + 1 ..]) |byte| {
+            if (byte != '\t' and (byte < ' ' or byte == 0x7f)) return error.InvalidResponse;
+        }
         const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
         if (std.ascii.eqlIgnoreCase(name, "Content-Length")) {
             if (length != null) return error.InvalidResponse;
-            length = try std.fmt.parseInt(u64, value, 10);
+            if (value.len == 0) return error.InvalidResponse;
+            for (value) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidResponse;
+            length = std.fmt.parseInt(u64, value, 10) catch return error.InvalidResponse;
         } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Wire-Version")) {
+            if (wire_ok != null) return error.InvalidResponse;
             wire_ok = std.mem.eql(u8, value, protocol.wire_version);
         } else if (std.ascii.eqlIgnoreCase(name, "Content-Type")) {
             if (kind != null) return error.InvalidResponse;
@@ -770,9 +1003,13 @@ fn readResponseHeadWithInactivity(fd: std.posix.fd_t, inactivity_ms: i32) !Respo
                 .result_text
             else
                 return error.InvalidResponse;
+        } else if (std.ascii.eqlIgnoreCase(name, "Transfer-Encoding") or
+            std.ascii.eqlIgnoreCase(name, "Content-Encoding"))
+        {
+            return error.InvalidResponse;
         }
     }
-    if (!wire_ok) return error.WrongWireVersion;
+    if (wire_ok != true) return error.WrongWireVersion;
     return .{
         .status = status,
         .content_length = length orelse return error.InvalidResponse,
@@ -781,10 +1018,14 @@ fn readResponseHeadWithInactivity(fd: std.posix.fd_t, inactivity_ms: i32) !Respo
 }
 
 fn readCommandResponse(fd: std.posix.fd_t, reply_buffer: *ReplyBuffer) !CommandReply {
+    return readCommandResponseUntil(std.Io.Threaded.global_single_threaded.io(), fd, reply_buffer, null);
+}
+
+fn readCommandResponseUntil(io: std.Io, fd: std.posix.fd_t, reply_buffer: *ReplyBuffer, until: ?i128) !CommandReply {
     reply_buffer.len = 0;
-    const head = try readResponseHead(fd);
+    const head = try readResponseHeadUntil(io, fd, 60_000, until);
     if (head.kind != .command_json) return error.InvalidResponse;
-    return readCommandBody(fd, head, reply_buffer);
+    return readCommandBodyUntil(io, fd, head, reply_buffer, until);
 }
 
 fn readResultResponse(
@@ -840,14 +1081,22 @@ fn readReportResponse(
 }
 
 fn readCommandBody(fd: std.posix.fd_t, head: ResponseHead, reply_buffer: *ReplyBuffer) !CommandReply {
+    return readCommandBodyUntil(std.Io.Threaded.global_single_threaded.io(), fd, head, reply_buffer, null);
+}
+
+fn readCommandBodyUntil(io: std.Io, fd: std.posix.fd_t, head: ResponseHead, reply_buffer: *ReplyBuffer, until: ?i128) !CommandReply {
     reply_buffer.len = 0;
     errdefer reply_buffer.len = 0;
     if (head.content_length > protocol.max_response_bytes) return error.ResponseTooLarge;
     const body_length: usize = @intCast(head.content_length);
     var offset: usize = 0;
     while (offset < body_length) {
-        if (!try waitReadable(fd, 60_000)) return error.ResponseInactive;
-        const count = try std.posix.read(fd, reply_buffer.bytes[offset..body_length]);
+        const count = if (until) |deadline|
+            try readUntil(io, fd, reply_buffer.bytes[offset..body_length], deadline)
+        else blk: {
+            if (!try waitReadable(fd, 60_000)) return error.ResponseInactive;
+            break :blk try std.posix.read(fd, reply_buffer.bytes[offset..body_length]);
+        };
         if (count == 0) return error.TruncatedResponse;
         offset += count;
     }
@@ -864,17 +1113,51 @@ fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) !bool {
     return try std.posix.poll(&poll_fd, timeout_ms) != 0;
 }
 
+// Unlike posix.poll's EINTR retry, recompute the remaining time after every
+// interruption. Only the Host-info exchange uses this absolute deadline.
+fn pollUntil(io: std.Io, fd: std.posix.fd_t, events: i16, deadline: i128) !bool {
+    while (true) {
+        const left = deadline - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+        if (left <= 0) return false;
+        const milliseconds: c_int = @intCast(@min(std.math.maxInt(c_int), @divTrunc(left + std.time.ns_per_ms - 1, std.time.ns_per_ms)));
+        var poll_fd = [_]std.c.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
+        const result = std.c.poll(&poll_fd, poll_fd.len, milliseconds);
+        switch (std.posix.errno(result)) {
+            .SUCCESS => return result != 0,
+            .INTR => continue,
+            else => return error.PollFailed,
+        }
+    }
+}
+
+fn readUntil(io: std.Io, fd: std.posix.fd_t, buffer: []u8, deadline: i128) !usize {
+    while (true) {
+        if (!try pollUntil(io, fd, std.posix.POLL.IN, deadline)) return error.ResponseInactive;
+        return std.posix.read(fd, buffer) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+    }
+}
+
 fn writeAll(fd: std.posix.fd_t, value: []const u8) !void {
+    return writeAllUntil(std.Io.Threaded.global_single_threaded.io(), fd, value, null);
+}
+
+fn writeAllUntil(io: std.Io, fd: std.posix.fd_t, value: []const u8, until: ?i128) !void {
     var offset: usize = 0;
     while (offset < value.len) {
-        var poll_fd = [_]std.posix.pollfd{.{
-            .fd = fd,
-            .events = std.posix.POLL.OUT,
-            .revents = 0,
-        }};
-        if (try std.posix.poll(&poll_fd, 60_000) == 0) return error.TransferInactive;
+        if (until) |deadline| {
+            if (!try pollUntil(io, fd, std.posix.POLL.OUT, deadline)) return error.TransferInactive;
+        } else {
+            var poll_fd = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
+            if (try std.posix.poll(&poll_fd, 60_000) == 0) return error.TransferInactive;
+        }
         const count = std.c.write(fd, value[offset..].ptr, value.len - offset);
-        if (count < 0) return error.WriteFailed;
+        if (count < 0) {
+            if (until != null and (std.posix.errno(count) == .AGAIN or std.posix.errno(count) == .INTR)) continue;
+            return error.WriteFailed;
+        }
         if (count == 0) return error.ConnectionClosed;
         offset += @intCast(count);
     }
@@ -913,6 +1196,45 @@ test "Host processing wait starts inactivity only after the first response byte"
     defer writer.join();
     const head = try readResponseHeadWithInactivity(sockets[0], 10);
     try std.testing.expectEqual(@as(u16, 200), head.status);
+}
+
+test "Host-info first byte is bounded independently of normal processing waits" {
+    const sockets = try socketPair();
+    defer closeTestDescriptor(sockets[0]);
+    const writer = try std.Thread.spawn(.{}, delayedResponse, .{
+        std.testing.io,
+        sockets[1],
+        std.Io.Duration.fromMilliseconds(50),
+        empty_test_response,
+    });
+    defer writer.join();
+    var buffer: ReplyBuffer = .{};
+    const until = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
+    try std.testing.expectError(error.ResponseInactive, readCommandResponseUntil(std.testing.io, sockets[0], &buffer, until));
+}
+
+test "Host-info deadline includes partial header and body" {
+    const response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\nab";
+    const body_start = std.mem.indexOf(u8, response, "\r\n\r\n").? + 4;
+    for ([_]usize{ 1, body_start + 1 }) |prefix_len| {
+        const sockets = try socketPair();
+        defer closeTestDescriptor(sockets[0]);
+        const flags = std.c.fcntl(sockets[0], std.c.F.GETFL);
+        const nonblocking: u32 = @bitCast(std.c.O{ .NONBLOCK = true });
+        try std.testing.expect(flags >= 0 and std.c.fcntl(sockets[0], std.c.F.SETFL, flags | @as(c_int, @intCast(nonblocking))) == 0);
+        try writeAll(sockets[1], response[0..prefix_len]);
+        const writer = try std.Thread.spawn(.{}, delayedResponse, .{
+            std.testing.io,
+            sockets[1],
+            std.Io.Duration.fromMilliseconds(50),
+            response[prefix_len..],
+        });
+        defer writer.join();
+        var buffer: ReplyBuffer = .{};
+        const until = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
+        try std.testing.expectError(error.ResponseInactive, readCommandResponseUntil(std.testing.io, sockets[0], &buffer, until));
+        try std.testing.expectEqual(@as(usize, 0), buffer.len);
+    }
 }
 
 test "Host processing wait does not consume response transfer inactivity" {
@@ -969,6 +1291,32 @@ test "response closure and truncation stay explicit" {
         var buffer: ReplyBuffer = .{};
         try std.testing.expectError(error.TruncatedResponse, readCommandResponse(sockets[0], &buffer));
     }
+}
+
+test "response framing rejects ambiguous or malformed fields before interpreting body" {
+    for ([_][]const u8{
+        "Content-Length : 0\r\n",
+        "Content-Length: +0\r\n",
+        "Content-Length: 0_0\r\n",
+        "Transfer-Encoding: chunked\r\nContent-Length: 0\r\n",
+        "Content-Length: 0\r\nTransfer-Encoding: identity\r\n",
+        "Bad Name: value\r\nContent-Length: 0\r\n",
+        "X-Extra: valid\x01not\r\nContent-Length: 0\r\n",
+        "X-Extra: valid\r\n folded\r\nContent-Length: 0\r\n",
+    }) |fields| {
+        const sockets = try socketPair();
+        defer closeTestDescriptor(sockets[0]);
+        defer closeTestDescriptor(sockets[1]);
+        var response: [512]u8 = undefined;
+        const bytes = try std.fmt.bufPrint(&response, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\n{s}\r\n", .{fields});
+        try writeAll(sockets[1], bytes);
+        try std.testing.expectError(error.InvalidResponse, readResponseHead(sockets[0]));
+    }
+    const sockets = try socketPair();
+    defer closeTestDescriptor(sockets[0]);
+    defer closeTestDescriptor(sockets[1]);
+    try writeAll(sockets[1], "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 00\r\nX-Rui-Wire-Version: 1\r\nX-Extra: one\r\nx-extra: two\r\n\r\n");
+    try std.testing.expectEqual(@as(u16, 200), (try readResponseHead(sockets[0])).status);
 }
 
 test "capture batches escaped file output and flushes before publication" {

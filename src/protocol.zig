@@ -82,6 +82,7 @@ pub const Configuration = struct {
 };
 
 pub const Kind = enum {
+    host_info,
     configure,
     message,
     session_stop,
@@ -229,7 +230,34 @@ pub const InspectSession = struct {
     profile: ReportProfile = .current,
 };
 
+// Random per serving lifetime; not a PID, Store identity, or recovery token.
+pub const InstanceId = [16]u8;
+
+pub fn parseInstanceId(text: []const u8) !InstanceId {
+    if (text.len != 32) return error.InvalidInstanceId;
+    for (text) |byte| {
+        if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return error.InvalidInstanceId;
+    }
+    var id: InstanceId = undefined;
+    _ = try std.fmt.hexToBytes(&id, text);
+    return id;
+}
+
+pub const HostInfo = struct {
+    version: []const u8,
+    type: []const u8,
+    store: []const u8,
+    instance: []const u8,
+    active_capacity: []const u8,
+    capabilities: struct {
+        bash: bool,
+        model: bool,
+        managed_authentication: bool,
+    },
+};
+
 pub const Request = union(Kind) {
+    host_info: struct { store: Bounded(max_store_bytes) = .{} },
     configure: ConfigureCommand,
     message: MessageCommand,
     session_stop: SessionStopCommand,
@@ -245,7 +273,7 @@ pub const Request = union(Kind) {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session => {},
+            .host_info, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session => {},
         }
     }
 
@@ -373,7 +401,9 @@ const Parser = struct {
         try self.expectKey("kind");
         var kind_text: Bounded(32) = .{};
         try self.readSmallString(&kind_text);
-        const kind: Kind = if (kind_text.eql("configure"))
+        const kind: Kind = if (kind_text.eql("host_info"))
+            .host_info
+        else if (kind_text.eql("configure"))
             .configure
         else if (kind_text.eql("message"))
             .message
@@ -402,6 +432,7 @@ const Parser = struct {
         try self.readSmallString(&store);
 
         var request: Request = switch (kind) {
+            .host_info => .{ .host_info = .{ .store = store } },
             .configure => .{ .configure = try self.parseConfigure(store) },
             .message => .{ .message = try self.parseMessage(store) },
             .session_stop => .{ .session_stop = try self.parseSessionStop(store) },
@@ -932,6 +963,9 @@ pub const max_observe_command_request_bytes =
     "{\"version\":\"1\",\"kind\":\"observe_command\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) +
     ",\"key\":".len + maximumJsonStringBytes(max_key_bytes) + "}".len;
+pub const max_host_info_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"host_info\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) + "}".len;
 pub const max_read_result_request_bytes =
     "{\"version\":\"1\",\"kind\":\"read_result\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) +
@@ -952,7 +986,7 @@ pub const max_read_action_call_id_request_bytes =
     ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
     ",\"action\":\"".len + 20 + "\"}".len;
 pub const max_client_request_bytes = @max(
-    @max(max_observe_command_request_bytes, max_read_result_request_bytes),
+    @max(@max(max_observe_command_request_bytes, max_read_result_request_bytes), max_host_info_request_bytes),
     @max(
         max_inspect_session_request_bytes,
         @max(max_read_action_arguments_request_bytes, max_read_action_call_id_request_bytes),
@@ -1077,7 +1111,13 @@ pub const max_control_response_bytes = @max(
 
 // Only bounded replies and errors use this resident buffer. Complete reports
 // and result content use their independent streamed delivery paths.
-pub const max_response_bytes = max_control_response_bytes;
+pub const max_host_info_response_bytes =
+    "{\"version\":\"1\",\"type\":\"host_info\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) +
+    ",\"instance\":\"".len + 32 +
+    "\",\"active_capacity\":\"".len + 20 +
+    "\",\"capabilities\":{\"bash\":true,\"model\":true,\"managed_authentication\":true}}".len;
+pub const max_response_bytes = @max(max_control_response_bytes, max_host_info_response_bytes);
 
 pub fn FixedJsonBuffer(comptime capacity: usize) type {
     return struct {

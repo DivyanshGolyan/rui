@@ -244,6 +244,27 @@ pub fn build(b: *std.Build) void {
     );
     descriptor_capacity_integration_step.dependOn(&descriptor_capacity_integration.step);
 
+    const host_status_actor = b.addExecutable(.{
+        .name = "rui-host-status-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/host_status_actor.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    host_status_actor.root_module.link_libc = true;
+    host_status_actor.root_module.addImport("client", b.createModule(.{
+        .root_source_file = b.path("src/client.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    }));
+    const host_status_integration = b.addSystemCommand(&.{"python3"});
+    host_status_integration.addFileArg(b.path("tests/integration/host_status_integration.py"));
+    host_status_integration.addArtifactArg(release_safe);
+    host_status_integration.addArtifactArg(host_status_actor);
+    const host_status_step = b.step("host-status-integration", "Run native Host information and lease observation cases");
+    host_status_step.dependOn(&host_status_integration.step);
+
     const debug = addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
     const debug_integration = b.addSystemCommand(&.{"sh"});
     debug_integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
@@ -273,6 +294,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addArtifactArg(debug);
     fast_integrations.addArg("parallel");
     fast_integrations.addArtifactArg(tests);
+    fast_integrations.addArtifactArg(host_status_actor);
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.step.dependOn(&release.step);
     fast_integrations.step.dependOn(&run_evaluator_host.step);
@@ -286,6 +308,7 @@ pub fn build(b: *std.Build) void {
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
     process_integrations.addArtifactArg(release_safe);
     process_integrations.addArtifactArg(debug);
+    process_integrations.addArtifactArg(host_status_actor);
     const full_evaluator = b.addSystemCommand(&.{"python3"});
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     full_evaluator.addArtifactArg(evaluator);
