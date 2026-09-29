@@ -4,9 +4,11 @@ set -eu
 directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 release_safe=$1
 debug=$2
+host_status_actor=${4:-${3:-}}
 
 if [ "${3:-}" = parallel ]; then
     test_binary=$4
+    host_status_actor=$5
     output=$(mktemp -d "${TMPDIR:-/tmp}/rui-check.XXXXXX")
     trap 'rm -rf "$output"' EXIT
     pids=
@@ -30,6 +32,7 @@ if [ "${3:-}" = parallel ]; then
     run_case codex python3 "$directory/codex_integration.py" "$release_safe"
     run_case control python3 "$directory/control_integration.py" "$release_safe"
     run_case descriptor-capacity python3 "$directory/descriptor_capacity_integration.py" "$release_safe"
+    run_case host-status python3 "$directory/host_status_integration.py" "$release_safe" "$host_status_actor"
 
     set -- $pids
     failed=0
@@ -76,6 +79,7 @@ python3 "$directory/bash_recovery_integration.py" "$release_safe"
 python3 "$directory/codex_integration.py" "$release_safe"
 python3 "$directory/control_integration.py" "$release_safe"
 python3 "$directory/descriptor_capacity_integration.py" "$release_safe"
+python3 "$directory/host_status_integration.py" "$release_safe" "$host_status_actor"
 sh "$directory/admission_integration.sh" "$debug" artifact-smoke
 python3 "$directory/host_process_test.py"
 python3 "$directory/host_allocator_test.py" "$release_safe"

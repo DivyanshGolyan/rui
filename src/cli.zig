@@ -26,6 +26,7 @@ pub fn main(init: std.process.Init) !void {
         return serve(init, args[2..]);
     }
     if (std.mem.eql(u8, command, "login")) return login(init, args[2..]);
+    if (std.mem.eql(u8, command, "host")) return host(init, args[2..]);
     if (std.mem.eql(u8, command, "setup")) try setup(init, args[2..]) else if (std.mem.eql(u8, command, "session")) try enterSession(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, args[2..], false) else return usage();
     try postCommandHold(init);
 }
@@ -147,6 +148,32 @@ fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![
         return buffer[0..defaults.store.len];
     }
     return preferences.defaultStore(home, buffer);
+}
+
+fn host(init: std.process.Init, args: []const []const u8) !void {
+    if (args.len == 0 or !std.mem.eql(u8, args[0], "status")) return usage();
+    var explicit: ?[]const u8 = null;
+    var index: usize = 1;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--store") and explicit == null) {
+            explicit = try takeValue(args, &index);
+        } else return usage();
+    }
+    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const selected = try selectedStore(init, explicit, &fallback);
+    switch (client.hostStatus(init.io, selected)) {
+        .ready => |ready| {
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Host: ready\n");
+            try writeSafeField(init.io, "Store: ", ready.store.slice());
+            var line: [160]u8 = undefined;
+            const instance = std.fmt.bytesToHex(ready.instance, .lower);
+            try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "Wire: {s}\nActive capacity: {d}\nBash: {s}\nModel: {s}\nManaged authentication: {s}\nInstance: {s}\n", .{ protocol.wire_version, ready.active_capacity, if (ready.capabilities.bash) "enabled" else "disabled", if (ready.capabilities.model) "enabled" else "disabled", if (ready.capabilities.managed_authentication) "enabled" else "disabled", &instance }));
+        },
+        .unavailable => try std.Io.File.stdout().writeStreamingAll(init.io, "Host: unavailable (no current Store owner established)\n"),
+        .owned_unavailable => try std.Io.File.stdout().writeStreamingAll(init.io, "Host: owned but unavailable (starting or draining; completion unconfirmed)\n"),
+        .incompatible => try std.Io.File.stdout().writeStreamingAll(init.io, "Host: incompatible (protected reply or wire version)\n"),
+        .access_failure => try std.Io.File.stdout().writeStreamingAll(init.io, "Host: access failure (selected Store or protected Host endpoint)\n"),
+    }
 }
 
 fn login(init: std.process.Init, args: []const []const u8) !void {
@@ -1811,6 +1838,8 @@ fn usage() error{InvalidArguments} {
     std.debug.print(
         \\usage:
         \\  rui login codex
+        \\  rui host status [--store PATH]
+        \\    Read the selected Store's protected Host readiness, capacity and capabilities without starting it.
         \\  rui setup [--store PATH] [--provider codex] [--model MODEL]
         \\    Inspect without arguments; save private defaults for future interactive Sessions.
         \\    Selected Store must exist and pass canonical/private checks.

@@ -117,6 +117,7 @@ const Host = struct {
     allocator: std.mem.Allocator,
     lease: *platform.StoreLease,
     store: *store_module.Store,
+    instance: protocol.InstanceId = undefined,
     faults: Faults,
     provider_endpoint: ?[]const u8 = null,
     provider_ca_file: ?[]const u8 = null,
@@ -295,6 +296,7 @@ pub fn serve(
         provider_initialization_owned = true;
     }
     errdefer if (provider_initialization_owned) provider.deinitialize();
+    try std.Io.randomSecure(io, &host.instance);
     const execution_thread = try std.Thread.spawn(.{}, executionMain, .{&host});
     provider_initialization_owned = false;
     defer {
@@ -2799,6 +2801,7 @@ fn connectionMain(connection: *Connection) void {
 }
 
 const Route = enum {
+    host_info,
     configure,
     message,
     session_stop,
@@ -2821,6 +2824,7 @@ const Header = struct {
     route: Route,
     content_length: u64,
     drop: DropMode = .none,
+    instance: ?protocol.InstanceId = null,
 };
 
 fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void {
@@ -2885,6 +2889,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
         return respondStatic(host.io, fd, 409, "invocation_error", "wrong_store_identity");
     }
     const route_matches = switch (request) {
+        .host_info => header.route == .host_info,
         .configure => header.route == .configure,
         .message => header.route == .message,
         .session_stop => header.route == .session_stop,
@@ -2899,12 +2904,33 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
     if (!route_matches) {
         return respondStatic(host.io, fd, 400, "invocation_error", "route_kind_mismatch");
     }
+    if (header.instance) |instance| {
+        if (!std.mem.eql(u8, &instance, &host.instance)) {
+            return respondStatic(host.io, fd, 409, "invocation_error", "host_instance_changed");
+        }
+    }
     if (header.drop == .before_admission) return;
     if (header.drop == .during_admission and std.c.shutdown(fd, std.c.SHUT.RDWR) != 0) {
         return error.InjectedDisconnectFailed;
     }
 
     switch (request) {
+        .host_info => {
+            if (!host.launchAllowed()) {
+                return respondStatic(host.io, fd, 503, "host_unavailable", "dispatch_fenced");
+            }
+            var response: protocol.ResponseBuffer = .{};
+            try response.append("{\"version\":\"1\",\"type\":\"host_info\",\"store\":");
+            try response.appendJsonString(host.lease.paths.store.slice());
+            try response.append(",\"instance\":\"");
+            try response.append(&std.fmt.bytesToHex(host.instance, .lower));
+            try response.appendFmt("\",\"active_capacity\":\"{d}\",\"capabilities\":{{\"bash\":true,\"model\":{s},\"managed_authentication\":{s}}}}}", .{
+                host.custody.records.len,
+                if (host.provider_endpoint != null) "true" else "false",
+                if (host.provider_endpoint != null and host.authentication != null) "true" else "false",
+            });
+            deliverResponse(host.io, fd, 200, response.slice());
+        },
         .configure => |*command| {
             const result = host.store.configure(command, .{
                 .content_read = host.faults.content_read,
@@ -3132,7 +3158,9 @@ const HeaderReader = struct {
         {
             return error.InvalidRequestLine;
         }
-        return if (std.mem.eql(u8, path, "/v1/configure"))
+        return if (std.mem.eql(u8, path, "/v1/host-info"))
+            .host_info
+        else if (std.mem.eql(u8, path, "/v1/configure"))
             .configure
         else if (std.mem.eql(u8, path, "/v1/message"))
             .message
@@ -3170,6 +3198,7 @@ const HeaderReader = struct {
         var wire_ok = false;
         var content_type_ok = false;
         var drop: DropMode = .none;
+        var instance: ?protocol.InstanceId = null;
         while (lines.next()) |line| {
             if (line.len == 0) break;
             const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidHeader;
@@ -3182,6 +3211,9 @@ const HeaderReader = struct {
                 content_type_ok = std.ascii.eqlIgnoreCase(value, "application/json");
             } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Wire-Version")) {
                 wire_ok = std.mem.eql(u8, value, protocol.wire_version);
+            } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Host-Instance")) {
+                if (instance != null) return error.DuplicateHostInstance;
+                instance = try protocol.parseInstanceId(value);
             } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Test-Drop-Reply")) {
                 drop = if (std.mem.eql(u8, value, "before-admission"))
                     .before_admission
@@ -3201,6 +3233,7 @@ const HeaderReader = struct {
             .route = route,
             .content_length = content_length orelse return error.MissingContentLength,
             .drop = drop,
+            .instance = instance,
         };
     }
 
