@@ -33,6 +33,48 @@ def cli_status(home, *args):
     return result.stdout
 
 
+def read_request(connection):
+    # Closing with an unread request can reset the connection, replacing the
+    # response classification under test with a transport failure.
+    connection.settimeout(5)
+    request = b""
+    while b"\r\n\r\n" not in request:
+        chunk = connection.recv(4096)
+        assert chunk, "truncated fixture request headers"
+        request += chunk
+        assert len(request) <= 16 * 1024, "fixture request headers exceeded bound"
+    head, body = request.split(b"\r\n\r\n", 1)
+    lengths = [line.split(b":", 1)[1].strip() for line in head.split(b"\r\n")[1:]
+        if line.lower().startswith(b"content-length:")]
+    assert len(lengths) == 1 and lengths[0].isdigit(), head
+    length = int(lengths[0])
+    assert len(body) <= length <= 8192, "fixture request body exceeded bound"
+    while len(body) < length:
+        chunk = connection.recv(length - len(body))
+        assert chunk, "truncated fixture request body"
+        body += chunk
+    return body
+
+
+def prove_fragmented_request():
+    class FragmentedRequest:
+        chunks = iter((
+            b"POST /v1/host-info HTTP/1.1\r\nContent-Length: 8\r\n\r\n",
+            b'{"x":',
+            b'17}',
+        ))
+
+        def settimeout(self, timeout):
+            assert timeout > 0
+
+        def recv(self, limit):
+            chunk = next(self.chunks)
+            assert len(chunk) <= limit
+            return chunk
+
+    assert read_request(FragmentedRequest()) == b'{"x":17}'
+
+
 def start(store, capacity, *options):
     return start_ready_process(
         [RUI, "serve", "--store", store, "--active-capacity", str(capacity), *options],
@@ -69,6 +111,7 @@ def raw_info(sock, store, instance=None, *, kind="host_info", route="host-info",
 
 
 def main():
+    prove_fragmented_request()
     with tempfile.TemporaryDirectory(prefix="rui-host-info-") as root:
         store = pathlib.Path(root) / "store"
         home = pathlib.Path(root) / "home"
@@ -106,7 +149,7 @@ def main():
                     def stalled_peer():
                         connection, _ = endpoint.accept()
                         with connection:
-                            connection.recv(4096)
+                            read_request(connection)
                             if partial:
                                 connection.sendall(partial)
                             release.wait(timeout=4)
@@ -129,7 +172,7 @@ def main():
                     for _ in range(2):
                         connection, _ = endpoint.accept()
                         with connection:
-                            connection.recv(4096)
+                            read_request(connection)
                             connection.sendall(
                                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
                                 b"Content-Length: 2\r\nX-Rui-Wire-Version: 2\r\n\r\n{}"
@@ -193,13 +236,15 @@ def main():
                         for _ in range(2):
                             connection, _ = endpoint.accept()
                             with connection:
-                                connection.recv(4096)
+                                read_request(connection)
                                 connection.sendall(response)
 
                     peer = threading.Thread(target=malformed_peer, daemon=True)
                     peer.start()
-                    assert status(store) == "incompatible"
-                    assert cli_status(home, "--store", store).startswith("Host: incompatible")
+                    observed = status(store)
+                    assert observed == "incompatible", (response, observed)
+                    observed = cli_status(home, "--store", store)
+                    assert observed.startswith("Host: incompatible"), (response, observed)
                     peer.join(timeout=3)
                     assert not peer.is_alive()
                 stale.unlink()
@@ -216,7 +261,7 @@ def main():
                         for _ in range(2):
                             connection, _ = endpoint.accept()
                             with connection:
-                                connection.recv(4096)
+                                read_request(connection)
                                 connection.sendall(response)
 
                     peer = threading.Thread(target=unavailable_peer, daemon=True)
