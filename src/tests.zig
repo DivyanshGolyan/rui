@@ -8,6 +8,7 @@ test {
     _ = @import("execution_turn.zig");
     _ = @import("protocol.zig");
     _ = @import("platform.zig");
+    _ = @import("HostDiagnostics.zig");
     _ = @import("store.zig");
     _ = @import("server.zig");
     _ = @import("client.zig");

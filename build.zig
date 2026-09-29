@@ -79,6 +79,7 @@ pub fn build(b: *std.Build) void {
     });
     configureSqlite(b, tests);
     configureBashPlatform(b, tests);
+    configureHostLaunch(b, tests);
     configureTerminalEditor(b, tests);
     configureTransport(b, tests, target, pinned_transport);
     const run_tests = b.addRunArtifact(tests);
@@ -264,6 +265,12 @@ pub fn build(b: *std.Build) void {
     host_status_integration.addArtifactArg(host_status_actor);
     const host_status_step = b.step("host-status-integration", "Run native Host information and lease observation cases");
     host_status_step.dependOn(&host_status_integration.step);
+
+    const host_launch_integration = b.addSystemCommand(&.{"python3"});
+    host_launch_integration.addFileArg(b.path("tests/integration/host_launch_integration.py"));
+    host_launch_integration.addArtifactArg(release_safe);
+    const host_launch_step = b.step("host-launch-integration", "Run detached Host launch, alias convergence and startup-failure cases");
+    host_launch_step.dependOn(&host_launch_integration.step);
 
     const debug = addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
     const debug_integration = b.addSystemCommand(&.{"sh"});
@@ -605,6 +612,7 @@ fn addRui(
     executable.root_module.link_libc = true;
     configureSqlite(b, executable);
     configureBashPlatform(b, executable);
+    configureHostLaunch(b, executable);
     configureTerminalEditor(b, executable);
     configureTransport(b, executable, target, pinned_transport);
     return executable;
@@ -702,6 +710,13 @@ fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
 fn configureBashPlatform(b: *std.Build, compile: *std.Build.Step.Compile) void {
     compile.root_module.addCSourceFile(.{
         .file = b.path("src/bash_platform.c"),
+        .flags = &.{"-std=c11"},
+    });
+}
+
+fn configureHostLaunch(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    compile.root_module.addCSourceFile(.{
+        .file = b.path("src/host_launch.c"),
         .flags = &.{"-std=c11"},
     });
 }
