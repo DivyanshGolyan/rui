@@ -5,6 +5,7 @@ import http.server
 import concurrent.futures
 import hashlib
 import json
+import os
 import pathlib
 import select
 import shutil
@@ -17,7 +18,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, TestHTTPServer, start_ready_process, stop_process
+from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, start_ready_process, stop_process
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -820,16 +821,19 @@ def prove_sealed_interruption_and_cleanup(state):
     endpoint, endpoint_thread = start_success_endpoint()
     process = None
     milestones = None
+    settlement_gate = ReleaseGate(state / "sealed-result-gate")
+    cleanup_gate = state / "sealed-cleanup-gate"
+    cleanup_gate.touch()
     try:
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
         process, _ = start_host(
             store,
             url,
             "--test-phase-trace",
-            "--test-before-result-delay-ms",
-            "4000",
-            "--test-cleanup-delay-ms",
-            "1500",
+            "--test-model-result-gate-path",
+            settlement_gate.path,
+            "--test-model-cleanup-gate-path",
+            cleanup_gate,
             "--test-suppress-first-control-hint",
         )
         milestones = HostDiagnostics(process)
@@ -862,12 +866,14 @@ def prove_sealed_interruption_and_cleanup(state):
         assert replayed["answer"]["status"] == "accepted", replayed
         assert replayed["answer"]["replayed"] is True, replayed
         milestones.wait("control_hint_published", subject="sealed-interrupt")
+        settlement_gate.release()
         milestones.wait(
             "model_settlement_superseded", operation=processing["operation"]
         )
         milestones.wait("cleanup_started", operation=processing["operation"])
         during_cleanup = inspect_execution(store, "phase/sealed")
         assert during_cleanup["custody_occupied"] == "1", during_cleanup
+        cleanup_gate.unlink()
         milestones.wait(
             "cleanup_completed", operation=processing["operation"], timeout=8
         )
@@ -897,9 +903,21 @@ def prove_sealed_interruption_and_cleanup(state):
             timeout=15,
         )
         assert unavailable.returncode != 0, unavailable
+        # A reader may resolve the FIFO name just before its sole writer
+        # closes. Reproduce that no-writer state without a scheduler race.
+        os.mkfifo(settlement_gate.path, mode=0o600)
+        message(state, store, "released-gate-message", "phase/sealed", "after release")
+        wait_for(
+            lambda: observe(store, "released-gate-message").get("result", {}).get("status")
+            == "completed",
+            "settlement gate with no writer does not strand its reader",
+        )
     finally:
         if process is not None:
             stop_process(process)
+        settlement_gate.release()
+        settlement_gate.path.unlink(missing_ok=True)
+        cleanup_gate.unlink(missing_ok=True)
         if milestones is not None:
             milestones.close()
         stop_success_endpoint(endpoint, endpoint_thread)
@@ -914,14 +932,16 @@ def prove_delivery_and_settlement_contention(
     process = None
     milestones = None
     inspections = []
+    inspection_gate = ReleaseGate(state / "contention-inspection-gate")
+    settlement_gate = ReleaseGate(state / "contention-result-gate")
     try:
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
         extra = [
             "--test-phase-trace",
-            "--test-inspection-reply-delay-ms",
-            "8000",
-            "--test-before-result-delay-ms",
-            "1200",
+            "--test-inspection-reply-gate-path",
+            inspection_gate.path,
+            "--test-model-result-gate-path",
+            settlement_gate.path,
         ]
         if cleanup_delay_ms:
             extra += ["--test-cleanup-delay-ms", str(cleanup_delay_ms)]
@@ -1014,12 +1034,14 @@ def prove_delivery_and_settlement_contention(
             assert int(publication["at_ns"]) <= int(
                 timing_by_key[command_key]["reply_complete_at_ns"]
             )
+        settlement_gate.release()
         milestones.wait("model_settlement_superseded", timeout=8)
         if sample_host is not None:
             resource_samples["controls_acknowledged"] = sample_host(
                 process.pid, "controls_acknowledged"
             )
 
+        inspection_gate.release()
         with concurrent.futures.ThreadPoolExecutor(max_workers=24) as pool:
             responses = list(
                 pool.map(lambda connection: read_http_response(connection, 12), inspections)
@@ -1072,6 +1094,8 @@ def prove_delivery_and_settlement_contention(
             connection.close()
         if process is not None:
             stop_process(process)
+        inspection_gate.release()
+        settlement_gate.release()
         if milestones is not None:
             milestones.close()
         stop_success_endpoint(endpoint, endpoint_thread)
@@ -1092,13 +1116,13 @@ def prove_real_settlement_contention(
     controls_start = threading.Event()
     blocked_results = []
     replacement_ordinary = []
+    inspection_gate = ReleaseGate(state / "real-inspection-gate")
     try:
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
-        inspection_delay_ms = 20_000 if sample_host is not None else 8_000
         extra = [
             "--test-phase-trace",
-            "--test-inspection-reply-delay-ms",
-            str(inspection_delay_ms),
+            "--test-inspection-reply-gate-path",
+            inspection_gate.path,
             "--test-client-send-buffer-bytes",
             "4096",
         ]
@@ -1227,12 +1251,11 @@ def prove_real_settlement_contention(
             resource_samples["controls_acknowledged"] = sample_host(
                 process.pid, "controls_acknowledged"
             )
+        inspection_gate.release()
         with concurrent.futures.ThreadPoolExecutor(max_workers=24) as pool:
             responses = list(
                 pool.map(
-                    lambda connection: read_http_response(
-                        connection, inspection_delay_ms / 1000 + 5
-                    ),
+                    lambda connection: read_http_response(connection, 10),
                     inspections,
                 )
             )
@@ -1302,7 +1325,7 @@ def prove_real_settlement_contention(
         post_disconnect_execution = inspect_execution(
             store,
             session,
-            timeout=inspection_delay_ms / 1000 + 5,
+            timeout=10,
         )
         assert post_disconnect_execution["dispatch_fenced"] is False
 
@@ -1361,6 +1384,7 @@ def prove_real_settlement_contention(
             connection.close()
         if process is not None:
             stop_process(process)
+        inspection_gate.release()
         if milestones is not None:
             milestones.close()
         stop_success_endpoint(endpoint, endpoint_thread)

@@ -56,6 +56,13 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
         // The exact Action is already printed. Nothing received before the
         // complete fresh prompt may count as its decision.
         if (termios.tcdrain(1) != 0 or termios.tcflush(0, termios.TCIFLUSH) != 0) return error.TerminalFlushFailed;
+        // Borrowed fixture descriptor: prompt visibility alone does not prove
+        // the input flush finished. Signal only after that boundary.
+        if (std.c.getenv("RUI_TEST_ACTION_READY_FD")) |text| {
+            const fd = try std.fmt.parseInt(std.posix.fd_t, std.mem.span(text), 10);
+            const ready: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+            try ready.writeStreamingAll(io, "x");
+        }
     }
     var editor: Editor = .{ .buffer = buffer, .allow_paste = allow_paste };
     const initial_size = windowSize();

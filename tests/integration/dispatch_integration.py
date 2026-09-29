@@ -291,12 +291,16 @@ class SuccessEndpoint(TestHTTPServer):
 
 
 class ResponseSpec:
-    def __init__(self, body, headers, status=200, *, retry_date_seconds=None, chunk_delay=0, gate_timeout=10):
+    def __init__(
+        self, body, headers, status=200, *, retry_date_seconds=None,
+        chunk_delay=0, pacing_end=None, gate_timeout=10,
+    ):
         self.body = body
         self.headers = headers
         self.status = status
         self.retry_date_seconds = retry_date_seconds
         self.chunk_delay = chunk_delay
+        self.pacing_end = pacing_end
         self.gate_timeout = gate_timeout
         self.body_finished_at = None
 
@@ -350,7 +354,10 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
         index = 0
         while cursor < len(payload):
             if spec is not None and spec.chunk_delay:
-                time.sleep(spec.chunk_delay)
+                if spec.pacing_end is None:
+                    time.sleep(spec.chunk_delay)
+                else:
+                    spec.pacing_end.wait(spec.chunk_delay)
             size = offsets[index % len(offsets)]
             try:
                 self.wfile.write(payload[cursor : cursor + size])
@@ -3727,9 +3734,11 @@ def main():
 
         # A capacity-waiting easy has no curl progress callback. Its Attempt
         # must still expire while the first H1 response makes steady progress.
-        slow_endpoint = SuccessEndpoint(
-            [ResponseSpec(b"x" * 2048, {}, 422, chunk_delay=0.015)]
+        pacing_end = threading.Event()
+        slow_response = ResponseSpec(
+            b"x" * 2048, {}, 422, chunk_delay=0.015, pacing_end=pacing_end
         )
+        slow_endpoint = SuccessEndpoint([slow_response])
         slow_thread = threading.Thread(target=slow_endpoint.serve_forever, daemon=True)
         slow_thread.start()
         slow_store = state / "h1-queue-deadline-store"
@@ -3755,8 +3764,16 @@ def main():
             "queued H1 Attempt releases custody on expiry",
         )
         assert len(slow_endpoint.requests) == 1, slow_endpoint.requests
+        assert slow_response.body_finished_at is None
         assert slow_host.poll() is None, "Host exited during queued H1 expiry"
-        wait_for(lambda: observe(slow_store, "slow-message-first").get("result"), "progressing H1 completion", timeout=15)
+        pacing_end.set()
+        slow_failure = wait_for(
+            lambda: (value := observe(slow_store, "slow-message-first")).get("result", {}).get("code")
+            == "provider_http_422"
+            and value,
+            "progressing H1 completion",
+        )
+        assert slow_failure["queue"]["status"] == "failed", slow_failure
         stop_host(slow_host)
         processes.remove(slow_host)
         with sqlite3.connect(slow_store / "rui.sqlite3") as database:
@@ -4308,21 +4325,38 @@ def main():
             f"http://127.0.0.1:{endpoint.server_port}/stall",
             "--test-provider-inactivity-seconds",
             "1",
+            "--test-retry-waits-ms",
+            "60000,60000,60000",
+            accelerated_retries=False,
         )
         processes.append(host)
         configure(state, stall_store, "stall-config", "direct/stall", "model-a")
         message(state, stall_store, "stall-message", "direct/stall", "stall")
-        stalled = wait_for(
-            lambda: (value := observe(stall_store, "stall-message")).get("result", {}).get("code")
-            == "retry_exhausted"
-            and value,
-            "stalled response inactivity failure",
-            timeout=16,
+        wait_for(
+            lambda: command(
+                "inspect-session", "--store", stall_store, "--session", "direct/stall"
+            )["execution"]["custody_occupied"] == "1",
+            "stalled response takes custody",
         )
-        assert stalled["queue"]["status"] == "failed"
-        assert stalled["processing"]["attempt"] == "4", stalled
+        stalled_resources = wait_for(
+            lambda: (lambda value: value if value["execution"]["custody_occupied"] == "0" else None)(
+                command("inspect-session", "--store", stall_store, "--session", "direct/stall")
+            ),
+            "stalled response releases custody into retry wait",
+        )
+        assert stalled_resources["execution"]["scratch_used_bytes"] == "0", stalled_resources
+        stalled = observe(stall_store, "stall-message")
+        assert stalled["queue"]["status"] == "processing" and "result" not in stalled, stalled
+        assert stalled["processing"]["attempt"] == "1", stalled
         stop_host(host)
         processes.remove(host)
+        with sqlite3.connect(stall_store / "rui.sqlite3") as database:
+            retry = database.execute(
+                "SELECT attempt_ordinal,allowance_used,uncertain,resolution_code,last_failure_code,retry_due_at_ms>? "
+                "FROM model_operation",
+                (int(time.time() * 1000),),
+            ).fetchall()
+        assert retry == [(1, 1, 0, None, "provider_transport_failure", 1)], retry
 
         # Discarding large bodies must preserve HTTP classification. Retryable
         # evidence releases physical custody and saves the next eligible retry.

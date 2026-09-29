@@ -3,8 +3,10 @@
 
 import json
 import os
+import pathlib
 import subprocess
 import sys
+import tempfile
 import time
 
 from host_process import (
@@ -12,6 +14,7 @@ from host_process import (
     STDERR_TAIL_LIMIT,
     HostDiagnostics,
     HostStartError,
+    ReleaseGate,
     start_ready_process,
     stop_process,
 )
@@ -83,6 +86,32 @@ def main():
     finally:
         stop_process(process)
     prove_coalesced_phase_records()
+    prove_gate_broadcast()
+
+
+def prove_gate_broadcast():
+    with tempfile.TemporaryDirectory(prefix="rui-release-gate-") as directory:
+        gate = ReleaseGate(pathlib.Path(directory) / "gate")
+        readers = []
+        try:
+            for _ in range(2):
+                reader = os.open(gate.path, os.O_RDONLY | os.O_NONBLOCK)
+                readers.append(reader)
+                try:
+                    os.read(reader, 1)
+                except BlockingIOError:
+                    pass
+                else:
+                    raise AssertionError("gate did not hold reader")
+            gate.release()
+            for reader in readers:
+                assert os.read(reader, 1) == b"", "release did not broadcast EOF"
+            assert not gate.path.exists(), "later native arrivals would block"
+            gate.release()
+        finally:
+            gate.release()
+            for reader in readers:
+                os.close(reader)
 
 
 def prove_coalesced_phase_records():

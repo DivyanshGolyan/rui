@@ -20,6 +20,26 @@ class TestHTTPServer(http.server.ThreadingHTTPServer):
         super().serve_forever(poll_interval=poll_interval)
 
 
+class ReleaseGate:
+    """Hold native FIFO readers until release; later arrivals pass the removed name."""
+
+    def __init__(self, path):
+        self.path = path
+        os.mkfifo(path, mode=0o600)
+        try:
+            self.fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        except BaseException:
+            path.unlink()
+            raise
+
+    def release(self):
+        if self.fd is not None:
+            self.path.unlink()
+            # Closing the sole writer broadcasts EOF to every held reader.
+            os.close(self.fd)
+            self.fd = None
+
+
 class HostDiagnostics:
     """Sole stderr owner: retain bounded diagnostics and parse Host milestones."""
 

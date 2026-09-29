@@ -87,7 +87,9 @@ pub const Faults = struct {
     retry_waits_ms: [3]u64 = default_retry_waits_ms,
     before_launch_delay_ms: i64 = 0,
     before_result_delay_ms: i64 = 0,
+    model_result_gate_path: ?[]const u8 = null,
     inspection_reply_delay_ms: i64 = 0,
+    inspection_reply_gate_path: ?[]const u8 = null,
     report_unlink: bool = false,
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
@@ -2052,8 +2054,9 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         settleAttemptFailure(host, owner.token, owner.binding, "contradictory_provider_output", .terminal);
         return .cleanup;
     }
-    if (host.faults.before_result_delay_ms != 0) {
+    if (host.faults.before_result_delay_ms != 0 or host.faults.model_result_gate_path != null) {
         traceOperation(host, "sealed_before_settlement", owner.binding);
+        if (host.faults.model_result_gate_path) |path| waitAtTestGate(host, path);
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_result_delay_ms), .awake) catch {};
     }
     if (!host.custody.claimTerminalDelivery(owner.token)) return .cleanup;
@@ -2558,8 +2561,12 @@ fn testTransition(host: *Host, transition: TestTransition, binding: store_module
 }
 
 fn waitAtTestGate(host: *Host, path: []const u8) void {
-    var gate = std.Io.Dir.cwd().openFile(host.io, path, .{}) catch return;
+    // A releasing fixture unlinks the FIFO and closes its sole writer. An
+    // opener that already resolved the name must not wait for a new writer.
+    const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0) catch return;
+    var gate: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
     defer gate.close(host.io);
+    if (std.c.fcntl(fd, std.c.F.SETFL, @as(c_int, 0)) == -1) return;
     var release: [1]u8 = undefined;
     _ = gate.readStreaming(host.io, &.{&release}) catch return;
 }
@@ -3059,6 +3066,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
             defer report.deinit();
             traceSubject(host, "inspection_captured", "session", request_value.session.slice());
             traceSqliteDiagnostic(host, request_value.session.slice());
+            if (host.faults.inspection_reply_gate_path) |path| waitAtTestGate(host, path);
             if (host.faults.inspection_reply_delay_ms != 0) {
                 _ = host.io.sleep(.fromMilliseconds(host.faults.inspection_reply_delay_ms), .awake) catch {};
             }
