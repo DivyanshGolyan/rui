@@ -19,6 +19,7 @@ import threading
 import time
 
 import dispatch_integration as fixture
+import codex_integration as codex_fixture
 
 
 def run(home, *args, success=True, environment=None):
@@ -244,7 +245,9 @@ def main():
         preferences_home = state / "preferences-home"
         preferences_home.mkdir()
         fallback = preferences_home / ".local/share/rui/store"
-        assert f"Store: {fallback} (HOME fallback)" in run(preferences_home, "setup")
+        fresh_setup = run(preferences_home, "setup")
+        assert f"Store: {fallback} (HOME fallback)" in fresh_setup
+        assert "choose a supported provider" in fresh_setup and "Host: unavailable" in fresh_setup
         assert not (preferences_home / ".config").exists(), "inspection created private state"
         # The shorter preferences path fits while the unsaved Store fallback
         # does not. A provider-only update must fail before publication.
@@ -287,7 +290,10 @@ def main():
         saved.write_text(original_preferences)
         assert saved.stat().st_mode & 0o777 == 0o600
         assert saved.parent.stat().st_mode & 0o777 == 0o700
-        assert str(store.resolve()) in run(preferences_home, "setup")
+        missing_setup = run(preferences_home, "setup")
+        assert str(store.resolve()) in missing_setup
+        assert "credential: missing" in missing_setup and "No fallback" in missing_setup
+        assert "Host: ready without managed Codex" in missing_setup
         linked_home = state / "linked-home"
         (linked_home / ".config").mkdir(parents=True)
         (linked_home / ".config/rui").symlink_to(saved.parent, target_is_directory=True)
@@ -312,14 +318,47 @@ def main():
         assert run(preferences_home, "setup", success=False) == ""
         assert "Saved defaults" in run(preferences_home, "setup", "--store", store)
         assert f"store={store.resolve()}\n" in saved.read_text()
+        credential = saved.parent / "codex.json"
+        lock = saved.parent / ".codex.json.lock"
+        assert not credential.exists() and not lock.exists()
+        codex_fixture.credentials(credential)
+        configured_setup = run(preferences_home, "setup")
+        assert "credential: configured locally" in configured_setup and "remote acceptance not checked" in configured_setup
+        assert not lock.exists(), "status must not create a credential lock"
+        fresh_provider_home = state / "fresh-provider-home"
+        (fresh_provider_home / ".config/rui").mkdir(parents=True, mode=0o700)
+        codex_fixture.credentials(fresh_provider_home / ".config/rui/codex.json")
+        assert "Saved defaults" in run(fresh_provider_home, "setup", "--model", "gpt-6-luna")
+        assert (fresh_provider_home / ".config/rui/preferences").read_text().endswith(
+            "store=\nprovider=codex\nmodel=gpt-6-luna\n")
+        credential.unlink()
+        os.mkfifo(credential, mode=0o600)
+        try:
+            blocked = subprocess.run([str(fixture.RUI), "setup"],
+                env={**os.environ, "HOME": str(preferences_home)},
+                capture_output=True, text=True, timeout=2)
+            assert blocked.returncode == 0 and "credential: error" in blocked.stdout, blocked
+        finally:
+            credential.unlink()
+        codex_fixture.credentials(credential, state="refresh_pending")
+        assert "credential: refresh required" in run(preferences_home, "setup")
+        assert "state=refresh_pending" in credential.read_text(), "status must not refresh"
+        credential.chmod(0o644)
+        assert "credential: error" in run(preferences_home, "setup")
+        credential.unlink()
         assert run(preferences_home, "setup", "--provider", "other", success=False) == ""
+        assert run(preferences_home, "setup", "--model", "other-model", success=False) == ""
+        assert saved.read_text().endswith("model=gpt-6-luna\n")
         assert run(preferences_home, "setup", "--store", state / "missing", success=False) == ""
         assert saved.read_text().endswith("model=gpt-6-luna\n")
         # A directory in the temporary-file slot is an honest save failure;
         # no partial replacement may appear as a saved preference.
         temp = saved.parent / "preferences.tmp"
         temp.mkdir()
-        assert run(preferences_home, "setup", "--model", "another-model", success=False) == ""
+        blocked = subprocess.run([str(fixture.RUI), "setup", "--store", str(store)],
+            env={**os.environ, "HOME": str(preferences_home)},
+            capture_output=True, text=True, timeout=2)
+        assert blocked.returncode != 0 and "save failed: InsecurePreferenceFile" in blocked.stderr, blocked
         assert saved.read_text().endswith("model=gpt-6-luna\n")
         temp.rmdir()
         os.mkfifo(temp, mode=0o600)
@@ -331,6 +370,25 @@ def main():
             assert saved.read_text().endswith("model=gpt-6-luna\n")
         finally:
             temp.unlink()
+        codex_fixture.credentials(credential)
+        saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
+        stale = run(preferences_home, "setup")
+        assert "credential: configured locally" in stale and "saved provider is unsupported; no fallback" in stale
+        assert saved.read_text().endswith("provider=retired\nmodel=old-model\n")
+        assert "Saved defaults" in run(preferences_home, "setup", "--store", store)
+        assert saved.read_text().endswith("provider=retired\nmodel=old-model\n")
+        assert "Saved defaults" in run(preferences_home, "setup", "--provider", "codex")
+        assert saved.read_text().endswith("provider=codex\nmodel=gpt-6-luna\n")
+        saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
+        assert "Saved defaults" in run(preferences_home, "setup", "--provider", "codex", "--model", "gpt-6-luna")
+        saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=old-model\n")
+        assert "saved model is unsupported; no fallback" in run(preferences_home, "setup")
+        assert "Saved defaults" in run(preferences_home, "setup", "--model", "gpt-6-luna")
+        saved.rename(saved.parent / "preferences.backup")
+        sole = run(preferences_home, "setup")
+        assert "Provider: not selected" in sole and "Next Session: codex / gpt-6-luna" in sole
+        (saved.parent / "preferences.backup").rename(saved)
+        credential.unlink()
         saved.write_text("version=9\n")
         assert run(preferences_home, "setup", success=False) == ""
         assert run(preferences_home, "setup", "--model", "another-model", success=False) == ""
@@ -524,7 +582,8 @@ def main():
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             assert "No work to wait for." in terminal_step(master, "/wait")
             assert "gpt-6-luna" in terminal_step(master, "/setup")
-            assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model later-model")
+            assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model gpt-6-luna")
+            assert "active Session unchanged" in terminal_step(master, "/setup --model other-model")
             spaced_store = state / "spaced store"
             spaced_store.mkdir(mode=0o700)
             assert "Saved defaults for future Sessions" in terminal_step(master, f'/setup --store "{spaced_store}"')
