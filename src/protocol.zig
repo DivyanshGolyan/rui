@@ -101,6 +101,7 @@ pub const ConfigureCommand = struct {
     key: Bounded(max_key_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
     configuration: Configuration = .{},
+    require_model: bool = false,
 
     pub fn removeTemporaryContent(self: *ConfigureCommand, io: std.Io) !void {
         var cleanup_error: ?anyerror = null;
@@ -130,6 +131,7 @@ pub const ConfigureCommand = struct {
         }
         hashOptional(&hash, &self.configuration.permission_mode);
         hashContent(&hash, &self.configuration.output_schema);
+        hash.update(&.{@intFromBool(self.require_model)});
         return hash.finalResult();
     }
 };
@@ -494,6 +496,18 @@ const Parser = struct {
         try self.expectKey("output_schema");
         try self.readContent(&request.configuration.output_schema, true);
         try self.expectByte('}');
+        if (try self.consumeIf(',')) {
+            try self.expectKey("require_model");
+            try self.skipWhitespace();
+            const first = try self.source.readByte();
+            const rest: []const u8 = switch (first) {
+                't' => "rue",
+                'f' => "alse",
+                else => return error.InvalidJsonShape,
+            };
+            for (rest) |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
+            request.require_model = first == 't';
+        }
         return request;
     }
 
@@ -1448,10 +1462,11 @@ test "observation needs no scratch at a full budget" {
 }
 
 test "configuration provider envelope preserves exact spelling and omission" {
-    const cases = [_]struct { field: []const u8, expected: ?[]const u8, failure: ?anyerror = null }{
+    const cases = [_]struct { field: []const u8, expected: ?[]const u8, suffix: []const u8 = "", failure: ?anyerror = null }{
         .{ .field = "{\"state\":\"omitted\"}", .expected = null },
         .{ .field = "{\"state\":\"value\",\"value\":\"codex\"}", .expected = "codex" },
         .{ .field = "{\"state\":\"value\",\"value\":\"c\\u006fdex\"}", .expected = "codex" },
+        .{ .field = "{\"state\":\"value\",\"value\":\"codex\"}", .expected = "codex", .suffix = ",\"require_model\":true" },
         // Admission, not parsing, rejects bounded unsupported spellings.
         .{ .field = "{\"state\":\"value\",\"value\":\"Codex\"}", .expected = "Codex" },
         .{ .field = "{\"state\":\"value\",\"value\":\"other\"}", .expected = "other" },
@@ -1468,8 +1483,8 @@ test "configuration provider envelope preserves exact spelling and omission" {
             "{{\"version\":\"1\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
                 "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{s},\"model\":{{\"state\":\"omitted\"}}," ++
                 "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"omitted\"}}," ++
-                "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}}}",
-            .{case.field},
+                "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}{s}}}",
+            .{ case.field, case.suffix },
         );
         var source = SocketBody.init(-1, 0);
         @memcpy(source.buffer[0..json.len], json);
@@ -1488,6 +1503,7 @@ test "configuration provider envelope preserves exact spelling and omission" {
             continue;
         }
         const request = try parser.parse();
+        try std.testing.expectEqual(index == 3, request.configure.require_model);
         const field = request.configure.configuration.provider;
         if (case.expected) |value| {
             try std.testing.expectEqual(FieldState.value, field.state);

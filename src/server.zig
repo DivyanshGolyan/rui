@@ -2999,6 +2999,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
         },
         .configure => |*command| {
             const result = host.store.configure(command, .{
+                .model_available = host.provider_endpoint != null,
                 .content_read = host.faults.content_read,
                 .content_import = host.faults.content_import,
                 .before_commit = host.faults.before_commit,

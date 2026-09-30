@@ -26,7 +26,7 @@ test "detached launcher reports exec failure before claiming Host readiness" {
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const args = try init.minimal.args.toSlice(allocator);
-    if (args.len < 2) return usage();
+    if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return newSession(init, args[1..]);
     const command = args[1];
     if (std.mem.eql(u8, command, "serve")) {
         try configureHostAllocator(init, args);
@@ -472,6 +472,115 @@ fn guideProviderLogin(init: std.process.Init) !void {
     };
 }
 
+fn newSession(init: std.process.Init, args: []const []const u8) !void {
+    var store: ?[]const u8 = null;
+    var explicit_provider: ?[]const u8 = null;
+    var explicit_model: ?[]const u8 = null;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--store") and store == null) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--provider") and explicit_provider == null) explicit_provider = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--model") and explicit_model == null) explicit_model = try takeValue(args, &index) else return usage();
+    }
+    if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
+        std.debug.print("rui needs terminal input and output to create a Session; use explicit one-shot commands for scripts. No Host or Session changed.\n", .{});
+        return error.InteractiveTerminalRequired;
+    }
+    var cwd = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
+    defer cwd.close(init.io);
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace_length = try cwd.realPath(init.io, &workspace_buffer);
+    const workspace = workspace_buffer[0..workspace_length];
+
+    const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+    var defaults: preferences.Values = .{};
+    // Explicit Store bypasses even a damaged preference file; provider/model
+    // preferences remain independent of the Store selector.
+    defaults = blk: {
+        break :blk preferences.load(home) catch |err| {
+            if (store != null and explicit_provider != null and explicit_model != null) break :blk preferences.Values{};
+            std.debug.print("rui: private setup defaults unreadable ({s}); inspect rui setup before creating a Session.\n", .{@errorName(err)});
+            return err;
+        };
+    };
+    var credential_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const credential = try credentialPath(init, &credential_buffer, false);
+    const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
+    const readiness: provider_selection.Readiness = if (codex_credentials.localStatus(credential, now)) |state| switch (state) {
+        .missing => .missing,
+        .configured => .configured,
+        .refresh_required => .refresh_required,
+    } else |_| .credential_error;
+    var selection = provider_selection.resolve(&.{provider_selection.codex(readiness)}, explicit_provider, explicit_model, if (defaults.provider.len == 0) null else defaults.provider.slice(), if (defaults.model.len == 0) null else defaults.model.slice()) catch |err| {
+        std.debug.print("rui: unsupported prospective provider/model ({s}); inspect rui setup or select codex / gpt-6-luna. No Session created.\n", .{@errorName(err)});
+        return err;
+    };
+    if (selection == .chooser or selection.selected.readiness != .configured) {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No locally ready provider for a new Session. Choose Codex login or defer; saved work remains inspectable.\n");
+        try guideProviderLogin(init);
+        // Explicit destination and binding never depend on the preference file,
+        // including after a login whose future-default save failed.
+        if (store == null or explicit_provider == null or explicit_model == null)
+            defaults = try preferences.load(home);
+        const after_choice: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
+        const updated = codex_credentials.localStatus(credential, after_choice) catch |err| {
+            std.debug.print("rui: credential still unreadable ({s}); inspect rui setup. No Session created.\n", .{@errorName(err)});
+            return err;
+        };
+        selection = provider_selection.resolve(&.{provider_selection.codex(switch (updated) {
+            .missing => .missing,
+            .configured => .configured,
+            .refresh_required => .refresh_required,
+        })}, explicit_provider, explicit_model, if (defaults.provider.len == 0) null else defaults.provider.slice(), if (defaults.model.len == 0) null else defaults.model.slice()) catch |err| {
+            std.debug.print("rui: unsupported prospective provider/model after login ({s}); inspect rui setup. No Session created.\n", .{@errorName(err)});
+            return err;
+        };
+        if (selection == .chooser or selection.selected.readiness != .configured) {
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No new Session created. Use rui setup or rui login codex when ready; existing work is unchanged.\n");
+            return;
+        }
+    }
+    const selected = selection.selected;
+    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const selected_store = store orelse (if (defaults.store.len != 0) defaults.store.slice() else try preferences.defaultStore(home, &fallback));
+    try startHost(init, selected_store);
+    const paths = try platform.resolveClientPaths(init.io, selected_store);
+    const destination = paths.store.slice();
+    const ready = switch (client.hostStatus(init.io, destination)) {
+        .ready => |current| current,
+        else => return error.HostReadinessUnconfirmed,
+    };
+    if (!ready.capabilities.model) {
+        std.debug.print("rui: selected Host has no model capability; it was not restarted. Inspect rui host status before creating a Session.\n", .{});
+        return error.HostModelUnavailable;
+    }
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var captured = try client.captureConfigure(init.io, .{
+        .store = destination,
+        .session = .from_capture_key,
+        .require_model = true,
+        .workspace = .{ .present = true, .value = workspace },
+        .provider = .{ .present = true, .value = selected.provider },
+        .model = .{ .present = true, .value = selected.model },
+        .tools = "bash",
+        .permission_mode = .{ .present = true, .value = "ask" },
+    }, .{ .generated = try requestDirectory(init, &directory_buffer) });
+    const saved = captured.identity().*;
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = blk: {
+        defer captured.close(init.io);
+        try announceCapture(init.io, saved.key.slice());
+        try writeSafeField(init.io, "Rui: New Session intent: ", saved.session.slice());
+        break :blk client.sendCaptured(init.io, &captured, null, &reply_buffer) catch |err| {
+            std.debug.print("rui: configuration not confirmed ({s}); inspect rui requests and recover only a saved original key. Do not replace uncertain work.\n", .{@errorName(err)});
+            return err;
+        };
+    };
+    if (!try acceptedReply(reply)) {
+        try writeAdmission(init.io, reply, null);
+        return error.SessionConfigurationRejected;
+    }
+    try enterSession(init, &.{ "--store", saved.store.slice(), "--session", saved.session.slice() });
+}
+
 fn serve(init: std.process.Init, args: []const []const u8) !void {
     const io = init.io;
     var store_path: ?[]const u8 = null;
@@ -628,7 +737,7 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
     var json = false;
     var input = client.ConfigureInput{
         .store = "",
-        .session = "",
+        .session = .{ .named = "" },
     };
     var location: @FieldType(client.CaptureTarget, "explicit") = .{ .record = "", .key = "" };
     var drop_reply: ?[]const u8 = null;
@@ -642,10 +751,10 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
             key_seen = true;
         } else if (std.mem.eql(u8, arg, "--provider")) {
             input.provider = .{ .present = true, .value = try takeValue(args, &index) };
-        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--workspace")) input.workspace = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--model")) input.model = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--instructions")) input.instructions = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--tools")) input.tools = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--permission-mode")) input.permission_mode = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--output-schema")) input.output_schema = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--text-output")) input.output_schema = .{ .state = .explicit_null } else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
+        } else if (std.mem.eql(u8, arg, "--session")) input.session = .{ .named = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--workspace")) input.workspace = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--model")) input.model = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--instructions")) input.instructions = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--tools")) input.tools = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--permission-mode")) input.permission_mode = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--output-schema")) input.output_schema = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--text-output")) input.output_schema = .{ .state = .explicit_null } else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
-    if (input.session.len == 0 or (location.record.len == 0) != !key_seen) return usage();
+    if (input.session.named.len == 0 or (location.record.len == 0) != !key_seen) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, explicit_store, &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -666,7 +775,7 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
     if (human and interactive and accepted) try std.Io.File.stdout().writeStreamingAll(io, "Rui: Configured.\n");
     if (human and !json and !interactive) {
         var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "configuration: {s} in {s}\n", .{ input.session, input.store }));
+        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "configuration: {s} in {s}\n", .{ saved.session.slice(), saved.store.slice() }));
         if (try acceptedReply(reply)) try std.Io.File.stdout().writeStreamingAll(io, "next: rui session (same Store and Session)\n");
     }
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
@@ -2023,6 +2132,9 @@ fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
 fn usage() error{InvalidArguments} {
     std.debug.print(
         \\usage:
+        \\  rui [--store PATH] [--provider codex] [--model gpt-6-luna]
+        \\    On a terminal, attach/start a Host and create a fresh Session in the current Workspace.
+        \\    Non-TTY calls must use explicit one-shot commands; use rui requests/recover after a lost reply.
         \\  rui login codex
         \\  rui host status [--store PATH]
         \\    Read the selected Store's protected Host readiness, capacity and capabilities without starting it.
@@ -2052,7 +2164,7 @@ fn usage() error{InvalidArguments} {
         \\  rui follow HANDLE [--json]
         \\    Follow this saved Message, not whatever the Session does next.
         \\  rui result HANDLE [--json]
-        \\    Handles are saved under HOME/.config/rui/requests; Host startup is explicit.
+        \\    Handles are saved under HOME/.config/rui/requests; scripted Host startup is explicit.
         \\  Low-level explicit-key commands:
         \\  rui configure --store PATH --record FILE --key KEY --session REF [settings]
         \\  rui message --store PATH --record FILE --key KEY --session REF --text FILE|-

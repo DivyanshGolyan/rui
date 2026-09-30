@@ -468,6 +468,209 @@ def main():
             capture_output=True, text=True, timeout=5)
         assert invalid_store.returncode != 0 and "InvalidStore" in invalid_store.stderr, invalid_store
         assert invalid_store.stdout == "" and run(preferences_home, "requests", "--json") == before
+        no_tty_home = state / "no-tty-home"
+        no_tty_home.mkdir()
+        no_terminal = subprocess.run([str(fixture.RUI)], cwd=workspace,
+            env={**os.environ, "HOME": str(no_tty_home)}, capture_output=True, text=True, timeout=5)
+        assert no_terminal.returncode != 0 and "InteractiveTerminalRequired" in no_terminal.stderr
+        assert not (no_tty_home / ".config").exists(), "non-TTY invocation created preferences or a request"
+        assert not (no_tty_home / ".local/share/rui/store").exists(), "non-TTY invocation changed the Store"
+        before_missing = set(run(preferences_home, "requests").splitlines())
+        master, slave = pty.openpty()
+        deferred = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+            env={**os.environ, "HOME": str(preferences_home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            offered = read_terminal(master, "Provider: [c]")
+            assert "No locally ready provider" in offered and "Codex login" in offered, offered
+            assert "No new Session created" in terminal_step(master, "d", "No new Session created")
+            assert deferred.wait(timeout=5) == 0
+            assert set(run(preferences_home, "requests").splitlines()) == before_missing
+        finally:
+            if deferred.poll() is None:
+                deferred.kill()
+                deferred.wait(timeout=5)
+            os.close(master)
+        explicit_home = state / "explicit-home"
+        explicit_config = explicit_home / ".config/rui"
+        explicit_config.mkdir(parents=True, mode=0o700)
+        malformed = explicit_config / "preferences"
+        malformed.write_text("version=9\n")
+        malformed.chmod(0o600)
+        master, slave = pty.openpty()
+        explicit = subprocess.Popen([str(fixture.RUI), "--store", str(store),
+            "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
+            env={**os.environ, "HOME": str(explicit_home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            assert "No locally ready provider" in read_terminal(master, "Provider: [c]")
+            # Another client installs a fixture credential while this caller
+            # waits for a choice. Its explicit selectors must still bypass the
+            # malformed prospective defaults when it rechecks readiness.
+            codex_fixture.credentials(explicit_config / "codex.json")
+            os.write(master, b"d\n")
+            welcome = b""
+            deadline = time.monotonic() + 10
+            while b"rui> " not in welcome and time.monotonic() < deadline:
+                if not select.select([master], [], [], max(0, deadline - time.monotonic()))[0]:
+                    break
+                try:
+                    welcome += os.read(master, 65536)
+                except OSError as err:
+                    if err.errno != errno.EIO:
+                        raise
+                    break
+            welcome = welcome.decode(errors="replace")
+            assert "Session: rui/" in welcome and "Provider: codex" in welcome, welcome
+            assert "Model: gpt-6-luna" in welcome, welcome
+            assert malformed.read_text() == "version=9\n"
+            assert "Detached." in terminal_step(master, "/exit", "Detached.")
+            assert explicit.wait(timeout=5) == 0
+        finally:
+            if explicit.poll() is None:
+                explicit.kill()
+                explicit.wait(timeout=5)
+            os.close(master)
+        # The credential arrives while the prompt is open, then expires
+        # before the choice. Readiness must use the post-choice clock.
+        (explicit_config / "codex.json").unlink()
+        master, slave = pty.openpty()
+        expiring = subprocess.Popen([str(fixture.RUI), "--store", str(store),
+            "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
+            env={**os.environ, "HOME": str(explicit_home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            assert "No locally ready provider" in read_terminal(master, "Provider: [c]")
+            expiry = int(time.time()) + 2
+            credential_file = explicit_config / "codex.json"
+            codex_fixture.credentials(credential_file)
+            credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", f"expires_at={expiry}"))
+            while time.time() < expiry:
+                time.sleep(0.01)
+            assert "No new Session created" in terminal_step(master, "d", "No new Session created")
+            assert expiring.wait(timeout=5) == 0
+            assert malformed.read_text() == "version=9\n"
+        finally:
+            if expiring.poll() is None:
+                expiring.kill()
+                expiring.wait(timeout=5)
+            os.close(master)
+        longer_store = state / "another-longer-store-selector"
+        other_host = fixture.start_host(longer_store, url)
+        try:
+            for index, (before, after) in enumerate(((store, longer_store), (longer_store, store))):
+                changing_home = state / f"changing-home-{index}"
+                changing_home.mkdir()
+                assert "Saved defaults" in run(changing_home, "setup", "--store", before,
+                    "--provider", "codex", "--model", "gpt-6-luna")
+                master, slave = pty.openpty()
+                changing = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+                    env={**os.environ, "HOME": str(changing_home)},
+                    stdin=slave, stdout=slave, stderr=slave)
+                os.close(slave)
+                try:
+                    assert "No locally ready provider" in read_terminal(master, "Provider: [c]")
+                    assert "Saved defaults" in run(changing_home, "setup", "--store", after)
+                    codex_fixture.credentials(changing_home / ".config/rui/codex.json")
+                    welcome = terminal_step(master, "d")
+                    assert f"Diagnostics: {after.resolve()}/diagnostics" in welcome, welcome
+                    handle = next(line.split("request: ", 1)[1].strip() for line in welcome.splitlines()
+                        if line.startswith("request: "))
+                    current = fixture.command("inspect-session", "--store", after,
+                        "--session", f"rui/{handle}")
+                    assert current["session"]["model"] == "gpt-6-luna", current
+                    assert "Detached." in terminal_step(master, "/exit", "Detached.")
+                    assert changing.wait(timeout=5) == 0
+                finally:
+                    if changing.poll() is None:
+                        changing.kill()
+                        changing.wait(timeout=5)
+                    os.close(master)
+        finally:
+            fixture.stop_host(other_host)
+        codex_fixture.credentials(credential)
+        created = []
+        for _ in range(2):
+            master, slave = pty.openpty()
+            caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+                env={**os.environ, "HOME": str(preferences_home)},
+                stdin=slave, stdout=slave, stderr=slave)
+            os.close(slave)
+            try:
+                welcome = read_terminal(master, "rui> ")
+                handle = next(line.split("request: ", 1)[1].strip() for line in welcome.splitlines()
+                    if line.startswith("request: "))
+                reference = f"rui/{handle}"
+                assert f"Session: {reference}" in welcome and "Permission: ask" in welcome, welcome
+                assert f"Workspace (Bash cwd): {workspace.resolve()}" in welcome, welcome
+                assert "Model: gpt-6-luna" in welcome and "Provider: codex" in welcome, welcome
+                current = fixture.command("inspect-session", "--store", store, "--session", reference)
+                assert current["session"]["permission_mode"] == "ask", current
+                assert current["session"]["workspace"] == str(workspace.resolve()), current
+                assert json.loads(run(preferences_home, "recover", handle, "--json"))["answer"]["replayed"] is True
+                created.append(reference)
+                assert "Detached." in terminal_step(master, "/exit", "Detached.")
+                assert caller.wait(timeout=5) == 0
+            finally:
+                if caller.poll() is None:
+                    caller.kill()
+                    caller.wait(timeout=5)
+                os.close(master)
+        assert created[0] != created[1], "independent new intent reused a reference"
+        blocked_home = state / "blocked-capture-home"
+        blocked_config = blocked_home / ".config/rui"
+        blocked_config.mkdir(parents=True, mode=0o700)
+        (blocked_config / "preferences").write_text(
+            f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
+        (blocked_config / "preferences").chmod(0o600)
+        (blocked_config / "requests").write_text("not a directory")
+        codex_fixture.credentials(blocked_config / "codex.json")
+        master, slave = pty.openpty()
+        blocked = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+            env={**os.environ, "HOME": str(blocked_home)}, stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            output = read_terminal(master, "configuration not confirmed")
+            assert "New Session intent" not in output and "request: " not in output, output
+            assert blocked.wait(timeout=5) != 0
+        finally:
+            if blocked.poll() is None:
+                blocked.kill()
+                blocked.wait(timeout=5)
+            os.close(master)
+        before = set(run(preferences_home, "requests").splitlines())
+        gate = state / "new-session-capture"
+        master, slave = pty.openpty()
+        interrupted = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+            env={**os.environ, "HOME": str(preferences_home), "RUI_TEST_CAPTURE_GATE": str(gate)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            fixture.wait_for(lambda: pathlib.Path(f"{gate}.ready").exists(), "fresh configuration captured")
+            early = os.read(master, 65536) if select.select([master], [], [], 0)[0] else b""
+            assert b"New Session intent" not in early, "announced before the capture callback"
+            after = set(run(preferences_home, "requests").splitlines())
+            assert len(after - before) == 1, (before, after)
+            handle = (after - before).pop()
+            captured = json.loads((preferences_home / ".config/rui/requests" / f"{handle}.json").read_text())
+            assert captured["require_model"] is True, captured
+            interrupted.kill()
+            interrupted.wait(timeout=5)
+            recovered = json.loads(run(preferences_home, "recover", handle, "--json"))
+            assert recovered["answer"]["status"] == "accepted" and not recovered["answer"]["replayed"], recovered
+            recovered_again = json.loads(run(preferences_home, "recover", handle, "--json"))
+            assert recovered_again["answer"]["replayed"], recovered_again
+            assert fixture.command("inspect-session", "--store", store,
+                "--session", f"rui/{handle}")["session"]["permission_mode"] == "ask"
+        finally:
+            if interrupted.poll() is None:
+                interrupted.kill()
+                interrupted.wait(timeout=5)
+            os.close(master)
+        credential.unlink()
         initial = fixture.command("inspect-session", "--store", store, "--session", session)
         assert initial["selected_message"] is None and initial["recent_messages"] == [], initial
         assert "InteractiveTerminalRequired" in subprocess.run(

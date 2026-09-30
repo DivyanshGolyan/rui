@@ -5,6 +5,7 @@ import json
 import fcntl
 import os
 import pathlib
+import pty
 import re
 import resource
 import select
@@ -16,6 +17,7 @@ import tempfile
 import time
 
 from host_process import start_ready_process, stop_process
+import codex_integration as codex_fixture
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -274,6 +276,44 @@ def main():
                 disconnected.wait(timeout=3)
             disconnected.stderr.close()
             forced_crash_cleanup(disconnected_store)
+
+        # Bare terminal entry starts the same managed Host and configures one
+        # recoverable Session without any separate serve terminal.
+        bare_home = root / "bare-home"
+        bare_home.mkdir(mode=0o700)
+        bare_store = bare_home / ".local/share/rui/store"
+        bare_credential_dir = bare_home / ".config/rui"
+        bare_credential_dir.mkdir(parents=True, mode=0o700)
+        bare_credential = bare_credential_dir / "codex.json"
+        codex_fixture.credentials(bare_credential)
+        bare_env = {**os.environ, "HOME": str(bare_home)}
+        master, slave = pty.openpty()
+        caller = subprocess.Popen([RUI], cwd=root, env=bare_env,
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        try:
+            output = b""
+            until = time.monotonic() + COMMAND_TIMEOUT
+            while b"rui> " not in output:
+                remaining = until - time.monotonic()
+                assert remaining > 0 and select.select([master], [], [], remaining)[0], output
+                output += os.read(master, 65536)
+            assert b"Host ready (active capacity 8)" in output, output
+            assert b"Provider: codex" in output and b"Permission: ask" in output, output
+            assert b"request: " in output and b"Session: rui/" in output, output
+            assert len(wait_for_processes(bare_store, 1)) == 1
+            os.write(master, b"/exit\n")
+            assert caller.wait(timeout=5) == 0
+            assert instance(status(bare_store, bare_env), 8)
+            stopped = subprocess.run([RUI, "host", "stop", "--store", bare_store],
+                env=bare_env, capture_output=True, text=True, timeout=5)
+            assert stopped.returncode == 0 and "Stop acknowledged" in stopped.stdout, stopped
+        finally:
+            if caller.poll() is None:
+                caller.kill()
+                caller.wait(timeout=5)
+            os.close(master)
+            forced_crash_cleanup(bare_store)
 
         # A detached Host that cannot satisfy its inherited descriptor budget
         # exits; the CLI bounds uncertainty and points at owner diagnostics.

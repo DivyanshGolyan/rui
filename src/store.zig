@@ -69,6 +69,9 @@ const retry_admission_select_sql =
     "AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2";
 
 pub const Faults = struct {
+    // The Host supplies its own capability fact at admission; tests default
+    // to an available model unless exercising a missing-capability boundary.
+    model_available: bool = true,
     content_read: bool = false,
     content_import: bool = false,
     before_commit: bool = false,
@@ -119,6 +122,7 @@ pub const ConfigurationRejection = enum {
     unsupported_permission_mode,
     unsupported_provider,
     invalid_model,
+    model_capability_unavailable,
     invalid_output_schema,
     incomplete_initial_configuration,
     invalid_workspace,
@@ -1515,6 +1519,9 @@ pub const Store = struct {
             } };
         }
 
+        if (command.require_model and !faults.model_available) {
+            return try self.saveConfigurationRejection(command, &digest, .model_capability_unavailable, faults);
+        }
         if (command.session.len == 0) {
             return try self.saveConfigurationRejection(command, &digest, .invalid_session_reference, faults);
         }
@@ -9541,6 +9548,36 @@ test "saved incomplete initialization stays rejected after Session creation" {
     const replay = storage.configure(&incomplete, .{});
     try std.testing.expect(replay == .rejected);
     try std.testing.expect(replay.rejected.replayed);
+}
+
+test "capability-required configuration rejects on replacement and replays its saved decision" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("capability-guard", "rui/capability-guard", workspace, "model-a");
+    command.require_model = true;
+
+    const rejected = storage.configure(&command, .{ .model_available = false });
+    try std.testing.expect(rejected == .rejected);
+    try std.testing.expectEqual(ConfigurationRejection.model_capability_unavailable, rejected.rejected.code);
+    try std.testing.expect(!(try storage.inspectSession(command.session.slice())).found);
+    const replay = storage.configure(&command, .{ .model_available = true });
+    try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+    try std.testing.expectEqual(rejected.rejected.code, replay.rejected.code);
+
+    var new_key = command;
+    try new_key.key.set("capability-guard-next");
+    try std.testing.expect(storage.configure(&new_key, .{ .model_available = true }) == .accepted);
+    try std.testing.expect(storage.configure(&new_key, .{ .model_available = false }).accepted.replayed);
+    var changed_intent = command;
+    changed_intent.require_model = false;
+    try std.testing.expect(storage.configure(&changed_intent, .{}) == .conflict);
+    try changed_intent.key.set("explicit-offline-config");
+    try changed_intent.session.set("direct/offline");
+    try std.testing.expect(storage.configure(&changed_intent, .{ .model_available = false }) == .accepted);
 }
 
 test "failed commit saves neither answer nor partial Session" {

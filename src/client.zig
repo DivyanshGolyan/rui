@@ -14,7 +14,11 @@ pub const OptionalFile = struct {
 
 pub const ConfigureInput = struct {
     store: []const u8,
-    session: []const u8,
+    session: union(enum) {
+        named: []const u8,
+        from_capture_key,
+    },
+    require_model: bool = false,
     workspace: OptionalText = .{},
     provider: OptionalText = .{},
     model: OptionalText = .{},
@@ -739,7 +743,12 @@ pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
-    try validateIdentityInputs(location.key, input.session);
+    var session_buffer: ["rui/".len + protocol.max_key_bytes]u8 = undefined;
+    const session = switch (input.session) {
+        .named => |name| name,
+        .from_capture_key => try std.fmt.bufPrint(&session_buffer, "rui/{s}", .{location.key}),
+    };
+    try validateIdentityInputs(location.key, session);
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
@@ -748,7 +757,7 @@ pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget
     try capture.write(",\"key\":");
     try capture.writeJsonString(location.key);
     try capture.write(",\"session\":");
-    try capture.writeJsonString(input.session);
+    try capture.writeJsonString(session);
     try capture.write(",\"configuration\":{\"workspace\":");
     try capture.writeOptionalText(input.workspace);
     try capture.write(",\"provider\":");
@@ -763,8 +772,8 @@ pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget
     try capture.writeOptionalText(input.permission_mode);
     try capture.write(",\"output_schema\":");
     try capture.writeOptionalFile(input.output_schema, true);
-    try capture.write("}}");
-    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, "configure");
+    try capture.write(if (input.require_model) "},\"require_model\":true}" else "}}");
+    return finishCapture(io, &capture, paths.store.slice(), location.key, session, "configure");
 }
 
 pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !CapturedRecord {
@@ -1586,6 +1595,38 @@ test "response framing rejects ambiguous or malformed fields before interpreting
     try std.testing.expectEqual(@as(u16, 200), (try readResponseHead(sockets[0])).status);
 }
 
+test "capture configure derives Session from captured key and retains model admission" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var captured = try captureConfigure(io, .{
+        .store = root,
+        .session = .from_capture_key,
+        .require_model = true,
+    }, .{ .generated = root });
+    const saved = captured.identity().*;
+    var bytes: [2048]u8 = undefined;
+    const count = blk: {
+        defer captured.close(io);
+        break :blk try captured.file.readPositionalAll(io, &bytes, 0);
+    };
+    try std.testing.expect(validRequestHandle(saved.key.slice()));
+    var expected_buffer: ["rui/".len + 36]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buffer, "rui/{s}", .{saved.key.slice()});
+    try std.testing.expectEqualStrings(expected, saved.session.slice());
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..count], .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(saved.key.slice(), parsed.value.object.get("key").?.string);
+    try std.testing.expectEqualStrings(expected, parsed.value.object.get("session").?.string);
+    try std.testing.expect(parsed.value.object.get("require_model").?.bool);
+    var recovered = try openCaptured(io, root, saved.key.slice());
+    defer recovered.close(io);
+    try std.testing.expectEqualStrings(expected, recovered.identity().session.slice());
+}
+
 test "capture returns original identity before send and preserves empty explicit keys" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -1824,7 +1865,7 @@ test "capture recovery closes rejected records and retains only its reader lifet
     try tmp.dir.deleteFile(io, filename);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try requestPath(root, handle, &path_buffer);
-    var captured = try captureConfigure(io, .{ .store = root, .session = "original" }, .{ .explicit = .{ .record = path, .key = handle } });
+    var captured = try captureConfigure(io, .{ .store = root, .session = .{ .named = "original" } }, .{ .explicit = .{ .record = path, .key = handle } });
     captured.close(io);
     var recovered = try openCaptured(observed_io, root, handle);
     const descriptor = recovered.file.handle;
