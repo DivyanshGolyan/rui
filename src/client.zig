@@ -14,8 +14,6 @@ pub const OptionalFile = struct {
 
 pub const ConfigureInput = struct {
     store: []const u8,
-    record: []const u8,
-    key: []const u8,
     session: []const u8,
     workspace: OptionalText = .{},
     provider: OptionalText = .{},
@@ -24,19 +22,13 @@ pub const ConfigureInput = struct {
     tools: ?[]const u8 = null,
     permission_mode: OptionalText = .{},
     output_schema: OptionalFile = .{},
-    drop_reply: ?[]const u8 = null,
-    captured: ?*const fn (std.Io, []const u8) anyerror!void = null,
 };
 
 pub const MessageInput = struct {
     store: []const u8,
-    record: []const u8,
-    key: []const u8,
     session: []const u8,
     text_path: []const u8,
     text: ?[]const u8 = null,
-    drop_reply: ?[]const u8 = null,
-    captured: ?*const fn (std.Io, []const u8) anyerror!void = null,
 };
 
 pub const SessionStopInput = struct {
@@ -59,13 +51,9 @@ pub const ModelInterruptionInput = struct {
 
 pub const PermissionDecisionInput = struct {
     store: []const u8,
-    record: []const u8,
-    key: []const u8,
     session: []const u8,
     action_id: u64,
     decision: protocol.PermissionDecision = .deny,
-    drop_reply: ?[]const u8 = null,
-    captured: ?*const fn (std.Io, []const u8) anyerror!void = null,
 };
 
 pub const ReplyBuffer = protocol.ResponseBuffer;
@@ -304,24 +292,6 @@ fn renderReadRequest(
     try body.append("}");
 }
 
-pub fn configure(io: std.Io, input: ConfigureInput, reply_buffer: *ReplyBuffer) !CommandReply {
-    reply_buffer.len = 0;
-    const paths = try platform.resolveClientPaths(io, input.store);
-    try validateIdentityInputs(input.key, input.session);
-    try captureConfigure(io, &paths, input);
-    if (input.captured) |notify| try notify(io, input.record);
-    return sendRecord(io, &paths, input.record, "/v1/configure", input.drop_reply, reply_buffer);
-}
-
-pub fn message(io: std.Io, input: MessageInput, reply_buffer: *ReplyBuffer) !CommandReply {
-    reply_buffer.len = 0;
-    const paths = try platform.resolveClientPaths(io, input.store);
-    try validateIdentityInputs(input.key, input.session);
-    try captureMessage(io, &paths, input);
-    if (input.captured) |notify| try notify(io, input.record);
-    return sendRecord(io, &paths, input.record, "/v1/message", input.drop_reply, reply_buffer);
-}
-
 pub fn stopSession(io: std.Io, input: SessionStopInput, reply_buffer: *ReplyBuffer) !CommandReply {
     reply_buffer.len = 0;
     const paths = try platform.resolveClientPaths(io, input.store);
@@ -351,16 +321,6 @@ pub fn interruptModel(io: std.Io, input: ModelInterruptionInput, reply_buffer: *
         input.drop_reply,
         reply_buffer,
     );
-}
-
-pub fn denyPermission(io: std.Io, input: PermissionDecisionInput, reply_buffer: *ReplyBuffer) !CommandReply {
-    reply_buffer.len = 0;
-    const paths = try platform.resolveClientPaths(io, input.store);
-    try validateIdentityInputs(input.key, input.session);
-    if (input.action_id == 0) return error.InvalidTarget;
-    try capturePermissionDecision(io, &paths, input);
-    if (input.captured) |notify| try notify(io, input.record);
-    return sendRecord(io, &paths, input.record, "/v1/control/permission-decision", input.drop_reply, reply_buffer);
 }
 
 pub fn retry(
@@ -399,6 +359,154 @@ pub fn observeCommand(
     var body: protocol.RequestBuffer = .{};
     try renderReadRequest(&body, "observe_command", paths.store.slice(), "key", key, null, null);
     return sendBytes(io, &paths, "/v1/observe-command", body.slice(), null, reply_buffer);
+}
+
+/// An owned selected address, independent of any local request capture.
+pub const MessageAddress = struct {
+    store: protocol.Bounded(protocol.max_store_bytes) = .{},
+    session: protocol.Bounded(protocol.max_session_bytes) = .{},
+    key: protocol.Bounded(protocol.max_key_bytes) = .{},
+
+    pub fn init(store: []const u8, session: []const u8, key: []const u8) !MessageAddress {
+        try validateIdentityInputs(key, session);
+        var address: MessageAddress = .{};
+        try address.store.set(store);
+        try address.session.set(session);
+        try address.key.set(key);
+        return address;
+    }
+};
+
+/// Owns decoded storage. Code slices borrow it until deinit, independently of
+/// the reply buffer. Consumers use facts and writeJson, never the parsed tree.
+pub const MessageObservation = struct {
+    state: State,
+    code: ?[]const u8 = null,
+    progress: ?Progress = null,
+    storage: *Storage,
+
+    const Storage = opaque {};
+
+    pub const State = enum {
+        accepted,
+        queued,
+        processing,
+        rejected,
+        completed,
+        failed,
+        cancelled,
+
+        pub fn terminal(self: State) bool {
+            return switch (self) {
+                .rejected, .completed, .failed, .cancelled => true,
+                else => false,
+            };
+        }
+    };
+
+    pub const Progress = struct {
+        status: enum { runnable, in_flight, waiting_for_permission },
+        action: ?u64,
+    };
+
+    pub fn deinit(self: *MessageObservation) void {
+        const parsed: *std.json.Parsed(std.json.Value) = @ptrCast(@alignCast(self.storage));
+        parsed.deinit();
+        self.* = undefined;
+    }
+
+    /// Writes the complete supported observation, including fields not consumed
+    /// by typed facts. No second serialized payload or typed reconstruction.
+    pub fn writeJson(self: *const MessageObservation, writer: *std.Io.Writer) !void {
+        const parsed: *const std.json.Parsed(std.json.Value) = @ptrCast(@alignCast(self.storage));
+        try std.json.Stringify.value(parsed.value.object.get("observation").?, .{}, writer);
+    }
+
+    pub fn parse(allocator: std.mem.Allocator, reply: CommandReply, address: *const MessageAddress) !MessageObservation {
+        if (reply.status != 200) return error.ObservationFailed;
+        if (reply.body.len > protocol.max_response_bytes) return error.ResponseTooLarge;
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, reply.body, .{ .allocate = .alloc_always, .parse_numbers = false });
+        errdefer parsed.deinit();
+        const root = parsed.value;
+        if (!std.mem.eql(u8, try observationString(root, "version"), protocol.wire_version) or
+            !std.mem.eql(u8, try observationString(root, "type"), "command_observation")) return error.InvalidObservation;
+        if (!std.mem.eql(u8, try observationString(root, "key"), address.key.slice())) return error.RequestBindingMismatch;
+        const observation = try observationField(root, "observation");
+        const status = try observationString(observation, "status");
+        if (std.mem.eql(u8, status, "absent")) return error.RequestNotAdmitted;
+        if (!std.mem.eql(u8, try observationString(observation, "kind"), "message") or
+            !std.mem.eql(u8, try observationString(observation, "target"), address.session.slice())) return error.RequestBindingMismatch;
+
+        // Store the private lifetime record in the parser's existing arena: no
+        // independent allocation owner or second copy of the observation tree.
+        const storage = try parsed.arena.allocator().create(@TypeOf(parsed));
+        storage.* = parsed;
+        var result: MessageObservation = .{ .state = .accepted, .storage = @ptrCast(storage) };
+        if (std.mem.eql(u8, status, "rejected")) {
+            result.state = .rejected;
+            result.code = try observationCode(observation);
+            return result;
+        }
+        if (!std.mem.eql(u8, status, "accepted")) return error.InvalidObservation;
+        // The selected Message's terminal result wins over queue/progress hints,
+        // including an excluded queue and a successor's permission attention.
+        if (observation.object.get("result")) |terminal_result| {
+            const outcome = try observationString(terminal_result, "status");
+            result.state = std.meta.stringToEnum(State, outcome) orelse return error.InvalidObservation;
+            if (result.state != .completed and result.state != .failed and result.state != .cancelled) return error.InvalidObservation;
+            result.code = try observationCode(terminal_result);
+            return result;
+        }
+        if (observation.object.get("queue")) |queue| {
+            const queued = try observationString(queue, "status");
+            result.state = std.meta.stringToEnum(State, queued) orelse return error.InvalidObservation;
+            if (result.state != .queued and result.state != .processing) return error.InvalidObservation;
+        }
+        if (observation.object.get("progress")) |progress| {
+            const progress_status = std.meta.stringToEnum(@FieldType(Progress, "status"), try observationString(progress, "status")) orelse return error.InvalidObservation;
+            const action = try observationField(progress, "action");
+            const action_id: ?u64 = switch (action) {
+                .null => null,
+                .string => blk: {
+                    if (action.string.len == 0) return error.InvalidObservation;
+                    for (action.string) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidObservation;
+                    const id = std.fmt.parseInt(u64, action.string, 10) catch return error.InvalidObservation;
+                    if (id == 0) return error.InvalidObservation;
+                    break :blk id;
+                },
+                else => return error.InvalidObservation,
+            };
+            if (progress_status == .waiting_for_permission and action_id == null) return error.InvalidObservation;
+            result.progress = .{ .status = progress_status, .action = action_id };
+        }
+        return result;
+    }
+};
+
+fn observationField(value: std.json.Value, name: []const u8) !std.json.Value {
+    if (value != .object) return error.InvalidObservation;
+    return value.object.get(name) orelse error.InvalidObservation;
+}
+
+fn observationString(value: std.json.Value, name: []const u8) ![]const u8 {
+    const field = try observationField(value, name);
+    if (field != .string) return error.InvalidObservation;
+    return field.string;
+}
+
+fn observationCode(value: std.json.Value) !?[]const u8 {
+    if (value != .object) return error.InvalidObservation;
+    if (value.object.get("code")) |code| {
+        if (code != .string) return error.InvalidObservation;
+        return code.string;
+    }
+    return null;
+}
+
+pub fn observeMessage(io: std.Io, allocator: std.mem.Allocator, address: *const MessageAddress) !MessageObservation {
+    var buffer: ReplyBuffer = .{};
+    const reply = try observeCommand(io, address.store.slice(), address.key.slice(), &buffer);
+    return MessageObservation.parse(allocator, reply, address);
 }
 
 pub fn readResult(
@@ -510,11 +618,92 @@ pub const CapturedIdentity = struct {
     kind: protocol.Bounded(32) = .{},
 };
 
+pub const CaptureTarget = union(enum) {
+    generated: []const u8, // Caller-selected private directory, not HOME policy.
+    explicit: struct { record: []const u8, key: []const u8 },
+
+    fn resolve(self: CaptureTarget, io: std.Io, path: []u8, key: *[36]u8) !@FieldType(CaptureTarget, "explicit") {
+        return switch (self) {
+            .explicit => |value| value,
+            .generated => |directory| blk: {
+                var bytes: [16]u8 = undefined;
+                try std.Io.randomSecure(io, &bytes);
+                bytes[6] = (bytes[6] & 0x0f) | 0x40;
+                bytes[8] = (bytes[8] & 0x3f) | 0x80;
+                const id = try std.fmt.bufPrint(key, "{x:0>8}-{x:0>4}-{x:0>4}-{x:0>4}-{x:0>12}", .{
+                    std.mem.readInt(u32, bytes[0..4], .big),
+                    std.mem.readInt(u16, bytes[4..6], .big),
+                    std.mem.readInt(u16, bytes[6..8], .big),
+                    std.mem.readInt(u16, bytes[8..10], .big),
+                    std.mem.readInt(u48, bytes[10..16], .big),
+                });
+                break :blk .{ .record = try requestPath(directory, id, path), .key = id };
+            },
+        };
+    }
+};
+
+// Owns one read-only descriptor, never the saved name's deletion. Identity
+// borrows this value and remains available after any send failure. Do not copy
+// the live owner; close once after the last send/identity consumer.
+pub const CapturedRecord = struct {
+    file: std.Io.File,
+    length: u64,
+    saved: CapturedIdentity,
+
+    pub fn identity(self: *const CapturedRecord) *const CapturedIdentity {
+        return &self.saved;
+    }
+
+    pub fn close(self: *CapturedRecord, io: std.Io) void {
+        self.file.close(io);
+        self.* = undefined;
+    }
+};
+
+pub fn validRequestHandle(handle: []const u8) bool {
+    if (handle.len != 36) return false;
+    for (handle, 0..) |byte, index| {
+        if (index == 8 or index == 13 or index == 18 or index == 23) {
+            if (byte != '-') return false;
+        } else if (!std.ascii.isHex(byte) or std.ascii.isUpper(byte)) return false;
+    }
+    return true;
+}
+
+fn requestPath(directory: []const u8, handle: []const u8, buffer: []u8) ![]const u8 {
+    if (!validRequestHandle(handle)) return error.InvalidRequestHandle;
+    return std.fmt.bufPrint(buffer, "{s}/{s}.json", .{ directory, handle });
+}
+
+// Generated recovery intentionally supports only configure/message/permission
+// decisions. Stop/interruption retain the explicit retry route, not a new parser.
+pub fn openCaptured(io: std.Io, directory: []const u8, handle: []const u8) !CapturedRecord {
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try requestPath(directory, handle, &path_buffer);
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    errdefer file.close(io);
+    const saved = try readCapturedIdentity(io, &file, handle);
+    _ = try capturedRoute(&saved);
+    return .{ .file = file, .length = try file.length(io), .saved = saved };
+}
+
+fn capturedRoute(saved: *const CapturedIdentity) ![]const u8 {
+    if (saved.kind.eql("configure")) return "/v1/configure";
+    if (saved.kind.eql("message")) return "/v1/message";
+    if (saved.kind.eql("permission_decision")) return "/v1/control/permission-decision";
+    return error.InvalidRequestRecord;
+}
+
+pub fn sendCaptured(io: std.Io, captured: *CapturedRecord, drop_reply: ?[]const u8, reply_buffer: *ReplyBuffer) !CommandReply {
+    reply_buffer.len = 0;
+    const paths = try platform.resolveClientPaths(io, captured.saved.store.slice());
+    return sendSource(io, &paths, try capturedRoute(&captured.saved), captured.length, &captured.file, null, drop_reply, null, reply_buffer, null);
+}
+
 // Capture writes identity first, before variable content. Recover the bounded
 // prefix without loading or copying the potentially large captured payload.
-pub fn readCapturedIdentity(io: std.Io, path: []const u8, handle: []const u8) !CapturedIdentity {
-    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
+fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !CapturedIdentity {
     const header_bytes = 6 * (protocol.max_store_bytes + protocol.max_key_bytes + protocol.max_session_bytes) + 256;
     var buffer: [header_bytes]u8 = undefined;
     const count = try file.readPositionalAll(io, &buffer, 0);
@@ -545,14 +734,19 @@ pub fn readCapturedIdentity(io: std.Io, path: []const u8, handle: []const u8) !C
     return identity;
 }
 
-fn captureConfigure(io: std.Io, paths: *const platform.Paths, input: ConfigureInput) !void {
+pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget) !CapturedRecord {
+    const paths = try platform.resolveClientPaths(io, input.store);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try validateIdentityInputs(location.key, input.session);
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, input.record, &output_buffer);
+    var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
     try capture.write("{\"version\":\"1\",\"kind\":\"configure\",\"store\":");
     try capture.writeJsonString(paths.store.slice());
     try capture.write(",\"key\":");
-    try capture.writeJsonString(input.key);
+    try capture.writeJsonString(location.key);
     try capture.write(",\"session\":");
     try capture.writeJsonString(input.session);
     try capture.write(",\"configuration\":{\"workspace\":");
@@ -570,17 +764,22 @@ fn captureConfigure(io: std.Io, paths: *const platform.Paths, input: ConfigureIn
     try capture.write(",\"output_schema\":");
     try capture.writeOptionalFile(input.output_schema, true);
     try capture.write("}}");
-    try capture.commit();
+    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, "configure");
 }
 
-fn captureMessage(io: std.Io, paths: *const platform.Paths, input: MessageInput) !void {
+pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !CapturedRecord {
+    const paths = try platform.resolveClientPaths(io, input.store);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try validateIdentityInputs(location.key, input.session);
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, input.record, &output_buffer);
+    var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
     try capture.write("{\"version\":\"1\",\"kind\":\"message\",\"store\":");
     try capture.writeJsonString(paths.store.slice());
     try capture.write(",\"key\":");
-    try capture.writeJsonString(input.key);
+    try capture.writeJsonString(location.key);
     try capture.write(",\"session\":");
     try capture.writeJsonString(input.session);
     try capture.write(",\"text\":{\"state\":\"value\",\"value\":");
@@ -589,7 +788,7 @@ fn captureMessage(io: std.Io, paths: *const platform.Paths, input: MessageInput)
         try capture.writeJsonString(value);
     } else try capture.writeJsonFile(input.text_path);
     try capture.write("}}");
-    try capture.commit();
+    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, "message");
 }
 
 fn captureSessionStop(io: std.Io, paths: *const platform.Paths, input: SessionStopInput) !void {
@@ -629,22 +828,34 @@ fn captureModelInterruption(
     try capture.commit();
 }
 
-fn capturePermissionDecision(io: std.Io, paths: *const platform.Paths, input: PermissionDecisionInput) !void {
+pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, target: CaptureTarget) !CapturedRecord {
+    const paths = try platform.resolveClientPaths(io, input.store);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try validateIdentityInputs(location.key, input.session);
+    if (input.action_id == 0) return error.InvalidTarget;
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, input.record, &output_buffer);
+    var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
-    try capture.write("{\"version\":\"1\",\"kind\":\"permission_decision\",\"store\":");
-    try capture.writeJsonString(paths.store.slice());
-    try capture.write(",\"key\":");
-    try capture.writeJsonString(input.key);
-    try capture.write(",\"session\":");
-    try capture.writeJsonString(input.session);
-    var suffix: [96]u8 = undefined;
-    try capture.write(try std.fmt.bufPrint(&suffix, ",\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{
-        input.action_id,
-        @tagName(input.decision),
-    }));
+    try capture.writePermissionDecision(paths.store.slice(), location.key, input);
+    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, "permission_decision");
+}
+
+fn finishCapture(io: std.Io, capture: *Capture, store: []const u8, key: []const u8, session: []const u8, kind: []const u8) !CapturedRecord {
+    var saved: CapturedIdentity = .{};
+    try saved.store.set(store);
+    try saved.key.set(key);
+    try saved.session.set(session);
+    try saved.kind.set(kind);
+    // Pin the temporary inode under capture custody, before exposing its name.
+    // This reader observes the final flush, not a later public-path replacement.
+    var file = try capture.parent.openFile(io, capture.temporary_name.slice(), .{});
+    errdefer file.close(io);
+    // A post-publication directory-sync failure returns no transmissible owner,
+    // but abort preserves the published name for later explicit recovery.
     try capture.commit();
+    return .{ .file = file, .length = try file.length(io), .saved = saved };
 }
 
 const Capture = struct {
@@ -746,6 +957,20 @@ const Capture = struct {
         if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
         std.json.Stringify.encodeJsonString(value, .{}, &self.writer.interface) catch
             return self.writer.err orelse error.WriteFailed;
+    }
+
+    fn writePermissionDecision(self: *Capture, store: []const u8, key: []const u8, input: PermissionDecisionInput) !void {
+        try self.write("{\"version\":\"1\",\"kind\":\"permission_decision\",\"store\":");
+        try self.writeJsonString(store);
+        try self.write(",\"key\":");
+        try self.writeJsonString(key);
+        try self.write(",\"session\":");
+        try self.writeJsonString(input.session);
+        var suffix: [96]u8 = undefined;
+        try self.write(try std.fmt.bufPrint(&suffix, ",\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{
+            input.action_id,
+            @tagName(input.decision),
+        }));
     }
 
     fn writeOptionalText(self: *Capture, value: OptionalText) !void {
@@ -913,7 +1138,7 @@ fn sendSource(
         var sent: u64 = 0;
         while (sent < length) {
             const wanted: usize = @intCast(@min(length - sent, buffer.len));
-            const count = try source.readStreaming(io, &.{buffer[0..wanted]});
+            const count = try source.readPositionalAll(io, buffer[0..wanted], sent);
             if (count != wanted) return error.RecordChangedDuringSend;
             try writeAllUntil(io, fd, buffer[0..count], until);
             sent += count;
@@ -1361,6 +1586,263 @@ test "response framing rejects ambiguous or malformed fields before interpreting
     try std.testing.expectEqual(@as(u16, 200), (try readResponseHead(sockets[0])).status);
 }
 
+test "capture returns original identity before send and preserves empty explicit keys" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const input: MessageInput = .{ .store = root, .session = "original/é", .text_path = "", .text = "original\ntext" };
+    var generated = try captureMessage(io, input, .{ .generated = root });
+    const saved = generated.identity().*;
+    const descriptor = generated.file.handle;
+    {
+        defer generated.close(io);
+        try std.testing.expect(validRequestHandle(saved.key.slice()));
+        try std.testing.expectEqual(@as(u8, '4'), saved.key.slice()[14]);
+        try std.testing.expect(std.mem.indexOfScalar(u8, "89ab", saved.key.slice()[19]) != null);
+        try std.testing.expectEqualStrings(root, saved.store.slice());
+        try std.testing.expectEqualStrings("original/é", saved.session.slice());
+        try std.testing.expectEqualStrings("message", saved.kind.slice());
+        var reply: ReplyBuffer = .{};
+        try std.testing.expectError(error.FileNotFound, sendCaptured(io, &generated, null, &reply));
+        try std.testing.expectEqualStrings(saved.key.slice(), generated.identity().key.slice());
+        try std.testing.expectEqualStrings(root, generated.identity().store.slice());
+    }
+    try std.testing.expect(std.c.fcntl(descriptor, std.c.F.GETFD) < 0);
+    var recovered = try openCaptured(io, root, saved.key.slice());
+    defer recovered.close(io);
+    try std.testing.expectEqualStrings(saved.key.slice(), recovered.identity().key.slice());
+    var record: [2048]u8 = undefined;
+    const n = try recovered.file.readPositionalAll(io, &record, 0);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, record[0..n], .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("original\ntext", parsed.value.object.get("text").?.object.get("value").?.string);
+
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/explicit", .{root});
+    var explicit = try captureMessage(io, input, .{ .explicit = .{ .record = path, .key = "" } });
+    defer explicit.close(io);
+    try std.testing.expectEqualStrings("", explicit.identity().key.slice());
+    try std.testing.expectError(error.RecordAlreadyExists, captureMessage(io, input, .{ .explicit = .{ .record = path, .key = "different" } }));
+    try std.testing.expectError(error.InvalidRequestHandle, openCaptured(io, root, ""));
+}
+
+test "capture retransmits complete original bytes after a lost reply" {
+    const Peer = struct {
+        var client_fd: std.posix.fd_t = undefined;
+        var failure: ?anyerror = null;
+        fn connect(_: ?*anyopaque, _: *const std.Io.net.UnixAddress) std.Io.net.UnixAddress.ConnectError!std.Io.net.Socket.Handle {
+            return client_fd;
+        }
+        fn serve(fd: std.posix.fd_t, expected: []const u8, reply: bool) void {
+            exchange(fd, expected, reply) catch |err| {
+                failure = err;
+            };
+        }
+        fn exchange(fd: std.posix.fd_t, expected: []const u8, reply: bool) !void {
+            defer closeTestDescriptor(fd);
+            var head: [512]u8 = undefined;
+            var used: usize = 0;
+            while (!std.mem.endsWith(u8, head[0..used], "\r\n\r\n")) {
+                if (used == head.len) return error.TestRequestHeadTooLarge;
+                const n = std.posix.system.read(fd, head[used..].ptr, 1);
+                if (n != 1) return error.TestRequestTruncated;
+                used += 1;
+            }
+            try std.testing.expect(std.mem.startsWith(u8, head[0..used], "POST /v1/message HTTP/1.1\r\n"));
+            var length_buffer: [64]u8 = undefined;
+            const length = try std.fmt.bufPrint(&length_buffer, "Content-Length: {d}\r\n", .{expected.len});
+            try std.testing.expect(std.mem.indexOf(u8, head[0..used], length) != null);
+            var bytes: [protocol.content_window_bytes]u8 = undefined;
+            var offset: usize = 0;
+            while (offset < expected.len) {
+                const wanted = @min(bytes.len, expected.len - offset);
+                const n = std.posix.system.read(fd, &bytes, wanted);
+                if (n <= 0) return error.TestRequestTruncated;
+                const count: usize = @intCast(n);
+                try std.testing.expectEqualSlices(u8, expected[offset..][0..count], bytes[0..count]);
+                offset += count;
+            }
+            if (reply) try writeAll(fd, empty_test_response);
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/explicit", .{root});
+    const text = [_]u8{'q'} ** (2 * protocol.content_window_bytes + 3);
+    var captured = try captureMessage(io, .{ .store = root, .session = "original/session", .text_path = "", .text = &text }, .{ .explicit = .{ .record = path, .key = "owned-key" } });
+    defer captured.close(io);
+    var expected_buffer: [text.len + 1024]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"owned-key\",\"session\":\"original/session\",\"text\":{{\"state\":\"value\",\"value\":\"{s}\"}}}}", .{ root, text });
+    var vtable = io.vtable.*;
+    vtable.netConnectUnix = Peer.connect;
+    const connected_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    for ([_]bool{ false, true }) |reply| {
+        const sockets = try socketPair();
+        Peer.client_fd = sockets[0]; // The production send owns and closes it.
+        Peer.failure = null;
+        const peer = try std.Thread.spawn(.{}, Peer.serve, .{ sockets[1], expected, reply });
+        var buffer: ReplyBuffer = .{};
+        const result = sendCaptured(connected_io, &captured, null, &buffer);
+        peer.join();
+        if (Peer.failure) |err| return err;
+        if (reply) {
+            try std.testing.expectEqual(@as(u16, 200), (try result).status);
+        } else try std.testing.expectError(error.TruncatedResponse, result);
+        try std.testing.expectEqualStrings("owned-key", captured.identity().key.slice());
+    }
+}
+
+test "capture publication transfers original inode across pathname replacement" {
+    const Replacement = struct {
+        fn rename(userdata: ?*anyopaque, old_dir: std.Io.Dir, old_path: []const u8, new_dir: std.Io.Dir, new_path: []const u8) std.Io.Dir.RenamePreserveError!void {
+            try std.testing.io.vtable.dirRenamePreserve(userdata, old_dir, old_path, new_dir, new_path);
+            // Simulate a second local process immediately after the production
+            // rename, before sync/lock release and the captured-owner handoff.
+            new_dir.rename(new_path, new_dir, "displaced-original", std.testing.io) catch return error.Unexpected;
+            const file = new_dir.createFile(std.testing.io, new_path, .{}) catch return error.Unexpected;
+            defer file.close(std.testing.io);
+            file.writeStreamingAll(std.testing.io, "replacement bytes") catch return error.Unexpected;
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/record", .{root});
+    var vtable = io.vtable.*;
+    vtable.dirRenamePreserve = Replacement.rename;
+    const replaced_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var captured = try captureMessage(replaced_io, .{ .store = root, .session = "original/session", .text_path = "", .text = "original\ntext" }, .{ .explicit = .{ .record = path, .key = "original-key" } });
+    defer captured.close(io);
+    var expected_buffer: [2048]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"original-key\",\"session\":\"original/session\",\"text\":{{\"state\":\"value\",\"value\":\"original\\ntext\"}}}}", .{root});
+    var bytes: [2048]u8 = undefined;
+    const count = try captured.file.readPositionalAll(io, &bytes, 0);
+    try std.testing.expectEqualStrings(expected, bytes[0..count]);
+    try std.testing.expectEqual(@as(u64, expected.len), captured.length);
+}
+
+test "capture closes pinned reader when publication or handoff fails" {
+    const Failure = struct {
+        var reader: std.posix.fd_t = undefined;
+        var closed: usize = 0;
+        fn open(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            const file = try std.testing.io.vtable.dirOpenFile(userdata, dir, path, options);
+            reader = file.handle;
+            return file;
+        }
+        fn close(userdata: ?*anyopaque, files: []const std.Io.File) void {
+            for (files) |file| if (file.handle == reader) {
+                closed += 1;
+            };
+            std.testing.io.vtable.fileClose(userdata, files);
+        }
+        fn sync(_: ?*anyopaque, _: std.Io.File) std.Io.File.SyncError!void {
+            return error.NoSpaceLeft;
+        }
+        fn length(_: ?*anyopaque, _: std.Io.File) std.Io.File.LengthError!u64 {
+            return error.AccessDenied;
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/record", .{root});
+    for ([_]bool{ false, true }) |published| {
+        var vtable = io.vtable.*;
+        vtable.dirOpenFile = Failure.open;
+        vtable.fileClose = Failure.close;
+        if (published) vtable.fileLength = Failure.length else vtable.fileSync = Failure.sync;
+        const failing_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+        Failure.closed = 0;
+        try std.testing.expectError(if (published) error.AccessDenied else error.NoSpaceLeft, captureMessage(failing_io, .{ .store = root, .session = "original/session", .text_path = "", .text = "original" }, .{ .explicit = .{ .record = path, .key = "original-key" } }));
+        try std.testing.expectEqual(@as(usize, 1), Failure.closed);
+        try std.testing.expect(std.c.fcntl(Failure.reader, std.c.F.GETFD) < 0);
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, ".record.capture.tmp", .{}));
+        if (published) {
+            _ = try tmp.dir.statFile(io, "record", .{});
+        } else try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "record", .{}));
+    }
+}
+
+test "capture recovery closes rejected records and retains only its reader lifetime" {
+    const Probe = struct {
+        var opened: usize = 0;
+        var closed: usize = 0;
+        fn open(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            const file = try std.testing.io.vtable.dirOpenFile(userdata, dir, path, options);
+            opened += 1;
+            return file;
+        }
+        fn close(userdata: ?*anyopaque, files: []const std.Io.File) void {
+            closed += files.len;
+            std.testing.io.vtable.fileClose(userdata, files);
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const handle = "01234567-89ab-4cde-8012-3456789abcde";
+    const filename = handle ++ ".json";
+    var vtable = io.vtable.*;
+    vtable.dirOpenFile = Probe.open;
+    vtable.fileClose = Probe.close;
+    const observed_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    Probe.opened = 0;
+    Probe.closed = 0;
+    for ([_][]const u8{
+        "not json",
+        "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\"}",
+        "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"target\":{\"session\":\"original\",\"turn\":\"1\",\"operation\":\"2\"}}",
+        "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"other\",\"session\":\"original\",\"text\":{}}",
+        "{\"version\":\"1\",\"kind\":\"unknown\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{}}",
+    }) |bytes| {
+        const file = try tmp.dir.createFile(io, filename, .{});
+        try file.writeStreamingAll(io, bytes);
+        file.close(io);
+        try std.testing.expectError(error.InvalidRequestRecord, openCaptured(observed_io, root, handle));
+        try std.testing.expectEqual(Probe.opened, Probe.closed);
+    }
+    try tmp.dir.deleteFile(io, filename);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try requestPath(root, handle, &path_buffer);
+    var captured = try captureConfigure(io, .{ .store = root, .session = "original" }, .{ .explicit = .{ .record = path, .key = handle } });
+    captured.close(io);
+    var recovered = try openCaptured(observed_io, root, handle);
+    const descriptor = recovered.file.handle;
+    {
+        defer recovered.close(observed_io);
+        try std.testing.expectEqual(Probe.opened, Probe.closed + 1);
+        try tmp.dir.rename(filename, tmp.dir, "original-record", io);
+        const replacement = try tmp.dir.createFile(io, filename, .{});
+        try replacement.writeStreamingAll(io, "replacement must not change the open original");
+        replacement.close(io);
+        var bytes: [2048]u8 = undefined;
+        const n = try recovered.file.readPositionalAll(io, &bytes, 0);
+        try std.testing.expect(std.mem.startsWith(u8, bytes[0..n], "{\"version\":\"1\",\"kind\":\"configure\""));
+    }
+    try std.testing.expectEqual(Probe.opened, Probe.closed);
+    try std.testing.expect(std.c.fcntl(descriptor, std.c.F.GETFD) < 0);
+}
+
 test "capture batches escaped file output and flushes before publication" {
     const Probe = struct {
         var writes: usize = 0;
@@ -1658,14 +2140,16 @@ test "control captures attain their exact worst-case request bounds" {
         "{s}/records/permission-record",
         .{root_buffer[0..root_length]},
     );
-    try capturePermissionDecision(std.testing.io, &paths, .{
+    var permission_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var permission_capture = try Capture.open(std.testing.io, permission_path, &permission_buffer);
+    defer permission_capture.abort();
+    try permission_capture.writePermissionDecision(paths.store.slice(), &escaped_key, .{
         .store = "unused",
-        .record = permission_path,
-        .key = &escaped_key,
         .session = &escaped_session,
         .action_id = std.math.maxInt(u64),
         .decision = .allow_once,
     });
+    try permission_capture.commit();
     const permission_file = try std.Io.Dir.cwd().openFile(std.testing.io, permission_path, .{});
     defer permission_file.close(std.testing.io);
     try std.testing.expectEqual(
@@ -1817,4 +2301,100 @@ test "truncated result body leaves only an unsuccessful destination prefix" {
         readResultResponse(std.testing.io, descriptors[0], destination, &buffer),
     );
     try std.testing.expectEqual(@as(u64, 2), try destination.length(std.testing.io));
+}
+
+test "Message observation preserves binding outcomes and absent progress" {
+    const address = try MessageAddress.init("/store", "original/session", "original-key");
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"original-key\",\"observation\":{\"kind\":\"message\",\"target\":\"original/session\",";
+    const cases = .{
+        .{ "\"status\":\"accepted\"}}", MessageObservation.State.accepted, null },
+        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"queued\"}}}", MessageObservation.State.queued, null },
+        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"processing\"}}}", MessageObservation.State.processing, null },
+        .{ "\"status\":\"rejected\",\"code\":\"unknown_session\"}}", MessageObservation.State.rejected, "unknown_session" },
+        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"processing\"},\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"19\"}}}", MessageObservation.State.failed, "provider_http_422" },
+        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"excluded\"},\"result\":{\"status\":\"cancelled\",\"code\":\"session_stopped\"}}}", MessageObservation.State.cancelled, "session_stopped" },
+        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"completed\"},\"result\":{\"status\":\"completed\"}}}", MessageObservation.State.completed, null },
+    };
+    inline for (cases) |case| {
+        var observed = try MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ case[0] }, &address);
+        defer observed.deinit();
+        try std.testing.expectEqual(case[1], observed.state);
+        const expected_code: ?[]const u8 = case[2];
+        if (expected_code) |code| try std.testing.expectEqualStrings(code, observed.code.?) else try std.testing.expect(observed.code == null);
+        try std.testing.expect(observed.progress == null);
+    }
+    const other_session = try MessageAddress.init("/store", "later/session", "original-key");
+    const other_key = try MessageAddress.init("/store", "original/session", "later-key");
+    const completed: CommandReply = .{ .status = 200, .body = prefix ++ "\"status\":\"accepted\",\"result\":{\"status\":\"completed\"}}}" };
+    try std.testing.expectError(error.RequestBindingMismatch, MessageObservation.parse(std.testing.allocator, completed, &other_session));
+    try std.testing.expectError(error.RequestBindingMismatch, MessageObservation.parse(std.testing.allocator, completed, &other_key));
+    try std.testing.expectError(error.ObservationFailed, MessageObservation.parse(std.testing.allocator, .{ .status = 503, .body = "" }, &address));
+    try std.testing.expectError(error.RequestNotAdmitted, MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ "\"status\":\"absent\"}}" }, &address));
+    try std.testing.expectError(error.RequestBindingMismatch, MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"original-key\",\"observation\":{\"status\":\"accepted\",\"kind\":\"configure\",\"target\":\"original/session\"}}" }, &address));
+}
+
+test "Message observation rejects malformed facts rather than work failures" {
+    const address = try MessageAddress.init("/store", "s", "k");
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"s\",\"status\":\"accepted\",";
+    inline for (.{
+        "\"queue\":null}}",
+        "\"queue\":{\"status\":\"excluded\"}}}",
+        "\"result\":{\"status\":\"processing\"}}}",
+        "\"result\":{\"status\":\"failed\",\"code\":17}}}",
+        "\"progress\":{\"status\":\"invented\",\"action\":null}}}",
+        "\"progress\":{\"status\":\"waiting_for_permission\",\"action\":null}}}",
+        "\"progress\":{\"status\":\"in_flight\"}}}",
+        "\"progress\":{\"status\":\"in_flight\",\"action\":17}}}",
+        "\"progress\":{\"status\":\"in_flight\",\"action\":\"0\"}}}",
+        "\"progress\":{\"status\":\"in_flight\",\"action\":\"+7\"}}}",
+        "\"progress\":{\"status\":\"in_flight\",\"action\":\"18446744073709551616\"}}}",
+    }) |suffix| try std.testing.expectError(error.InvalidObservation, MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ suffix }, &address));
+    inline for (.{ "{}", "[]", "{\"version\":\"2\"}", "{\"version\":\"1\",\"type\":\"wrong\"}" }) |body|
+        try std.testing.expectError(error.InvalidObservation, MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = body }, &address));
+    try std.testing.expectError(error.DuplicateField, MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ "\"queue\":{\"status\":\"queued\",\"status\":\"processing\"}}}" }, &address));
+    var oversized: [protocol.max_response_bytes + 1]u8 = undefined;
+    try std.testing.expectError(error.ResponseTooLarge, MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = &oversized }, &address));
+}
+
+test "Message observation owns decoded strings and writes complete JSON after reply reuse" {
+    const address = try MessageAddress.init("/store", "s", "k");
+    const observation = "{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"digest\"},\"queue\":{\"status\":\"processing\",\"admission\":\"41\"},\"processing\":{\"turn\":\"3\",\"operation\":\"9\",\"attempt\":\"15\"},\"result\":{\"status\":\"failed\",\"code\":\"plain_code\"},\"extra\":{\"precise\":123456789012345678901234567890,\"decimal\":0.123456789012345678901234567890,\"items\":[true,null,\"line\\n\\u001b\"]}}";
+    const body = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":" ++ observation ++ "}";
+    var reply_storage: [body.len]u8 = undefined;
+    @memcpy(&reply_storage, body);
+    var observed = try MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = &reply_storage }, &address);
+    defer observed.deinit();
+    @memset(&reply_storage, 'x');
+    try std.testing.expectEqualStrings("plain_code", observed.code.?);
+    var output: [body.len]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output);
+    try observed.writeJson(&writer);
+    try std.testing.expectEqualStrings(observation, writer.buffered());
+    var too_small = std.Io.Writer.fixed(&.{});
+    try std.testing.expectError(error.WriteFailed, observed.writeJson(&too_small));
+}
+
+test "Message observation releases storage across allocation failures and repeated polls" {
+    const Harness = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const address = try MessageAddress.init("/store", "s", "k");
+            const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\",";
+            var observed = try MessageObservation.parse(allocator, .{ .status = 200, .body = prefix ++ "\"queue\":{\"status\":\"processing\"},\"progress\":{\"status\":\"in_flight\",\"action\":\"18446744073709551615\"}}}" }, &address);
+            defer observed.deinit();
+            try std.testing.expectEqual(std.math.maxInt(u64), observed.progress.?.action.?);
+            var invalid = MessageObservation.parse(allocator, .{ .status = 200, .body = prefix ++ "\"progress\":{\"status\":\"in_flight\",\"action\":false}}}" }, &address) catch |err| switch (err) {
+                error.InvalidObservation => return,
+                else => return err,
+            };
+            invalid.deinit();
+            return error.ExpectedInvalidObservation;
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
+    for (0..100) |_| {
+        var tracked = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        try Harness.run(tracked.allocator());
+        try std.testing.expectEqual(tracked.allocated_bytes, tracked.freed_bytes);
+        try std.testing.expectEqual(tracked.allocations, tracked.deallocations);
+    }
 }

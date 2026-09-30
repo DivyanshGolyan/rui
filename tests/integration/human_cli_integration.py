@@ -77,6 +77,126 @@ def terminal_bulk(master, command, marker="rui> "):
     return output
 
 
+def saved_capture_cases(state, store, workspace):
+    home = state / "capture-home"
+    home.mkdir()
+    records = home / ".config/rui/requests"
+    args = ["configure", "--store", store, "--session", "capture/original",
+        "--workspace", workspace, "--provider", "codex", "--model", "model-a"]
+    gate = state / "capture-original-reader"
+    caller = subprocess.Popen([str(fixture.RUI), *map(str, args), "--json"],
+        env={**os.environ, "HOME": str(home), "RUI_TEST_CAPTURE_GATE": str(gate)},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    original = None
+    record = None
+    try:
+        fixture.wait_for(lambda: pathlib.Path(f"{gate}.ready").exists(), "capture reader publication")
+        handles = json.loads(run(home, "requests", "--json"))
+        assert len(handles) == 1, handles
+        handle = handles[0]
+        record = records / f"{handle}.json"
+        original = record.read_bytes()
+        assert fixture.command("observe-command", "--store", store,
+            "--key", handle)["observation"]["status"] == "absent"
+        # A pathname replacement after publication must not swap the bytes
+        # selected by the captured owner before its announcement.
+        replaced = json.loads(original)
+        replaced["session"] = "capture/replacement"
+        replacement = records / "replacement"
+        replacement.write_text(json.dumps(replaced, separators=(",", ":")))
+        replacement.replace(record)
+        pathlib.Path(f"{gate}.release").touch()
+        output, errors = caller.communicate(timeout=20)
+        assert caller.returncode == 0, (output, errors)
+        captured, admission = map(json.loads, output.splitlines())
+        assert captured["request"] == handle and admission["admission"]["answer"]["status"] == "accepted"
+        observed = fixture.command("observe-command", "--store", store, "--key", handle)["observation"]
+        assert observed["target"] == "capture/original", ("captured owner transmitted a replaced pathname", observed)
+    finally:
+        if caller.poll() is None:
+            caller.kill()
+            caller.communicate(timeout=5)
+        if original is not None:
+            record.write_bytes(original)
+
+    # Recovery must ignore a newly selected, nonexistent preference Store.
+    run(home, "setup", "--store", store)
+    preferences = home / ".config/rui/preferences"
+    preferences.write_text(f"version=1\nstore={state / 'missing-capture-store'}\n")
+    assert json.loads(run(home, "recover", handle, "--json"))["answer"]["replayed"] is True
+
+    # Failure to announce happens after publication but before any send.
+    before = set(run(home, "requests").splitlines())
+    output = run(home, *args, success=False,
+        environment={"RUI_TEST_CAPTURE_GATE": str(state / "missing-parent/gate")})
+    assert output == "", output
+    failed_notice, = set(run(home, "requests").splitlines()) - before
+    assert fixture.command("observe-command", "--store", store,
+        "--key", failed_notice)["observation"]["status"] == "absent"
+    assert json.loads(run(home, "recover", failed_notice, "--json"))["answer"]["replayed"] is False
+
+    # Linux libc fault injection reaches the actual post-rename directory sync,
+    # not a fixture-only success path. No automatic send may follow uncertainty.
+    if sys.platform == "linux":
+        source, library = state / "capture-sync.c", state / "capture-sync.so"
+        source.write_text(r"""
+#include <dlfcn.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <unistd.h>
+int fsync(int fd) {
+    struct stat value;
+    if (!fstat(fd, &value) && S_ISDIR(value.st_mode)) { errno = EIO; return -1; }
+    int (*real_sync)(int) = dlsym(RTLD_NEXT, "fsync");
+    return real_sync(fd);
+}
+""")
+        subprocess.run(["cc", "-shared", "-fPIC", str(source), "-ldl", "-o", str(library)], check=True)
+        before = set(run(home, "requests").splitlines())
+        failed = subprocess.run([str(fixture.RUI), *map(str, args)],
+            env={**os.environ, "HOME": str(home), "LD_PRELOAD": str(library)},
+            capture_output=True, text=True, timeout=20)
+        assert failed.returncode != 0 and "RecordDirectorySyncFailed" in failed.stderr, failed
+        assert failed.stdout == "", failed.stdout
+        uncertain, = set(run(home, "requests").splitlines()) - before
+        assert fixture.command("observe-command", "--store", store,
+            "--key", uncertain)["observation"]["status"] == "absent"
+        assert json.loads(run(home, "recover", uncertain, "--json"))["answer"]["replayed"] is False
+    else:
+        print("capture directory-sync injection: unavailable outside Linux", flush=True)
+
+    invalid = "01234567-89ab-4cde-8012-3456789abcde"
+    unsupported = "01234567-89ab-4cde-8012-3456789abcdf"
+    (records / f"{invalid}.json").write_text("not a readable record")
+    stop = {"version": "1", "kind": "session_stop", "store": str(store.resolve()),
+        "key": unsupported, "session": "capture/original"}
+    (records / f"{unsupported}.json").write_text(json.dumps(stop, separators=(",", ":")))
+    (records / "not-a-handle.json").write_text("not a record")
+    listed = json.loads(run(home, "requests", "--json"))
+    assert invalid in listed and unsupported in listed and "not-a-handle" not in listed, listed
+    assert run(home, "recover", invalid, success=False) == ""
+    assert run(home, "recover", unsupported, success=False) == ""
+    master, slave = pty.openpty()
+    entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+        "--session", "capture/original"], env={**os.environ, "HOME": str(home)},
+        stdin=slave, stdout=slave, stderr=slave)
+    os.close(slave)
+    try:
+        read_terminal(master, "rui> ")
+        listing = terminal_step(master, "/requests")
+        assert handle in listing and failed_notice in listing, listing
+        assert invalid not in listing and unsupported not in listing, listing
+        terminal_step(master, "/exit", "Detached.")
+        assert entered.wait(timeout=5) == 0
+    finally:
+        if entered.poll() is None:
+            entered.kill()
+            entered.wait(timeout=5)
+        os.close(master)
+    print("saved capture owner: pinned original bytes, preference-independent recovery, failed announcement, "
+        "sync uncertainty, listing asymmetry", flush=True)
+
+
 def main():
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-human-cli."))
     home = state / "home"
@@ -120,6 +240,7 @@ def main():
     completed = False
     try:
         host = fixture.start_host(store, url)
+        saved_capture_cases(state, store, workspace)
         preferences_home = state / "preferences-home"
         preferences_home.mkdir()
         fallback = preferences_home / ".local/share/rui/store"
