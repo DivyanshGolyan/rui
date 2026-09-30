@@ -2229,6 +2229,9 @@ fn shutdownExecution(
     model_preparation: *model_adapter.Preparation,
     model_preparation_active: *bool,
 ) void {
+    // Initiate every effect's shutdown before waiting for any retirement.
+    // Discarded transfers retain their pointer-stable capture storage until
+    // the writer drains; that wait must not delay Bash signals or cleanup.
     for (slots) |*slot| switch (slot.*) {
         .free => {},
         .model_preparing => |active| {
@@ -2249,27 +2252,29 @@ fn shutdownExecution(
             discardBashResources(host, slot, active.token, cleanup);
         },
         .bash => |*active| active.execution.requestInfrastructureShutdown(.now(host.io, .awake)),
-        .bash_prepared_cleanup, .named_scratch => {},
-        .provider => |*active| {
-            const token = active.owner.token;
-            reactor.?.discard(&active.transfer);
-            while (active.transfer.advanceFinalization(false) == .pending)
-                _ = host.io.sleep(.fromMilliseconds(25), .awake) catch {};
-            active.transfer.deinit();
-            host.custody.detach(token) catch unreachable;
-            host.custody.cleanupComplete(token) catch unreachable;
-            slot.* = .free;
-        },
-        .cleanup => |cleanup| {
-            host.custody.cleanupComplete(cleanup.owner.token) catch unreachable;
-            slot.* = .free;
-        },
+        .bash_prepared_cleanup, .named_scratch, .cleanup => {},
+        .provider => |*active| reactor.?.discard(&active.transfer),
     };
     var bash_window: [bash.copy_window_bytes]u8 = undefined;
     var retained_cleanup_at = std.Io.Clock.Timestamp.now(host.io, .awake);
     while (hasOwnedSlots(slots)) {
-        var made_progress = advanceBash(host, slots, &bash_window);
+        var made_progress = false;
+        for (slots) |*slot| switch (slot.*) {
+            .provider => |*active| {
+                // Shutdown discards transport evidence rather than invoking
+                // ordinary model completion or saving a semantic failure.
+                if (active.transfer.advanceFinalization(false) == .discarded) {
+                    const owner = active.owner;
+                    active.transfer.deinit();
+                    beginCleanup(host, slot, owner);
+                    made_progress = true;
+                }
+            },
+            else => {},
+        };
+        made_progress = advanceBash(host, slots, &bash_window) or made_progress;
         const now = std.Io.Clock.Timestamp.now(host.io, .awake);
+        made_progress = advanceCleanupAt(host, slots, now) or made_progress;
         made_progress = advanceRetainedCleanup(host, slots, now, &retained_cleanup_at) or made_progress;
         if (!made_progress) _ = host.io.sleep(.fromMilliseconds(100), .awake) catch {};
     }

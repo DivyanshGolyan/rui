@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -13,7 +14,7 @@ import threading
 
 import bash_integration as bash_fixture
 import dispatch_integration as fixture
-from host_process import HostDiagnostics, stop_process
+from host_process import HostDiagnostics, ReleaseGate, stop_process
 from host_status_integration import socket_path, status
 
 
@@ -57,6 +58,121 @@ def finish(stream, body):
             response.extend(chunk)
             assert len(response) < 8192
     return bytes(response)
+
+
+def mixed_effect_drain(provider_first):
+    """A held provider capture cannot postpone another owner's retirement."""
+    order = "provider-before-Bash" if provider_first else "Bash-before-provider"
+    with tempfile.TemporaryDirectory(prefix="rui-mixed-stop-") as root:
+        state = pathlib.Path(root)
+        store = state / "store"
+        ready = state / "bash-ready"
+        events = state / "events"
+        quoted_events = shlex.quote(str(events))
+        command = (
+            f"trap 'printf \"TERM\\n\" >> {quoted_events}; exit 0' TERM; "
+            f"printf ready > {shlex.quote(str(ready))}; "
+            f"for ((i=0; i<600; i++)); do printf 'alive\\n' >> {quoted_events}; sleep 0.05; done"
+        )
+        proposal = fixture.sse_tool_calls("bash-proposal", [
+            ("bash", "bash-call", json.dumps({"cmd": command, "timeout_ms": None}))
+        ])
+        large = fixture.sse_answer("held-provider", "private-reason", "answer", "x" * 128000)[0]
+        endpoint = fixture.SuccessEndpoint([], responses_by_input={"bash": proposal, "provider": large})
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        thread.start()
+        gate = ReleaseGate(state / "capture-gate")
+        cleanup_gate = state / "model-cleanup-gate"
+        cleanup_gate.write_text("held")
+        host = None
+        diagnostics = None
+        try:
+            host = fixture.start_host(
+                store, f"http://127.0.0.1:{endpoint.server_port}/responses",
+                "--test-response-capture-gate-path", gate.path,
+                "--test-response-capture-gate-min-written-bytes", "4096",
+                "--test-model-cleanup-gate-path", cleanup_gate,
+                "--test-phase-trace", active_capacity=3,
+            )
+            diagnostics = HostDiagnostics(host)
+            bash_fixture.configure(state, store, "configure-bash", "bash/session")
+            fixture.message(state, store, "message-bash", "bash/session", "bash")
+            action = fixture.wait_for(lambda: bash_fixture.action_for(store, "bash/session"), "Bash proposal")
+            proposal_cleanup = diagnostics.wait("cleanup_started")[0]["operation"]
+            fixture.configure(state, store, "configure-provider", "provider/session", "model-a")
+
+            def launch_bash():
+                bash_fixture.allow(state, store, "allow-bash", "bash/session", action["action"])
+                fixture.wait_for(ready.exists, "native Bash ready file")
+                diagnostics.wait("bash_handoff_committed", action=action["action"])
+
+            def hold_provider():
+                fixture.message(state, store, "message-provider", "provider/session", "provider")
+                diagnostics.wait("capture_write_gate_entered")
+                assert gate.fd is not None
+
+            if provider_first:
+                hold_provider()
+                launch_bash()
+            else:
+                launch_bash()
+                hold_provider()
+
+            occupied = fixture.command("inspect-session", "--store", store, "--session", "bash/session")["execution"]
+            assert int(occupied["custody_occupied"]) == 3, occupied
+            assert actor("stop", store, instance(store)) == "acknowledged"
+            fixture.wait_for(lambda: not socket_path(store).exists(), "listener closure with held capture")
+            assert status(store) == "owned_unavailable"
+            assert host.poll() is None, "held capture must retain the Host and Store lease"
+
+            # This is the regression assertion, before the capture gate opens.
+            # Both admission orders must retire and release Bash independently.
+            fixture.wait_for(lambda: "TERM\n" in events.read_text(),
+                             f"{order}: Bash TERM before provider capture release", timeout=2)
+            diagnostics.wait("cleanup_completed", action=action["action"], timeout=3)
+            assert gate.fd is not None and host.poll() is None
+            assert status(store) == "owned_unavailable"
+            contender = subprocess.run([RUI, "serve", "--store", store, "--active-capacity", "1"],
+                                       capture_output=True, timeout=10)
+            assert contender.returncode != 0 and b"ready store=" not in contender.stdout, contender
+            gate.release()
+            diagnostics.wait("cleanup_started", count=3)  # proposal, Bash, discarded provider
+            assert not [record for record in diagnostics.matching("cleanup_completed", operation=proposal_cleanup)
+                        if "action" not in record]
+            assert host.poll() is None and status(store) == "owned_unavailable"
+            cleanup_gate.unlink()
+            assert host.wait(timeout=10) != 0 and b"EffectAwareShutdown" in diagnostics.tail()
+            diagnostics.close()
+            assert len(diagnostics.matching("cleanup_completed", action=action["action"])) == 1
+            model_cleanups = [record for record in diagnostics.matching("cleanup_completed") if "action" not in record]
+            assert len(model_cleanups) == 2 and len({record["operation"] for record in model_cleanups}) == 2
+            assert status(store) == "unavailable"
+            assert list((store / "scratch").iterdir()) == [], "mixed shutdown retained scratch"
+            # Stopped-Store audit: infrastructure cleanup must not become a
+            # user cancellation, a provider failure or a new continuation.
+            assert bash_fixture.rows(store, "SELECT attempt_ordinal,resolution_code FROM action_operation") == [(1, "infrastructure_shutdown")]
+            assert bash_fixture.rows(store, "SELECT session_ref,attempt_ordinal,resolution_code FROM model_operation ORDER BY session_ref") == [
+                ("bash/session", 1, "tool_calls"), ("provider/session", 1, None),
+            ]
+            print(f"mixed Host stop passed: {order}, TERM and exactly-once Bash cleanup before capture release; retained model cleanup, lease held, scratch=0")
+        finally:
+            gate.release()
+            cleanup_gate.unlink(missing_ok=True)
+            if host is not None:
+                if host.poll() is None:
+                    # On the red path, let the original owner drain once the
+                    # fixture's capture gate opens; kill only if it cannot.
+                    try:
+                        host.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        host.kill()
+                        host.wait(timeout=10)
+                if diagnostics is not None:
+                    diagnostics.close()
+                stop_process(host)
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
 
 
 def main():
@@ -181,4 +297,6 @@ def main():
 
 
 if __name__ == "__main__":
+    mixed_effect_drain(True)
+    mixed_effect_drain(False)
     main()
