@@ -8,7 +8,7 @@ local_bin="$HOME/.local/bin"
 local_opt="$HOME/.local/opt"
 
 step() {
-    printf '\n==> %s\n' "$1"
+    printf '\n==> %s (setup elapsed: %ss)\n' "$1" "$SECONDS"
 }
 
 install_system_packages() {
@@ -16,6 +16,7 @@ install_system_packages() {
         bash
         build-essential
         ca-certificates
+        coreutils
         curl
         git
         make
@@ -48,12 +49,33 @@ install_system_packages() {
     DEBIAN_FRONTEND=noninteractive "${apt[@]}" install -y --no-install-recommends "${missing[@]}"
 }
 
+download() {
+    local url=$1
+    local destination=$2
+    local started=$SECONDS status=0
+    printf 'Downloading %s (overall limit: 90s)\n' "$url"
+    # curl's retry budget does not interrupt an in-flight attempt; timeout bounds
+    # the whole transfer, including redirects, retries and retry delays.
+    timeout --kill-after=5s 90s curl \
+        --fail --location --silent --show-error \
+        --connect-timeout 10 --max-time 60 \
+        --retry 2 --retry-delay 1 --retry-max-time 75 \
+        --write-out 'HTTP %{http_code}; %{size_download} bytes; %{time_total}s transfer\n' \
+        "$url" --output "$destination" || status=$?
+    printf 'Download finished in %ss (exit %s): %s\n' "$((SECONDS - started))" "$status" "$url"
+    return "$status"
+}
+
 download_verified() {
     local url=$1
     local expected=$2
     local destination=$3
-    curl --fail --location --retry 3 --silent --show-error "$url" --output "$destination"
-    printf '%s  %s\n' "$expected" "$destination" | sha256sum --check --status
+    download "$url" "$destination" || return $?
+    if ! printf '%s  %s\n' "$expected" "$destination" | sha256sum --check --status; then
+        printf 'SHA-256 mismatch: %s\n' "$url" >&2
+        return 1
+    fi
+    printf 'SHA-256 verified: %s\n' "$url"
 }
 
 fetch_zig_dependency() {
@@ -65,12 +87,12 @@ fetch_zig_dependency() {
         return
     fi
 
-    curl --fail --location --retry 3 --silent --show-error \
-        "$url" \
-        --output "$dependency_downloads/$filename"
-    local actual
+    download "$url" "$dependency_downloads/$filename"
+    local actual started=$SECONDS
+    printf 'Importing and verifying Zig dependency %s\n' "$filename"
     actual="$(zig fetch --global-cache-dir "$zig_cache" "$dependency_downloads/$filename")"
     [[ "$actual" == "$expected" ]]
+    printf 'Zig dependency %s verified in %ss.\n' "$filename" "$((SECONDS - started))"
 }
 
 install_zig() (
@@ -95,20 +117,37 @@ install_zig() (
             ;;
     esac
 
-    local temporary archive extracted destination
+    local temporary archive extracted destination filename source verified=0 started
     temporary="$(mktemp -d)"
     trap 'rm -rf "$temporary"' EXIT
     archive="$temporary/zig.tar.xz"
-    extracted="$temporary/zig-$archive_arch-linux-$zig_version"
+    filename="zig-$archive_arch-linux-$zig_version.tar.xz"
+    extracted="$temporary/${filename%.tar.xz}"
     destination="$local_opt/zig-$zig_version"
-    download_verified \
-        "https://ziglang.org/download/$zig_version/zig-$archive_arch-linux-$zig_version.tar.xz" \
-        "$checksum" \
-        "$archive"
+    # Community mirrors serve identical archives. Keep the independently pinned
+    # checksum as authority, and try the slow origin only after both mirrors fail.
+    # Three 90s transfers bound fallback to 270s, plus at most 5s kill grace each.
+    for source in \
+        'https://pkg.hexops.org/zig' \
+        'https://zigmirror.hryx.net/zig' \
+        "https://ziglang.org/download/$zig_version"; do
+        if download_verified "$source/$filename" "$checksum" "$archive"; then
+            verified=1
+            break
+        fi
+        printf 'Zig source failed; trying next source.\n' >&2
+    done
+    if ((verified == 0)); then
+        printf 'No source supplied a verified Zig %s archive.\n' "$zig_version" >&2
+        return 1
+    fi
+    started=$SECONDS
+    printf 'Extracting Zig %s\n' "$zig_version"
     tar -xJf "$archive" -C "$temporary"
     rm -rf "$destination"
     mv "$extracted" "$destination"
     ln -sfn "$destination/zig" "$local_bin/zig"
+    printf 'Zig %s installed; extraction/install took %ss.\n' "$zig_version" "$((SECONDS - started))"
 )
 
 install_go() (
@@ -133,7 +172,7 @@ install_go() (
             ;;
     esac
 
-    local temporary archive destination
+    local temporary archive destination started
     temporary="$(mktemp -d)"
     trap 'rm -rf "$temporary"' EXIT
     archive="$temporary/go.tar.gz"
@@ -142,11 +181,14 @@ install_go() (
         "https://go.dev/dl/go$go_version.linux-$archive_arch.tar.gz" \
         "$checksum" \
         "$archive"
+    started=$SECONDS
+    printf 'Extracting Go %s\n' "$go_version"
     tar -xzf "$archive" -C "$temporary"
     rm -rf "$destination"
     mv "$temporary/go" "$destination"
     ln -sfn "$destination/bin/go" "$local_bin/go"
     ln -sfn "$destination/bin/gofmt" "$local_bin/gofmt"
+    printf 'Go %s installed; extraction/install took %ss.\n' "$go_version" "$((SECONDS - started))"
 )
 
 persist_path() {
@@ -262,10 +304,19 @@ fetch_zig_dependency \
     https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v2.11.3.tar.gz \
     N-V-__8AACywKABFCj0r_Y-jIWsk9ahy10zlk78hjn6S-39g \
     utf8proc-2.11.3.tar.gz
+fetch_zig_dependency \
+    https://github.com/quickjs-ng/quickjs/archive/1ab8676f4b6d6d669baeb5f21790fb9734636a20.tar.gz \
+    N-V-__8AAC-eRACa__taXkae9pRIZde7nn8oQSxb9n9rhkFp \
+    quickjs-1ab8676f4b6d6d669baeb5f21790fb9734636a20.tar.gz
+printf 'Checking complete pinned Zig dependency graph\n'
+started=$SECONDS
 (cd "$repo_root" && zig build --global-cache-dir "$zig_cache" --fetch=all)
+printf 'Zig dependency graph ready in %ss.\n' "$((SECONDS - started))"
 
 step 'Fetching pinned Go measurement dependencies'
+started=$SECONDS
 GOTOOLCHAIN=local go -C "$repo_root/tests/qualification" mod download
+printf 'Go measurement dependencies ready in %ss.\n' "$((SECONDS - started))"
 
 step 'Orb setup complete'
 zig version
