@@ -14,8 +14,6 @@ pub const OptionalFile = struct {
 
 pub const ConfigureInput = struct {
     store: []const u8,
-    record: []const u8,
-    key: []const u8,
     session: []const u8,
     workspace: OptionalText = .{},
     provider: OptionalText = .{},
@@ -24,19 +22,13 @@ pub const ConfigureInput = struct {
     tools: ?[]const u8 = null,
     permission_mode: OptionalText = .{},
     output_schema: OptionalFile = .{},
-    drop_reply: ?[]const u8 = null,
-    captured: ?*const fn (std.Io, []const u8) anyerror!void = null,
 };
 
 pub const MessageInput = struct {
     store: []const u8,
-    record: []const u8,
-    key: []const u8,
     session: []const u8,
     text_path: []const u8,
     text: ?[]const u8 = null,
-    drop_reply: ?[]const u8 = null,
-    captured: ?*const fn (std.Io, []const u8) anyerror!void = null,
 };
 
 pub const SessionStopInput = struct {
@@ -59,13 +51,9 @@ pub const ModelInterruptionInput = struct {
 
 pub const PermissionDecisionInput = struct {
     store: []const u8,
-    record: []const u8,
-    key: []const u8,
     session: []const u8,
     action_id: u64,
     decision: protocol.PermissionDecision = .deny,
-    drop_reply: ?[]const u8 = null,
-    captured: ?*const fn (std.Io, []const u8) anyerror!void = null,
 };
 
 pub const ReplyBuffer = protocol.ResponseBuffer;
@@ -304,24 +292,6 @@ fn renderReadRequest(
     try body.append("}");
 }
 
-pub fn configure(io: std.Io, input: ConfigureInput, reply_buffer: *ReplyBuffer) !CommandReply {
-    reply_buffer.len = 0;
-    const paths = try platform.resolveClientPaths(io, input.store);
-    try validateIdentityInputs(input.key, input.session);
-    try captureConfigure(io, &paths, input);
-    if (input.captured) |notify| try notify(io, input.record);
-    return sendRecord(io, &paths, input.record, "/v1/configure", input.drop_reply, reply_buffer);
-}
-
-pub fn message(io: std.Io, input: MessageInput, reply_buffer: *ReplyBuffer) !CommandReply {
-    reply_buffer.len = 0;
-    const paths = try platform.resolveClientPaths(io, input.store);
-    try validateIdentityInputs(input.key, input.session);
-    try captureMessage(io, &paths, input);
-    if (input.captured) |notify| try notify(io, input.record);
-    return sendRecord(io, &paths, input.record, "/v1/message", input.drop_reply, reply_buffer);
-}
-
 pub fn stopSession(io: std.Io, input: SessionStopInput, reply_buffer: *ReplyBuffer) !CommandReply {
     reply_buffer.len = 0;
     const paths = try platform.resolveClientPaths(io, input.store);
@@ -351,16 +321,6 @@ pub fn interruptModel(io: std.Io, input: ModelInterruptionInput, reply_buffer: *
         input.drop_reply,
         reply_buffer,
     );
-}
-
-pub fn denyPermission(io: std.Io, input: PermissionDecisionInput, reply_buffer: *ReplyBuffer) !CommandReply {
-    reply_buffer.len = 0;
-    const paths = try platform.resolveClientPaths(io, input.store);
-    try validateIdentityInputs(input.key, input.session);
-    if (input.action_id == 0) return error.InvalidTarget;
-    try capturePermissionDecision(io, &paths, input);
-    if (input.captured) |notify| try notify(io, input.record);
-    return sendRecord(io, &paths, input.record, "/v1/control/permission-decision", input.drop_reply, reply_buffer);
 }
 
 pub fn retry(
@@ -510,11 +470,92 @@ pub const CapturedIdentity = struct {
     kind: protocol.Bounded(32) = .{},
 };
 
+pub const CaptureTarget = union(enum) {
+    generated: []const u8, // Caller-selected private directory, not HOME policy.
+    explicit: struct { record: []const u8, key: []const u8 },
+
+    fn resolve(self: CaptureTarget, io: std.Io, path: []u8, key: *[36]u8) !@FieldType(CaptureTarget, "explicit") {
+        return switch (self) {
+            .explicit => |value| value,
+            .generated => |directory| blk: {
+                var bytes: [16]u8 = undefined;
+                try std.Io.randomSecure(io, &bytes);
+                bytes[6] = (bytes[6] & 0x0f) | 0x40;
+                bytes[8] = (bytes[8] & 0x3f) | 0x80;
+                const id = try std.fmt.bufPrint(key, "{x:0>8}-{x:0>4}-{x:0>4}-{x:0>4}-{x:0>12}", .{
+                    std.mem.readInt(u32, bytes[0..4], .big),
+                    std.mem.readInt(u16, bytes[4..6], .big),
+                    std.mem.readInt(u16, bytes[6..8], .big),
+                    std.mem.readInt(u16, bytes[8..10], .big),
+                    std.mem.readInt(u48, bytes[10..16], .big),
+                });
+                break :blk .{ .record = try requestPath(directory, id, path), .key = id };
+            },
+        };
+    }
+};
+
+// Owns one read-only descriptor, never the saved name's deletion. Identity
+// borrows this value and remains available after any send failure. Do not copy
+// the live owner; close once after the last send/identity consumer.
+pub const CapturedRecord = struct {
+    file: std.Io.File,
+    length: u64,
+    saved: CapturedIdentity,
+
+    pub fn identity(self: *const CapturedRecord) *const CapturedIdentity {
+        return &self.saved;
+    }
+
+    pub fn close(self: *CapturedRecord, io: std.Io) void {
+        self.file.close(io);
+        self.* = undefined;
+    }
+};
+
+pub fn validRequestHandle(handle: []const u8) bool {
+    if (handle.len != 36) return false;
+    for (handle, 0..) |byte, index| {
+        if (index == 8 or index == 13 or index == 18 or index == 23) {
+            if (byte != '-') return false;
+        } else if (!std.ascii.isHex(byte) or std.ascii.isUpper(byte)) return false;
+    }
+    return true;
+}
+
+fn requestPath(directory: []const u8, handle: []const u8, buffer: []u8) ![]const u8 {
+    if (!validRequestHandle(handle)) return error.InvalidRequestHandle;
+    return std.fmt.bufPrint(buffer, "{s}/{s}.json", .{ directory, handle });
+}
+
+// Generated recovery intentionally supports only configure/message/permission
+// decisions. Stop/interruption retain the explicit retry route, not a new parser.
+pub fn openCaptured(io: std.Io, directory: []const u8, handle: []const u8) !CapturedRecord {
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try requestPath(directory, handle, &path_buffer);
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    errdefer file.close(io);
+    const saved = try readCapturedIdentity(io, &file, handle);
+    _ = try capturedRoute(&saved);
+    return .{ .file = file, .length = try file.length(io), .saved = saved };
+}
+
+fn capturedRoute(saved: *const CapturedIdentity) ![]const u8 {
+    if (saved.kind.eql("configure")) return "/v1/configure";
+    if (saved.kind.eql("message")) return "/v1/message";
+    if (saved.kind.eql("permission_decision")) return "/v1/control/permission-decision";
+    return error.InvalidRequestRecord;
+}
+
+pub fn sendCaptured(io: std.Io, captured: *CapturedRecord, drop_reply: ?[]const u8, reply_buffer: *ReplyBuffer) !CommandReply {
+    reply_buffer.len = 0;
+    const paths = try platform.resolveClientPaths(io, captured.saved.store.slice());
+    return sendSource(io, &paths, try capturedRoute(&captured.saved), captured.length, &captured.file, null, drop_reply, null, reply_buffer, null);
+}
+
 // Capture writes identity first, before variable content. Recover the bounded
 // prefix without loading or copying the potentially large captured payload.
-pub fn readCapturedIdentity(io: std.Io, path: []const u8, handle: []const u8) !CapturedIdentity {
-    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
+fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !CapturedIdentity {
     const header_bytes = 6 * (protocol.max_store_bytes + protocol.max_key_bytes + protocol.max_session_bytes) + 256;
     var buffer: [header_bytes]u8 = undefined;
     const count = try file.readPositionalAll(io, &buffer, 0);
@@ -545,14 +586,19 @@ pub fn readCapturedIdentity(io: std.Io, path: []const u8, handle: []const u8) !C
     return identity;
 }
 
-fn captureConfigure(io: std.Io, paths: *const platform.Paths, input: ConfigureInput) !void {
+pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget) !CapturedRecord {
+    const paths = try platform.resolveClientPaths(io, input.store);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try validateIdentityInputs(location.key, input.session);
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, input.record, &output_buffer);
+    var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
     try capture.write("{\"version\":\"1\",\"kind\":\"configure\",\"store\":");
     try capture.writeJsonString(paths.store.slice());
     try capture.write(",\"key\":");
-    try capture.writeJsonString(input.key);
+    try capture.writeJsonString(location.key);
     try capture.write(",\"session\":");
     try capture.writeJsonString(input.session);
     try capture.write(",\"configuration\":{\"workspace\":");
@@ -570,17 +616,22 @@ fn captureConfigure(io: std.Io, paths: *const platform.Paths, input: ConfigureIn
     try capture.write(",\"output_schema\":");
     try capture.writeOptionalFile(input.output_schema, true);
     try capture.write("}}");
-    try capture.commit();
+    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, "configure");
 }
 
-fn captureMessage(io: std.Io, paths: *const platform.Paths, input: MessageInput) !void {
+pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !CapturedRecord {
+    const paths = try platform.resolveClientPaths(io, input.store);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try validateIdentityInputs(location.key, input.session);
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, input.record, &output_buffer);
+    var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
     try capture.write("{\"version\":\"1\",\"kind\":\"message\",\"store\":");
     try capture.writeJsonString(paths.store.slice());
     try capture.write(",\"key\":");
-    try capture.writeJsonString(input.key);
+    try capture.writeJsonString(location.key);
     try capture.write(",\"session\":");
     try capture.writeJsonString(input.session);
     try capture.write(",\"text\":{\"state\":\"value\",\"value\":");
@@ -589,7 +640,7 @@ fn captureMessage(io: std.Io, paths: *const platform.Paths, input: MessageInput)
         try capture.writeJsonString(value);
     } else try capture.writeJsonFile(input.text_path);
     try capture.write("}}");
-    try capture.commit();
+    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, "message");
 }
 
 fn captureSessionStop(io: std.Io, paths: *const platform.Paths, input: SessionStopInput) !void {
@@ -629,22 +680,34 @@ fn captureModelInterruption(
     try capture.commit();
 }
 
-fn capturePermissionDecision(io: std.Io, paths: *const platform.Paths, input: PermissionDecisionInput) !void {
+pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, target: CaptureTarget) !CapturedRecord {
+    const paths = try platform.resolveClientPaths(io, input.store);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try validateIdentityInputs(location.key, input.session);
+    if (input.action_id == 0) return error.InvalidTarget;
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, input.record, &output_buffer);
+    var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
-    try capture.write("{\"version\":\"1\",\"kind\":\"permission_decision\",\"store\":");
-    try capture.writeJsonString(paths.store.slice());
-    try capture.write(",\"key\":");
-    try capture.writeJsonString(input.key);
-    try capture.write(",\"session\":");
-    try capture.writeJsonString(input.session);
-    var suffix: [96]u8 = undefined;
-    try capture.write(try std.fmt.bufPrint(&suffix, ",\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{
-        input.action_id,
-        @tagName(input.decision),
-    }));
+    try capture.writePermissionDecision(paths.store.slice(), location.key, input);
+    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, "permission_decision");
+}
+
+fn finishCapture(io: std.Io, capture: *Capture, store: []const u8, key: []const u8, session: []const u8, kind: []const u8) !CapturedRecord {
+    var saved: CapturedIdentity = .{};
+    try saved.store.set(store);
+    try saved.key.set(key);
+    try saved.session.set(session);
+    try saved.kind.set(kind);
+    // Pin the temporary inode under capture custody, before exposing its name.
+    // This reader observes the final flush, not a later public-path replacement.
+    var file = try capture.parent.openFile(io, capture.temporary_name.slice(), .{});
+    errdefer file.close(io);
+    // A post-publication directory-sync failure returns no transmissible owner,
+    // but abort preserves the published name for later explicit recovery.
     try capture.commit();
+    return .{ .file = file, .length = try file.length(io), .saved = saved };
 }
 
 const Capture = struct {
@@ -746,6 +809,20 @@ const Capture = struct {
         if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
         std.json.Stringify.encodeJsonString(value, .{}, &self.writer.interface) catch
             return self.writer.err orelse error.WriteFailed;
+    }
+
+    fn writePermissionDecision(self: *Capture, store: []const u8, key: []const u8, input: PermissionDecisionInput) !void {
+        try self.write("{\"version\":\"1\",\"kind\":\"permission_decision\",\"store\":");
+        try self.writeJsonString(store);
+        try self.write(",\"key\":");
+        try self.writeJsonString(key);
+        try self.write(",\"session\":");
+        try self.writeJsonString(input.session);
+        var suffix: [96]u8 = undefined;
+        try self.write(try std.fmt.bufPrint(&suffix, ",\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{
+            input.action_id,
+            @tagName(input.decision),
+        }));
     }
 
     fn writeOptionalText(self: *Capture, value: OptionalText) !void {
@@ -913,7 +990,7 @@ fn sendSource(
         var sent: u64 = 0;
         while (sent < length) {
             const wanted: usize = @intCast(@min(length - sent, buffer.len));
-            const count = try source.readStreaming(io, &.{buffer[0..wanted]});
+            const count = try source.readPositionalAll(io, buffer[0..wanted], sent);
             if (count != wanted) return error.RecordChangedDuringSend;
             try writeAllUntil(io, fd, buffer[0..count], until);
             sent += count;
@@ -1361,6 +1438,263 @@ test "response framing rejects ambiguous or malformed fields before interpreting
     try std.testing.expectEqual(@as(u16, 200), (try readResponseHead(sockets[0])).status);
 }
 
+test "capture returns original identity before send and preserves empty explicit keys" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const input: MessageInput = .{ .store = root, .session = "original/é", .text_path = "", .text = "original\ntext" };
+    var generated = try captureMessage(io, input, .{ .generated = root });
+    const saved = generated.identity().*;
+    const descriptor = generated.file.handle;
+    {
+        defer generated.close(io);
+        try std.testing.expect(validRequestHandle(saved.key.slice()));
+        try std.testing.expectEqual(@as(u8, '4'), saved.key.slice()[14]);
+        try std.testing.expect(std.mem.indexOfScalar(u8, "89ab", saved.key.slice()[19]) != null);
+        try std.testing.expectEqualStrings(root, saved.store.slice());
+        try std.testing.expectEqualStrings("original/é", saved.session.slice());
+        try std.testing.expectEqualStrings("message", saved.kind.slice());
+        var reply: ReplyBuffer = .{};
+        try std.testing.expectError(error.FileNotFound, sendCaptured(io, &generated, null, &reply));
+        try std.testing.expectEqualStrings(saved.key.slice(), generated.identity().key.slice());
+        try std.testing.expectEqualStrings(root, generated.identity().store.slice());
+    }
+    try std.testing.expect(std.c.fcntl(descriptor, std.c.F.GETFD) < 0);
+    var recovered = try openCaptured(io, root, saved.key.slice());
+    defer recovered.close(io);
+    try std.testing.expectEqualStrings(saved.key.slice(), recovered.identity().key.slice());
+    var record: [2048]u8 = undefined;
+    const n = try recovered.file.readPositionalAll(io, &record, 0);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, record[0..n], .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("original\ntext", parsed.value.object.get("text").?.object.get("value").?.string);
+
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/explicit", .{root});
+    var explicit = try captureMessage(io, input, .{ .explicit = .{ .record = path, .key = "" } });
+    defer explicit.close(io);
+    try std.testing.expectEqualStrings("", explicit.identity().key.slice());
+    try std.testing.expectError(error.RecordAlreadyExists, captureMessage(io, input, .{ .explicit = .{ .record = path, .key = "different" } }));
+    try std.testing.expectError(error.InvalidRequestHandle, openCaptured(io, root, ""));
+}
+
+test "capture retransmits complete original bytes after a lost reply" {
+    const Peer = struct {
+        var client_fd: std.posix.fd_t = undefined;
+        var failure: ?anyerror = null;
+        fn connect(_: ?*anyopaque, _: *const std.Io.net.UnixAddress) std.Io.net.UnixAddress.ConnectError!std.Io.net.Socket.Handle {
+            return client_fd;
+        }
+        fn serve(fd: std.posix.fd_t, expected: []const u8, reply: bool) void {
+            exchange(fd, expected, reply) catch |err| {
+                failure = err;
+            };
+        }
+        fn exchange(fd: std.posix.fd_t, expected: []const u8, reply: bool) !void {
+            defer closeTestDescriptor(fd);
+            var head: [512]u8 = undefined;
+            var used: usize = 0;
+            while (!std.mem.endsWith(u8, head[0..used], "\r\n\r\n")) {
+                if (used == head.len) return error.TestRequestHeadTooLarge;
+                const n = std.posix.system.read(fd, head[used..].ptr, 1);
+                if (n != 1) return error.TestRequestTruncated;
+                used += 1;
+            }
+            try std.testing.expect(std.mem.startsWith(u8, head[0..used], "POST /v1/message HTTP/1.1\r\n"));
+            var length_buffer: [64]u8 = undefined;
+            const length = try std.fmt.bufPrint(&length_buffer, "Content-Length: {d}\r\n", .{expected.len});
+            try std.testing.expect(std.mem.indexOf(u8, head[0..used], length) != null);
+            var bytes: [protocol.content_window_bytes]u8 = undefined;
+            var offset: usize = 0;
+            while (offset < expected.len) {
+                const wanted = @min(bytes.len, expected.len - offset);
+                const n = std.posix.system.read(fd, &bytes, wanted);
+                if (n <= 0) return error.TestRequestTruncated;
+                const count: usize = @intCast(n);
+                try std.testing.expectEqualSlices(u8, expected[offset..][0..count], bytes[0..count]);
+                offset += count;
+            }
+            if (reply) try writeAll(fd, empty_test_response);
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/explicit", .{root});
+    const text = [_]u8{'q'} ** (2 * protocol.content_window_bytes + 3);
+    var captured = try captureMessage(io, .{ .store = root, .session = "original/session", .text_path = "", .text = &text }, .{ .explicit = .{ .record = path, .key = "owned-key" } });
+    defer captured.close(io);
+    var expected_buffer: [text.len + 1024]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"owned-key\",\"session\":\"original/session\",\"text\":{{\"state\":\"value\",\"value\":\"{s}\"}}}}", .{ root, text });
+    var vtable = io.vtable.*;
+    vtable.netConnectUnix = Peer.connect;
+    const connected_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    for ([_]bool{ false, true }) |reply| {
+        const sockets = try socketPair();
+        Peer.client_fd = sockets[0]; // The production send owns and closes it.
+        Peer.failure = null;
+        const peer = try std.Thread.spawn(.{}, Peer.serve, .{ sockets[1], expected, reply });
+        var buffer: ReplyBuffer = .{};
+        const result = sendCaptured(connected_io, &captured, null, &buffer);
+        peer.join();
+        if (Peer.failure) |err| return err;
+        if (reply) {
+            try std.testing.expectEqual(@as(u16, 200), (try result).status);
+        } else try std.testing.expectError(error.TruncatedResponse, result);
+        try std.testing.expectEqualStrings("owned-key", captured.identity().key.slice());
+    }
+}
+
+test "capture publication transfers original inode across pathname replacement" {
+    const Replacement = struct {
+        fn rename(userdata: ?*anyopaque, old_dir: std.Io.Dir, old_path: []const u8, new_dir: std.Io.Dir, new_path: []const u8) std.Io.Dir.RenamePreserveError!void {
+            try std.testing.io.vtable.dirRenamePreserve(userdata, old_dir, old_path, new_dir, new_path);
+            // Simulate a second local process immediately after the production
+            // rename, before sync/lock release and the captured-owner handoff.
+            new_dir.rename(new_path, new_dir, "displaced-original", std.testing.io) catch return error.Unexpected;
+            const file = new_dir.createFile(std.testing.io, new_path, .{}) catch return error.Unexpected;
+            defer file.close(std.testing.io);
+            file.writeStreamingAll(std.testing.io, "replacement bytes") catch return error.Unexpected;
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/record", .{root});
+    var vtable = io.vtable.*;
+    vtable.dirRenamePreserve = Replacement.rename;
+    const replaced_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var captured = try captureMessage(replaced_io, .{ .store = root, .session = "original/session", .text_path = "", .text = "original\ntext" }, .{ .explicit = .{ .record = path, .key = "original-key" } });
+    defer captured.close(io);
+    var expected_buffer: [2048]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"original-key\",\"session\":\"original/session\",\"text\":{{\"state\":\"value\",\"value\":\"original\\ntext\"}}}}", .{root});
+    var bytes: [2048]u8 = undefined;
+    const count = try captured.file.readPositionalAll(io, &bytes, 0);
+    try std.testing.expectEqualStrings(expected, bytes[0..count]);
+    try std.testing.expectEqual(@as(u64, expected.len), captured.length);
+}
+
+test "capture closes pinned reader when publication or handoff fails" {
+    const Failure = struct {
+        var reader: std.posix.fd_t = undefined;
+        var closed: usize = 0;
+        fn open(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            const file = try std.testing.io.vtable.dirOpenFile(userdata, dir, path, options);
+            reader = file.handle;
+            return file;
+        }
+        fn close(userdata: ?*anyopaque, files: []const std.Io.File) void {
+            for (files) |file| if (file.handle == reader) {
+                closed += 1;
+            };
+            std.testing.io.vtable.fileClose(userdata, files);
+        }
+        fn sync(_: ?*anyopaque, _: std.Io.File) std.Io.File.SyncError!void {
+            return error.NoSpaceLeft;
+        }
+        fn length(_: ?*anyopaque, _: std.Io.File) std.Io.File.LengthError!u64 {
+            return error.AccessDenied;
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/record", .{root});
+    for ([_]bool{ false, true }) |published| {
+        var vtable = io.vtable.*;
+        vtable.dirOpenFile = Failure.open;
+        vtable.fileClose = Failure.close;
+        if (published) vtable.fileLength = Failure.length else vtable.fileSync = Failure.sync;
+        const failing_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+        Failure.closed = 0;
+        try std.testing.expectError(if (published) error.AccessDenied else error.NoSpaceLeft, captureMessage(failing_io, .{ .store = root, .session = "original/session", .text_path = "", .text = "original" }, .{ .explicit = .{ .record = path, .key = "original-key" } }));
+        try std.testing.expectEqual(@as(usize, 1), Failure.closed);
+        try std.testing.expect(std.c.fcntl(Failure.reader, std.c.F.GETFD) < 0);
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, ".record.capture.tmp", .{}));
+        if (published) {
+            _ = try tmp.dir.statFile(io, "record", .{});
+        } else try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "record", .{}));
+    }
+}
+
+test "capture recovery closes rejected records and retains only its reader lifetime" {
+    const Probe = struct {
+        var opened: usize = 0;
+        var closed: usize = 0;
+        fn open(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            const file = try std.testing.io.vtable.dirOpenFile(userdata, dir, path, options);
+            opened += 1;
+            return file;
+        }
+        fn close(userdata: ?*anyopaque, files: []const std.Io.File) void {
+            closed += files.len;
+            std.testing.io.vtable.fileClose(userdata, files);
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const handle = "01234567-89ab-4cde-8012-3456789abcde";
+    const filename = handle ++ ".json";
+    var vtable = io.vtable.*;
+    vtable.dirOpenFile = Probe.open;
+    vtable.fileClose = Probe.close;
+    const observed_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    Probe.opened = 0;
+    Probe.closed = 0;
+    for ([_][]const u8{
+        "not json",
+        "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\"}",
+        "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"target\":{\"session\":\"original\",\"turn\":\"1\",\"operation\":\"2\"}}",
+        "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"other\",\"session\":\"original\",\"text\":{}}",
+        "{\"version\":\"1\",\"kind\":\"unknown\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{}}",
+    }) |bytes| {
+        const file = try tmp.dir.createFile(io, filename, .{});
+        try file.writeStreamingAll(io, bytes);
+        file.close(io);
+        try std.testing.expectError(error.InvalidRequestRecord, openCaptured(observed_io, root, handle));
+        try std.testing.expectEqual(Probe.opened, Probe.closed);
+    }
+    try tmp.dir.deleteFile(io, filename);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try requestPath(root, handle, &path_buffer);
+    var captured = try captureConfigure(io, .{ .store = root, .session = "original" }, .{ .explicit = .{ .record = path, .key = handle } });
+    captured.close(io);
+    var recovered = try openCaptured(observed_io, root, handle);
+    const descriptor = recovered.file.handle;
+    {
+        defer recovered.close(observed_io);
+        try std.testing.expectEqual(Probe.opened, Probe.closed + 1);
+        try tmp.dir.rename(filename, tmp.dir, "original-record", io);
+        const replacement = try tmp.dir.createFile(io, filename, .{});
+        try replacement.writeStreamingAll(io, "replacement must not change the open original");
+        replacement.close(io);
+        var bytes: [2048]u8 = undefined;
+        const n = try recovered.file.readPositionalAll(io, &bytes, 0);
+        try std.testing.expect(std.mem.startsWith(u8, bytes[0..n], "{\"version\":\"1\",\"kind\":\"configure\""));
+    }
+    try std.testing.expectEqual(Probe.opened, Probe.closed);
+    try std.testing.expect(std.c.fcntl(descriptor, std.c.F.GETFD) < 0);
+}
+
 test "capture batches escaped file output and flushes before publication" {
     const Probe = struct {
         var writes: usize = 0;
@@ -1658,14 +1992,16 @@ test "control captures attain their exact worst-case request bounds" {
         "{s}/records/permission-record",
         .{root_buffer[0..root_length]},
     );
-    try capturePermissionDecision(std.testing.io, &paths, .{
+    var permission_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var permission_capture = try Capture.open(std.testing.io, permission_path, &permission_buffer);
+    defer permission_capture.abort();
+    try permission_capture.writePermissionDecision(paths.store.slice(), &escaped_key, .{
         .store = "unused",
-        .record = permission_path,
-        .key = &escaped_key,
         .session = &escaped_session,
         .action_id = std.math.maxInt(u64),
         .decision = .allow_once,
     });
+    try permission_capture.commit();
     const permission_file = try std.Io.Dir.cwd().openFile(std.testing.io, permission_path, .{});
     defer permission_file.close(std.testing.io);
     try std.testing.expectEqual(

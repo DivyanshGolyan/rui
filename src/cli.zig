@@ -471,38 +471,41 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
     var json = false;
     var input = client.ConfigureInput{
         .store = "",
-        .record = "",
-        .key = "",
         .session = "",
     };
+    var location: @FieldType(client.CaptureTarget, "explicit") = .{ .record = "", .key = "" };
+    var drop_reply: ?[]const u8 = null;
     var explicit_store: ?[]const u8 = null;
     var key_seen = false;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
-            input.key = try takeValue(args, &index);
+        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) location.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
+            location.key = try takeValue(args, &index);
             key_seen = true;
         } else if (std.mem.eql(u8, arg, "--provider")) {
             input.provider = .{ .present = true, .value = try takeValue(args, &index) };
-        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--workspace")) input.workspace = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--model")) input.model = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--instructions")) input.instructions = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--tools")) input.tools = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--permission-mode")) input.permission_mode = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--output-schema")) input.output_schema = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--text-output")) input.output_schema = .{ .state = .explicit_null } else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
+        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--workspace")) input.workspace = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--model")) input.model = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--instructions")) input.instructions = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--tools")) input.tools = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--permission-mode")) input.permission_mode = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--output-schema")) input.output_schema = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--text-output")) input.output_schema = .{ .state = .explicit_null } else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
-    if (input.session.len == 0 or (input.record.len == 0) != !key_seen) return usage();
+    if (input.session.len == 0 or (location.record.len == 0) != !key_seen) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, explicit_store, &selected_buffer);
-    var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var key_buffer: [36]u8 = undefined;
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const human = !key_seen;
-    if (human) {
-        input.record = try newRequest(init, &record_buffer, &key_buffer);
-        input.key = &key_buffer;
-        input.captured = if (interactive) null else if (json) announceCaptureJson else announceCapture;
-    }
+    const target: client.CaptureTarget = if (human) .{ .generated = try requestDirectory(init, &directory_buffer) } else .{ .explicit = location };
+    var captured = try client.captureConfigure(io, input, target);
+    const saved = captured.identity().*;
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try client.configure(io, input, &reply_buffer);
+    const reply = blk: {
+        defer captured.close(io);
+        if (human and !interactive) {
+            if (json) try announceCaptureJson(io, saved.key.slice()) else try announceCapture(io, saved.key.slice());
+        }
+        break :blk try client.sendCaptured(io, &captured, drop_reply, &reply_buffer);
+    };
     const accepted = if (human and interactive) try acceptedReply(reply) else false;
-    if (human and (!interactive or !accepted)) try writeAdmission(io, reply, if (json) input.record else null) else if (!human) try writeCommandReply(io, reply);
+    if (human and (!interactive or !accepted)) try writeAdmission(io, reply, if (json) saved.key.slice() else null) else if (!human) try writeCommandReply(io, reply);
     if (human and interactive and accepted) try std.Io.File.stdout().writeStreamingAll(io, "Rui: Configured.\n");
     if (human and !json and !interactive) {
         var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
@@ -515,37 +518,42 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
 fn message(init: std.process.Init, args: []const []const u8) !void {
     const io = init.io;
     var json = false;
-    var input = client.MessageInput{ .store = "", .record = "", .key = "", .session = "", .text_path = "" };
+    var input = client.MessageInput{ .store = "", .session = "", .text_path = "" };
+    var location: @FieldType(client.CaptureTarget, "explicit") = .{ .record = "", .key = "" };
+    var drop_reply: ?[]const u8 = null;
     var explicit_store: ?[]const u8 = null;
     var positional: ?[]const u8 = null;
     var key_seen = false;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
-            input.key = try takeValue(args, &index);
+        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) location.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
+            location.key = try takeValue(args, &index);
             key_seen = true;
-        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--text")) input.text_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else if (positional == null and (arg.len == 0 or arg[0] != '-' or std.mem.eql(u8, arg, "-"))) positional = arg else return error.UnknownArgument;
+        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--text")) input.text_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else if (positional == null and (arg.len == 0 or arg[0] != '-' or std.mem.eql(u8, arg, "-"))) positional = arg else return error.UnknownArgument;
         index += 1;
     }
     if (positional) |value| {
         if (key_seen or input.text_path.len != 0) return usage();
         if (std.mem.eql(u8, value, "-")) input.text_path = "-" else input.text = value;
     }
-    if (input.session.len == 0 or (input.text_path.len == 0 and input.text == null) or (input.record.len == 0) != !key_seen) return usage();
+    if (input.session.len == 0 or (input.text_path.len == 0 and input.text == null) or (location.record.len == 0) != !key_seen) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, explicit_store, &selected_buffer);
-    var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var key_buffer: [36]u8 = undefined;
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const human = !key_seen;
-    if (human) {
-        input.record = try newRequest(init, &record_buffer, &key_buffer);
-        input.key = &key_buffer;
-        input.captured = if (json) announceCaptureJson else announceCapture;
-    }
+    const target: client.CaptureTarget = if (human) .{ .generated = try requestDirectory(init, &directory_buffer) } else .{ .explicit = location };
+    var captured = try client.captureMessage(io, input, target);
+    const saved = captured.identity().*;
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try client.message(io, input, &reply_buffer);
-    if (human) try writeAdmission(io, reply, if (json) input.record else null) else try writeCommandReply(io, reply);
+    const reply = blk: {
+        defer captured.close(io);
+        if (human) {
+            if (json) try announceCaptureJson(io, saved.key.slice()) else try announceCapture(io, saved.key.slice());
+        }
+        break :blk try client.sendCaptured(io, &captured, drop_reply, &reply_buffer);
+    };
+    if (human) try writeAdmission(io, reply, if (json) saved.key.slice() else null) else try writeCommandReply(io, reply);
     if (human and !json) {
         var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "message: {s} in {s}\n", .{ input.session, input.store }));
@@ -687,40 +695,36 @@ fn reportAcceptedPresentationFailure(key: []const u8, err: anyerror) void {
 }
 
 fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []const u8, text: []const u8) !?Attention {
-    var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var key_buffer: [36]u8 = undefined;
-    const record = try newRequest(init, &record_buffer, &key_buffer);
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const input = client.MessageInput{
         .store = store,
         .session = session_ref,
-        .record = record,
-        .key = &key_buffer,
         .text_path = "",
         .text = text,
-        .captured = null,
     };
+    var captured = try client.captureMessage(init.io, input, .{ .generated = try requestDirectory(init, &directory_buffer) });
+    const saved = captured.identity().*;
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try client.message(init.io, input, &reply_buffer);
+    const reply = blk: {
+        defer captured.close(init.io);
+        break :blk try client.sendCaptured(init.io, &captured, null, &reply_buffer);
+    };
     const accepted = try acceptedReply(reply);
     if (!accepted) try writeAdmission(init.io, reply, null);
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
     if (!accepted) return null;
     writeSafeField(init.io, "You: ", text) catch |err| {
-        reportAcceptedPresentationFailure(&key_buffer, err);
-        return null;
-    };
-    const saved = selectedRequest(store, session_ref, &key_buffer) catch |err| {
-        reportAcceptedPresentationFailure(&key_buffer, err);
+        reportAcceptedPresentationFailure(saved.key.slice(), err);
         return null;
     };
     const next = followMessage(init, &saved, .interactive, false, false) catch |err| {
-        reportAcceptedPresentationFailure(&key_buffer, err);
+        reportAcceptedPresentationFailure(saved.key.slice(), err);
         return null;
     };
     if (next) |attention|
         return .{ .work = attention, .message = saved.key };
     showResult(init, &saved, .interactive) catch |err| {
-        reportAcceptedPresentationFailure(&key_buffer, err);
+        reportAcceptedPresentationFailure(saved.key.slice(), err);
     };
     return null;
 }
@@ -881,19 +885,18 @@ fn interactiveAction(init: std.process.Init, store: []const u8, session_ref: []c
             continue;
         }
         const decision: protocol.PermissionDecision = if (choice[0] == 'a') .allow_once else .deny;
-        var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        var key_buffer: [36]u8 = undefined;
-        const record = try newRequest(init, &record_buffer, &key_buffer);
+        var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var reply_buffer: client.ReplyBuffer = .{};
-        const reply = try client.denyPermission(init.io, .{
+        var captured = try client.capturePermissionDecision(init.io, .{
             .store = store,
             .session = session_ref,
-            .record = record,
-            .key = &key_buffer,
             .action_id = id,
             .decision = decision,
-            .captured = null,
-        }, &reply_buffer);
+        }, .{ .generated = try requestDirectory(init, &directory_buffer) });
+        const reply = blk: {
+            defer captured.close(init.io);
+            break :blk try client.sendCaptured(init.io, &captured, null, &reply_buffer);
+        };
         const accepted = try acceptedReply(reply);
         if (!accepted) try writeAdmission(init.io, reply, null);
         if (reply.status != 200) return;
@@ -1027,41 +1030,44 @@ fn decideAction(init: std.process.Init, args: []const []const u8, decision: @Fie
     var json = false;
     var input = client.PermissionDecisionInput{
         .store = "",
-        .record = "",
-        .key = "",
         .session = "",
         .action_id = 0,
         .decision = decision,
     };
+    var location: @FieldType(client.CaptureTarget, "explicit") = .{ .record = "", .key = "" };
+    var drop_reply: ?[]const u8 = null;
     var explicit_store: ?[]const u8 = null;
     var key_seen = false;
     var action_seen = false;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) input.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
-            input.key = try takeValue(args, &index);
+        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) location.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
+            location.key = try takeValue(args, &index);
             key_seen = true;
         } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--action")) {
             input.action_id = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
             action_seen = true;
-        } else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) input.drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
+        } else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
-    if (input.session.len == 0 or !action_seen or (input.record.len == 0) != !key_seen) return usage();
+    if (input.session.len == 0 or !action_seen or (location.record.len == 0) != !key_seen) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, explicit_store, &selected_buffer);
-    var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var key_buffer: [36]u8 = undefined;
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const human = !key_seen;
-    if (human) {
-        input.record = try newRequest(init, &record_buffer, &key_buffer);
-        input.key = &key_buffer;
-        input.captured = if (json) announceCaptureJson else announceCapture;
-    }
+    const target: client.CaptureTarget = if (human) .{ .generated = try requestDirectory(init, &directory_buffer) } else .{ .explicit = location };
+    var captured = try client.capturePermissionDecision(io, input, target);
+    const saved = captured.identity().*;
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try client.denyPermission(io, input, &reply_buffer);
-    if (human) try writeAdmission(io, reply, if (json) input.record else null) else try writeCommandReply(io, reply);
+    const reply = blk: {
+        defer captured.close(io);
+        if (human) {
+            if (json) try announceCaptureJson(io, saved.key.slice()) else try announceCapture(io, saved.key.slice());
+        }
+        break :blk try client.sendCaptured(io, &captured, drop_reply, &reply_buffer);
+    };
+    if (human) try writeAdmission(io, reply, if (json) saved.key.slice() else null) else try writeCommandReply(io, reply);
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
@@ -1215,36 +1221,17 @@ fn requestDirectory(init: std.process.Init, buffer: []u8) ![]const u8 {
     return std.fmt.bufPrint(buffer, "{s}/.config/rui/requests", .{home});
 }
 
-fn newRequest(init: std.process.Init, path: []u8, key: *[36]u8) ![]const u8 {
-    var bytes: [16]u8 = undefined;
-    try std.Io.randomSecure(init.io, &bytes);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    const id = try std.fmt.bufPrint(key, "{x:0>8}-{x:0>4}-{x:0>4}-{x:0>4}-{x:0>12}", .{
-        std.mem.readInt(u32, bytes[0..4], .big),
-        std.mem.readInt(u16, bytes[4..6], .big),
-        std.mem.readInt(u16, bytes[6..8], .big),
-        std.mem.readInt(u16, bytes[8..10], .big),
-        std.mem.readInt(u48, bytes[10..16], .big),
-    });
-    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const directory = try requestDirectory(init, &directory_buffer);
-    return std.fmt.bufPrint(path, "{s}/{s}.json", .{ directory, id });
-}
-
-fn announceCapture(io: std.Io, record: []const u8) !void {
+fn announceCapture(io: std.Io, handle: []const u8) !void {
     try testGate(io, "RUI_TEST_CAPTURE_GATE");
-    const name = std.fs.path.basename(record);
     try std.Io.File.stdout().writeStreamingAll(io, "request: ");
-    try std.Io.File.stdout().writeStreamingAll(io, name[0 .. name.len - ".json".len]);
+    try std.Io.File.stdout().writeStreamingAll(io, handle);
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
 }
 
-fn announceCaptureJson(io: std.Io, record: []const u8) !void {
+fn announceCaptureJson(io: std.Io, handle: []const u8) !void {
     try testGate(io, "RUI_TEST_CAPTURE_GATE");
-    const name = std.fs.path.basename(record);
     var line: [96]u8 = undefined;
-    try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"event\":\"captured\",\"request\":\"{s}\"}}\n", .{name[0 .. name.len - ".json".len]}));
+    try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"event\":\"captured\",\"request\":\"{s}\"}}\n", .{handle}));
 }
 
 fn testGate(io: std.Io, name: [*:0]const u8) !void {
@@ -1265,11 +1252,10 @@ fn testGate(io: std.Io, name: [*:0]const u8) !void {
     }
 }
 
-fn writeAdmission(io: std.Io, reply: client.CommandReply, json_record: ?[]const u8) !void {
-    if (json_record) |record| {
-        const name = std.fs.path.basename(record);
+fn writeAdmission(io: std.Io, reply: client.CommandReply, json_handle: ?[]const u8) !void {
+    if (json_handle) |handle| {
         var line: [112]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"event\":\"admission\",\"request\":\"{s}\",\"admission\":", .{name[0 .. name.len - ".json".len]}));
+        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"event\":\"admission\",\"request\":\"{s}\",\"admission\":", .{handle}));
         try std.Io.File.stdout().writeStreamingAll(io, reply.body);
         return std.Io.File.stdout().writeStreamingAll(io, "}\n");
     }
@@ -1362,25 +1348,11 @@ fn parseSavedMessage(reply: client.CommandReply, saved: *const SavedRequest) !Sa
     return .{ .parsed = parsed, .value = observation, .state = state };
 }
 
-fn requestPath(init: std.process.Init, handle: []const u8, buffer: []u8) ![]const u8 {
-    if (handle.len != 36) return error.InvalidRequestHandle;
-    for (handle, 0..) |byte, index| {
-        if (index == 8 or index == 13 or index == 18 or index == 23) {
-            if (byte != '-') return error.InvalidRequestHandle;
-        } else if (!std.ascii.isHex(byte) or std.ascii.isUpper(byte)) return error.InvalidRequestHandle;
-    }
-    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const directory = try requestDirectory(init, &directory_buffer);
-    return std.fmt.bufPrint(buffer, "{s}/{s}.json", .{ directory, handle });
-}
-
 fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try requestPath(init, handle, &path_buffer);
-    const value = try client.readCapturedIdentity(init.io, path, handle);
-    if (!value.kind.eql("configure") and !value.kind.eql("message") and
-        !value.kind.eql("permission_decision")) return error.InvalidRequestRecord;
-    return value;
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var captured = try client.openCaptured(init.io, try requestDirectory(init, &directory_buffer), handle);
+    defer captured.close(init.io);
+    return captured.identity().*;
 }
 
 fn requests(init: std.process.Init, args: []const []const u8) !void {
@@ -1400,8 +1372,7 @@ fn requests(init: std.process.Init, args: []const []const u8) !void {
     while (try iterator.next(init.io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
         const handle = entry.name[0 .. entry.name.len - ".json".len];
-        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        _ = requestPath(init, handle, &path_buffer) catch continue;
+        if (!client.validRequestHandle(handle)) continue;
         if (json) {
             if (!first) try std.Io.File.stdout().writeStreamingAll(init.io, ",");
             var line: [64]u8 = undefined;
@@ -1418,12 +1389,13 @@ fn requests(init: std.process.Init, args: []const []const u8) !void {
 fn recover(init: std.process.Init, args: []const []const u8) !void {
     const json = args.len == 2 and std.mem.eql(u8, args[1], "--json");
     if (args.len != 1 and !json) return usage();
-    const saved = try savedRequest(init, args[0]);
-    const kind = if (saved.kind.eql("permission_decision")) "permission-decision" else saved.kind.slice();
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try requestPath(init, args[0], &path_buffer);
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var captured = try client.openCaptured(init.io, try requestDirectory(init, &directory_buffer), args[0]);
     var buffer: client.ReplyBuffer = .{};
-    const reply = try client.retry(init.io, saved.store.slice(), path, kind, &buffer);
+    const reply = blk: {
+        defer captured.close(init.io);
+        break :blk try client.sendCaptured(init.io, &captured, null, &buffer);
+    };
     if (json) try writeCommandReply(init.io, reply) else try writeAdmission(init.io, reply, null);
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
