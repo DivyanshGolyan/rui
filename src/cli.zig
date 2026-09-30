@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
         try configureHostAllocator(init, args);
         return serve(init, args[2..]);
     }
-    if (std.mem.eql(u8, command, "login")) return login(init, args[2..]);
+    if (std.mem.eql(u8, command, "login")) return login(init, args[2..], false);
     if (std.mem.eql(u8, command, "host")) return host(init, args[2..]);
     if (std.mem.eql(u8, command, "setup")) try setup(init, args[2..]) else if (std.mem.eql(u8, command, "session")) try enterSession(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, args[2..], false) else return usage();
     try postCommandHold(init);
@@ -334,7 +334,7 @@ fn writeHostDiagnostics(io: std.Io, store: []const u8) !void {
     try writeSafeField(io, "Diagnostics: ", try std.fmt.bufPrint(&location, "{s}/diagnostics", .{store}));
 }
 
-fn login(init: std.process.Init, args: []const []const u8) !void {
+fn login(init: std.process.Init, args: []const []const u8, interactive: bool) !void {
     if (args.len != 1 or !std.mem.eql(u8, args[0], "codex")) return usage();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try credentialPath(init, &path_buffer, true);
@@ -347,11 +347,22 @@ fn login(init: std.process.Init, args: []const []const u8) !void {
     }
     try provider.initialize();
     defer provider.deinitialize();
-    var tokens = try codex_auth.login(init.io, struct {
-        fn display(code: []const u8) !void {
-            std.debug.print("Open https://auth.openai.com/codex/device and enter code: {s}\n", .{code});
-        }
-    }.display);
+    var tokens = if (interactive)
+        try codex_auth.login(init.io, struct {
+            fn display(code: []const u8) !void {
+                const output = std.Io.File.stdout();
+                const io = std.Io.Threaded.global_single_threaded.io();
+                try output.writeStreamingAll(io, "Open https://auth.openai.com/codex/device and enter code: ");
+                try output.writeStreamingAll(io, code);
+                try output.writeStreamingAll(io, "\n");
+            }
+        }.display, loginInterrupted)
+    else
+        try codex_auth.login(init.io, struct {
+            fn display(code: []const u8) !void {
+                std.debug.print("Open https://auth.openai.com/codex/device and enter code: {s}\n", .{code});
+            }
+        }.display, loginInterrupted);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&tokens));
     var record: codex_credentials.Record = .{
         .generation = 0,
@@ -368,8 +379,97 @@ fn login(init: std.process.Init, args: []const []const u8) !void {
     try record.id_token.set(tokens.id_token.slice());
     try record.access_token.set(tokens.access_token.slice());
     try record.refresh_token.set(tokens.refresh_token.slice());
+    // Publication and SIGINT claim the same gate. Once publication wins,
+    // cancellation cannot be reported as if installation were rolled back.
+    if (login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) != null) return error.LoginInterrupted;
     try codex_credentials.install(path, &record, null);
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Codex login installed.\n");
+    const home = init.environ_map.get("HOME") orelse "";
+    // The preference attempt must run even if the terminal receipt cannot be
+    // written. Installation and future defaults have independent outcomes.
+    const default_outcome = preferences.fillProviderAfterLogin(home);
+    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Codex credential installed. Remote model acceptance is not established. Current Session unchanged.\n");
+    const added = default_outcome catch |err| {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Credential installed, but future defaults were not saved or durability is uncertain (");
+        try std.Io.File.stdout().writeStreamingAll(init.io, @errorName(err));
+        return std.Io.File.stdout().writeStreamingAll(init.io, "). Inspect rui setup; active Session unchanged.\n");
+    };
+    try std.Io.File.stdout().writeStreamingAll(init.io, if (added)
+        "Rui: No provider default existed; Codex selected for future Sessions (gpt-6-luna).\n"
+    else
+        "Rui: Existing provider default unchanged.\n");
+}
+
+const LoginState = enum(u8) { cancellable, cancelled, publishing };
+var login_state = std.atomic.Value(LoginState).init(.cancellable);
+
+fn onLoginInterrupt(_: std.posix.SIG) callconv(.c) void {
+    _ = login_state.cmpxchgStrong(.cancellable, .cancelled, .acq_rel, .acquire);
+}
+
+fn loginInterrupted() bool {
+    return login_state.load(.acquire) == .cancelled;
+}
+
+test "SIGINT and credential publication have one winner" {
+    const action: std.posix.Sigaction = .{ .handler = .{ .handler = onLoginInterrupt }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    var previous: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.INT, &action, &previous);
+    defer std.posix.sigaction(.INT, &previous, null);
+    defer login_state.store(.cancellable, .release);
+    login_state.store(.cancellable, .release);
+    try std.posix.raise(.INT);
+    try std.testing.expect(loginInterrupted());
+    try std.testing.expect(login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) != null);
+    login_state.store(.cancellable, .release);
+    try std.testing.expect(login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) == null);
+    try std.posix.raise(.INT);
+    try std.testing.expect(!loginInterrupted());
+    try std.testing.expectEqual(LoginState.publishing, login_state.load(.acquire));
+}
+
+/// A fresh terminal choice authorizes login; reading setup status alone does not.
+fn guideProviderLogin(init: std.process.Init) !void {
+    login_state.store(.cancellable, .release);
+    const action: std.posix.Sigaction = .{ .handler = .{ .handler = onLoginInterrupt }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    var previous: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.INT, &action, &previous);
+    defer std.posix.sigaction(.INT, &previous, null);
+    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Supported integration: Codex. Login stores Rui-owned credentials; defer leaves this Session and Host work unchanged.\n");
+    var choice_buffer: [16]u8 = undefined;
+    const choice = (TerminalEditor.readLine(init.io, &choice_buffer, "Provider: [c] Codex login, [d] defer > ", false) catch |err| switch (err) {
+        error.StreamTooLong, error.InvalidTerminalInput => {
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Choose c or d. No login or preference change.\n");
+            return;
+        },
+        else => return err,
+    }) orelse {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Login deferred. Inspect saved work with /status or /result.\n");
+        return;
+    };
+    if (std.mem.eql(u8, choice, "d")) {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Login deferred. Inspect saved work with /status or /result.\n");
+        return;
+    }
+    if (!std.mem.eql(u8, choice, "c")) {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Choose c or d. No login or preference change.\n");
+        return;
+    }
+    if (loginInterrupted()) {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Login interrupted. No provider preference changed; check credentials before retrying.\n");
+        return;
+    }
+    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Starting Codex device login. The printed code is for the provider page only; waiting for its answer.\n");
+    const outcome = login(init, &.{"codex"}, true);
+    outcome catch |err| {
+        const advice: []const u8 = switch (err) {
+            error.LoginInterrupted => "Rui: Login interrupted. No provider preference changed; check credentials before retrying.\n",
+            error.LoginDenied => "Rui: Login denied. No provider preference changed; retry /login if intended.\n",
+            error.LoginExpired => "Rui: Login expired. No provider preference changed; retry /login for a fresh code.\n",
+            else => "Rui: Login failed or credential save unconfirmed. Inspect rui setup before retrying; no Session binding changed.\n",
+        };
+        try std.Io.File.stdout().writeStreamingAll(init.io, advice);
+        return;
+    };
 }
 
 fn serve(init: std.process.Init, args: []const []const u8) !void {
@@ -821,7 +921,14 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         if (text.len == 0) continue;
         if (std.mem.eql(u8, text, "/exit")) break;
         if (std.mem.eql(u8, text, "/help")) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: /help  /status  /wait  /requests  /result KEY  /setup [--store PATH] [--provider codex] [--model gpt-6-luna]  /configure [settings]  /exit\n/help shows these commands; /status inspects this Session; /wait follows selected work; /requests lists local recovery handles; /result KEY reads a saved answer. /setup reads local credential/Host status and saves defaults for future Sessions only; /configure changes this Session; /exit detaches without stopping work.\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: /help  /status  /wait  /requests  /result KEY  /setup [--store PATH] [--provider codex] [--model gpt-6-luna]  /login  /configure [settings]  /exit\n/help shows these commands; /status inspects this Session; /wait follows selected work; /requests lists local recovery handles; /result KEY reads a saved answer. /setup reads local credential/Host status and saves defaults for future Sessions only; /login chooses Codex login or defers; /configure changes this Session; /exit detaches without stopping work.\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
+            continue;
+        }
+        if (std.mem.eql(u8, text, "/login")) {
+            guideProviderLogin(init) catch |err| {
+                if (err != error.InteractiveInterrupted) return err;
+                try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Login deferred. Inspect saved work with /status or /result.\n");
+            };
             continue;
         }
         const attention: ?Attention = if (std.mem.eql(u8, text, "/setup") or std.mem.startsWith(u8, text, "/setup ")) blk: {

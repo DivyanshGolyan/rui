@@ -572,7 +572,7 @@ def main():
             assert "Provider: codex" in greeting and "Model: model-a" in greeting, greeting
             assert "Permission: ask" in greeting and "Store:" not in greeting and "Work: completed" not in greeting and queued not in greeting, greeting
             help_text = terminal_step(master, "/help")
-            for command in ("/help", "/status", "/wait", "/requests", "/result KEY", "/configure", "/exit"):
+            for command in ("/help", "/status", "/wait", "/requests", "/result KEY", "/setup", "/login", "/configure", "/exit"):
                 assert command in help_text, help_text
             for explanation in ("/help shows", "/status inspects", "/wait follows", "/requests lists",
                 "/result KEY reads", "/configure changes", "/exit detaches"):
@@ -582,6 +582,20 @@ def main():
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             assert "No work to wait for." in terminal_step(master, "/wait")
             assert "gpt-6-luna" in terminal_step(master, "/setup")
+            login_prompt = terminal_step(master, "/login", "Provider: [c]")
+            assert "Supported integration: Codex" in login_prompt and "defer leaves this Session" in login_prompt
+            assert "Login deferred" in terminal_step(master, "d")
+            assert not credential.exists(), "deferred login created credentials"
+            invalid_prompt = terminal_step(master, "/login", "Provider: [c]")
+            assert "Codex" in invalid_prompt
+            assert "No login or preference change" in terminal_step(master, "x")
+            terminal_step(master, "/login", "Provider: [c]")
+            assert "No login or preference change" in terminal_step(master, "12345678901234567")
+            terminal_step(master, "/login", "Provider: [c]")
+            os.write(master, b"\xff\n")
+            assert "No login or preference change" in read_terminal(master, "rui> ")
+            assert "Permission: ask" in terminal_step(master, "/status")
+            assert not credential.exists()
             assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model gpt-6-luna")
             assert "active Session unchanged" in terminal_step(master, "/setup --model other-model")
             spaced_store = state / "spaced store"

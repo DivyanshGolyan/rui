@@ -90,6 +90,16 @@ pub fn load(home: []const u8) !Values {
 /// Serializes read/modify/write for competing setup callers. A failed write or
 /// rename leaves the previous complete file; post-rename sync failure is uncertain.
 pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model: ?[]const u8, readiness: provider_selection.Readiness) !Values {
+    return (try save(home, store, provider, model, readiness, false)).?;
+}
+
+/// Under the same preference lock as setup, keep an existing provider choice.
+/// Null means no change was published; credentials are owned separately.
+pub fn fillProviderAfterLogin(home: []const u8) !bool {
+    return (try save(home, null, "codex", "gpt-6-luna", .configured, true)) != null;
+}
+
+fn save(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model: ?[]const u8, readiness: provider_selection.Readiness, only_if_unset: bool) !?Values {
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = try directoryPath(home, &path);
     if (provider) |value| {
@@ -139,6 +149,10 @@ pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model
     defer lock.close(io);
     try privateFile(lock);
     const saved = try read(dir);
+    if (only_if_unset) {
+        try validate(&saved);
+        if (saved.provider.len != 0) return null;
+    }
     var values = saved;
     if (store) |value| {
         const paths = try platform.resolveClientPaths(io, value);
@@ -224,4 +238,27 @@ fn validateOwner(handle: anytype) !void {
     var stat: c.struct_stat = undefined;
     if (c.fstat(handle, &stat) != 0) return error.PreferenceStatFailed;
     if (stat.st_uid != c.geteuid()) return error.UnownedPreferences;
+}
+
+test "login fills only a missing provider under the preference lock" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(io, &home_buffer);
+    const home = home_buffer[0..len];
+    try std.testing.expect(try fillProviderAfterLogin(home));
+    const first = try load(home);
+    try std.testing.expect(first.provider.eql("codex") and first.model.eql("gpt-6-luna"));
+
+    // A saved, currently unsupported choice is still the user's choice. An
+    // unconditional login update would overwrite this exact counterexample.
+    var config = try tmp.dir.openDir(io, ".config/rui", .{});
+    defer config.close(io);
+    var file = try config.createFile(io, "preferences.tmp", .{ .permissions = .fromMode(0o600) });
+    try file.writeStreamingAll(io, "version=1\nstore=\nprovider=legacy\nmodel=legacy-model\n");
+    file.close(io);
+    try config.rename("preferences.tmp", config, "preferences", io);
+    try std.testing.expect(!try fillProviderAfterLogin(home));
+    const saved = try load(home);
+    try std.testing.expect(saved.provider.eql("legacy") and saved.model.eql("legacy-model"));
 }
