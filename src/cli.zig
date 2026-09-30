@@ -562,15 +562,6 @@ fn message(init: std.process.Init, args: []const []const u8) !void {
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
-fn selectedRequest(store: []const u8, session_ref: []const u8, key: []const u8) !SavedRequest {
-    var saved: SavedRequest = .{};
-    try saved.store.set(store);
-    try saved.session.set(session_ref);
-    try saved.key.set(key);
-    try saved.kind.set("message");
-    return saved;
-}
-
 fn acceptedReply(reply: client.CommandReply) !bool {
     if (reply.status != 200) return false;
     var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
@@ -625,9 +616,9 @@ fn waitForSession(init: std.process.Init, store: []const u8, session_ref: []cons
             try writeSafeField(init.io, "selected message: ", selected);
         }
         if (!terminal_only and work.action_count > 1) try showActionable(init.io, report.file, presentation == .json);
-        break :blk try selectedRequest(store, session_ref, selected);
+        break :blk try client.MessageAddress.init(store, session_ref, selected);
     };
-    if (try followMessage(init, &saved, presentation, true, terminal_only)) |attention|
+    if (try followMessage(init, &saved, presentation, if (terminal_only) .terminal_only else .session_blocked)) |attention|
         return .{ .work = attention, .message = saved.key };
     if (presentation != .json) try showResult(init, &saved, presentation);
     return null;
@@ -703,12 +694,13 @@ fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []cons
         .text = text,
     };
     var captured = try client.captureMessage(init.io, input, .{ .generated = try requestDirectory(init, &directory_buffer) });
-    const saved = captured.identity().*;
+    const identity = captured.identity().*;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(init.io);
         break :blk try client.sendCaptured(init.io, &captured, null, &reply_buffer);
     };
+    const saved = try client.MessageAddress.init(identity.store.slice(), identity.session.slice(), identity.key.slice());
     const accepted = try acceptedReply(reply);
     if (!accepted) try writeAdmission(init.io, reply, null);
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
@@ -717,7 +709,7 @@ fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []cons
         reportAcceptedPresentationFailure(saved.key.slice(), err);
         return null;
     };
-    const next = followMessage(init, &saved, .interactive, false, false) catch |err| {
+    const next = followMessage(init, &saved, .interactive, .follow_attention) catch |err| {
         reportAcceptedPresentationFailure(saved.key.slice(), err);
         return null;
     };
@@ -797,7 +789,7 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
                 break :blk null;
             }
         else if (std.mem.startsWith(u8, text, "/result ")) blk: {
-            const saved = selectedRequest(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
+            const saved = client.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
                 std.debug.print("rui: result key: {s}\n", .{@errorName(err)});
                 break :blk null;
             };
@@ -868,7 +860,7 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
 }
 
 fn interactiveAction(init: std.process.Init, store: []const u8, session_ref: []const u8, initial: Attention) !void {
-    const saved = try selectedRequest(store, session_ref, initial.message.slice());
+    const saved = try client.MessageAddress.init(store, session_ref, initial.message.slice());
     var pending: ?Work = initial.work;
     while (pending) |work| {
         if (work.action.len == 0) return;
@@ -901,7 +893,7 @@ fn interactiveAction(init: std.process.Init, store: []const u8, session_ref: []c
         if (!accepted) try writeAdmission(init.io, reply, null);
         if (reply.status != 200) return;
         if (!accepted) return;
-        pending = try followMessage(init, &saved, .interactive, false, false);
+        pending = try followMessage(init, &saved, .interactive, .follow_attention);
         if (pending == null) try showResult(init, &saved, .interactive);
     }
 }
@@ -1289,65 +1281,6 @@ fn stringField(value: std.json.Value, name: []const u8) ![]const u8 {
 
 const SavedRequest = client.CapturedIdentity;
 
-const SavedMessageObservation = struct {
-    parsed: std.json.Parsed(std.json.Value),
-    // Borrowed from parsed; valid until parsed.deinit().
-    value: std.json.Value,
-    state: State,
-
-    const State = enum {
-        accepted,
-        queued,
-        processing,
-        rejected,
-        completed,
-        failed,
-        cancelled,
-
-        fn terminal(self: State) bool {
-            return switch (self) {
-                .rejected, .completed, .failed, .cancelled => true,
-                else => false,
-            };
-        }
-    };
-};
-
-fn readSavedMessage(init: std.process.Init, saved: *const SavedRequest) !SavedMessageObservation {
-    var buffer: client.ReplyBuffer = .{};
-    const reply = try client.observeCommand(init.io, saved.store.slice(), saved.key.slice(), &buffer);
-    return parseSavedMessage(reply, saved);
-}
-
-fn parseSavedMessage(reply: client.CommandReply, saved: *const SavedRequest) !SavedMessageObservation {
-    if (reply.status != 200) return error.ObservationFailed;
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
-    errdefer parsed.deinit();
-    const observation = try objectField(parsed.value, "observation");
-    const status = try stringField(observation, "status");
-    if (std.mem.eql(u8, status, "absent")) return error.RequestNotAdmitted;
-    if (!std.mem.eql(u8, try stringField(observation, "kind"), "message") or
-        !std.mem.eql(u8, try stringField(observation, "target"), saved.session.slice())) return error.RequestBindingMismatch;
-
-    const state: SavedMessageObservation.State = if (std.mem.eql(u8, status, "rejected")) .rejected else if (std.mem.eql(u8, status, "accepted")) blk: {
-        if (observation.object.get("result")) |terminal_result| {
-            const outcome = try stringField(terminal_result, "status");
-            if (std.mem.eql(u8, outcome, "completed")) break :blk .completed;
-            if (std.mem.eql(u8, outcome, "failed")) break :blk .failed;
-            if (std.mem.eql(u8, outcome, "cancelled")) break :blk .cancelled;
-            return error.InvalidObservation;
-        }
-        if (observation.object.get("queue")) |queue| {
-            const queued = try stringField(queue, "status");
-            if (std.mem.eql(u8, queued, "queued")) break :blk .queued;
-            if (std.mem.eql(u8, queued, "processing")) break :blk .processing;
-            return error.InvalidObservation;
-        }
-        break :blk .accepted;
-    } else return error.InvalidObservation;
-    return .{ .parsed = parsed, .value = observation, .state = state };
-}
-
 fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var captured = try client.openCaptured(init.io, try requestDirectory(init, &directory_buffer), handle);
@@ -1405,18 +1338,15 @@ fn result(init: std.process.Init, args: []const []const u8) !void {
     if (args.len != 1 and !json) return usage();
     const saved = try savedRequest(init, args[0]);
     if (!saved.kind.eql("message")) return error.NotMessageRequest;
-    try showResult(init, &saved, if (json) .json else .human);
+    const address = try client.MessageAddress.init(saved.store.slice(), saved.session.slice(), saved.key.slice());
+    try showResult(init, &address, if (json) .json else .human);
 }
 
-fn showResult(init: std.process.Init, saved: *const SavedRequest, presentation: Presentation) !void {
+fn showResult(init: std.process.Init, saved: *const client.MessageAddress, presentation: Presentation) !void {
     const json = presentation == .json;
-    var observed = try readSavedMessage(init, saved);
-    defer observed.parsed.deinit();
-    const observation = observed.value;
+    var observed = try client.observeMessage(init.io, std.heap.c_allocator, saved);
+    defer observed.deinit();
     const state = observed.state;
-    const observation_json = if (json) try std.json.Stringify.valueAlloc(std.heap.c_allocator, observation, .{}) else "";
-    defer if (json) std.heap.c_allocator.free(observation_json);
-    const result_value = observation.object.get("result");
     if (presentation == .interactive and state != .completed) {
         const notice = switch (state) {
             .accepted => "Rui: This Message was accepted; observe its original request for the result.\n",
@@ -1428,30 +1358,24 @@ fn showResult(init: std.process.Init, saved: *const SavedRequest, presentation: 
             .completed => unreachable,
         };
         try std.Io.File.stdout().writeStreamingAll(init.io, notice);
-        const details = if (state == .rejected) observation else result_value;
-        if (details) |value| {
-            if (value.object.get("code")) |code| {
-                if (code != .string) return error.InvalidObservation;
-                try writeSafeField(init.io, "Rui: Code: ", code.string);
-                if (std.mem.eql(u8, code.string, "indeterminate"))
-                    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: The command may have run. Rui did not rerun it; inspect saved work before choosing a next action.\n");
-            }
+        if (observed.code) |code| {
+            try writeSafeField(init.io, "Rui: Code: ", code);
+            if (std.mem.eql(u8, code, "indeterminate"))
+                try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: The command may have run. Rui did not rerun it; inspect saved work before choosing a next action.\n");
         }
     } else if (!json and presentation != .interactive) {
         var line: [256]u8 = undefined;
         try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "result: {s}\n", .{@tagName(state)}));
-        const details = if (state == .rejected) observation else result_value;
-        if (details) |value| {
-            if (value.object.get("code")) |code| {
-                if (code != .string) return error.InvalidObservation;
-                try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "code: {s}\n", .{code.string}));
-            }
-        }
+        if (observed.code) |code|
+            try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "code: {s}\n", .{code}));
     }
     if (state != .completed) {
         if (json) {
             try std.Io.File.stdout().writeStreamingAll(init.io, "{\"observation\":");
-            try std.Io.File.stdout().writeStreamingAll(init.io, observation_json);
+            var buffer: [protocol.content_window_bytes]u8 = undefined;
+            var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+            try observed.writeJson(&writer.interface);
+            try writer.flush();
             try std.Io.File.stdout().writeStreamingAll(init.io, ",\"answer\":null}\n");
         }
         return;
@@ -1463,7 +1387,10 @@ fn showResult(init: std.process.Init, saved: *const SavedRequest, presentation: 
         const answer = try client.readResult(init.io, saved.store.slice(), saved.key.slice(), file, &read_buffer);
         if (answer != .answer) return error.ResultReadFailed;
         try std.Io.File.stdout().writeStreamingAll(init.io, "{\"observation\":");
-        try std.Io.File.stdout().writeStreamingAll(init.io, observation_json);
+        var buffer: [protocol.content_window_bytes]u8 = undefined;
+        var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+        try observed.writeJson(&writer.interface);
+        try writer.flush();
         try std.Io.File.stdout().writeStreamingAll(init.io, ",\"answer\":\"");
         try writeJsonFileAt(init.io, file, 0, answer.answer.bytes, false);
         return std.Io.File.stdout().writeStreamingAll(init.io, "\"}\n");
@@ -1740,17 +1667,18 @@ fn showActionable(io: std.Io, file: std.Io.File, json: bool) !void {
     }
 }
 
-fn writeFollowOutcome(init: std.process.Init, observation: std.json.Value, state: SavedMessageObservation.State, presentation: Presentation) !void {
+fn writeFollowOutcome(init: std.process.Init, observation: *const client.MessageObservation, presentation: Presentation) !void {
     if (presentation == .interactive) return;
     if (presentation == .json) {
-        const observation_json = try std.json.Stringify.valueAlloc(std.heap.c_allocator, observation, .{});
-        defer std.heap.c_allocator.free(observation_json);
         try std.Io.File.stdout().writeStreamingAll(init.io, "{\"return\":\"outcome\",\"observation\":");
-        try std.Io.File.stdout().writeStreamingAll(init.io, observation_json);
+        var buffer: [protocol.content_window_bytes]u8 = undefined;
+        var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+        try observation.writeJson(&writer.interface);
+        try writer.flush();
         try std.Io.File.stdout().writeStreamingAll(init.io, "}\n");
     } else {
         var line: [128]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "return: outcome\nstatus: {s}\n", .{@tagName(state)}));
+        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "return: outcome\nstatus: {s}\n", .{@tagName(observation.state)}));
     }
 }
 
@@ -1759,63 +1687,84 @@ fn follow(init: std.process.Init, args: []const []const u8) !void {
     if (args.len != 1 and !json) return usage();
     const saved = try savedRequest(init, args[0]);
     if (!saved.kind.eql("message")) return error.NotMessageRequest;
-    _ = try followMessage(init, &saved, if (json) .json else .human, false, false);
+    const address = try client.MessageAddress.init(saved.store.slice(), saved.session.slice(), saved.key.slice());
+    _ = try followMessage(init, &address, if (json) .json else .human, .follow_attention);
 }
 
-fn progressNotice(queue: SavedMessageObservation.State, status: []const u8, has_action: bool) ![]const u8 {
+const FollowPolicy = enum {
+    follow_attention,
+    session_blocked,
+    terminal_only,
+
+    fn attention(self: FollowPolicy, observation: *const client.MessageObservation) ?client.MessageObservation.Progress {
+        if (observation.state.terminal()) return null;
+        const progress = observation.progress orelse return null;
+        if (progress.action == null) return null;
+        return switch (self) {
+            .follow_attention => progress,
+            .session_blocked => if (progress.status == .waiting_for_permission) progress else null,
+            .terminal_only => null,
+        };
+    }
+};
+
+fn progressNotice(queue: client.MessageObservation.State, status: @FieldType(client.MessageObservation.Progress, "status"), has_action: bool) ![]const u8 {
     if (queue == .queued) {
-        if (std.mem.eql(u8, status, "waiting_for_permission")) return "Rui: Your message is queued behind work needing a decision.\n";
-        if (std.mem.eql(u8, status, "in_flight")) return if (has_action)
+        if (status == .waiting_for_permission) return "Rui: Your message is queued behind work needing a decision.\n";
+        if (status == .in_flight) return if (has_action)
             "Rui: Your message is queued behind work in flight; an Action also needs a decision.\n"
         else
             "Rui: Your message is queued behind work in flight.\n";
-        if (std.mem.eql(u8, status, "runnable")) return "Rui: Your message is queued and ready for execution.\n";
+        if (status == .runnable) return "Rui: Your message is queued and ready for execution.\n";
     } else if (queue == .processing) {
-        if (std.mem.eql(u8, status, "waiting_for_permission")) return "Rui: Work needs your decision.\n";
-        if (std.mem.eql(u8, status, "in_flight")) return if (has_action)
+        if (status == .waiting_for_permission) return "Rui: Work needs your decision.\n";
+        if (status == .in_flight) return if (has_action)
             "Rui: An Action needs your choice while other work remains in flight.\n"
         else
             "Rui: Work is in flight.\n";
-        if (std.mem.eql(u8, status, "runnable")) return "Rui: Work is ready to continue.\n";
+        if (status == .runnable) return "Rui: Work is ready to continue.\n";
     }
     return error.InvalidObservation;
 }
 
 // null is the selected message's terminal observation; an Action is only a hint
 // to inspect and decide against the Host's exact current target.
-fn followMessage(init: std.process.Init, saved: *const SavedRequest, presentation: Presentation, session_wait: bool, terminal_only: bool) !?Work {
-    var last_queue: ?SavedMessageObservation.State = null;
-    var last_progress: protocol.Bounded(32) = .{};
+fn followMessage(init: std.process.Init, saved: *const client.MessageAddress, presentation: Presentation, policy: FollowPolicy) !?Work {
+    var last_queue: ?client.MessageObservation.State = null;
+    var last_progress: ?@FieldType(client.MessageObservation.Progress, "status") = null;
     var last_action = false;
     var unchanged_polls: u8 = 0;
     while (true) {
-        var observed = try readSavedMessage(init, saved);
-        defer observed.parsed.deinit();
+        var observed = try client.observeMessage(init.io, std.heap.c_allocator, saved);
+        defer observed.deinit();
         if (observed.state.terminal()) {
-            try writeFollowOutcome(init, observed.value, observed.state, presentation);
+            try writeFollowOutcome(init, &observed, presentation);
             return null;
         }
-        const progress = try objectField(observed.value, "progress");
-        const state = try stringField(progress, "status");
-        const action = try objectField(progress, "action");
         // Test-only pause after capturing the Message's coherent observation.
         try testGate(init.io, "RUI_TEST_FOLLOW_GATE");
-        if (presentation == .interactive and (last_queue == null or last_queue.? != observed.state or !last_progress.eql(state) or last_action != (action == .string))) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, try progressNotice(observed.state, state, action == .string));
+        // Notices describe status and Action presence, not which Action. A
+        // replacement ID still targets attention but does not reset reminders.
+        const progress_status = if (observed.progress) |progress| progress.status else null;
+        const has_action = if (observed.progress) |progress| progress.action != null else false;
+        if (presentation == .interactive and (last_queue == null or last_queue.? != observed.state or last_progress != progress_status or last_action != has_action)) {
+            if (observed.progress) |progress|
+                try std.Io.File.stdout().writeStreamingAll(init.io, try progressNotice(observed.state, progress.status, progress.action != null));
             last_queue = observed.state;
-            try last_progress.set(state);
-            last_action = action == .string;
+            last_progress = progress_status;
+            last_action = has_action;
             unchanged_polls = 0;
-        } else if (presentation == .interactive and std.mem.eql(u8, state, "in_flight")) {
+        } else if (presentation == .interactive and observed.progress != null and observed.progress.?.status == .in_flight) {
             if (unchanged_polls == 99) {
                 try std.Io.File.stdout().writeStreamingAll(init.io, if (observed.state == .queued) "Rui: Still queued behind work in flight.\n" else "Rui: Work is still in flight.\n");
                 unchanged_polls = 0;
             } else unchanged_polls += 1;
         }
-        if (!terminal_only and action == .string and (!session_wait or std.mem.eql(u8, state, "waiting_for_permission"))) {
+        if (policy.attention(&observed)) |progress| {
             var work: Work = .{};
-            try work.status.set(state);
-            try work.action.set(action.string);
+            try work.status.set(@tagName(progress.status));
+            var action_buffer: [20]u8 = undefined;
+            try work.action.set(try std.fmt.bufPrint(&action_buffer, "{d}", .{progress.action.?}));
             if (presentation == .json) {
                 var line: [160]u8 = undefined;
                 try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{{\"return\":\"attention\",\"status\":\"{s}\",\"action\":\"{s}\"}}\n", .{ work.status.slice(), work.action.slice() }));
@@ -1959,40 +1908,51 @@ fn usage() error{InvalidArguments} {
 }
 
 test "interactive progress distinguishes queued dependency from selected work" {
-    try std.testing.expectEqualStrings("Rui: Your message is queued behind work in flight.\n", try progressNotice(.queued, "in_flight", false));
-    try std.testing.expectEqualStrings("Rui: Your message is queued behind work in flight; an Action also needs a decision.\n", try progressNotice(.queued, "in_flight", true));
-    try std.testing.expectEqualStrings("Rui: Your message is queued behind work needing a decision.\n", try progressNotice(.queued, "waiting_for_permission", true));
-    try std.testing.expectEqualStrings("Rui: Work is in flight.\n", try progressNotice(.processing, "in_flight", false));
-    try std.testing.expectEqualStrings("Rui: An Action needs your choice while other work remains in flight.\n", try progressNotice(.processing, "in_flight", true));
-    try std.testing.expectEqualStrings("Rui: Work needs your decision.\n", try progressNotice(.processing, "waiting_for_permission", true));
-    try std.testing.expectEqualStrings("Rui: Your message is queued and ready for execution.\n", try progressNotice(.queued, "runnable", false));
-    try std.testing.expectError(error.InvalidObservation, progressNotice(.failed, "in_flight", false));
+    try std.testing.expectEqualStrings("Rui: Your message is queued behind work in flight.\n", try progressNotice(.queued, .in_flight, false));
+    try std.testing.expectEqualStrings("Rui: Your message is queued behind work in flight; an Action also needs a decision.\n", try progressNotice(.queued, .in_flight, true));
+    try std.testing.expectEqualStrings("Rui: Your message is queued behind work needing a decision.\n", try progressNotice(.queued, .waiting_for_permission, true));
+    try std.testing.expectEqualStrings("Rui: Work is in flight.\n", try progressNotice(.processing, .in_flight, false));
+    try std.testing.expectEqualStrings("Rui: An Action needs your choice while other work remains in flight.\n", try progressNotice(.processing, .in_flight, true));
+    try std.testing.expectEqualStrings("Rui: Work needs your decision.\n", try progressNotice(.processing, .waiting_for_permission, true));
+    try std.testing.expectEqualStrings("Rui: Your message is queued and ready for execution.\n", try progressNotice(.queued, .runnable, false));
+    try std.testing.expectError(error.InvalidObservation, progressNotice(.failed, .in_flight, false));
 }
 
-test "saved Message classification retains original binding and terminal outcomes" {
-    var saved: SavedRequest = .{};
-    try saved.session.set("original/session");
-    const prefix = "{\"observation\":{\"kind\":\"message\",\"target\":\"original/session\",";
+test "Message follow policies use decoded facts without inventing progress" {
+    const address = try client.MessageAddress.init("/store", "original/session", "original-key");
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"original-key\",\"observation\":{\"kind\":\"message\",\"target\":\"original/session\",\"status\":\"accepted\",\"queue\":{\"status\":\"queued\"}";
+    // Independent expectations: ordinary follow sees attention alongside a
+    // progressing sibling, Session wait sees only blocked progress, terminal
+    // wait sees neither. Missing progress grants no attention or runnable fact.
     const cases = .{
-        .{ "\"status\":\"accepted\"}}", SavedMessageObservation.State.accepted },
-        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"queued\"},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"7\"}}}", SavedMessageObservation.State.queued },
-        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"processing\"}}}", SavedMessageObservation.State.processing },
-        .{ "\"status\":\"rejected\",\"code\":\"unknown_session\"}}", SavedMessageObservation.State.rejected },
-        .{ "\"status\":\"accepted\",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}}}", SavedMessageObservation.State.failed },
-        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"excluded\"},\"result\":{\"status\":\"cancelled\"}}}", SavedMessageObservation.State.cancelled },
-        .{ "\"status\":\"accepted\",\"result\":{\"status\":\"completed\"}}}", SavedMessageObservation.State.completed },
+        .{ "}}", false, false },
+        .{ ",\"progress\":{\"status\":\"runnable\",\"action\":null}}}", false, false },
+        .{ ",\"progress\":{\"status\":\"in_flight\",\"action\":null}}}", false, false },
+        .{ ",\"progress\":{\"status\":\"in_flight\",\"action\":\"17\"}}}", true, false },
+        .{ ",\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"29\"}}}", true, true },
+        .{ ",\"result\":{\"status\":\"failed\",\"code\":\"original_failure\"},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"31\"}}}", false, false },
     };
     inline for (cases) |case| {
-        var observed = try parseSavedMessage(.{ .status = 200, .body = prefix ++ case[0] }, &saved);
-        defer observed.parsed.deinit();
-        try std.testing.expectEqual(case[1], observed.state);
-        try std.testing.expectEqualStrings("original/session", try stringField(observed.value, "target"));
+        var observed = try client.MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ case[0] }, &address);
+        defer observed.deinit();
+        try std.testing.expectEqual(case[1], FollowPolicy.follow_attention.attention(&observed) != null);
+        try std.testing.expectEqual(case[2], FollowPolicy.session_blocked.attention(&observed) != null);
+        try std.testing.expect(FollowPolicy.terminal_only.attention(&observed) == null);
+        if (comptime std.mem.eql(u8, case[0], "}}")) try std.testing.expect(observed.progress == null);
     }
-    try std.testing.expectError(error.ObservationFailed, parseSavedMessage(.{ .status = 503, .body = "" }, &saved));
-    try std.testing.expectError(error.RequestNotAdmitted, parseSavedMessage(.{ .status = 200, .body = "{\"observation\":{\"status\":\"absent\"}}" }, &saved));
-    try std.testing.expectError(error.RequestBindingMismatch, parseSavedMessage(.{ .status = 200, .body = "{\"observation\":{\"status\":\"accepted\",\"kind\":\"configure\",\"target\":\"original/session\"}}" }, &saved));
-    try std.testing.expectError(error.RequestBindingMismatch, parseSavedMessage(.{ .status = 200, .body = "{\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"later/session\",\"result\":{\"status\":\"completed\"}}}" }, &saved));
-    try std.testing.expectError(error.InvalidObservation, parseSavedMessage(.{ .status = 200, .body = prefix ++ "\"status\":\"accepted\",\"result\":{\"status\":\"mystery\"}}}" }, &saved));
+}
+
+test "Message attention retains replacement IDs while notices retain status and presence" {
+    const address = try client.MessageAddress.init("/store", "s", "k");
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\",\"queue\":{\"status\":\"processing\"},\"progress\":{\"status\":\"in_flight\",\"action\":\"";
+    inline for (.{ .{ "17", 17 }, .{ "71", 71 } }) |case| {
+        var observed = try client.MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ case[0] ++ "\"}}}" }, &address);
+        defer observed.deinit();
+        const attention = FollowPolicy.follow_attention.attention(&observed).?;
+        try std.testing.expectEqual(@as(u64, case[1]), attention.action.?);
+        try std.testing.expectEqualStrings("Rui: An Action needs your choice while other work remains in flight.\n", try progressNotice(observed.state, attention.status, attention.action != null));
+        try std.testing.expect(FollowPolicy.session_blocked.attention(&observed) == null);
+    }
 }
 
 test "post-command hold signals only after work and exits on release" {
