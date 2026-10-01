@@ -498,6 +498,137 @@ fn loginInterrupted() bool {
     return login_state.load(.acquire) == .cancelled;
 }
 
+test "one-shot login interruption preserves publication and independent defaults" {
+    const Fixture = struct {
+        var before: bool = false;
+        var lock_path: []const u8 = undefined;
+        var signal_thread: ?std.Thread = null;
+
+        fn exchange(io: std.Io, callback: anytype, cancelled: *const fn () bool) !codex_auth.Tokens {
+            _ = callback;
+            if (before) {
+                try std.posix.raise(.INT);
+                if (cancelled()) return error.LoginInterrupted;
+                return error.TestCancellationLost;
+            }
+            // The real credential owner must wait after winning publication.
+            const lock = try std.Io.Dir.cwd().openFile(io, lock_path, .{ .mode = .read_write, .lock = .exclusive });
+            signal_thread = try std.Thread.spawn(.{}, struct {
+                fn send(held: std.Io.File) void {
+                    defer held.close(std.Io.Threaded.global_single_threaded.io());
+                    const clock = std.Io.Threaded.global_single_threaded.io();
+                    const limit = std.Io.Clock.Timestamp.now(clock, .awake).raw.nanoseconds + std.time.ns_per_s;
+                    while (login_state.load(.acquire) != .publishing) {
+                        if (std.Io.Clock.Timestamp.now(clock, .awake).raw.nanoseconds > limit) std.c._exit(20);
+                        std.Thread.yield() catch {};
+                    }
+                    std.posix.raise(.INT) catch std.c._exit(21);
+                }
+            }.send, .{lock});
+            var tokens: codex_auth.Tokens = .{};
+            try tokens.id_token.set(codex_auth.fixture_id_token);
+            try tokens.access_token.set(codex_auth.fixture_access_token);
+            try tokens.refresh_token.set("synthetic-refresh");
+            try tokens.account_id.set(codex_auth.fixture_account_id);
+            return tokens;
+        }
+    };
+    const io = std.Io.Threaded.global_single_threaded.io();
+    inline for (.{ .{ true, false, false }, .{ false, false, false }, .{ false, true, false }, .{ true, false, true } }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+        var directory = try tmp.dir.createDirPathOpen(io, ".config/rui", .{ .permissions = .fromMode(0o700) });
+        defer directory.close(io);
+        const lock = try directory.createFile(io, ".codex.json.lock", .{ .read = true, .permissions = .fromMode(0o600) });
+        lock.close(io);
+        if (case[1]) {
+            const file = try directory.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
+            defer file.close(io);
+            try file.writeStreamingAll(io, "version=9\n");
+        }
+        var lock_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        Fixture.lock_path = try std.fmt.bufPrint(&lock_buffer, "{s}/.config/rui/.codex.json.lock", .{home});
+        Fixture.before = case[0];
+        var held: ?std.Io.File = if (case[2]) try directory.openFile(io, ".codex.json.lock", .{ .mode = .read_write, .lock = .exclusive }) else null;
+        defer if (held) |file| file.close(io);
+        const child = std.c.fork();
+        if (child < 0) return error.TestForkFailed;
+        if (child == 0) {
+            // The test runner owns stdout's wire protocol; capture CLI receipts.
+            const receipt = directory.createFile(io, "receipt", .{}) catch std.c._exit(27);
+            if (std.c.dup2(receipt.handle, 1) < 0) std.c._exit(28);
+            receipt.close(io);
+            const previous: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.DFL }, .mask = std.posix.sigemptyset(), .flags = 0 };
+            std.posix.sigaction(.INT, &previous, null);
+            var environment = std.process.Environ.Map.init(std.heap.c_allocator);
+            environment.put("HOME", home) catch std.c._exit(22);
+            var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+            const args = [_][*:0]const u8{ "rui", "login", "codex" };
+            const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &args }, .environ = .empty }, .arena = &arena, .gpa = std.heap.c_allocator, .io = io, .environ_map = &environment, .preopens = .empty };
+            const outcome = dispatch(init, Fixture.exchange);
+            if (Fixture.signal_thread) |thread| thread.join();
+            if (case[0]) {
+                if (outcome) |_| std.c._exit(23) else |err| if (err != error.LoginInterrupted) std.c._exit(24);
+            } else outcome catch std.c._exit(25);
+            var restored: std.posix.Sigaction = undefined;
+            std.posix.sigaction(.INT, null, &restored);
+            if (restored.handler.handler != std.posix.SIG.DFL) std.c._exit(26);
+            std.c._exit(0);
+        }
+        var status: c_int = undefined;
+        if (case[2]) {
+            const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 5 * std.time.ns_per_s;
+            while (std.c.waitpid(child, &status, std.c.W.NOHANG) == 0) {
+                if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= until) {
+                    std.posix.kill(child, .KILL) catch {};
+                    _ = std.c.waitpid(child, &status, 0);
+                    return error.PrepublicationWaitedForCredentialLock;
+                }
+                try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+            }
+            held.?.close(io);
+            held = null;
+        } else try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+        try std.testing.expectEqual(@as(c_int, 0), status);
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "{s}/.config/rui/codex.json", .{home});
+        if (case[0]) {
+            try std.testing.expectError(error.FileNotFound, codex_credentials.load(path));
+            try std.testing.expect((try preferences.load(home)).provider.len == 0);
+        } else {
+            var record = try codex_credentials.load(path);
+            defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+            try std.testing.expectEqualStrings(codex_auth.fixture_account_id, record.account_id.slice());
+            try std.testing.expectEqual(@as(u64, 1), record.generation);
+            if (case[1]) try std.testing.expectError(error.UnsupportedPreferencesVersion, preferences.load(home)) else {
+                const defaults = try preferences.load(home);
+                try std.testing.expectEqualStrings("codex", defaults.provider.slice());
+                try std.testing.expectEqual(@as(usize, 0), defaults.model.len);
+            }
+        }
+    }
+}
+
+test "SIGINT and credential publication have one winner" {
+    const action: std.posix.Sigaction = .{ .handler = .{ .handler = onLoginInterrupt }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    var previous: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.INT, &action, &previous);
+    defer std.posix.sigaction(.INT, &previous, null);
+    defer login_state.store(.cancellable, .release);
+    login_state.store(.cancellable, .release);
+    try std.posix.raise(.INT);
+    try std.testing.expect(loginInterrupted());
+    try std.testing.expect(login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) != null);
+    login_state.store(.cancellable, .release);
+    try std.testing.expect(login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) == null);
+    try std.posix.raise(.INT);
+    try std.testing.expect(!loginInterrupted());
+    try std.testing.expectEqual(LoginState.publishing, login_state.load(.acquire));
+}
+
+/// A fresh terminal choice authorizes login; reading setup status alone does not.
 fn guideProviderLogin(init: std.process.Init) !void {
     var interrupt = LoginInterrupt.init();
     defer interrupt.deinit();

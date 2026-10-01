@@ -519,6 +519,62 @@ test "extracts both pinned account claim spellings and rejects malformed compact
     try std.testing.expectError(error.InvalidCompactToken, parseAccount("a..c"));
 }
 
+test "local readiness uses runtime credential claims without refresh or lock" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(std.testing.io, "private", .{
+        .permissions = .fromMode(0o700),
+        .open_options = .{},
+    });
+    defer private.close(std.testing.io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &root);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/private/auth", .{root[0..length]});
+    try std.testing.expectEqual(LocalStatus.missing, try localStatus(path, 100));
+    try std.testing.expect(!(try localStatus(path, 100)).usable());
+    try std.testing.expectError(error.FileNotFound, private.openFile(std.testing.io, ".auth.lock", .{}));
+    var record: credentials.Record = .{
+        .generation = 0,
+        .account_id = .{},
+        .id_token = .{},
+        .access_token = .{},
+        .refresh_token = .{},
+        .expires_at = 4_102_444_800,
+        .refreshed_at = 100,
+    };
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+    try record.account_id.set(fixture_account_id);
+    try record.id_token.set(fixture_id_token);
+    try record.access_token.set(fixture_access_token);
+    try record.refresh_token.set("private-refresh");
+    try credentials.install(path, &record, null);
+    try std.testing.expectEqual(LocalStatus.configured, try localStatus(path, 4_102_444_799));
+    try std.testing.expectEqual(LocalStatus.renewal_due, try localStatus(path, 4_102_444_800));
+    try std.testing.expect((try localStatus(path, 4_102_444_799)).usable());
+    try std.testing.expect((try localStatus(path, 4_102_444_800)).usable());
+
+    record.fedramp = true;
+    try credentials.install(path, &record, null);
+    try std.testing.expectError(error.AccountMismatch, localStatus(path, 100));
+    record.fedramp = false;
+    record.expires_at = 1234;
+    try credentials.install(path, &record, null);
+    try std.testing.expectError(error.InvalidCredentialExpiry, localStatus(path, 100));
+    record.expires_at = 0;
+    try record.access_token.set("opaque-access");
+    try credentials.install(path, &record, null);
+    try std.testing.expectEqual(LocalStatus.configured, try localStatus(path, 100 + 8 * 24 * 60 * 60 - 1));
+    try std.testing.expectEqual(LocalStatus.renewal_due, try localStatus(path, 100 + 8 * 24 * 60 * 60));
+    try std.testing.expectError(error.InjectedRefreshFailure, credentials.exchangeRefresh(path, 4, {}, struct {
+        fn fail(_: void, _: *const credentials.Record) error{InjectedRefreshFailure}!credentials.Record {
+            return error.InjectedRefreshFailure;
+        }
+    }.fail));
+    try std.testing.expectEqual(LocalStatus.refresh_required, try localStatus(path, 100));
+    try std.testing.expect(!(try localStatus(path, 100)).usable());
+}
+
 test "refresh preserves omitted fields and refuses account replacement" {
     const old_id = "e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0XzEifQ.c2ln";
     const old_access = "e30.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln";
