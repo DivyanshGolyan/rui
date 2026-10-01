@@ -16,6 +16,7 @@ const platform = @import("platform.zig");
 const provider = @import("provider.zig");
 const protocol = @import("protocol.zig");
 const store_module = @import("store.zig");
+const session_view = @import("session_view.zig");
 
 pub const default_active_capacity = 1000;
 pub const default_retry_waits_ms = [3]u64{ 2_000, 4_000, 8_000 };
@@ -113,6 +114,58 @@ const TestTransition = enum {
     action_result_committed,
 };
 
+// Value transitions; Host serializes them with its existing drain mutex.
+// Each accepted connection owns one place through socket close, including
+// error delivery and construction failure. Discovery retains headroom rather
+// than borrowing an ordinary place, but cannot consume both control places.
+const Admission = struct {
+    const Place = enum { classification, ordinary, control, discovery };
+    total: usize = 0,
+    headroom: usize = 0,
+    ordinary: usize = 0,
+    discovery: usize = 0,
+
+    fn reserve(self: *Admission) !Place {
+        if (self.total == max_clients) return error.ConnectionCapacityExhausted;
+        if (self.headroom == control_headroom) return error.ClassificationCapacityExhausted;
+        self.total += 1;
+        self.headroom += 1;
+        return .classification;
+    }
+
+    fn classify(self: *Admission, place: *Place, route: Route) !void {
+        std.debug.assert(place.* == .classification);
+        if (route == .host_info) {
+            if (self.discovery == 1) return error.DiscoveryCapacityExhausted;
+            self.discovery += 1;
+            place.* = .discovery;
+        } else if (route.isControl()) {
+            place.* = .control;
+        } else {
+            if (self.ordinary == max_ordinary_clients) return error.OrdinaryCapacityExhausted;
+            self.ordinary += 1;
+            self.headroom -= 1;
+            place.* = .ordinary;
+        }
+    }
+
+    fn release(self: *Admission, place: Place) void {
+        std.debug.assert(self.total > 0);
+        self.total -= 1;
+        if (place == .ordinary) {
+            std.debug.assert(self.ordinary > 0);
+            self.ordinary -= 1;
+        } else {
+            std.debug.assert(self.headroom > 0);
+            self.headroom -= 1;
+            if (place == .discovery) {
+                std.debug.assert(self.discovery == 1);
+                self.discovery = 0;
+            }
+        }
+    }
+};
+
 const Host = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -135,9 +188,7 @@ const Host = struct {
     controls_changed: std.atomic.Value(bool) = .init(false),
     control_hint_suppressed: std.atomic.Value(bool) = .init(false),
     request_counter: std.atomic.Value(u64) = .init(0),
-    active_clients: std.atomic.Value(usize) = .init(0),
-    classification_clients: std.atomic.Value(usize) = .init(0),
-    ordinary_clients: std.atomic.Value(usize) = .init(0),
+    admission: Admission = .{},
     scratch_used: std.atomic.Value(u64) = .init(0),
     launch_mutex: std.Io.Mutex = .init,
     trace_mutex: std.Io.Mutex = .init,
@@ -164,10 +215,21 @@ const Host = struct {
         try launch(context);
     }
 
-    fn clientFinished(self: *Host) void {
+    fn reserveClient(self: *Host) !Admission.Place {
         self.drain_mutex.lockUncancelable(self.io);
-        const prior = self.active_clients.fetchSub(1, .acq_rel);
-        std.debug.assert(prior > 0);
+        defer self.drain_mutex.unlock(self.io);
+        return self.admission.reserve();
+    }
+
+    fn classifyClient(self: *Host, place: *Admission.Place, route: Route) !void {
+        self.drain_mutex.lockUncancelable(self.io);
+        defer self.drain_mutex.unlock(self.io);
+        try self.admission.classify(place, route);
+    }
+
+    fn clientFinished(self: *Host, place: Admission.Place) void {
+        self.drain_mutex.lockUncancelable(self.io);
+        self.admission.release(place);
         self.drain_condition.broadcast(self.io);
         self.drain_mutex.unlock(self.io);
     }
@@ -175,7 +237,7 @@ const Host = struct {
     fn drain(self: *Host) void {
         self.drain_mutex.lockUncancelable(self.io);
         defer self.drain_mutex.unlock(self.io);
-        while (self.active_clients.load(.acquire) != 0) {
+        while (self.admission.total != 0) {
             self.drain_condition.waitUncancelable(self.io, &self.drain_mutex);
         }
     }
@@ -185,6 +247,7 @@ const Connection = struct {
     host: *Host,
     stream: std.Io.net.Stream,
     accepted_at_ns: u64,
+    place: Admission.Place,
 };
 
 extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
@@ -368,6 +431,7 @@ pub fn serve(
                 return err,
             else => return err,
         };
+        const accepted_at_ns = nowNs(&host);
         if (host.effect_shutdown.load(.acquire)) {
             stream.close(io);
             return error.EffectAwareShutdown;
@@ -384,37 +448,26 @@ pub fn serve(
                 return err;
             };
         }
-        const previous = host.active_clients.fetchAdd(1, .acq_rel);
-        if (previous >= max_clients) {
-            host.clientFinished();
-            sendStatic(io, stream.socket.handle, 503, "busy", "connection_capacity_exhausted") catch {};
+        const place = host.reserveClient() catch |err| {
+            sendStaticUntil(io, stream.socket.handle, 503, "busy", admissionCode(err), @as(i128, accepted_at_ns) + 10 * std.time.ns_per_s) catch {};
             stream.close(io);
             continue;
-        }
-        const previous_classification = host.classification_clients.fetchAdd(1, .acq_rel);
-        if (previous_classification >= control_headroom) {
-            _ = host.classification_clients.fetchSub(1, .acq_rel);
-            host.clientFinished();
-            sendStatic(io, stream.socket.handle, 503, "busy", "classification_capacity_exhausted") catch {};
-            stream.close(io);
-            continue;
-        }
+        };
         const connection = allocator.create(Connection) catch {
-            _ = host.classification_clients.fetchSub(1, .acq_rel);
-            host.clientFinished();
             stream.close(io);
+            host.clientFinished(place);
             continue;
         };
         connection.* = .{
             .host = &host,
             .stream = stream,
-            .accepted_at_ns = nowNs(&host),
+            .accepted_at_ns = accepted_at_ns,
+            .place = place,
         };
         const thread = std.Thread.spawn(.{ .stack_size = connection_stack_bytes }, connectionMain, .{connection}) catch {
             allocator.destroy(connection);
-            _ = host.classification_clients.fetchSub(1, .acq_rel);
-            host.clientFinished();
             stream.close(io);
+            host.clientFinished(place);
             continue;
         };
         thread.detach();
@@ -2842,13 +2895,28 @@ fn connectionMain(connection: *Connection) void {
     const accepted_at_ns = connection.accepted_at_ns;
     defer {
         stream.close(host.io);
+        const place = connection.place;
         host.allocator.destroy(connection);
         // This is the last Host access: drain may release the stack owner as
         // soon as the active population reaches zero.
-        host.clientFinished();
+        host.clientFinished(place);
     }
-    handleConnection(host, stream.socket.handle, accepted_at_ns) catch |err| {
-        sendStatic(host.io, stream.socket.handle, 400, "invocation_error", @errorName(err)) catch {};
+    handleConnection(host, stream.socket.handle, accepted_at_ns, &connection.place) catch |err| {
+        const deadline: ?i128 = if (connection.place == .discovery or connection.place == .classification)
+            @as(i128, accepted_at_ns) + 10 * std.time.ns_per_s
+        else
+            null;
+        sendStaticUntil(host.io, stream.socket.handle, 400, "invocation_error", @errorName(err), deadline) catch {};
+    };
+}
+
+fn admissionCode(err: anyerror) []const u8 {
+    return switch (err) {
+        error.ConnectionCapacityExhausted => "connection_capacity_exhausted",
+        error.ClassificationCapacityExhausted => "classification_capacity_exhausted",
+        error.DiscoveryCapacityExhausted => "discovery_capacity_exhausted",
+        error.OrdinaryCapacityExhausted => "ordinary_capacity_exhausted",
+        else => unreachable,
     };
 }
 
@@ -2861,6 +2929,9 @@ const Route = enum {
     model_interruption,
     permission_decision,
     observe,
+    session_calls,
+    session_call_content,
+    message_content,
     read_result,
     read_action_call_id,
     read_action_arguments,
@@ -2868,6 +2939,7 @@ const Route = enum {
     list_sessions,
     conversation_page,
     conversation_content,
+    session_view,
     unsupported_control,
 
     fn isControl(self: Route) bool {
@@ -2883,30 +2955,16 @@ const Header = struct {
     instance: ?protocol.InstanceId = null,
 };
 
-fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void {
-    var classification_held = true;
-    defer if (classification_held) {
-        _ = host.classification_clients.fetchSub(1, .acq_rel);
-    };
-    var ordinary_held = false;
-    defer if (ordinary_held) {
-        _ = host.ordinary_clients.fetchSub(1, .acq_rel);
-    };
-    var header_reader = HeaderReader.init(host.io, fd);
+fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place: *Admission.Place) !void {
+    const header_deadline = @as(i128, accepted_at_ns) + 10 * std.time.ns_per_s;
+    var header_reader = HeaderReader.init(host.io, fd, header_deadline);
     const route = try header_reader.readRoute();
-    const ordinary = !route.isControl();
-    if (ordinary) {
-        const previous = host.ordinary_clients.fetchAdd(1, .acq_rel);
-        if (previous >= max_ordinary_clients) {
-            _ = host.ordinary_clients.fetchSub(1, .acq_rel);
-            return respondStatic(host.io, fd, 503, "busy", "ordinary_capacity_exhausted");
-        }
-        ordinary_held = true;
-        const prior = host.classification_clients.fetchSub(1, .acq_rel);
-        std.debug.assert(prior > 0);
-        classification_held = false;
-    }
+    host.classifyClient(place, route) catch |err| {
+        sendStaticUntil(host.io, fd, 503, "busy", admissionCode(err), header_deadline) catch {};
+        return;
+    };
     const header = try header_reader.finish(route);
+    if (route == .host_info) return handleHostInfo(host, fd, header, header_deadline);
     if (header.route == .unsupported_control) {
         return respondStatic(host.io, fd, 501, "unsupported", "control_surface_enters_in_later_slice");
     }
@@ -2954,6 +3012,9 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
         .model_interruption => header.route == .model_interruption,
         .permission_decision => header.route == .permission_decision,
         .observe_command => header.route == .observe,
+        .session_calls => header.route == .session_calls,
+        .session_call_content => header.route == .session_call_content,
+        .message_content => header.route == .message_content,
         .read_result => header.route == .read_result,
         .read_action_call_id => header.route == .read_action_call_id,
         .read_action_arguments => header.route == .read_action_arguments,
@@ -2961,6 +3022,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
         .list_sessions => header.route == .list_sessions,
         .conversation_page => header.route == .conversation_page,
         .conversation_content => header.route == .conversation_content,
+        .session_view => header.route == .session_view,
     };
     if (!route_matches) {
         return respondStatic(host.io, fd, 400, "invocation_error", "route_kind_mismatch");
@@ -2979,22 +3041,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
     }
 
     switch (request) {
-        .host_info => {
-            if (!host.launchAllowed()) {
-                return respondStatic(host.io, fd, 503, "host_unavailable", "dispatch_fenced");
-            }
-            var response: protocol.ResponseBuffer = .{};
-            try response.append("{\"version\":\"1\",\"type\":\"host_info\",\"store\":");
-            try response.appendJsonString(host.lease.paths.store.slice());
-            try response.append(",\"instance\":\"");
-            try response.append(&std.fmt.bytesToHex(host.instance, .lower));
-            try response.appendFmt("\",\"active_capacity\":\"{d}\",\"capabilities\":{{\"bash\":true,\"model\":{s},\"managed_authentication\":{s}}}}}", .{
-                host.custody.records.len,
-                if (host.provider_endpoint != null) "true" else "false",
-                if (host.provider_endpoint != null and host.authentication != null) "true" else "false",
-            });
-            deliverResponse(host.io, fd, 200, response.slice());
-        },
+        .host_info => unreachable, // Discovery has its own bounded exchange.
         .host_stop => {
             host.launch_mutex.lockUncancelable(host.io);
             const first = !host.effect_shutdown.swap(true, .acq_rel);
@@ -3114,6 +3161,41 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
             try renderCommandObservation(&response, command.key.slice(), observation);
             deliverResponse(host.io, fd, 200, response.slice());
         },
+        .session_calls => |command| {
+            const page = host.store.nextSessionCall(command.session.slice(), command.after_position) catch |err| switch (err) {
+                error.InvalidSessionCallCursor, error.SessionNotFound => return respondStatic(host.io, fd, 409, "invocation_error", "invalid_session_call_cursor"),
+                else => {
+                    fenceDispatch(host, "session calls", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                },
+            };
+            var response: protocol.ResponseBuffer = .{};
+            try response.appendFmt("{{\"version\":\"1\",\"type\":\"session_calls\",\"position\":\"{d}\",\"call\":", .{page.position});
+            if (page.call) |value| {
+                try response.appendFmt("{{\"turn\":\"{d}\",\"operation\":\"{d}\",\"ordinal\":\"{d}\",\"classification\":", .{ value.turn_id, value.operation_id, value.call_ordinal });
+                try response.appendJsonString(@tagName(value.classification));
+                try response.append(",\"rejection\":");
+                if (value.classification == .rejected) try response.appendJsonString(value.rejection_code.slice()) else try response.append("null");
+                try response.append(",\"name\":");
+                try renderContentReference(&response, value.name_reference);
+                try response.append(",\"arguments\":");
+                try renderContentReference(&response, value.arguments_reference);
+                try response.append("}");
+            } else try response.append("null}");
+            if (page.call != null) try response.append("}");
+            deliverResponse(host.io, fd, 200, response.slice());
+        },
+        .session_call_content => |command| {
+            var reader = host.store.openSessionCallContent(command) catch |err| switch (err) {
+                error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(host.io, fd, 409, "call_content_unavailable", @errorName(err)),
+                else => {
+                    fenceDispatch(host, "session call content", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                },
+            };
+            defer reader.close();
+            try deliverPublicContent(host, fd, &reader, command.start, command.length, command.stream);
+        },
         .read_result => |command| {
             const reference = host.store.commandResult(command.key.slice()) catch |err| switch (err) {
                 error.ResultNotFound => return respondStatic(host.io, fd, 409, "result_unavailable", "result_not_found"),
@@ -3191,6 +3273,28 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
             defer page.deinit();
             deliverReport(host.io, fd, &page) catch {};
         },
+        .session_view => |command| {
+            const page = host.store.sessionView(command.session.slice(), command.cursor) catch |err| switch (err) {
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, "session_view_unavailable", @errorName(err)),
+                else => {
+                    fenceDispatch(host, "Session view", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                },
+            };
+            var response: protocol.FixedJsonBuffer(session_view.response_bytes) = .{};
+            try response.appendFmt("{{\"version\":\"1\",\"type\":\"session_view\",\"end\":\"{d}\",\"more\":{s},\"pending_total\":\"{d}\",\"action\":\"{d}\",\"work\":{{\"status\":\"{s}\",\"turn\":\"{d}\",\"operation\":\"{d}\"}},\"items\":[", .{ page.end, if (page.more) "true" else "false", page.pending_total, page.action, @tagName(page.work.status), page.work.turn, page.work.operation });
+            for (page.items[0..page.count], 0..) |*item, i| {
+                if (i != 0) try response.append(",");
+                try session_view.writeItem(&response, item);
+            }
+            try response.append("],\"pending\":[");
+            for (page.pending[0..page.pending_count], 0..) |*item, i| {
+                if (i != 0) try response.append(",");
+                try session_view.writeItem(&response, item);
+            }
+            try response.append("]}");
+            deliverResponse(host.io, fd, 200, response.slice());
+        },
         .conversation_page => |command| {
             const page = host.store.publicConversationPage(command) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, "conversation_unavailable", @errorName(err)),
@@ -3215,6 +3319,17 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
             try response.append("}");
             deliverResponse(host.io, fd, 200, response.slice());
         },
+        .message_content => |command| {
+            var reader = host.store.openMessageContent(command) catch |err| switch (err) {
+                error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(host.io, fd, 409, "message_unavailable", @errorName(err)),
+                else => {
+                    fenceDispatch(host, "message content", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                },
+            };
+            defer reader.close();
+            try deliverPublicContent(host, fd, &reader, command.start, command.length, command.stream);
+        },
         .conversation_content => |command| {
             var reader = host.store.openPublicConversationContent(command) catch |err| switch (err) {
                 error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(host.io, fd, 409, "conversation_unavailable", @errorName(err)),
@@ -3224,39 +3339,45 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
                 },
             };
             defer reader.close();
-            // Projection readers are sequential. Skip earlier decoded bytes in
-            // the same bounded window; no transaction spans socket delivery.
-            var buffer: [protocol.content_window_bytes]u8 = undefined;
-            const count: usize = @intCast(@min(reader.reference.length - command.start, buffer.len));
-            var offset: u64 = 0;
-            switch (reader.representation) {
-                .raw => offset = command.start,
-                .projection => {
-                    while (offset < command.start) {
-                        const wanted: usize = @intCast(@min(command.start - offset, buffer.len));
-                        if (reader.read(offset, buffer[0..wanted]) catch |err| {
-                            fenceDispatch(host, "conversation content", err);
-                            return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
-                        } != wanted) {
-                            fenceDispatch(host, "conversation content", error.ShortCanonicalRead);
-                            return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
-                        }
-                        offset += wanted;
-                    }
-                },
-            }
-            if (reader.read(offset, buffer[0..count]) catch |err| {
-                fenceDispatch(host, "conversation content", err);
-                return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
-            } != count) {
-                fenceDispatch(host, "conversation content", error.ShortCanonicalRead);
-                return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
-            }
-            var header_buffer: [320]u8 = undefined;
-            const content_header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ count, reader.reference.length, command.start + count });
-            writeAll(fd, content_header) catch return;
-            writeAll(fd, buffer[0..count]) catch {};
+            try deliverPublicContent(host, fd, &reader, command.start, protocol.content_window_bytes, command.stream);
         },
+    }
+}
+
+// One reader and delivery window per ordinary handler, independent of content
+// length/history. The Store releases its lock before every socket write.
+fn deliverPublicContent(host: *Host, fd: std.posix.fd_t, reader: *store_module.ContentReader, start: u64, length: u64, stream: bool) !void {
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    reader.position(start, &buffer) catch |err| {
+        fenceDispatch(host, "public content", err);
+        return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+    };
+    const delivered = if (stream) reader.reference.length else @min(reader.reference.length - start, length);
+    const end = start + delivered;
+    const first: usize = @intCast(@min(delivered, buffer.len));
+    if (reader.read(start, buffer[0..first]) catch |err| {
+        fenceDispatch(host, "public content", err);
+        return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+    } != first) {
+        fenceDispatch(host, "public content", error.ShortCanonicalRead);
+        return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+    }
+    var header_buffer: [320]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ delivered, reader.reference.length, end });
+    writeAll(fd, header) catch return;
+    writeAll(fd, buffer[0..first]) catch return;
+    var offset = start + first;
+    while (offset < end) {
+        const count: usize = @intCast(@min(end - offset, buffer.len));
+        if (reader.read(offset, buffer[0..count]) catch |err| {
+            fenceDispatch(host, "public content", err);
+            return;
+        } != count) {
+            fenceDispatch(host, "public content", error.ShortCanonicalRead);
+            return;
+        }
+        writeAll(fd, buffer[0..count]) catch return;
+        offset += count;
     }
 }
 
@@ -3290,15 +3411,58 @@ fn nextRequestNumber(host: *Host) !u64 {
     }
 }
 
+fn handleHostInfo(host: *Host, fd: std.posix.fd_t, header: Header, deadline: i128) !void {
+    if (header.content_length > protocol.max_host_info_request_bytes) return error.DiscoveryRequestTooLarge;
+    var cleanup_failed = false;
+    const request = try protocol.parseRequest(.{
+        .io = host.io,
+        .fd = fd,
+        .content_length = header.content_length,
+        .scratch_path = "", // Expected kind rejects content-bearing requests before capture.
+        .request_number = 0,
+        .cleanup_failed = &cleanup_failed,
+        .expected_kind = .host_info,
+        .deadline = deadline,
+    });
+    if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
+        sendStaticUntil(host.io, fd, 409, "invocation_error", "wrong_store_identity", deadline) catch {};
+        return;
+    }
+    if (header.instance) |instance| {
+        if (!std.mem.eql(u8, &instance, &host.instance)) {
+            sendStaticUntil(host.io, fd, 409, "invocation_error", "host_instance_changed", deadline) catch {};
+            return;
+        }
+    }
+    if (header.drop == .before_admission) return;
+    if (!host.launchAllowed()) {
+        sendStaticUntil(host.io, fd, 503, "host_unavailable", "dispatch_fenced", deadline) catch {};
+        return;
+    }
+    var response: protocol.ResponseBuffer = .{};
+    try response.append("{\"version\":\"1\",\"type\":\"host_info\",\"store\":");
+    try response.appendJsonString(host.lease.paths.store.slice());
+    try response.append(",\"instance\":\"");
+    try response.append(&std.fmt.bytesToHex(host.instance, .lower));
+    try response.appendFmt("\",\"active_capacity\":\"{d}\",\"capabilities\":{{\"bash\":true,\"model\":{s},\"managed_authentication\":{s}}}}}", .{
+        host.custody.records.len,
+        if (host.provider_endpoint != null) "true" else "false",
+        if (host.provider_endpoint != null and host.authentication != null) "true" else "false",
+    });
+    std.debug.assert(response.len <= protocol.max_host_info_response_bytes);
+    // Never append an error to a partially delivered response.
+    writeHttpUntil(host.io, fd, 200, response.slice(), deadline) catch {};
+}
+
 const HeaderReader = struct {
     io: std.Io,
     fd: std.posix.fd_t,
     buffer: [protocol.max_header_bytes]u8 = undefined,
     used: usize = 0,
-    started: std.Io.Clock.Timestamp,
+    deadline: i128,
 
-    fn init(io: std.Io, fd: std.posix.fd_t) HeaderReader {
-        return .{ .io = io, .fd = fd, .started = .now(io, .awake) };
+    fn init(io: std.Io, fd: std.posix.fd_t, deadline: i128) HeaderReader {
+        return .{ .io = io, .fd = fd, .deadline = deadline };
     }
 
     fn readRoute(self: *HeaderReader) !Route {
@@ -3333,6 +3497,12 @@ const HeaderReader = struct {
             .permission_decision
         else if (std.mem.eql(u8, path, "/v1/observe-command"))
             .observe
+        else if (std.mem.eql(u8, path, "/v1/session-calls"))
+            .session_calls
+        else if (std.mem.eql(u8, path, "/v1/session-call-content"))
+            .session_call_content
+        else if (std.mem.eql(u8, path, "/v1/message-content"))
+            .message_content
         else if (std.mem.eql(u8, path, "/v1/read-result"))
             .read_result
         else if (std.mem.eql(u8, path, "/v1/read-action-call-id"))
@@ -3347,6 +3517,8 @@ const HeaderReader = struct {
             .conversation_page
         else if (std.mem.eql(u8, path, "/v1/conversation-content"))
             .conversation_content
+        else if (std.mem.eql(u8, path, "/v1/session-view"))
+            .session_view
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
             .unsupported_control
         else
@@ -3405,19 +3577,7 @@ const HeaderReader = struct {
     }
 
     fn readByte(self: *HeaderReader) !void {
-        const now = std.Io.Clock.Timestamp.now(self.io, .awake);
-        const elapsed = self.started.durationTo(now).raw.nanoseconds;
-        if (elapsed >= 10 * std.time.ns_per_s) return error.HeaderDeadlineExceeded;
-        const remaining_ms: i32 = @intCast(@max(
-            1,
-            @divFloor(10 * std.time.ns_per_s - elapsed, std.time.ns_per_ms),
-        ));
-        var poll_fd = [_]std.posix.pollfd{.{
-            .fd = self.fd,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        }};
-        if (try std.posix.poll(&poll_fd, remaining_ms) == 0) return error.HeaderDeadlineExceeded;
+        try protocol.pollExchange(self.io, self.fd, std.posix.POLL.IN, self.deadline);
         const count = try std.posix.read(self.fd, self.buffer[self.used .. self.used + 1]);
         if (count == 0) return error.IncompleteHeader;
         self.used += count;
@@ -3741,13 +3901,17 @@ fn appendHex(response: *protocol.ResponseBuffer, bytes: *const [32]u8) !void {
 }
 
 fn sendStatic(io: std.Io, fd: std.posix.fd_t, status: u16, kind: []const u8, code: []const u8) !void {
+    return sendStaticUntil(io, fd, status, kind, code, null);
+}
+
+fn sendStaticUntil(io: std.Io, fd: std.posix.fd_t, status: u16, kind: []const u8, code: []const u8, deadline: ?i128) !void {
     var response: protocol.ResponseBuffer = .{};
     try response.append("{\"version\":\"1\",\"type\":");
     try response.appendJsonString(kind);
     try response.append(",\"code\":");
     try response.appendJsonString(code);
     try response.append("}");
-    try writeHttp(io, fd, status, response.slice());
+    try writeHttpUntil(io, fd, status, response.slice(), deadline);
 }
 
 fn respondStatic(io: std.Io, fd: std.posix.fd_t, status: u16, kind: []const u8, code: []const u8) void {
@@ -3793,7 +3957,18 @@ fn deliverReport(io: std.Io, fd: std.posix.fd_t, report: *store_module.SessionRe
 }
 
 fn writeHttp(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8) !void {
-    _ = io;
+    return writeHttpUntil(io, fd, status, body, null);
+}
+
+fn writeHttpUntil(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8, deadline: ?i128) !void {
+    if (deadline != null) {
+        // This terminal reply owns the descriptor until connection close.
+        // Darwin AF_UNIX sends can block despite MSG_DONTWAIT; readiness only
+        // promises some capacity, not space for the complete write.
+        const flags = std.c.fcntl(fd, std.c.F.GETFL);
+        const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+        if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblocking) < 0) return error.WriteFailed;
+    }
     const reason = switch (status) {
         200 => "OK",
         400 => "Bad Request",
@@ -3806,21 +3981,27 @@ fn writeHttp(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8) !voi
     };
     var header_buffer: [256]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ status, reason, body.len });
-    try writeAll(fd, header);
-    try writeAll(fd, body);
+    try writeAllUntil(io, fd, header, deadline);
+    try writeAllUntil(io, fd, body, deadline);
 }
 
 fn writeAll(fd: std.posix.fd_t, bytes: []const u8) !void {
+    return writeAllUntil(undefined, fd, bytes, null);
+}
+
+// The HTTP reply owner establishes nonblocking mode for bounded delivery.
+fn writeAllUntil(io: std.Io, fd: std.posix.fd_t, bytes: []const u8, deadline: ?i128) !void {
     var offset: usize = 0;
     while (offset < bytes.len) {
-        var poll_fd = [_]std.posix.pollfd{.{
-            .fd = fd,
-            .events = std.posix.POLL.OUT,
-            .revents = 0,
-        }};
-        if (try std.posix.poll(&poll_fd, 60_000) == 0) return error.TransferInactive;
+        try protocol.pollExchange(io, fd, std.posix.POLL.OUT, deadline);
         const count = std.c.write(fd, bytes[offset..].ptr, bytes.len - offset);
-        if (count < 0) return error.WriteFailed;
+        if (count < 0) {
+            if (deadline == null) return error.WriteFailed;
+            switch (std.posix.errno(count)) {
+                .AGAIN, .INTR => continue,
+                else => return error.WriteFailed,
+            }
+        }
         if (count == 0) return error.ConnectionClosed;
         offset += @intCast(count);
     }
@@ -4817,7 +4998,7 @@ test "control response variants fit exact worst-case JSON bounds" {
 fn finishTestClient(host: *Host, release: *std.atomic.Value(bool), completed: *std.atomic.Value(bool)) void {
     while (!release.load(.acquire)) std.atomic.spinLoopHint();
     completed.store(true, .release);
-    host.clientFinished();
+    host.clientFinished(.classification);
 }
 
 test "shutdown drain retains stack-owned Host until active clients finish" {
@@ -4828,7 +5009,7 @@ test "shutdown drain retains stack-owned Host until active clients finish" {
         .store = undefined,
         .faults = .{},
     };
-    host.active_clients.store(1, .release);
+    _ = try host.reserveClient();
     var release: std.atomic.Value(bool) = .init(false);
     var completed: std.atomic.Value(bool) = .init(false);
     const thread = try std.Thread.spawn(.{}, finishTestClient, .{ &host, &release, &completed });
