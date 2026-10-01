@@ -396,6 +396,7 @@ pub const MessageAddress = struct {
 pub const MessageObservation = struct {
     state: State,
     code: ?[]const u8 = null,
+    processing_turn: ?u64 = null,
     progress: ?Progress = null,
     storage: *Storage,
 
@@ -437,6 +438,7 @@ pub const MessageObservation = struct {
     }
 
     pub fn parse(allocator: std.mem.Allocator, reply: CommandReply, address: *const MessageAddress) !MessageObservation {
+        try checkCanonicalFailure(reply);
         if (reply.status != 200) return error.ObservationFailed;
         if (reply.body.len > protocol.max_response_bytes) return error.ResponseTooLarge;
         var parsed = try std.json.parseFromSlice(std.json.Value, allocator, reply.body, .{ .allocate = .alloc_always, .parse_numbers = false });
@@ -462,6 +464,8 @@ pub const MessageObservation = struct {
             return result;
         }
         if (!std.mem.eql(u8, status, "accepted")) return error.InvalidObservation;
+        if (observation.object.get("processing")) |processing|
+            result.processing_turn = try observationId(try observationField(processing, "turn"));
         // The selected Message's terminal result wins over queue/progress hints,
         // including an excluded queue and a successor's permission attention.
         if (observation.object.get("result")) |terminal_result| {
@@ -481,14 +485,7 @@ pub const MessageObservation = struct {
             const action = try observationField(progress, "action");
             const action_id: ?u64 = switch (action) {
                 .null => null,
-                .string => blk: {
-                    if (action.string.len == 0) return error.InvalidObservation;
-                    for (action.string) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidObservation;
-                    const id = std.fmt.parseInt(u64, action.string, 10) catch return error.InvalidObservation;
-                    if (id == 0) return error.InvalidObservation;
-                    break :blk id;
-                },
-                else => return error.InvalidObservation,
+                else => try observationId(action),
             };
             if (progress_status == .waiting_for_permission and action_id == null) return error.InvalidObservation;
             result.progress = .{ .status = progress_status, .action = action_id };
@@ -506,6 +503,14 @@ fn observationString(value: std.json.Value, name: []const u8) ![]const u8 {
     const field = try observationField(value, name);
     if (field != .string) return error.InvalidObservation;
     return field.string;
+}
+
+fn observationId(value: std.json.Value) !u64 {
+    if (value != .string or value.string.len == 0) return error.InvalidObservation;
+    for (value.string) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidObservation;
+    const id = std.fmt.parseInt(u64, value.string, 10) catch return error.InvalidObservation;
+    if (id == 0) return error.InvalidObservation;
+    return id;
 }
 
 fn observationCode(value: std.json.Value) !?[]const u8 {
@@ -530,6 +535,28 @@ pub fn readResult(
     destination: std.Io.File,
     reply_buffer: *ReplyBuffer,
 ) !ResultReply {
+    return readResultWithSink(io, store_path, key, destination, reply_buffer);
+}
+
+/// Streams answer windows to the caller without retaining a complete copy.
+/// The sink receives borrowed windows valid only during each feed call.
+pub fn readResultStream(
+    io: std.Io,
+    store_path: []const u8,
+    key: []const u8,
+    sink: anytype,
+    reply_buffer: *ReplyBuffer,
+) !ResultReply {
+    return readResultWithSink(io, store_path, key, sink, reply_buffer);
+}
+
+fn readResultWithSink(
+    io: std.Io,
+    store_path: []const u8,
+    key: []const u8,
+    sink: anytype,
+    reply_buffer: *ReplyBuffer,
+) !ResultReply {
     reply_buffer.len = 0;
     if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
     const paths = try platform.resolveClientPaths(io, store_path);
@@ -543,7 +570,7 @@ pub fn readResult(
     const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/read-result HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{body.len});
     try writeAll(fd, header);
     try writeAll(fd, body.slice());
-    return readResultResponse(io, fd, destination, reply_buffer);
+    return readResultResponseSink(io, fd, sink, reply_buffer);
 }
 
 pub fn inspectSession(
@@ -1238,12 +1265,14 @@ fn connectFailure(code: std.posix.E) error{ AccessDenied, PermissionDenied, Unix
     };
 }
 
-const ResponseKind = enum { command_json, result_text };
+const ResponseKind = enum { command_json, result_text, content_bytes };
 
 const ResponseHead = struct {
     status: u16,
     content_length: u64,
     kind: ResponseKind,
+    total: ?u64 = null,
+    next: ?u64 = null,
 };
 
 fn readResponseHead(fd: std.posix.fd_t) !ResponseHead {
@@ -1293,6 +1322,8 @@ fn parseResponseHead(bytes: []const u8) !ResponseHead {
     var length: ?u64 = null;
     var wire_ok: ?bool = null;
     var kind: ?ResponseKind = null;
+    var total: ?u64 = null;
+    var next: ?u64 = null;
     while (lines.next()) |line| {
         if (line.len == 0) return error.InvalidResponse;
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidResponse;
@@ -1314,12 +1345,20 @@ fn parseResponseHead(bytes: []const u8) !ResponseHead {
         } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Wire-Version")) {
             if (wire_ok != null) return error.InvalidResponse;
             wire_ok = std.mem.eql(u8, value, protocol.wire_version);
+        } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Content-Bytes")) {
+            if (total != null) return error.InvalidResponse;
+            total = try std.fmt.parseInt(u64, value, 10);
+        } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Next-Offset")) {
+            if (next != null) return error.InvalidResponse;
+            next = try std.fmt.parseInt(u64, value, 10);
         } else if (std.ascii.eqlIgnoreCase(name, "Content-Type")) {
             if (kind != null) return error.InvalidResponse;
             kind = if (std.ascii.eqlIgnoreCase(value, "application/json"))
                 .command_json
             else if (std.ascii.eqlIgnoreCase(value, "text/plain; charset=utf-8"))
                 .result_text
+            else if (std.ascii.eqlIgnoreCase(value, "application/octet-stream"))
+                .content_bytes
             else
                 return error.InvalidResponse;
         } else if (std.ascii.eqlIgnoreCase(name, "Transfer-Encoding") or
@@ -1333,6 +1372,8 @@ fn parseResponseHead(bytes: []const u8) !ResponseHead {
         .status = status,
         .content_length = length orelse return error.InvalidResponse,
         .kind = kind orelse return error.InvalidResponse,
+        .total = total,
+        .next = next,
     };
 }
 
@@ -1353,6 +1394,15 @@ fn readResultResponse(
     destination: std.Io.File,
     reply_buffer: *ReplyBuffer,
 ) !ResultReply {
+    return readResultResponseSink(io, fd, destination, reply_buffer);
+}
+
+fn readResultResponseSink(
+    io: std.Io,
+    fd: std.posix.fd_t,
+    sink: anytype,
+    reply_buffer: *ReplyBuffer,
+) !ResultReply {
     reply_buffer.len = 0;
     const head = try readResponseHead(fd);
     if (head.status != 200) {
@@ -1367,7 +1417,10 @@ fn readResultResponse(
         const wanted: usize = @intCast(@min(remaining, buffer.len));
         const count = try std.posix.read(fd, buffer[0..wanted]);
         if (count == 0) return error.TruncatedResponse;
-        try destination.writeStreamingAll(io, buffer[0..count]);
+        if (@TypeOf(sink) == std.Io.File)
+            try sink.writeStreamingAll(io, buffer[0..count])
+        else
+            try sink.feed(buffer[0..count]);
         remaining -= count;
     }
     return .{ .answer = .{ .bytes = head.content_length } };
@@ -1421,6 +1474,185 @@ fn readCommandBodyUntil(io: std.Io, fd: std.posix.fd_t, head: ResponseHead, repl
     }
     reply_buffer.len = body_length;
     return .{ .status = head.status, .body = reply_buffer.slice() };
+}
+
+// Canonical failure is authority, never an optional presentation outage.
+// Scripted/raw command callers can retain the complete error JSON instead.
+pub fn checkCanonicalFailure(reply: CommandReply) !void {
+    if (reply.status == 200) return;
+    if (reply.body.len > protocol.max_response_bytes) return error.InvalidResponse;
+    const Envelope = struct {
+        const Code = enum {
+            other,
+            canonical,
+
+            pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+                // A plain []const u8 field also accepts JSON byte arrays.
+                if (try source.peekNextTokenType() != .string) return error.UnexpectedToken;
+                const token = try source.nextAllocMax(allocator, .alloc_if_needed, options.max_value_len.?);
+                defer if (token == .allocated_string) allocator.free(token.allocated_string);
+                const value = switch (token) {
+                    .string, .allocated_string => |string| string,
+                    else => unreachable,
+                };
+                return if (std.mem.eql(u8, value, "canonical_store_failure")) .canonical else .other;
+            }
+        };
+
+        code: Code = .other,
+        answer: struct { code: Code = .other } = .{},
+    };
+    // Reserve nesting first, including malformed N-opening-delimiter prefixes.
+    // Names/code decode one byte string at a time and free it before advancing.
+    // std.json frees even a matched "answer" name before descending into it.
+    // With stack growth excluded, FBA grows/shrinks that last allocation in
+    // place. Both byte arrays are bounded by stdlib's capacity growth formula.
+    const capacity = comptime std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) +
+        std.ArrayList(u8).growCapacity(protocol.max_response_bytes);
+    var storage: [capacity]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    const allocator = fixed.allocator();
+    var scanner = std.json.Scanner.initCompleteInput(allocator, reply.body);
+    defer scanner.deinit();
+    scanner.ensureTotalStackCapacity(protocol.max_response_bytes) catch unreachable;
+    const envelope = std.json.parseFromTokenSourceLeaky(Envelope, allocator, &scanner, .{
+        .ignore_unknown_fields = true,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => unreachable, // The bounded-storage proof above covers every input.
+        else => return error.InvalidResponse,
+    };
+    // Unknown values receive full syntax validation but no duplicate-key policy;
+    // consequential decoded answer/code fields must be unambiguous.
+    if (envelope.code == .canonical or envelope.answer.code == .canonical) return error.CanonicalStoreFailure;
+}
+
+test "canonical failure classifier validates complete string-only error envelope" {
+    const canonical = [_][]const u8{
+        "{\"code\":\"canonical_store_failure\"}",
+        "{\"co\\u0064e\":\"canonical_store_\\u0066ailure\",\"extra\":[1,{}]}",
+        "{\"code\":\"canonical_store_failure\",\"extra\":{\"x\":1,\"x\":2},\"extra\":null}",
+        "{\"answer\":{\"status\":\"infrastructure_failure\",\"code\":\"canonical_store_failure\"}}",
+        "{\"answ\\u0065r\":{\"co\\u0064e\":\"canonical_store_\\u0066ailure\"}}",
+    };
+    for (canonical) |body| try std.testing.expectError(error.CanonicalStoreFailure, checkCanonicalFailure(.{ .status = 500, .body = body }));
+    for ([_][]const u8{
+        "{\"code\":\"canonical_store_failure\",\"co\\u0064e\":\"other\"}",
+        "{\"code\":\"canonical_store_failure\",\"extra\":[}",
+        "{\"code\":\"canonical_store_failure\"} trailing",
+        "{\"code\":null}",
+        "{\"code\":[99,97,110,111,110,105,99,97,108,95,115,116,111,114,101,95,102,97,105,108,117,114,101]}",
+        "{\"answer\":{\"code\":\"canonical_store_failure\",\"co\\u0064e\":\"other\"}}",
+        "{\"answer\":{\"code\":\"canonical_store_failure\"},\"answ\\u0065r\":{}}",
+        "{\"answer\":null}",
+        "{\"answer\":{\"code\":null}}",
+        "{\"answer\":{\"code\":\"canonical_store_failure\"}} trailing",
+        "[]",
+    }) |body| try std.testing.expectError(error.InvalidResponse, checkCanonicalFailure(.{ .status = 500, .body = body }));
+    try checkCanonicalFailure(.{ .status = 503, .body = "{\"code\":\"unavailable\"}" });
+    try checkCanonicalFailure(.{ .status = 409, .body = "{\"answer\":{\"code\":\"idempotency_key_conflict\"}}" });
+    try checkCanonicalFailure(.{ .status = 500, .body = "{\"extra\":{\"code\":\"canonical_store_failure\"}}" });
+    try checkCanonicalFailure(.{ .status = 500, .body = "{\"extra\":\"canonical_store_failure\"}" });
+    try checkCanonicalFailure(.{ .status = 200, .body = "not an error envelope" });
+}
+
+test "nested canonical failure retains bounded escaped-name and depth storage" {
+    const prefix = "{\"answ\\u0065r\":{\"co\\u0064e\":\"canonical_store_\\u0066ailure\",\"extra\":";
+    var body: [protocol.max_response_bytes]u8 = undefined;
+    @memcpy(body[0..prefix.len], prefix);
+    const depth = (body.len - prefix.len - 3) / 2;
+    @memset(body[prefix.len..][0..depth], '[');
+    var length = prefix.len + depth;
+    body[length] = '0';
+    length += 1;
+    @memset(body[length..][0..depth], ']');
+    length += depth;
+    @memcpy(body[length..][0..2], "}}");
+    length += 2;
+    @memset(body[length..], ' ');
+    try std.testing.expectError(error.CanonicalStoreFailure, checkCanonicalFailure(.{ .status = 500, .body = &body }));
+    @memset(body[prefix.len..], '[');
+    try std.testing.expectError(error.InvalidResponse, checkCanonicalFailure(.{ .status = 500, .body = &body }));
+
+    const opening = "{\"answ\\u0065r\":{\"";
+    const ending = "\":0,\"co\\u0064e\":\"canonical_store_failure\"}}";
+    @memcpy(body[0..opening.len], opening);
+    length = opening.len;
+    while (length + 6 + ending.len <= body.len) : (length += 6) @memcpy(body[length..][0..6], "\\u0061");
+    @memcpy(body[length..][0..ending.len], ending);
+    length += ending.len;
+    @memset(body[length..], ' ');
+    try std.testing.expectError(error.CanonicalStoreFailure, checkCanonicalFailure(.{ .status = 500, .body = &body }));
+}
+
+test "canonical failure classifier bounds deep wide and escaped maximum replies" {
+    const prefix = "{\"code\":\"canonical_store_failure\",\"extra\":";
+    var body: [protocol.max_response_bytes + 1]u8 = undefined;
+    @memcpy(body[0..prefix.len], prefix);
+    const depth = (protocol.max_response_bytes - prefix.len - 2) / 2;
+    @memset(body[prefix.len..][0..depth], '[');
+    var length = prefix.len + depth;
+    body[length] = '0';
+    length += 1;
+    @memset(body[length..][0..depth], ']');
+    length += depth;
+    body[length] = '}';
+    length += 1;
+    @memset(body[length..protocol.max_response_bytes], ' ');
+    try std.testing.expectError(error.CanonicalStoreFailure, checkCanonicalFailure(.{ .status = 500, .body = body[0..protocol.max_response_bytes] }));
+    @memset(body[prefix.len..protocol.max_response_bytes], '[');
+    try std.testing.expectError(error.InvalidResponse, checkCanonicalFailure(.{ .status = 500, .body = body[0..protocol.max_response_bytes] }));
+
+    // A nearly maximum escaped field name must be released before code decode.
+    const field_prefix = "{\"";
+    const field_suffix = "\":0,\"co\\u0064e\":\"canonical_store_\\u0066ailure\"}";
+    @memcpy(body[0..field_prefix.len], field_prefix);
+    length = field_prefix.len;
+    const escaped_end = protocol.max_response_bytes - field_suffix.len - 6;
+    @memset(body[length..escaped_end], 'x');
+    length = escaped_end;
+    @memcpy(body[length..][0..6], "\\u0078");
+    length += 6;
+    @memcpy(body[length..][0..field_suffix.len], field_suffix);
+    length += field_suffix.len;
+    @memset(body[length..protocol.max_response_bytes], ' ');
+    try std.testing.expectError(error.CanonicalStoreFailure, checkCanonicalFailure(.{ .status = 500, .body = body[0..protocol.max_response_bytes] }));
+
+    @memcpy(body[0..prefix.len], prefix);
+    length = prefix.len;
+    const wide = "{\"x\":0,\"x\":0}";
+    // Discarded wide objects validate syntax, not irrelevant key uniqueness.
+    body[length] = '[';
+    length += 1;
+    while (length + wide.len + 3 <= protocol.max_response_bytes) {
+        @memcpy(body[length..][0..wide.len], wide);
+        length += wide.len;
+        body[length] = ',';
+        length += 1;
+    }
+    length -= 1;
+    @memcpy(body[length..][0..2], "]}");
+    length += 2;
+    @memset(body[length..protocol.max_response_bytes], ' ');
+    try std.testing.expectError(error.CanonicalStoreFailure, checkCanonicalFailure(.{ .status = 500, .body = body[0..protocol.max_response_bytes] }));
+    body[protocol.max_response_bytes] = ' ';
+    try std.testing.expectError(error.InvalidResponse, checkCanonicalFailure(.{ .status = 500, .body = &body }));
+
+    @memcpy(body[0..prefix.len], prefix);
+    length = prefix.len;
+    // Consecutive escaped names must not accumulate decoded allocations.
+    const names = "\"ignored\",\"\\u0061\":0,";
+    @memcpy(body[length..][0..names.len], names);
+    length += names.len;
+    const name = "\"\\u0061\":0,";
+    while (length + name.len + 1 <= protocol.max_response_bytes) {
+        @memcpy(body[length..][0..name.len], name);
+        length += name.len;
+    }
+    length -= 1;
+    body[length] = '}';
+    length += 1;
+    @memset(body[length..protocol.max_response_bytes], ' ');
+    try std.testing.expectError(error.CanonicalStoreFailure, checkCanonicalFailure(.{ .status = 500, .body = body[0..protocol.max_response_bytes] }));
 }
 
 fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) !bool {
@@ -2427,6 +2659,23 @@ test "truncated result body leaves only an unsuccessful destination prefix" {
     try std.testing.expectEqual(@as(u64, 2), try destination.length(std.testing.io));
 }
 
+test "Message observation retains selected Turn independently of terminal progress" {
+    const address = try MessageAddress.init("/store", "s", "k");
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"s\",\"status\":\"accepted\",\"processing\":{\"turn\":\"37\"},";
+    inline for (.{
+        .{ "\"queue\":{\"status\":\"processing\"}}}", MessageObservation.State.processing },
+        .{ "\"result\":{\"status\":\"completed\"},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"91\"}}}", MessageObservation.State.completed },
+        .{ "\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}}}", MessageObservation.State.failed },
+        .{ "\"result\":{\"status\":\"cancelled\"}}}", MessageObservation.State.cancelled },
+    }) |case| {
+        var observed = try MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ case[0] }, &address);
+        defer observed.deinit();
+        try std.testing.expectEqual(case[1], observed.state);
+        try std.testing.expectEqual(@as(?u64, 37), observed.processing_turn);
+        try std.testing.expect(observed.progress == null);
+    }
+}
+
 test "Message observation preserves binding outcomes and absent progress" {
     const address = try MessageAddress.init("/store", "original/session", "original-key");
     const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"original-key\",\"observation\":{\"kind\":\"message\",\"target\":\"original/session\",";
@@ -2446,13 +2695,16 @@ test "Message observation preserves binding outcomes and absent progress" {
         const expected_code: ?[]const u8 = case[2];
         if (expected_code) |code| try std.testing.expectEqualStrings(code, observed.code.?) else try std.testing.expect(observed.code == null);
         try std.testing.expect(observed.progress == null);
+        try std.testing.expect(observed.processing_turn == null);
     }
     const other_session = try MessageAddress.init("/store", "later/session", "original-key");
     const other_key = try MessageAddress.init("/store", "original/session", "later-key");
     const completed: CommandReply = .{ .status = 200, .body = prefix ++ "\"status\":\"accepted\",\"result\":{\"status\":\"completed\"}}}" };
     try std.testing.expectError(error.RequestBindingMismatch, MessageObservation.parse(std.testing.allocator, completed, &other_session));
     try std.testing.expectError(error.RequestBindingMismatch, MessageObservation.parse(std.testing.allocator, completed, &other_key));
-    try std.testing.expectError(error.ObservationFailed, MessageObservation.parse(std.testing.allocator, .{ .status = 503, .body = "" }, &address));
+    try std.testing.expectError(error.InvalidResponse, MessageObservation.parse(std.testing.allocator, .{ .status = 503, .body = "" }, &address));
+    try std.testing.expectError(error.ObservationFailed, MessageObservation.parse(std.testing.allocator, .{ .status = 503, .body = "{\"code\":\"host_unavailable\"}" }, &address));
+    try std.testing.expectError(error.CanonicalStoreFailure, MessageObservation.parse(std.testing.allocator, .{ .status = 500, .body = "{\"code\":\"canonical_store_failure\"}" }, &address));
     try std.testing.expectError(error.RequestNotAdmitted, MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ "\"status\":\"absent\"}}" }, &address));
     try std.testing.expectError(error.RequestBindingMismatch, MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"original-key\",\"observation\":{\"status\":\"accepted\",\"kind\":\"configure\",\"target\":\"original/session\"}}" }, &address));
 }
@@ -2461,6 +2713,12 @@ test "Message observation rejects malformed facts rather than work failures" {
     const address = try MessageAddress.init("/store", "s", "k");
     const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"s\",\"status\":\"accepted\",";
     inline for (.{
+        "\"processing\":null}}",
+        "\"processing\":{}}}",
+        "\"processing\":{\"turn\":7}}}",
+        "\"processing\":{\"turn\":\"0\"}}}",
+        "\"processing\":{\"turn\":\"+7\"}}}",
+        "\"processing\":{\"turn\":\"18446744073709551616\"}}}",
         "\"queue\":null}}",
         "\"queue\":{\"status\":\"excluded\"}}}",
         "\"result\":{\"status\":\"processing\"}}}",
@@ -2490,6 +2748,7 @@ test "Message observation owns decoded strings and writes complete JSON after re
     defer observed.deinit();
     @memset(&reply_storage, 'x');
     try std.testing.expectEqualStrings("plain_code", observed.code.?);
+    try std.testing.expectEqual(@as(?u64, 3), observed.processing_turn);
     var output: [body.len]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
     try observed.writeJson(&writer);
