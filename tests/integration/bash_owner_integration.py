@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import pathlib
 import shutil
 import sqlite3
@@ -7,6 +8,8 @@ import threading
 
 import bash_integration as bash_fixture
 import dispatch_integration as fixture
+from control_integration import raw_request
+from host_process import start_ready_process
 
 
 def execution_idle(store, session):
@@ -205,12 +208,15 @@ def main():
         endpoint, endpoint_thread, continuations = continuation_endpoint(
             ("retention-first", "retention-second")
         )
-        host = fixture.start_host(
-            retention_store,
-            f"http://127.0.0.1:{endpoint.server_port}/responses",
-            "--test-retention-entry-capacity",
-            "2",
-            "--test-retention-removal-failure",
+        host, fields = start_ready_process(
+            fixture.host_arguments(
+                retention_store,
+                f"http://127.0.0.1:{endpoint.server_port}/responses",
+                "--test-retention-entry-capacity",
+                "2",
+                "--test-retention-removal-failure",
+            ),
+            required_fields={"execution": "enabled"},
         )
         bash_fixture.allow(
             state,
@@ -266,6 +272,25 @@ def main():
             bash_fixture.result_text(retention_store, "direct/retention-second")
             == second_result
         )
+        # The public Conversation projection reads the same canonical Tool
+        # Result despite optional full-output retention failure. No spillover
+        # pathname is needed to address or complete this content.
+        session = "direct/retention-second"
+        page_request = {"version": "1", "kind": "conversation_page",
+                        "store": str(retention_store), "session": session, "end": "0",
+                        "before_position": "0", "before_ordinal": "0"}
+        head, body = raw_request(fields["socket"], "/v1/conversation-page",
+                                 json.dumps(page_request, separators=(",", ":")).encode())
+        assert head.startswith(b"HTTP/1.1 200 "), (head, body)
+        page = json.loads(body)
+        result_item = next(item for item in page["items"] if item["kind"] == "tool_result")
+        content_request = {"version": "1", "kind": "conversation_content",
+                           "store": str(retention_store), "session": session,
+                           "position": result_item["position"], "ordinal": result_item["ordinal"], "start": "0"}
+        head, body = raw_request(fields["socket"], "/v1/conversation-content",
+                                 json.dumps(content_request, separators=(",", ":")).encode())
+        assert head.startswith(b"HTTP/1.1 200 "), (head, body)
+        assert body == second_result.encode(), (body, second_result)
         after = fixture.wait_for(
             lambda: bash_fixture.execution_custody_idle(
                 retention_store, "direct/retention-second"

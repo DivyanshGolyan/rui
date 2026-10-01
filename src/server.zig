@@ -2865,6 +2865,9 @@ const Route = enum {
     read_action_call_id,
     read_action_arguments,
     inspect,
+    list_sessions,
+    conversation_page,
+    conversation_content,
     unsupported_control,
 
     fn isControl(self: Route) bool {
@@ -2955,6 +2958,9 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
         .read_action_call_id => header.route == .read_action_call_id,
         .read_action_arguments => header.route == .read_action_arguments,
         .inspect_session => header.route == .inspect,
+        .list_sessions => header.route == .list_sessions,
+        .conversation_page => header.route == .conversation_page,
+        .conversation_content => header.route == .conversation_content,
     };
     if (!route_matches) {
         return respondStatic(host.io, fd, 400, "invocation_error", "route_kind_mismatch");
@@ -3165,6 +3171,92 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
             }
             deliverReport(host.io, fd, &report) catch {};
         },
+        .list_sessions => |request_value| {
+            var page = host.store.captureSessionList(request_value, .{
+                .scratch_path = host.lease.paths.scratch.slice(),
+                .scratch_budget = host.retention.sharedBudget(),
+                .request_number = request_number,
+                .fail_unlink = host.faults.report_unlink,
+            }) catch |err| {
+                if (err == error.ReportScratchCleanupFailed) {
+                    fenceDispatch(host, "Session list scratch cleanup", err);
+                    return respondStatic(host.io, fd, 500, "observation_error", "report_scratch_cleanup_failed");
+                }
+                if (host.store.isFenced()) {
+                    fenceDispatch(host, "Session list", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                }
+                return respondStatic(host.io, fd, if (err == error.ReportScratchExhausted) 507 else 500, "observation_error", @errorName(err));
+            };
+            defer page.deinit();
+            deliverReport(host.io, fd, &page) catch {};
+        },
+        .conversation_page => |command| {
+            const page = host.store.publicConversationPage(command) catch |err| switch (err) {
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, "conversation_unavailable", @errorName(err)),
+                else => {
+                    fenceDispatch(host, "conversation page", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                },
+            };
+            var response: protocol.FixedJsonBuffer(protocol.max_conversation_page_response_bytes) = .{};
+            try response.appendFmt("{{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"{d}\",\"items\":[", .{page.end});
+            for (page.items[0..page.count], 0..) |item, index| {
+                if (index != 0) try response.append(",");
+                try response.appendFmt("{{\"position\":\"{d}\",\"ordinal\":\"{d}\",\"kind\":\"{s}\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\",\"display\":\"omitted\"}}}}", .{
+                    item.position, item.ordinal, @tagName(item.kind), item.content.length, std.fmt.bytesToHex(item.content.digest, .lower),
+                });
+            }
+            try response.appendFmt("],\"more\":{s}", .{if (page.more) "true" else "false"});
+            if (page.more) {
+                const last = page.items[page.count - 1];
+                try response.appendFmt(",\"before_position\":\"{d}\",\"before_ordinal\":\"{d}\"", .{ last.position, last.ordinal });
+            }
+            try response.append("}");
+            deliverResponse(host.io, fd, 200, response.slice());
+        },
+        .conversation_content => |command| {
+            var reader = host.store.openPublicConversationContent(command) catch |err| switch (err) {
+                error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(host.io, fd, 409, "conversation_unavailable", @errorName(err)),
+                else => {
+                    fenceDispatch(host, "conversation content", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                },
+            };
+            defer reader.close();
+            // Projection readers are sequential. Skip earlier decoded bytes in
+            // the same bounded window; no transaction spans socket delivery.
+            var buffer: [protocol.content_window_bytes]u8 = undefined;
+            const count: usize = @intCast(@min(reader.reference.length - command.start, buffer.len));
+            var offset: u64 = 0;
+            switch (reader.representation) {
+                .raw => offset = command.start,
+                .projection => {
+                    while (offset < command.start) {
+                        const wanted: usize = @intCast(@min(command.start - offset, buffer.len));
+                        if (reader.read(offset, buffer[0..wanted]) catch |err| {
+                            fenceDispatch(host, "conversation content", err);
+                            return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                        } != wanted) {
+                            fenceDispatch(host, "conversation content", error.ShortCanonicalRead);
+                            return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                        }
+                        offset += wanted;
+                    }
+                },
+            }
+            if (reader.read(offset, buffer[0..count]) catch |err| {
+                fenceDispatch(host, "conversation content", err);
+                return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+            } != count) {
+                fenceDispatch(host, "conversation content", error.ShortCanonicalRead);
+                return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+            }
+            var header_buffer: [320]u8 = undefined;
+            const content_header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ count, reader.reference.length, command.start + count });
+            writeAll(fd, content_header) catch return;
+            writeAll(fd, buffer[0..count]) catch {};
+        },
     }
 }
 
@@ -3249,6 +3341,12 @@ const HeaderReader = struct {
             .read_action_arguments
         else if (std.mem.eql(u8, path, "/v1/inspect-session"))
             .inspect
+        else if (std.mem.eql(u8, path, "/v1/list-sessions"))
+            .list_sessions
+        else if (std.mem.eql(u8, path, "/v1/conversation-page"))
+            .conversation_page
+        else if (std.mem.eql(u8, path, "/v1/conversation-content"))
+            .conversation_content
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
             .unsupported_control
         else

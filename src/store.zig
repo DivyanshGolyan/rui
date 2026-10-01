@@ -10,7 +10,7 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 16;
+pub const schema_version: u32 = 17;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 const complete_tool_results_sql =
@@ -292,6 +292,21 @@ pub const BashExecutionInput = struct {
 pub const ContentReference = struct {
     length: u64,
     digest: [32]u8,
+};
+
+pub const PublicConversationItem = struct {
+    position: u64,
+    ordinal: u64, // Zero for User/Assistant; one-based call ordinal in a completed Tool Result group.
+    kind: enum { user, assistant, tool_result },
+    content: ContentReference,
+};
+
+pub const PublicConversationPage = struct {
+    pub const capacity = protocol.public_conversation_page_items;
+    end: u64,
+    items: [capacity]PublicConversationItem = undefined,
+    count: usize = 0,
+    more: bool = false,
 };
 
 pub const MessageObservation = struct {
@@ -944,6 +959,13 @@ pub const SessionReportOptions = struct {
     fail_unlink: bool = false,
 };
 
+pub const SessionListOptions = struct {
+    scratch_path: []const u8,
+    scratch_budget: protocol.ScratchBudget,
+    request_number: u64,
+    fail_unlink: bool = false,
+};
+
 pub const SessionReport = struct {
     pub const read_window_bytes = 64 * 1024;
 
@@ -979,23 +1001,23 @@ const SessionReportCapture = struct {
     charged: u64 = 0,
     ordinary_failure: bool = false,
 
-    fn init(io: std.Io, options: SessionReportOptions) !SessionReportCapture {
-        var scratch = try std.Io.Dir.cwd().openDir(io, options.scratch_path, .{});
+    fn init(io: std.Io, scratch_path: []const u8, budget: protocol.ScratchBudget, request_number: u64, fail_unlink: bool) !SessionReportCapture {
+        var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
         var name_buffer: [96]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buffer, "report-{d}-1.tmp", .{options.request_number});
+        const name = try std.fmt.bufPrint(&name_buffer, "report-{d}-1.tmp", .{request_number});
         const writer = try scratch.createFile(io, name, .{
             .read = true,
             .exclusive = true,
             .permissions = .fromMode(0o600),
         });
         errdefer writer.close(io);
-        if (options.fail_unlink) return error.ReportScratchCleanupFailed;
+        if (fail_unlink) return error.ReportScratchCleanupFailed;
         scratch.deleteFile(io, name) catch return error.ReportScratchCleanupFailed;
         return .{
             .io = io,
             .writer = writer,
-            .budget = options.scratch_budget,
+            .budget = budget,
         };
     }
 
@@ -2471,12 +2493,146 @@ pub const Store = struct {
         return observation;
     }
 
+    // Reverse chronological, with call order breaking ties at a completed
+    // group's final acceptance position. No transaction survives this call.
+    // The fixed end is the last committed position at the first read, not a
+    // count of visible rows; a private-only append cannot become public later.
+    pub fn publicConversationPage(self: *Store, request: protocol.ConversationPage) !PublicConversationPage {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        return self.publicConversationPageLocked(request) catch |err| switch (err) {
+            error.SessionNotFound, error.InvalidCursor => err,
+            else => self.fenceReadFailure(err),
+        };
+    }
+
+    fn publicConversationPageLocked(self: *Store, request: protocol.ConversationPage) !PublicConversationPage {
+        if (request.end > std.math.maxInt(i64) or request.before_position > std.math.maxInt(i64) or
+            request.before_ordinal > std.math.maxInt(i64) or
+            (request.end == 0 and request.before_position != 0) or
+            (request.before_position == 0 and request.before_ordinal != 0) or
+            (request.end != 0 and request.before_position > request.end)) return error.InvalidCursor;
+        const current = (try self.readSession(request.session.slice())) orelse return error.SessionNotFound;
+        const end = if (request.end == 0) current.next_position - 1 else request.end;
+        if (request.end != 0 and (request.before_position > end or end >= current.next_position or
+            end > std.math.maxInt(i64))) return error.InvalidCursor;
+        if (request.before_position != 0) {
+            _ = self.publicConversationContentIdLocked(request.session.slice(), request.before_position, request.before_ordinal) catch |err| switch (err) {
+                error.ContentNotFound => return error.InvalidCursor,
+                else => return err,
+            };
+        }
+        var page = PublicConversationPage{ .end = end };
+        if (end == 0) return page;
+        // Tool outcomes enter public Conversation only when the entire group
+        // settles. Position is then its last acceptance; call ordinal is the
+        // stable tie breaker. Private model items/instructions never enter it.
+        const statement = try prepare(self.database, "WITH groups AS (SELECT op.operation_id,max(coalesce(call.acceptance_position,action.acceptance_position)) AS position " ++
+            "FROM model_operation op JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
+            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+            "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' GROUP BY op.operation_id " ++
+            "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
+            "AND min(coalesce(call.acceptance_position,action.acceptance_position)) IS NOT NULL " ++
+            "AND count(coalesce(call.rejection_content_id,action.resolution_content_id))=count(*)), " ++
+            "public AS (SELECT e.session_position AS position,0 AS ordinal,e.entry_kind AS kind,e.content_id " ++
+            "FROM conversation_entry e WHERE e.session_ref=?1 AND e.entry_kind IN (1,3) AND e.session_position<=?2 " ++
+            "UNION ALL SELECT groups.position,call.call_ordinal+1,4,coalesce(call.rejection_content_id,action.resolution_content_id) " ++
+            "FROM groups JOIN model_tool_call call ON call.operation_id=groups.operation_id " ++
+            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+            "WHERE groups.position<=?2) " ++
+            "SELECT position,ordinal,kind,content_id FROM public WHERE (?3=0 OR position<?3 OR (position=?3 AND ordinal<?4)) " ++
+            "ORDER BY position DESC,ordinal DESC LIMIT 17");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, request.session.slice());
+        try bindU64(statement, 2, end);
+        try bindU64(statement, 3, request.before_position);
+        try bindU64(statement, 4, request.before_ordinal);
+        while (true) {
+            const result = c.sqlite3_step(statement);
+            if (result == c.SQLITE_DONE) break;
+            if (result != c.SQLITE_ROW) return error.ConversationReadFailed;
+            if (page.count == page.items.len) {
+                page.more = true;
+                break;
+            }
+            const position = c.sqlite3_column_int64(statement, 0);
+            const ordinal = c.sqlite3_column_int64(statement, 1);
+            const kind = c.sqlite3_column_int(statement, 2);
+            const content_id = c.sqlite3_column_int64(statement, 3);
+            if (position <= 0 or ordinal < 0 or content_id <= 0 or
+                (kind != 1 and kind != 3 and kind != 4) or
+                (kind == 4) != (ordinal > 0)) return error.CorruptStore;
+            const metadata = try self.readContentMetadata(content_id);
+            page.items[page.count] = .{ .position = @intCast(position), .ordinal = @intCast(ordinal), .kind = switch (kind) {
+                1 => .user,
+                3 => .assistant,
+                4 => .tool_result,
+                else => unreachable,
+            }, .content = .{ .length = metadata.length, .digest = metadata.digest } };
+            page.count += 1;
+        }
+        return page;
+    }
+
+    // Resolve the public identity again, rather than accepting a global digest:
+    // another Session's content or private provider material is not authority.
+    pub fn openPublicConversationContent(self: *Store, request: protocol.ConversationContent) !ContentReader {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        return self.openPublicConversationContentLocked(request) catch |err| switch (err) {
+            error.ContentNotFound, error.RangeOutOfBounds => err,
+            else => self.fenceReadFailure(err),
+        };
+    }
+
+    fn openPublicConversationContentLocked(self: *Store, request: protocol.ConversationContent) !ContentReader {
+        if (request.position == 0 or request.position > std.math.maxInt(i64) or
+            request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
+        const content_id = try self.publicConversationContentIdLocked(request.session.slice(), request.position, request.ordinal);
+        const metadata = try self.readContentMetadata(content_id);
+        if (request.start > metadata.length) return error.RangeOutOfBounds;
+        return .{ .store = self, .content_id = content_id, .reference = .{ .length = metadata.length, .digest = metadata.digest }, .representation = if (try self.contentIsRaw(content_id, metadata.length)) .raw else .{ .projection = .{} } };
+    }
+
+    fn publicConversationContentIdLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !i64 {
+        const statement = if (ordinal == 0)
+            try prepare(self.database, "SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND session_position=?2 AND entry_kind IN (1,3)")
+        else
+            try prepare(self.database, "SELECT coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_operation op " ++
+                "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
+                "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+                "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' AND call.call_ordinal+1=?3 " ++
+                "AND (SELECT max(coalesce(c.acceptance_position,a.acceptance_position)) FROM model_tool_call c " ++
+                "LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id)=?2 " ++
+                "AND (SELECT count(*) FROM model_tool_call c WHERE c.operation_id=op.operation_id)=" ++
+                "(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
+                "AND NOT EXISTS (SELECT 1 FROM model_tool_call c LEFT JOIN action_operation a " ++
+                "ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id " ++
+                "AND (coalesce(c.acceptance_position,a.acceptance_position) IS NULL OR coalesce(c.rejection_content_id,a.resolution_content_id) IS NULL))");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session);
+        try bindU64(statement, 2, position);
+        if (ordinal != 0) try bindU64(statement, 3, ordinal);
+        switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => {},
+            c.SQLITE_DONE => return error.ContentNotFound,
+            else => return error.PublicContentReadFailed,
+        }
+        const content_id = c.sqlite3_column_int64(statement, 0);
+        if (content_id <= 0) return error.CorruptStore;
+        return content_id;
+    }
+
     pub fn captureSessionReport(
         self: *Store,
         session_ref: []const u8,
         options: SessionReportOptions,
     ) !SessionReport {
-        var capture = try SessionReportCapture.init(self.io, options);
+        var capture = try SessionReportCapture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
@@ -2488,6 +2644,93 @@ pub const Store = struct {
         };
         self.mutex.unlock(self.io);
         return capture.seal();
+    }
+
+    /// Returns an owned, unlinked page; no SQLite cursor or mutex survives capture.
+    /// The caller releases its scratch charge by deinitializing the report.
+    pub fn captureSessionList(self: *Store, request: protocol.ListSessions, options: SessionListOptions) !SessionReport {
+        if (request.after > std.math.maxInt(i64) or request.ceiling > std.math.maxInt(i64) or
+            (request.after == 0 and request.ceiling != 0) or
+            (request.after != 0 and request.after > request.ceiling)) return error.InvalidCursor;
+        var capture = try SessionReportCapture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
+        errdefer capture.deinit();
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        const result = self.renderSessionListLocked(request, &capture);
+        result catch |err| {
+            if (!capture.ordinary_failure) self.fenced.store(true, .release);
+            self.mutex.unlock(self.io);
+            return err;
+        };
+        self.mutex.unlock(self.io);
+        return capture.seal();
+    }
+
+    fn renderSessionListLocked(self: *Store, request: protocol.ListSessions, capture: *SessionReportCapture) !void {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        var ceiling = request.ceiling;
+        if (request.after == 0) {
+            const maximum = try prepare(self.database, "SELECT coalesce(max(rowid),0) FROM session");
+            defer _ = c.sqlite3_finalize(maximum);
+            if (c.sqlite3_step(maximum) != c.SQLITE_ROW) return error.SessionReadFailed;
+            const value = c.sqlite3_column_int64(maximum, 0);
+            if (value < 0) return error.CorruptStore;
+            ceiling = @intCast(value);
+        }
+        const statement = try prepare(self.database, if (request.workspace == null)
+            "SELECT rowid,session_ref,workspace,provider,model,tools_mask,permission_mode FROM session WHERE rowid>?1 AND rowid<=?2 ORDER BY rowid LIMIT 9"
+        else
+            "SELECT rowid,session_ref,workspace,provider,model,tools_mask,permission_mode FROM session INDEXED BY session_workspace_list WHERE rowid>?1 AND rowid<=?2 AND workspace=?3 ORDER BY rowid LIMIT 9");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, request.after);
+        try bindU64(statement, 2, ceiling);
+        if (request.workspace) |workspace| try bindText(statement, 3, workspace.slice());
+        try capture.append("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
+        var count: usize = 0;
+        var last: u64 = 0;
+        var more = false;
+        while (true) {
+            const step = c.sqlite3_step(statement);
+            if (step == c.SQLITE_DONE) break;
+            if (step != c.SQLITE_ROW) return error.SessionReadFailed;
+            if (count == protocol.session_list_page_size) {
+                more = true;
+                break;
+            }
+            const id = c.sqlite3_column_int64(statement, 0);
+            if (id <= 0) return error.CorruptStore;
+            last = @intCast(id);
+            var reference: protocol.Bounded(protocol.max_session_bytes) = .{};
+            var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+            var model: protocol.Bounded(protocol.max_model_bytes) = .{};
+            try readText(statement, 1, &reference);
+            try readText(statement, 2, &workspace);
+            const provider = try readProvider(statement, 3);
+            try readText(statement, 4, &model);
+            const tools = c.sqlite3_column_int(statement, 5);
+            const permission = c.sqlite3_column_int(statement, 6);
+            if (tools < 0 or tools > 3 or permission < 0 or permission > 1) return error.CorruptStore;
+            if (count != 0) try capture.append(",");
+            try capture.append("{\"reference\":");
+            try capture.appendJsonString(reference.slice());
+            try capture.append(",\"workspace\":");
+            try capture.appendJsonString(workspace.slice());
+            try capture.append(",\"provider\":");
+            try capture.appendJsonString(@tagName(provider));
+            try capture.append(",\"model\":");
+            try capture.appendJsonString(model.slice());
+            try capture.append(",\"tools\":");
+            try capture.appendTools(@intCast(tools));
+            try capture.append(",\"permission_mode\":");
+            try capture.appendPermissionMode(@intCast(permission));
+            try capture.append("}");
+            count += 1;
+        }
+        if (more) {
+            try capture.appendFmt("],\"next\":{{\"after\":\"{d}\",\"ceiling\":\"{d}\"}}}}", .{ last, ceiling });
+        } else {
+            try capture.append("],\"next\":null}");
+        }
     }
 
     fn renderSessionReportLocked(
@@ -5825,6 +6068,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ revision INTEGER NOT NULL CHECK(revision>0),
         \\ next_position INTEGER NOT NULL CHECK(next_position>0)
         \\) STRICT;
+        \\CREATE INDEX session_workspace_list ON session(workspace);
         \\CREATE TABLE core_command(
         \\ command_key TEXT PRIMARY KEY CHECK(length(CAST(command_key AS BLOB))<=128),
         \\ kind INTEGER NOT NULL CHECK(kind IN (1,2,3,4,5)),
@@ -6031,7 +6275,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('message_admission_session_order','message_admission_pending','message_admission_session_pending','session_stop_exclusion','action_operation_session_order','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','conversation_entry_history','model_output_history','turn_session_latest')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','session_stop_exclusion','action_operation_session_order','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','conversation_entry_history','model_output_history','turn_session_latest')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -6776,6 +7020,166 @@ fn testingSessionReportWithProfile(
     return bytes;
 }
 
+fn testingSessionList(storage: *Store, tmp: *std.testing.TmpDir, request: protocol.ListSessions, used: *std.atomic.Value(u64), request_number: u64) ![]u8 {
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &root);
+    var report = try storage.captureSessionList(request, .{
+        .scratch_path = root[0..length],
+        .scratch_budget = .{ .used = used, .limit = 1024 * 1024 },
+        .request_number = request_number,
+    });
+    defer report.deinit();
+    const bytes = try std.testing.allocator.alloc(u8, @intCast(report.length));
+    errdefer std.testing.allocator.free(bytes);
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const count = try report.read(offset, bytes[offset..@min(bytes.len, offset + SessionReport.read_window_bytes)]);
+        if (count == 0) return error.ShortReportRead;
+        offset += count;
+    }
+    return bytes;
+}
+
+test "Session list pages accepted creation order with exact workspace and fixed high water" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const workspace = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+    var long_path: [3 * 241]u8 = undefined;
+    @memset(&long_path, 'w');
+    long_path[240] = '/';
+    long_path[481] = '/';
+    var nested = try tmp.dir.createDirPathOpen(std.testing.io, &long_path, .{});
+    defer nested.close(std.testing.io);
+    var other_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const other = other_buffer[0..try nested.realPath(std.testing.io, &other_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    // Not configuration: request captures must never create list entries.
+    var unrelated = try completeConfiguration("rejected-list", "direct/rejected", workspace, "model");
+    unrelated.configuration.workspace.state = .omitted;
+    try std.testing.expect(storage.configure(&unrelated, .{}) == .rejected);
+    const empty = try testingSessionList(&storage, &tmp, .{}, &used, 1);
+    defer std.testing.allocator.free(empty);
+    try std.testing.expectEqualStrings("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}", empty);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+
+    var long_reference: [protocol.max_session_bytes]u8 = undefined;
+    @memset(&long_reference, 'x');
+    long_reference[2] = 1;
+    long_reference[3] = 0;
+    const names = [_][]const u8{ "z-first", "a-second", &long_reference, "b-fourth", "a-fifth", "z-sixth", "a-seventh", "b-eighth", "z-ninth", "a-tenth" };
+    for (names, 0..) |name, index| {
+        var key_buffer: [32]u8 = undefined;
+        const key = try std.fmt.bufPrint(&key_buffer, "list-config-{d}", .{index});
+        var config = try completeConfiguration(key, name, workspace, "model\nwith-control");
+        if (index == 3) try config.configuration.workspace.value.set(other);
+        try std.testing.expect(storage.configure(&config, .{}) == .accepted);
+        if (index == 8) {
+            var exactly_eight = protocol.ListSessions{};
+            exactly_eight.workspace = .{};
+            try exactly_eight.workspace.?.set(workspace);
+            const boundary = try testingSessionList(&storage, &tmp, exactly_eight, &used, 99);
+            defer std.testing.allocator.free(boundary);
+            var parsed_boundary = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, boundary, .{});
+            defer parsed_boundary.deinit();
+            try std.testing.expectEqual(@as(usize, 8), parsed_boundary.value.object.get("sessions").?.array.items.len);
+            try std.testing.expect(parsed_boundary.value.object.get("next").? == .null);
+        }
+    }
+    var request = protocol.ListSessions{};
+    try std.testing.expectError(error.InvalidCursor, storage.captureSessionList(.{ .after = 2, .ceiling = 1 }, undefined));
+    request.workspace = .{};
+    try request.workspace.?.set(workspace);
+    const first = try testingSessionList(&storage, &tmp, request, &used, 2);
+    defer std.testing.allocator.free(first);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, first, .{});
+    defer parsed.deinit();
+    const sessions = parsed.value.object.get("sessions").?.array.items;
+    try std.testing.expectEqual(@as(usize, 8), sessions.len);
+    const expected = [_][]const u8{ names[0], names[1], names[2], names[4], names[5], names[6], names[7], names[8] };
+    for (sessions, expected) |item, name| {
+        try std.testing.expectEqualStrings(name, item.object.get("reference").?.string);
+        try std.testing.expectEqualStrings(workspace, item.object.get("workspace").?.string);
+        try std.testing.expectEqualStrings("model\nwith-control", item.object.get("model").?.string);
+    }
+    const next = parsed.value.object.get("next").?.object;
+    request.after = try std.fmt.parseInt(u64, next.get("after").?.string, 10);
+    request.ceiling = try std.fmt.parseInt(u64, next.get("ceiling").?.string, 10);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    var later = try completeConfiguration("list-later", "later-new", workspace, "different");
+    try std.testing.expect(storage.configure(&later, .{}) == .accepted);
+    const second = try testingSessionList(&storage, &tmp, request, &used, 3);
+    defer std.testing.allocator.free(second);
+    var final = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, second, .{});
+    defer final.deinit();
+    try std.testing.expectEqualStrings(names[9], final.value.object.get("sessions").?.array.items[0].object.get("reference").?.string);
+    try std.testing.expectEqual(@as(usize, 1), final.value.object.get("sessions").?.array.items.len);
+    try std.testing.expect(final.value.object.get("next").? == .null);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    var exact = protocol.ListSessions{};
+    exact.workspace = .{};
+    try exact.workspace.?.set(other);
+    const filtered = try testingSessionList(&storage, &tmp, exact, &used, 4);
+    defer std.testing.allocator.free(filtered);
+    var filtered_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, filtered, .{});
+    defer filtered_json.deinit();
+    const one = filtered_json.value.object.get("sessions").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), one.len);
+    try std.testing.expectEqualStrings("b-fourth", one[0].object.get("reference").?.string);
+    try std.testing.expectEqualStrings(other, one[0].object.get("workspace").?.string);
+    var scratch_path: [protocol.max_store_bytes]u8 = undefined;
+    const scratch_length = try tmp.dir.realPath(std.testing.io, &scratch_path);
+    // Hold a captured page while a new configuration commits: delivery owns
+    // scratch, not a SQLite cursor, transaction or Store mutex.
+    var held = try storage.captureSessionList(.{}, .{
+        .scratch_path = scratch_path[0..scratch_length],
+        .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
+        .request_number = 5,
+    });
+    try std.testing.expect(used.load(.acquire) > 0);
+    var concurrent = try completeConfiguration("list-concurrent", "concurrent", workspace, "model");
+    try std.testing.expect(storage.configure(&concurrent, .{}) == .accepted);
+    held.deinit();
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectError(error.ReportScratchExhausted, storage.captureSessionList(.{}, .{
+        .scratch_path = scratch_path[0..scratch_length],
+        .scratch_budget = .{ .used = &used, .limit = 16 },
+        .request_number = 6,
+    }));
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "Session list capture and cursor storage stay page bounded as dormant Sessions grow" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const workspace = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+    var used = std.atomic.Value(u64).init(0);
+    var first_length: usize = 0;
+    for (0..1000) |i| {
+        var key_buffer: [32]u8 = undefined;
+        var reference_buffer: [32]u8 = undefined;
+        const key = try std.fmt.bufPrint(&key_buffer, "dormant-key-{d}", .{i});
+        const reference = try std.fmt.bufPrint(&reference_buffer, "dormant-{d:0>4}", .{i});
+        var config = try completeConfiguration(key, reference, workspace, "model");
+        try std.testing.expect(storage.configure(&config, .{}) == .accepted);
+        if (i == 99 or i == 999) {
+            const bytes = try testingSessionList(&storage, &tmp, .{}, &used, i + 1);
+            defer std.testing.allocator.free(bytes);
+            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+            defer parsed.deinit();
+            try std.testing.expectEqual(@as(usize, protocol.session_list_page_size), parsed.value.object.get("sessions").?.array.items.len);
+            if (i == 99) first_length = bytes.len else try std.testing.expect(bytes.len <= first_length + 1);
+            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        }
+    }
+}
+
 test "Current excludes history while Full exposes exact closed Session inventory" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -7091,6 +7495,18 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleTwoActionsForTesting(&storage, &tmp, binding, "action-metadata");
 
+    var public_request = protocol.ConversationPage{};
+    try public_request.session.set("direct/actions");
+    const proposed = try storage.publicConversationPage(public_request);
+    try std.testing.expectEqual(@as(usize, 1), proposed.count);
+    try std.testing.expect(proposed.items[0].kind == .user);
+    // The provider's complete proposal, including its call arguments, is not
+    // addressable as a public content position.
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{
+        .session = public_request.session,
+        .position = proposed.end,
+    }));
+
     const first_action_id = first: {
         const report_bytes = try testingSessionReport(&storage, &tmp, "direct/actions", 1024 * 1024);
         defer std.testing.allocator.free(report_bytes);
@@ -7115,6 +7531,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     try deny.session.set("direct/actions");
     const accepted = storage.denyPermission(&deny, .{});
     try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
+    try std.testing.expectEqual(@as(usize, 1), (try storage.publicConversationPage(public_request)).count);
     try std.testing.expect(storage.denyPermission(&deny, .{}).accepted.replayed);
     deny.action_id += 1;
     try std.testing.expect(storage.denyPermission(&deny, .{}) == .conflict);
@@ -7143,6 +7560,18 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     const action_stop = storage.stopSession(&stop, .{});
     try std.testing.expect(action_stop == .accepted);
     try std.testing.expectEqual(SessionStopCompletion.completed, action_stop.accepted.completion);
+    const settled_page = try storage.publicConversationPage(public_request);
+    try std.testing.expectEqual(@as(usize, 3), settled_page.count);
+    try std.testing.expect(settled_page.items[0].kind == .tool_result);
+    try std.testing.expectEqual(settled_page.items[0].position, settled_page.items[1].position);
+    try std.testing.expectEqual(@as(u64, 2), settled_page.items[0].ordinal);
+    try std.testing.expectEqual(@as(u64, 1), settled_page.items[1].ordinal);
+    var result_reader = try storage.openPublicConversationContent(.{
+        .session = public_request.session,
+        .position = settled_page.items[0].position,
+        .ordinal = 2,
+    });
+    result_reader.close();
     var stale: protocol.PermissionDecisionCommand = .{ .action_id = second_action_id };
     try stale.key.set("stale-denial");
     try stale.session.set("direct/actions");
@@ -10513,6 +10942,226 @@ test "large raw content opens without materializing its payload" {
     for (last) |byte| try std.testing.expectEqual(@as(u8, 'q'), byte);
 }
 
+test "public conversation owner fixes end, filters settings and bounds content" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var configuration = try completeConfiguration("public-config", "direct/public", workspace, "model-a");
+    try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+    var request = protocol.ConversationPage{};
+    try request.session.set("direct/public");
+    try std.testing.expectEqual(@as(usize, 0), (try storage.publicConversationPage(request)).count);
+
+    // A large first input and nineteen small ones expose both the item and
+    // content bound; no answer is invented for queued, unapplied input.
+    for (0..20) |index| {
+        var name_buffer: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "public-{d}", .{index});
+        var command: protocol.MessageCommand = .{};
+        try command.key.set(name);
+        try command.session.set("direct/public");
+        command.text = if (index == 19)
+            try testingBytesContent(&tmp, name, "é中")
+        else
+            try testingContent(&tmp, name, 'x', if (index == 0) 1024 * 1024 else 3);
+        try std.testing.expect(storage.submitMessage(&command, .{}) == .accepted);
+        try command.removeTemporaryContent(std.testing.io);
+    }
+    try std.testing.expectEqual(@as(usize, 0), (try storage.publicConversationPage(request)).count);
+    var instruction: protocol.ConfigureCommand = .{};
+    try instruction.key.set("public-instruction-before-selection");
+    try instruction.session.set("direct/public");
+    instruction.configuration.instructions = try testingContent(&tmp, "public-instruction-before", 's', 7);
+    defer instruction.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&instruction, .{}) == .accepted);
+    const active = (try storage.admitNextModelAttempt(.{})).?;
+    const first = try storage.publicConversationPage(request);
+    try std.testing.expectEqual(@as(usize, 16), first.count);
+    try std.testing.expect(first.more);
+    try std.testing.expectEqual(@as(u64, 20), first.items[0].position);
+    try std.testing.expectEqual(@as(u64, 5), first.items[15].position);
+    for (first.items[0..first.count]) |item| try std.testing.expect(item.kind == .user);
+    try std.testing.expectEqual(@as(u64, 5), first.items[0].content.length);
+    try std.testing.expectError(error.InvalidCursor, storage.publicConversationPage(.{
+        .session = request.session,
+        .end = first.end,
+        .before_position = first.items[15].position,
+        .before_ordinal = 1,
+    }));
+    try std.testing.expect(!storage.isFenced());
+    var unicode_reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = 20 });
+    var lead: [1]u8 = undefined;
+    var rest: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try unicode_reader.read(0, &lead));
+    try std.testing.expectEqual(@as(usize, 4), try unicode_reader.read(1, &rest));
+    try std.testing.expectEqual("é中"[0], lead[0]);
+    try std.testing.expectEqualStrings("é中"[1..], &rest);
+    unicode_reader.close();
+
+    var later: protocol.ConfigureCommand = .{};
+    try later.key.set("public-instructions");
+    try later.session.set("direct/public");
+    later.configuration.instructions = try testingContent(&tmp, "public-private-settings", 'p', 16);
+    defer later.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&later, .{}) == .accepted);
+    try submitTestMessage(&storage, &tmp, "after-page", "after-page-key", "direct/public", "later public input");
+    try storage.settleModelAttemptFailure(active.permit.binding, "fixture_failure", .terminal, .{});
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    const fixed_first = try storage.publicConversationPage(.{ .session = request.session, .end = first.end });
+    try std.testing.expectEqual(first.end, fixed_first.end);
+    try std.testing.expectEqual(first.count, fixed_first.count);
+    for (first.items[0..first.count], fixed_first.items[0..fixed_first.count]) |expected, actual| {
+        try std.testing.expectEqual(expected.position, actual.position);
+        try std.testing.expectEqual(expected.ordinal, actual.ordinal);
+    }
+    request.end = first.end;
+    request.before_position = first.items[15].position;
+    const older = try storage.publicConversationPage(request);
+    try std.testing.expectEqual(@as(usize, 4), older.count);
+    try std.testing.expect(!older.more);
+    try std.testing.expectEqual(@as(u64, 4), older.items[0].position);
+    try std.testing.expectEqual(@as(u64, 1), older.items[3].position);
+    try std.testing.expectEqual(@as(u64, 1024 * 1024), older.items[3].content.length);
+    const fresh = try storage.publicConversationPage(.{ .session = request.session });
+    try std.testing.expectEqual(@as(usize, 16), fresh.count);
+    try std.testing.expect(fresh.items[0].position > first.end);
+    try std.testing.expect(fresh.items[0].kind == .user);
+    var read = protocol.ConversationContent{ .session = request.session, .position = older.items[3].position, .start = 1024 * 1024 - 2 };
+    var reader = try storage.openPublicConversationContent(read);
+    var tail: [2]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), try reader.read(read.start, &tail));
+    try std.testing.expectEqualStrings("xx", &tail);
+    reader.close();
+    read.position = 21; // the applied instruction is not public content
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(read));
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{ .session = .{}, .position = 1 }));
+    try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(.{ .session = request.session, .position = 1, .start = 1024 * 1024 + 1 }));
+    try std.testing.expectError(error.InvalidCursor, storage.publicConversationPage(.{ .session = request.session, .end = first.end + 100, .before_position = 1 }));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "public content SQL failure fences Store instead of reporting absence" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "public-read-config", "direct/read-failure");
+    try submitTestMessage(&storage, &tmp, "public-read-text", "public-read-key", "direct/read-failure", "text");
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    var request: protocol.ConversationContent = .{ .position = 1 };
+    try request.session.set("direct/read-failure");
+    const Interrupt = struct {
+        fn progress(_: ?*anyopaque) callconv(.c) c_int {
+            return 1;
+        }
+    };
+    c.sqlite3_progress_handler(storage.database, 1, Interrupt.progress, null);
+    defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+    try std.testing.expectError(error.PublicContentReadFailed, storage.openPublicConversationContent(request));
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectError(error.StoreFenced, storage.openPublicConversationContent(request));
+}
+
+test "private-only model output never becomes public conversation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "private-config", "direct/private");
+    try submitTestMessage(&storage, &tmp, "private-input", "private-message", "direct/private", "hi");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // Keep a successor queued: a terminal text Turn requires an answer, while
+    // this intermediate accepted output contains only opaque continuation.
+    try submitTestMessage(&storage, &tmp, "private-next", "private-next-message", "direct/private", "later");
+    const bytes = "private continuation";
+    const source = try tmp.dir.createFile(std.testing.io, "private-output", .{ .read = true });
+    defer source.close(std.testing.io);
+    try source.writeStreamingAll(std.testing.io, bytes);
+    try source.sync(std.testing.io);
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..root_length], "private-metadata", .{ .used = &used, .limit = 1024 }, false, &retained);
+    defer metadata.deinit();
+    try metadata.append(.{ .tag = .item, .kind = .reasoning, .start = 0, .length = bytes.len, .content_digest = protocol.contentDigest(bytes) });
+    try metadata.sealForRead();
+    try storage.settleModelSuccess(binding, &.{
+        .source = source,
+        .source_length = bytes.len,
+        .metadata = metadata.file,
+        .item_count = 1,
+        .call_count = 0,
+        .answer_length = 0,
+        .answer_digest = protocol.contentDigest(""),
+        .response_id = .{},
+        .body_model = .{},
+        .openai_model = .{},
+        .x_openai_model = .{},
+        .request_id = .{},
+    }, .{});
+    var request = protocol.ConversationPage{};
+    try request.session.set("direct/private");
+    const page = try storage.publicConversationPage(request);
+    try std.testing.expectEqual(@as(usize, 1), page.count);
+    try std.testing.expect(page.items[0].kind == .user);
+    try std.testing.expect(page.end > page.items[0].position);
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{
+        .session = request.session,
+        .position = page.end,
+    }));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "public tool-result cursor crosses a completed group boundary" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "group-config", "direct/group-page");
+    try submitTestMessage(&storage, &tmp, "group-input", "group-message", "direct/group-page", "run tools");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var ids: [17][16]u8 = undefined;
+    var names: [17][16]u8 = undefined;
+    var calls: [17]TestingCall = undefined;
+    for (&calls, 0..) |*call, index| {
+        const id = try std.fmt.bufPrint(&ids[index], "item-{d}", .{index});
+        const call_id = try std.fmt.bufPrint(&names[index], "call-{d}", .{index});
+        call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = call_id, .decoded_call_id = call_id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+    }
+    try settleCallsForTesting(&storage, &tmp, binding, "group-metadata", &calls);
+    var cursor = protocol.ConversationPage{};
+    try cursor.session.set("direct/group-page");
+    const newest = try storage.publicConversationPage(cursor);
+    try std.testing.expectEqual(@as(usize, 16), newest.count);
+    try std.testing.expect(newest.more);
+    for (newest.items[0..newest.count], 0..) |item, index| {
+        try std.testing.expect(item.kind == .tool_result);
+        try std.testing.expectEqual(newest.items[0].position, item.position);
+        try std.testing.expectEqual(@as(u64, 17) - index, item.ordinal);
+    }
+    cursor.end = newest.end;
+    cursor.before_position = newest.items[15].position;
+    cursor.before_ordinal = 18; // No such completed call in this group.
+    try std.testing.expectError(error.InvalidCursor, storage.publicConversationPage(cursor));
+    try std.testing.expect(!storage.isFenced());
+    cursor.before_ordinal = newest.items[15].ordinal;
+    const older = try storage.publicConversationPage(cursor);
+    try std.testing.expectEqual(@as(usize, 2), older.count);
+    try std.testing.expect(!older.more);
+    try std.testing.expectEqual(@as(u64, 1), older.items[0].ordinal);
+    try std.testing.expect(older.items[0].kind == .tool_result);
+    try std.testing.expect(older.items[1].kind == .user);
+    var reader = try storage.openPublicConversationContent(.{ .session = cursor.session, .position = older.items[0].position, .ordinal = 1 });
+    defer reader.close();
+    var result: [64]u8 = undefined;
+    const size = try reader.read(0, &result);
+    try std.testing.expectEqualStrings("Unknown tool: unknown.", result[0..size]);
+}
+
 test "definite rejections retain decisions without retaining payloads" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -10819,6 +11468,16 @@ test "continued accepted output keeps model immutable" {
         .request_id = .{},
     };
     try storage.settleModelSuccess(binding, &output, .{});
+    var public_request = protocol.ConversationPage{};
+    try public_request.session.set("direct/continued-output");
+    const public_page = try storage.publicConversationPage(public_request);
+    try std.testing.expectEqual(@as(usize, 2), public_page.count);
+    try std.testing.expect(public_page.items[0].kind == .assistant);
+    var public_reader = try storage.openPublicConversationContent(.{ .session = public_request.session, .position = public_page.items[0].position });
+    var decoded: [6]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 6), try public_reader.read(0, &decoded));
+    try std.testing.expectEqualStrings("answer", &decoded);
+    public_reader.close();
     {
         const resolution = try prepare(
             storage.database,

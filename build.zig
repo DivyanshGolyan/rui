@@ -117,6 +117,20 @@ pub fn build(b: *std.Build) void {
     logic_test_step.dependOn(&run_logic_tests.step);
 
     const release_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
+    const session_list_client = b.addExecutable(.{
+        .name = "rui-session-list-client-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/session_list_client.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    session_list_client.root_module.link_libc = true;
+    session_list_client.root_module.addImport("rui_client", b.createModule(.{
+        .root_source_file = b.path("src/client.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    }));
     const integration = b.addSystemCommand(&.{"sh"});
     integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     integration.addArtifactArg(release_safe);
@@ -317,6 +331,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addArg("parallel");
     fast_integrations.addArtifactArg(tests);
     fast_integrations.addArtifactArg(host_status_actor);
+    fast_integrations.addArtifactArg(session_list_client);
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.step.dependOn(&release.step);
     fast_integrations.step.dependOn(&run_evaluator_host.step);
@@ -331,6 +346,7 @@ pub fn build(b: *std.Build) void {
     process_integrations.addArtifactArg(release_safe);
     process_integrations.addArtifactArg(debug);
     process_integrations.addArtifactArg(host_status_actor);
+    process_integrations.addArtifactArg(session_list_client);
     const full_evaluator = b.addSystemCommand(&.{"python3"});
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     full_evaluator.addArtifactArg(evaluator);

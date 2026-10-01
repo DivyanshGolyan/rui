@@ -16,8 +16,10 @@ pub const Provider = enum { codex };
 pub const max_provider_bytes = 16;
 pub const max_header_bytes = 16 * 1024;
 pub const content_window_bytes = 4096;
+pub const public_conversation_page_items = 16;
 pub const max_json_depth = 64;
 pub const max_sqlite_content_bytes: u64 = 1024 * 1024 * 1024 - 4096;
+pub const session_list_page_size: usize = 8;
 
 pub fn Bounded(comptime capacity: usize) type {
     return struct {
@@ -94,6 +96,9 @@ pub const Kind = enum {
     read_action_call_id,
     read_action_arguments,
     inspect_session,
+    list_sessions,
+    conversation_page,
+    conversation_content,
 };
 
 pub const ConfigureCommand = struct {
@@ -259,6 +264,32 @@ pub const HostInfo = struct {
     },
 };
 
+pub const ListSessions = struct {
+    store: Bounded(max_store_bytes) = .{},
+    workspace: ?Bounded(max_workspace_bytes) = null,
+    // Zero/zero begins a traversal. A continuation carries both values.
+    after: u64 = 0,
+    ceiling: u64 = 0,
+};
+
+// Positions are immutable within a Session. The zero end/cursor requests the
+// first (newest) page; subsequent requests carry the returned fixed end.
+pub const ConversationPage = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    end: u64 = 0,
+    before_position: u64 = 0,
+    before_ordinal: u64 = 0,
+};
+
+pub const ConversationContent = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    position: u64 = 0,
+    ordinal: u64 = 0,
+    start: u64 = 0,
+};
+
 pub const Request = union(Kind) {
     host_info: struct { store: Bounded(max_store_bytes) = .{} },
     host_stop: struct { store: Bounded(max_store_bytes) = .{} },
@@ -272,12 +303,15 @@ pub const Request = union(Kind) {
     read_action_call_id: ReadActionArguments,
     read_action_arguments: ReadActionArguments,
     inspect_session: InspectSession,
+    list_sessions: ListSessions,
+    conversation_page: ConversationPage,
+    conversation_content: ConversationContent,
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session => {},
+            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content => {},
         }
     }
 
@@ -429,6 +463,12 @@ const Parser = struct {
             .read_action_arguments
         else if (kind_text.eql("inspect_session"))
             .inspect_session
+        else if (kind_text.eql("list_sessions"))
+            .list_sessions
+        else if (kind_text.eql("conversation_page"))
+            .conversation_page
+        else if (kind_text.eql("conversation_content"))
+            .conversation_content
         else
             return error.UnknownCommand;
 
@@ -450,6 +490,9 @@ const Parser = struct {
             .read_action_call_id => .{ .read_action_call_id = try self.parseReadActionArguments(store) },
             .read_action_arguments => .{ .read_action_arguments = try self.parseReadActionArguments(store) },
             .inspect_session => .{ .inspect_session = try self.parseInspect(store) },
+            .list_sessions => .{ .list_sessions = try self.parseListSessions(store) },
+            .conversation_page => .{ .conversation_page = try self.parseConversationPage(store) },
+            .conversation_content => .{ .conversation_content = try self.parseConversationContent(store) },
         };
         errdefer request.removeTemporaryContent(self.options.io) catch {
             self.options.cleanup_failed.* = true;
@@ -629,6 +672,72 @@ const Parser = struct {
             try self.readSmallString(&profile);
             request.profile = if (profile.eql("full")) .full else return error.UnknownReportProfile;
         }
+        return request;
+    }
+
+    fn parseListSessions(self: *Parser, store: Bounded(max_store_bytes)) !ListSessions {
+        var request = ListSessions{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("workspace");
+        if (!try self.consumeIf('n')) {
+            var workspace: Bounded(max_workspace_bytes) = .{};
+            try self.readSmallString(&workspace);
+            request.workspace = workspace;
+        } else {
+            try self.expectByte('u');
+            try self.expectByte('l');
+            try self.expectByte('l');
+        }
+        try self.expectByte(',');
+        try self.expectKey("after");
+        request.after = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("ceiling");
+        request.ceiling = try self.readCanonicalU64();
+        if (request.after > std.math.maxInt(i64) or request.ceiling > std.math.maxInt(i64) or
+            (request.after == 0 and request.ceiling != 0) or
+            (request.after != 0 and request.after > request.ceiling)) return error.InvalidCursor;
+        return request;
+    }
+
+    fn parseConversationPage(self: *Parser, store: Bounded(max_store_bytes)) !ConversationPage {
+        var request = ConversationPage{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("end");
+        request.end = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("before_position");
+        request.before_position = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("before_ordinal");
+        request.before_ordinal = try self.readCanonicalU64();
+        if (request.end > std.math.maxInt(i64) or request.before_position > std.math.maxInt(i64) or
+            request.before_ordinal > std.math.maxInt(i64) or
+            (request.end == 0 and request.before_position != 0) or
+            (request.before_position == 0 and request.before_ordinal != 0) or
+            (request.end != 0 and request.before_position > request.end)) return error.InvalidCursor;
+        return request;
+    }
+
+    fn parseConversationContent(self: *Parser, store: Bounded(max_store_bytes)) !ConversationContent {
+        var request = ConversationContent{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("position");
+        request.position = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("ordinal");
+        request.ordinal = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("start");
+        request.start = try self.readCanonicalU64();
+        if (request.position == 0 or request.position > std.math.maxInt(i64) or
+            request.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
         return request;
     }
 
@@ -997,6 +1106,11 @@ pub const max_inspect_session_request_bytes =
     maximumJsonStringBytes(max_store_bytes) +
     ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
     ",\"profile\":\"full\"}".len;
+pub const max_list_sessions_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) +
+    ",\"workspace\":".len + maximumJsonStringBytes(max_workspace_bytes) +
+    ",\"after\":\"".len + 20 + ",\"ceiling\":\"".len + 20 + "\"}".len;
 pub const max_read_action_arguments_request_bytes =
     "{\"version\":\"1\",\"kind\":\"read_action_arguments\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) +
@@ -1007,11 +1121,25 @@ pub const max_read_action_call_id_request_bytes =
     maximumJsonStringBytes(max_store_bytes) +
     ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
     ",\"action\":\"".len + 20 + "\"}".len;
+pub const max_conversation_content_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"conversation_content\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) + ",\"session\":".len +
+    maximumJsonStringBytes(max_session_bytes) +
+    ",\"position\":\"".len + 20 +
+    "\",\"ordinal\":\"".len + 20 +
+    "\",\"start\":\"".len + 20 + "\"}".len;
+pub const max_conversation_page_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"conversation_page\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) + ",\"session\":".len +
+    maximumJsonStringBytes(max_session_bytes) +
+    ",\"end\":\"".len + 20 +
+    "\",\"before_position\":\"".len + 20 +
+    "\",\"before_ordinal\":\"".len + 20 + "\"}".len;
 pub const max_client_request_bytes = @max(
     @max(@max(max_observe_command_request_bytes, max_read_result_request_bytes), @max(max_host_info_request_bytes, max_host_stop_request_bytes)),
     @max(
-        max_inspect_session_request_bytes,
-        @max(max_read_action_arguments_request_bytes, max_read_action_call_id_request_bytes),
+        @max(max_inspect_session_request_bytes, max_list_sessions_request_bytes),
+        @max(@max(max_read_action_arguments_request_bytes, max_read_action_call_id_request_bytes), @max(max_conversation_page_request_bytes, max_conversation_content_request_bytes)),
     ),
 );
 
@@ -1141,6 +1269,13 @@ pub const max_host_info_response_bytes =
     "\",\"capabilities\":{\"bash\":true,\"model\":true,\"managed_authentication\":true}}".len;
 pub const host_stop_ack = "{\"version\":\"1\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), host_stop_ack.len);
+pub const max_conversation_page_response_bytes =
+    "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"".len + 20 +
+    "\",\"items\":[".len + public_conversation_page_items * ("{\"position\":\"".len + 20 + "\",\"ordinal\":\"".len + 20 +
+        "\",\"kind\":\"tool_result\",\"content\":{\"bytes\":\"".len + 20 +
+        "\",\"sha256\":\"".len + 64 + "\",\"display\":\"omitted\"}},".len) +
+    "],\"more\":true,\"before_position\":\"".len + 20 +
+    "\",\"before_ordinal\":\"".len + 20 + "\"}".len;
 
 pub fn FixedJsonBuffer(comptime capacity: usize) type {
     return struct {
@@ -1461,6 +1596,36 @@ test "observation needs no scratch at a full budget" {
     try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
 }
 
+test "conversation cursor parser rejects unfixed and malformed continuations" {
+    const cases = [_]struct { body: []const u8, failure: ?anyerror = null }{
+        .{ .body = "\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"0\"" },
+        .{ .body = "\"end\":\"25\",\"before_position\":\"0\",\"before_ordinal\":\"0\"" },
+        .{ .body = "\"end\":\"25\",\"before_position\":\"10\",\"before_ordinal\":\"2\"" },
+        .{ .body = "\"end\":\"0\",\"before_position\":\"10\",\"before_ordinal\":\"0\"", .failure = error.InvalidCursor },
+        .{ .body = "\"end\":\"25\",\"before_position\":\"0\",\"before_ordinal\":\"1\"", .failure = error.InvalidCursor },
+        .{ .body = "\"end\":\"25\",\"before_position\":\"26\",\"before_ordinal\":\"0\"", .failure = error.InvalidCursor },
+        .{ .body = "\"end\":\"25\",\"before_position\":\"10\",\"before_ordinal\":\"18446744073709551615\"", .failure = error.InvalidCursor },
+        .{ .body = "\"end\":\"18446744073709551615\",\"before_position\":\"10\",\"before_ordinal\":\"0\"", .failure = error.InvalidCursor },
+        .{ .body = "\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"1\"", .failure = error.InvalidCursor },
+        .{ .body = "\"end\":\"025\",\"before_position\":\"10\",\"before_ordinal\":\"0\"", .failure = error.InvalidIdentity },
+    };
+    for (cases) |case| {
+        var buffer: [512]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"1\",\"kind\":\"conversation_page\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.body});
+        var source = SocketBody.init(-1, 0);
+        @memcpy(source.buffer[0..json.len], json);
+        source.end = json.len;
+        var cleanup_failed = false;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .cleanup_failed = &cleanup_failed } };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parser.parse());
+        } else {
+            const request = try parser.parse();
+            try std.testing.expect(request == .conversation_page);
+        }
+    }
+}
+
 test "configuration provider envelope preserves exact spelling and omission" {
     const cases = [_]struct { field: []const u8, expected: ?[]const u8, suffix: []const u8 = "", failure: ?anyerror = null }{
         .{ .field = "{\"state\":\"omitted\"}", .expected = null },
@@ -1551,5 +1716,34 @@ test "Session report profile is closed and omission selects Current" {
         } else {
             try std.testing.expectError(error.UnknownReportProfile, parser.parse());
         }
+    }
+}
+
+test "Session listing wire distinguishes all, exact workspace, continuation and invalid cursor" {
+    const cases = [_]struct { json: []const u8, workspace: ?[]const u8, after: u64, ceiling: u64, valid: bool }{
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"}", .workspace = null, .after = 0, .ceiling = 0, .valid = true },
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\\u0001b\",\"after\":\"8\",\"ceiling\":\"12\"}", .workspace = "/a\x01b", .after = 8, .ceiling = 12, .valid = true },
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"12\"}", .workspace = null, .after = 0, .ceiling = 12, .valid = false },
+        .{ .json = "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"13\",\"ceiling\":\"12\"}", .workspace = null, .after = 13, .ceiling = 12, .valid = false },
+    };
+    for (cases) |case| {
+        var source = SocketBody.init(-1, 0);
+        @memcpy(source.buffer[0..case.json.len], case.json);
+        source.end = case.json.len;
+        var cleanup_failed = false;
+        var parser = Parser{ .source = &source, .options = .{
+            .io = std.testing.io,
+            .fd = -1,
+            .content_length = case.json.len,
+            .scratch_path = "unused",
+            .request_number = 0,
+            .cleanup_failed = &cleanup_failed,
+        } };
+        if (case.valid) {
+            const request = (try parser.parse()).list_sessions;
+            try std.testing.expectEqual(case.after, request.after);
+            try std.testing.expectEqual(case.ceiling, request.ceiling);
+            if (case.workspace) |workspace| try std.testing.expectEqualStrings(workspace, request.workspace.?.slice()) else try std.testing.expect(request.workspace == null);
+        } else try std.testing.expectError(error.InvalidCursor, parser.parse());
     }
 }

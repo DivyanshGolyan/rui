@@ -272,6 +272,16 @@ pub const ReportReply = union(enum) {
     command: CommandReply,
 };
 
+pub const SessionListCursor = struct { after: u64 = 0, ceiling: u64 = 0 };
+
+fn renderSessionListRequest(body: *protocol.RequestBuffer, store: []const u8, workspace: ?[]const u8, cursor: SessionListCursor) !void {
+    try body.append("{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":");
+    try body.appendJsonString(store);
+    try body.append(",\"workspace\":");
+    if (workspace) |value| try body.appendJsonString(value) else try body.append("null");
+    try body.appendFmt(",\"after\":\"{d}\",\"ceiling\":\"{d}\"}}", .{ cursor.after, cursor.ceiling });
+}
+
 fn renderReadRequest(
     body: *protocol.RequestBuffer,
     kind: []const u8,
@@ -556,6 +566,39 @@ pub fn inspectSession(
     const fd = stream.socket.handle;
     var header_buffer: [512]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/inspect-session HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{body.len});
+    try writeAll(fd, header);
+    try writeAll(fd, body.slice());
+    return readReportResponse(io, fd, destination, reply_buffer);
+}
+
+/// Streams one complete JSON page into destination. A non-200 reply borrows
+/// reply_buffer; a partial destination after an I/O error is not a valid page.
+/// Pass the response's next cursor and the same workspace for continuation.
+pub fn listSessions(
+    io: std.Io,
+    store_path: []const u8,
+    workspace: ?[]const u8,
+    cursor: SessionListCursor,
+    destination: std.Io.File,
+    reply_buffer: *ReplyBuffer,
+) !ReportReply {
+    reply_buffer.len = 0;
+    if (workspace) |value| {
+        if (value.len == 0 or value.len > protocol.max_workspace_bytes or
+            !std.unicode.utf8ValidateSlice(value)) return error.InvalidWorkspace;
+    }
+    if (cursor.after > std.math.maxInt(i64) or cursor.ceiling > std.math.maxInt(i64) or
+        (cursor.after == 0 and cursor.ceiling != 0) or
+        (cursor.after != 0 and cursor.after > cursor.ceiling)) return error.InvalidCursor;
+    const paths = try platform.resolveClientPaths(io, store_path);
+    var body: protocol.RequestBuffer = .{};
+    try renderSessionListRequest(&body, paths.store.slice(), workspace, cursor);
+    const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
+    const stream = try address.connect(io);
+    defer stream.close(io);
+    const fd = stream.socket.handle;
+    var header_buffer: [512]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/list-sessions HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{body.len});
     try writeAll(fd, header);
     try writeAll(fd, body.slice());
     return readReportResponse(io, fd, destination, reply_buffer);
@@ -2119,6 +2162,24 @@ test "bounded read requests attain their independent worst-case capacities" {
     try std.testing.expectError(error.BufferTooLarge, full.append("x"));
 }
 
+test "Session list client renders exact cursor and maximum escaped workspace without truncation" {
+    var empty: protocol.RequestBuffer = .{};
+    try renderSessionListRequest(&empty, "/store", null, .{});
+    try std.testing.expectEqualStrings(
+        "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"/store\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"}",
+        empty.slice(),
+    );
+    const escaped_store = [_]u8{1} ** protocol.max_store_bytes;
+    const escaped_workspace = [_]u8{1} ** protocol.max_workspace_bytes;
+    var maximum: protocol.RequestBuffer = .{};
+    try renderSessionListRequest(&maximum, &escaped_store, &escaped_workspace, .{
+        .after = std.math.maxInt(i64),
+        .ceiling = std.math.maxInt(i64),
+    });
+    try std.testing.expectEqual(protocol.max_list_sessions_request_bytes - 1, maximum.len);
+    try std.testing.expect(std.mem.endsWith(u8, maximum.slice(), "\"after\":\"9223372036854775807\",\"ceiling\":\"9223372036854775807\"}"));
+}
+
 test "control captures attain their exact worst-case request bounds" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2223,6 +2284,7 @@ test "response parsing rejects truncated head and command body" {
 const LargeResponseContext = struct {
     fd: std.posix.fd_t,
     length: u64,
+    content_type: []const u8 = "text/plain; charset=utf-8",
     failure: ?anyerror = null,
 };
 
@@ -2235,8 +2297,8 @@ fn writeLargeTestResponse(context: *LargeResponseContext) void {
     var header_buffer: [256]u8 = undefined;
     const header = std.fmt.bufPrint(
         &header_buffer,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 1\r\n\r\n",
-        .{context.length},
+        "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 1\r\n\r\n",
+        .{ context.content_type, context.length },
     ) catch |err| {
         context.failure = err;
         return;
@@ -2300,6 +2362,27 @@ test "result response streams 100,000 bytes into an explicit file" {
     }
     try std.testing.expectEqual(expected_hash.finalResult(), actual_hash.finalResult());
     try std.testing.expect(context.failure == null);
+}
+
+test "Session list client streams a page larger than the resident reply buffer" {
+    const page_bytes = 100_000;
+    const descriptors = try testPipe();
+    var context = LargeResponseContext{ .fd = descriptors[1], .length = page_bytes, .content_type = "application/json" };
+    const writer = try std.Thread.spawn(.{}, writeLargeTestResponse, .{&context});
+    defer closeTestDescriptor(descriptors[0]);
+    defer writer.join();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destination = try tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+    defer destination.close(std.testing.io);
+    var reply_buffer: ReplyBuffer = .{};
+    const reply = try readReportResponse(std.testing.io, descriptors[0], destination, &reply_buffer);
+    switch (reply) {
+        .report => |report| try std.testing.expectEqual(@as(u64, page_bytes), report.bytes),
+        .command => return error.ExpectedReport,
+    }
+    try std.testing.expectEqual(@as(u64, page_bytes), try destination.length(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 0), reply_buffer.len);
 }
 
 test "read result returns bounded command errors without touching destination" {
