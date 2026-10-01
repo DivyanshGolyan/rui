@@ -4,13 +4,14 @@ const named_scratch = @import("named_scratch.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const tool_catalog = @import("tools.zig");
+const session_view = @import("session_view.zig");
 
 const c = @cImport({
     @cInclude("sqlite3.h");
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 17;
+pub const schema_version: u32 = 19;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 const complete_tool_results_sql =
@@ -321,6 +322,22 @@ pub const MessageProgress = struct {
     pub const Status = enum { runnable, in_flight, waiting_for_permission };
     status: Status,
     action_id: ?u64 = null,
+};
+
+pub const SessionCall = struct {
+    position: u64,
+    turn_id: u64,
+    operation_id: u64,
+    call_ordinal: u64,
+    classification: enum { rejected, ask, bypass },
+    rejection_code: protocol.Bounded(32) = .{},
+    name_reference: ContentReference,
+    arguments_reference: ContentReference,
+};
+
+pub const SessionCallPage = struct {
+    position: u64,
+    call: ?SessionCall = null,
 };
 
 pub const AcceptedMessageQueue = struct {
@@ -1190,6 +1207,22 @@ pub const ContentReader = struct {
         return self.store.readOwnedContent(self, start, destination);
     }
 
+    /// Positions a fresh public reader with the caller's existing delivery
+    /// window. Raw content seeks directly; projections discard bounded windows.
+    pub fn position(self: *ContentReader, start: u64, window: []u8) !void {
+        std.debug.assert(self.active);
+        if (start > self.reference.length) return error.RangeOutOfBounds;
+        if (self.representation == .raw) return;
+        std.debug.assert(window.len > 0);
+        var offset = self.representation.projection.decoded_position;
+        std.debug.assert(start >= offset);
+        while (offset < start) {
+            const wanted: usize = @intCast(@min(start - offset, window.len));
+            if (try self.read(offset, window[0..wanted]) != wanted) return error.ShortCanonicalRead;
+            offset += wanted;
+        }
+    }
+
     pub fn close(self: *ContentReader) void {
         std.debug.assert(self.active);
         self.active = false;
@@ -1865,13 +1898,14 @@ pub const Store = struct {
         {
             const insert = try prepare(
                 self.database,
-                "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff) VALUES(?1,?2,?3,?4)",
+                "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,view_position) VALUES(?1,?2,?3,?4,?5)",
             );
             defer _ = c.sqlite3_finalize(insert);
             try bindText(insert, 1, command.key.slice());
             try bindText(insert, 2, command.session.slice());
             try bindNullableU64(insert, 3, selected_turn_id);
             try bindI64(insert, 4, cutoff_value);
+            try bindU64(insert, 5, try self.takePosition(command.session.slice()));
             try expectDone(insert);
         }
         var interrupted_operation_id: ?u64 = null;
@@ -2076,6 +2110,7 @@ pub const Store = struct {
             try bindU64(settle_turn, 2, command.operation_id);
             try expectDone(settle_turn);
             if (c.sqlite3_changes(self.database) != 1) return error.InterruptionTargetChanged;
+            try self.recordTurnOutcomePosition(command.turn_id);
         }
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
@@ -2321,6 +2356,169 @@ pub const Store = struct {
         return observation;
     }
 
+    /// Returns the next saved model call after a Session position. When there is
+    /// no call, the cursor advances to the committed Session highwater; output
+    /// items and the call owner are committed together, so older calls cannot
+    /// subsequently backfill behind that position.
+    pub fn nextSessionCall(self: *Store, session_ref: []const u8, after_position: ?u64) !SessionCallPage {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        return self.nextSessionCallLocked(session_ref, after_position) catch |err| switch (err) {
+            error.InvalidSessionCallCursor, error.SessionNotFound => err,
+            else => return self.fenceReadFailure(err),
+        };
+    }
+
+    fn nextSessionCallLocked(self: *Store, session_ref: []const u8, supplied_position: ?u64) !SessionCallPage {
+        if (supplied_position != null and supplied_position.? > std.math.maxInt(i64)) return error.InvalidSessionCallCursor;
+        const session = try prepare(self.database, "SELECT next_position FROM session WHERE session_ref=?1");
+        defer _ = c.sqlite3_finalize(session);
+        try bindText(session, 1, session_ref);
+        const session_step = c.sqlite3_step(session);
+        if (session_step == c.SQLITE_DONE) return error.SessionNotFound;
+        if (session_step != c.SQLITE_ROW) return error.SessionCallReadFailed;
+        const next_position = c.sqlite3_column_int64(session, 0);
+        if (next_position <= 0) return error.CorruptStore;
+        const highwater: u64 = @intCast(next_position - 1);
+        if (supplied_position == null) return .{ .position = highwater };
+        const after_position = supplied_position.?;
+        if (after_position > highwater) return error.InvalidSessionCallCursor;
+
+        const statement = try prepare(self.database, "SELECT item.session_position,operation.turn_id,call.operation_id,call.call_ordinal," ++
+            "call.name_content_id,call.arguments_content_id,call.rejection_code,action.action_id,revision.permission_mode,operation.session_ref,action.session_ref,producer.session_ref " ++
+            "FROM model_output_item item INDEXED BY model_output_call_feed " ++
+            "LEFT JOIN model_tool_call call ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal " ++
+            "LEFT JOIN model_operation operation ON operation.operation_id=item.operation_id " ++
+            "LEFT JOIN turn producer ON producer.turn_id=operation.turn_id " ++
+            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+            "LEFT JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
+            "WHERE item.session_ref=?1 AND item.item_kind=3 AND item.session_position>?2 " ++
+            "ORDER BY item.session_position LIMIT 1");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        try bindU64(statement, 2, after_position);
+        const step = c.sqlite3_step(statement);
+        if (step == c.SQLITE_DONE) return .{ .position = highwater };
+        if (step != c.SQLITE_ROW) return error.ActionReadFailed;
+        // Keep the indexed output item visible even when a required producer
+        // is missing; only a validated row can advance the public cursor.
+        if (c.sqlite3_column_type(statement, 1) == c.SQLITE_NULL or
+            c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) return error.CorruptStore;
+        const position = c.sqlite3_column_int64(statement, 0);
+        const turn_id = c.sqlite3_column_int64(statement, 1);
+        const operation_id = c.sqlite3_column_int64(statement, 2);
+        const ordinal = c.sqlite3_column_int64(statement, 3);
+        const name_id = c.sqlite3_column_int64(statement, 4);
+        const arguments_id = c.sqlite3_column_int64(statement, 5);
+        if (position <= 0 or position > highwater or turn_id <= 0 or operation_id <= 0 or ordinal < 0 or name_id <= 0 or arguments_id <= 0)
+            return error.CorruptStore;
+        var producing_session: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try readText(statement, 9, &producing_session);
+        if (!producing_session.eql(session_ref)) return error.CorruptStore;
+        if (c.sqlite3_column_type(statement, 11) == c.SQLITE_NULL) return error.CorruptStore;
+        var turn_session: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try readText(statement, 11, &turn_session);
+        if (!turn_session.eql(session_ref)) return error.CorruptStore;
+        const rejection = c.sqlite3_column_type(statement, 6) != c.SQLITE_NULL;
+        const action_id = c.sqlite3_column_int64(statement, 7);
+        const permission = c.sqlite3_column_int64(statement, 8);
+        if (rejection and c.sqlite3_column_type(statement, 7) != c.SQLITE_NULL) return error.CorruptStore;
+        if (!rejection and (c.sqlite3_column_type(statement, 7) == c.SQLITE_NULL or action_id <= 0 or
+            c.sqlite3_column_type(statement, 8) == c.SQLITE_NULL or permission < 0 or permission > 1))
+            return error.CorruptStore;
+        if (!rejection) {
+            var action_session: protocol.Bounded(protocol.max_session_bytes) = .{};
+            try readText(statement, 10, &action_session);
+            if (!action_session.eql(session_ref)) return error.CorruptStore;
+        }
+        var value = SessionCall{
+            .position = @intCast(position),
+            .turn_id = @intCast(turn_id),
+            .operation_id = @intCast(operation_id),
+            .call_ordinal = @intCast(ordinal),
+            .classification = if (rejection) .rejected else if (permission == 0) .ask else .bypass,
+            .name_reference = undefined,
+            .arguments_reference = undefined,
+        };
+        if (rejection) try readText(statement, 6, &value.rejection_code);
+        const name = try self.readContentMetadata(name_id);
+        const arguments = try self.readContentMetadata(arguments_id);
+        value.name_reference = .{ .length = name.length, .digest = name.digest };
+        value.arguments_reference = .{ .length = arguments.length, .digest = arguments.digest };
+        return .{ .position = value.position, .call = value };
+    }
+
+    /// Owns a bounded reader of one public proposal field, including rejected
+    /// calls. The feed lookup validates the same producer/authorization links;
+    /// a caller cannot select arbitrary content or private provider output.
+    pub fn openSessionCallContent(self: *Store, request: protocol.SessionCallContent) !ContentReader {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        return self.openSessionCallContentLocked(request) catch |err| switch (err) {
+            error.ContentNotFound, error.RangeOutOfBounds => err,
+            else => self.fenceReadFailure(err),
+        };
+    }
+
+    fn openSessionCallContentLocked(self: *Store, request: protocol.SessionCallContent) !ContentReader {
+        if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
+        const page = self.nextSessionCallLocked(request.session.slice(), request.position - 1) catch |err| switch (err) {
+            error.SessionNotFound, error.InvalidSessionCallCursor => return error.ContentNotFound,
+            else => return err,
+        };
+        const value = page.call orelse return error.ContentNotFound;
+        if (value.position != request.position) return error.ContentNotFound;
+        const reference = switch (request.field) {
+            .name => value.name_reference,
+            .arguments => value.arguments_reference,
+        };
+        if (request.start > reference.length) return error.RangeOutOfBounds;
+        return self.openContentIdentityLocked(reference, false);
+    }
+
+    /// Returns an owned bounded reader. Admission is an immutable public
+    /// identity even before application, and remains readable after a stop.
+    pub fn openMessageContent(self: *Store, request: protocol.MessageContent) !ContentReader {
+        if (request.admission_id == 0 or request.admission_id > std.math.maxInt(i64)) return error.ContentNotFound;
+        if (request.length == 0 or request.length > protocol.content_window_bytes or
+            (request.stream and request.start != 0)) return error.RangeOutOfBounds;
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        return self.openMessageContentLocked(request) catch |err| switch (err) {
+            error.ContentNotFound, error.RangeOutOfBounds => err,
+            else => self.fenceReadFailure(err),
+        };
+    }
+
+    fn openMessageContentLocked(self: *Store, request: protocol.MessageContent) !ContentReader {
+        const statement = try prepare(self.database, "SELECT session_ref,command_key,content_id FROM message_admission WHERE admission_id=?1");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, request.admission_id);
+        switch (c.sqlite3_step(statement)) {
+            c.SQLITE_DONE => return error.ContentNotFound,
+            c.SQLITE_ROW => {},
+            else => return error.ContentReadFailed,
+        }
+        var session: protocol.Bounded(128) = .{};
+        try readText(statement, 0, &session);
+        if (!session.eql(request.session.slice())) return error.ContentNotFound;
+        var key: protocol.Bounded(128) = .{};
+        try readText(statement, 1, &key);
+        const content_id = c.sqlite3_column_int64(statement, 2);
+        const command = (try self.readExistingCommand(key.slice())) orelse return error.CorruptStore;
+        if (content_id <= 0 or command.kind != .message or !command.accepted or
+            !command.target.eql(session.slice()) or command.primary_content_id != content_id) return error.CorruptStore;
+        const metadata = try self.readContentMetadata(content_id);
+        if (request.start > metadata.length) return error.RangeOutOfBounds;
+        return self.openContentIdentityLocked(.{ .length = metadata.length, .digest = metadata.digest }, false);
+    }
+
     fn readMessageQueue(
         self: *Store,
         command_key: []const u8,
@@ -2508,6 +2706,252 @@ pub const Store = struct {
         };
     }
 
+    /// Captures value-owned metadata; no database handle follows delivery.
+    pub fn sessionView(self: *Store, session: []const u8, cursor: session_view.Cursor) !session_view.Page {
+        if (cursor.end > std.math.maxInt(i64) or cursor.position > std.math.maxInt(i64) or
+            cursor.ordinal > std.math.maxInt(i64) or (cursor.recent and (cursor.position != 0 or cursor.ordinal != 0))) return error.InvalidCursor;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        return self.sessionViewLocked(session, cursor) catch |err| switch (err) {
+            error.InvalidCursor, error.SessionNotFound => err,
+            else => self.fenceReadFailure(err),
+        };
+    }
+
+    fn sessionViewLocked(self: *Store, session: []const u8, cursor: session_view.Cursor) !session_view.Page {
+        const current = (try self.readSession(session)) orelse return error.SessionNotFound;
+        const end = if (cursor.end == 0) current.next_position - 1 else cursor.end;
+        if (end >= current.next_position or cursor.position > end or (cursor.position == 0 and cursor.ordinal != 0)) return error.InvalidCursor;
+        if (cursor.ordinal != 0) {
+            _ = self.publicConversationContentIdLocked(session, cursor.position, cursor.ordinal) catch |err| switch (err) {
+                error.ContentNotFound => return error.InvalidCursor,
+                else => return err,
+            };
+        }
+        var page: session_view.Page = .{ .end = end };
+        const Candidates = struct {
+            rows: [session_view.capacity + 1]session_view.Item = undefined,
+            count: usize = 0,
+            recent: bool,
+
+            fn add(rows: *@This(), item: session_view.Item) void {
+                var at: usize = 0;
+                while (at < rows.count) : (at += 1) {
+                    const other = rows.rows[at];
+                    const before = item.position < other.position or (item.position == other.position and item.ordinal < other.ordinal);
+                    if (if (rows.recent) !before else before) break;
+                }
+                if (at == rows.rows.len) return;
+                const last = @min(rows.count, rows.rows.len - 1);
+                var i = last;
+                while (i > at) : (i -= 1) rows.rows[i] = rows.rows[i - 1];
+                rows.rows[at] = item;
+                rows.count = @min(rows.rows.len, rows.count + 1);
+            }
+        };
+        var candidates: Candidates = .{ .recent = cursor.recent };
+        // Each indexed source contributes only its own next 17 metadata rows.
+        // The bounded merge never materializes a Session's historical population.
+        const sources = .{
+            "SELECT view_position,0,'admission',admission_id,0,0,0,0,content_id,'' FROM message_admission WHERE session_ref=?1 AND view_position>?2 AND view_position<=?3 ORDER BY view_position ",
+            "SELECT session_position,0,CASE entry_kind WHEN 1 THEN 'user' ELSE 'assistant' END,coalesce(source_admission_id,0),turn_id,coalesce(source_operation_id,0),0,0,content_id,'' FROM conversation_entry WHERE session_ref=?1 AND entry_kind IN(1,3) AND session_position>?2 AND session_position<=?3 ORDER BY session_position ",
+            "SELECT outcome_position,0,'outcome',0,turn_id,operation_id,0,input_cutoff,0,outcome_code FROM turn WHERE session_ref=?1 AND outcome_position>?2 AND outcome_position<=?3 ORDER BY outcome_position ",
+            "SELECT view_position,0,'stop',0,coalesce(selected_turn_id,0),0,0,admission_cutoff,0,'session_stopped' FROM session_stop WHERE session_ref=?1 AND view_position>?2 AND view_position<=?3 ORDER BY view_position ",
+        };
+        inline for (sources) |source| {
+            const statement = try prepare(self.database, if (cursor.recent) source ++ "DESC LIMIT 17" else source ++ "ASC LIMIT 17");
+            defer _ = c.sqlite3_finalize(statement);
+            try bindText(statement, 1, session);
+            try bindU64(statement, 2, cursor.position);
+            try bindU64(statement, 3, end);
+            while (true) switch (c.sqlite3_step(statement)) {
+                c.SQLITE_DONE => break,
+                c.SQLITE_ROW => {
+                    const item = try self.readViewItem(statement);
+                    if (item.kind == .user or item.kind == .assistant) _ = try self.publicOrdinaryContentLocked(session, item.position);
+                    candidates.add(item);
+                },
+                else => return error.ConversationReadFailed,
+            };
+        }
+        // Resolve indexed anchors through the public call owner; an inner join
+        // must not hide a missing producer or bypass authorization provenance.
+        const anchors = try prepare(self.database, if (cursor.recent)
+            "SELECT session_position FROM model_output_item INDEXED BY model_output_call_feed WHERE session_ref=?1 AND item_kind=3 AND session_position>?2 AND session_position<=?3 ORDER BY session_position DESC LIMIT 17"
+        else
+            "SELECT session_position FROM model_output_item INDEXED BY model_output_call_feed WHERE session_ref=?1 AND item_kind=3 AND session_position>?2 AND session_position<=?3 ORDER BY session_position ASC LIMIT 17");
+        defer _ = c.sqlite3_finalize(anchors);
+        try bindText(anchors, 1, session);
+        try bindU64(anchors, 2, cursor.position);
+        try bindU64(anchors, 3, end);
+        while (true) switch (c.sqlite3_step(anchors)) {
+            c.SQLITE_DONE => break,
+            c.SQLITE_ROW => {
+                const position = try readNullablePositiveI64(anchors, 0) orelse return error.CorruptStore;
+                const call = (try self.nextSessionCallLocked(session, @intCast(position - 1))).call orelse return error.CorruptStore;
+                var item: session_view.Item = .{ .position = call.position, .kind = .call, .turn = call.turn_id, .operation = call.operation_id, .call = call.call_ordinal, .bytes = call.name_reference.length + call.arguments_reference.length };
+                item.code_len = call.rejection_code.len;
+                @memcpy(item.code[0..item.code_len], call.rejection_code.slice());
+                candidates.add(item);
+            },
+            else => return error.ConversationReadFailed,
+        };
+        // Source order equals complete-group order. Include a group whose
+        // proposal predates the cursor but whose last sibling settled after it.
+        var group = try self.publicToolGroupBefore(session, if (cursor.recent) end else cursor.position);
+        var source_cursor = cursor.position;
+        var contributed: usize = 0;
+        while (contributed < session_view.capacity + 1) {
+            if (group) |value| {
+                if (value.position) |position| {
+                    if (position <= end and (cursor.recent or position >= cursor.position)) {
+                        const query = "SELECT ?2,call.call_ordinal+1,'tool_result',0,operation.turn_id,call.operation_id,call.call_ordinal,0,coalesce(call.rejection_content_id,action.resolution_content_id),'' " ++
+                            "FROM model_tool_call call JOIN model_operation operation ON operation.operation_id=call.operation_id LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+                            "WHERE call.operation_id=?1 AND (?2>?3 OR call.call_ordinal+1>?4) ORDER BY call.call_ordinal ";
+                        const result = try prepare(self.database, if (cursor.recent) query ++ "DESC LIMIT 17" else query ++ "ASC LIMIT 17");
+                        defer _ = c.sqlite3_finalize(result);
+                        try bindU64(result, 1, value.operation_id);
+                        try bindU64(result, 2, position);
+                        try bindU64(result, 3, cursor.position);
+                        try bindU64(result, 4, cursor.ordinal);
+                        while (contributed < session_view.capacity + 1) switch (c.sqlite3_step(result)) {
+                            c.SQLITE_DONE => break,
+                            c.SQLITE_ROW => {
+                                candidates.add(try self.readViewItem(result));
+                                contributed += 1;
+                            },
+                            else => return error.ConversationReadFailed,
+                        };
+                    }
+                }
+                if (cursor.recent) {
+                    group = try self.publicToolGroupBefore(session, value.source_position - 1);
+                    continue;
+                }
+                source_cursor = value.last_source_position;
+            } else if (cursor.recent) break;
+            const next = try prepare(self.database, "SELECT session_position FROM model_output_item INDEXED BY model_output_call_feed WHERE session_ref=?1 AND item_kind=3 AND session_position>?2 AND session_position<=?3 ORDER BY session_position LIMIT 1");
+            defer _ = c.sqlite3_finalize(next);
+            try bindText(next, 1, session);
+            try bindU64(next, 2, source_cursor);
+            try bindU64(next, 3, end);
+            switch (c.sqlite3_step(next)) {
+                c.SQLITE_DONE => break,
+                c.SQLITE_ROW => group = try self.publicToolGroupBefore(session, @intCast(c.sqlite3_column_int64(next, 0))),
+                else => return error.ConversationReadFailed,
+            }
+        }
+        page.count = @min(candidates.count, session_view.capacity);
+        page.more = !cursor.recent and candidates.count > session_view.capacity;
+        for (0..page.count) |i| page.items[i] = candidates.rows[if (cursor.recent) page.count - 1 - i else i];
+        // Application and stop cutoffs consume a monotone admission prefix.
+        // Seek the prefix at this captured end, not today's pending index and
+        // not a correlated scan of every retained admission on every poll.
+        const boundaries = try prepare(self.database, "SELECT max(coalesce((SELECT session_position FROM conversation_entry WHERE session_ref=?1 AND entry_kind=1 AND session_position<=?2 ORDER BY session_position DESC LIMIT 1),0)," ++
+            "coalesce((SELECT view_position FROM session_stop WHERE session_ref=?1 AND view_position<=?2 ORDER BY view_position DESC LIMIT 1),0))");
+        defer _ = c.sqlite3_finalize(boundaries);
+        try bindText(boundaries, 1, session);
+        try bindU64(boundaries, 2, end);
+        if (c.sqlite3_step(boundaries) != c.SQLITE_ROW) return error.MessageAdmissionReadFailed;
+        const lower = c.sqlite3_column_int64(boundaries, 0);
+        if (lower < 0 or lower > end) return error.CorruptStore;
+        const pending_sql = " FROM message_admission m INDEXED BY message_admission_view WHERE m.session_ref=?1 AND m.view_position>?2 AND m.view_position<=?3";
+        const count = try prepare(self.database, "SELECT count(*)" ++ pending_sql);
+        defer _ = c.sqlite3_finalize(count);
+        try bindText(count, 1, session);
+        try bindI64(count, 2, lower);
+        try bindU64(count, 3, end);
+        if (c.sqlite3_step(count) != c.SQLITE_ROW) return error.MessageAdmissionReadFailed;
+        page.pending_total = @intCast(c.sqlite3_column_int64(count, 0));
+        const pending = try prepare(self.database, "SELECT m.view_position,0,'admission',m.admission_id,0,0,0,0,m.content_id,''" ++ pending_sql ++ " ORDER BY m.view_position LIMIT 4");
+        defer _ = c.sqlite3_finalize(pending);
+        try bindText(pending, 1, session);
+        try bindI64(pending, 2, lower);
+        try bindU64(pending, 3, end);
+        while (true) switch (c.sqlite3_step(pending)) {
+            c.SQLITE_DONE => break,
+            c.SQLITE_ROW => {
+                page.pending[page.pending_count] = try self.readViewItem(pending);
+                page.pending_count += 1;
+            },
+            else => return error.MessageAdmissionReadFailed,
+        };
+        const attention = try prepare(self.database, "SELECT action_id FROM action_operation WHERE session_ref=?1 AND permission_state=0 AND resolution_code IS NULL ORDER BY action_id LIMIT 1");
+        defer _ = c.sqlite3_finalize(attention);
+        try bindText(attention, 1, session);
+        switch (c.sqlite3_step(attention)) {
+            c.SQLITE_DONE => {},
+            c.SQLITE_ROW => page.action = @intCast(try readNullablePositiveI64(attention, 0) orelse return error.CorruptStore),
+            else => return error.ActionReadFailed,
+        }
+        const active = try prepare(self.database, "SELECT t.turn_id,t.operation_id,o.resolution_code,o.session_ref,o.turn_id " ++
+            "FROM turn t INDEXED BY turn_one_active_per_session LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
+            "WHERE t.session_ref=?1 AND t.outcome_code IS NULL");
+        defer _ = c.sqlite3_finalize(active);
+        try bindText(active, 1, session);
+        switch (c.sqlite3_step(active)) {
+            c.SQLITE_DONE => page.work.status = if (try self.countPendingMessages(session) != 0) .runnable else .idle,
+            c.SQLITE_ROW => {
+                page.work.turn = @intCast(try readNullablePositiveI64(active, 0) orelse return error.CorruptStore);
+                page.work.operation = @intCast(try readNullablePositiveI64(active, 1) orelse return error.CorruptStore);
+                if (c.sqlite3_column_type(active, 4) == c.SQLITE_NULL or c.sqlite3_column_int64(active, 4) != page.work.turn) return error.CorruptStore;
+                var producer: protocol.Bounded(protocol.max_session_bytes) = .{};
+                try readText(active, 3, &producer);
+                if (!producer.eql(session)) return error.CorruptStore;
+                var resolution: ?protocol.Bounded(96) = null;
+                if (c.sqlite3_column_type(active, 2) != c.SQLITE_NULL) {
+                    resolution = .{};
+                    try readText(active, 2, &resolution.?);
+                }
+                page.work.status = switch ((try self.activeMessageProgress(session, resolution)).status) {
+                    .runnable => .runnable,
+                    .in_flight => .in_flight,
+                    .waiting_for_permission => .waiting_for_permission,
+                };
+            },
+            else => return error.TurnReadFailed,
+        }
+        return page;
+    }
+
+    fn readViewItem(self: *Store, statement: *c.sqlite3_stmt) !session_view.Item {
+        for (0..9) |column| {
+            if (column == 2) continue;
+            if (c.sqlite3_column_type(statement, @intCast(column)) == c.SQLITE_NULL or
+                c.sqlite3_column_int64(statement, @intCast(column)) < 0) return error.CorruptStore;
+        }
+        var kind: protocol.Bounded(16) = .{};
+        try readText(statement, 2, &kind);
+        var item: session_view.Item = .{
+            .position = @intCast(c.sqlite3_column_int64(statement, 0)),
+            .ordinal = @intCast(c.sqlite3_column_int64(statement, 1)),
+            .kind = std.meta.stringToEnum(session_view.Item.Kind, kind.slice()) orelse return error.CorruptStore,
+            .message = @intCast(c.sqlite3_column_int64(statement, 3)),
+            .turn = @intCast(c.sqlite3_column_int64(statement, 4)),
+            .operation = @intCast(c.sqlite3_column_int64(statement, 5)),
+            .call = @intCast(c.sqlite3_column_int64(statement, 6)),
+            .cutoff = @intCast(c.sqlite3_column_int64(statement, 7)),
+        };
+        if (item.position == 0) return error.CorruptStore;
+        const content = c.sqlite3_column_int64(statement, 8);
+        switch (item.kind) {
+            .admission => if (item.message == 0 or content == 0) return error.CorruptStore,
+            .user => if (item.message == 0 or item.turn == 0 or content == 0) return error.CorruptStore,
+            .assistant => if (item.turn == 0 or item.operation == 0 or content == 0) return error.CorruptStore,
+            .tool_result => if (item.turn == 0 or item.operation == 0 or item.ordinal == 0 or content == 0) return error.CorruptStore,
+            .outcome => if (item.turn == 0 or item.operation == 0 or item.cutoff == 0) return error.CorruptStore,
+            .stop => {},
+            .call => return error.CorruptStore,
+        }
+        if (content != 0) item.bytes = (try self.readContentMetadata(content)).length;
+        var code: protocol.Bounded(96) = .{};
+        try readText(statement, 9, &code);
+        @memcpy(item.code[0..code.len], code.slice());
+        item.code_len = code.len;
+        return item;
+    }
+
     fn publicConversationPageLocked(self: *Store, request: protocol.ConversationPage) !PublicConversationPage {
         if (request.end > std.math.maxInt(i64) or request.before_position > std.math.maxInt(i64) or
             request.before_ordinal > std.math.maxInt(i64) or
@@ -2526,46 +2970,83 @@ pub const Store = struct {
         }
         var page = PublicConversationPage{ .end = end };
         if (end == 0) return page;
-        // Tool outcomes enter public Conversation only when the entire group
-        // settles. Position is then its last acceptance; call ordinal is the
-        // stable tie breaker. Private model items/instructions never enter it.
-        const statement = try prepare(self.database, "WITH groups AS (SELECT op.operation_id,max(coalesce(call.acceptance_position,action.acceptance_position)) AS position " ++
-            "FROM model_operation op JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
-            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-            "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' GROUP BY op.operation_id " ++
-            "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
-            "AND min(coalesce(call.acceptance_position,action.acceptance_position)) IS NOT NULL " ++
-            "AND count(coalesce(call.rejection_content_id,action.resolution_content_id))=count(*)), " ++
-            "public AS (SELECT e.session_position AS position,0 AS ordinal,e.entry_kind AS kind,e.content_id " ++
-            "FROM conversation_entry e WHERE e.session_ref=?1 AND e.entry_kind IN (1,3) AND e.session_position<=?2 " ++
-            "UNION ALL SELECT groups.position,call.call_ordinal+1,4,coalesce(call.rejection_content_id,action.resolution_content_id) " ++
-            "FROM groups JOIN model_tool_call call ON call.operation_id=groups.operation_id " ++
-            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-            "WHERE groups.position<=?2) " ++
-            "SELECT position,ordinal,kind,content_id FROM public WHERE (?3=0 OR position<?3 OR (position=?3 AND ordinal<?4)) " ++
-            "ORDER BY position DESC,ordinal DESC LIMIT 17");
+        const Row = struct { position: u64, ordinal: u64, kind: i32, content_id: i64 };
+        // Capture only each stream's next page and lookahead, then merge.
+        // Neither stream materializes the historical population or payloads.
+        var ordinary: [PublicConversationPage.capacity + 1]Row = undefined;
+        var tools: [PublicConversationPage.capacity + 1]Row = undefined;
+        var ordinary_count: usize = 0;
+        var tool_count: usize = 0;
+        const upper = if (request.before_position == 0) end else request.before_position;
+        const statement = try prepare(self.database, "SELECT session_position,entry_kind,content_id FROM conversation_entry " ++
+            "WHERE session_ref=?1 AND session_position<=?2 AND entry_kind IN (1,3) " ++
+            "AND (session_position<?2 OR ?3!=0) ORDER BY session_position DESC LIMIT 17");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, request.session.slice());
-        try bindU64(statement, 2, end);
-        try bindU64(statement, 3, request.before_position);
-        try bindU64(statement, 4, request.before_ordinal);
-        while (true) {
-            const result = c.sqlite3_step(statement);
-            if (result == c.SQLITE_DONE) break;
-            if (result != c.SQLITE_ROW) return error.ConversationReadFailed;
+        try bindU64(statement, 2, upper);
+        try bindU64(statement, 3, if (request.before_position == 0) 1 else request.before_ordinal);
+        while (true) switch (c.sqlite3_step(statement)) {
+            c.SQLITE_DONE => break,
+            c.SQLITE_ROW => {
+                const position = c.sqlite3_column_int64(statement, 0);
+                const kind = c.sqlite3_column_int(statement, 1);
+                const content_id = c.sqlite3_column_int64(statement, 2);
+                if (position <= 0 or content_id <= 0 or (kind != 1 and kind != 3)) return error.CorruptStore;
+                _ = try self.publicOrdinaryContentLocked(request.session.slice(), @intCast(position));
+                ordinary[ordinary_count] = .{ .position = @intCast(position), .ordinal = 0, .kind = kind, .content_id = content_id };
+                ordinary_count += 1;
+            },
+            else => return error.ConversationReadFailed,
+        };
+        var source_upper = upper;
+        while (tool_count < tools.len) {
+            const group = (try self.publicToolGroupBefore(request.session.slice(), source_upper)) orelse break;
+            source_upper = group.source_position - 1;
+            const position = group.position orelse continue; // ordinary unresolved group
+            if (position > upper) continue; // final acceptance is outside this fixed read
+            const results = try prepare(self.database, "SELECT call.call_ordinal,coalesce(call.rejection_content_id,action.resolution_content_id) " ++
+                "FROM model_tool_call call LEFT JOIN action_operation action " ++
+                "ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+                "WHERE call.operation_id=?1 AND call.call_ordinal<?2 ORDER BY call.call_ordinal DESC LIMIT 17");
+            defer _ = c.sqlite3_finalize(results);
+            try bindU64(results, 1, group.operation_id);
+            const ordinal_end = if (position == request.before_position)
+                (if (request.before_ordinal == 0) 0 else request.before_ordinal - 1)
+            else
+                @as(u64, std.math.maxInt(i64));
+            try bindU64(results, 2, ordinal_end);
+            while (tool_count < tools.len) switch (c.sqlite3_step(results)) {
+                c.SQLITE_DONE => break,
+                c.SQLITE_ROW => {
+                    const ordinal = c.sqlite3_column_int64(results, 0);
+                    const content_id = c.sqlite3_column_int64(results, 1);
+                    if (ordinal < 0 or content_id <= 0) return error.CorruptStore;
+                    tools[tool_count] = .{ .position = position, .ordinal = @as(u64, @intCast(ordinal)) + 1, .kind = 4, .content_id = content_id };
+                    tool_count += 1;
+                },
+                else => return error.ConversationReadFailed,
+            };
+        }
+        var ordinary_index: usize = 0;
+        var tool_index: usize = 0;
+        while (ordinary_index < ordinary_count or tool_index < tool_count) {
             if (page.count == page.items.len) {
                 page.more = true;
                 break;
             }
-            const position = c.sqlite3_column_int64(statement, 0);
-            const ordinal = c.sqlite3_column_int64(statement, 1);
-            const kind = c.sqlite3_column_int(statement, 2);
-            const content_id = c.sqlite3_column_int64(statement, 3);
-            if (position <= 0 or ordinal < 0 or content_id <= 0 or
-                (kind != 1 and kind != 3 and kind != 4) or
-                (kind == 4) != (ordinal > 0)) return error.CorruptStore;
-            const metadata = try self.readContentMetadata(content_id);
-            page.items[page.count] = .{ .position = @intCast(position), .ordinal = @intCast(ordinal), .kind = switch (kind) {
+            const row = if (tool_index < tool_count and (ordinary_index == ordinary_count or
+                tools[tool_index].position >= ordinary[ordinary_index].position))
+            row: {
+                const value = tools[tool_index];
+                tool_index += 1;
+                break :row value;
+            } else row: {
+                const value = ordinary[ordinary_index];
+                ordinary_index += 1;
+                break :row value;
+            };
+            const metadata = try self.readContentMetadata(row.content_id);
+            page.items[page.count] = .{ .position = row.position, .ordinal = row.ordinal, .kind = switch (row.kind) {
                 1 => .user,
                 3 => .assistant,
                 4 => .tool_result,
@@ -2639,6 +3120,65 @@ pub const Store = struct {
         }
         if (c.sqlite3_column_int(statement, 1) != 1) return error.CorruptStore;
         return try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore;
+    }
+
+    const PublicToolGroup = struct {
+        operation_id: u64,
+        source_position: u64,
+        last_source_position: u64,
+        position: ?u64,
+    };
+
+    // Next-group admission requires all previous outcomes (including stopped
+    // Turns, whose terminalization waits for Action settlement/recovery).
+    // Thus source order is also completed-group order. Seek one source anchor
+    // before the requested position, then validate ALL siblings, never a
+    // cursor-filtered subset. Exact identity reads share this selection.
+    // Validation costs one full producing output/group traversal, including
+    // private siblings in that output; no durable-history-sized allocation.
+    fn publicToolGroupBefore(self: *Store, session: []const u8, upper: u64) !?PublicToolGroup {
+        const anchor = try prepare(self.database, "SELECT item.operation_id,operation.session_ref,operation.resolution_code,producer.session_ref,operation.admission_position,saved.next_position " ++
+            "FROM model_output_item item INDEXED BY model_output_call_feed " ++
+            "LEFT JOIN model_operation operation ON operation.operation_id=item.operation_id " ++
+            "LEFT JOIN turn producer ON producer.turn_id=operation.turn_id " ++
+            "LEFT JOIN session saved ON saved.session_ref=item.session_ref " ++
+            "WHERE item.session_ref=?1 AND item.item_kind=3 AND item.session_position<=?2 " ++
+            "ORDER BY item.session_position DESC LIMIT 1");
+        defer _ = c.sqlite3_finalize(anchor);
+        try bindText(anchor, 1, session);
+        try bindU64(anchor, 2, upper);
+        switch (c.sqlite3_step(anchor)) {
+            c.SQLITE_DONE => return null,
+            c.SQLITE_ROW => {},
+            else => return error.ConversationReadFailed,
+        }
+        const operation_id = try readNullablePositiveI64(anchor, 0) orelse return error.CorruptStore;
+        var identity: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try readText(anchor, 1, &identity);
+        if (!identity.eql(session)) return error.CorruptStore;
+        try readText(anchor, 3, &identity);
+        if (!identity.eql(session)) return error.CorruptStore;
+        var resolution: protocol.Bounded(96) = .{};
+        try readText(anchor, 2, &resolution);
+        if (!resolution.eql("tool_calls")) return error.CorruptStore;
+        const admission = try readNullablePositiveI64(anchor, 4) orelse return error.CorruptStore;
+        const next_position = try readNullablePositiveI64(anchor, 5) orelse return error.CorruptStore;
+        const facts = try self.readToolOutcomeFacts(@intCast(operation_id), false);
+        const source = try prepare(self.database, "SELECT min(CASE WHEN item_kind=3 THEN session_position END),max(CASE WHEN item_kind=3 THEN session_position END),count(*)," ++
+            "sum(CASE WHEN session_ref=?2 AND session_position>?3 AND session_position<?4 AND content.content_id IS NOT NULL THEN 1 ELSE 0 END),max(session_position) " ++
+            "FROM model_output_item LEFT JOIN content ON content.content_id=model_output_item.content_id WHERE operation_id=?1");
+        defer _ = c.sqlite3_finalize(source);
+        try bindI64(source, 1, operation_id);
+        try bindText(source, 2, session);
+        try bindI64(source, 3, admission);
+        try bindI64(source, 4, next_position);
+        if (c.sqlite3_step(source) != c.SQLITE_ROW) return error.ConversationReadFailed;
+        const first = try readNullablePositiveI64(source, 0) orelse return error.CorruptStore;
+        const last = try readNullablePositiveI64(source, 1) orelse return error.CorruptStore;
+        if (first <= admission or last >= next_position or
+            c.sqlite3_column_int64(source, 2) != c.sqlite3_column_int64(source, 3) or
+            (facts.position != null and (facts.position.? <= c.sqlite3_column_int64(source, 4) or facts.position.? >= next_position))) return error.CorruptStore;
+        return .{ .operation_id = @intCast(operation_id), .source_position = @intCast(first), .last_source_position = @intCast(last), .position = facts.position };
     }
 
     pub fn captureSessionReport(
@@ -2763,6 +3303,7 @@ pub const Store = struct {
             try capture.append("null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}");
             return;
         };
+        if (current.next_position == 0 or current.next_position > std.math.maxInt(i64)) return error.CorruptStore;
         const instructions = try self.readContentMetadata(current.instructions_id orelse return error.CorruptStore);
         const output_schema = if (current.output_schema_id) |content_id|
             try self.readContentMetadata(content_id)
@@ -2793,7 +3334,7 @@ pub const Store = struct {
         } else {
             try capture.append("null");
         }
-        try capture.appendFmt("}},\"pending_messages\":\"{d}\",\"work\":", .{pending_messages});
+        try capture.appendFmt("}},\"history_end\":\"{d}\",\"pending_messages\":\"{d}\",\"work\":", .{ current.next_position - 1, pending_messages });
         try self.appendCurrentWork(session_ref, pending_messages, capture);
         try capture.append(",\"selected_message\":");
         try self.appendSelectedMessage(session_ref, capture);
@@ -3646,7 +4187,7 @@ pub const Store = struct {
     }
 
     const ToolOutcomeFacts = struct {
-        position: ?u64,
+        position: ?u64, // Final acceptance only when every call has an outcome.
         call_count: u64,
     };
 
@@ -3699,7 +4240,7 @@ pub const Store = struct {
         const position = try readNullablePositiveI64(statement, 4);
         if (require_terminal and position == null) return error.CorruptStore;
         return .{
-            .position = if (position) |value| @intCast(value) else null,
+            .position = if (terminal == expected) (if (position) |value| @intCast(value) else null) else null,
             .call_count = @intCast(calls),
         };
     }
@@ -4072,6 +4613,7 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(update);
         try bindU64(update, 1, turn_id);
         try expectDone(update);
+        if (c.sqlite3_changes(self.database) != 0) try self.recordTurnOutcomePosition(turn_id);
     }
 
     fn admitNextModelAttemptLocked(self: *Store, faults: Faults) !?AttemptAdmission {
@@ -4777,6 +5319,7 @@ pub const Store = struct {
                 },
             },
         }
+        try self.recordTurnOutcomePosition(binding.turn_id);
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
     }
@@ -4860,6 +5403,7 @@ pub const Store = struct {
             try expectDone(update_turn);
             if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
         }
+        try self.recordTurnOutcomePosition(binding.turn_id);
         try exec(self.database, "COMMIT");
         return true;
     }
@@ -4975,6 +5519,28 @@ pub const Store = struct {
         }
         if (imported_items != output.item_count) return error.CorruptOutputMetadata;
 
+        // Public text precedes the results derived from this response. Raw
+        // output items already exist for importAnswerProjection to read.
+        const answer_id: ?i64 = if (output.answer_length != 0)
+            try self.importAnswerProjection(binding, output)
+        else
+            null;
+        if (answer_id) |content_id| {
+            const insert = try prepare(
+                self.database,
+                "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id) " ++
+                    "VALUES(?1,coalesce((SELECT max(entry_ordinal) FROM conversation_entry WHERE session_ref=?1),0)+1,?2,3,?3,NULL,NULL,?4,?5)",
+            );
+            defer _ = c.sqlite3_finalize(insert);
+            try bindText(insert, 1, session_ref.slice());
+            try bindU64(insert, 2, current.next_position);
+            try bindU64(insert, 3, binding.turn_id);
+            try bindU64(insert, 4, binding.operation_id);
+            try bindI64(insert, 5, content_id);
+            try expectDone(insert);
+            current.next_position = try std.math.add(u64, current.next_position, 1);
+        }
+
         var imported_calls: u64 = 0;
         var item_id_record: ?OutputMetadataRecord = null;
         var name_record: ?OutputMetadataRecord = null;
@@ -5086,25 +5652,6 @@ pub const Store = struct {
         if (item_id_record != null or name_record != null or call_id_record != null or
             imported_calls != output.call_count) return error.CorruptOutputMetadata;
 
-        const answer_id: ?i64 = if (output.answer_length != 0)
-            try self.importAnswerProjection(binding, output)
-        else
-            null;
-        if (answer_id) |content_id| {
-            const insert = try prepare(
-                self.database,
-                "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id) " ++
-                    "VALUES(?1,coalesce((SELECT max(entry_ordinal) FROM conversation_entry WHERE session_ref=?1),0)+1,?2,3,?3,NULL,NULL,?4,?5)",
-            );
-            defer _ = c.sqlite3_finalize(insert);
-            try bindText(insert, 1, session_ref.slice());
-            try bindU64(insert, 2, current.next_position);
-            try bindU64(insert, 3, binding.turn_id);
-            try bindU64(insert, 4, binding.operation_id);
-            try bindI64(insert, 5, content_id);
-            try expectDone(insert);
-            current.next_position = try std.math.add(u64, current.next_position, 1);
-        }
         const pending = try self.countPendingMessages(session_ref.slice());
         const resolution_code = if (output.call_count != 0) "tool_calls" else if (pending == 0) "completed" else "continued";
         {
@@ -5138,6 +5685,12 @@ pub const Store = struct {
             try bindU64(update, 3, binding.operation_id);
             try expectDone(update);
             if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
+            const position = try prepare(self.database, "UPDATE turn SET outcome_position=?2 WHERE turn_id=?1");
+            defer _ = c.sqlite3_finalize(position);
+            try bindU64(position, 1, binding.turn_id);
+            try bindU64(position, 2, current.next_position);
+            try expectDone(position);
+            current.next_position = try std.math.add(u64, current.next_position, 1);
         }
         {
             const update = try prepare(self.database, "UPDATE session SET next_position=?2 WHERE session_ref=?1");
@@ -5827,14 +6380,40 @@ pub const Store = struct {
             }
             break :blk @intCast(prior + 1);
         } else return error.MessageAdmissionReadFailed;
-        const statement = try prepare(self.database, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id) VALUES(?1,?2,?3,?4)");
+        const statement = try prepare(self.database, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,view_position) VALUES(?1,?2,?3,?4,?5)");
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, admission_id);
         try bindText(statement, 2, session_ref);
         try bindText(statement, 3, command_key);
         try bindI64(statement, 4, content_id);
+        try bindU64(statement, 5, try self.takePosition(session_ref));
         try expectDone(statement);
         return admission_id;
+    }
+
+    // Called only inside the causing owner's canonical transaction. Ordering
+    // metadata uses the existing Session clock; it is not another lifecycle.
+    fn takePosition(self: *Store, session: []const u8) !u64 {
+        var current = (try self.readSession(session)) orelse return error.CorruptStore;
+        const position = current.next_position;
+        current.next_position = try std.math.add(u64, position, 1);
+        try self.updateSession(session, &current);
+        return position;
+    }
+
+    fn recordTurnOutcomePosition(self: *Store, turn_id: u64) !void {
+        const select = try prepare(self.database, "SELECT session_ref FROM turn WHERE turn_id=?1 AND outcome_code IS NOT NULL AND outcome_position IS NULL");
+        defer _ = c.sqlite3_finalize(select);
+        try bindU64(select, 1, turn_id);
+        if (c.sqlite3_step(select) == c.SQLITE_DONE) return;
+        var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try readText(select, 0, &session);
+        const position = try self.takePosition(session.slice());
+        const update = try prepare(self.database, "UPDATE turn SET outcome_position=?2 WHERE turn_id=?1");
+        defer _ = c.sqlite3_finalize(update);
+        try bindU64(update, 1, turn_id);
+        try bindU64(update, 2, position);
+        try expectDone(update);
     }
 
     fn importEmptyContent(self: *Store) !i64 {
@@ -6114,6 +6693,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ session_ref TEXT NOT NULL REFERENCES session(session_ref),
         \\ command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key) DEFERRABLE INITIALLY DEFERRED,
         \\ content_id INTEGER NOT NULL REFERENCES content(content_id),
+        \\ view_position INTEGER NOT NULL DEFAULT 0 CHECK(view_position>=0),
         \\ turn_id INTEGER REFERENCES turn(turn_id) DEFERRABLE INITIALLY DEFERRED
         \\) STRICT;
         \\CREATE TABLE turn(
@@ -6123,6 +6703,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ input_cutoff INTEGER NOT NULL CHECK(input_cutoff>=first_admission_id),
         \\ operation_id INTEGER NOT NULL,
         \\ outcome_code TEXT CHECK(outcome_code IS NULL OR length(CAST(outcome_code AS BLOB)) BETWEEN 1 AND 96),
+        \\ outcome_position INTEGER CHECK(outcome_position IS NULL OR outcome_position>0),
         \\ outcome_content_id INTEGER REFERENCES content(content_id)
         \\) STRICT;
         \\CREATE UNIQUE INDEX turn_one_active_per_session ON turn(session_ref) WHERE outcome_code IS NULL;
@@ -6130,6 +6711,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ command_key TEXT PRIMARY KEY REFERENCES core_command(command_key),
         \\ session_ref TEXT NOT NULL REFERENCES session(session_ref),
         \\ selected_turn_id INTEGER REFERENCES turn(turn_id),
+        \\ view_position INTEGER NOT NULL DEFAULT 0 CHECK(view_position>=0),
         \\ admission_cutoff INTEGER NOT NULL CHECK(admission_cutoff>=0)
         \\) STRICT, WITHOUT ROWID;
         \\CREATE TABLE model_interruption_command(
@@ -6259,6 +6841,9 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL;
         \\CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL;
         \\CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff);
+        \\CREATE INDEX message_admission_view ON message_admission(session_ref,view_position);
+        \\CREATE INDEX session_stop_view ON session_stop(session_ref,view_position);
+        \\CREATE INDEX turn_view ON turn(session_ref,outcome_position) WHERE outcome_position IS NOT NULL;
         \\CREATE INDEX action_operation_session_order ON action_operation(session_ref,action_id);
         \\CREATE INDEX action_operation_executable ON action_operation(action_id) WHERE permission_state=1 AND resolution_code IS NULL AND attempt_ordinal=0;
         \\CREATE INDEX action_operation_unresolved_attempt ON action_operation(action_id) WHERE resolution_code IS NULL AND attempt_ordinal=1;
@@ -6269,6 +6854,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id);
         \\CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position);
         \\CREATE INDEX model_output_history ON model_output_item(session_ref,session_position);
+        \\CREATE INDEX model_output_call_feed ON model_output_item(session_ref,session_position) WHERE item_kind=3;
         \\CREATE INDEX turn_session_latest ON turn(session_ref,turn_id DESC);
     );
     try exec(database, "PRAGMA application_id=1280591409");
@@ -6289,7 +6875,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','session_stop_exclusion','action_operation_session_order','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','conversation_entry_history','model_output_history','turn_session_latest')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','session_stop_exclusion','message_admission_view','session_stop_view','turn_view','action_operation_session_order','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','conversation_entry_history','model_output_history','model_output_call_feed','turn_session_latest')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -6807,7 +7393,7 @@ fn settleCallsForTesting(
     file_prefix: []const u8,
     calls: []const TestingCall,
 ) !void {
-    return settleCallsForTestingWithFaults(storage, tmp, binding, file_prefix, calls, .{});
+    return settleCallsForTestingWithFaults(storage, tmp, binding, file_prefix, calls, "", .{});
 }
 
 fn settleCallsForTestingWithFaults(
@@ -6816,6 +7402,7 @@ fn settleCallsForTestingWithFaults(
     binding: AttemptBinding,
     file_prefix: []const u8,
     calls: []const TestingCall,
+    answer: []const u8,
     faults: Faults,
 ) !void {
     var source_buffer: [64 * 1024]u8 = undefined;
@@ -6830,20 +7417,29 @@ fn settleCallsForTestingWithFaults(
         file_prefix,
         .{
             .used = &metadata_used,
-            .limit = try std.math.mul(u64, calls.len, 5 * output_metadata_record_bytes),
+            .limit = try std.math.mul(u64, calls.len * 5 + @as(usize, if (answer.len != 0) 2 else 0), output_metadata_record_bytes),
         },
         false,
         &retained_metadata,
     );
     defer metadata.deinit();
     var offset: u64 = 0;
+    const call_offset: usize = if (answer.len != 0) 1 else 0;
+    if (answer.len != 0) {
+        try source_writer.writeByte('"');
+        try source_writer.writeAll(answer);
+        try source_writer.writeByte('"');
+        offset = answer.len + 2;
+        try metadata.append(.{ .tag = .item, .kind = .message, .start = 0, .length = offset, .content_digest = protocol.contentDigest(source_writer.buffered()[0..@intCast(offset)]) });
+        try metadata.append(.{ .tag = .text, .start = 1, .length = answer.len, .decoded_length = answer.len });
+    }
     for (calls, 0..) |call, index| {
         const item_start = offset;
         try source_writer.writeAll(call.item_id);
         try metadata.append(.{
             .tag = .item_id,
             .kind = .function_call,
-            .ordinal = index,
+            .ordinal = index + call_offset,
             .start = offset,
             .length = call.item_id.len,
             .decoded_length = call.item_id.len,
@@ -6854,7 +7450,7 @@ fn settleCallsForTestingWithFaults(
         try metadata.append(.{
             .tag = .name,
             .kind = .function_call,
-            .ordinal = index,
+            .ordinal = index + call_offset,
             .start = offset,
             .length = call.name.len,
             .decoded_length = call.name.len,
@@ -6865,7 +7461,7 @@ fn settleCallsForTestingWithFaults(
         try metadata.append(.{
             .tag = .call_id,
             .kind = .function_call,
-            .ordinal = index,
+            .ordinal = index + call_offset,
             .start = offset,
             .length = call.encoded_call_id.len,
             .decoded_length = call.decoded_call_id.len,
@@ -6876,7 +7472,7 @@ fn settleCallsForTestingWithFaults(
         try metadata.append(.{
             .tag = .arguments,
             .kind = .function_call,
-            .ordinal = index,
+            .ordinal = index + call_offset,
             .start = offset,
             .length = call.encoded_arguments.len,
             .decoded_length = call.decoded_arguments.len,
@@ -6886,7 +7482,7 @@ fn settleCallsForTestingWithFaults(
         try metadata.append(.{
             .tag = .item,
             .kind = .function_call,
-            .ordinal = index,
+            .ordinal = index + call_offset,
             .start = item_start,
             .length = offset - item_start,
             .id_digest = protocol.contentDigest(call.item_id),
@@ -6904,10 +7500,10 @@ fn settleCallsForTestingWithFaults(
         .source = source,
         .source_length = source_bytes.len,
         .metadata = metadata.file,
-        .item_count = calls.len,
+        .item_count = calls.len + call_offset,
         .call_count = calls.len,
-        .answer_length = 0,
-        .answer_digest = protocol.contentDigest(""),
+        .answer_length = answer.len,
+        .answer_digest = protocol.contentDigest(answer),
         .response_id = .{},
         .body_model = .{},
         .openai_model = .{},
@@ -9122,6 +9718,7 @@ test "controls wait behind an active model settlement transaction" {
                 self.binding,
                 "transaction-race-metadata",
                 self.calls,
+                "",
                 .{ .settlement_trace = .{ .context = self.shared, .mark_fn = Shared.settlementTrace } },
             ) catch |err| {
                 self.result = err;
@@ -10995,8 +11592,9 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     const first = try storage.publicConversationPage(request);
     try std.testing.expectEqual(@as(usize, 16), first.count);
     try std.testing.expect(first.more);
-    try std.testing.expectEqual(@as(u64, 20), first.items[0].position);
-    try std.testing.expectEqual(@as(u64, 5), first.items[15].position);
+    // Twenty accepted admissions precede the twenty applied User positions.
+    try std.testing.expectEqual(@as(u64, 40), first.items[0].position);
+    try std.testing.expectEqual(@as(u64, 25), first.items[15].position);
     for (first.items[0..first.count]) |item| try std.testing.expect(item.kind == .user);
     try std.testing.expectEqual(@as(u64, 5), first.items[0].content.length);
     try std.testing.expectError(error.InvalidCursor, storage.publicConversationPage(.{
@@ -11006,7 +11604,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
         .before_ordinal = 1,
     }));
     try std.testing.expect(!storage.isFenced());
-    var unicode_reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = 20 });
+    var unicode_reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = 40 });
     var lead: [1]u8 = undefined;
     var rest: [4]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), try unicode_reader.read(0, &lead));
@@ -11036,8 +11634,8 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     const older = try storage.publicConversationPage(request);
     try std.testing.expectEqual(@as(usize, 4), older.count);
     try std.testing.expect(!older.more);
-    try std.testing.expectEqual(@as(u64, 4), older.items[0].position);
-    try std.testing.expectEqual(@as(u64, 1), older.items[3].position);
+    try std.testing.expectEqual(@as(u64, 24), older.items[0].position);
+    try std.testing.expectEqual(@as(u64, 21), older.items[3].position);
     try std.testing.expectEqual(@as(u64, 1024 * 1024), older.items[3].content.length);
     const fresh = try storage.publicConversationPage(.{ .session = request.session });
     try std.testing.expectEqual(@as(usize, 16), fresh.count);
@@ -11049,10 +11647,10 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     try std.testing.expectEqual(@as(usize, 2), try reader.read(read.start, &tail));
     try std.testing.expectEqualStrings("xx", &tail);
     reader.close();
-    read.position = 21; // the applied instruction is not public content
+    read.position = 41; // the applied instruction is not public content
     try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(read));
     try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{ .session = .{}, .position = 1 }));
-    try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(.{ .session = request.session, .position = 1, .start = 1024 * 1024 + 1 }));
+    try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(.{ .session = request.session, .position = 21, .start = 1024 * 1024 + 1 }));
     try std.testing.expectError(error.InvalidCursor, storage.publicConversationPage(.{ .session = request.session, .end = first.end + 100, .before_position = 1 }));
     try std.testing.expect(!storage.isFenced());
 }
@@ -11283,7 +11881,9 @@ test "one committed selection freezes its settings and input prefix" {
 
     // Failed admission publishes neither projection nor instruction inclusion.
     try std.testing.expectEqual(@as(i64, 0), try pragmaInt(storage.database, "SELECT count(*) FROM conversation_entry"));
-    try std.testing.expectEqual(@as(i64, 1), try pragmaInt(storage.database, "SELECT next_position FROM session"));
+    // The two successful admissions retained their positions; the failed
+    // processing binding consumed none.
+    try std.testing.expectEqual(@as(i64, 3), try pragmaInt(storage.database, "SELECT next_position FROM session"));
 
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
@@ -12260,6 +12860,10 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     try std.testing.expectEqual(@as(usize, 5150), comparisons);
 
     try exec(storage.database, "DELETE FROM model_operation");
+    // Recovery now publishes ordered outcomes in the selected Turn's Session.
+    // The two selectable synthetic Turns need their real canonical owners.
+    try configureTestSession(&storage, "exhausted-owner-6100", "exhausted-6100");
+    try configureTestSession(&storage, "exhausted-owner-6101", "exhausted-6101");
     try exec(
         storage.database,
         "WITH RECURSIVE sequence(value) AS (VALUES(6000) UNION ALL SELECT value+1 FROM sequence WHERE value<6101) " ++
