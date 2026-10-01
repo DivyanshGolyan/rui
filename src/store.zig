@@ -2599,24 +2599,15 @@ pub const Store = struct {
     }
 
     fn publicConversationContentIdLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !i64 {
-        const statement = if (ordinal == 0)
-            try prepare(self.database, "SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND session_position=?2 AND entry_kind IN (1,3)")
-        else
-            try prepare(self.database, "SELECT coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_operation op " ++
-                "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
-                "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-                "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' AND call.call_ordinal+1=?3 " ++
-                "AND (SELECT max(coalesce(c.acceptance_position,a.acceptance_position)) FROM model_tool_call c " ++
-                "LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id)=?2 " ++
-                "AND (SELECT count(*) FROM model_tool_call c WHERE c.operation_id=op.operation_id)=" ++
-                "(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
-                "AND NOT EXISTS (SELECT 1 FROM model_tool_call c LEFT JOIN action_operation a " ++
-                "ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id " ++
-                "AND (coalesce(c.acceptance_position,a.acceptance_position) IS NULL OR coalesce(c.rejection_content_id,a.resolution_content_id) IS NULL))");
+        if (ordinal == 0) return self.publicOrdinaryContentLocked(session, position);
+        const group = (try self.publicToolGroupBefore(session, position)) orelse return error.ContentNotFound;
+        if (group.position == null or group.position.? != position) return error.ContentNotFound;
+        const statement = try prepare(self.database, "SELECT coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_tool_call call " ++
+            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+            "WHERE call.operation_id=?1 AND call.call_ordinal=?2");
         defer _ = c.sqlite3_finalize(statement);
-        try bindText(statement, 1, session);
-        try bindU64(statement, 2, position);
-        if (ordinal != 0) try bindU64(statement, 3, ordinal);
+        try bindU64(statement, 1, group.operation_id);
+        try bindU64(statement, 2, ordinal - 1);
         switch (c.sqlite3_step(statement)) {
             c.SQLITE_ROW => {},
             c.SQLITE_DONE => return error.ContentNotFound,
@@ -2625,6 +2616,29 @@ pub const Store = struct {
         const content_id = c.sqlite3_column_int64(statement, 0);
         if (content_id <= 0) return error.CorruptStore;
         return content_id;
+    }
+
+    // One indexed ordinary identity owns provenance for pages, view and bytes.
+    // LEFT JOIN retains damaged dependencies so absence cannot hide corruption.
+    fn publicOrdinaryContentLocked(self: *Store, session: []const u8, position: u64) !i64 {
+        const statement = try prepare(self.database, "SELECT e.content_id,CASE WHEN c.content_id IS NOT NULL AND t.session_ref=e.session_ref AND " ++
+            "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
+            "(e.entry_kind=3 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id AND o.resolution_content_id=e.content_id)) THEN 1 ELSE 0 END " ++
+            "FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
+            "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
+            "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
+            "LEFT JOIN content c ON c.content_id=e.content_id " ++
+            "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session);
+        try bindU64(statement, 2, position);
+        switch (c.sqlite3_step(statement)) {
+            c.SQLITE_DONE => return error.ContentNotFound,
+            c.SQLITE_ROW => {},
+            else => return error.ConversationReadFailed,
+        }
+        if (c.sqlite3_column_int(statement, 1) != 1) return error.CorruptStore;
+        return try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore;
     }
 
     pub fn captureSessionReport(
