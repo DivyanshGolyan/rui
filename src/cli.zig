@@ -1,5 +1,7 @@
 const std = @import("std");
 const TerminalEditor = @import("TerminalEditor.zig");
+const SessionTerminal = @import("SessionTerminal.zig");
+const FrontendRead = @import("FrontendRead.zig");
 const TerminalText = @import("TerminalText.zig");
 const client = @import("client.zig");
 const codex_auth = @import("codex_auth.zig");
@@ -39,6 +41,28 @@ pub fn main(init: std.process.Init) !void {
     try postCommandHold(init);
 }
 
+fn reportTerminalFailure(err: anyerror) void {
+    const flags = std.c.fcntl(2, std.c.F.GETFL, @as(c_int, 0));
+    if (flags < 0) return;
+    const nonblocking: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    const changed = flags & nonblocking == 0;
+    if (changed and std.c.fcntl(2, std.c.F.SETFL, flags | nonblocking) < 0) return;
+    const name = @errorName(err);
+    const vectors = [_]std.posix.iovec_const{
+        .{ .base = "error: ", .len = "error: ".len },
+        .{ .base = name.ptr, .len = name.len },
+        .{ .base = "\n", .len = 1 },
+    };
+    // Partial output or failure is intentionally not retried. These flags can
+    // belong to the same open-file description as stdin/stdout or a parent FD.
+    _ = std.c.writev(2, &vectors, vectors.len);
+    if (changed and std.c.fcntl(2, std.c.F.SETFL, flags) < 0) {
+        // This is already a fatal, terminating path. Do not reopen blocking
+        // reporting or claim restoration after an unconfirmed native failure.
+        return;
+    }
+}
+
 fn configureHostAllocator(init: std.process.Init, args: []const []const u8) !void {
     if (@import("builtin").os.tag != .macos) return;
     if (std.mem.eql(u8, init.environ_map.get("RUI_HOST_MALLOC_DEFAULTS") orelse "", "0")) return;
@@ -62,6 +86,7 @@ fn configureHostAllocator(init: std.process.Init, args: []const []const u8) !voi
 
 const Presentation = enum { human, json, interactive };
 
+const action_choice_prompt = "Allow once, deny, or later? [a/d/l] ";
 const post_command_ready_fd_environment = "RUI_TEST_POST_COMMAND_READY_FD";
 const post_command_release_fd_environment = "RUI_TEST_POST_COMMAND_RELEASE_FD";
 
@@ -782,6 +807,60 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
+fn configureEntered(init: std.process.Init, args: []const []const u8, interactive: bool, frontend: ?*Frontend) !void {
+    const io = init.io;
+    var json = false;
+    var input = client.ConfigureInput{
+        .store = "",
+        .session = .{ .named = "" },
+    };
+    var location: @FieldType(client.CaptureTarget, "explicit") = .{ .record = "", .key = "" };
+    var drop_reply: ?[]const u8 = null;
+    var explicit_store: ?[]const u8 = null;
+    var key_seen = false;
+    var index: usize = 0;
+    while (index < args.len) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) location.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
+            location.key = try takeValue(args, &index);
+            key_seen = true;
+        } else if (std.mem.eql(u8, arg, "--provider")) {
+            input.provider = .{ .present = true, .value = try takeValue(args, &index) };
+        } else if (std.mem.eql(u8, arg, "--session")) input.session = .{ .named = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--workspace")) input.workspace = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--model")) input.model = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--instructions")) input.instructions = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--tools")) input.tools = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--permission-mode")) input.permission_mode = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--output-schema")) input.output_schema = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--text-output")) input.output_schema = .{ .state = .explicit_null } else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
+        index += 1;
+    }
+    if (input.session.named.len == 0 or (location.record.len == 0) != !key_seen) return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    input.store = try selectedStore(init, explicit_store, &selected_buffer);
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const human = !key_seen;
+    const target: client.CaptureTarget = if (human) .{ .generated = try requestDirectory(init, &directory_buffer) } else .{ .explicit = location };
+    var captured = try client.captureConfigure(io, input, target);
+    const saved = captured.identity().*;
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = blk: {
+        defer captured.close(io);
+        if (human and !interactive) {
+            if (json) try announceCaptureJson(io, saved.key.slice()) else try announceCapture(io, saved.key.slice());
+        }
+        break :blk try readRequest(frontend, io, client.sendCaptured, .{ &captured, drop_reply, &reply_buffer });
+    };
+    if (interactive) try client.checkCanonicalFailure(reply);
+    const accepted = if (human and interactive) try acceptedReply(reply) else false;
+    if (human and (!interactive or !accepted)) {
+        if (frontend) |owner| try writeAdmissionTo(owner.terminal.writer(), reply, if (json) saved.key.slice() else null) else try writeAdmission(io, reply, if (json) saved.key.slice() else null);
+    } else if (!human) try writeCommandReply(io, reply);
+    if (human and interactive and accepted) {
+        if (frontend) |owner| try owner.terminal.write("Rui: Configured.\n") else try std.Io.File.stdout().writeStreamingAll(io, "Rui: Configured.\n");
+    }
+    if (human and !json and !interactive) {
+        var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
+        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "configuration: {s} in {s}\n", .{ saved.session.slice(), saved.store.slice() }));
+        if (try acceptedReply(reply)) try std.Io.File.stdout().writeStreamingAll(io, "next: rui --resume REF [--store PATH]\n");
+    }
+    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
+}
+
 fn message(init: std.process.Init, args: []const []const u8) !void {
     const io = init.io;
     var json = false;
@@ -935,10 +1014,111 @@ fn showSessionStatus(init: std.process.Init, store: []const u8, session_ref: []c
     }
 }
 
+const Frontend = struct {
+    init: std.process.Init,
+    terminal: *SessionTerminal,
+    admission: *Admission,
+    lane: FrontendRead = .{},
+    store: []const u8 = "",
+    session: []const u8 = "",
+    accepting: bool = false,
+
+    fn fatal(self: *const Frontend, err: anyerror) bool {
+        // A service failure ends terminal custody before joining the reader.
+        // Only worker request failures with an active terminal may recover.
+        return !self.terminal.active or fatalPresentation(err);
+    }
+
+    fn cancel(self: *Frontend) void {
+        self.lane.stop();
+        self.admission.cancellation.requestStop();
+        if (self.terminal.active) self.terminal.close() catch @panic("terminal restoration failed");
+    }
+
+    fn service(self: *Frontend) !void {
+        // /wait also services input without an active reader wait scope.
+        errdefer self.cancel();
+        try self.terminal.service(10);
+        if (!self.terminal.output) try self.terminal.repaint();
+        if (self.accepting and !self.admission.held) {
+            if (self.terminal.readyDraft()) |text| {
+                if (text.len != 0) try self.submit(text);
+            }
+        }
+    }
+
+    fn submit(self: *Frontend, text: []const u8) !void {
+        const message_text = if (std.mem.startsWith(u8, text, "//")) text[1..] else text;
+        var directory: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        self.admission.captured = client.captureMessage(self.init.io, .{ .store = self.store, .session = self.session, .text_path = "", .text = message_text }, .{ .generated = try requestDirectory(self.init, &directory) }) catch |err| {
+            self.terminal.ready = false;
+            const restored = self.terminal.rejectSubmission();
+            if (!self.terminal.output) try self.terminal.beginOutput();
+            try self.terminal.writer().print("rui: capture failed ({s}); nothing sent. {s}\n", .{ @errorName(err), if (restored) "Original draft restored." else "Original draft retained; /discard releases it without sending." });
+            return;
+        };
+        self.admission.held = true;
+        self.admission.reply = null;
+        self.admission.failure = null;
+        self.terminal.captureReady();
+        try self.admission.start();
+    }
+
+    fn wait(self: *Frontend, sink: anytype) !void {
+        errdefer {
+            // Do this before join, even when the producer is withholding the
+            // first byte or waiting for this terminal's content rendezvous.
+            self.cancel();
+            self.lane.join();
+        }
+        while (!self.lane.done.load(.acquire)) {
+            if (self.lane.borrow()) |bytes| {
+                defer self.lane.release();
+                if (@TypeOf(sink) != @TypeOf(null)) try sink.feed(bytes) else unreachable;
+            }
+            try self.service();
+        }
+        self.lane.join();
+    }
+
+    fn call(self: *Frontend, comptime function: anytype, args: anytype) anyerror!@typeInfo(@TypeOf(@call(.auto, function, .{@as(client.Requests, undefined)} ++ args))).error_union.payload {
+        var job: FrontendRead.Job(function, @TypeOf(args)) = .{ .args = args };
+        try self.lane.start(&job);
+        try self.wait(null);
+        return job.result;
+    }
+
+    fn stream(self: *Frontend, comptime function: anytype, prefix: anytype, sink: anytype, reply: *client.ReplyBuffer) anyerror!@typeInfo(@TypeOf(@call(.auto, function, .{@as(client.Requests, undefined)} ++ prefix ++ .{ &self.lane, reply }))).error_union.payload {
+        const args = prefix ++ .{ &self.lane, reply };
+        var job: FrontendRead.Job(function, @TypeOf(args)) = .{ .args = args };
+        try self.lane.start(&job);
+        try self.wait(sink);
+        return job.result;
+    }
+};
+
+fn readRequest(frontend: ?*Frontend, io: std.Io, comptime function: anytype, args: anytype) anyerror!@typeInfo(@TypeOf(@call(.auto, function, .{@as(client.Requests, undefined)} ++ args))).error_union.payload {
+    if (frontend) |owner| return owner.call(function, args);
+    return @call(.auto, function, .{client.Requests{ .io = io }} ++ args);
+}
+
+fn streamRequest(frontend: ?*Frontend, io: std.Io, comptime function: anytype, prefix: anytype, sink: anytype, reply: *client.ReplyBuffer) anyerror!@typeInfo(@TypeOf(@call(.auto, function, .{@as(client.Requests, undefined)} ++ prefix ++ .{ sink, reply }))).error_union.payload {
+    if (frontend) |owner| return owner.stream(function, prefix, sink, reply);
+    return @call(.auto, function, .{client.Requests{ .io = io }} ++ prefix ++ .{ sink, reply });
+}
+
 fn writeSafeField(io: std.Io, label: []const u8, value: []const u8) !void {
     try std.Io.File.stdout().writeStreamingAll(io, label);
     try writeSafeText(io, value);
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
+}
+
+fn writeField(out: *std.Io.Writer, label: []const u8, value: []const u8) !void {
+    try out.writeAll(label);
+    var text: TerminalText = .{ .mode = .line };
+    try text.feed(out, value);
+    try text.finish(out);
+    try out.writeAll("\n");
 }
 
 fn writeSafeText(io: std.Io, value: []const u8) !void {
@@ -1177,6 +1357,72 @@ fn interactiveAction(init: std.process.Init, store: []const u8, session_ref: []c
 // Decode command arguments into the editor's borrowed line. Removing quotes
 // and escapes only shrinks it, so each returned slice remains valid until the
 // next prompt reuses the input buffer. This is not shell expansion.
+const Admission = struct {
+    captured: client.CapturedRecord = undefined,
+    buffer: client.ReplyBuffer = .{},
+    reply: ?client.CommandReply = null,
+    failure: ?anyerror = null,
+    done: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+    held: bool = false,
+    cancellation: client.Cancellation = .{},
+
+    fn start(self: *Admission) !void {
+        std.debug.assert(self.thread == null);
+        // This borrower may outlive the terminal's /login handoff. Inherit
+        // blocked SIGINT from birth; only the terminal owns its delivery.
+        var set = std.posix.sigemptyset();
+        std.posix.sigaddset(&set, .INT);
+        var previous: std.posix.sigset_t = undefined;
+        if (std.c.pthread_sigmask(@intCast(std.posix.SIG.BLOCK), &set, &previous) != 0) return error.AdmissionSignalMaskFailed;
+        defer if (std.c.pthread_sigmask(@intCast(std.posix.SIG.SETMASK), &previous, &set) != 0) @panic("terminal signal mask restoration failed");
+        self.done.store(false, .release);
+        self.thread = try std.Thread.spawn(.{}, Admission.run, .{self});
+    }
+
+    fn run(self: *Admission) void {
+        const exchange: client.Requests = .{ .io = std.Io.Threaded.global_single_threaded.io(), .cancellation = &self.cancellation };
+        self.reply = exchange.sendCaptured(&self.captured, null, &self.buffer) catch |err| blk: {
+            self.failure = err;
+            break :blk null;
+        };
+        if (self.reply) |reply| {
+            client.checkCanonicalFailure(reply) catch |err| {
+                self.reply = null;
+                self.failure = err;
+                self.done.store(true, .release);
+                return;
+            };
+            if (reply.status != 200 and reply.status != 409) {
+                self.reply = null;
+                self.failure = error.HostInvocationFailed;
+            }
+        }
+        self.done.store(true, .release);
+    }
+
+    fn recover(self: *Admission) !void {
+        if (self.failure == null or self.thread != null) return;
+        const failure = self.failure.?;
+        self.failure = null;
+        errdefer self.failure = failure;
+        try self.start();
+    }
+
+    fn close(self: *Admission, io: std.Io) void {
+        if (self.thread) |thread| {
+            self.cancellation.requestStop();
+            thread.join();
+            self.thread = null;
+        }
+        // No borrower remains. A subsequent explicit recovery/admission gets
+        // a fresh capability, never an implicitly retried exchange.
+        self.cancellation = .{};
+        if (self.held) self.captured.close(io);
+        self.held = false;
+    }
+};
+
 fn interactiveTokens(input: []u8, tokens: [][]const u8) !usize {
     var read: usize = 0;
     var write: usize = 0;
@@ -1544,6 +1790,26 @@ fn writeAdmission(io: std.Io, reply: client.CommandReply, json_handle: ?[]const 
     }
 }
 
+fn writeAdmissionTo(out: *std.Io.Writer, reply: client.CommandReply, json_handle: ?[]const u8) !void {
+    if (json_handle) |handle| {
+        try out.print("{{\"event\":\"admission\",\"request\":\"{s}\",\"admission\":", .{handle});
+        try out.writeAll(reply.body);
+        return out.writeAll("}\n");
+    }
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
+    defer parsed.deinit();
+    const answer = try objectField(parsed.value, "answer");
+    const status = try stringField(answer, "status");
+    try out.print("admitted: {s}\n", .{status});
+    const replayed = try objectField(answer, "replayed");
+    if (replayed != .bool) return error.InvalidObservation;
+    try out.writeAll(if (replayed.bool) "replayed: true\n" else "replayed: false\n");
+    if (answer.object.get("code")) |code| {
+        if (code != .string) return error.InvalidObservation;
+        try writeField(out, "code: ", code.string);
+    }
+}
+
 fn objectField(value: std.json.Value, name: []const u8) !std.json.Value {
     if (value != .object) return error.InvalidObservation;
     return value.object.get(name) orelse error.InvalidObservation;
@@ -1835,6 +2101,31 @@ fn showResult(init: std.process.Init, saved: *const client.MessageAddress, prese
         .command => return error.ResultReadFailed,
     }
     try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+}
+
+fn waitEnteredSession(frontend: *Frontend) !?Work {
+    const report = try inspectWork(frontend.init, frontend.store, frontend.session, frontend);
+    defer report.file.close(frontend.init.io);
+    const selected = report.work.selected_message orelse {
+        try frontend.terminal.write("Rui: No work to wait for.\n");
+        return null;
+    };
+    // Selection is one immutable Message address, not the Session's changing
+    // current Turn; a successor never delays the originally selected answer.
+    const address = try client.MessageAddress.init(frontend.store, frontend.session, selected.slice());
+    while (true) {
+        var observed = try readRequest(frontend, frontend.init.io, client.observeMessage, .{ std.heap.c_allocator, &address });
+        defer observed.deinit();
+        if (observed.state.terminal()) {
+            try showResult(frontend.init, &address, .interactive, frontend);
+            return null;
+        }
+        if (observed.progress) |progress| {
+            if (progress.action != null and progress.status == .waiting_for_permission) return report.work;
+        }
+        try frontend.service();
+        try std.Io.sleep(frontend.init.io, .fromMilliseconds(100), .awake);
+    }
 }
 
 const Work = struct {
@@ -2161,6 +2452,20 @@ fn progressNotice(queue: client.MessageObservation.State, status: @FieldType(cli
 
 // null is the selected message's terminal observation; an Action is only a hint
 // to inspect and decide against the Host's exact current target.
+test "Frontend terminal custody distinguishes service failure from request outage" {
+    var terminal: SessionTerminal = .{ .io = std.testing.io, .editor = .{ .buffer = &.{} }, .spare = &.{}, .original = undefined, .raw = undefined, .size = undefined };
+    const frontend: Frontend = .{ .init = undefined, .terminal = &terminal, .admission = undefined };
+    try std.testing.expect(!frontend.fatal(error.HostUnavailable));
+    try std.testing.expect(frontend.fatal(error.IncompleteTerminalInput));
+    try std.testing.expect(frontend.fatal(error.IncompleteTerminalLine));
+    terminal.active = false;
+    // Classifying names alone cannot cover every OS/service failure. Losing
+    // custody is decisive even for an error normally recoverable from a worker.
+    try std.testing.expect(frontend.fatal(error.HostUnavailable));
+}
+
+// null is the selected message's terminal observation; an Action is only a hint
+// to inspect and decide against the Host's exact current target.
 fn followMessage(init: std.process.Init, saved: *const client.MessageAddress, presentation: Presentation, policy: FollowPolicy) !?Work {
     var last_queue: ?client.MessageObservation.State = null;
     var last_progress: ?@FieldType(client.MessageObservation.Progress, "status") = null;
@@ -2256,6 +2561,55 @@ fn inspectAction(init: std.process.Init, args: []const []const u8, interactive: 
     try std.Io.File.stdout().writeStreamingAll(io, "\"\n");
 }
 
+fn inspectEnteredAction(init: std.process.Init, args: []const []const u8, interactive: bool, frontend: ?*Frontend) !void {
+    const io = init.io;
+    var store: ?[]const u8 = null;
+    var session: ?[]const u8 = null;
+    var action: ?u64 = null;
+    var json = false;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--action")) action = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else if (std.mem.eql(u8, args[index], "--json")) json = true else return error.UnknownArgument;
+    }
+    const target = action orelse return usage();
+    const reference = session orelse return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const selected = try selectedStore(init, store, &selected_buffer);
+    if (interactive) {
+        var size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+        if (std.c.ioctl(1, @intCast(std.c.T.IOCGWINSZ), &size) == 0 and size.col > 0) {
+            if (size.col <= action_choice_prompt.len + 1) return error.TerminalTooNarrow;
+        }
+    }
+    const file = try renderScratch(init);
+    defer file.close(io);
+    var buffer: client.ReplyBuffer = .{};
+    var call_bytes: u64 = 0;
+    if (!interactive) {
+        const call = try client.readActionCallId(io, selected, reference, target, file, &buffer);
+        if (call != .answer) return error.ActionReadFailed;
+        call_bytes = call.answer.bytes;
+    }
+    const arguments = try readRequest(frontend, io, client.readActionArguments, .{ selected, reference, target, file, &buffer });
+    if (arguments != .answer) {
+        try client.checkCanonicalFailure(arguments.command);
+        return error.ActionReadFailed;
+    }
+    var source: ActionSource = .{ .io = io, .file = file, .start = call_bytes, .length = arguments.answer.bytes };
+    const descriptor = (try tools.inspectBashArguments(&source)) orelse return error.InvalidActionArguments;
+    source.position = 0;
+    var output_buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stdout().writerStreaming(io, &output_buffer);
+    const out = if (frontend) |owner| owner.terminal.writer() else &writer.interface;
+    writeActionInspection(io, target, &source, descriptor, json, interactive, out) catch |err| {
+        if (interactive) return error.ActionDisplayFailed;
+        return err;
+    };
+    try out.flush();
+}
+
+// Retrieval and exact descriptor validation finish before any authority-bearing
+// output. Failure after rendering begins is fatal to the interactive session.
 fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escape_unicode: bool) !void {
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var writer = std.Io.File.stdout().writerStreaming(io, &output_buffer);
