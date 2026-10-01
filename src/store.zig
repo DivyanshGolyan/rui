@@ -12033,6 +12033,408 @@ test "private-only model output never becomes public conversation" {
     try std.testing.expect(!storage.isFenced());
 }
 
+test "public history owner work does not grow with older groups" {
+    const Measure = struct {
+        const Counter = struct {
+            steps: u64 = 0,
+
+            fn trace(event: c_uint, context: ?*anyopaque, statement: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
+                if (event == c.SQLITE_TRACE_PROFILE) {
+                    const counter: *Counter = @ptrCast(@alignCast(context.?));
+                    counter.steps += @intCast(c.sqlite3_stmt_status(@ptrCast(statement.?), c.SQLITE_STMTSTATUS_VM_STEP, 0));
+                }
+                return 0;
+            }
+        };
+
+        fn run(groups: usize, width: usize, unrelated: usize, private_items: usize) ![5]u64 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            if (unrelated != 0) {
+                try configureTestSession(&storage, "other-config", "direct/other-work");
+                try submitTestMessage(&storage, &tmp, "other-input", "other-message", "direct/other-work", "tools");
+                var other = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const call = TestingCall{ .item_id = "other", .name = "unknown", .encoded_call_id = "other", .decoded_call_id = "other", .encoded_arguments = "{}", .decoded_arguments = "{}" };
+                for (0..unrelated) |index| {
+                    try settleCallsForTesting(&storage, &tmp, other, "other-output", &.{call});
+                    if (index + 1 < unrelated) other = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                }
+                var stop = try completeSessionStop("other-stop", "direct/other-work");
+                try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            }
+            try configureTestSession(&storage, "work-config", "direct/public-work");
+            try submitTestMessage(&storage, &tmp, "work-input", "work-message", "direct/public-work", "tools");
+            var binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            if (private_items != 0) {
+                // Commit private continuation through the same settlement
+                // boundary, not a second transcript fixture/projection.
+                try submitTestMessage(&storage, &tmp, "private-input", "private-message", "direct/public-work", "more");
+                const source = try tmp.dir.createFile(std.testing.io, "private-source", .{ .read = true });
+                defer source.close(std.testing.io);
+                try source.writeStreamingAll(std.testing.io, "private");
+                try source.sync(std.testing.io);
+                var root: [protocol.max_store_bytes]u8 = undefined;
+                const root_length = try tmp.dir.realPath(std.testing.io, &root);
+                var used: std.atomic.Value(u64) = .init(0);
+                var retained: ?named_scratch.Owner = null;
+                var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..root_length], "private-work", .{ .used = &used, .limit = private_items * output_metadata_record_bytes }, false, &retained);
+                defer metadata.deinit();
+                for (0..private_items) |ordinal| {
+                    var id: [32]u8 = undefined;
+                    const item_id = try std.fmt.bufPrint(&id, "private-{d}", .{ordinal});
+                    try metadata.append(.{ .tag = .item, .kind = .reasoning, .ordinal = ordinal, .start = 0, .length = 7, .id_digest = protocol.contentDigest(item_id), .content_digest = protocol.contentDigest("private") });
+                }
+                try metadata.sealForRead();
+                try storage.settleModelSuccess(binding, &.{ .source = source, .source_length = 7, .metadata = metadata.file, .item_count = private_items, .call_count = 0, .answer_length = 0, .answer_digest = protocol.contentDigest(""), .response_id = .{}, .body_model = .{}, .openai_model = .{}, .x_openai_model = .{}, .request_id = .{} }, .{});
+                binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            }
+            var calls: [65]TestingCall = undefined;
+            var ids: [65][32]u8 = undefined;
+            var request = protocol.ConversationPage{};
+            try request.session.set("direct/public-work");
+            const users = try storage.publicConversationPage(request);
+            try std.testing.expectEqual(@as(usize, if (private_items == 0) 1 else 2), users.count);
+            for (calls[0..width], 0..) |*call, index| {
+                const id = try std.fmt.bufPrint(&ids[index], "work-call-{d}", .{index});
+                call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+            }
+            var positions: [128]u64 = undefined;
+            var source_after: u64 = 0;
+            for (0..groups) |group| {
+                try settleCallsForTesting(&storage, &tmp, binding, "work-output", calls[0..width]);
+                // Independent public call-feed anchors plus the fixture's one
+                // rejection acceptance per call define the expected history.
+                for (0..width) |_| {
+                    const call = try storage.nextSessionCall("direct/public-work", source_after);
+                    source_after = call.call.?.position;
+                }
+                positions[group] = source_after + width;
+                if (group + 1 < groups) binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            }
+            var counter = Counter{};
+            try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_trace_v2(storage.database, c.SQLITE_TRACE_PROFILE, Counter.trace, &counter));
+            defer _ = c.sqlite3_trace_v2(storage.database, 0, null, null);
+            var memory_before: c.sqlite3_int64 = 0;
+            var memory_peak: c.sqlite3_int64 = 0;
+            try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_status64(c.SQLITE_STATUS_MEMORY_USED, &memory_before, &memory_peak, 1));
+            const first = try storage.publicConversationPage(request);
+            const page_steps = counter.steps;
+            try std.testing.expectEqual(@as(usize, 16), first.count);
+            try std.testing.expect(first.more);
+            counter.steps = 0;
+            var reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = positions[groups - 1], .ordinal = width });
+            reader.close();
+            const content_steps = counter.steps;
+            counter.steps = 0;
+            request.end = first.end;
+            request.before_position = first.items[15].position;
+            request.before_ordinal = first.items[15].ordinal;
+            _ = try storage.publicConversationPage(request);
+            const cursor_steps = counter.steps;
+            counter.steps = 0;
+            var oldest = try storage.openPublicConversationContent(.{ .session = request.session, .position = positions[0], .ordinal = width });
+            oldest.close();
+            const oldest_content_steps = counter.steps;
+            var memory_after: c.sqlite3_int64 = 0;
+            try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_status64(c.SQLITE_STATUS_MEMORY_USED, &memory_after, &memory_peak, 0));
+            counter.steps = 0;
+            var seen: usize = 0;
+            request.before_position = 0;
+            request.before_ordinal = 0;
+            while (true) {
+                const page = try storage.publicConversationPage(request);
+                for (page.items[0..page.count]) |item| {
+                    if (seen < groups * width) {
+                        try std.testing.expectEqual(positions[groups - 1 - seen / width], item.position);
+                        try std.testing.expectEqual(@as(u64, @intCast(width - seen % width)), item.ordinal);
+                        try std.testing.expect(item.kind == .tool_result);
+                        try std.testing.expectEqual(@as(u64, "Unknown tool: unknown.".len), item.content.length);
+                        try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Unknown tool: unknown."), &item.content.digest);
+                    } else {
+                        try std.testing.expect(seen < groups * width + 1 + @as(usize, if (private_items != 0) 1 else 0));
+                        try std.testing.expect(item.kind == .user);
+                        try std.testing.expectEqual(@as(u64, 0), item.ordinal);
+                        const user_index = seen - groups * width;
+                        try std.testing.expectEqual(users.items[user_index].position, item.position);
+                        const text = if (private_items != 0 and user_index == 0) "more" else "tools";
+                        try std.testing.expectEqual(@as(u64, text.len), item.content.length);
+                        try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &item.content.digest);
+                    }
+                    seen += 1;
+                }
+                if (!page.more) break;
+                request.before_position = page.items[page.count - 1].position;
+                request.before_ordinal = page.items[page.count - 1].ordinal;
+            }
+            try std.testing.expectEqual(groups * width + 1 + @as(usize, if (private_items != 0) 1 else 0), seen);
+            const traversal_steps = counter.steps;
+            std.debug.print("public history groups={d} width={d} unrelated={d} private={d}: page/content/cursor VM={d}/{d}/{d}, SQLite transient peak={d} retained delta={d}\n", .{ groups, width, unrelated, private_items, page_steps, content_steps, cursor_steps, memory_peak - memory_before, memory_after - memory_before });
+            std.debug.print("public history oldest content/full traversal VM={d}/{d}\n", .{ oldest_content_steps, traversal_steps });
+            return .{ page_steps, content_steps, cursor_steps, oldest_content_steps, traversal_steps };
+        }
+    };
+    const smaller = try Measure.run(32, 1, 0, 0);
+    const small = try Measure.run(64, 1, 0, 0);
+    const large = try Measure.run(128, 1, 0, 0);
+    // Suffix and exact oldest-item reads must not scan the doubled population;
+    // traversal increments cancel fixed first/last-page work before comparing
+    // the doubled number of additional groups, without a timing allowance.
+    // At 32 groups the second page's lookahead is a User, not a Tool Result.
+    try std.testing.expectEqualSlices(u64, smaller[0..2], small[0..2]);
+    try std.testing.expectEqual(smaller[3], small[3]);
+    try std.testing.expectEqualSlices(u64, small[0..4], large[0..4]);
+    try std.testing.expect(small[4] > smaller[4] and large[4] > small[4]);
+    try std.testing.expect(large[4] - small[4] <= 2 * (small[4] - smaller[4]));
+    const other = try Measure.run(64, 1, 128, 0);
+    const more_other = try Measure.run(64, 1, 256, 0);
+    try std.testing.expectEqualSlices(u64, &other, &more_other);
+    const private = try Measure.run(64, 1, 0, 128);
+    const more_private = try Measure.run(64, 1, 0, 512);
+    try std.testing.expectEqualSlices(u64, &private, &more_private);
+    // Width is a separate required full-group validation cost, not a magic
+    // page-work cap. Record its slope while independently checking sequences.
+    _ = try Measure.run(4, 17, 0, 0);
+    _ = try Measure.run(4, 65, 0, 0);
+}
+
+test "public history mixed group waits for stopped Action recovery and preserves fixed end" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSessionAsk(&storage, "mixed-public-config", "direct/mixed-public", false);
+    try submitTestMessage(&storage, &tmp, "mixed-public-input", "mixed-public-message", "direct/mixed-public", "tools");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "reject", .name = "unknown", .encoded_call_id = "reject", .decoded_call_id = "reject", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        .{ .item_id = "deny", .name = "bash", .encoded_call_id = "deny", .decoded_call_id = "deny", .encoded_arguments = "{\"cmd\":\"one\",\"timeout_ms\":null}", .decoded_arguments = "{\"cmd\":\"one\",\"timeout_ms\":null}" },
+        .{ .item_id = "run", .name = "bash", .encoded_call_id = "run", .decoded_call_id = "run", .encoded_arguments = "{\"cmd\":\"two\",\"timeout_ms\":null}", .decoded_arguments = "{\"cmd\":\"two\",\"timeout_ms\":null}" },
+    };
+    try settleCallsForTestingWithFaults(&storage, &tmp, binding, "mixed-public-output", &calls, "prefix", .{});
+    var request = protocol.ConversationPage{};
+    try request.session.set("direct/mixed-public");
+    const incomplete = try storage.publicConversationPage(request);
+    try std.testing.expectEqual(@as(usize, 2), incomplete.count);
+    try std.testing.expect(incomplete.items[0].kind == .assistant);
+    try std.testing.expect(incomplete.items[1].kind == .user);
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{ .session = request.session, .position = incomplete.end, .ordinal = 1 }));
+    try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+    var deny: protocol.PermissionDecisionCommand = .{ .action_id = 1 };
+    try deny.key.set("mixed-public-deny");
+    deny.session = request.session;
+    try std.testing.expect(storage.denyPermission(&deny, .{}) == .accepted);
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = 2, .decision = .allow_once };
+    try allow.key.set("mixed-public-allow");
+    allow.session = request.session;
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    _ = (try storage.admitNextActionAttempt(300_000, .{})).?;
+    var stop = try completeSessionStop("mixed-public-stop", "direct/mixed-public");
+    const stopped = storage.stopSession(&stop, .{});
+    try std.testing.expect(stopped == .accepted);
+    try std.testing.expectEqual(SessionStopCompletion.pending, stopped.accepted.completion);
+    try submitTestMessage(&storage, &tmp, "mixed-public-next", "mixed-public-next-message", "direct/mixed-public", "next");
+    try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+    const before_recovery = try storage.publicConversationPage(request);
+    try std.testing.expectEqual(@as(usize, 2), before_recovery.count);
+    try std.testing.expect(try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
+    const complete = try storage.publicConversationPage(request);
+    try std.testing.expectEqual(@as(usize, 5), complete.count);
+    try std.testing.expectEqual(before_recovery.end + 1, complete.items[0].position);
+    for (complete.items[0..3], 0..) |item, index| {
+        try std.testing.expect(item.kind == .tool_result);
+        try std.testing.expectEqual(complete.items[0].position, item.position);
+        try std.testing.expectEqual(@as(u64, 3) - index, item.ordinal);
+        var reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal });
+        defer reader.close();
+        var bytes: [128]u8 = undefined;
+        const length = try reader.read(0, &bytes);
+        const expected = ([_][]const u8{ "Bash outcome is indeterminate after Host recovery; the command was not replayed.", "Permission denied.", "Unknown tool: unknown." })[index];
+        try std.testing.expectEqualStrings(expected, bytes[0..length]);
+    }
+    try std.testing.expectEqual(@as(usize, 2), (try storage.publicConversationPage(.{ .session = request.session, .end = before_recovery.end })).count);
+    const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expect(next.turn_id != binding.turn_id);
+    try std.testing.expectEqual(@as(usize, 5), (try storage.publicConversationPage(.{ .session = request.session, .end = complete.end })).count);
+    const fresh = try storage.publicConversationPage(request);
+    try std.testing.expectEqual(@as(usize, 6), fresh.count);
+    try std.testing.expect(fresh.items[0].kind == .user);
+    try std.testing.expect(fresh.items[0].position > complete.items[0].position);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "public ordinary row provenance fences every public route" {
+    const mutations = [_][:0]const u8{
+        "UPDATE message_admission SET session_ref='foreign'",
+        "UPDATE message_admission SET turn_id=NULL",
+        "UPDATE message_admission SET content_id=999",
+        "UPDATE message_admission SET content_id=(SELECT content_id FROM content WHERE content_id!=message_admission.content_id LIMIT 1)",
+        "UPDATE conversation_entry SET content_id=999",
+        "DELETE FROM message_admission",
+        "UPDATE turn SET session_ref='foreign'",
+        "DELETE FROM turn",
+    };
+    for (mutations) |mutation| for (0..4) |route| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = "direct/provenance";
+        try configureTestSession(&storage, "provenance-config", session);
+        try submitTestMessage(&storage, &tmp, "provenance-input", "provenance-message", session, "input");
+        try submitTestMessage(&storage, &tmp, "provenance-other-input", "provenance-other-message", session, "different content");
+        _ = (try storage.admitNextModelAttempt(.{})).?;
+        var request = protocol.ConversationPage{};
+        try request.session.set(session);
+        const page = try storage.publicConversationPage(request);
+        try exec(storage.database, "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON");
+        try exec(storage.database, mutation);
+        switch (route) {
+            0 => try std.testing.expectError(error.CorruptStore, storage.sessionView(session, .{})),
+            1 => try std.testing.expectError(error.CorruptStore, storage.sessionView(session, .{ .recent = true })),
+            2 => try std.testing.expectError(error.CorruptStore, storage.publicConversationPage(request)),
+            3 => try std.testing.expectError(error.CorruptStore, storage.openPublicConversationContent(.{ .session = request.session, .position = page.items[0].position })),
+            else => unreachable,
+        }
+        try std.testing.expect(storage.isFenced());
+        try std.testing.expectError(error.StoreFenced, storage.sessionView(session, .{}));
+    };
+}
+
+test "public assistant and private sibling provenance fences every public route" {
+    const mutations = [_][:0]const u8{
+        "UPDATE model_operation SET session_ref='foreign'",
+        "UPDATE model_operation SET turn_id=999",
+        "DELETE FROM model_operation",
+        "UPDATE turn SET session_ref='foreign'",
+        "DELETE FROM turn",
+        "UPDATE conversation_entry SET content_id=999 WHERE entry_kind=3",
+        "UPDATE conversation_entry SET content_id=(SELECT content_id FROM message_admission WHERE command_key='sibling-message') WHERE entry_kind=3",
+        "UPDATE model_output_item SET session_ref='foreign' WHERE item_ordinal=0",
+        "UPDATE model_output_item SET session_position=1 WHERE item_ordinal=0",
+        "UPDATE model_output_item SET content_id=999 WHERE item_ordinal=0",
+    };
+    for ([_]bool{ false, true }) |private| for (mutations, 0..) |mutation, index| {
+        if ((!private and index >= 7) or (private and (index == 5 or index == 6))) continue;
+        for (0..4) |route| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = "direct/sibling";
+            try configureTestSession(&storage, "sibling-config", session);
+            try submitTestMessage(&storage, &tmp, "sibling-input", "sibling-message", session, "input");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const call = TestingCall{ .item_id = "one", .name = "unknown", .encoded_call_id = "one", .decoded_call_id = "one", .encoded_arguments = "{}", .decoded_arguments = "{}" };
+            try settleOutputForTesting(&storage, &tmp, binding, "sibling-output", &.{call}, "prefix", private, .{});
+            const advanced = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(binding.turn_id, advanced.turn_id);
+            try std.testing.expect(binding.operation_id != advanced.operation_id);
+            var request = protocol.ConversationPage{};
+            try request.session.set(session);
+            const page = try storage.publicConversationPage(request);
+            const selected = page.items[if (private) 0 else 1];
+            if (!private) {
+                var reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = selected.position });
+                defer reader.close();
+                var bytes: [16]u8 = undefined;
+                try std.testing.expectEqualStrings("prefix", bytes[0..try reader.read(0, &bytes)]);
+            }
+            const call_position = (try storage.nextSessionCall(session, 0)).call.?.position;
+            try exec(storage.database, "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON");
+            try exec(storage.database, mutation);
+            switch (route) {
+                0 => try std.testing.expectError(error.CorruptStore, storage.sessionView(session, .{ .position = if (private) call_position else 0 })),
+                1 => try std.testing.expectError(error.CorruptStore, storage.sessionView(session, .{ .recent = true })),
+                2 => try std.testing.expectError(error.CorruptStore, storage.publicConversationPage(request)),
+                3 => try std.testing.expectError(error.CorruptStore, storage.openPublicConversationContent(.{ .session = request.session, .position = selected.position, .ordinal = selected.ordinal })),
+                else => unreachable,
+            }
+            try std.testing.expect(storage.isFenced());
+            try std.testing.expectError(error.StoreFenced, storage.sessionView(session, .{}));
+        }
+    };
+}
+
+test "public ordinary missing identities and invalid cursors do not fence" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = "direct/ordinary-controls";
+    try configureTestSession(&storage, "ordinary-controls-config", session);
+    var request = protocol.ConversationContent{};
+    try request.session.set(session);
+    request.position = 1;
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(request));
+    try request.session.set("missing");
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(request));
+    try std.testing.expectError(error.SessionNotFound, storage.sessionView("missing", .{}));
+    try std.testing.expectError(error.InvalidCursor, storage.sessionView(session, .{ .position = 999 }));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "Session view signed metadata corruption fences instead of trapping" {
+    const mutations = [_][:0]const u8{
+        "UPDATE message_admission SET content_id=-1",
+        "UPDATE conversation_entry SET turn_id=-1",
+        "UPDATE conversation_entry SET source_admission_id=-1",
+        "UPDATE turn SET input_cutoff=-1",
+        "UPDATE turn SET operation_id=-1",
+    };
+    for (mutations) |mutation| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = "direct/signed";
+        try configureTestSession(&storage, "signed-config", session);
+        try submitTestMessage(&storage, &tmp, "signed-input", "signed-message", session, "input");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
+        try exec(storage.database, "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON");
+        try exec(storage.database, mutation);
+        try std.testing.expectError(error.CorruptStore, storage.sessionView(session, .{ .recent = true }));
+        try std.testing.expect(storage.isFenced());
+        try std.testing.expectError(error.StoreFenced, storage.sessionView(session, .{}));
+    }
+}
+
+test "public history corrupt canonical group fences paging and exact content" {
+    const Damage = enum { missing_call, future_acceptance, missing_producer };
+    for (std.enums.values(Damage)) |damage| for ([_]bool{ false, true }) |exact| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try configureTestSession(&storage, "broken-public-config", "direct/broken-public");
+        try submitTestMessage(&storage, &tmp, "broken-public-input", "broken-public-message", "direct/broken-public", "tools");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = [_]TestingCall{
+            .{ .item_id = "one", .name = "unknown", .encoded_call_id = "one", .decoded_call_id = "one", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            .{ .item_id = "two", .name = "unknown", .encoded_call_id = "two", .decoded_call_id = "two", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        };
+        try settleCallsForTesting(&storage, &tmp, binding, "broken-public-output", &calls);
+        var request = protocol.ConversationPage{};
+        try request.session.set("direct/broken-public");
+        const complete = try storage.publicConversationPage(request);
+        try std.testing.expectEqual(@as(usize, 3), complete.count);
+        try exec(storage.database, "PRAGMA foreign_keys=OFF");
+        try exec(storage.database, switch (damage) {
+            .missing_call => "DELETE FROM model_tool_call WHERE call_ordinal=0",
+            .future_acceptance => "UPDATE model_tool_call SET acceptance_position=999 WHERE call_ordinal=0",
+            .missing_producer => "DELETE FROM model_operation",
+        });
+        if (exact) {
+            try std.testing.expectError(error.CorruptStore, storage.openPublicConversationContent(.{ .session = request.session, .position = complete.items[0].position, .ordinal = 2 }));
+        } else {
+            try std.testing.expectError(error.CorruptStore, storage.publicConversationPage(request));
+        }
+        try std.testing.expect(storage.isFenced());
+    };
+}
+
 test "public tool-result cursor crosses a completed group boundary" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -12077,6 +12479,54 @@ test "public tool-result cursor crosses a completed group boundary" {
     var result: [64]u8 = undefined;
     const size = try reader.read(0, &result);
     try std.testing.expectEqualStrings("Unknown tool: unknown.", result[0..size]);
+}
+
+test "assistant prefix precedes an all-rejected group across public pages" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "prefix-config", "direct/prefix-page");
+    try submitTestMessage(&storage, &tmp, "prefix-input", "prefix-message", "direct/prefix-page", "ask tools");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var cursor = protocol.ConversationPage{};
+    try cursor.session.set("direct/prefix-page");
+    const before = try storage.publicConversationPage(cursor);
+    try std.testing.expectEqual(@as(usize, 1), before.count);
+
+    var ids: [17][16]u8 = undefined;
+    var names: [17][16]u8 = undefined;
+    var calls: [17]TestingCall = undefined;
+    for (&calls, 0..) |*call, index| {
+        const id = try std.fmt.bufPrint(&ids[index], "item-{d}", .{index});
+        const call_id = try std.fmt.bufPrint(&names[index], "call-{d}", .{index});
+        call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = call_id, .decoded_call_id = call_id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+    }
+    try settleCallsForTestingWithFaults(&storage, &tmp, binding, "prefix-metadata", &calls, "first, the answer", .{});
+    try std.testing.expectEqual(@as(usize, 1), (try storage.publicConversationPage(.{ .session = cursor.session, .end = before.end })).count);
+    const newest = try storage.publicConversationPage(cursor);
+    try std.testing.expectEqual(@as(usize, 16), newest.count);
+    try std.testing.expect(newest.more);
+    for (newest.items[0..newest.count], 0..) |item, index| {
+        try std.testing.expect(item.kind == .tool_result);
+        try std.testing.expectEqual(@as(u64, 17) - index, item.ordinal);
+    }
+    cursor.end = newest.end;
+    cursor.before_position = newest.items[15].position;
+    cursor.before_ordinal = newest.items[15].ordinal;
+    const older = try storage.publicConversationPage(cursor);
+    try std.testing.expectEqual(@as(usize, 3), older.count);
+    try std.testing.expect(!older.more);
+    try std.testing.expect(older.items[0].kind == .tool_result);
+    try std.testing.expectEqual(@as(u64, 1), older.items[0].ordinal);
+    try std.testing.expect(older.items[1].kind == .assistant);
+    try std.testing.expect(older.items[1].position < older.items[0].position);
+    try std.testing.expect(older.items[2].kind == .user);
+    var reader = try storage.openPublicConversationContent(.{ .session = cursor.session, .position = older.items[1].position });
+    defer reader.close();
+    var text: [32]u8 = undefined;
+    const size = try reader.read(0, &text);
+    try std.testing.expectEqualStrings("first, the answer", text[0..size]);
 }
 
 test "definite rejections retain decisions without retaining payloads" {
