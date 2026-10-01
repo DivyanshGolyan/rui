@@ -1,5 +1,6 @@
 const std = @import("std");
 const TerminalEditor = @import("TerminalEditor.zig");
+const TerminalText = @import("TerminalText.zig");
 const client = @import("client.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
@@ -943,7 +944,9 @@ fn writeSafeField(io: std.Io, label: []const u8, value: []const u8) !void {
 fn writeSafeText(io: std.Io, value: []const u8) !void {
     var buffer: [256]u8 = undefined;
     var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
-    try std.json.Stringify.encodeJsonStringChars(value, .{ .escape_unicode = true }, &writer.interface);
+    var text: TerminalText = .{ .mode = .line };
+    try text.feed(&writer.interface, value);
+    try text.finish(&writer.interface);
     try writer.flush();
 }
 

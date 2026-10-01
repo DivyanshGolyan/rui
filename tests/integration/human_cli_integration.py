@@ -783,7 +783,7 @@ def main():
             assert "Assistant: first answer" in terminal_step(master, f"/result {queued}")
             assert "Local recovery handles" in terminal_step(master, "/requests")
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
-            assert "No work to wait for." in terminal_step(master, "/wait")
+            assert "No work to wait for." in terminal_step(master, "/wait", before_prompt="No work to wait for.")
             assert "gpt-6-luna" in terminal_step(master, "/setup")
             login_prompt = terminal_step(master, "/login", "Provider: [c]")
             assert "Supported integration: Codex" in login_prompt and "defer leaves this Session" in login_prompt
