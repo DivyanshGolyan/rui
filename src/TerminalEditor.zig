@@ -21,8 +21,13 @@ paste_prefix_length: usize = 0,
 rejected: ?Event = null,
 plain_ascii: bool = true,
 
-const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow };
+pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow };
 const paste_end = "\x1b[201~";
+
+/// Retains the caller's storage, but discards all draft and decoder state.
+pub fn reset(self: *Editor) void {
+    self.* = .{ .buffer = self.buffer, .allow_paste = self.allow_paste };
+}
 
 /// Returns a slice borrowed from buffer until its caller next reuses it.
 /// No draft, terminal mode or buffered input survives a prompt.
@@ -50,11 +55,9 @@ pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool)
 
 fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]const u8 {
     const output = std.Io.File.stdout();
-    try output.writeStreamingAll(io, "\x1b[?2004h");
-    try output.writeStreamingAll(io, prompt);
     if (!allow_paste) {
-        // The exact Action is already printed. Nothing received before the
-        // complete fresh prompt may count as its decision.
+        // Discard typeahead after the exact Action is printed, before its
+        // choice prompt is published. Never flush prompt-visible input.
         if (termios.tcdrain(1) != 0 or termios.tcflush(0, termios.TCIFLUSH) != 0) return error.TerminalFlushFailed;
         // Borrowed fixture descriptor: prompt visibility alone does not prove
         // the input flush finished. Signal only after that boundary.
@@ -64,6 +67,8 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
             try ready.writeStreamingAll(io, "x");
         }
     }
+    try output.writeStreamingAll(io, "\x1b[?2004h");
+    try output.writeStreamingAll(io, prompt);
     var editor: Editor = .{ .buffer = buffer, .allow_paste = allow_paste };
     const initial_size = windowSize();
     var plain_prompt = true;
@@ -220,7 +225,7 @@ fn visibleRow(editor: *const Editor, prompt_size: usize, size: std.posix.winsize
 
 // This transition is also the production byte-ingress path. Its result is
 // observable through the accepted line; no escape parser reads past a prompt.
-fn feed(self: *Editor, byte: u8) Event {
+pub fn feed(self: *Editor, byte: u8) Event {
     if (self.paste) return self.pasted(byte);
     if (self.escape != .none and (byte == 3 or byte == 4 or byte == '\r' or byte == '\n')) {
         self.escape = .none;

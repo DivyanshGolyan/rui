@@ -6,5 +6,6 @@ test {
     _ = @import("named_scratch.zig");
     _ = @import("request_encoding.zig");
     _ = @import("session_view.zig");
+    _ = @import("SessionTerminal.zig");
     _ = @import("TerminalEditor.zig");
 }
