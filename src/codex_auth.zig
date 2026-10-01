@@ -76,6 +76,33 @@ fn validateSelected(record: *const credentials.Record, fixture: bool) !void {
         return error.InvalidCredentialExpiry;
 }
 
+pub const LocalStatus = enum {
+    missing,
+    configured,
+    renewal_due,
+    refresh_required,
+
+    pub fn usable(self: LocalStatus) bool {
+        return switch (self) {
+            .configured, .renewal_due => true,
+            .missing, .refresh_required => false,
+        };
+    }
+};
+
+/// Read one local snapshot without taking the refresh lock or contacting the
+/// provider. Configured and renewal-due are locally usable, not remotely accepted.
+pub fn localStatus(path: []const u8, now_seconds: i64) !LocalStatus {
+    var record: credentials.Record = undefined;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+    if (!try credentials.readSnapshotInto(path, &record)) return .missing;
+    if (record.state == .refresh_pending) return .refresh_required;
+    try validateSelected(&record, false);
+    if (if (record.expires_at != 0) record.expires_at <= now_seconds else credentials.opaqueRefreshDue(record.refreshed_at, now_seconds))
+        return .renewal_due;
+    return .configured;
+}
+
 pub fn acquireInto(io: std.Io, path: []const u8, fixture: bool, destination: *credentials.Lease) !void {
     var record: credentials.Record = undefined;
     try credentials.loadInto(path, &record);
