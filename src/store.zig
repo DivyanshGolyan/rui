@@ -7405,6 +7405,19 @@ fn settleCallsForTestingWithFaults(
     answer: []const u8,
     faults: Faults,
 ) !void {
+    return settleOutputForTesting(storage, tmp, binding, file_prefix, calls, answer, false, faults);
+}
+
+fn settleOutputForTesting(
+    storage: *Store,
+    tmp: *std.testing.TmpDir,
+    binding: AttemptBinding,
+    file_prefix: []const u8,
+    calls: []const TestingCall,
+    answer: []const u8,
+    private_prefix: bool,
+    faults: Faults,
+) !void {
     var source_buffer: [64 * 1024]u8 = undefined;
     var source_writer = std.Io.Writer.fixed(&source_buffer);
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -7430,8 +7443,8 @@ fn settleCallsForTestingWithFaults(
         try source_writer.writeAll(answer);
         try source_writer.writeByte('"');
         offset = answer.len + 2;
-        try metadata.append(.{ .tag = .item, .kind = .message, .start = 0, .length = offset, .content_digest = protocol.contentDigest(source_writer.buffered()[0..@intCast(offset)]) });
-        try metadata.append(.{ .tag = .text, .start = 1, .length = answer.len, .decoded_length = answer.len });
+        try metadata.append(.{ .tag = .item, .kind = if (private_prefix) .reasoning else .message, .start = 0, .length = offset, .content_digest = protocol.contentDigest(source_writer.buffered()[0..@intCast(offset)]) });
+        if (!private_prefix) try metadata.append(.{ .tag = .text, .start = 1, .length = answer.len, .decoded_length = answer.len });
     }
     for (calls, 0..) |call, index| {
         const item_start = offset;
@@ -7502,8 +7515,8 @@ fn settleCallsForTestingWithFaults(
         .metadata = metadata.file,
         .item_count = calls.len + call_offset,
         .call_count = calls.len,
-        .answer_length = answer.len,
-        .answer_digest = protocol.contentDigest(answer),
+        .answer_length = if (private_prefix) 0 else answer.len,
+        .answer_digest = protocol.contentDigest(if (private_prefix) "" else answer),
         .response_id = .{},
         .body_model = .{},
         .openai_model = .{},
@@ -8575,6 +8588,43 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     };
     try settleCallsForTesting(&storage, &tmp, binding, "mixed-metadata", &calls);
 
+    var feed_cursor: u64 = 0;
+    for (0..calls.len) |ordinal| {
+        const page = try storage.nextSessionCall("direct/mixed-calls", feed_cursor);
+        const call = page.call orelse return error.TestExpectedEqual;
+        try std.testing.expectEqual(binding.turn_id, call.turn_id);
+        try std.testing.expectEqual(binding.operation_id, call.operation_id);
+        try std.testing.expectEqual(ordinal, call.call_ordinal);
+        try std.testing.expectEqual(ordinal != 0 and ordinal != 6, call.classification == .rejected);
+        if (ordinal == 0 or ordinal == 6) try std.testing.expectEqual(.ask, call.classification);
+        try std.testing.expectEqual(@as(u64, calls[ordinal].name.len), call.name_reference.length);
+        try std.testing.expectEqual(@as(u64, calls[ordinal].decoded_arguments.len), call.arguments_reference.length);
+        var request: protocol.SessionCallContent = .{ .position = page.position };
+        try request.session.set("direct/mixed-calls");
+        inline for (.{ .name, .arguments }) |field| {
+            request.field = field;
+            const expected = if (field == .name) calls[ordinal].name else calls[ordinal].decoded_arguments;
+            var reader = try storage.openSessionCallContent(request);
+            defer reader.close();
+            var digest: [32]u8 = undefined;
+            var hash = std.crypto.hash.sha2.Sha256.init(.{});
+            hash.update(&.{ 0, 0, 0, 0, 0, 0, 0, 14 });
+            hash.update("rui/content/v1");
+            hash.update(expected);
+            hash.final(&digest);
+            try std.testing.expectEqualSlices(u8, &digest, &reader.reference.digest);
+            var bytes: [512]u8 = undefined;
+            const count = try reader.read(0, &bytes);
+            try std.testing.expectEqualStrings(expected, bytes[0..count]);
+        }
+        feed_cursor = page.position;
+    }
+    const exhausted = try storage.nextSessionCall("direct/mixed-calls", feed_cursor);
+    try std.testing.expect(exhausted.call == null);
+    try std.testing.expect(exhausted.position >= feed_cursor);
+    try std.testing.expectError(error.InvalidSessionCallCursor, storage.nextSessionCall("direct/mixed-calls", std.math.maxInt(u64)));
+    try std.testing.expect(!storage.isFenced());
+
     try std.testing.expectEqual(@as(u64, 7), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call"));
     try std.testing.expectEqual(@as(u64, 5), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call WHERE rejection_code IS NOT NULL"));
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call WHERE rejection_code='tool_unavailable'"));
@@ -8706,6 +8756,244 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     try std.testing.expectEqual(@as(usize, 1), recovered_report.value.actions.unresolved.len);
     try std.testing.expectEqualStrings("6", recovered_report.value.actions.unresolved[0].call_ordinal);
     try std.testing.expectEqual(@as(usize, 5), recovered_report.value.rejected_calls.items.len);
+
+    // Rejected calls canonically have no Action and were read above. A
+    // non-rejected call without its Action is canonical corruption, not ask.
+    try exec(reopened.database, "PRAGMA foreign_keys=OFF");
+    try exec(reopened.database, "DELETE FROM action_operation WHERE call_ordinal=0");
+    try exec(reopened.database, "PRAGMA foreign_keys=ON");
+    try std.testing.expectError(error.CorruptStore, reopened.nextSessionCall("direct/mixed-calls", 0));
+    try std.testing.expect(reopened.isFenced());
+}
+
+test "Session call feed fences rejected call with an impossible Action" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSessionAsk(&storage, "ghost-config", "direct/ghost-action", true);
+    try submitTestMessage(&storage, &tmp, "ghost-message", "ghost-message", "direct/ghost-action", "call");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{.{ .item_id = "ghost-item", .name = "other", .encoded_call_id = "ghost-call", .decoded_call_id = "ghost-call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+    try settleCallsForTesting(&storage, &tmp, binding, "ghost-metadata", &calls);
+    try exec(storage.database, "PRAGMA foreign_keys=OFF");
+    const insert = try prepare(storage.database, "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,permission_state,resolution_code) VALUES(999,?1,0,'direct/ghost-action',1,1,1,NULL)");
+    defer _ = c.sqlite3_finalize(insert);
+    try bindU64(insert, 1, binding.operation_id);
+    try expectDone(insert);
+    try exec(storage.database, "PRAGMA foreign_keys=ON");
+
+    try std.testing.expectError(error.CorruptStore, storage.nextSessionCall("direct/ghost-action", 0));
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectError(error.StoreFenced, storage.admitNextActionAttempt(1000, .{}));
+}
+
+test "Session call content scopes large accepted and rejected fields before Conversation" {
+    std.debug.print("saved-call fixed storage: reader={d}, delivery={d}, metadata={d}, shared reply={d} bytes\n", .{ @sizeOf(ContentReader), protocol.content_window_bytes, @sizeOf(SessionCall), @sizeOf(protocol.ResponseBuffer) });
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSessionAsk(&storage, "content-config", "direct/call-content", true);
+    try configureTestSessionAsk(&storage, "foreign-config", "direct/foreign-content", true);
+    try submitTestMessage(&storage, &tmp, "content-message", "content-message", "direct/call-content", "call");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "large-valid", .name = "bash", .encoded_call_id = "valid", .decoded_call_id = "valid", .encoded_arguments = "{\\\"cmd\\\":\\\"echo " ++ "x" ** 4080 ++ "😀" ++ "y" ** 5000 ++ "\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"echo " ++ "x" ** 4080 ++ "😀" ++ "y" ** 5000 ++ "\",\"timeout_ms\":null}" },
+        .{ .item_id = "large-rejected", .name = "n" ** 4095 ++ "😀" ++ "z" ** 5000, .encoded_call_id = "rejected", .decoded_call_id = "rejected", .encoded_arguments = "a" ** 4094 ++ "中" ++ "b" ** 5000, .decoded_arguments = "a" ** 4094 ++ "中" ++ "b" ** 5000 },
+    };
+    try settleCallsForTesting(&storage, &tmp, binding, "content-metadata", &calls);
+    var cursor: u64 = 0;
+    for (calls, 0..) |call, index| {
+        const page = try storage.nextSessionCall("direct/call-content", cursor);
+        try std.testing.expectEqual(index == 1, page.call.?.classification == .rejected);
+        var request: protocol.SessionCallContent = .{ .position = page.position };
+        try request.session.set("direct/foreign-content");
+        try std.testing.expectError(error.ContentNotFound, storage.openSessionCallContent(request));
+        try request.session.set("direct/call-content");
+        inline for (.{ .name, .arguments }) |field| {
+            request.field = field;
+            const expected = if (field == .name) call.name else call.decoded_arguments;
+            var reader = try storage.openSessionCallContent(request);
+            defer reader.close();
+            var offset: usize = 0;
+            var bytes: [4096]u8 = undefined;
+            while (offset < expected.len) {
+                const count = try reader.read(offset, &bytes);
+                try std.testing.expect(count != 0);
+                try std.testing.expectEqualSlices(u8, expected[offset..][0..count], bytes[0..count]);
+                offset += count;
+            }
+            try std.testing.expectEqual(expected.len, offset);
+            request.start = expected.len + 1;
+            try std.testing.expectError(error.RangeOutOfBounds, storage.openSessionCallContent(request));
+            request.start = 0;
+        }
+        cursor = page.position;
+    }
+    var invalid: protocol.SessionCallContent = .{ .position = binding.operation_id };
+    try invalid.session.set("direct/call-content");
+    // The input and private/non-call output positions are not call identities.
+    invalid.position = 1;
+    try std.testing.expectError(error.ContentNotFound, storage.openSessionCallContent(invalid));
+    invalid.position = std.math.maxInt(u64);
+    try std.testing.expectError(error.ContentNotFound, storage.openSessionCallContent(invalid));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "Session call content shares producer and authorization fencing" {
+    for ([_][:0]const u8{
+        "UPDATE model_operation SET session_ref='direct/foreign'",
+        "UPDATE model_operation SET turn_id=(SELECT turn_id FROM turn WHERE session_ref='direct/foreign') WHERE session_ref='direct/content'",
+        "UPDATE action_operation SET session_ref='direct/foreign'",
+        "DELETE FROM content WHERE content_id=(SELECT name_content_id FROM model_tool_call LIMIT 1)",
+    }) |mutation| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try configureTestSessionAsk(&storage, "c-config", "direct/content", true);
+        try configureTestSessionAsk(&storage, "f-config", "direct/foreign", true);
+        try submitTestMessage(&storage, &tmp, "c-message", "c-message", "direct/content", "call");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try settleTwoActionsForTesting(&storage, &tmp, binding, "c-metadata");
+        const page = try storage.nextSessionCall("direct/content", 0);
+        try submitTestMessage(&storage, &tmp, "f-message", "f-message", "direct/foreign", "call");
+        _ = (try storage.admitNextModelAttempt(.{})).?.permit;
+        var request: protocol.SessionCallContent = .{ .position = page.position };
+        try request.session.set("direct/content");
+        try exec(storage.database, "PRAGMA foreign_keys=OFF");
+        try exec(storage.database, mutation);
+        try exec(storage.database, "PRAGMA foreign_keys=ON");
+        if (storage.openSessionCallContent(request)) |reader| {
+            var unexpected = reader;
+            unexpected.close();
+            return error.ExpectedCanonicalFailure;
+        } else |_| {}
+        try std.testing.expect(storage.isFenced());
+        try std.testing.expectError(error.StoreFenced, storage.nextSessionCall("direct/content", 0));
+    }
+}
+
+test "Session call feed fences mismatched producing Session" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSessionAsk(&storage, "call-owner-config", "direct/call-owner", true);
+    try configureTestSessionAsk(&storage, "other-owner-config", "direct/other-owner", true);
+    try submitTestMessage(&storage, &tmp, "call-owner-message", "call-owner-message", "direct/call-owner", "call");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleTwoActionsForTesting(&storage, &tmp, binding, "call-owner-metadata");
+    try exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try exec(storage.database, "UPDATE model_operation SET session_ref='direct/other-owner' WHERE operation_id=(SELECT min(operation_id) FROM model_operation)");
+    try exec(storage.database, "PRAGMA foreign_keys=ON");
+    try std.testing.expectError(error.CorruptStore, storage.nextSessionCall("direct/call-owner", 0));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "Session call feed cannot skip an orphaned output item" {
+    // An indexed output item is the anchor. A missing producer must not
+    // disappear from the read as though its Session position had no call.
+    for ([_]bool{ false, true }) |has_successor| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try configureTestSessionAsk(&storage, "orphan-config", "direct/orphan", true);
+        try submitTestMessage(&storage, &tmp, "orphan-message", "orphan-message", "direct/orphan", "call");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try settleTwoActionsForTesting(&storage, &tmp, binding, "orphan-metadata");
+        const first = (try storage.nextSessionCall("direct/orphan", 0)).call.?;
+        if (!has_successor) {
+            try exec(storage.database, "DELETE FROM model_output_item WHERE item_kind=3 AND session_position>" ++
+                "(SELECT min(session_position) FROM model_output_item WHERE item_kind=3)");
+        } else {
+            try std.testing.expect((try storage.nextSessionCall("direct/orphan", first.position)).call != null);
+        }
+        try exec(storage.database, "PRAGMA foreign_keys=OFF");
+        try exec(storage.database, "UPDATE model_output_item SET operation_id=999999 WHERE item_kind=3 AND session_position=" ++
+            "(SELECT min(session_position) FROM model_output_item WHERE item_kind=3)");
+        try exec(storage.database, "PRAGMA foreign_keys=ON");
+        try std.testing.expectError(error.CorruptStore, storage.nextSessionCall("direct/orphan", 0));
+        try std.testing.expect(storage.isFenced());
+    }
+}
+
+test "Session call feed fences producing Turn from another Session" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSessionAsk(&storage, "turn-owner-config", "direct/turn-owner", true);
+    try configureTestSessionAsk(&storage, "foreign-turn-config", "direct/foreign-turn", true);
+    try submitTestMessage(&storage, &tmp, "turn-owner-message", "turn-owner-message", "direct/turn-owner", "call");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleTwoActionsForTesting(&storage, &tmp, binding, "turn-owner-metadata");
+    try submitTestMessage(&storage, &tmp, "foreign-turn-message", "foreign-turn-message", "direct/foreign-turn", "other");
+    const foreign = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expect(foreign.turn_id != binding.turn_id);
+    try std.testing.expectEqual(binding.turn_id, (try storage.nextSessionCall("direct/turn-owner", 0)).call.?.turn_id);
+    try exec(storage.database, "UPDATE model_operation SET turn_id=(SELECT turn_id FROM turn WHERE session_ref='direct/foreign-turn') " ++
+        "WHERE operation_id=(SELECT min(operation_id) FROM model_operation)");
+    try std.testing.expectError(error.CorruptStore, storage.nextSessionCall("direct/turn-owner", 0));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "Session call feed fences a call beyond its Session highwater" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSessionAsk(&storage, "call-position-config", "direct/call-position", false);
+    try submitTestMessage(&storage, &tmp, "call-position-message", "call-position-message", "direct/call-position", "call");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleTwoActionsForTesting(&storage, &tmp, binding, "call-position-metadata");
+    try exec(storage.database, "UPDATE model_output_item SET session_position=session_position+(SELECT next_position FROM session WHERE session_ref='direct/call-position') " ++
+        "WHERE item_kind=3");
+    try std.testing.expectError(error.CorruptStore, storage.nextSessionCall("direct/call-position", 0));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "Session call feed fences Action authorization from another Session" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSessionAsk(&storage, "call-auth-config", "direct/call-auth", false);
+    try configureTestSessionAsk(&storage, "other-auth-config", "direct/other-auth", false);
+    var bypass: protocol.ConfigureCommand = .{};
+    try bypass.key.set("other-auth-bypass");
+    try bypass.session.set("direct/other-auth");
+    bypass.configuration.permission_mode.state = .value;
+    try bypass.configuration.permission_mode.value.set("bypass");
+    try std.testing.expect(storage.configure(&bypass, .{}) == .accepted);
+    try submitTestMessage(&storage, &tmp, "call-auth-message", "call-auth-message", "direct/call-auth", "call");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleTwoActionsForTesting(&storage, &tmp, binding, "call-auth-metadata");
+    try std.testing.expectEqual(.ask, (try storage.nextSessionCall("direct/call-auth", 0)).call.?.classification);
+    try exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try exec(storage.database, "UPDATE action_operation SET session_ref='direct/other-auth',permission_revision=2 WHERE call_ordinal=0");
+    try exec(storage.database, "PRAGMA foreign_keys=ON");
+    try std.testing.expectError(error.CorruptStore, storage.nextSessionCall("direct/call-auth", 0));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "Session call feed fences interrupted Session lookup instead of reporting absence" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSessionAsk(&storage, "call-read-config", "direct/call-read", true);
+    const Interrupt = struct {
+        fn progress(_: ?*anyopaque) callconv(.c) c_int {
+            return 1;
+        }
+    };
+    c.sqlite3_progress_handler(storage.database, 1, Interrupt.progress, null);
+    defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+    try std.testing.expectError(error.SessionCallReadFailed, storage.nextSessionCall("direct/call-read", null));
+    try std.testing.expect(storage.isFenced());
 }
 
 test "complete call outcomes continue once in call order ahead of pending input" {
@@ -8755,6 +9043,21 @@ test "complete call outcomes continue once in call order ahead of pending input"
     const stale_reply = storage.denyPermission(&stale_denial, .{});
     try std.testing.expect(stale_reply == .rejected);
     try std.testing.expectEqual(PermissionDecisionRejection.action_not_pending, stale_reply.rejected.code);
+
+    var continuation_cursor: u64 = 0;
+    for (0..calls.len) |_| {
+        const page = try storage.nextSessionCall("direct/tool-results", continuation_cursor);
+        const historical_call = page.call orelse return error.TestExpectedEqual;
+        try std.testing.expectEqual(first_binding.turn_id, historical_call.turn_id);
+        try std.testing.expectEqual(first_binding.operation_id, historical_call.operation_id);
+        continuation_cursor = page.position;
+    }
+    const advanced = try storage.nextSessionCall("direct/tool-results", continuation_cursor);
+    try std.testing.expect(advanced.call == null);
+    try std.testing.expect(advanced.position >= continuation_cursor);
+    const held = try storage.nextSessionCall("direct/tool-results", advanced.position);
+    try std.testing.expect(held.call == null);
+    try std.testing.expectEqual(advanced.position, held.position);
 
     var view = try storage.openHistoricalView(continuation);
     defer view.close();
@@ -11672,7 +11975,9 @@ test "public content SQL failure fences Store instead of reporting absence" {
     };
     c.sqlite3_progress_handler(storage.database, 1, Interrupt.progress, null);
     defer c.sqlite3_progress_handler(storage.database, 0, null, null);
-    try std.testing.expectError(error.PublicContentReadFailed, storage.openPublicConversationContent(request));
+    // The shared provenance query is interrupted during preparation, before
+    // identity lookup can step. Either phase must retain the public fence.
+    try std.testing.expectError(error.StatementPrepareFailed, storage.openPublicConversationContent(request));
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.openPublicConversationContent(request));
 }
