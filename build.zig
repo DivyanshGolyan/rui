@@ -116,6 +116,23 @@ pub fn build(b: *std.Build) void {
     );
     logic_test_step.dependOn(&run_logic_tests.step);
 
+    const renderer_allocation = b.addExecutable(.{
+        .name = "rui-answer-renderer-allocation-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/answer_renderer_allocation.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    renderer_allocation.root_module.addImport("AnswerRenderer", b.createModule(.{
+        .root_source_file = b.path("src/AnswerRenderer.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    }));
+    const run_renderer_allocation = b.addRunArtifact(renderer_allocation);
+    logic_test_step.dependOn(&run_renderer_allocation.step);
+    test_step.dependOn(&run_renderer_allocation.step);
+
     const release_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
     const session_list_client = b.addExecutable(.{
         .name = "rui-session-list-client-test",
@@ -335,6 +352,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.step.dependOn(&release.step);
     fast_integrations.step.dependOn(&run_evaluator_host.step);
+    fast_integrations.step.dependOn(&run_renderer_allocation.step);
     check_step.dependOn(&fast_integrations.step);
 
     const full_check_step = b.step(
@@ -353,6 +371,7 @@ pub fn build(b: *std.Build) void {
     full_evaluator.addArtifactArg(evaluator_driver);
     full_evaluator.addArtifactArg(evaluator_probe);
     full_evaluator.step.dependOn(&run_tests.step);
+    full_evaluator.step.dependOn(&run_renderer_allocation.step);
     full_evaluator.step.dependOn(string_sanitizer_step);
     const full_evaluator_host = b.addRunArtifact(evaluator_host);
     full_evaluator_host.addArtifactArg(evaluator);
