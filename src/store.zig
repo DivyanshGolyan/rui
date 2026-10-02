@@ -2599,20 +2599,18 @@ pub const Store = struct {
     }
 
     fn publicConversationContentIdLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !i64 {
-        const statement = if (ordinal == 0)
-            try prepare(self.database, "SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND session_position=?2 AND entry_kind IN (1,3)")
-        else
-            try prepare(self.database, "SELECT coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_operation op " ++
-                "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
-                "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-                "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' AND call.call_ordinal+1=?3 " ++
-                "AND (SELECT max(coalesce(c.acceptance_position,a.acceptance_position)) FROM model_tool_call c " ++
-                "LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id)=?2 " ++
-                "AND (SELECT count(*) FROM model_tool_call c WHERE c.operation_id=op.operation_id)=" ++
-                "(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
-                "AND NOT EXISTS (SELECT 1 FROM model_tool_call c LEFT JOIN action_operation a " ++
-                "ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id " ++
-                "AND (coalesce(c.acceptance_position,a.acceptance_position) IS NULL OR coalesce(c.rejection_content_id,a.resolution_content_id) IS NULL))");
+        if (ordinal == 0) return self.publicOrdinaryContentLocked(session, position);
+        const statement = try prepare(self.database, "SELECT coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_operation op " ++
+            "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
+            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+            "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' AND call.call_ordinal+1=?3 " ++
+            "AND (SELECT max(coalesce(c.acceptance_position,a.acceptance_position)) FROM model_tool_call c " ++
+            "LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id)=?2 " ++
+            "AND (SELECT count(*) FROM model_tool_call c WHERE c.operation_id=op.operation_id)=" ++
+            "(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
+            "AND NOT EXISTS (SELECT 1 FROM model_tool_call c LEFT JOIN action_operation a " ++
+            "ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id " ++
+            "AND (coalesce(c.acceptance_position,a.acceptance_position) IS NULL OR coalesce(c.rejection_content_id,a.resolution_content_id) IS NULL))");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session);
         try bindU64(statement, 2, position);
@@ -2625,6 +2623,29 @@ pub const Store = struct {
         const content_id = c.sqlite3_column_int64(statement, 0);
         if (content_id <= 0) return error.CorruptStore;
         return content_id;
+    }
+
+    // One indexed ordinary identity owns provenance for pages, view and bytes.
+    // LEFT JOIN retains damaged dependencies so absence cannot hide corruption.
+    fn publicOrdinaryContentLocked(self: *Store, session: []const u8, position: u64) !i64 {
+        const statement = try prepare(self.database, "SELECT e.content_id,CASE WHEN c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
+            "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
+            "(e.entry_kind=3 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id AND o.resolution_content_id=e.content_id)) THEN 1 ELSE 0 END " ++
+            "FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
+            "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
+            "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
+            "LEFT JOIN content c ON c.content_id=e.content_id " ++
+            "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session);
+        try bindU64(statement, 2, position);
+        switch (c.sqlite3_step(statement)) {
+            c.SQLITE_DONE => return error.ContentNotFound,
+            c.SQLITE_ROW => {},
+            else => return error.ConversationReadFailed,
+        }
+        if (c.sqlite3_column_int(statement, 1) != 1) return error.CorruptStore;
+        return try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore;
     }
 
     pub fn captureSessionReport(
@@ -5881,16 +5902,24 @@ pub const Store = struct {
         return content_id;
     }
 
-    const ContentMetadata = struct { length: u64, digest: [32]u8 };
+    const ContentMetadata = struct { length: u64, digest: [32]u8, private: bool };
 
     fn readContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
-        const statement = try prepare(self.database, "SELECT byte_length,digest FROM content WHERE content_id=?1");
+        const statement = try prepare(self.database, "SELECT byte_length,digest,private FROM content WHERE content_id=?1");
         defer _ = c.sqlite3_finalize(statement);
         try bindI64(statement, 1, content_id);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
         const length = c.sqlite3_column_int64(statement, 0);
         if (length < 0) return error.CorruptStore;
-        return .{ .length = @intCast(length), .digest = try readDigest(statement, 1) };
+        return .{ .length = @intCast(length), .digest = try readDigest(statement, 1), .private = c.sqlite3_column_int(statement, 2) != 0 };
+    }
+
+    // Every public metadata/byte route validates the exposed content, never
+    // its projection backing: raw provider source rows are legitimately private.
+    fn readPublicContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
+        const metadata = try self.readContentMetadata(content_id);
+        if (metadata.private) return error.CorruptStore;
+        return metadata;
     }
 
     fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {
@@ -11060,7 +11089,9 @@ test "public content SQL failure fences Store instead of reporting absence" {
     };
     c.sqlite3_progress_handler(storage.database, 1, Interrupt.progress, null);
     defer c.sqlite3_progress_handler(storage.database, 0, null, null);
-    try std.testing.expectError(error.PublicContentReadFailed, storage.openPublicConversationContent(request));
+    // The shared provenance query is interrupted during preparation, before
+    // identity lookup can step. Either phase must retain the public fence.
+    try std.testing.expectError(error.StatementPrepareFailed, storage.openPublicConversationContent(request));
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.openPublicConversationContent(request));
 }
