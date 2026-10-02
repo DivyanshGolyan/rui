@@ -1,4 +1,5 @@
 test {
+    _ = @import("AnswerRenderer.zig");
     _ = @import("attempt.zig");
     _ = @import("execution.zig");
     _ = @import("execution_turn.zig");
