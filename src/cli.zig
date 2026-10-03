@@ -1,7 +1,9 @@
 const std = @import("std");
+const AnswerRenderer = @import("AnswerRenderer.zig");
 const TerminalEditor = @import("TerminalEditor.zig");
 const SessionTerminal = @import("SessionTerminal.zig");
 const FrontendRead = @import("FrontendRead.zig");
+const session_view = @import("session_view.zig");
 const TerminalText = @import("TerminalText.zig");
 const client = @import("client.zig");
 const codex_auth = @import("codex_auth.zig");
@@ -13,6 +15,7 @@ const provider = @import("provider.zig");
 const provider_selection = @import("provider_selection.zig");
 const protocol = @import("protocol.zig");
 const server = @import("server.zig");
+const tools = @import("tools.zig");
 
 // Zig otherwise reserves an alternate signal stack on every thread even when
 // the release build has no default crash handler to use it.
@@ -92,8 +95,9 @@ fn configureHostAllocator(init: std.process.Init, args: []const []const u8) !voi
 }
 
 const Presentation = enum { human, json, interactive };
-
 const action_choice_prompt = "Allow once, deny, or later? [a/d/l] ";
+const answer_divider = "\n────────\n";
+
 const post_command_ready_fd_environment = "RUI_TEST_POST_COMMAND_READY_FD";
 const post_command_release_fd_environment = "RUI_TEST_POST_COMMAND_RELEASE_FD";
 
@@ -1137,10 +1141,80 @@ fn streamRequest(frontend: ?*Frontend, io: std.Io, comptime function: anytype, p
     return @call(.auto, function, .{client.Requests{ .io = io }} ++ prefix ++ .{ sink, reply });
 }
 
+const PreparedOpening = struct {
+    report: SessionObservation,
+    view: session_view.Page,
+
+    fn close(self: *const PreparedOpening, io: std.Io) void {
+        self.report.file.close(io);
+    }
+};
+
+fn prepareOpening(init: std.process.Init, store: []const u8, session: []const u8, replay: bool, frontend: ?*Frontend) !PreparedOpening {
+    const report = try inspectWork(init, store, session, frontend);
+    errdefer report.file.close(init.io);
+    if (report.work.workspace.len == 0) return error.SessionNotConfigured;
+    if (replay and report.work.history_end == null) return error.InvalidObservation;
+    var reply: client.ReplyBuffer = .{};
+    const view = try readRequest(frontend, init.io, client.sessionView, .{ store, session, session_view.Cursor{ .recent = true }, &reply });
+    // Only bounded metadata precedes the switch. Payloads stream once after
+    // the target header; a late read failure exits rather than rolling back.
+    if (replay) try testGate(init.io, "RUI_TEST_RESUME_GATE");
+    return .{ .report = report, .view = view };
+}
+
+fn renderSessionStatus(init: std.process.Init, store: []const u8, session_ref: []const u8, report: *const SessionObservation, brief: bool, out: *std.Io.Writer) !void {
+    const work = report.work;
+    if (work.workspace.len == 0) return error.SessionNotConfigured;
+    if (brief) {
+        try writeField(out, "Session: ", session_ref);
+        try writeField(out, "Workspace (Bash cwd): ", work.workspace.slice());
+        try writeField(out, "Provider: ", work.provider.slice());
+        try writeField(out, "Model: ", work.model.slice());
+        try out.writeAll("Permission: ");
+        var text: TerminalText = .{ .mode = .line };
+        try text.feed(out, work.permission_mode.slice());
+        try text.finish(out);
+        try out.writeAll(if (work.bash and work.permission_mode.eql("bypass")) " (Bash runs without approval)\n" else "\n");
+    } else {
+        var size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+        const aligned = std.c.ioctl(1, @intCast(std.c.T.IOCGWINSZ), &size) == 0 and size.col >= 60;
+        try writeStatusField(out, "Session: ", session_ref, aligned);
+        try writeStatusField(out, "Store: ", store, aligned);
+        try writeStatusField(out, "Workspace (Bash cwd): ", work.workspace.slice(), aligned);
+        try writeStatusField(out, "Provider: ", work.provider.slice(), aligned);
+        try writeStatusField(out, "Model: ", work.model.slice(), aligned);
+        try writeStatusField(out, "Permission: ", work.permission_mode.slice(), aligned);
+        if (work.bash and work.permission_mode.eql("bypass")) try out.writeAll("Rui: Bash commands can run without asking you.\n");
+        try writeStatusField(out, "Work: ", work.status.slice(), aligned);
+        if (work.selected_message) |selected|
+            try writeStatusField(out, "Current message: ", selected.slice(), aligned);
+        if (work.action_count != 0) try showActionable(init.io, report.file, false, out);
+    }
+    if (work.indeterminate_action) |action| {
+        try writeField(out, "Indeterminate Action: ", action.slice());
+        if (work.indeterminate_count > 1) {
+            try out.print("Rui: {d} indeterminate Actions in this Turn; inspect-session --profile current lists all IDs.\n", .{work.indeterminate_count});
+        }
+        try out.writeAll("Rui: The command may have run; Rui did not replay it. Check its effects before deciding what to do next.\n");
+    }
+    if (!brief and work.recent_count != 0) {
+        try out.writeAll("Recent messages (use /result KEY for an answer):\n");
+        for (work.recent[0..work.recent_count]) |recent| {
+            try out.writeAll("  ");
+            var text: TerminalText = .{ .mode = .line };
+            try text.feed(out, recent.key.slice());
+            try text.finish(out);
+            try writeField(out, ": ", recent.outcome.slice());
+        }
+    }
+}
+
 fn writeSafeField(io: std.Io, label: []const u8, value: []const u8) !void {
-    try std.Io.File.stdout().writeStreamingAll(io, label);
-    try writeSafeText(io, value);
-    try std.Io.File.stdout().writeStreamingAll(io, "\n");
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
+    try writeField(&writer.interface, label, value);
+    try writer.flush();
 }
 
 fn writeField(out: *std.Io.Writer, label: []const u8, value: []const u8) !void {
@@ -1149,6 +1223,15 @@ fn writeField(out: *std.Io.Writer, label: []const u8, value: []const u8) !void {
     try text.feed(out, value);
     try text.finish(out);
     try out.writeAll("\n");
+}
+
+fn writeStatusField(out: *std.Io.Writer, label: []const u8, value: []const u8, aligned: bool) !void {
+    try out.writeAll(label);
+    if (aligned) {
+        const spaces = [_]u8{' '} ** 22;
+        try out.writeAll(spaces[0 .. 22 - label.len]);
+    }
+    try writeField(out, "", value);
 }
 
 fn writeSafeText(io: std.Io, value: []const u8) !void {
@@ -1160,8 +1243,15 @@ fn writeSafeText(io: std.Io, value: []const u8) !void {
     try writer.flush();
 }
 
-fn reportAcceptedPresentationFailure(key: []const u8, err: anyerror) void {
-    std.debug.print("rui: Message accepted, but later observation or presentation failed ({s}). Use rui result {s} to inspect the same Message; do not resubmit it\n", .{ @errorName(err), key });
+// One final-storage exchange, no events or duplicate request registry. The
+// worker only sends the immutable pinned capture; the terminal owns all output.
+fn writeSafePreview(io: std.Io, value: []const u8) !void {
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
+    var text: TerminalText = .{ .mode = .preview };
+    try text.feed(&writer.interface, value);
+    try text.finish(&writer.interface);
+    try writer.flush();
 }
 
 const Admission = struct {
@@ -1381,6 +1471,127 @@ const Admission = struct {
         self.slot = null;
     }
 };
+
+const SessionContentSink = struct {
+    out: *std.Io.Writer,
+    renderer: ?*AnswerRenderer = null,
+    text: TerminalText = .{ .mode = .multiline },
+
+    pub fn feed(self: *SessionContentSink, bytes: []const u8) !void {
+        if (self.renderer) |renderer| try renderer.feed(bytes) else try self.text.feed(self.out, bytes);
+    }
+
+    fn finish(self: *SessionContentSink) !void {
+        if (self.renderer) |renderer| try renderer.finish() else try self.text.finish(self.out);
+    }
+};
+
+fn renderSessionView(io: std.Io, store: []const u8, session: []const u8, page: *const session_view.Page, historical: bool, out: *std.Io.Writer, displayed_result_turn: *u64, frontend: ?*Frontend) !void {
+    var reply: client.ReplyBuffer = .{};
+    for (page.items[0..page.count]) |item| {
+        // Acceptance is pending footer state, not a second transcript bubble.
+        if (item.kind == .admission) continue;
+        // Presentation remembers only the most recent visible result's Turn,
+        // across page boundaries. It neither selects nor tracks runtime work.
+        if (item.kind == .outcome and std.mem.eql(u8, item.codeText(), "completed") and displayed_result_turn.* == item.turn) continue;
+        try out.writeAll(switch (item.kind) {
+            .user => "\nYou: ",
+            .assistant => answer_divider,
+            .call => if (item.code_len == 0) "\nProposed tool: " else "\nRejected proposal: ",
+            .tool_result => "\nTool result:\n",
+            .outcome => if (std.mem.eql(u8, item.codeText(), "completed")) "\nWork completed.\n" else if (std.mem.eql(u8, item.codeText(), "cancelled")) "\nWork cancelled.\n" else "\nWork failed: ",
+            .stop => "\nSession stop accepted.\n",
+            .admission => unreachable,
+        });
+        if (item.code_len != 0 and item.kind != .stop and
+            !(item.kind == .outcome and (std.mem.eql(u8, item.codeText(), "completed") or std.mem.eql(u8, item.codeText(), "cancelled"))))
+        {
+            var text: TerminalText = .{ .mode = .multiline };
+            try text.feed(out, item.codeText());
+            try text.finish(out);
+            try out.writeAll("\n");
+        }
+        if (item.kind == .call and item.code_len != 0) try out.writeAll("Proposed tool: ");
+        // Conversation exports do not resolve proposal fields. Stream complete
+        // names/arguments on replay too, rather than advertise an invalid read.
+        if (historical and item.kind != .call and item.bytes > 8192) {
+            try writeContentOmission(out, store, session, item.position, item.ordinal, item.bytes);
+            try out.flush();
+            continue;
+        }
+        var renderer: AnswerRenderer = .{ .out = out };
+        var sink: SessionContentSink = .{ .out = out, .renderer = if (item.kind == .assistant) &renderer else null };
+        switch (item.kind) {
+            .user => _ = try streamRequest(frontend, io, client.messageContentStream, .{ store, session, item.message, item.bytes }, &sink, &reply),
+            .assistant, .tool_result => {
+                _ = try streamRequest(frontend, io, client.conversationContentStream, .{ store, session, item.position, item.ordinal, @as(?u64, item.bytes) }, &sink, &reply);
+            },
+            .call => {
+                for ([_]protocol.SessionCallContent.Field{ .name, .arguments }) |field| {
+                    _ = try streamRequest(frontend, io, client.sessionCallContentStream, .{ store, session, item.position, field }, &sink, &reply);
+                    try sink.finish();
+                    sink.text = .{ .mode = .multiline };
+                    try out.writeAll("\n");
+                }
+            },
+            .outcome, .stop => {},
+            .admission => unreachable,
+        }
+        try sink.finish();
+        try out.writeAll("\n");
+        try out.flush();
+        if ((item.kind == .assistant or item.kind == .tool_result) and item.bytes != 0) displayed_result_turn.* = item.turn;
+    }
+}
+
+fn writeContentOmission(out: *std.Io.Writer, store: []const u8, session: []const u8, position: u64, ordinal: u64, bytes: u64) !void {
+    try out.print("[content omitted: {d} bytes; save exact content with]\nrui conversation-content --store ", .{bytes});
+    try writeShellArgument(out, store);
+    try out.writeAll(" --session ");
+    try writeShellArgument(out, session);
+    try out.print(" --position {d} --ordinal {d} --output NEW_FILE\n", .{ position, ordinal });
+}
+
+// Bash ANSI-C quoting makes this exceptional export command both terminal-safe
+// and exact, including quotes, controls and non-ASCII selector bytes.
+fn writeShellArgument(out: *std.Io.Writer, value: []const u8) !void {
+    try out.writeAll("$'");
+    for (value) |byte| {
+        if (byte < 32 or byte >= 127 or byte == '\'' or byte == '\\') {
+            try out.print("\\x{x:0>2}", .{byte});
+        } else try out.writeByte(byte);
+    }
+    try out.writeByte('\'');
+}
+
+test "Session presentation completion depends on this Turn's displayed result, not later success" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = try tmp.dir.createFile(io, "display", .{ .read = true });
+    defer file.close(io);
+    var page: session_view.Page = .{ .end = 20, .count = 4 };
+    const codes = [_][]const u8{ "completed", "completed", "provider_http_422", "session_stopped" };
+    for (codes, 0..) |code, i| {
+        page.items[i] = .{ .position = 10 + i, .kind = if (i == 3) .stop else .outcome, .turn = if (i == 1) 8 else 7, .code_len = code.len };
+        @memcpy(page.items[i].code[0..code.len], code);
+    }
+    // A prior page already showed Turn 7's result. Suppress only its normal
+    // completion: Turn 8's unseen completion and Turn 7's failure remain.
+    var displayed_result_turn: u64 = 7;
+    var buffer: [4096]u8 = undefined;
+    var writer = file.writerStreaming(io, &buffer);
+    try renderSessionView(io, "/unused", "unused", &page, false, &writer.interface, &displayed_result_turn, null);
+    try writer.flush();
+    var bytes: [256]u8 = undefined;
+    const count = try file.readPositionalAll(io, &bytes, 0);
+    try std.testing.expectEqualStrings("\nWork completed.\n\n\nWork failed: provider_http_422\n\n\nSession stop accepted.\n\n", bytes[0..count]);
+    try std.testing.expectEqual(@as(u64, 7), displayed_result_turn);
+}
+
+fn reportAcceptedPresentationFailure(key: []const u8, err: anyerror) void {
+    std.debug.print("rui: Message accepted, but later observation or presentation failed ({s}). Use rui result {s} to inspect the same Message; do not resubmit it\n", .{ @errorName(err), key });
+}
 
 fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []const u8, text: []const u8) !?Attention {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1949,27 +2160,10 @@ fn testGate(io: std.Io, name: [*:0]const u8) !void {
 }
 
 fn writeAdmission(io: std.Io, reply: client.CommandReply, json_handle: ?[]const u8) !void {
-    if (json_handle) |handle| {
-        var line: [112]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"event\":\"admission\",\"request\":\"{s}\",\"admission\":", .{handle}));
-        try std.Io.File.stdout().writeStreamingAll(io, reply.body);
-        return std.Io.File.stdout().writeStreamingAll(io, "}\n");
-    }
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
-    defer parsed.deinit();
-    const answer = try objectField(parsed.value, "answer");
-    const status = try stringField(answer, "status");
-    var line: [128]u8 = undefined;
-    try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "admitted: {s}\n", .{status}));
-    const replayed = try objectField(answer, "replayed");
-    if (replayed != .bool) return error.InvalidObservation;
-    try std.Io.File.stdout().writeStreamingAll(io, if (replayed.bool) "replayed: true\n" else "replayed: false\n");
-    if (answer.object.get("code")) |code| {
-        if (code != .string) return error.InvalidObservation;
-        try std.Io.File.stdout().writeStreamingAll(io, "code: ");
-        try std.Io.File.stdout().writeStreamingAll(io, code.string);
-        try std.Io.File.stdout().writeStreamingAll(io, "\n");
-    }
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
+    try writeAdmissionTo(&writer.interface, reply, json_handle);
+    try writer.flush();
 }
 
 fn writeAdmissionTo(out: *std.Io.Writer, reply: client.CommandReply, json_handle: ?[]const u8) !void {
@@ -2084,7 +2278,7 @@ fn parseSessionPage(init: std.process.Init, file: std.Io.File, show: bool) !Sess
                     try writeSafeField(init.io, "  Model: ", model.slice());
                     try std.Io.File.stdout().writeStreamingAll(init.io, if (bash and edit) "  Tools: Bash, Edit\n" else if (bash) "  Tools: Bash\n" else if (edit) "  Tools: Edit\n" else "  Tools: none\n");
                     try writeSafeField(init.io, "  Permission: ", permission.slice());
-                    if (permission.eql("bypass")) try std.Io.File.stdout().writeStreamingAll(init.io, "  Rui: Bash runs without approval.\n");
+                    if (bash and permission.eql("bypass")) try std.Io.File.stdout().writeStreamingAll(init.io, "  Rui: Bash runs without approval.\n");
                 }
             }
         } else if (std.mem.eql(u8, name, "next")) {
@@ -2118,6 +2312,7 @@ fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8
     defer file.close(init.io);
     var buffer: client.ReplyBuffer = .{};
     const reply = try client.listSessions(init.io, store, workspace, cursor, file, &buffer);
+    if (reply == .command) try client.checkCanonicalFailure(reply.command);
     if (reply != .report) return error.SessionListUnavailable;
     const page = try parseSessionPage(init, file, false);
     if (presentation == .json) {
@@ -2134,6 +2329,215 @@ fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8
         _ = try parseSessionPage(init, file, true);
     }
     return page;
+}
+
+const HistoryItem = struct {
+    position: []const u8,
+    ordinal: []const u8,
+    kind: []const u8,
+    content: struct { bytes: []const u8, sha256: []const u8, display: []const u8 },
+};
+
+const HistoryPage = struct {
+    version: []const u8,
+    type: []const u8,
+    direction: []const u8,
+    end: []const u8,
+    items: []const HistoryItem,
+    more: bool,
+    before_position: ?[]const u8 = null,
+    before_ordinal: ?[]const u8 = null,
+
+    fn continuation(self: *const HistoryPage, cursor: client.ConversationCursor) !?client.ConversationCursor {
+        if (!std.mem.eql(u8, self.version, "1") or !std.mem.eql(u8, self.type, "conversation_page") or
+            !std.mem.eql(u8, self.direction, "newest_first") or self.items.len > protocol.public_conversation_page_items) return error.InvalidConversationPage;
+        const end = try std.fmt.parseInt(u64, self.end, 10);
+        if (end > std.math.maxInt(i64) or (cursor.end != 0 and end != cursor.end)) return error.InvalidConversationPage;
+        var previous: client.ConversationCursor = .{ .end = end, .before_position = cursor.before_position, .before_ordinal = cursor.before_ordinal };
+        for (self.items) |item| {
+            const position = try std.fmt.parseInt(u64, item.position, 10);
+            const ordinal = try std.fmt.parseInt(u64, item.ordinal, 10);
+            const tool = std.mem.eql(u8, item.kind, "tool_result");
+            if (position == 0 or position > end or ordinal > std.math.maxInt(i64) or
+                (!tool and !std.mem.eql(u8, item.kind, "user") and !std.mem.eql(u8, item.kind, "assistant")) or
+                (tool != (ordinal != 0)) or !std.mem.eql(u8, item.content.display, "omitted")) return error.InvalidConversationPage;
+            _ = try std.fmt.parseInt(u64, item.content.bytes, 10);
+            var digest: [32]u8 = undefined;
+            if (item.content.sha256.len != 64) return error.InvalidConversationPage;
+            _ = std.fmt.hexToBytes(&digest, item.content.sha256) catch return error.InvalidConversationPage;
+            if (previous.before_position != 0 and
+                (position > previous.before_position or (position == previous.before_position and ordinal >= previous.before_ordinal))) return error.InvalidConversationPage;
+            previous.before_position = position;
+            previous.before_ordinal = ordinal;
+        }
+        if (!self.more) {
+            if (self.before_position != null or self.before_ordinal != null) return error.InvalidConversationPage;
+            return null;
+        }
+        if (self.items.len == 0 or
+            previous.before_position != try std.fmt.parseInt(u64, self.before_position orelse return error.InvalidConversationPage, 10) or
+            previous.before_ordinal != try std.fmt.parseInt(u64, self.before_ordinal orelse return error.InvalidConversationPage, 10)) return error.InvalidConversationPage;
+        return previous;
+    }
+};
+
+fn showConversationPage(init: std.process.Init, store: []const u8, session: []const u8, cursor: client.ConversationCursor, frontend: *Frontend) !?client.ConversationCursor {
+    const prepared = try prepareConversationPage(init, store, session, cursor, frontend);
+    defer prepared.file.close(init.io);
+    return prepared.display(init, frontend.terminal.writer());
+}
+
+const PreparedConversationPage = struct {
+    file: std.Io.File,
+    next: ?client.ConversationCursor,
+
+    fn display(self: PreparedConversationPage, init: std.process.Init, out: *std.Io.Writer) !?client.ConversationCursor {
+        const display_length = self.file.length(init.io) catch return error.HistoryDisplayFailed;
+        var output: [protocol.content_window_bytes]u8 = undefined;
+        var offset: u64 = 0;
+        while (offset < display_length) {
+            const count = self.file.readPositionalAll(init.io, output[0..@intCast(@min(display_length - offset, output.len))], offset) catch return error.HistoryDisplayFailed;
+            if (count == 0) return error.HistoryDisplayFailed;
+            out.writeAll(output[0..count]) catch return error.HistoryDisplayFailed;
+            offset += count;
+        }
+        return self.next;
+    }
+};
+
+fn prepareConversationPage(init: std.process.Init, store: []const u8, session: []const u8, cursor: client.ConversationCursor, frontend: *Frontend) !PreparedConversationPage {
+    const page_file = try renderScratch(init);
+    defer page_file.close(init.io);
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = try readRequest(frontend, init.io, client.conversationPage, .{ store, session, cursor, page_file, &reply_buffer });
+    if (reply == .command) try client.checkCanonicalFailure(reply.command);
+    if (reply != .report or reply.report.bytes > protocol.max_conversation_page_response_bytes) return error.ConversationUnavailable;
+    var page_bytes: [protocol.max_conversation_page_response_bytes]u8 = undefined;
+    const length: usize = @intCast(reply.report.bytes);
+    if (try page_file.readPositionalAll(init.io, page_bytes[0..length], 0) != length) return error.TruncatedConversationPage;
+    var arena_bytes: [32 * 1024]u8 = undefined;
+    var arena = std.heap.FixedBufferAllocator.init(&arena_bytes);
+    const page = (try std.json.parseFromSliceLeaky(HistoryPage, arena.allocator(), page_bytes[0..length], .{ .ignore_unknown_fields = false }));
+    const next = try page.continuation(cursor);
+    // Stage this entire bounded page before showing any of it. A later content
+    // read can fail; a per-item retry would repeat already displayed items.
+    const prepared = try renderScratch(init);
+    errdefer prepared.close(init.io);
+    for (0..page.items.len) |i| {
+        const item = page.items[page.items.len - 1 - i];
+        const position = try std.fmt.parseInt(u64, item.position, 10);
+        const ordinal = try std.fmt.parseInt(u64, item.ordinal, 10);
+        const bytes = try std.fmt.parseInt(u64, item.content.bytes, 10);
+        const assistant = std.mem.eql(u8, item.kind, "assistant");
+        const label = if (std.mem.eql(u8, item.kind, "user")) "You: " else if (assistant) "" else if (std.mem.eql(u8, item.kind, "tool_result")) "Tool result: " else return error.InvalidConversationPage;
+        if (assistant) try prepared.writeStreamingAll(init.io, answer_divider);
+        try prepared.writeStreamingAll(init.io, label);
+        if (bytes > 8 * 1024) {
+            var output_buffer: [4096]u8 = undefined;
+            var writer = prepared.writerStreaming(init.io, &output_buffer);
+            try writeContentOmission(&writer.interface, store, session, position, ordinal, bytes);
+            try writer.flush();
+            continue;
+        }
+        {
+            const content_file = try renderScratch(init);
+            defer content_file.close(init.io);
+            var offset: u64 = 0;
+            while (true) {
+                const range = try readRequest(frontend, init.io, client.conversationContent, .{ store, session, position, ordinal, offset, content_file, &reply_buffer });
+                if (range.total != bytes) return error.InvalidConversationContent;
+                offset = range.next;
+                if (offset == bytes) break;
+            }
+            try verifyConversationContent(init.io, content_file, bytes, item.content.sha256);
+            if (assistant) {
+                var output_buffer: [4096]u8 = undefined;
+                var writer = prepared.writerStreaming(init.io, &output_buffer);
+                var renderer: AnswerRenderer = .{ .out = &writer.interface };
+                var input_buffer: [4096]u8 = undefined;
+                var read_offset: u64 = 0;
+                while (read_offset < bytes) {
+                    const count = try content_file.readPositionalAll(init.io, input_buffer[0..@intCast(@min(bytes - read_offset, input_buffer.len))], read_offset);
+                    if (count == 0) return error.TruncatedConversationContent;
+                    try renderer.feed(input_buffer[0..count]);
+                    read_offset += count;
+                }
+                try renderer.finish();
+                try writer.flush();
+            } else try writeSafeFileAt(init.io, content_file, prepared, 0, bytes);
+            try prepared.writeStreamingAll(init.io, "\n");
+        }
+    }
+    return .{ .file = prepared, .next = next };
+}
+
+fn verifyConversationContent(io: std.Io, file: std.Io.File, bytes: u64, encoded: []const u8) !void {
+    var expected: [32]u8 = undefined;
+    if (encoded.len != 64) return error.InvalidConversationContent;
+    _ = std.fmt.hexToBytes(&expected, encoded) catch return error.InvalidConversationContent;
+    if (try file.length(io) != bytes) return error.InvalidConversationContent;
+    var hash = protocol.contentHasher();
+    var buffer: [4096]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < bytes) {
+        const wanted: usize = @intCast(@min(bytes - offset, buffer.len));
+        if (try file.readPositionalAll(io, buffer[0..wanted], offset) != wanted) return error.TruncatedConversationContent;
+        hash.update(buffer[0..wanted]);
+        offset += wanted;
+    }
+    if (!std.mem.eql(u8, &hash.finalResult(), &expected)) return error.InvalidConversationContent;
+}
+
+test "cycle3 history verifies raw content including empty control and Markdown" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "", "hello", "\x1b[31m\x00", "**bold**\n[link](url)", &(@as([8192]u8, @splat('a'))) }) |raw| {
+        const file = try createRenderScratch(io, tmp.dir, false);
+        defer file.close(io);
+        try file.writeStreamingAll(io, raw);
+        const encoded = std.fmt.bytesToHex(protocol.contentDigest(raw), .lower);
+        try verifyConversationContent(io, file, raw.len, &encoded);
+        const wrong = std.fmt.bytesToHex(protocol.contentDigest("different"), .lower);
+        try std.testing.expectError(error.InvalidConversationContent, verifyConversationContent(io, file, raw.len, &wrong));
+    }
+}
+
+test "cycle3 history rejects same-length altered raw bytes with valid metadata digest" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "hello", "\x1b[31m\x00", "**bold**\n[link](url)" }) |raw| {
+        const file = try createRenderScratch(io, tmp.dir, false);
+        defer file.close(io);
+        try file.writeStreamingAll(io, raw);
+        const encoded = std.fmt.bytesToHex(protocol.contentDigest(raw), .lower);
+        try file.writePositionalAll(io, "!", 0);
+        try std.testing.expectEqual(@as(u64, raw.len), try file.length(io));
+        try std.testing.expectError(error.InvalidConversationContent, verifyConversationContent(io, file, raw.len, &encoded));
+    }
+}
+
+fn saveConversationContent(init: std.process.Init, args: []const []const u8) !void {
+    var store: ?[]const u8 = null;
+    var session: ?[]const u8 = null;
+    var output: ?[]const u8 = null;
+    var position: ?u64 = null;
+    var ordinal: ?u64 = null;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--store") and store == null) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session") and session == null) session = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--position") and position == null) position = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else if (std.mem.eql(u8, args[index], "--ordinal") and ordinal == null) ordinal = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else if (std.mem.eql(u8, args[index], "--output") and output == null) output = try takeValue(args, &index) else return usage();
+    }
+    const selected_session = session orelse return usage();
+    const selected_position = position orelse return usage();
+    const selected_ordinal = ordinal orelse return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const selected_store = try selectedStore(init, store, &selected_buffer);
+    const file = try std.Io.Dir.cwd().createFile(init.io, output orelse return usage(), .{ .exclusive = true, .permissions = .fromMode(0o600) });
+    defer file.close(init.io);
+    errdefer std.debug.print("rui: content output may be incomplete; do not treat it as the saved item\n", .{});
+    var reply_buffer: client.ReplyBuffer = .{};
+    _ = try client.conversationContentStream(init.io, selected_store, selected_session, selected_position, selected_ordinal, null, file, &reply_buffer);
 }
 
 fn sessions(init: std.process.Init, args: []const []const u8) !void {
@@ -2285,6 +2689,17 @@ fn showResult(init: std.process.Init, saved: *const client.MessageAddress, prese
     try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
 }
 
+fn showInteractiveAnswer(init: std.process.Init, saved: *const client.MessageAddress, frontend: ?*Frontend, out: *std.Io.Writer) !void {
+    try out.writeAll(answer_divider);
+    var renderer: AnswerRenderer = .{ .out = out };
+    var read_buffer: client.ReplyBuffer = .{};
+    const answer = try streamRequest(frontend, init.io, client.readResultStream, .{ saved.store.slice(), saved.key.slice() }, &renderer, &read_buffer);
+    if (answer != .answer) return error.ResultReadFailed;
+    try renderer.finish();
+    try out.writeAll("\n");
+    try out.flush();
+}
+
 fn waitEnteredSession(frontend: *Frontend) !?Work {
     const report = try inspectWork(frontend.init, frontend.store, frontend.session, frontend);
     defer report.file.close(frontend.init.io);
@@ -2326,7 +2741,9 @@ const Work = struct {
     provider: protocol.Bounded(32) = .{},
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
     permission_mode: protocol.Bounded(16) = .{},
+    bash: bool = false,
     selected_message: ?protocol.Bounded(protocol.max_key_bytes) = null,
+    history_end: ?u64 = null,
     recent: [10]Recent = [_]Recent{.{}} ** 10,
     recent_count: usize = 0,
 };
@@ -2395,6 +2812,15 @@ fn readWork(reader: *std.json.Reader) !Work {
                     } else if (std.mem.eql(u8, key, "model")) {
                         try work.model.set(try tokenString(value));
                     } else try work.permission_mode.set(try tokenString(value));
+                } else if (std.mem.eql(u8, key, "tools")) {
+                    if ((try reader.next()) != .array_begin) return error.InvalidObservation;
+                    while (true) {
+                        const tool = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 16);
+                        defer freeToken(tool);
+                        if (tool == .array_end) break;
+                        const tool_name = try tokenString(tool);
+                        if (std.mem.eql(u8, tool_name, "bash")) work.bash = true else if (!std.mem.eql(u8, tool_name, "edit")) return error.InvalidObservation;
+                    }
                 } else try reader.skipValue();
             }
         } else if (std.mem.eql(u8, field, "selected_message")) {
@@ -2405,6 +2831,12 @@ fn readWork(reader: *std.json.Reader) !Work {
                 try selected.set(try tokenString(value));
                 work.selected_message = selected;
             }
+        } else if (std.mem.eql(u8, field, "history_end")) {
+            if (work.history_end != null) return error.InvalidObservation;
+            const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 20);
+            defer freeToken(value);
+            work.history_end = try std.fmt.parseInt(u64, try tokenString(value), 10);
+            if (work.history_end.? > std.math.maxInt(i64)) return error.InvalidObservation;
         } else if (std.mem.eql(u8, field, "recent_messages")) {
             if ((try reader.next()) != .array_begin) return error.InvalidObservation;
             while (true) {
@@ -2498,8 +2930,25 @@ fn readWork(reader: *std.json.Reader) !Work {
             }
         } else try reader.skipValue();
     }
-    if (work.status.len == 0 or (try reader.next()) != .end_of_document) return error.InvalidObservation;
+    if ((work.workspace.len != 0 and work.status.len == 0) or (try reader.next()) != .end_of_document) return error.InvalidObservation;
     return work;
+}
+
+test "Current keeps an optional history watermark for resume without rejecting ordinary inspection" {
+    inline for (.{
+        .{ .json = "{\"session\":null,\"execution\":{\"status\":\"unavailable\"}}", .expected = @as(?u64, null), .valid = true },
+        .{ .json = "{\"session\":{\"workspace\":\"/tmp\"},\"work\":{\"status\":\"idle\"}}", .expected = @as(?u64, null), .valid = true },
+        .{ .json = "{\"session\":{\"workspace\":\"/tmp\"},\"history_end\":\"0\",\"work\":{\"status\":\"idle\"}}", .expected = @as(?u64, 0), .valid = true },
+        .{ .json = "{\"session\":{\"workspace\":\"/tmp\"},\"history_end\":\"7\",\"work\":{\"status\":\"idle\"}}", .expected = @as(?u64, 7), .valid = true },
+        .{ .json = "{\"session\":{\"workspace\":\"/tmp\"},\"history_end\":\"1\",\"history_end\":\"2\",\"work\":{\"status\":\"idle\"}}", .expected = @as(?u64, null), .valid = false },
+    }) |case| {
+        var source = std.Io.Reader.fixed(case.json);
+        var reader = std.json.Reader.init(std.testing.allocator, &source);
+        defer reader.deinit();
+        if (case.valid) {
+            try std.testing.expectEqual(case.expected, (try readWork(&reader)).history_end);
+        } else try std.testing.expectError(error.InvalidObservation, readWork(&reader));
+    }
 }
 
 const SessionObservation = struct {
@@ -2632,8 +3081,141 @@ fn progressNotice(queue: client.MessageObservation.State, status: @FieldType(cli
     return error.InvalidObservation;
 }
 
-// null is the selected message's terminal observation; an Action is only a hint
-// to inspect and decide against the Host's exact current target.
+fn sessionCallHead(init: std.process.Init, store: []const u8, session: []const u8) !u64 {
+    var buffer: client.ReplyBuffer = .{};
+    const reply = try client.sessionCalls(init.io, store, session, null, &buffer);
+    if (reply.status == 409) return error.SessionNotConfigured;
+    if (reply.status != 200) return error.CallFeedReadFailed;
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
+    defer parsed.deinit();
+    if (!std.mem.eql(u8, try stringField(parsed.value, "type"), "session_calls") or
+        (try objectField(parsed.value, "call")) != .null) return error.InvalidObservation;
+    return std.fmt.parseInt(u64, try stringField(parsed.value, "position"), 10) catch error.InvalidObservation;
+}
+
+// Explicit keyed follow/wait retain their bounded notices. The automatic
+// terminal transcript instead follows Session view facts and public content.
+const CallNarration = struct {
+    cursor: ?u64 = null,
+    terminal_end: ?u64 = null,
+
+    fn capture(init: std.process.Init, store: []const u8, session: []const u8) !CallNarration {
+        var self: CallNarration = .{ .cursor = sessionCallHead(init, store, session) catch |err| blk: {
+            if (err == error.CanonicalStoreFailure or err == error.RenderScratchCleanupFailed) return err;
+            break :blk null;
+        } };
+        if (self.cursor == null) try self.unavailable(init.io, error.ActivityUnavailable);
+        return self;
+    }
+
+    fn unavailable(self: *CallNarration, io: std.Io, err: anyerror) !void {
+        if (err == error.CanonicalStoreFailure) return err;
+        self.cursor = null;
+        std.Io.File.stdout().writeStreamingAll(io, "Rui: Activity notices unavailable or incomplete; following the original Message independently.\n") catch return error.CallDisplayFailed;
+    }
+
+    fn drain(self: *CallNarration, init: std.process.Init, saved: *const client.MessageAddress, turn: u64, terminal: bool) !void {
+        if (self.cursor == null) return;
+        if (terminal and self.terminal_end == null) {
+            self.terminal_end = sessionCallHead(init, saved.store.slice(), saved.session.slice()) catch |err| {
+                return self.unavailable(init.io, err);
+            };
+            if (self.terminal_end.? < self.cursor.?) return self.unavailable(init.io, error.InvalidObservation);
+        }
+        var count: usize = 0;
+        while (if (self.terminal_end) |end| self.cursor.? < end else count < 16) : (count += 1) {
+            const requested = self.cursor.?;
+            const notice = readCallNotice(init, saved, requested, turn, self.terminal_end) catch |err| {
+                return self.unavailable(init.io, err);
+            };
+            self.cursor = notice.position;
+            // Printing is deliberately outside the auxiliary boundary. After
+            // any output failure, the caller exits rather than replaying it.
+            if (notice.visible) notice.print(init.io) catch return error.CallDisplayFailed;
+            if (notice.position == requested) return;
+        }
+    }
+};
+
+const CallNotice = struct {
+    position: u64,
+    visible: bool = false,
+    name: protocol.Bounded(128) = .{},
+    arguments: protocol.Bounded(256) = .{},
+    name_length: u64 = 0,
+    arguments_length: u64 = 0,
+    rejection: ?protocol.Bounded(32) = null,
+
+    fn print(self: *const CallNotice, io: std.Io) !void {
+        const out = std.Io.File.stdout();
+        if (self.rejection != null) try out.writeStreamingAll(io, "Rejected proposal · ");
+        try writeSafePreview(io, self.name.slice());
+        if (self.name_length > self.name.len) try out.writeStreamingAll(io, "…");
+        try out.writeStreamingAll(io, " · ");
+        try writeSafePreview(io, self.arguments.slice());
+        if (self.arguments_length > self.arguments.len) try out.writeStreamingAll(io, "…");
+        if (self.rejection) |code| {
+            try out.writeStreamingAll(io, " · ");
+            try writeSafePreview(io, code.slice());
+        }
+        try out.writeStreamingAll(io, "\n");
+    }
+};
+
+// Complete retrieval and validation before printing even the name. One index
+// exchange plus at most two bounded ranges, never a full argument download.
+fn readCallNotice(init: std.process.Init, saved: *const client.MessageAddress, cursor: u64, selected_turn: u64, end: ?u64) !CallNotice {
+    var buffer: client.ReplyBuffer = .{};
+    const reply = try client.sessionCalls(init.io, saved.store.slice(), saved.session.slice(), cursor, &buffer);
+    if (reply.status != 200) return error.CallFeedReadFailed;
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
+    defer parsed.deinit();
+    const position = std.fmt.parseInt(u64, try stringField(parsed.value, "position"), 10) catch return error.InvalidObservation;
+    if (position < cursor) return error.InvalidObservation;
+    var notice: CallNotice = .{ .position = if (end) |fixed| @min(position, fixed) else position };
+    const value = try objectField(parsed.value, "call");
+    if (value == .null) return notice;
+    if (position == cursor) return error.InvalidObservation;
+    if (end != null and position > end.?) return notice;
+    const turn = std.fmt.parseInt(u64, try stringField(value, "turn"), 10) catch return error.InvalidObservation;
+    _ = std.fmt.parseInt(u64, try stringField(value, "operation"), 10) catch return error.InvalidObservation;
+    _ = std.fmt.parseInt(u64, try stringField(value, "ordinal"), 10) catch return error.InvalidObservation;
+    if (turn != selected_turn) return notice;
+    const classification = try stringField(value, "classification");
+    if (std.mem.eql(u8, classification, "ask")) return notice;
+    if (std.mem.eql(u8, classification, "rejected")) {
+        notice.rejection = .{};
+        try notice.rejection.?.set(try stringField(value, "rejection"));
+    } else if (!std.mem.eql(u8, classification, "bypass")) return error.InvalidObservation;
+    notice.name_length = try readCallPrefix(init, saved, position, .name, try objectField(value, "name"), &notice.name, &buffer);
+    notice.arguments_length = try readCallPrefix(init, saved, position, .arguments, try objectField(value, "arguments"), &notice.arguments, &buffer);
+    notice.visible = true;
+    return notice;
+}
+
+fn readCallPrefix(init: std.process.Init, saved: *const client.MessageAddress, position: u64, field: protocol.SessionCallContent.Field, metadata: std.json.Value, destination: anytype, buffer: *client.ReplyBuffer) !u64 {
+    const length = std.fmt.parseInt(u64, try stringField(metadata, "bytes"), 10) catch return error.InvalidObservation;
+    var digest: [32]u8 = undefined;
+    const encoded = try stringField(metadata, "sha256");
+    if (encoded.len != 64) return error.InvalidObservation;
+    _ = std.fmt.hexToBytes(&digest, encoded) catch return error.InvalidObservation;
+    if (length == 0) return length;
+    const range = try client.sessionCallContent(init.io, saved.store.slice(), saved.session.slice(), position, field, 0, &destination.bytes, buffer);
+    if (range.total != length or range.next != @min(length, destination.bytes.len)) return error.InvalidObservation;
+    destination.len = @intCast(range.next);
+    if (length == destination.len) {
+        const actual = protocol.contentDigest(destination.slice());
+        if (!std.mem.eql(u8, &digest, &actual)) return error.InvalidObservation;
+    }
+    // At most three trailing bytes can belong to an incomplete scalar.
+    var trimmed: usize = 0;
+    while (!std.unicode.utf8ValidateSlice(destination.slice())) : (trimmed += 1) {
+        if (length == range.next or trimmed == 3 or destination.len == 0) return error.InvalidObservation;
+        destination.len -= 1;
+    }
+    return length;
+}
+
 fn fatalPresentation(err: anyerror) bool {
     return err == error.InteractiveInterrupted or err == error.CanonicalStoreFailure or err == error.AnswerDisplayFailed or err == error.ActionDisplayFailed or
         err == error.WriteFailed or err == error.BrokenPipe or err == error.InputOutput or err == error.NoSpaceLeft or
@@ -2734,6 +3316,135 @@ fn inspectAction(init: std.process.Init, args: []const []const u8, interactive: 
     try std.Io.File.stdout().writeStreamingAll(io, "Bash arguments: \"");
     try writeJsonFileAt(io, file, call_bytes, arguments.answer.bytes, true);
     try std.Io.File.stdout().writeStreamingAll(io, "\"\n");
+}
+
+fn inspectEnteredAction(init: std.process.Init, args: []const []const u8, interactive: bool, frontend: ?*Frontend) !void {
+    const io = init.io;
+    var store: ?[]const u8 = null;
+    var session: ?[]const u8 = null;
+    var action: ?u64 = null;
+    var json = false;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--action")) action = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else if (std.mem.eql(u8, args[index], "--json")) json = true else return error.UnknownArgument;
+    }
+    const target = action orelse return usage();
+    const reference = session orelse return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const selected = try selectedStore(init, store, &selected_buffer);
+    if (interactive) {
+        var size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+        if (std.c.ioctl(1, @intCast(std.c.T.IOCGWINSZ), &size) == 0 and size.col > 0) {
+            if (size.col <= action_choice_prompt.len + 1) return error.TerminalTooNarrow;
+        }
+    }
+    const file = try renderScratch(init);
+    defer file.close(io);
+    var buffer: client.ReplyBuffer = .{};
+    var call_bytes: u64 = 0;
+    if (!interactive) {
+        const call = try client.readActionCallId(io, selected, reference, target, file, &buffer);
+        if (call != .answer) return error.ActionReadFailed;
+        call_bytes = call.answer.bytes;
+    }
+    const arguments = try readRequest(frontend, io, client.readActionArguments, .{ selected, reference, target, file, &buffer });
+    if (arguments != .answer) {
+        try client.checkCanonicalFailure(arguments.command);
+        return error.ActionReadFailed;
+    }
+    var source: ActionSource = .{ .io = io, .file = file, .start = call_bytes, .length = arguments.answer.bytes };
+    const descriptor = (try tools.inspectBashArguments(&source)) orelse return error.InvalidActionArguments;
+    source.position = 0;
+    var output_buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stdout().writerStreaming(io, &output_buffer);
+    const out = if (frontend) |owner| owner.terminal.writer() else &writer.interface;
+    writeActionInspection(io, target, &source, descriptor, json, interactive, out) catch |err| {
+        if (interactive) return error.ActionDisplayFailed;
+        return err;
+    };
+    try out.flush();
+}
+
+// Retrieval and exact descriptor validation finish before any authority-bearing
+// output. Failure after rendering begins is fatal to the interactive session.
+fn writeActionInspection(io: std.Io, target: u64, source: *ActionSource, descriptor: tools.BashArguments, json: bool, interactive: bool, out: *std.Io.Writer) !void {
+    var line: [96]u8 = undefined;
+    if (json) {
+        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"action\":\"{d}\",\"call_id\":\"", .{target}));
+        try writeJsonFileAt(io, source.file, 0, source.start);
+        try std.Io.File.stdout().writeStreamingAll(io, "\",\"arguments\":\"");
+        try writeJsonFileAt(io, source.file, source.start, source.length);
+        return std.Io.File.stdout().writeStreamingAll(io, "\"}\n");
+    }
+    // Quote provider-controlled fields so control and bidi bytes cannot alter the
+    // proposal visible next to the human approval prompt.
+    if (interactive) try out.writeAll("\n────────\nPermission required · Bash\n") else try out.print("Action {d}\n", .{target});
+    try out.flush();
+    if (!interactive) {
+        try std.Io.File.stdout().writeStreamingAll(io, "call ID: \"");
+        try writeSafeFileAt(io, source.file, std.Io.File.stdout(), 0, source.start);
+        try std.Io.File.stdout().writeStreamingAll(io, "\"\n");
+    }
+    try out.writeAll(if (interactive) "Command: \"" else "Bash command: \"");
+    var terminal_text: TerminalText = .{ .mode = .line };
+    const CommandDisplay = struct {
+        output: *std.Io.Writer,
+        text: *TerminalText,
+        pub fn writeAll(self: *@This(), bytes: []const u8) !void {
+            try self.text.feed(self.output, bytes);
+        }
+    };
+    var display: CommandDisplay = .{ .output = out, .text = &terminal_text };
+    if (!try tools.writeBashCommand(source, &display)) return error.InvalidActionArguments;
+    try terminal_text.finish(out);
+    try out.writeAll("\"\n");
+    if (descriptor.timeout_ms) |timeout| {
+        try out.print("Timeout: {d} ms\n", .{timeout});
+    } else try out.writeAll("Timeout: Host default\n");
+}
+
+const ActionSource = struct {
+    io: std.Io,
+    file: std.Io.File,
+    start: u64,
+    length: u64,
+    position: u64 = 0,
+    buffer_start: u64 = 0,
+    buffer_length: usize = 0,
+    buffer: [protocol.content_window_bytes]u8 = undefined,
+
+    pub fn peek(self: *ActionSource) !?u8 {
+        if (self.position == self.length) return null;
+        if (self.position < self.buffer_start or self.position >= self.buffer_start + self.buffer_length) {
+            self.buffer_start = self.position;
+            const wanted: usize = @intCast(@min(self.length - self.position, self.buffer.len));
+            self.buffer_length = try self.file.readPositionalAll(self.io, self.buffer[0..wanted], self.start + self.position);
+            if (self.buffer_length != wanted) return error.TruncatedResult;
+        }
+        return self.buffer[@intCast(self.position - self.buffer_start)];
+    }
+
+    pub fn take(self: *ActionSource) !u8 {
+        const byte = try self.peek() orelse return error.InvalidActionArguments;
+        self.position += 1;
+        return byte;
+    }
+};
+
+fn writeSafeFileAt(io: std.Io, file: std.Io.File, destination: std.Io.File, start: u64, length: u64) !void {
+    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var writer = destination.writerStreaming(io, &output_buffer);
+    var text: TerminalText = .{ .mode = .line };
+    var chunk: [protocol.content_window_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < length) {
+        const wanted: usize = @intCast(@min(length - offset, chunk.len));
+        if (try file.readPositionalAll(io, chunk[0..wanted], start + offset) != wanted) return error.TruncatedResult;
+        try text.feed(&writer.interface, chunk[0..wanted]);
+        offset += wanted;
+    }
+    try text.finish(&writer.interface);
+    try writer.flush();
 }
 
 fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escape_unicode: bool) !void {
