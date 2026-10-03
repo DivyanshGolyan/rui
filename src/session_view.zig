@@ -166,3 +166,27 @@ pub fn decode(bytes: []const u8, cursor: Cursor) !Page {
     }
     return page;
 }
+
+test "Session view continuation advances scanned gaps only after interval drains" {
+    var page: Page = .{ .end = 19, .count = 1, .more = true };
+    page.items[0] = .{ .position = 12, .ordinal = 3, .kind = .tool_result };
+    var cursor = page.continuation(.{});
+    try std.testing.expectEqual(Cursor{ .end = 19, .position = 12, .ordinal = 3 }, cursor);
+    page.more = false;
+    try std.testing.expectEqual(Cursor{ .position = 19 }, page.continuation(cursor));
+    page.items[0] = .{ .position = 19, .ordinal = 17, .kind = .tool_result };
+    cursor = page.continuation(cursor);
+    try std.testing.expectEqual(Cursor{ .position = 19, .ordinal = 17 }, cursor);
+    page.count = 0;
+    for (0..3) |_| {
+        cursor = page.continuation(cursor);
+        try std.testing.expectEqual(Cursor{ .position = 19, .ordinal = 17 }, cursor);
+    }
+    page.end = 23;
+    cursor = page.continuation(cursor);
+    try std.testing.expectEqual(Cursor{ .position = 23 }, cursor);
+    page.end = 29;
+    page.count = 1;
+    page.items[0] = .{ .position = 29, .kind = .assistant };
+    try std.testing.expectEqual(Cursor{ .position = 29 }, page.continuation(cursor));
+}
