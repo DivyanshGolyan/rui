@@ -1403,3 +1403,957 @@ def focused_incomplete_case(env, route):
             terminal.save('focused-'+route+'-'+name)
             print(label+': '+('nonzero exit (stderr backpressured)' if route == 'prompt' else 'original timeout')+
                   ', exact restoration, no capture/decision/effect before release', flush=True)
+
+
+def focused_valid_case(env):
+    session = 'pty/focused/valid'
+    env.configure(session, '--tools', 'bash', '--permission-mode', 'ask')
+    arguments = json.dumps({'cmd': 'printf x >> focused-count', 'timeout_ms': None})
+    env.endpoint.responses.append(fixture.sse_tool_calls(session, [('bash', session, arguments)]))
+    key = env.message(session, 'inspect before choosing')
+    action = fixture.wait_for(lambda: env.facts(session)['actionable_permissions'], 'Action ready')[0]['action']
+    env.answer('focused fresh choice completed')
+    env.proxy = Proxy(env.host.rui_ready_fields['socket'], 'read')
+    terminal = env.terminal(session)
+    terminal.send('retained中\x1b[D')
+    terminal.draft(['retained中'], 10)
+    captures = env.records()
+    env.proxy.hold_kind = 'read_action_arguments'
+    # Completed typeahead is staging-only; a subsequent incomplete sequence
+    # has a real staging deadline which successful drain/flush must retire.
+    terminal.send('\x07a\n\x1b[')
+    assert env.proxy.held.wait(15), 'Action inspection was not held'
+    assert env.records() == captures and not (env.workspace/'focused-count').exists()
+    env.proxy.release.set()
+    terminal.action_ready(env.ready_read)
+    terminal.read_until(lambda: 'Allow once, deny, or later?' in terminal.text(), 'fresh choice after staged CSI')
+    try:
+        terminal.child.wait(timeout=2.2)
+        raise AssertionError('retired staging deadline ended a fresh idle choice')
+    except subprocess.TimeoutExpired:
+        pass
+    start = len(terminal.raw)
+    terminal.send('l\n')
+    later = b'No decision sent; use /wait to revisit.'
+    terminal.read_until(lambda: later in terminal.raw[start:], 'later after retired staging deadline')
+    terminal.draft(['retained中'], 10)
+    for name in ('bare-escape', 'fragmented-csi', 'fragmented-ss3'):
+        terminal.send('\x07')
+        terminal.action_ready(env.ready_read)
+        start = len(terminal.raw)
+        terminal.send('\x1b' if name == 'bare-escape' else '\x1b[' if name == 'fragmented-csi' else '\x1bO')
+        # Deliberate ambiguity/fragmentation intervals test actual 80-ms and
+        # 2-second policy, not synchronization or a shorter fixture deadline.
+        time.sleep(0.15)
+        terminal.send('l\n' if name == 'bare-escape' else 'Cl\n')
+        terminal.read_until(lambda: later in terminal.raw[start:], name+' valid fresh choice')
+        terminal.draft(['retained中'], 10)
+        assert env.records() == captures and not (env.workspace/'focused-count').exists()
+    assert not any(row.startswith('> ') or 'retained中' in row for row in terminal.history())
+    terminal.save('focused-valid')
+    terminal.send('\x07')
+    terminal.action_ready(env.ready_read)
+    terminal.send('a\n')
+    env.completed(key)
+    terminal.read_until(lambda: 'focused fresh choice completed' in terminal.all_text(), 'fresh exact allow')
+    terminal.draft(['retained中'], 10)
+    decision, = set(env.records())-set(captures)
+    record = json.loads(env.records()[decision])
+    assert record['kind'] == 'permission_decision' and str(record['action']) == str(action)
+    assert record['decision'] == 'allow_once'
+    assert (env.workspace/'focused-count').read_text() == 'x'
+    assert len(env.proxy.commands) == 1, 'focused typeahead authorized extra decisions'
+    print('focused valid: staged typeahead/CSI retired, idle fresh choice, bare ESC, fragmented CSI/SS3 and one exact allow; draft/cursor preserved', flush=True)
+
+
+def footer_edit_case(env):
+    if os.uname().sysname != 'Linux':
+        print('footer EAGAIN observation: unavailable outside Linux', flush=True)
+        return
+    library = env.state/'terminal-output.so'
+    subprocess.run(['cc', '-shared', '-fPIC',
+                    str(pathlib.Path(__file__).with_name('terminal_output_probe.c')),
+                    '-ldl', '-o', str(library)], check=True)
+    for name, draft in (('rows', 'paint-transient-'*40),
+                        ('cluster', 'e'+'\u0301'*2200+'tail')):
+        session = 'pty/footer-edit/'+name
+        env.configure(session)
+        with contextlib.ExitStack() as cleanup:
+            notice_read, notice_write = os.pipe()
+            cleanup.callback(os.close, notice_read)
+            cleanup.callback(os.close, notice_write)
+            terminal = Terminal(env, session, environment={
+                'LD_PRELOAD': str(library), 'RUI_PAINT_NOTICE_FD': str(notice_write),
+                'RUI_PAINT_CLUSTER': '1' if name == 'cluster' else '0'},
+                pass_fds=(notice_write,))
+            env.terminals.append(terminal)
+            terminal.draft([''], 2)
+            payload = draft.encode()
+            for offset in range(0, len(payload), 2048):
+                terminal.send(payload[offset:offset+2048])
+            # No output reader. Repainting eventually fills the real PTY; the
+            # probe signals only an actual EAGAIN on footer writes, not a
+            # sleep, private state, artificial write failure or opaque backlog.
+            for _ in range(200):
+                if select.select([notice_read], [], [], 0.02)[0]:
+                    break
+                terminal.send('z')
+            assert select.select([notice_read], [], [], 0)[0], 'footer write never reached actual EAGAIN'
+            assert os.read(notice_read, 1) == b'x'
+            terminal.send('\x01\x0b\x1b[200~中e\u0301\nsecond尾\x1b[201~\x1b[DX')
+            env.answer('\n'.join('paint-permanent-'+f'{i:03}' for i in range(40)))
+            key = env.message(session, 'permanent output after blocked edit')
+            env.completed(key)
+            terminal.read_until(lambda: 'paint-permanent-039' in terminal.all_text(), 'output after blocked footer edit')
+            terminal.draft(['中e\u0301', 'secondX尾'], 9)
+            # Cosmetic notice removal cannot rescue abandoned row custody:
+            # later output pushes leaked transient rows into real scrollback.
+            assert not any(row.startswith('> ') or 'paint-transient-' in row or '\u0301' in row
+                           or '[display restarted' in row for row in terminal.history()), ('transient footer escaped custody', terminal.snapshot())
+            assert '[display restarted' not in terminal.all_text(), 'logical edit was treated as physical resize'
+            terminal.save('blocked-footer-'+name)
+            env.answer('exact blocked-edit submission')
+            before = env.records()
+            terminal.send('\n')
+            terminal.read_until(lambda: 'exact blocked-edit submission' in terminal.all_text(), 'edited message completes')
+            assert env.user_text() == '中e\u0301\nsecondX尾', env.user_text()
+            assert len(set(env.records())-set(before)) == 1, 'blocked edit duplicated admission'
+            print(name+': actual footer EAGAIN, exact cells/cursor/submission and no transient scrollback', flush=True)
+
+
+def drain_detach_case(env):
+    if os.uname().sysname != 'Linux':
+        print('drain interruption fault probe: unavailable outside Linux', flush=True)
+        return
+    library = env.state/'terminal-drain.so'
+    subprocess.run(['cc', '-shared', '-fPIC', '-std=c11',
+                    str(pathlib.Path(__file__).with_name('terminal_drain_probe.c')),
+                    '-ldl', '-pthread', '-o', str(library)], check=True)
+    for name, detach in (('interrupt', '\x03'), ('eof', '\x04')):
+        session = 'pty/drain-detach/'+name
+        env.configure(session, '--tools', 'bash', '--permission-mode', 'ask')
+        args = json.dumps({'cmd': 'printf forbidden > drain-effect', 'timeout_ms': None})
+        env.endpoint.responses.append(fixture.sse_tool_calls(session, [('bash', session, args)]))
+        env.message(session, 'inspect without authorization')
+        fixture.wait_for(lambda: env.facts(session)['actionable_permissions'], 'Action ready')
+        with contextlib.ExitStack() as cleanup:
+            notice_read, notice_write = os.pipe()
+            gate_read, gate_write = os.pipe()
+            for fd in (notice_read, notice_write, gate_read, gate_write):
+                cleanup.callback(os.close, fd)
+            terminal = Terminal(env, session, environment={
+                'LD_PRELOAD': str(library), 'RUI_DRAIN_NOTICE_FD': str(notice_write),
+                'RUI_DRAIN_GATE_FD': str(gate_read)}, pass_fds=(notice_write, gate_read))
+            env.terminals.append(terminal)
+            terminal.draft([''], 2)
+            captures = env.records()
+            terminal.send('composition\x07a\n')
+            assert select.select([notice_read], [], [], 10)[0], 'native drain was not entered'
+            assert os.read(notice_read, 1) == b'E', 'native tcdrain failed before injection'
+            assert env.records() == captures and not (env.workspace/'drain-effect').exists()
+            terminal.send(detach)
+            try:
+                terminal.child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                # The single-signal mutation is deterministically caught before
+                # its read syscall; only this explicit cleanup releases it.
+                os.write(gate_write, b'x')
+                raise AssertionError('lost-first-signal: borrower did not finish before release') from None
+            assert terminal.child.returncode == 0, terminal.child.returncode
+            notices = os.read(notice_read, 64)
+            assert notices.count(b'T') >= 2 and b'B' in notices and b'K' in notices, notices
+            assert notices.endswith(b'JR'), ('join/disposition restoration order', notices)
+            assert termios.tcgetattr(terminal.slave) == terminal.original_mode
+            assert fcntl.fcntl(terminal.slave, fcntl.F_GETFL) == terminal.original_flags
+            assert env.records() == captures and not (env.workspace/'drain-effect').exists()
+            assert not select.select([env.ready_read], [], [], 0)[0], 'cancelled drain published fresh choice'
+            print(name+': lost first signal, established kernel read, TTY before signal/join, exact disposition restored', flush=True)
+
+
+def admission_case(env, mode):
+    session = 'pty/'+mode
+    env.configure(session)
+    env.proxy = Proxy(env.host.rui_ready_fields['socket'], mode)
+    terminal = env.terminal(session)
+    gate = env.answer('original-completion', held=True)
+    before = env.records()
+    started = time.monotonic()
+    bound_content = mode in ('malformed-admission-bytes', 'malformed-admission-digest')
+    terminal.send('//original中e\u0301\n' if bound_content else 'original中e\u0301\n')
+    captures = fixture.wait_for(lambda: set(env.records()) - set(before), 'local capture publication')
+    captured_at = time.monotonic()
+    original, = captures
+    assert env.proxy.held.wait(15), 'real admission reply not intercepted'
+    saved = env.records()[original]
+    record = json.loads(saved)
+    assert record['key'] == original and record['session'] == session
+    assert record['text']['value'] == ('/original中e\u0301' if bound_content else 'original中e\u0301'), record
+    observed = fixture.command('observe-command', '--store', env.store, '--key', original)['observation']
+    assert observed['status'] == 'accepted', observed
+    admitted_at = time.monotonic()
+    terminal.send('next中e\u0301\x1b[D')
+    terminal.draft(['next中e\u0301'], 8)
+    terminal.send('\n')
+    terminal.read_until(lambda: 'Original admission is unresolved' in terminal.all_text(), 'second send blocked')
+    terminal.draft(['next中e\u0301'], 8)
+    assert 'Sending...' in terminal.text(), terminal.snapshot()
+    assert set(env.records()) - set(before) == {original}
+    env.proxy.release.set()
+    if mode == 'lost' or mode.startswith('malformed-admission'):
+        terminal.read_until(lambda: 'Ctrl-R: submission unconfirmed' in terminal.text(), 'lost reply observed')
+        assert 'Submission unconfirmed (' in terminal.all_text(), terminal.snapshot()
+        assert terminal.raw.count(b'Submission unconfirmed (') == 1, 'worker completion consumed more than once'
+        terminal.draft(['next中e\u0301'], 8)
+        terminal.save('lost-reply-preserved')
+        terminal.send('\x12')
+        terminal.read_until(lambda: 'Sending...' not in terminal.text()
+                            and 'Ctrl-R: submission unconfirmed' not in terminal.text()
+                            and '/discard: rejected original' not in terminal.text(),
+                            'immutable recovery confirmed')
+        terminal.draft(['next中e\u0301'], 8)
+        messages = [body for command, body in env.proxy.commands if command['kind'] == 'message']
+        assert len(messages) == 2 and messages[0] == messages[1], messages
+        assert env.records()[original] == saved
+        assert terminal.raw.count(b'Submission unconfirmed (') == 1, 'old uncertainty presented again after recovery'
+        facts = env.facts(session)
+        assert facts['selected_message'] == original and facts['pending_messages'] == '0', facts
+    else:
+        terminal.read_until(lambda: 'Sending...' not in terminal.text()
+                            and 'Ctrl-R: submission unconfirmed' not in terminal.text()
+                            and '/discard: rejected original' not in terminal.text(),
+                            'held reply confirmed')
+    terminal.draft(['next中e\u0301'], 8)
+    confirmed_at = time.monotonic()
+    gate.set()
+    env.completed(original)
+    assert len(env.facts(session)['recent_messages']) == 1, env.facts(session)
+    assert env.user_text() == ('/original中e\u0301' if bound_content else 'original中e\u0301'), env.user_text()
+    terminal.read_until(lambda: 'original-completion' in terminal.all_text(), 'original finishes')
+    terminal.draft(['next中e\u0301'], 8)
+    terminal.save(mode+'-admission')
+    env.answer('next-intent-completion')
+    terminal.send('X\n')
+    terminal.read_until(lambda: 'next-intent-completion' in terminal.all_text(), 'intentional next message')
+    assert env.user_text() == 'next中Xe\u0301', env.user_text()
+    new, = set(env.records()) - set(before) - {original}
+    assert new != original and env.records()[original] == saved
+    print(f'{mode} observations seconds: input-to-capture-detected={captured_at-started:.6f}, '
+          f'capture-detected-to-Host-accepted-observed={admitted_at-captured_at:.6f}, '
+          f'capture-detected-to-confirmed={confirmed_at-captured_at:.6f} '
+          '(capture detection is polled, not its commit timestamp; includes deliberate hold; no perceptual promise)')
+
+
+def admission_start_failure_case(env):
+    library = env.state/'terminal-start-failure.so'
+    subprocess.run(['cc', '-shared', '-fPIC',
+                    str(pathlib.Path(__file__).with_name('terminal_signal_probe.c')),
+                    '-ldl', '-pthread', '-o', str(library)], check=True)
+    for kind in ('MASK', 'SPAWN'):
+        session = 'pty/admission-start-failure/'+kind
+        env.configure(session)
+        env.proxy = Proxy(env.host.rui_ready_fields['socket'], 'read')
+        with contextlib.ExitStack() as cleanup:
+            read, write = os.pipe()
+            cleanup.callback(os.close, read)
+            cleanup.callback(os.close, write)
+            terminal = Terminal(env, session, environment={
+                'LD_PRELOAD': str(library), 'RUI_ADMISSION_NOTICE_FD': str(write),
+                'RUI_ADMISSION_FAIL_'+kind: '1'}, pass_fds=(write,))
+            env.terminals.append(terminal)
+            terminal.draft([''], 2)
+            before = env.records()
+            env.answer('same identity recovered')
+            terminal.send('not sent original\n')
+            terminal.read_until(lambda: 'Ctrl-R: submission not sent' in terminal.text(), 'startup not-sent result consumed')
+            terminal.read_until(lambda: b'Submission not sent (' in terminal.raw, 'startup completion consumed and recovery identity published')
+            assert select.select([read], [], [], 0)[0], 'native failure did not run'
+            assert os.read(read, 1) == (b'F' if kind == 'MASK' else b'B')
+            original, = set(env.records())-set(before)
+            saved = env.records()[original]
+            assert not env.proxy.commands, 'failed startup sent request bytes'
+            terminal.send('next draft')
+            terminal.draft(['next draft'], 12)
+            assert terminal.raw.count(b'Submission not sent (') == 1 and original.encode() in terminal.raw, 'startup completion not consumed exactly once'
+            terminal.send('\x12')
+            terminal.read_until(lambda: 'same identity recovered' in terminal.all_text(), 'Ctrl-R recovered original not-sent capture')
+            terminal.draft(['next draft'], 12)
+            env.completed(original)
+            assert env.records()[original] == saved and set(env.records())-set(before) == {original}
+            assert len(env.proxy.commands) == 1 and env.proxy.commands[0][0]['key'] == original
+            assert env.user_text() == 'not sent original'
+            assert terminal.raw.count(b'Submission not sent (') == 1, 'startup result presented again after recovery'
+            terminal.send('\x03')
+            terminal.child.wait(timeout=5)
+            assert terminal.child.returncode == 0
+            assert_restored(terminal.slave, terminal.original_flags, terminal.original_mode)
+            env.proxy.close()
+            env.proxy = None
+            print(kind+': native startup failure sent nothing; Ctrl-R retained capture and next draft', flush=True)
+
+
+def admission_read_failure_case(env):
+    for content in (False, True):
+        session = 'pty/admission-read-failure/'+str(content)
+        env.configure(session)
+        env.proxy = Proxy(env.host.rui_ready_fields['socket'], 'read')
+        terminal = env.terminal(session)
+        env.proxy.hold_kind = 'conversation_content' if content else 'session_view'
+        env.proxy.hold_partial = content
+        env.proxy.fail_held_read = True
+        if content:
+            env.answer('partial-live-marker\n'+('body data\n'*3000))
+            live = env.message(session, 'start live content')
+            env.completed(live)
+        assert env.proxy.held.wait(15), 'real read did not reach held first byte/suffix'
+        if content:
+            terminal.read_until(lambda: 'partial-live-marker' in terminal.all_text(), 'live content window rendered')
+        before = env.records()
+        env.answer('first capture while read held')
+        terminal.send('first original\n')
+        first, = fixture.wait_for(lambda: set(env.records())-set(before), 'first capture during held read')
+        env.completed(first)
+        # The completion must release its bank while the same read is held,
+        # not at a transcript-loop boundary. A second exact intent proves it.
+        env.answer('second capture while read held')
+        terminal.send('second original\n')
+        second, = fixture.wait_for(lambda: set(env.records())-set(before)-{first}, 'second capture before read release')
+        env.completed(second)
+        saved = env.records()[second]
+        assert not env.proxy.release.is_set()
+        env.proxy.release.set()  # deliberately close the incomplete read
+        terminal.child.wait(timeout=5)
+        assert terminal.child.returncode == 1
+        assert_restored(terminal.slave, terminal.original_flags, terminal.original_mode)
+        terminal.collect()
+        assert b'Submission accepted.' in terminal.raw and ('Session: '+session).encode() in terminal.raw
+        assert ('Key: '+second).encode() in terminal.raw, terminal.raw
+        assert b'Use rui result KEY' in terminal.raw and b'Use rui recover KEY' not in terminal.raw, terminal.raw
+        assert env.records()[second] == saved and set(env.records())-set(before) == {first, second}
+        sent = [json.loads(body)['text']['value'] for command, body in env.proxy.commands
+                if command['kind'] == 'message' and command['key'] in (first, second)]
+        assert sent == ['first original', 'second original'], sent
+        env.proxy.close()
+        env.proxy = None
+        print(f'content={content}: two once-applied completions before read release, fatal read retains latest exact address', flush=True)
+
+
+def admission_canonical_failure_case(env):
+    library = env.state/'terminal-canonical.so'
+    subprocess.run(['cc', '-shared', '-fPIC', str(pathlib.Path(__file__).with_name('terminal_signal_probe.c')),
+                    '-ldl', '-pthread', '-o', str(library)], check=True)
+    for route, stopped, detach in ((route, stopped, detach)
+                                  for route in ('view', 'content', 'ordinary')
+                                  for stopped in (False, True)
+                                  for detach in ('service', 'exit', 'interrupt')):
+        label = f'{route}/stopped={stopped}/{detach}'
+        session = 'pty/admission-canonical/'+label
+        env.configure(session)
+        env.proxy = Proxy(env.host.rui_ready_fields['socket'], 'read')
+        notice_read, notice_write = os.pipe()
+        gate_read, gate_write = os.pipe()
+        terminal = Terminal(env, session, environment={
+            'LD_PRELOAD': str(library), 'RUI_ADMISSION_NOTICE_FD': str(notice_write),
+            'RUI_ADMISSION_HOLD_SETMASK': '1', 'RUI_ADMISSION_MASK_GATE_FD': str(gate_read)},
+            pass_fds=(notice_write, gate_read))
+        env.terminals.append(terminal)
+        os.close(notice_write)
+        os.close(gate_read)
+        terminal.draft([''], 2)
+        env.proxy.hold_kind = 'conversation_content' if route == 'content' else 'session_view' if route == 'view' else None
+        env.proxy.hold_partial = route == 'content'
+        if route == 'content':
+            env.answer('partial-live-marker\n'+('body data\n'*3000))
+            env.completed(env.message(session, 'start live content'))
+        if route != 'ordinary':
+            assert env.proxy.held.wait(15), 'read not held'
+        if route == 'content':
+            terminal.read_until(lambda: 'partial-live-marker' in terminal.all_text(), 'live prefix rendered')
+        before = env.records()
+        commands_before = len(env.proxy.commands)
+        env.proxy.mode = 'canonical-admission'
+        env.answer('real committed original')
+        terminal.send('canonical original\n')
+        original, = fixture.wait_for(lambda: set(env.records())-set(before), 'immutable original capture')
+        assert env.proxy.admission_held.wait(15)
+        saved = env.records()[original]
+        notices = bytearray()
+
+        def await_notice(byte):
+            while byte not in notices:
+                assert select.select([notice_read], [], [], 3)[0], (label, 'native transition missing', notices)
+                part = os.read(notice_read, 16)
+                assert part, (label, 'native observer closed', notices)
+                notices.extend(part)
+
+        await_notice(ord('R'))  # Parent cannot harvest while SETMASK is gated.
+        if stopped:
+            termios.tcflow(terminal.slave, termios.TCOOFF)
+        try:
+            env.proxy.admission_release.set()
+            assert env.proxy.canonical_sent.wait(3), 'canonical reply not delivered'
+            await_notice(ord('D'))  # True worker publication precedes detach.
+            if detach != 'service':
+                terminal.send('/exit\n' if detach == 'exit' else '\x03')
+            assert os.write(gate_write, b'x') == 1
+            terminal.child.wait(timeout=3)
+            await_notice(ord('E'))  # Real successful mask restoration, no EIO.
+            assert terminal.child.returncode == 1, (label, 'canonical failure became successful detach', terminal.child.returncode)
+            assert_restored(terminal.slave, terminal.original_flags, terminal.original_mode)
+            assert not env.proxy.release.is_set(), 'exit required held read release'
+            assert env.records()[original] == saved and set(env.records())-set(before) == {original}
+            messages = [command for command, _ in env.proxy.commands[commands_before:] if command['kind'] == 'message']
+            assert len(messages) == 1 and messages[0]['key'] == original, messages
+            if not stopped:
+                terminal.collect()
+                assert b'error: CanonicalStoreFailure' in terminal.raw, terminal.raw
+                assert b'Submission unconfirmed.' in terminal.raw and ('Key: '+original).encode() in terminal.raw
+        finally:
+            termios.tcflow(terminal.slave, termios.TCOON)
+            os.close(notice_read)
+            os.close(gate_write)
+        env.proxy.close()
+        env.proxy = None
+        print(label+': fatal completion exits1/restores before read/output release; original uncertainty retained', flush=True)
+
+
+def admission_canonical_teardown_case(env):
+    library = env.state/'terminal-canonical-teardown.so'
+    subprocess.run(['cc', '-shared', '-fPIC', str(pathlib.Path(__file__).with_name('terminal_signal_probe.c')),
+                    '-ldl', '-pthread', '-o', str(library)], check=True)
+    for stopped, detach in ((stopped, detach) for stopped in (False, True) for detach in ('exit', 'interrupt')):
+        label = f'stopped={stopped}/{detach}'
+        session = 'pty/admission-canonical-teardown/'+label
+        env.configure(session)
+        env.proxy = Proxy(env.host.rui_ready_fields['socket'], 'read')
+        with contextlib.ExitStack() as cleanup:
+            notice_read, notice_write = os.pipe()
+            gate_read, gate_write = os.pipe()
+            for fd in (notice_read, notice_write, gate_read, gate_write):
+                cleanup.callback(os.close, fd)
+            terminal = Terminal(env, session, environment={
+                'LD_PRELOAD': str(library), 'RUI_ADMISSION_NOTICE_FD': str(notice_write),
+                'RUI_ADMISSION_HOLD_BODY': '1', 'RUI_ADMISSION_BODY_GATE_FD': str(gate_read)},
+                pass_fds=(notice_write, gate_read))
+            env.terminals.append(terminal)
+            terminal.draft([''], 2)
+            env.proxy.hold_kind = 'session_view'
+            assert env.proxy.held.wait(15)
+            env.proxy.mode = 'canonical-admission'
+            before = env.records()
+            env.answer('committed original with held body return')
+            terminal.send('canonical teardown original\n')
+            assert env.proxy.admission_held.wait(15)
+            original, = set(env.records())-set(before)
+            saved = env.records()[original]
+            env.proxy.admission_release.set()
+            notices = bytearray()
+
+            def await_notice(byte):
+                while byte not in notices:
+                    assert select.select([notice_read], [], [], 3)[0], (label, 'native transition missing', notices)
+                    part = os.read(notice_read, 16)
+                    assert part, (label, 'observer closed', notices)
+                    notices.extend(part)
+
+            await_notice(ord('C'))  # Full real body read, worker not published.
+            if stopped:
+                termios.tcflow(terminal.slave, termios.TCOOFF)
+                cleanup.callback(termios.tcflow, terminal.slave, termios.TCOON)
+            terminal.send('/exit\n' if detach == 'exit' else '\x03')
+            await_notice(ord('T'))  # Actual terminal restoration before join.
+            assert_restored(terminal.slave, terminal.original_flags, terminal.original_mode)
+            assert terminal.child.poll() is None and ord('D') not in notices, 'borrower released before cleanup observation'
+            await_notice(ord('J'))  # Finalizer reached the outstanding worker join.
+            assert notices.index(ord('T')) < notices.index(ord('J')) and ord('D') not in notices, notices
+            assert os.write(gate_write, b'x') == 1
+            terminal.child.wait(timeout=3)
+            await_notice(ord('D'))
+            assert terminal.child.returncode == 1, (label, 'post-join canonical failure became successful detach', terminal.child.returncode)
+            assert not env.proxy.release.is_set(), 'teardown required held view release'
+            assert env.records()[original] == saved and set(env.records())-set(before) == {original}
+            assert len(env.proxy.commands) == 1 and env.proxy.commands[0][0]['key'] == original
+            if not stopped:
+                terminal.collect()
+                assert b'error: CanonicalStoreFailure' in terminal.raw and b'Submission unconfirmed.' in terminal.raw
+                assert ('Key: '+original).encode() in terminal.raw
+        env.proxy.close()
+        env.proxy = None
+        print(label+': restoration precedes held-worker join; post-join canonical result exits1 before read/output release', flush=True)
+
+
+def admission_switch_case(env):
+    for uncertain in (False, True):
+        old, target = 'pty/admission-A/'+str(uncertain), 'pty/admission-B/'+str(uncertain)
+        env.configure(old)
+        env.configure(target)
+        env.proxy = Proxy(env.host.rui_ready_fields['socket'], 'lost' if uncertain else 'read')
+        terminal = env.terminal(old)
+        before = env.records()
+        env.answer('original A receipt')
+        terminal.send('original in A\n')
+        original, = fixture.wait_for(lambda: set(env.records())-set(before), 'A capture')
+        if uncertain:
+            assert env.proxy.held.wait(15)
+            env.proxy.release.set()
+            terminal.read_until(lambda: b'Submission unconfirmed (' in terminal.raw, 'A uncertainty consumed')
+        else:
+            terminal.read_until(lambda: 'original A receipt' in terminal.all_text(), 'A acceptance rendered')
+        terminal.send('/resume '+target+'\n')
+        terminal.read_until(lambda: ('Session: '+target).encode() in terminal.raw, 'switched to B')
+        terminal.draft([''], 2)
+        if uncertain:
+            terminal.send('\x12')
+            fixture.wait_for(lambda: len(env.proxy.commands) == 2, 'original A recovery transmitted while entered in B')
+            terminal.read_until(lambda: 'Ctrl-R: submission unconfirmed' not in terminal.text() and 'Sending...' not in terminal.text(), 'A recovery in B')
+            messages = [command for command, _ in env.proxy.commands if command['kind'] == 'message']
+            assert len(messages) == 2 and all(command['session'] == old and command['key'] == original for command in messages), messages
+        env.completed(original)
+        # Fail a B read without creating a new Message. The receipt must still
+        # identify A, not the Frontend's now-current destination.
+        env.proxy.held.clear()
+        env.proxy.release.clear()
+        env.proxy.hold_kind = 'session_view'
+        env.proxy.fail_held_read = True
+        assert env.proxy.held.wait(15)
+        env.proxy.release.set()
+        terminal.child.wait(timeout=5)
+        terminal.collect()
+        assert terminal.child.returncode == 1
+        assert_restored(terminal.slave, terminal.original_flags, terminal.original_mode)
+        assert b'Submission accepted.' in terminal.raw and ('Key: '+original).encode() in terminal.raw
+        assert ('Session: '+old).encode() in terminal.raw, terminal.raw
+        assert b'Use rui result KEY' in terminal.raw and b'Use rui recover KEY' not in terminal.raw, terminal.raw
+        assert set(env.records())-set(before) == {original}
+        env.proxy.close()
+        env.proxy = None
+        print(f'uncertain={uncertain}: A identity survives B switch/read failure, recovery never targets B', flush=True)
+
+
+def admission_retry_failure_case(env):
+    library = env.state/'terminal-retry-failure.so'
+    subprocess.run(['cc', '-shared', '-fPIC', str(pathlib.Path(__file__).with_name('terminal_signal_probe.c')),
+                    '-ldl', '-pthread', '-o', str(library)], check=True)
+    for kind, shortcut in [('MASK', '\x12'), ('SPAWN', '/recover\n')]:
+        session = 'pty/admission-retry-failure/'+kind
+        env.configure(session)
+        env.proxy = Proxy(env.host.rui_ready_fields['socket'], 'lost')
+        with contextlib.ExitStack() as cleanup:
+            read, write = os.pipe()
+            cleanup.callback(os.close, read)
+            cleanup.callback(os.close, write)
+            terminal = Terminal(env, session, environment={
+                'LD_PRELOAD': str(library), 'RUI_ADMISSION_NOTICE_FD': str(write),
+                'RUI_ADMISSION_FAIL_'+kind: '1', 'RUI_ADMISSION_FAIL_ATTEMPT': '2'}, pass_fds=(write,))
+            env.terminals.append(terminal)
+            terminal.draft([''], 2)
+            before = env.records()
+            env.answer('same key after failed retry')
+            terminal.send('uncertain original\n')
+            assert env.proxy.held.wait(15), 'original acceptance reply not held'
+            original, = set(env.records())-set(before)
+            saved = env.records()[original]
+            env.proxy.release.set()
+            terminal.read_until(lambda: b'Submission unconfirmed (' in terminal.raw, 'lost reply consumed')
+            if shortcut == '\x12':
+                terminal.send('next中e\u0301\x1b[D')
+                terminal.draft(['next中e\u0301'], 8)
+            terminal.send(shortcut)
+            terminal.read_until(lambda: terminal.raw.count(b'Submission unconfirmed (') == 2,
+                                'failed retry retains earlier uncertainty')
+            assert b'Submission not sent (' not in terminal.raw
+            assert len(env.proxy.commands) == 1, 'failed retry transmitted another request'
+            terminal.draft(['next中e\u0301'] if shortcut == '\x12' else [''], 8 if shortcut == '\x12' else 2)
+            terminal.send(shortcut)
+            terminal.read_until(lambda: 'Sending...' not in terminal.text() and 'Ctrl-R: submission unconfirmed' not in terminal.text(),
+                                'third startup recovers same key')
+            terminal.draft(['next中e\u0301'] if shortcut == '\x12' else [''], 8 if shortcut == '\x12' else 2)
+            env.completed(original)
+            assert len(env.proxy.commands) == 2 and env.proxy.commands[0][1] == env.proxy.commands[1][1]
+            assert set(env.records())-set(before) == {original} and env.records()[original] == saved
+            assert terminal.raw.count(b'Submission unconfirmed (') == 2
+            terminal.send('\x03')
+            terminal.child.wait(timeout=5)
+            assert terminal.child.returncode == 0
+            assert_restored(terminal.slave, terminal.original_flags, terminal.original_mode)
+            env.proxy.close()
+            env.proxy = None
+            print(kind+': lost reply, failed retry startup remains uncertain, original-key recovery/no duplicate', flush=True)
+
+
+def admission_mask_cleanup_case(env):
+    library = env.state/'terminal-mask-cleanup.so'
+    subprocess.run(['cc', '-shared', '-fPIC', str(pathlib.Path(__file__).with_name('terminal_signal_probe.c')),
+                    '-ldl', '-pthread', '-o', str(library)], check=True)
+    for worker in ('none', 'held', 'complete', 'canonical'):
+        for stopped in (False, True):
+            session = 'pty/admission-mask-cleanup/'+worker+'/'+str(stopped)
+            env.configure(session)
+            env.proxy = Proxy(env.host.rui_ready_fields['socket'], 'canonical-admission' if worker == 'canonical' else 'held')
+            with contextlib.ExitStack() as cleanup:
+                notice_read, notice_write = os.pipe()
+                gate_read, gate_write = os.pipe()
+                for fd in (notice_read, notice_write, gate_read, gate_write):
+                    cleanup.callback(os.close, fd)
+                settings = {'LD_PRELOAD': str(library), 'RUI_ADMISSION_NOTICE_FD': str(notice_write),
+                            'RUI_ADMISSION_MASK_GATE_FD': str(gate_read), 'RUI_ADMISSION_FAIL_SETMASK': '1',
+                            'RUI_ADMISSION_QUEUE_INTERRUPT': '1'}
+                if worker == 'none':
+                    settings['RUI_ADMISSION_FAIL_SPAWN'] = '1'
+                terminal = Terminal(env, session, environment=settings, pass_fds=(notice_write, gate_read))
+                env.terminals.append(terminal)
+                terminal.draft([''], 2)
+                before = env.records()
+                if worker != 'none':
+                    env.answer('fatal cleanup retains true outcome')
+                terminal.send('mask cleanup original\n')
+                notices = bytearray()
+
+                def await_notice(byte):
+                    deadline = time.monotonic()+15
+                    while byte not in notices:
+                        assert select.select([notice_read], [], [], max(0, deadline-time.monotonic()))[0], (worker, stopped, byte, notices)
+                        notices.extend(os.read(notice_read, 16))
+
+                await_notice(ord('R'))
+                original, = set(env.records())-set(before)
+                saved = env.records()[original]
+                if worker != 'none':
+                    held = env.proxy.admission_held if worker == 'canonical' else env.proxy.held
+                    assert held.wait(15), 'spawned worker did not send original capture'
+                if worker == 'complete':
+                    env.proxy.release.set()
+                    await_notice(ord('D'))  # true worker publication before parent SETMASK failure
+                elif worker == 'canonical':
+                    env.proxy.admission_release.set()
+                    await_notice(ord('D'))  # canonical result must not hide mask cleanup
+                if stopped:
+                    termios.tcflow(terminal.slave, termios.TCOOFF)
+                    cleanup.callback(termios.tcflow, terminal.slave, termios.TCOON)
+                os.write(gate_write, b'x')
+                await_notice(ord('E'))  # injection verified mask remains blocked, not restored
+                terminal.child.wait(timeout=5)
+                assert terminal.child.returncode == 1, (worker, stopped, 'fatal cleanup misclassified', terminal.child.returncode)
+                assert_restored(terminal.slave, terminal.original_flags, terminal.original_mode)
+                assert env.records()[original] == saved and set(env.records())-set(before) == {original}
+                if worker != 'complete':
+                    assert not env.proxy.release.is_set(), 'cleanup depended on held backend/output release'
+                if not stopped:
+                    terminal.collect()
+                    assert b'error: AdmissionMaskRestorationFailed' in terminal.raw, terminal.raw
+                    expected = b'Submission '+{'none': b'not sent', 'held': b'unconfirmed', 'complete': b'accepted', 'canonical': b'unconfirmed'}[worker]
+                    assert expected in terminal.raw and original.encode() in terminal.raw, terminal.raw
+                    if worker == 'complete':
+                        assert b'Use rui result KEY' in terminal.raw and b'Use rui recover KEY' not in terminal.raw, terminal.raw
+                    else:
+                        assert b'Use rui recover KEY' in terminal.raw and b'Use rui result KEY' not in terminal.raw, terminal.raw
+                    assert b'panic' not in terminal.raw
+                if stopped:
+                    termios.tcflow(terminal.slave, termios.TCOON)
+                if worker != 'none':
+                    await_notice(ord('D'))
+                    env.completed(original)
+                assert len(env.proxy.commands) == (0 if worker == 'none' else 1)
+                env.proxy.close()
+                env.proxy = None
+                if worker == 'none':
+                    env.answer('original no-worker recovery')
+                    recovered = json.loads(human.run(env.home, 'recover', original, '--json'))
+                    assert recovered['answer']['status'] == 'accepted' and recovered['answer']['replayed'] is False, recovered
+                    env.completed(original)
+                print(f'{worker}/{stopped}: SETMASK EIO fatal before release, queued interrupt, truthful result, exact TTY restoration', flush=True)
+
+
+def admission_signal_case(env):
+    if os.uname().sysname != 'Linux':
+        print('Admission birth-mask observation: unavailable outside Linux', flush=True)
+        return
+    library = env.state/'terminal-signal.so'
+    subprocess.run(['cc', '-shared', '-fPIC',
+                    str(pathlib.Path(__file__).with_name('terminal_signal_probe.c')),
+                    '-ldl', '-pthread', '-o', str(library)], check=True)
+    for recover in (False, True):
+        session = 'pty/admission-signal/'+str(recover)
+        env.configure(session)
+        env.proxy = Proxy(env.host.rui_ready_fields['socket'], 'lost' if recover else 'read')
+        if not recover:
+            env.proxy.hold_kind = 'message'
+        with contextlib.ExitStack() as cleanup:
+            notice_read, notice_write = os.pipe()
+            cleanup.callback(os.close, notice_read)
+            cleanup.callback(os.close, notice_write)
+            terminal = Terminal(env, session, environment={
+                'LD_PRELOAD': str(library), 'RUI_ADMISSION_NOTICE_FD': str(notice_write)},
+                pass_fds=(notice_write,))
+            env.terminals.append(terminal)
+            terminal.draft([''], 2)
+
+            def masks():
+                observed = {}
+                for task in pathlib.Path('/proc', str(terminal.child.pid), 'task').iterdir():
+                    try:
+                        status = (task/'status').read_text()
+                    except FileNotFoundError:
+                        # A scoped read can join between directory enumeration
+                        # and read. The held Admission and main task may not.
+                        assert int(task.name) != terminal.child.pid
+                        continue
+                    observed[int(task.name)] = int(next(line.split()[1] for line in status.splitlines()
+                                                        if line.startswith('SigBlk:')), 16)
+                return observed
+
+            prior = masks()[terminal.child.pid]
+            assert prior & (1 << (signal.SIGUSR2-1)) and not prior & (1 << (signal.SIGINT-1)), prior
+            gate = env.answer('signal-custody completion', held=True)
+            before = env.records()
+            terminal.send('immutable signal custody\n')
+            assert env.proxy.held.wait(15), 'Admission was not held'
+            original, = set(env.records())-set(before)
+            saved = env.records()[original]
+            if recover:
+                env.proxy.release.set()
+                terminal.read_until(lambda: 'Ctrl-R: submission unconfirmed' in terminal.text(), 'original reply lost')
+                env.proxy.mode = 'read'
+                env.proxy.release.clear()
+                env.proxy.held.clear()
+                env.proxy.hold_kind = 'message'
+                terminal.send('\x12')
+                assert env.proxy.held.wait(15), 'explicit recovery was not held'
+            assert select.select([notice_read], [], [], 0)[0], 'Admission was not SIGINT-masked at pthread creation'
+            assert os.read(notice_read, 16) == b'B'*(2 if recover else 1), 'initial/recovery creation mask missing'
+            current = masks()
+            assert current[terminal.child.pid] == prior, ('terminal prior mask changed', prior, current)
+            assert list(current.values()).count(prior | (1 << (signal.SIGINT-1))) == 1, current
+            detached_before_release(terminal, env.proxy, 'Admission signal custody')
+            assert env.records()[original] == saved and len(env.records()) == len(before)+1
+            assert len(env.proxy.commands) == (2 if recover else 1), 'signal correction duplicated admission'
+            env.proxy.close()
+            env.proxy = None
+            gate.set()
+            env.completed(original)
+            print(('recovery' if recover else 'initial')+': SIGINT blocked at birth; exact terminal mask/capture restored', flush=True)
+
+
+def admission_detach_case(env):
+    for name, detach in [('interrupt', b'\x03'), ('eof', b'\x04'), ('exit', b'/exit\n')]:
+        session = 'pty/admission-detach-' + name
+        env.configure(session)
+        env.proxy = Proxy(env.host.rui_ready_fields['socket'], 'held')
+        terminal = env.terminal(session)
+        gate = env.answer('detached-original-completion', held=True)
+        before = env.records()
+        terminal.send('immutable-detached-intent\n')
+        captures = fixture.wait_for(lambda: set(env.records()) - set(before), 'capture before detach')
+        original, = captures
+        saved = env.records()[original]
+        assert env.proxy.held.wait(15), 'real admission reply not intercepted'
+        observed = fixture.command('observe-command', '--store', env.store, '--key', original)['observation']
+        assert observed['status'] == 'accepted', observed
+        terminal.read_until(lambda: 'Sending...' in terminal.text(), 'held admission footer')
+        if name == 'interrupt':
+            terminal.send('independent-next-draft')
+            terminal.draft(['independent-next-draft'], 24)
+        terminal.send(detach)
+        # The response remains withheld: neither server release nor fixture
+        # cleanup may rescue a blocked join. This is the regression oracle.
+        try:
+            terminal.child.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            raise AssertionError('CLI did not exit before held admission reply release') from None
+        assert terminal.child.returncode == 0, terminal.child.returncode
+        assert not env.proxy.release.is_set(), 'fixture released admission before child exit'
+        mode = termios.tcgetattr(terminal.master)[3]
+        assert mode & termios.ICANON and mode & termios.ECHO and mode & termios.ISIG, 'TTY not restored before reply release'
+        assert env.records()[original] == saved, 'detachment removed or changed recovery identity'
+        messages = [body for command, body in env.proxy.commands if command['kind'] == 'message' and command['session'] == session]
+        assert len(messages) == 1, 'detachment duplicated admission'
+        env.proxy.release.set()
+        gate.set()
+        env.completed(original)
+        assert len(env.facts(session)['recent_messages']) == 1, env.facts(session)
+        assert env.user_text() == 'immutable-detached-intent', env.user_text()
+        env.proxy.close()
+        env.proxy = None
+
+
+def backpressure_case(env):
+    session = "pty/backpressure'$(touch unexpected)中"
+    env.configure(session)
+    env.proxy = Proxy(env.host.rui_ready_fields['socket'], 'backpressure')
+    terminal = env.terminal(session)
+    # All content is live; never confuse historical omission with bounded live
+    # streaming. No PTY reader runs from admission until both Host outcomes.
+    answer = '\n'.join(f'large-{i:05} '+('x'*60) for i in range(8000))
+    env.answer(answer)
+    original = env.message(session, 'large-live-answer')
+    env.completed(original)
+    assert env.proxy.blocked.wait(15), 'public content stream never backpressured'
+    env.answer('control-progresses-with-reader-held')
+    control = env.message(session, 'independent-control')
+    env.completed(control)
+    # Independent public durable outcome is the barrier, not an arbitrary sleep
+    # after EAGAIN. A queueing renderer would drain the complete content stream.
+    assert not env.proxy.content_finished.is_set(), 'CLI read complete large content while PTY reader held'
+    assert env.proxy.content_bytes < 128*1024, ('public content ran ahead', env.proxy.content_bytes)
+    print(f'backpressure: {env.proxy.content_bytes} public wire bytes forwarded while reader held; '
+          f'{len(answer.encode())} live content bytes; independent control completed')
+    marker = b'control-progresses-with-reader-held'
+    searched = len(terminal.raw)
+
+    def control_rendered():
+        nonlocal searched
+        # Search each newly ingested window plus marker overlap, not the full
+        # 4096-row emulator history on every read. Keep exact display/raw checks
+        # below; an independently completed control is not proof of delivery.
+        start = max(0, searched - len(marker) + 1)
+        searched = len(terminal.raw)
+        return terminal.raw.find(marker, start, searched) >= 0
+
+    terminal.read_until(control_rendered, 'drain after backpressure', timeout=30)
+    terminal.draft([''], 2)
+    assert 'large-07999' in terminal.all_text(), 'live answer tail lost'
+    real_output = terminal.raw.decode().replace('\r\r\n', '\n').replace('\r\n', '\n')
+    assert answer in real_output, 'live content truncated despite correct displayed tail'
+    terminal.save('backpressure-drained')
+    replay = env.terminal(session)
+    omitted = f'[content omitted: {len(answer.encode())} bytes;'
+    assert omitted in replay.all_text(), replay.snapshot()
+    assert b'large-00000' not in replay.raw and b'large-07999' not in replay.raw
+    command = next(line for line in replay.raw.decode().splitlines()
+                   if line.startswith('rui conversation-content '))
+    command = shlex.quote(str(fixture.RUI)) + command[len('rui'):]
+    exported = subprocess.run(['bash', '-c', command], cwd=env.state,
+                              env={**os.environ, 'HOME': str(env.home)},
+                              capture_output=True, timeout=15)
+    assert exported.returncode == 0, exported.stderr
+    assert (env.state / 'NEW_FILE').read_bytes() == answer.encode(), 'displayed export command retargeted/truncated content'
+    assert not (env.state / 'unexpected').exists(), 'selector expansion executed a command'
+    replay.save('historical-omission')
+
+
+def restoration_counterexamples():
+    for mutation in ('nonblock', 'echo', 'canonical', 'control-character'):
+        master, slave = human.open_terminal()
+        try:
+            flags, mode = fcntl.fcntl(slave, fcntl.F_GETFL), termios.tcgetattr(slave)
+            assert_restored(slave, flags, mode)
+            # Exercise write bookkeeping and raw/canonical transitions on the
+            # actual native PTY, never socket APPEND or fabricated flags.
+            assert os.write(slave, b'x') == 1
+            changed = termios.tcgetattr(slave)
+            changed[3] &= ~(termios.ECHO | termios.ICANON)
+            termios.tcsetattr(slave, termios.TCSANOW, changed)
+            termios.tcsetattr(slave, termios.TCSANOW, mode)
+            assert_restored(slave, flags, mode)
+            if mutation == 'nonblock':
+                fcntl.fcntl(slave, fcntl.F_SETFL, flags ^ os.O_NONBLOCK)
+            else:
+                changed = termios.tcgetattr(slave)
+                if mutation == 'control-character':
+                    prior = changed[6][termios.VEOF]
+                    changed[6][termios.VEOF] = bytes([(prior[0] + 1) % 256])
+                else:
+                    changed[3] ^= termios.ECHO if mutation == 'echo' else termios.ICANON
+                termios.tcsetattr(slave, termios.TCSANOW, changed)
+            try:
+                assert_restored(slave, flags, mode)
+            except AssertionError as failure:
+                assert 'final_mode' in failure.args[0] and 'final_flags' in failure.args[0]
+            else:
+                raise AssertionError('restoration comparator missed '+mutation)
+        finally:
+            os.close(master)
+            os.close(slave)
+    print('restoration comparator: four real native PTY counterexamples rejected', flush=True)
+
+
+def reporting_case(env):
+    restoration_counterexamples()
+    args = [str(fixture.RUI), 'read-result', '--invalid']
+    captures = env.records()
+    for nonblocking in (False, True):
+        master, slave = human.open_terminal()
+        try:
+            if nonblocking:
+                fcntl.fcntl(slave, fcntl.F_SETFL, fcntl.fcntl(slave, fcntl.F_GETFL) | os.O_NONBLOCK)
+            flags, mode = fcntl.fcntl(slave, fcntl.F_GETFL), termios.tcgetattr(slave)
+            child = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=slave,
+                env={**os.environ, 'HOME': str(env.home)}, timeout=3)
+            assert child.returncode == 1 and child.stdout == b''
+            assert select.select([master], [], [], 1)[0], 'flowing TTY lost error name'
+            assert os.read(master, 4096).replace(b'\r\n', b'\n') == b'error: UnknownArgument\n'
+            assert_restored(slave, flags, mode)
+        finally:
+            os.close(master)
+            os.close(slave)
+    redirected = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True,
+        env={**os.environ, 'HOME': str(env.home)}, timeout=3)
+    assert redirected.returncode == 1 and redirected.stdout == b''
+    assert b'error: UnknownArgument\n' in redirected.stderr
+    assert env.records() == captures
+    print('fatal reporting: flowing TTY original error, restoration comparator satisfied, redirected reporter and nonzero exit', flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('executable')
+    parser.add_argument('--case', choices=('request-write', 'opening-stream', 'resume-selection', 'presentation', 'proposal', 'display', 'flag', 'resize', 'approval', 'approval-detach', 'admission-detach', 'admission-signal', 'admission-start-failure', 'admission-retry-failure', 'admission-mask-cleanup', 'admission-read-failure', 'admission-canonical-failure', 'admission-canonical-teardown', 'admission-switch', 'read-detach', 'output-detach', 'prompt-detach', 'restoration-failure', 'enter-edit', 'enter-nested', 'enter-command', 'enter-discard', 'enter-detach', 'status-incomplete', 'focused-read', 'focused-prompt', 'focused-drain', 'focused-valid', 'footer-edit', 'drain-detach', 'reporting', 'held', 'lost', 'malformed-admission', 'malformed-admission-bytes', 'malformed-admission-digest', 'rejection', 'backpressure'), action='append')
+    args = parser.parse_args()
+    fixture.RUI = pathlib.Path(args.executable).resolve()
+    cases = {'presentation': presentation_case, 'proposal': proposal_case, 'display': display_case, 'flag': flag_case, 'resize': resize_case, 'approval': approval_case,
+             'approval-detach': approval_detach_case,
+             'admission-detach': admission_detach_case,
+             'admission-signal': admission_signal_case,
+             'admission-start-failure': admission_start_failure_case,
+             'admission-retry-failure': admission_retry_failure_case,
+             'admission-mask-cleanup': admission_mask_cleanup_case,
+             'admission-read-failure': admission_read_failure_case,
+             'admission-canonical-failure': admission_canonical_failure_case,
+             'admission-canonical-teardown': admission_canonical_teardown_case,
+             'admission-switch': admission_switch_case,
+             'opening-stream': opening_stream_case,
+             'request-write': request_write_case,
+             'resume-selection': resume_selection_case,
+             'read-detach': read_detach_case, 'output-detach': output_detach_case, 'drain-detach': drain_detach_case,
+             'prompt-detach': prompt_detach_case,
+             'restoration-failure': restoration_failure_case,
+             'enter-edit': lambda env: enter_case(env, 'edit'),
+             'enter-nested': lambda env: enter_case(env, 'nested'),
+             'enter-command': lambda env: enter_case(env, 'command'),
+             'enter-discard': lambda env: enter_case(env, 'discard'),
+             'enter-detach': lambda env: enter_case(env, 'detach'),
+             'status-incomplete': incomplete_status_case,
+             'focused-read': lambda env: focused_incomplete_case(env, 'read'),
+             'focused-prompt': lambda env: focused_incomplete_case(env, 'prompt'),
+             'focused-drain': lambda env: focused_incomplete_case(env, 'drain'),
+             'focused-valid': focused_valid_case,
+             'reporting': reporting_case,
+             'footer-edit': footer_edit_case,
+             'held': lambda env: admission_case(env, 'held'),
+             'lost': lambda env: admission_case(env, 'lost'),
+             'malformed-admission': lambda env: admission_case(env, 'malformed-admission'),
+             'malformed-admission-bytes': lambda env: admission_case(env, 'malformed-admission-bytes'),
+             'malformed-admission-digest': lambda env: admission_case(env, 'malformed-admission-digest'),
+             'rejection': rejection_case, 'backpressure': backpressure_case}
+    failures = []
+    linux_only = {'admission-signal', 'enter-edit', 'enter-nested', 'enter-command',
+                  'enter-discard', 'enter-detach', 'status-incomplete', 'focused-read',
+                  'focused-prompt', 'focused-drain', 'footer-edit', 'drain-detach', 'output-detach'}
+    linux_only.update(('admission-start-failure', 'admission-retry-failure', 'admission-mask-cleanup', 'admission-canonical-failure', 'admission-canonical-teardown', 'opening-stream', 'request-write', 'restoration-failure'))
+    for name in args.case or cases:
+        if os.uname().sysname != 'Linux' and name in linux_only:
+            print(name+': SKIP (native fault probe unavailable outside Linux)', flush=True)
+            continue
+        try:
+            with Environment() as env:
+                cases[name](env)
+            print(name+': PASS', flush=True)
+        except Exception:
+            failures.append(name)
+            if env.terminals:
+                env.terminals[-1].save(name+'-failure')
+            traceback.print_exc()
+    assert not failures, ('production PTY regressions failed', failures)
+
+
+if __name__ == '__main__':
+    main()
