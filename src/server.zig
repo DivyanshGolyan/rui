@@ -4035,6 +4035,319 @@ test "connection populations preserve two control places" {
     try std.testing.expectEqual(@as(usize, 10 * 64 * 1024), maximum_result_delivery_buffers_bytes);
 }
 
+test "discovery reply cannot renew or outlive its absolute exchange deadline" {
+    var sockets: [2]std.posix.fd_t = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
+    defer std.Io.File.close(.{ .handle = sockets[0], .flags = .{ .nonblocking = false } }, std.testing.io);
+    defer std.Io.File.close(.{ .handle = sockets[1], .flags = .{ .nonblocking = false } }, std.testing.io);
+    const initial_flags = std.c.fcntl(sockets[0], std.c.F.GETFL);
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    try std.testing.expect(initial_flags >= 0);
+    try std.testing.expectEqual(@as(c_int, 0), initial_flags & nonblocking);
+    try std.testing.expect(std.c.fcntl(sockets[0], std.c.F.SETFL, initial_flags | nonblocking) == 0);
+    const buffer: [4096]u8 = @splat('x');
+    // Fill the real kernel send buffer with no reader, so bounded reply
+    // delivery must exercise backpressure rather than an already-writable FD.
+    while (true) {
+        const count = std.c.write(sockets[0], &buffer, buffer.len);
+        if (count < 0) {
+            try std.testing.expectEqual(std.posix.E.AGAIN, std.posix.errno(count));
+            break;
+        }
+        try std.testing.expect(count > 0);
+    }
+    // The production reply owner, not fixture setup, must establish safety.
+    try std.testing.expect(std.c.fcntl(sockets[0], std.c.F.SETFL, initial_flags) == 0);
+    const restored_flags = std.c.fcntl(sockets[0], std.c.F.GETFL);
+    try std.testing.expect(restored_flags >= 0);
+    try std.testing.expectEqual(@as(c_int, 0), restored_flags & nonblocking);
+    const started = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds;
+    try std.testing.expectError(error.ExchangeDeadlineExceeded, writeHttpUntil(
+        std.testing.io,
+        sockets[0],
+        200,
+        "{}",
+        started + 20 * std.time.ns_per_ms,
+    ));
+    const elapsed = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds - started;
+    try std.testing.expect(elapsed >= 20 * std.time.ns_per_ms and elapsed < std.time.ns_per_s);
+    // Kernel-derived write status is not Rui's requested flag policy.
+    const delivered_flags = std.c.fcntl(sockets[0], std.c.F.GETFL);
+    try std.testing.expect(delivered_flags >= 0);
+    try std.testing.expectEqual(nonblocking, delivered_flags & nonblocking);
+    // Once expired, even writable delivery may not obtain a new budget.
+    try std.testing.expectError(error.ExchangeDeadlineExceeded, writeHttpUntil(
+        std.testing.io,
+        sockets[1],
+        200,
+        "{}",
+        started,
+    ));
+}
+
+test "discovery reply initially writable socket cannot block past its deadline" {
+    var sockets: [2]std.posix.fd_t = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
+    defer std.Io.File.close(.{ .handle = sockets[0], .flags = .{ .nonblocking = false } }, std.testing.io);
+    defer std.Io.File.close(.{ .handle = sockets[1], .flags = .{ .nonblocking = false } }, std.testing.io);
+    const requested_buffer: c_int = 4096;
+    try std.posix.setsockopt(sockets[0], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&requested_buffer));
+    var actual_buffer: c_int = 0;
+    var size: std.c.socklen_t = @sizeOf(c_int);
+    try std.testing.expect(std.c.getsockopt(sockets[0], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, &actual_buffer, &size) == 0);
+    const body: [64 * 1024]u8 = @splat('x');
+    try std.testing.expect(actual_buffer > 0 and actual_buffer < body.len);
+    // Only a safety net for a broken blocking writer: outside the passing
+    // elapsed bound, so it cannot masquerade as the production deadline.
+    const safety_timeout: std.c.timeval = .{ .sec = 2, .usec = 0 };
+    try std.posix.setsockopt(sockets[0], std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&safety_timeout));
+    const started = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds;
+    try std.testing.expectError(error.ExchangeDeadlineExceeded, writeHttpUntil(
+        std.testing.io,
+        sockets[0],
+        200,
+        &body,
+        started + 20 * std.time.ns_per_ms,
+    ));
+    const elapsed = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds - started;
+    try std.testing.expectEqual(true, elapsed >= 20 * std.time.ns_per_ms and elapsed < std.time.ns_per_s);
+    const flags = std.c.fcntl(sockets[1], std.c.F.GETFL);
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    try std.testing.expect(flags >= 0 and std.c.fcntl(sockets[1], std.c.F.SETFL, flags | nonblocking) == 0);
+    var received: [body.len + 256]u8 = undefined;
+    var used: usize = 0;
+    while (true) {
+        const count = std.c.read(sockets[1], received[used..].ptr, received.len - used);
+        if (count < 0) {
+            try std.testing.expectEqual(std.posix.E.AGAIN, std.posix.errno(count));
+            break;
+        }
+        try std.testing.expect(count > 0);
+        used += @intCast(count);
+    }
+    try std.testing.expect(std.mem.startsWith(u8, received[0..used], "HTTP/1.1 200 OK\r\n"));
+    const header_end = (std.mem.indexOf(u8, received[0..used], "\r\n\r\n") orelse return error.MissingReplyHeader) + 4;
+    try std.testing.expect(used > header_end and used - header_end < body.len);
+    for (received[header_end..used]) |byte| try std.testing.expectEqual(@as(u8, 'x'), byte);
+}
+
+test "ordinary reply writer establishes nonblocking delivery" {
+    var sockets: [2]std.posix.fd_t = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
+    defer std.Io.File.close(.{ .handle = sockets[0], .flags = .{ .nonblocking = false } }, std.testing.io);
+    defer std.Io.File.close(.{ .handle = sockets[1], .flags = .{ .nonblocking = false } }, std.testing.io);
+    const flags = std.c.fcntl(sockets[0], std.c.F.GETFL);
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    try std.testing.expect(flags >= 0);
+    try std.testing.expectEqual(@as(c_int, 0), flags & nonblocking);
+    try writeHttpUntil(std.testing.io, sockets[0], 200, "{}", null);
+    const delivered_flags = std.c.fcntl(sockets[0], std.c.F.GETFL);
+    try std.testing.expect(delivered_flags >= 0);
+    try std.testing.expectEqual(nonblocking, delivered_flags & nonblocking);
+}
+
+test "ordinary reply excludes producer delay but discovery retains its absolute deadline" {
+    var sockets: [2]std.posix.fd_t = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
+    defer std.Io.File.close(.{ .handle = sockets[0], .flags = .{ .nonblocking = false } }, std.testing.io);
+    defer std.Io.File.close(.{ .handle = sockets[1], .flags = .{ .nonblocking = false } }, std.testing.io);
+    const Clock = struct {
+        offset: i96 = 0,
+        step: i96 = 0,
+
+        fn now(context: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const value = std.Io.Clock.now(clock, std.testing.io).nanoseconds + self.offset;
+            self.offset += self.step;
+            return .{ .nanoseconds = value };
+        }
+    };
+    var clock: Clock = .{};
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Clock.now;
+    const io: std.Io = .{ .userdata = &clock, .vtable = &vtable };
+    var ordinary = try ReplyDelivery.init(io, sockets[0], null);
+    const end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s;
+    var discovery = try ReplyDelivery.init(io, sockets[0], end);
+    try ordinary.write("prefix");
+    // Model a producer/Store wait, not a peer stall. No private delivery state
+    // is modified: the same owner must deliver newly available bytes.
+    clock.offset += 61 * std.time.ns_per_s;
+    try ordinary.write("body");
+    try std.testing.expectError(error.ExchangeDeadlineExceeded, discovery.write("expired"));
+    var received: [10]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 10), std.c.read(sockets[1], &received, received.len));
+    try std.testing.expectEqualStrings("prefixbody", &received);
+    const buffer: [4096]u8 = @splat('x');
+    while (true) {
+        const count = std.c.write(sockets[0], &buffer, buffer.len);
+        if (count < 0) {
+            try std.testing.expectEqual(std.posix.E.AGAIN, std.posix.errno(count));
+            break;
+        }
+        try std.testing.expect(count > 0);
+    }
+    // Advance at the owning clock boundary so an actual full socket cannot
+    // gain time from EAGAIN/no progress. This is not a real-time 60s witness.
+    clock.step = 61 * std.time.ns_per_s;
+    try std.testing.expectError(error.TransferInactive, ordinary.write(&buffer));
+}
+
+test "ordinary reply renews inactivity on positive short writes within one window" {
+    var sockets: [2]std.posix.fd_t = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
+    defer std.Io.File.close(.{ .handle = sockets[0], .flags = .{ .nonblocking = false } }, std.testing.io);
+    defer std.Io.File.close(.{ .handle = sockets[1], .flags = .{ .nonblocking = false } }, std.testing.io);
+    const requested_buffer: c_int = 4096;
+    try std.posix.setsockopt(sockets[0], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&requested_buffer));
+    var actual_buffer: c_int = 0;
+    var size: std.c.socklen_t = @sizeOf(c_int);
+    try std.testing.expect(std.c.getsockopt(sockets[0], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, &actual_buffer, &size) == 0);
+    var body: [64 * 1024]u8 = undefined;
+    for (&body, 0..) |*byte, i| byte.* = @intCast(i % 251);
+    try std.testing.expect(actual_buffer > 0 and actual_buffer < body.len / 3);
+    const flags = std.c.fcntl(sockets[1], std.c.F.GETFL);
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    try std.testing.expect(flags >= 0 and std.c.fcntl(sockets[1], std.c.F.SETFL, flags | nonblocking) == 0);
+    const PeerClock = struct {
+        fd: std.posix.fd_t,
+        bytes: [64 * 1024]u8 = undefined,
+        used: usize = 0,
+        positive_writes: usize = 0,
+        elapsed: i96 = 0,
+
+        fn now(context: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const before = self.used;
+            while (self.used < self.bytes.len) {
+                const count = std.c.read(self.fd, self.bytes[self.used..].ptr, self.bytes.len - self.used);
+                if (count < 0) {
+                    switch (std.posix.errno(count)) {
+                        .INTR => continue,
+                        .AGAIN => break,
+                        else => unreachable,
+                    }
+                }
+                std.debug.assert(count > 0);
+                self.used += @intCast(count);
+            }
+            if (self.used != before) {
+                // Drain each real positive write at the clock boundary, not
+                // a simulated write result. Each gap is 30s; total delivery
+                // exceeds 60s in this ONE production write call.
+                self.positive_writes += 1;
+                self.elapsed += 30 * std.time.ns_per_s;
+            }
+            return .{ .nanoseconds = std.Io.Clock.now(clock, std.testing.io).nanoseconds + self.elapsed };
+        }
+    };
+    var peer: PeerClock = .{ .fd = sockets[1] };
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = PeerClock.now;
+    const io: std.Io = .{ .userdata = &peer, .vtable = &vtable };
+    var delivery = try ReplyDelivery.init(io, sockets[0], null);
+    try delivery.write(&body);
+    try std.testing.expect(peer.positive_writes >= 3);
+    try std.testing.expect(peer.elapsed > 60 * std.time.ns_per_s);
+    try std.testing.expectEqualSlices(u8, &body, peer.bytes[0..peer.used]);
+}
+
+test "discovery reply preserves regular file append policy" {
+    // APPEND has real semantics on a file. Do not use it as a socket sentinel:
+    // clearing socket APPEND panics Darwin 24G720 inside F_SETFL.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "reply", .{ .read = true });
+    defer file.close(std.testing.io);
+    // Leave the stream offset at zero: dropping APPEND would overwrite this.
+    try file.writePositionalAll(std.testing.io, "seed", 0);
+    const flags = std.c.fcntl(file.handle, std.c.F.GETFL);
+    const append: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .APPEND = true })));
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    const policy_mask = append | nonblocking;
+    try std.testing.expect(flags >= 0);
+    try std.testing.expect(std.c.fcntl(file.handle, std.c.F.SETFL, flags | append) == 0);
+    const original_flags = std.c.fcntl(file.handle, std.c.F.GETFL);
+    try std.testing.expect(original_flags >= 0);
+    try std.testing.expectEqual(append, original_flags & policy_mask);
+    const deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 10 * std.time.ns_per_s;
+    try writeHttpUntil(std.testing.io, file.handle, 200, "{}", deadline);
+    const delivered_flags = std.c.fcntl(file.handle, std.c.F.GETFL);
+    try std.testing.expect(delivered_flags >= 0);
+    try std.testing.expectEqual(policy_mask, delivered_flags & policy_mask);
+    const expected = "seedHTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n{}";
+    var received: [expected.len + 1]u8 = undefined;
+    const count = try file.readPositionalAll(std.testing.io, &received, 0);
+    try std.testing.expectEqualStrings(expected, received[0..count]);
+}
+
+test "connection admission exhausts reachable reservation classification and release transitions" {
+    // Enumerate every legal aggregate population, including unclassified
+    // sockets. Failure retains the original reservation until owner close;
+    // construction failure, parse error and disconnect use that same release.
+    for (0..11) |ordinary| for (0..3) |controls| for (0..2) |discovery| for (0..3) |classification| {
+        const headroom = controls + discovery + classification;
+        if (headroom > 2) continue;
+        const original = Admission{
+            .total = ordinary + headroom,
+            .ordinary = ordinary,
+            .headroom = headroom,
+            .discovery = discovery,
+        };
+        var admission = original;
+        if (original.total == 12) {
+            try std.testing.expectError(error.ConnectionCapacityExhausted, admission.reserve());
+            try std.testing.expectEqualDeep(original, admission);
+        } else if (headroom == 2) {
+            try std.testing.expectError(error.ClassificationCapacityExhausted, admission.reserve());
+            try std.testing.expectEqualDeep(original, admission);
+        } else {
+            inline for (std.meta.tags(Route)) |route| {
+                admission = original;
+                var place = try admission.reserve();
+                try std.testing.expectEqual(Admission.Place.classification, place);
+                if (route == .host_info and discovery == 1) {
+                    try std.testing.expectError(error.DiscoveryCapacityExhausted, admission.classify(&place, route));
+                    try std.testing.expectEqual(Admission.Place.classification, place);
+                } else if (route != .host_info and !route.isControl() and ordinary == 10) {
+                    try std.testing.expectError(error.OrdinaryCapacityExhausted, admission.classify(&place, route));
+                    try std.testing.expectEqual(Admission.Place.classification, place);
+                } else {
+                    try admission.classify(&place, route);
+                    const expected: Admission.Place = if (route == .host_info) .discovery else if (route.isControl()) .control else .ordinary;
+                    try std.testing.expectEqual(expected, place);
+                    try std.testing.expectEqual(original.total + 1, admission.total);
+                    try std.testing.expectEqual(ordinary + @intFromBool(expected == .ordinary), admission.ordinary);
+                    try std.testing.expectEqual(headroom + @intFromBool(expected != .ordinary), admission.headroom);
+                    try std.testing.expectEqual(discovery + @intFromBool(expected == .discovery), admission.discovery);
+                }
+                admission.release(place);
+                try std.testing.expectEqualDeep(original, admission);
+            }
+            admission = original;
+            const failed_start = try admission.reserve();
+            admission.release(failed_start);
+            try std.testing.expectEqualDeep(original, admission);
+        }
+        inline for (std.meta.tags(Admission.Place)) |place| {
+            const population = switch (place) {
+                .ordinary => ordinary,
+                .control => controls,
+                .discovery => discovery,
+                .classification => classification,
+            };
+            if (population > 0) {
+                admission = original;
+                admission.release(place);
+                try std.testing.expectEqual(original.total - 1, admission.total);
+                try std.testing.expectEqual(ordinary - @intFromBool(place == .ordinary), admission.ordinary);
+                try std.testing.expectEqual(headroom - @intFromBool(place != .ordinary), admission.headroom);
+                try std.testing.expectEqual(discovery - @intFromBool(place == .discovery), admission.discovery);
+            }
+        }
+    };
+}
+
 test "model retry and inactivity defaults match the owning resource contract" {
     try std.testing.expectEqual([3]u64{ 2_000, 4_000, 8_000 }, default_retry_waits_ms);
     try std.testing.expectEqual(@as(i64, 5 * 60), (Faults{}).provider_inactivity_seconds);
@@ -5021,6 +5334,234 @@ fn finishTestClient(host: *Host, release: *std.atomic.Value(bool), completed: *s
     while (!release.load(.acquire)) std.atomic.spinLoopHint();
     completed.store(true, .release);
     host.clientFinished(.classification);
+}
+
+test "rejected discovery joins connection cleanup and restores control headroom" {
+    var host = Host{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .lease = undefined,
+        .store = undefined,
+        .faults = .{},
+    };
+    var ordinary_places: [10]Admission.Place = undefined;
+    var ordinary_count: usize = 0;
+    defer for (ordinary_places[0..ordinary_count]) |place| host.clientFinished(place);
+    for (&ordinary_places) |*place| {
+        place.* = try host.reserveClient();
+        ordinary_count += 1;
+        try host.classifyClient(place, .observe);
+    }
+    var discovery = try host.reserveClient();
+    defer host.clientFinished(discovery);
+    try host.classifyClient(&discovery, .host_info);
+
+    var sockets: [2]std.posix.fd_t = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
+    var server_owned = true;
+    defer if (server_owned) std.Io.File.close(.{ .handle = sockets[0], .flags = .{ .nonblocking = false } }, std.testing.io);
+    var peer_open = true;
+    defer if (peer_open) std.Io.File.close(.{ .handle = sockets[1], .flags = .{ .nonblocking = false } }, std.testing.io);
+    const place = try host.reserveClient();
+    const connection = host.allocator.create(Connection) catch |err| {
+        host.clientFinished(place);
+        return err;
+    };
+    connection.* = .{
+        .host = &host,
+        .stream = .{ .socket = .{ .handle = sockets[0], .address = undefined } },
+        .accepted_at_ns = @intCast(std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds),
+        .place = place,
+    };
+    const thread = std.Thread.spawn(.{ .stack_size = connection_stack_bytes }, connectionMain, .{connection}) catch |err| {
+        host.clientFinished(connection.place);
+        host.allocator.destroy(connection);
+        return err;
+    };
+    server_owned = false;
+    var joined = false;
+    defer {
+        if (peer_open) {
+            std.Io.File.close(.{ .handle = sockets[1], .flags = .{ .nonblocking = false } }, std.testing.io);
+            peer_open = false;
+        }
+        if (!joined) thread.join();
+        if (std.c.fcntl(sockets[0], std.c.F.GETFL) >= 0)
+            std.Io.File.close(.{ .handle = sockets[0], .flags = .{ .nonblocking = false } }, std.testing.io);
+    }
+    try writeAll(sockets[1], "POST /v1/host-info HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 0\r\n\r\n");
+    var reply: [512]u8 = undefined;
+    var received: usize = 0;
+    const deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 5 * std.time.ns_per_s;
+    while (true) {
+        try protocol.pollExchange(std.testing.io, sockets[1], std.posix.POLL.IN, deadline);
+        const count = std.c.read(sockets[1], reply[received..].ptr, reply.len - received);
+        // Classification rejects after the request line, leaving headers unread.
+        // Unix sockets may report reset rather than EOF after delivering the reply.
+        if (count < 0 and std.posix.errno(count) == .CONNRESET) break;
+        try std.testing.expect(count >= 0);
+        if (count == 0) break;
+        received += @intCast(count);
+        try std.testing.expect(received < reply.len);
+    }
+    const body = "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}";
+    var expected_buffer: [512]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buffer, "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n{s}", .{ body.len, body });
+    try std.testing.expectEqualStrings(expected, reply[0..received]);
+    // Response/EOF precedes final admission release legally; join its owner.
+    thread.join();
+    joined = true;
+    try std.testing.expectEqualDeep(Admission{ .total = 11, .ordinary = 10, .headroom = 1, .discovery = 1 }, host.admission);
+    try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(sockets[0], std.c.F.GETFL));
+    try std.testing.expectEqual(std.posix.E.BADF, std.posix.errno(@as(c_int, -1)));
+    var control = try host.reserveClient();
+    defer host.clientFinished(control);
+    try host.classifyClient(&control, .host_stop);
+    try std.testing.expectEqual(Admission.Place.control, control);
+}
+
+test "disconnected public content joins connection cleanup and restores admission" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var temporary_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const temporary = temporary_buffer[0..try tmp.dir.realPath(std.testing.io, &temporary_buffer)];
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buffer, "{s}/store", .{temporary});
+    var lease = try platform.StoreLease.acquire(std.testing.io, root);
+    defer lease.release();
+    var storage = try store_module.Store.open(std.testing.io, lease.paths.database.slice(), root);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
+    defer directory.close(std.testing.io);
+    const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
+    var configuration: protocol.ConfigureCommand = .{};
+    try configuration.key.set("disconnect-config");
+    try configuration.session.set("direct/disconnect");
+    configuration.configuration.workspace.state = .value;
+    try configuration.configuration.workspace.value.set(workspace);
+    configuration.configuration.provider.state = .value;
+    try configuration.configuration.provider.value.set("codex");
+    configuration.configuration.model.state = .value;
+    try configuration.configuration.model.value.set("model-a");
+    try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+    const content: [64 * 1024]u8 = @splat('p');
+    const file = try tmp.dir.createFile(std.testing.io, "message", .{ .read = true });
+    var message: protocol.MessageCommand = .{};
+    message.text = .{
+        .state = .value,
+        .file = file,
+        .length = content.len,
+        .digest = protocol.contentDigest(&content),
+    };
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    try file.writeStreamingAll(std.testing.io, &content);
+    try file.sync(std.testing.io);
+    try message.key.set("disconnect-message");
+    message.session = configuration.session;
+    try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
+    var admitted = (try storage.admitNextModelAttempt(.{})).?;
+    _ = try admitted.permit.consume();
+    const page = try storage.publicConversationPage(.{ .session = configuration.session });
+    try std.testing.expectEqual(@as(usize, 1), page.count);
+    try std.testing.expectEqual(@as(u64, content.len), page.items[0].content.length);
+
+    var used: std.atomic.Value(u64) = .init(0);
+    var entries: [1]output_retention.Entry = undefined;
+    var retention = output_retention.Queue.initialize(std.testing.io, lease.paths.scratch.slice(), .{ .used = &used, .limit = scratch_limit_bytes }, &entries);
+    var host = Host{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .lease = &lease,
+        .store = &storage,
+        .faults = .{},
+        .retention = &retention,
+    };
+    var old_sigpipe: std.posix.Sigaction = undefined;
+    const ignore_sigpipe: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.PIPE, &ignore_sigpipe, &old_sigpipe);
+    defer std.posix.sigaction(.PIPE, &old_sigpipe, null);
+    var sockets: [2]std.posix.fd_t = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
+    var server_owned = true;
+    defer if (server_owned) std.Io.File.close(.{ .handle = sockets[0], .flags = .{ .nonblocking = false } }, std.testing.io);
+    var peer_open = true;
+    defer if (peer_open) std.Io.File.close(.{ .handle = sockets[1], .flags = .{ .nonblocking = false } }, std.testing.io);
+    const send_buffer: c_int = 4096;
+    try std.posix.setsockopt(sockets[0], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&send_buffer));
+    var actual_buffer: c_int = 0;
+    var size: std.c.socklen_t = @sizeOf(c_int);
+    try std.testing.expect(std.c.getsockopt(sockets[0], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, &actual_buffer, &size) == 0);
+    // The complete reply cannot fit before the peer disconnects.
+    try std.testing.expect(actual_buffer > 0 and actual_buffer < content.len);
+    const place = try host.reserveClient();
+    const connection = host.allocator.create(Connection) catch |err| {
+        host.clientFinished(place);
+        return err;
+    };
+    connection.* = .{
+        .host = &host,
+        .stream = .{ .socket = .{ .handle = sockets[0], .address = undefined } },
+        .accepted_at_ns = @intCast(std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds),
+        .place = place,
+    };
+    const thread = std.Thread.spawn(.{ .stack_size = connection_stack_bytes }, connectionMain, .{connection}) catch |err| {
+        host.clientFinished(connection.place);
+        host.allocator.destroy(connection);
+        return err;
+    };
+    server_owned = false;
+    var joined = false;
+    defer {
+        if (peer_open) {
+            std.Io.File.close(.{ .handle = sockets[1], .flags = .{ .nonblocking = false } }, std.testing.io);
+            peer_open = false;
+        }
+        if (!joined) thread.join();
+        // Also reclaim the FD when the close negative control fails below.
+        if (std.c.fcntl(sockets[0], std.c.F.GETFL) >= 0)
+            std.Io.File.close(.{ .handle = sockets[0], .flags = .{ .nonblocking = false } }, std.testing.io);
+    }
+    var body_buffer: [2048]u8 = undefined;
+    const body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"1\",\"kind\":\"conversation_content\",\"store\":\"{s}\",\"session\":\"direct/disconnect\",\"position\":\"{d}\",\"ordinal\":\"{d}\",\"start\":\"0\",\"stream\":true}}", .{ root, page.items[0].position, page.items[0].ordinal });
+    var request_buffer: [2560]u8 = undefined;
+    const request = try std.fmt.bufPrint(&request_buffer, "POST /v1/conversation-content HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body });
+    try writeAll(sockets[1], request);
+    var reply: [512]u8 = undefined;
+    var received: usize = 0;
+    const deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 5 * std.time.ns_per_s;
+    while (true) {
+        try protocol.pollExchange(std.testing.io, sockets[1], std.posix.POLL.IN, deadline);
+        const count = std.c.read(sockets[1], reply[received..].ptr, reply.len - received);
+        try std.testing.expect(count > 0);
+        received += @intCast(count);
+        if (std.mem.indexOf(u8, reply[0..received], "\r\n\r\n")) |end| {
+            if (received >= end + 4 + 32) {
+                try std.testing.expect(std.mem.startsWith(u8, reply[0..received], "HTTP/1.1 200 "));
+                try std.testing.expectEqualSlices(u8, content[0..32], reply[end + 4 ..][0..32]);
+                break;
+            }
+        }
+        try std.testing.expect(received < reply.len);
+    }
+    // A delivered prefix proves the streaming reply has entered its owner.
+    // The larger-than-buffer reply still owns the open descriptor here.
+    const delivery_flags = std.c.fcntl(sockets[0], std.c.F.GETFL);
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    try std.testing.expect(delivery_flags >= 0);
+    try std.testing.expectEqual(nonblocking, delivery_flags & nonblocking);
+    std.Io.File.close(.{ .handle = sockets[1], .flags = .{ .nonblocking = false } }, std.testing.io);
+    peer_open = false;
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(sockets[0], std.c.F.GETFL));
+    try std.testing.expectEqual(std.posix.E.BADF, std.posix.errno(@as(c_int, -1)));
+    try std.testing.expectEqualDeep(Admission{}, host.admission);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
 test "shutdown drain retains stack-owned Host until active clients finish" {

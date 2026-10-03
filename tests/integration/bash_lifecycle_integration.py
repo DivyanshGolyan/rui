@@ -81,21 +81,32 @@ def hold_incomplete_connection(host, store):
         json.dumps(request)[:-2]
         + ',"instructions":{"state":"value","value":"'
     ).encode() + b"x" * 32768
+    scratch = store / "scratch"
+    existing = set(scratch.glob("request-*-*.tmp"))
     connection = socket.socket(socket.AF_UNIX)
-    connection.settimeout(5)
-    connection.connect(socket_path)
-    connection.sendall(
-        b"POST /v1/configure HTTP/1.1\r\n"
-        b"Host: local\r\n"
-        b"Content-Type: application/json\r\n"
-        b"Content-Length: 1000000\r\n"
-        b"X-Rui-Wire-Version: 1\r\n\r\n"
-        + body
-    )
-    fixture.wait_for(
-        lambda: list((store / "scratch").glob("request-*-*.tmp")),
-        "shutdown drain transferred connection custody",
-    )
+    try:
+        connection.settimeout(5)
+        connection.connect(socket_path)
+        connection.sendall(
+            b"POST /v1/configure HTTP/1.1\r\n"
+            b"Host: local\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: 1000000\r\n"
+            b"X-Rui-Wire-Version: 1\r\n\r\n"
+            + body
+        )
+        # New owned content proves ordinary classification/custody, not a
+        # committed configure command. The incomplete upload stays retained.
+        captured = fixture.wait_for(
+            lambda: next((path for path in scratch.glob("request-*-*.tmp")
+                          if path not in existing and path.stat().st_size >= 8192), None),
+            "shutdown drain transferred connection custody",
+        )
+        with captured.open("rb") as content:
+            assert content.read(8192) == b"x" * 8192, "retained upload content mismatch"
+    except BaseException:
+        connection.close()
+        raise
     return connection
 
 
