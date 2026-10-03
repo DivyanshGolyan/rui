@@ -836,8 +836,15 @@ def main():
             assert after["actions"]["unresolved"] == [], after
             assert after["actions"]["resolved"] == [], after
             assert after["rejected_calls"] == {"count": "0", "items": []}, after
-            assert after["execution"]["custody_occupied"] == "0", after
-            assert "bash_execution" not in after["execution"]["unavailable"], after
+            # The stop acknowledges canonical cancellation before physical
+            # execution custody is necessarily released.
+            after_cleanup = wait_for(
+                lambda: (lambda value: value if value["execution"]["custody_occupied"] == "0" else None)(
+                    command("inspect-session", "--store", proposal_store, "--session", session)
+                ),
+                f"{order} physical cleanup",
+            )
+            assert "bash_execution" not in after_cleanup["execution"]["unavailable"], after_cleanup
             with sqlite3.connect(proposal_store / "rui.sqlite3") as database:
                 rows = database.execute(
                     "SELECT call_ordinal,permission_state,resolution_code FROM action_operation "
@@ -3321,6 +3328,12 @@ def main():
             "attempt-before-commit",
         )
         processes.append(recovery_host)
+        # The stopped-Store backlog is synthetic retry history, but its
+        # Sessions/settings are real owners: terminal recovery now also stamps
+        # the owning Session's view clock. Do not seed orphan Operations.
+        for index in range(1, 101):
+            configure(state, recovery_store, f"recovery-history-config-{index}",
+                f"recovery-{index}", "model-a")
         stop_host(recovery_host)
         processes.remove(recovery_host)
         database = sqlite3.connect(recovery_store / "rui.sqlite3")
@@ -3334,6 +3347,7 @@ def main():
                 "SELECT value,value,printf('recovery-%d',value),1,1,1,1,1,0,9223372036854775807 "
                 "FROM sequence"
             )
+            database.execute("UPDATE session SET next_position=2 WHERE session_ref LIKE 'recovery-%'")
             database.commit()
         finally:
             database.close()
@@ -3763,6 +3777,7 @@ def main():
             lambda: command("inspect-session", "--store", slow_store, "--session", "direct/slow-second")["execution"]["custody_occupied"] == "1",
             "queued H1 Attempt releases custody on expiry",
         )
+        assert not observe(slow_store, "slow-message-first").get("result"), "first H1 response finished before queued expiry"
         assert len(slow_endpoint.requests) == 1, slow_endpoint.requests
         assert slow_response.body_finished_at is None
         assert slow_host.poll() is None, "Host exited during queued H1 expiry"
