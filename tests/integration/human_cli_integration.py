@@ -363,6 +363,7 @@ class ObservationProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
         self.before_exchange = None
         self.page_end_delta = None
         self.page_wrong_continuation = False
+        self.page_wrong_digest = False
         self.decisions = 0
         super().__init__(str(self.path), ObservationExchange)
         os.chmod(self.path, 0o600)
@@ -428,7 +429,7 @@ class ObservationExchange(socketserver.BaseRequestHandler):
             response_head = bytes(response_head[:-4])
             size = int(next(line.split(b":", 1)[1] for line in response_head.split(b"\r\n")
                 if line.lower().startswith(b"content-length:")))
-            altered_page = hit and (proxy.page_end_delta is not None or proxy.page_wrong_continuation)
+            altered_page = hit and (proxy.page_end_delta is not None or proxy.page_wrong_continuation or proxy.page_wrong_digest)
             truncated = hit and command["kind"] in ("read_result", "conversation_content")
             if altered_page:
                 # Sixteen metadata-only conversation items fit in 4 KiB;
@@ -459,11 +460,16 @@ class ObservationExchange(socketserver.BaseRequestHandler):
         if hit:
             if command["kind"] in ("read_result", "conversation_content"):
                 pass  # The bounded partial prefix was already relayed.
-            elif proxy.page_end_delta is not None or proxy.page_wrong_continuation:
+            elif altered_page:
                 assert command["kind"] == "conversation_page" and int(command["end"]) > 0, command
                 page = json.loads(payload)
                 assert page["end"] == command["end"], (page, command)
-                if proxy.page_wrong_continuation:
+                if proxy.page_wrong_digest:
+                    # Damage a later chronological item, so complete-page
+                    # staging must also hide already prepared earlier items.
+                    digest = page["items"][0]["content"]["sha256"]
+                    page["items"][0]["content"]["sha256"] = ("0" if digest[0] != "0" else "1") + digest[1:]
+                elif proxy.page_wrong_continuation:
                     assert len(page["items"]) >= 2 and page["items"][0]["position"] != page["items"][-1]["position"], page
                     page["more"] = True
                     page["before_position"] = page["items"][0]["position"]
@@ -542,6 +548,200 @@ def observation_relay():
                 backend.shutdown()
                 backend.server_close()
                 backend_thread.join(timeout=5)
+
+
+def resume_switch():
+    """Metadata failures preserve the old owner; committed stream failures exit."""
+    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-resume-switch-")).resolve()
+    home = state / "home"
+    workspace = state / "workspace"
+    home.mkdir()
+    workspace.mkdir()
+    store = state / "store"
+    endpoint = fixture.SuccessEndpoint([])
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    host = proxy = entered = None
+    master = None
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        old, target = "switch/old", "switch/target"
+        for session, count in ((old, 18), (target, 1)):
+            run(home, "configure", "--store", store, "--session", session,
+                "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+            for i in range(count):
+                tag = session.replace("/", "-") + str(i)
+                endpoint.responses.append(fixture.sse_answer(tag, tag + "-r", tag + "-m", tag + " answer")[0])
+                key = admit(home, "message", "--store", store, "--session", session, tag + " input")["request"]
+                fixture.wait_for(lambda: fixture.completed_observation(store, key), "switch history committed")
+        proxy = ObservationProxy(host.rui_ready_fields["socket"])
+        master, slave = open_terminal()
+        entered = subprocess.Popen([str(fixture.RUI), "--resume", old, "--store", str(store)],
+            env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        opening = read_terminal(master, "> ")
+        assert "switch-old17 answer" in opening and "switch-old0 input" not in opening, opening
+        # Eighteen completed pairs: the recent 16 Session-view entries cover
+        # four pairs (admission/user/assistant/outcome each), then the first
+        # 16-item Conversation page covers eight. Six oldest pairs remain;
+        # reopening old would repeat the middle page instead of reaching them.
+        middle = terminal_step(master, "/history")
+        assert "You: " in middle and "switch-old0 input" not in middle, middle
+        # Include EOF as a behavioral failure rather than a fixture/setup error.
+        try:
+            failed = terminal_step(master, "/resume switch/missing")
+        except OSError as err:
+            assert err.errno != errno.EIO, "nonexistent /resume detached the old Session instead of preserving its prompt"
+            raise
+        assert "active Session unchanged" in failed and "Session: " not in failed, failed
+        assert old in terminal_step(master, "/status"), "failed switch changed the address"
+        proxy.fault = lambda c: c["kind"] == "list_sessions"
+        selection_failed = terminal_step(master, "/resume")
+        assert "active Session unchanged" in selection_failed, selection_failed
+        assert old in terminal_step(master, "/status"), "selection read failure changed the address"
+        first = len(proxy.exchanges)
+        hits = proxy.hit
+        proxy.fault = lambda c: c["kind"] == "session_view" and c["session"] == target
+        failed = terminal_step(master, "/resume " + target)
+        assert proxy.hit == hits + 1, "target metadata failure was not exercised"
+        assert "active Session unchanged" in failed and "Session: " not in failed, failed
+        assert old in terminal_step(master, "/status"), "metadata failure changed the address"
+        for delta in (1, -1):
+            proxy.page_end_delta = delta
+            first, hits = len(proxy.exchanges), proxy.hit
+            proxy.fault = lambda c: c["kind"] == "conversation_page" and c["session"] == old
+            failed = terminal_step(master, "/history")
+            assert proxy.hit == hits + 1, "changed history end was not exercised"
+            assert "history unavailable (InvalidConversationPage)" in failed and "You: " not in failed, failed
+            assert not any(c["kind"] == "conversation_content" for c, _ in proxy.exchanges[first:]), "mismatched history end reached content fetch"
+        proxy.page_end_delta = None
+        proxy.page_wrong_continuation = True
+        first, hits = len(proxy.exchanges), proxy.hit
+        proxy.fault = lambda c: c["kind"] == "conversation_page" and c["session"] == old
+        failed = terminal_step(master, "/history")
+        assert proxy.hit == hits+1, "foreign last-item continuation was not exercised"
+        assert "history unavailable (InvalidConversationPage)" in failed and "You: " not in failed, failed
+        assert not any(c["kind"] == "conversation_content" for c, _ in proxy.exchanges[first:]), "malformed continuation reached content fetch"
+        failed_cursor = next(c for c, _ in proxy.exchanges[first:] if c["kind"] == "conversation_page")
+        proxy.page_wrong_continuation = False
+        proxy.page_wrong_digest = True
+        first, hits = len(proxy.exchanges), proxy.hit
+        proxy.fault = lambda c: c["kind"] == "conversation_page" and c["session"] == old
+        failed = terminal_step(master, "/history")
+        assert proxy.hit == hits + 1, "valid history digest mismatch was not exercised"
+        assert "history unavailable (InvalidConversationContent)" in failed, failed
+        assert "You: " not in failed and "switch-old0 answer" not in failed, failed
+        digest_cursor = next(c for c, _ in proxy.exchanges[first:] if c["kind"] == "conversation_page")
+        assert digest_cursor == failed_cursor, (digest_cursor, failed_cursor)
+        assert any(c["kind"] == "conversation_content" for c, _ in proxy.exchanges[first:]), "digest mismatch rejected before raw fetch"
+        proxy.page_wrong_digest = False
+        first = len(proxy.exchanges)
+        older = terminal_step(master, "/history")
+        retry_cursor = next(c for c, _ in proxy.exchanges[first:] if c["kind"] == "conversation_page")
+        assert retry_cursor == failed_cursor, (failed_cursor, retry_cursor)
+        assert "End of saved public history" in older, older
+        assert older.count("You: ") == 6, older
+        for i in range(6):
+            assert older.count(f"You: switch-old{i} input") == 1 and older.count(f"switch-old{i} answer") == 1, older
+        assert "switch-old10 input" not in older, "malformed history page reset the old history cursor"
+        first = len(proxy.exchanges)
+        switched = terminal_step(master, "/resume " + target)
+        assert "Session: " + target in switched and "switch-target0 input" in switched, switched
+        currents = [c for c, _ in proxy.exchanges[first:] if c["kind"] == "inspect_session"]
+        assert len(currents) == 1, currents
+        assert target in terminal_step(master, "/status"), "successful switch did not commit target"
+        proxy.canonical = True
+        proxy.fault = lambda c: c["kind"] == "inspect_session" and c["session"] == old
+        fatal = terminal_step(master, "/resume " + old, "CanonicalStoreFailure")
+        fatal += read_terminal_end(master, entered)
+        assert entered.returncode != 0 and "\r> \r\x1b[2C" not in fatal.split("CanonicalStoreFailure", 1)[1] and "active Session unchanged" not in fatal, fatal
+        os.close(master)
+        master = None
+        master, slave = open_terminal()
+        entered = subprocess.Popen([str(fixture.RUI), "--resume", old, "--store", str(store)],
+            env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        read_terminal(master, "> ")
+        proxy.fault = lambda c: c["kind"] == "list_sessions"
+        fatal = terminal_step(master, "/resume", "CanonicalStoreFailure")
+        fatal += read_terminal_end(master, entered)
+        assert entered.returncode != 0 and "\r> \r\x1b[2C" not in fatal.split("CanonicalStoreFailure", 1)[1] and "active Session unchanged" not in fatal, fatal
+        os.close(master)
+        master = None
+        proxy.canonical = False
+        master, slave = open_terminal()
+        entered = subprocess.Popen([str(fixture.RUI), "--resume", old, "--store", str(store)],
+            env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        read_terminal(master, "> ")
+        middle = terminal_step(master, "/history")
+        assert "switch-old0 input" not in middle, middle
+        first, hits = len(proxy.exchanges), proxy.hit
+        proxy.fault = lambda c: c["kind"] == "session_view" and c["session"] == target
+        failed = terminal_step(master, "/resume " + target)
+        assert proxy.hit == hits + 1, (failed, proxy.exchanges[first:])
+        assert "active Session unchanged" in failed and "Session: " + target not in failed, failed
+        assert "switch-target0 input" not in failed and "switch-target0 answer" not in failed, failed
+        assert entered.poll() is None and old in terminal_step(master, "/status"), failed
+        older = terminal_step(master, "/history")
+        assert older.count("You: switch-old0 input") == 1, older
+        assert "switch-old10 input" not in older, "failed metadata validation reset the old history cursor"
+        first, hits = len(proxy.exchanges), proxy.hit
+        proxy.fault = lambda c: c["kind"] == "conversation_content" and c["session"] == target
+        deadline = time.monotonic() + 15
+        failed = terminal_step(master, "/resume " + target, "HistoryDisplayFailed")
+        # The error marker is not EOF: retain any later repaint in the oracle.
+        failed += read_terminal_end(master, entered, timeout=deadline - time.monotonic())
+        assert proxy.hit == hits + 1, (failed, proxy.exchanges[first:])
+        assert entered.returncode == 1 and "Session: " + target in failed, failed
+        assert "active Session unchanged" not in failed and "switch-target0 answer" not in failed, failed
+        assert "\r> " not in failed.split("HistoryDisplayFailed", 1)[1], failed
+        assert sum(c["kind"] == "conversation_content" and c["session"] == target
+                   for c, _ in proxy.exchanges[first:]) == 1, "failed stream retried"
+        os.close(master)
+        master = None
+        output_target = "switch/output"
+        run(home, "configure", "--store", store, "--session", output_target,
+            "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+        # A full page exceeds the PTY queue, so disconnect after initial history
+        # output necessarily interrupts delivery, not a later input prompt.
+        for i in range(9):
+            tag = "output-" + str(i)
+            endpoint.responses.append(fixture.sse_answer(tag, tag + "-r", tag + "-m", "x" * 8000)[0])
+            key = admit(home, "message", "--store", store, "--session", output_target, tag)["request"]
+            fixture.wait_for(lambda: fixture.completed_observation(store, key), "output history committed")
+        master, slave = open_terminal()
+        entered = subprocess.Popen([str(fixture.RUI), "--resume", old, "--store", str(store)],
+            env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        os.close(slave)
+        read_terminal(master, "> ")
+        os.write(master, ("/resume " + output_target + "\n").encode())
+        partial = b""
+        deadline = time.monotonic() + 15
+        while b"x" * 100 not in partial:
+            assert select.select([master], [], [], max(0, deadline - time.monotonic()))[0], partial
+            partial += os.read(master, 512)
+        assert b"Session: switch/output" in partial and b"\r> \r\x1b[2C" not in partial.split(b"Session: switch/output", 1)[1], partial
+        os.close(master)
+        master = None
+        _, diagnostic = entered.communicate(timeout=5)
+        assert entered.returncode != 0, ('partial history disconnect reported success', entered.returncode, diagnostic)
+        assert diagnostic, ('partial history disconnect lost diagnostic', entered.returncode, diagnostic)
+        print("resume switch: metadata failures preserve old owner/cursor; fixed-end history, canonical failure and partial authoritative output checked", flush=True)
+    finally:
+        if entered is not None and entered.poll() is None:
+            entered.kill()
+            entered.wait(timeout=5)
+        if master is not None:
+            os.close(master)
+        if proxy is not None:
+            proxy.close()
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+        shutil.rmtree(state)
 
 
 def main():
@@ -2483,4 +2683,6 @@ def main():
 
 
 if __name__ == "__main__":
+    observation_relay()
+    resume_switch()
     main()
