@@ -175,6 +175,7 @@ drain_store="$state/drain-store"
 drain_ready="$state/drain-ready"
 drain_error="$state/drain-error"
 drain_client_ready="$state/drain-client-ready"
+drain_client_release="$state/drain-client-release"
 "$rui" serve --store "$drain_store" --fault shutdown-after-accept >"$drain_ready" 2>"$drain_error" &
 extra_pid=$!
 attempts=0
@@ -191,9 +192,9 @@ while ! grep -q '^ready ' "$drain_ready"; do
     sleep 0.01
 done
 drain_socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$drain_ready")
-python3 - "$drain_socket" "$drain_store" "$root" "$drain_client_ready" <<'PY' &
+python3 - "$drain_socket" "$drain_store" "$root" "$drain_client_ready" "$drain_client_release" <<'PY' &
 import json, os, socket, sys, time
-socket_path, store, workspace, client_ready = sys.argv[1:]
+socket_path, store, workspace, client_ready, client_release = sys.argv[1:]
 body = json.dumps({
     "version": "1",
     "kind": "configure",
@@ -211,6 +212,7 @@ body = json.dumps({
     },
 }, separators=(",", ":")).encode()
 client = socket.socket(socket.AF_UNIX)
+client.settimeout(10)
 client.connect(socket_path)
 header = (
     "POST /v1/configure HTTP/1.1\r\n"
@@ -222,7 +224,12 @@ header = (
 client.sendall(header + body[:1])
 with open(client_ready, "xb"):
     pass
-time.sleep(0.5)
+# Keep transferred custody live until the competing owner has been rejected.
+deadline = time.monotonic() + 15
+while not os.path.exists(client_release):
+    if time.monotonic() >= deadline:
+        raise SystemExit("drain fixture client was not released")
+    time.sleep(0.01)
 client.sendall(body[1:])
 response = b""
 while True:
@@ -267,11 +274,22 @@ while True:
     finally:
         client.close()
 PY
-if "$rui" serve --store "$drain_store" >"$state/drain-competing.out" 2>"$state/drain-competing.err"; then
-    echo "draining Host released its Store lock early" >&2
-    exit 1
-fi
-contains "$(cat "$state/drain-competing.err")" "StoreAlreadyOwned"
+python3 - "$rui" "$drain_store" "$state/drain-competing.out" "$state/drain-competing.err" <<'PY'
+import subprocess, sys
+binary, store, stdout_path, stderr_path = sys.argv[1:]
+with open(stdout_path, "wb") as stdout, open(stderr_path, "wb") as stderr:
+    try:
+        contender = subprocess.run([binary, "serve", "--store", store],
+                                   stdout=stdout, stderr=stderr, timeout=5)
+    except subprocess.TimeoutExpired:
+        # run kills and reaps the unexpected owner before returning here.
+        raise SystemExit("draining competing Host did not reject ownership within 5 seconds")
+with open(stderr_path, "rb") as stderr:
+    diagnostic = stderr.read()
+if contender.returncode == 0 or b"StoreAlreadyOwned" not in diagnostic:
+    raise SystemExit("draining Host released its Store lock early: " + diagnostic.decode(errors="replace"))
+PY
+: >"$drain_client_release"
 wait "$client_pid"
 client_pid=
 if wait "$extra_pid"; then
@@ -886,7 +904,7 @@ expected = {
     "journal_mode": "delete",
     "mmap_size": 0,
     "application_id": 0x4C544631,
-    "user_version": 17,
+    "user_version": 19,
 }
 for name, value in expected.items():
     actual = db.execute("PRAGMA " + name).fetchone()[0]

@@ -313,7 +313,11 @@ pub const CaptureWriter = struct {
         } else if (!failed) {
             if (self.test_gate_path) |path| if (capture.length >= self.test_gate_min_written_bytes) {
                 self.test_gate_path = null;
-                std.debug.print("{{\"rui_test_phase\":\"capture_write_gate_entered\",\"written_bytes\":{d}}}\n", .{capture.length});
+                // Formatting directly through debug.print's 64-byte buffer
+                // splits this line; concurrent Host traces can corrupt it.
+                var notice_buffer: [96]u8 = undefined;
+                const notice = std.fmt.bufPrint(&notice_buffer, "{{\"rui_test_phase\":\"capture_write_gate_entered\",\"written_bytes\":{d}}}\n", .{capture.length}) catch unreachable;
+                std.debug.print("{s}", .{notice});
                 if (std.Io.Dir.cwd().openFile(self.io, path, .{})) |gate| {
                     defer gate.close(self.io);
                     var release: [1]u8 = undefined;

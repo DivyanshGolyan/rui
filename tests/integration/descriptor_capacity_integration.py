@@ -388,18 +388,35 @@ def main():
         fixed_host = 2 + 4 + 1 + (4 if sys.platform == "darwin" else 2)
         execution = 5 + 10
         fixed = fixed_host + 42 + execution + 0 + 1
-        minimum_required = fixed + 3
         rejected_store = state / "rejected-store"
+        rejected_args = (
+            "serve",
+            "--store",
+            rejected_store,
+            "--active-capacity",
+            "2",
+            "--provider-endpoint",
+            f"http://127.0.0.1:{endpoint.server_port}/responses",
+        )
+        probe = subprocess.run(
+            limited_host(32, *rejected_args),
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        match = re.search(r"\brequired=(\d+).*\binherited=(\d+)", probe.stderr)
+        assert probe.returncode != 0 and match, probe.stderr
+        required, inherited = map(int, match.groups())
+        # macOS may open an allocator socket before main; count actual inherited
+        # handles, then check the owner's independently known fixed populations.
+        assert inherited in ({3, 4} if sys.platform == "darwin" else {3}), probe.stderr
+        assert required == fixed + inherited, probe.stderr
+        assert not rejected_store.exists(), "descriptor probe followed startup side effects"
+
         rejected = subprocess.run(
             limited_host(
-                minimum_required - 1,
-                "serve",
-                "--store",
-                rejected_store,
-                "--active-capacity",
-                "2",
-                "--provider-endpoint",
-                f"http://127.0.0.1:{endpoint.server_port}/responses",
+                required - 1,
+                *rejected_args,
             ),
             text=True,
             capture_output=True,
@@ -411,23 +428,11 @@ def main():
         assert "active_capacity=2" in rejected.stderr, rejected.stderr
         fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", rejected.stderr)}
         assert fields["inherited"] in ({3, 4} if sys.platform == "darwin" else {3}), fields
-        required = fixed + fields["inherited"]
-        expected = dict(active_capacity=2, required=required, soft_limit=minimum_required - 1,
+        expected = dict(active_capacity=2, required=required, soft_limit=required - 1,
             inherited=fields["inherited"], fixed_host=fixed_host, clients=42, execution=execution,
             authentication=0, self_wake=1)
         assert fields == expected, (fields, expected)
         assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
-        if required != minimum_required:
-            rejected = subprocess.run(
-                limited_host(required - 1, "serve", "--store", rejected_store,
-                    "--active-capacity", "2", "--provider-endpoint",
-                    f"http://127.0.0.1:{endpoint.server_port}/responses"),
-                text=True, capture_output=True, timeout=10)
-            assert rejected.returncode != 0 and "descriptor capacity insufficient" in rejected.stderr, rejected
-            assert not rejected.stdout.startswith("ready "), rejected.stdout
-            fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", rejected.stderr)}
-            assert fields == {**expected, "soft_limit": required - 1}, fields
-            assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
 
         store = state / "adequate-store"
         host, ready = start_ready_process(
