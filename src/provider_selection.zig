@@ -1,17 +1,23 @@
 const std = @import("std");
 
-pub const Readiness = enum { configured, missing, refresh_required, credential_error };
+pub const Readiness = enum {
+    configured,
+    renewal_due,
+    missing,
+    refresh_required,
+    credential_error,
+
+    pub fn usable(self: Readiness) bool {
+        return self == .configured or self == .renewal_due;
+    }
+};
 
 pub const Capability = struct {
     name: []const u8,
     recommended_model: []const u8,
-    models: []const []const u8,
+    valid_model: *const fn ([]const u8) bool,
     readiness: Readiness,
 };
-
-pub fn codex(readiness: Readiness) Capability {
-    return .{ .name = "codex", .recommended_model = "gpt-6-luna", .models = &.{"gpt-6-luna"}, .readiness = readiness };
-}
 
 pub const Selection = union(enum) {
     chooser,
@@ -28,7 +34,7 @@ pub fn resolve(capabilities: []const Capability, explicit_provider: ?[]const u8,
     var chosen = explicit_provider orelse saved_provider;
     if (chosen == null) {
         for (capabilities) |capability| {
-            if (capability.readiness != .configured) continue;
+            if (!capability.readiness.usable()) continue;
             if (chosen != null) return .chooser;
             chosen = capability.name;
         }
@@ -37,22 +43,28 @@ pub fn resolve(capabilities: []const Capability, explicit_provider: ?[]const u8,
     for (capabilities) |capability| {
         if (!std.mem.eql(u8, name, capability.name)) continue;
         const model = explicit_model orelse (if (saved_provider != null and std.mem.eql(u8, name, saved_provider.?)) saved_model else null) orelse capability.recommended_model;
-        for (capability.models) |supported| {
-            if (std.mem.eql(u8, model, supported)) return .{ .selected = .{
-                .provider = capability.name,
-                .model = model,
-                .readiness = capability.readiness,
-            } };
-        }
-        return error.UnsupportedSelectionModel;
+        if (!capability.valid_model(model)) return error.UnsupportedSelectionModel;
+        return .{ .selected = .{
+            .provider = capability.name,
+            .model = model,
+            .readiness = capability.readiness,
+        } };
     }
     return error.UnsupportedSelectionProvider;
 }
 
 test "prospective selection does not fall back from a stale or unavailable preference" {
+    const Policy = struct {
+        fn valid(model: []const u8) bool {
+            return std.mem.eql(u8, model, "luna") or std.mem.eql(u8, model, "other");
+        }
+        fn small(model: []const u8) bool {
+            return std.mem.eql(u8, model, "small");
+        }
+    };
     const capabilities = [_]Capability{
-        .{ .name = "codex", .recommended_model = "luna", .models = &.{ "luna", "other" }, .readiness = .configured },
-        .{ .name = "synthetic", .recommended_model = "small", .models = &.{"small"}, .readiness = .configured },
+        .{ .name = "codex", .recommended_model = "luna", .valid_model = Policy.valid, .readiness = .configured },
+        .{ .name = "synthetic", .recommended_model = "small", .valid_model = Policy.small, .readiness = .configured },
     };
     try std.testing.expectEqual(Selection.chooser, try resolve(&.{}, null, null, null, null));
     try std.testing.expectEqual(Selection.chooser, try resolve(&capabilities, null, null, null, null));
@@ -64,8 +76,13 @@ test "prospective selection does not fall back from a stale or unavailable prefe
     try std.testing.expectError(error.UnsupportedSelectionModel, resolve(&capabilities, "synthetic", "luna", null, null));
     const only = capabilities[0..1];
     try std.testing.expectEqualStrings("luna", (try resolve(only, null, null, null, null)).selected.model);
-    const missing = [_]Capability{.{ .name = "codex", .recommended_model = "luna", .models = &.{"luna"}, .readiness = .missing }};
+    const missing = [_]Capability{.{ .name = "codex", .recommended_model = "luna", .valid_model = Policy.valid, .readiness = .missing }};
     try std.testing.expectEqual(Selection.chooser, try resolve(&missing, null, null, null, null));
     try std.testing.expectEqual(Readiness.missing, (try resolve(&missing, null, null, "codex", null)).selected.readiness);
     try std.testing.expectEqual(Readiness.missing, (try resolve(&missing, "codex", null, null, null)).selected.readiness);
+    var changed = capabilities[0];
+    changed.recommended_model = "other";
+    changed.readiness = .renewal_due;
+    try std.testing.expectEqualStrings("other", (try resolve(&.{changed}, null, null, null, null)).selected.model);
+    try std.testing.expectEqualStrings("luna", (try resolve(&.{changed}, null, null, "codex", "luna")).selected.model);
 }
