@@ -1,5 +1,7 @@
 const std = @import("std");
 const TerminalEditor = @import("TerminalEditor.zig");
+const SessionTerminal = @import("SessionTerminal.zig");
+const FrontendRead = @import("FrontendRead.zig");
 const TerminalText = @import("TerminalText.zig");
 const client = @import("client.zig");
 const codex_auth = @import("codex_auth.zig");
@@ -39,6 +41,35 @@ pub fn main(init: std.process.Init) !void {
     try postCommandHold(init);
 }
 
+fn reportTerminalFailure(err: anyerror) void {
+    const name = @errorName(err);
+    const vectors = [_]std.posix.iovec_const{
+        .{ .base = "error: ", .len = "error: ".len },
+        .{ .base = name.ptr, .len = name.len },
+        .{ .base = "\n", .len = 1 },
+    };
+    writeTerminalDiagnostic(&vectors);
+}
+
+// Shared by the error name and the still-owned admission receipt. No drain,
+// retries, worker or output ownership survives this one optional native write.
+fn writeTerminalDiagnostic(vectors: []const std.posix.iovec_const) void {
+    if (std.c.isatty(2) != 1) return;
+    const flags = std.c.fcntl(2, std.c.F.GETFL, @as(c_int, 0));
+    if (flags < 0) return;
+    const nonblocking: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    const changed = flags & nonblocking == 0;
+    if (changed and std.c.fcntl(2, std.c.F.SETFL, flags | nonblocking) < 0) return;
+    // Partial output or failure is intentionally not retried. These flags can
+    // belong to the same open-file description as stdin/stdout or a parent FD.
+    _ = std.c.writev(2, vectors.ptr, @intCast(vectors.len));
+    if (changed and std.c.fcntl(2, std.c.F.SETFL, flags) < 0) {
+        // This is already a fatal, terminating path. Do not reopen blocking
+        // reporting or claim restoration after an unconfirmed native failure.
+        return;
+    }
+}
+
 fn configureHostAllocator(init: std.process.Init, args: []const []const u8) !void {
     if (@import("builtin").os.tag != .macos) return;
     if (std.mem.eql(u8, init.environ_map.get("RUI_HOST_MALLOC_DEFAULTS") orelse "", "0")) return;
@@ -62,6 +93,7 @@ fn configureHostAllocator(init: std.process.Init, args: []const []const u8) !voi
 
 const Presentation = enum { human, json, interactive };
 
+const action_choice_prompt = "Allow once, deny, or later? [a/d/l] ";
 const post_command_ready_fd_environment = "RUI_TEST_POST_COMMAND_READY_FD";
 const post_command_release_fd_environment = "RUI_TEST_POST_COMMAND_RELEASE_FD";
 
@@ -782,6 +814,60 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
     if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
+fn configureEntered(init: std.process.Init, args: []const []const u8, interactive: bool, frontend: ?*Frontend) !void {
+    const io = init.io;
+    var json = false;
+    var input = client.ConfigureInput{
+        .store = "",
+        .session = .{ .named = "" },
+    };
+    var location: @FieldType(client.CaptureTarget, "explicit") = .{ .record = "", .key = "" };
+    var drop_reply: ?[]const u8 = null;
+    var explicit_store: ?[]const u8 = null;
+    var key_seen = false;
+    var index: usize = 0;
+    while (index < args.len) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) location.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
+            location.key = try takeValue(args, &index);
+            key_seen = true;
+        } else if (std.mem.eql(u8, arg, "--provider")) {
+            input.provider = .{ .present = true, .value = try takeValue(args, &index) };
+        } else if (std.mem.eql(u8, arg, "--session")) input.session = .{ .named = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--workspace")) input.workspace = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--model")) input.model = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--instructions")) input.instructions = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--tools")) input.tools = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--permission-mode")) input.permission_mode = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--output-schema")) input.output_schema = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--text-output")) input.output_schema = .{ .state = .explicit_null } else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
+        index += 1;
+    }
+    if (input.session.named.len == 0 or (location.record.len == 0) != !key_seen) return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    input.store = try selectedStore(init, explicit_store, &selected_buffer);
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const human = !key_seen;
+    const target: client.CaptureTarget = if (human) .{ .generated = try requestDirectory(init, &directory_buffer) } else .{ .explicit = location };
+    var captured = try client.captureConfigure(io, input, target);
+    const saved = captured.identity().*;
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = blk: {
+        defer captured.close(io);
+        if (human and !interactive) {
+            if (json) try announceCaptureJson(io, saved.key.slice()) else try announceCapture(io, saved.key.slice());
+        }
+        break :blk try readRequest(frontend, io, client.sendCaptured, .{ &captured, drop_reply, &reply_buffer });
+    };
+    if (interactive) try client.checkCanonicalFailure(reply);
+    const accepted = if (human and interactive) try acceptedReply(reply) else false;
+    if (human and (!interactive or !accepted)) {
+        if (frontend) |owner| try writeAdmissionTo(owner.terminal.writer(), reply, if (json) saved.key.slice() else null) else try writeAdmission(io, reply, if (json) saved.key.slice() else null);
+    } else if (!human) try writeCommandReply(io, reply);
+    if (human and interactive and accepted) {
+        if (frontend) |owner| try owner.terminal.write("Rui: Configured.\n") else try std.Io.File.stdout().writeStreamingAll(io, "Rui: Configured.\n");
+    }
+    if (human and !json and !interactive) {
+        var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
+        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "configuration: {s} in {s}\n", .{ saved.session.slice(), saved.store.slice() }));
+        if (try acceptedReply(reply)) try std.Io.File.stdout().writeStreamingAll(io, "next: rui --resume REF [--store PATH]\n");
+    }
+    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
+}
+
 fn message(init: std.process.Init, args: []const []const u8) !void {
     const io = init.io;
     var json = false;
@@ -935,10 +1021,134 @@ fn showSessionStatus(init: std.process.Init, store: []const u8, session_ref: []c
     }
 }
 
+const Frontend = struct {
+    init: std.process.Init,
+    terminal: *SessionTerminal,
+    admission: *Admission,
+    lane: FrontendRead = .{},
+    store: []const u8 = "",
+    session: []const u8 = "",
+    accepting: bool = false,
+
+    fn fatal(self: *const Frontend, err: anyerror) bool {
+        // A service failure ends terminal custody before joining the reader.
+        // Only worker request failures with an active terminal may recover.
+        return !self.terminal.active or self.terminal.failure != null or err == error.AdmissionMaskRestorationFailed or fatalPresentation(err);
+    }
+
+    fn cancel(self: *Frontend) void {
+        self.lane.stop();
+        self.admission.cancellation.requestStop();
+        // close retains typed cleanup failure in the terminal owner. The
+        // entered-invocation boundary reports it only after every join.
+        if (self.terminal.active) self.terminal.close() catch {};
+    }
+
+    fn service(self: *Frontend) !void {
+        // /wait also services input without an active reader wait scope.
+        errdefer self.cancel();
+        try self.admission.takeCompletion(self.init.io, self.terminal);
+        try self.terminal.service(10);
+        if (!self.terminal.output) try self.terminal.repaint();
+        if (self.accepting and self.admission.replaceable()) {
+            if (self.terminal.readyDraft()) |text| {
+                if (text.len != 0) try self.submit(text) else self.terminal.finishReady();
+            }
+        }
+    }
+
+    fn submit(self: *Frontend, text: []const u8) !void {
+        const message_text = if (std.mem.startsWith(u8, text, "//")) text[1..] else text;
+        var directory: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const captured = client.captureMessage(self.init.io, .{ .store = self.store, .session = self.session, .text_path = "", .text = message_text }, .{ .generated = try requestDirectory(self.init, &directory) }) catch |err| {
+            self.terminal.ready = false;
+            const restored = self.terminal.rejectSubmission();
+            if (!self.terminal.output) try self.terminal.beginOutput();
+            try self.terminal.writer().print("rui: capture failed ({s}); nothing sent. {s}\n", .{ @errorName(err), if (restored) "Original draft restored." else "Original draft retained; /discard releases it without sending." });
+            return;
+        };
+        self.admission.install(captured);
+        self.terminal.captureReady();
+        // Only invocation cleanup escapes start; a no-worker startup failure
+        // publishes one certainty-preserving completion through the same slot.
+        try self.admission.start();
+    }
+
+    fn wait(self: *Frontend, sink: anytype) !void {
+        errdefer {
+            // Do this before join, even when the producer is withholding the
+            // first byte or waiting for this terminal's content rendezvous.
+            self.cancel();
+            self.lane.join();
+            // The caller and finalizer recheck the owned result after unwind.
+            self.admission.takeCompletion(self.init.io, self.terminal) catch {};
+        }
+        while (!self.lane.done.load(.acquire)) {
+            if (self.lane.borrow()) |bytes| {
+                defer self.lane.release();
+                if (@TypeOf(sink) != @TypeOf(null)) try sink.feed(bytes) else unreachable;
+            }
+            try self.service();
+        }
+        self.lane.join();
+        try self.admission.takeCompletion(self.init.io, self.terminal);
+    }
+
+    fn finishRead(self: *Frontend, read: anyerror!void) !void {
+        const completion = self.admission.takeCompletion(self.init.io, self.terminal);
+        // Harvest even on unwind, but never replace typed mask cleanup with
+        // the worker's independently fatal semantic result.
+        if (read) |_| {} else |err| {
+            if (err == error.AdmissionMaskRestorationFailed) return err;
+        }
+        try completion;
+        try read;
+    }
+
+    fn call(self: *Frontend, comptime function: anytype, args: anytype) anyerror!@typeInfo(@TypeOf(@call(.auto, function, .{@as(client.Requests, undefined)} ++ args))).error_union.payload {
+        var job: FrontendRead.Job(function, @TypeOf(args)) = .{ .args = args };
+        const read: anyerror!void = read: {
+            self.lane.start(&job) catch |err| break :read err;
+            break :read self.wait(null);
+        };
+        try self.finishRead(read);
+        return job.result;
+    }
+
+    fn stream(self: *Frontend, comptime function: anytype, prefix: anytype, sink: anytype, reply: *client.ReplyBuffer) anyerror!@typeInfo(@TypeOf(@call(.auto, function, .{@as(client.Requests, undefined)} ++ prefix ++ .{ &self.lane, reply }))).error_union.payload {
+        const args = prefix ++ .{ &self.lane, reply };
+        var job: FrontendRead.Job(function, @TypeOf(args)) = .{ .args = args };
+        const read: anyerror!void = read: {
+            self.lane.start(&job) catch |err| break :read err;
+            break :read self.wait(sink);
+        };
+        try self.finishRead(read);
+        return job.result;
+    }
+};
+
+fn readRequest(frontend: ?*Frontend, io: std.Io, comptime function: anytype, args: anytype) anyerror!@typeInfo(@TypeOf(@call(.auto, function, .{@as(client.Requests, undefined)} ++ args))).error_union.payload {
+    if (frontend) |owner| return owner.call(function, args);
+    return @call(.auto, function, .{client.Requests{ .io = io }} ++ args);
+}
+
+fn streamRequest(frontend: ?*Frontend, io: std.Io, comptime function: anytype, prefix: anytype, sink: anytype, reply: *client.ReplyBuffer) anyerror!@typeInfo(@TypeOf(@call(.auto, function, .{@as(client.Requests, undefined)} ++ prefix ++ .{ sink, reply }))).error_union.payload {
+    if (frontend) |owner| return owner.stream(function, prefix, sink, reply);
+    return @call(.auto, function, .{client.Requests{ .io = io }} ++ prefix ++ .{ sink, reply });
+}
+
 fn writeSafeField(io: std.Io, label: []const u8, value: []const u8) !void {
     try std.Io.File.stdout().writeStreamingAll(io, label);
     try writeSafeText(io, value);
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
+}
+
+fn writeField(out: *std.Io.Writer, label: []const u8, value: []const u8) !void {
+    try out.writeAll(label);
+    var text: TerminalText = .{ .mode = .line };
+    try text.feed(out, value);
+    try text.finish(out);
+    try out.writeAll("\n");
 }
 
 fn writeSafeText(io: std.Io, value: []const u8) !void {
@@ -953,6 +1163,224 @@ fn writeSafeText(io: std.Io, value: []const u8) !void {
 fn reportAcceptedPresentationFailure(key: []const u8, err: anyerror) void {
     std.debug.print("rui: Message accepted, but later observation or presentation failed ({s}). Use rui result {s} to inspect the same Message; do not resubmit it\n", .{ @errorName(err), key });
 }
+
+const Admission = struct {
+    const Result = union(enum) {
+        accepted,
+        rejected: client.CommandReply,
+        unconfirmed: anyerror,
+        not_sent: anyerror,
+    };
+
+    const Slot = union(enum) {
+        active: struct { captured: client.CapturedRecord, result: ?Result = null },
+        settled: struct { address: client.MessageAddress, result: Result },
+    };
+
+    // Active storage is pinned until its borrower has joined. A settled receipt
+    // owns identity but no descriptor; rejected replies borrow buffer below.
+    slot: ?Slot = null,
+    buffer: client.ReplyBuffer = .{},
+    done: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+    explanation_pending: bool = false,
+    cancellation: client.Cancellation = .{},
+
+    fn replaceable(self: *const Admission) bool {
+        return !self.explanation_pending and (self.slot == null or self.slot.? == .settled);
+    }
+
+    fn install(self: *Admission, captured: client.CapturedRecord) void {
+        std.debug.assert(self.replaceable() and self.thread == null);
+        self.slot = .{ .active = .{ .captured = captured } };
+    }
+
+    fn start(self: *Admission) !void {
+        std.debug.assert(self.thread == null and self.slot.? == .active and !self.explanation_pending);
+        const prior = self.slot.?.active.result;
+        self.done.store(false, .release);
+        self.cancellation = .{};
+        // This borrower may outlive the terminal's /login handoff. Inherit
+        // blocked SIGINT from birth; only the terminal owns its delivery.
+        var set = std.posix.sigemptyset();
+        std.posix.sigaddset(&set, .INT);
+        var previous: std.posix.sigset_t = undefined;
+        if (std.c.pthread_sigmask(@intCast(std.posix.SIG.BLOCK), &set, &previous) != 0) {
+            self.startupFailed(prior, error.AdmissionSignalMaskFailed);
+            return;
+        }
+        self.slot.?.active.result = null;
+        // Save launch custody before attempting parent cleanup. Once spawned,
+        // only the worker may publish result/done, even if SETMASK fails.
+        if (std.Thread.spawn(.{}, Admission.run, .{self})) |thread| {
+            self.thread = thread;
+        } else |err| {
+            self.startupFailed(prior, err);
+        }
+        if (std.c.pthread_sigmask(@intCast(std.posix.SIG.SETMASK), &previous, &set) != 0) return error.AdmissionMaskRestorationFailed;
+    }
+
+    fn startupFailed(self: *Admission, prior: ?Result, err: anyerror) void {
+        std.debug.assert(self.thread == null);
+        // A failed latest launch cannot prove an earlier exchange unsent.
+        self.slot.?.active.result = if (prior != null and prior.? == .unconfirmed) prior.? else .{ .not_sent = err };
+        self.done.store(true, .release);
+    }
+
+    fn run(self: *Admission) void {
+        self.slot.?.active.result = self.send() catch |err| .{ .unconfirmed = err };
+        self.done.store(true, .release);
+    }
+
+    fn send(self: *Admission) !Result {
+        const exchange: client.Requests = .{ .io = std.Io.Threaded.global_single_threaded.io(), .cancellation = &self.cancellation };
+        const captured = &self.slot.?.active.captured;
+        const reply = try exchange.sendCaptured(captured, null, &self.buffer);
+        return classify(reply, captured.saved.session.slice());
+    }
+
+    fn classify(reply: client.CommandReply, session: []const u8) !Result {
+        try client.checkCanonicalFailure(reply);
+        if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
+        defer parsed.deinit();
+        const value = parsed.value;
+        const answer = try objectField(value, "answer");
+        if (!std.mem.eql(u8, try stringField(value, "version"), "1") or
+            !std.mem.eql(u8, try stringField(value, "type"), "message_reply") or
+            !std.mem.eql(u8, try stringField(answer, "session"), session) or
+            (try objectField(answer, "replayed")) != .bool) return error.InvalidObservation;
+        const status = try stringField(answer, "status");
+        if (std.mem.eql(u8, status, "conflict")) {
+            if (reply.status != 409 or !std.mem.eql(u8, try stringField(answer, "code"), "idempotency_key_conflict")) return error.InvalidObservation;
+            return .{ .rejected = reply };
+        }
+        if (reply.status != 200) return error.InvalidObservation;
+        const input = try objectField(value, "input");
+        var digest: [32]u8 = undefined;
+        const encoded = try stringField(input, "sha256");
+        if (!std.mem.eql(u8, try stringField(input, "type"), "text") or encoded.len != 64) return error.InvalidObservation;
+        _ = std.fmt.hexToBytes(&digest, encoded) catch return error.InvalidObservation;
+        _ = try std.fmt.parseInt(u64, try stringField(input, "bytes"), 10);
+        if (std.mem.eql(u8, status, "rejected")) {
+            if ((try stringField(answer, "code")).len == 0) return error.InvalidObservation;
+            return .{ .rejected = reply };
+        }
+        if (!std.mem.eql(u8, status, "accepted")) return error.InvalidObservation;
+        const admission = try std.fmt.parseInt(u64, try stringField(answer, "admission"), 10);
+        const queue = try objectField(value, "queue");
+        if (admission == 0 or !std.mem.eql(u8, try stringField(queue, "status"), "queued") or
+            admission != try std.fmt.parseInt(u64, try stringField(queue, "admission"), 10)) return error.InvalidObservation;
+        return .accepted;
+    }
+
+    fn recover(self: *Admission) !void {
+        // A published completion must first be consumed with its bank effect;
+        // recovery cannot overwrite it between producer completion and service.
+        if (self.thread != null or self.done.load(.acquire) or self.explanation_pending or self.slot == null or self.slot.? != .active) return;
+        switch (self.slot.?.active.result orelse return) {
+            .not_sent, .unconfirmed => {},
+            .accepted, .rejected => return,
+        }
+        try self.start();
+    }
+
+    /// Main-thread, non-I/O handoff. Consume and apply together, including when
+    /// a read just failed or the invocation is leaving. Never print recursively.
+    fn takeCompletion(self: *Admission, io: std.Io, terminal: *SessionTerminal) !void {
+        if (self.done.swap(false, .acq_rel)) {
+            self.join();
+            const completion = self.slot.?.active.result.?;
+            switch (completion) {
+                .accepted, .rejected => {
+                    const saved = self.slot.?.active.captured.saved;
+                    const address: client.MessageAddress = .{ .store = saved.store, .session = saved.session, .key = saved.key };
+                    self.slot.?.active.captured.close(io);
+                    self.slot = .{ .settled = .{ .address = address, .result = completion } };
+                    if (completion == .accepted) terminal.releaseSubmitted() else _ = terminal.rejectSubmission();
+                },
+                .unconfirmed, .not_sent => {},
+            }
+            self.explanation_pending = completion != .accepted;
+        }
+        // Fatal invocation meaning belongs to the retained outcome, not its
+        // optional explanation. Recheck it even after completion was consumed.
+        if (self.outcome()) |completion| switch (completion) {
+            .unconfirmed, .not_sent => |err| if (err == error.CanonicalStoreFailure) return err,
+            .accepted, .rejected => {},
+        };
+    }
+
+    fn outcome(self: *const Admission) ?Result {
+        if (self.slot) |*slot| return switch (slot.*) {
+            .active => |*active| if (self.thread == null and !self.done.load(.acquire)) active.result else null,
+            .settled => |*settled| settled.result,
+        };
+        return null;
+    }
+
+    fn messageAddress(self: *const Admission) ?client.MessageAddress {
+        if (self.slot) |*slot| return switch (slot.*) {
+            .active => |*active| .{ .store = active.captured.saved.store, .session = active.captured.saved.session, .key = active.captured.saved.key },
+            .settled => |*settled| settled.address,
+        };
+        return null;
+    }
+
+    fn explain(self: *Admission, terminal: *SessionTerminal) !void {
+        if (!self.explanation_pending) return;
+        const completion = self.outcome().?;
+        if (!terminal.output) try terminal.beginOutput();
+        const out = terminal.writer();
+        switch (completion) {
+            .accepted => unreachable,
+            .rejected => |reply| {
+                try writeAdmissionTo(out, reply, null);
+                try out.writeAll("Rui: Rejected original restored or retained alongside composition. /discard releases only a retained rejected draft; its capture remains saved.\n");
+            },
+            .unconfirmed, .not_sent => |err| {
+                var label: [160]u8 = undefined;
+                try writeField(out, try std.fmt.bufPrint(&label, "Submission {s} ({s}); recover original request: ", .{ if (completion == .not_sent) "not sent" else "unconfirmed", @errorName(err) }), self.messageAddress().?.key.slice());
+            },
+        }
+        self.explanation_pending = false;
+    }
+
+    fn discard(self: *Admission, terminal: *SessionTerminal) void {
+        const completion = self.outcome();
+        // A capture failure retains a bank without installing a new receipt.
+        if ((completion != null and completion.? == .rejected) or self.replaceable()) terminal.discardRejected();
+    }
+
+    fn reportFailure(self: *const Admission) void {
+        const address = self.messageAddress() orelse return;
+        const completion = self.outcome().?;
+        // TerminalText can expand a control byte to four ASCII bytes. Identity
+        // is bounded and remains owned until this optional diagnostic finishes.
+        var bytes: [4 * (protocol.max_store_bytes + protocol.max_session_bytes + protocol.max_key_bytes) + 256]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&bytes);
+        out.print("Rui: Submission {s}. Saved request:\n", .{if (completion == .not_sent) "not sent" else @tagName(completion)}) catch unreachable;
+        writeField(&out, "Store: ", address.store.slice()) catch unreachable;
+        writeField(&out, "Session: ", address.session.slice()) catch unreachable;
+        writeField(&out, "Key: ", address.key.slice()) catch unreachable;
+        out.writeAll("Use rui recover KEY for the original request; do not submit replacement input.\n") catch unreachable;
+        const vectors = [_]std.posix.iovec_const{.{ .base = out.buffer.ptr, .len = out.end }};
+        writeTerminalDiagnostic(&vectors);
+    }
+
+    fn join(self: *Admission) void {
+        if (self.thread) |thread| thread.join();
+        self.thread = null;
+    }
+
+    fn close(self: *Admission, io: std.Io) void {
+        std.debug.assert(self.thread == null);
+        if (self.slot) |*slot| {
+            if (slot.* == .active) slot.active.captured.close(io);
+        }
+        self.slot = null;
+    }
+};
 
 fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []const u8, text: []const u8) !?Attention {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1544,6 +1972,26 @@ fn writeAdmission(io: std.Io, reply: client.CommandReply, json_handle: ?[]const 
     }
 }
 
+fn writeAdmissionTo(out: *std.Io.Writer, reply: client.CommandReply, json_handle: ?[]const u8) !void {
+    if (json_handle) |handle| {
+        try out.print("{{\"event\":\"admission\",\"request\":\"{s}\",\"admission\":", .{handle});
+        try out.writeAll(reply.body);
+        return out.writeAll("}\n");
+    }
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
+    defer parsed.deinit();
+    const answer = try objectField(parsed.value, "answer");
+    const status = try stringField(answer, "status");
+    try out.print("admitted: {s}\n", .{status});
+    const replayed = try objectField(answer, "replayed");
+    if (replayed != .bool) return error.InvalidObservation;
+    try out.writeAll(if (replayed.bool) "replayed: true\n" else "replayed: false\n");
+    if (answer.object.get("code")) |code| {
+        if (code != .string) return error.InvalidObservation;
+        try writeField(out, "code: ", code.string);
+    }
+}
+
 fn objectField(value: std.json.Value, name: []const u8) !std.json.Value {
     if (value != .object) return error.InvalidObservation;
     return value.object.get(name) orelse error.InvalidObservation;
@@ -1835,6 +2283,31 @@ fn showResult(init: std.process.Init, saved: *const client.MessageAddress, prese
         .command => return error.ResultReadFailed,
     }
     try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+}
+
+fn waitEnteredSession(frontend: *Frontend) !?Work {
+    const report = try inspectWork(frontend.init, frontend.store, frontend.session, frontend);
+    defer report.file.close(frontend.init.io);
+    const selected = report.work.selected_message orelse {
+        try frontend.terminal.write("Rui: No work to wait for.\n");
+        return null;
+    };
+    // Selection is one immutable Message address, not the Session's changing
+    // current Turn; a successor never delays the originally selected answer.
+    const address = try client.MessageAddress.init(frontend.store, frontend.session, selected.slice());
+    while (true) {
+        var observed = try readRequest(frontend, frontend.init.io, client.observeMessage, .{ std.heap.c_allocator, &address });
+        defer observed.deinit();
+        if (observed.state.terminal()) {
+            try showResult(frontend.init, &address, .interactive, frontend);
+            return null;
+        }
+        if (observed.progress) |progress| {
+            if (progress.action != null and progress.status == .waiting_for_permission) return report.work;
+        }
+        try frontend.service();
+        try std.Io.sleep(frontend.init.io, .fromMilliseconds(100), .awake);
+    }
 }
 
 const Work = struct {
@@ -2161,6 +2634,13 @@ fn progressNotice(queue: client.MessageObservation.State, status: @FieldType(cli
 
 // null is the selected message's terminal observation; an Action is only a hint
 // to inspect and decide against the Host's exact current target.
+fn fatalPresentation(err: anyerror) bool {
+    return err == error.InteractiveInterrupted or err == error.CanonicalStoreFailure or err == error.AnswerDisplayFailed or err == error.ActionDisplayFailed or
+        err == error.WriteFailed or err == error.BrokenPipe or err == error.InputOutput or err == error.NoSpaceLeft or
+        err == error.DiskQuota or err == error.FileTooBig or err == error.TerminalRestoreFailed or err == error.TerminalCleanupFailed or
+        err == error.TerminalFlushFailed or err == error.TerminalInputClosed or err == error.IncompleteTerminalInput or err == error.IncompleteTerminalLine;
+}
+
 fn followMessage(init: std.process.Init, saved: *const client.MessageAddress, presentation: Presentation, policy: FollowPolicy) !?Work {
     var last_queue: ?client.MessageObservation.State = null;
     var last_progress: ?@FieldType(client.MessageObservation.Progress, "status") = null;
