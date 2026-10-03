@@ -23,6 +23,7 @@ test {
     _ = @import("request_encoding.zig");
     _ = @import("tools.zig");
     _ = @import("SessionTerminal.zig");
+    _ = @import("session_terminal_native_tests.zig");
     _ = @import("FrontendRead.zig");
     _ = @import("client.zig");
     _ = @import("cli.zig");
