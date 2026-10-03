@@ -95,6 +95,37 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit, Store, and protocol tests");
     test_step.dependOn(&run_tests.step);
+    const terminal_native_step = b.step("terminal-native", "Run Linux terminal initialization-storage and fresh-choice owner witnesses");
+    if (target.query.isNative() and target.result.os.tag == .linux) {
+        const terminal_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/session_terminal_native_tests.zig"),
+                .target = target,
+                .optimize = .ReleaseSafe,
+            }),
+            .filters = &.{ "initialization input borrows final", "output and independent choice", "SessionTerminal native EOF", "failed stdout restores native PTY" },
+        });
+        configureTerminalEditor(b, terminal_tests);
+        const init_probe = b.addLibrary(.{
+            .name = "rui-terminal-init-probe",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{ .target = target, .optimize = .ReleaseSafe }),
+        });
+        init_probe.root_module.link_libc = true;
+        init_probe.root_module.addCSourceFile(.{
+            .file = b.path("tests/integration/terminal_init_probe.c"),
+            .flags = &.{"-std=gnu11"},
+        });
+        // Preload only the native test executable, never Zig or its build tools.
+        const run_terminal = b.addSystemCommand(&.{ "sh", "-c", "exec env RUI_INIT_PROBE=1 LD_PRELOAD=\"$1\" \"$2\"", "terminal-native" });
+        run_terminal.addArtifactArg(init_probe);
+        run_terminal.addArtifactArg(terminal_tests);
+        terminal_native_step.dependOn(&run_terminal.step);
+        test_step.dependOn(&run_terminal.step);
+    } else {
+        const skipped = b.addSystemCommand(&.{ "sh", "-c", "printf 'SKIP terminal-native: Linux native preload witnesses unavailable on this target\n'" });
+        terminal_native_step.dependOn(&skipped.step);
+    }
     const run_full_tests = b.addRunArtifact(tests);
     run_full_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "1");
     const full_test_step = b.step("test-full", "Run native tests including the real 60-second client deadline witness");
@@ -353,6 +384,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.step.dependOn(&release.step);
     fast_integrations.step.dependOn(&run_evaluator_host.step);
     fast_integrations.step.dependOn(&run_renderer_allocation.step);
+    fast_integrations.step.dependOn(terminal_native_step);
     check_step.dependOn(&fast_integrations.step);
 
     const full_check_step = b.step(
@@ -371,6 +403,7 @@ pub fn build(b: *std.Build) void {
     full_evaluator.addArtifactArg(evaluator_driver);
     full_evaluator.addArtifactArg(evaluator_probe);
     full_evaluator.step.dependOn(&run_tests.step);
+    full_evaluator.step.dependOn(terminal_native_step);
     full_evaluator.step.dependOn(&run_renderer_allocation.step);
     full_evaluator.step.dependOn(string_sanitizer_step);
     const full_evaluator_host = b.addRunArtifact(evaluator_host);
