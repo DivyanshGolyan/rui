@@ -5,6 +5,7 @@ const c = @cImport({
 });
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const model_adapter = @import("model_adapter.zig");
 const provider_selection = @import("provider_selection.zig");
 
 const io = std.Io.Threaded.global_single_threaded.io();
@@ -84,6 +85,35 @@ pub fn load(home: []const u8) !Values {
     defer dir.close(io);
     const values = try read(dir);
     try validate(&values);
+    return values;
+}
+
+pub const Edit = struct {
+    store: ?[]const u8 = null,
+    provider: ?[]const u8 = null,
+    model: union(enum) { keep, set: []const u8, clear } = .keep,
+};
+
+/// Apply choices, never resolved recommendations. Strings are copied into values.
+fn apply(saved: Values, edit: Edit, readiness: provider_selection.Readiness) !Values {
+    var values = saved;
+    if (edit.provider) |name| {
+        if (!std.mem.eql(u8, name, model_adapter.provider_label)) return error.UnsupportedPreferenceProvider;
+        if (!saved.provider.eql(name)) values.model = .{};
+        try values.provider.set(name);
+    }
+    switch (edit.model) {
+        .keep => {},
+        .clear => values.model = .{},
+        .set => |model| {
+            if (!model_adapter.validModel(model)) return error.InvalidPreferenceModel;
+            const choice = provider_selection.resolve(&.{model_adapter.capability(readiness)}, null, model, if (values.provider.len != 0) values.provider.slice() else null, null) catch
+                return error.UnsupportedPreferenceProvider;
+            if (choice == .chooser) return error.PreferenceProviderRequired;
+            try values.provider.set(choice.selected.provider);
+            try values.model.set(model);
+        },
+    }
     return values;
 }
 
