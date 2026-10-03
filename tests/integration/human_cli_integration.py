@@ -1201,7 +1201,7 @@ def main():
         os.close(slave)
         try:
             greeting = read_terminal(master, "rui> ")
-            assert "Session: human/name\\n\\u001b[2J\\u202e" in greeting, greeting
+            assert "Session: human/name\\n\\x1b[2J\\u202e" in greeting, greeting
             assert "\x1b[2J" not in greeting and "\u202e" not in greeting, greeting
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
@@ -1227,7 +1227,7 @@ def main():
             "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            assert waiter.stdout.readline() == "selected message: message\\n\\u001b[2J\\u202e\n"
+            assert waiter.stdout.readline() == "selected message: message\\n\\x1b[2J\\u202e\n"
             master, slave = pty.openpty()
             entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
                 "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
@@ -1236,7 +1236,7 @@ def main():
             try:
                 read_terminal(master, "rui> ")
                 status = terminal_step(master, "/status")
-                assert "Current message: message\\n\\u001b[2J\\u202e" in status, status
+                assert "Current message: message\\n\\x1b[2J\\u202e" in status, status
                 assert "\x1b[2J" not in status and "\u202e" not in status, status
                 assert "Detached." in terminal_step(master, "/exit", "Detached.")
                 assert entered.wait(timeout=5) == 0
@@ -1260,7 +1260,7 @@ def main():
             greeting = read_terminal(master, "rui> ")
             assert "Session: human/unsafe-key" in greeting, greeting
             status = terminal_step(master, "/status")
-            assert "message\\n\\u001b[2J\\u202e: completed" in status, status
+            assert "message\\n\\x1b[2J\\u202e: completed" in status, status
             assert "\x1b[2J" not in status and "\u202e" not in status, status
             assert "Detached." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0

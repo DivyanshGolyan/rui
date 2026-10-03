@@ -83,3 +83,34 @@ test "natural Unicode stays readable while controls and ambiguous command bytes 
     try text.finish(&output.writer);
     try std.testing.expectEqualStrings("Don’t café " ++ "\\\"quoted\\\" " ++ "\\\\u202e\\u202e\\n\\t\\x1b\\xff", output.written());
 }
+
+test "TerminalText line bytes are independent of chunk boundaries and incomplete UTF-8 stays visible" {
+    const cases = .{
+        .{ "Aé🙂Z\x00\x1f\x7f\xc2\x85\xe2\x81\xa6", "Aé🙂Z\\x00\\x1f\\x7f\\u0085\\u2066" },
+        .{ "\xe2\x82X\xf0\x80\x80\x80\xc3", "\\xe2\\x82X\\xf0\\x80\\x80\\x80\\xc3" },
+    };
+    inline for (cases) |case| {
+        for (0..case[0].len + 1) |split| {
+            var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer output.deinit();
+            var text: Self = .{ .mode = .line };
+            try text.feed(&output.writer, case[0][0..split]);
+            try text.feed(&output.writer, case[0][split..]);
+            try text.finish(&output.writer);
+            try text.finish(&output.writer);
+            try std.testing.expectEqualStrings(case[1], output.written());
+        }
+    }
+}
+
+test "TerminalText propagates output failure during feed and incomplete-byte finish" {
+    var bytes: [3]u8 = undefined;
+    var output = std.Io.Writer.fixed(&bytes);
+    var text: Self = .{ .mode = .line };
+    try std.testing.expectError(error.WriteFailed, text.feed(&output, "\x1b"));
+
+    output = std.Io.Writer.fixed(&bytes);
+    text = .{ .mode = .line };
+    try text.feed(&output, "\xe2");
+    try std.testing.expectError(error.WriteFailed, text.finish(&output));
+}
