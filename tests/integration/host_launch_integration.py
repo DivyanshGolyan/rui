@@ -11,9 +11,11 @@ import resource
 import select
 import shlex
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 
 from host_process import start_ready_process, stop_process
@@ -149,7 +151,7 @@ def lower_descriptor_limit():
 def main():
     assert len(sys.argv) == 2, "usage: host_launch_integration.py /absolute/path/to/rui"
     with tempfile.TemporaryDirectory(prefix="rui-host-launch-") as root_text:
-        root = pathlib.Path(root_text)
+        root = pathlib.Path(root_text).resolve()
         home = root / "home"
         home.mkdir(mode=0o700)
         credential = root / "credentials" / "missing.json"
@@ -199,6 +201,7 @@ def main():
             assert all(code == 0 for code, _, _ in results), results
             ready = status(alias, env)
             identity = instance(ready, 8)
+            assert "Bash: enabled\nModel: enabled\nManaged authentication: enabled\n" in ready, ready
             assert instance(status(store, env), 8) == identity
             pids = wait_for_processes(store, 1)
             assert pids[0] not in launcher_pids, "Host remained the CLI launcher process"
@@ -288,22 +291,26 @@ def main():
         codex_fixture.credentials(bare_credential)
         bare_env = {**os.environ, "HOME": str(bare_home)}
         master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
         caller = subprocess.Popen([RUI], cwd=root, env=bare_env,
             stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         try:
             output = b""
             until = time.monotonic() + COMMAND_TIMEOUT
-            while b"rui> " not in output:
+            while b"\r> \r\x1b[2C" not in output:
                 remaining = until - time.monotonic()
                 assert remaining > 0 and select.select([master], [], [], remaining)[0], output
                 output += os.read(master, 65536)
-            assert b"Host ready (active capacity 8)" in output, output
-            assert b"Provider: codex" in output and b"Permission: ask" in output, output
+            assert b"Host ready" not in output and b"Diagnostics:" not in output, output
+            assert b"Provider: codex" in output and b"Permission: bypass (Bash runs without approval)" in output, output
             assert b"request: " in output and b"Session: rui/" in output, output
             assert len(wait_for_processes(bare_store, 1)) == 1
-            os.write(master, b"/exit\n")
-            assert caller.wait(timeout=5) == 0
+            # Disconnect the terminal while its caller is still at a prompt;
+            # the detached Host's lifetime must not depend on that PTY.
+            os.close(master)
+            master = None
+            caller.wait(timeout=5)
             assert instance(status(bare_store, bare_env), 8)
             stopped = subprocess.run([RUI, "host", "stop", "--store", bare_store],
                 env=bare_env, capture_output=True, text=True, timeout=5)
@@ -312,7 +319,8 @@ def main():
             if caller.poll() is None:
                 caller.kill()
                 caller.wait(timeout=5)
-            os.close(master)
+            if master is not None:
+                os.close(master)
             forced_crash_cleanup(bare_store)
 
         # A detached Host that cannot satisfy its inherited descriptor budget
