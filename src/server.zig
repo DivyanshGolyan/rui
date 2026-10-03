@@ -3463,6 +3463,25 @@ fn renderConfigureReply(
     try response.append("},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}");
 }
 
+test "canonical failure classifier accepts every production mutation failure envelope" {
+    const client = @import("client.zig");
+    var response = protocol.ResponseBuffer{};
+    try renderConfigureReply(&response, &.{}, .infrastructure_failure);
+    try std.testing.expectError(error.CanonicalStoreFailure, client.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
+    response = .{};
+    try renderMessageReply(&response, &.{}, .infrastructure_failure);
+    try std.testing.expectError(error.CanonicalStoreFailure, client.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
+    response = .{};
+    try renderSessionStopReply(&response, &.{}, .infrastructure_failure);
+    try std.testing.expectError(error.CanonicalStoreFailure, client.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
+    response = .{};
+    try renderModelInterruptionReply(&response, &.{}, .infrastructure_failure);
+    try std.testing.expectError(error.CanonicalStoreFailure, client.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
+    response = .{};
+    try renderPermissionDecisionReply(&response, &.{}, .infrastructure_failure);
+    try std.testing.expectError(error.CanonicalStoreFailure, client.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
+}
+
 fn renderMessageReply(
     response: *protocol.ResponseBuffer,
     command: *const protocol.MessageCommand,
