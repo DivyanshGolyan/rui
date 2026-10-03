@@ -77,7 +77,7 @@ def stage_action(state, store, name, command):
 
 
 def main():
-    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-bash-owner."))
+    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-bash-owner.")).resolve()
     state = root / "state"
     state.mkdir(mode=0o700)
     store = root / "store"

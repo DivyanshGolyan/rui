@@ -118,16 +118,13 @@ def prove_effect_without_result_becomes_indeterminate(state):
         home = state / "effect-before-result-home"
         home.mkdir()
         master, slave = pty.openpty()
-        entered = subprocess.Popen([str(RUI), "session", "--store", str(store), "--session", session],
+        entered = subprocess.Popen([str(RUI), "--resume", session, "--store", str(store)],
             env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         try:
-            human.read_terminal(master, "rui> ")
-            status = human.terminal_step(master, "/status")
-            assert "Indeterminate Action: 1" in status, status
-            assert "The command may have run; Rui did not replay it." in status, status
-            human.terminal_step(master, "/exit", "Detached.")
-            assert entered.wait(timeout=5) == 0
+            opening = human.read_terminal(master, "The command may have run; Rui did not replay it.")
+            assert "Indeterminate Action: 1" in opening, opening
+            assert marker.read_text() == "x", "resume must not repeat the Bash effect"
         finally:
             if entered.poll() is None:
                 entered.kill()
