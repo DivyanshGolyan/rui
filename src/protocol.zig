@@ -225,9 +225,37 @@ pub const ObserveCommand = struct {
     key: Bounded(max_key_bytes) = .{},
 };
 
+pub const SessionCalls = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    after_position: ?u64 = null,
+};
+
+pub const SessionCallContent = struct {
+    pub const Field = enum { name, arguments };
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    position: u64 = 0,
+    field: Field = .name,
+    start: u64 = 0,
+    length: u64 = content_window_bytes,
+    stream: bool = false,
+};
+
 pub const ReadResult = struct {
     store: Bounded(max_store_bytes) = .{},
     key: Bounded(max_key_bytes) = .{},
+};
+
+/// Public immutable admission identity, independently of Conversation
+/// application. No content digest supplied by a caller grants access.
+pub const MessageContent = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    admission_id: u64 = 0,
+    start: u64 = 0,
+    length: u64 = content_window_bytes,
+    stream: bool = false,
 };
 
 pub const ReportProfile = enum { current, full };
@@ -288,6 +316,13 @@ pub const ConversationContent = struct {
     position: u64 = 0,
     ordinal: u64 = 0,
     start: u64 = 0,
+    stream: bool = false,
+};
+
+pub const SessionView = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    cursor: @import("session_view.zig").Cursor = .{},
 };
 
 pub const Request = union(Kind) {
