@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Public one-shot caller recovery and exact Bash authorization."""
+import base64
 import errno
 import json
 import fcntl
 import os
 import pathlib
+import re
 import pty
 import select
 import shlex
 import shutil
 import signal
+import socket
+import socketserver
 import struct
 import subprocess
 import sys
@@ -20,6 +24,14 @@ import time
 
 import dispatch_integration as fixture
 import codex_integration as codex_fixture
+from conversation_page_integration import host_resources, request as public_request
+
+
+def open_terminal():
+    """PTYs start with unusable zero geometry unless the fixture supplies it."""
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+    return master, slave
 
 
 def run(home, *args, success=True, environment=None):
@@ -39,22 +51,159 @@ def admit(home, *args):
     return admission
 
 
-def read_terminal(master, marker, timeout=15):
-    output = b""
+def read_terminal(master, marker, timeout=15, initial=""):
+    output = initial.encode()
     deadline = time.monotonic() + timeout
-    while marker.encode() not in output:
+    markers = marker if isinstance(marker, tuple) else (marker,)
+    # Typed command repaints contain '> ' too. Wait for the empty
+    # composing region, not an echo of input which has not been dispatched.
+    markers = tuple("\r> \r\x1b[2C" if item == "> " else item for item in markers)
+    while not any(item.encode() in output for item in markers):
         remaining = deadline - time.monotonic()
         assert remaining > 0, (marker, output.decode(errors="replace"))
         assert select.select([master], [], [], remaining)[0], (marker, output.decode(errors="replace"))
         output += os.read(master, 65536)
         assert len(output) < 1024 * 1024, "unexpected unbounded terminal output"
-    return (output.decode(errors="replace").replace("\r\n", "\n")
+    return (output.decode(errors="replace").replace("\r\r\n", "\n").replace("\r\n", "\n")
         .replace("\x1b[?2004h", "").replace("\x1b[?2004l", ""))
 
 
-def terminal_step(master, command, marker="rui> "):
+def read_terminal_end(master, child, timeout=15):
+    """Drain partial output until EOF, retaining a finite failure deadline."""
+    output = bytearray()
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0 and select.select([master], [], [], remaining)[0], output.decode(errors="replace")
+        try:
+            chunk = os.read(master, 65536)
+        except OSError as err:
+            if err.errno == errno.EIO:
+                break
+            raise
+        if not chunk:
+            break
+        output.extend(chunk)
+        assert len(output) < 4 * 1024 * 1024, "unbounded terminal output"
+    child.wait(timeout=5)
+    return output.decode(errors="replace").replace("\r\r\n", "\n").replace("\r\n", "\n")
+
+
+def detach_terminal(master, child, sequence=b"/exit\n"):
+    """Detach by outcome and restored input mode, not an optional notice."""
+    os.write(master, sequence)
+    output = read_terminal_end(master, child)
+    assert child.returncode == 0, (child.returncode, output)
+    restored = termios.ICANON | termios.ECHO | termios.ISIG
+    assert termios.tcgetattr(master)[3] & restored == restored, "terminal mode not restored"
+    return output
+
+
+def terminal_step(master, command, marker="> ", before_prompt=None):
     os.write(master, (command + "\n").encode())
+    if before_prompt is None and marker == "> ":
+        # These commands have observable response text. An input repaint is
+        # not their completion; do not synchronize the fixture on that hint.
+        before_prompt = {
+            '/setup': ('Defaults (read only):', 'Saved defaults for future Sessions.', 'Usage: /setup', 'rui: setup', 'rui: /setup:'),
+            '/status': ('Session:', 'rui: status:'),
+            '/resume': ('Session:', 'active Session unchanged'),
+            '/history': ('You:', '────────', 'End of saved public history', 'No older page', 'history unavailable'),
+            '/configure': ('Configured.', 'Usage: /configure', 'Use a file for', 'admitted:', 'rui: configure:'),
+            '/result': ('────────', 'Rui: This', 'rui: result'),
+            '/requests': ('Local recovery handles', 'rui: requests:'),
+            '/help': 'Rui: /help',
+            '/approve': ('Widen the terminal', 'No Action requires attention'),
+        }.get(command.split(' ', 1)[0])
+    if before_prompt is not None:
+        # A queued command can repaint the independent next composition
+        # during a read. Require its actual response before the final footer.
+        response = read_terminal(master, before_prompt)
+        candidates = before_prompt if isinstance(before_prompt, tuple) else (before_prompt,)
+        seen = min((item for item in candidates if item in response), key=response.index)
+        head, separator, tail = response.partition(seen)
+        return head + separator + read_terminal(master, marker, initial=tail)
     return read_terminal(master, marker)
+
+
+def reject_entry(home, workspace, args, expected):
+    master, slave = open_terminal()
+    child = subprocess.Popen([str(fixture.RUI), *map(str, args)], cwd=workspace,
+        env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
+    os.close(slave)
+    output = b""
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if not select.select([master], [], [], max(0, deadline - time.monotonic()))[0]:
+                break
+            try:
+                chunk = os.read(master, 65536)
+            except OSError as err:
+                if err.errno == errno.EIO:
+                    break
+                raise
+            if not chunk:
+                break
+            output += chunk
+            assert b"Provider: [c]" not in output, "repair offered before selected resource checks"
+        assert expected.encode() in output, output.decode(errors="replace")
+        assert child.wait(timeout=5) != 0
+        assert b"request: " not in output and b"Session: rui/" not in output
+        assert not (home / ".config/rui/codex.json").exists(), "entry repaired credentials"
+        assert not (home / ".config/rui/.codex.json.lock").exists(), "entry created a credential lock"
+        assert not (home / ".config/rui/requests").exists(), "entry captured a Session"
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        os.close(master)
+
+
+def resume_credential_readiness(state, workspace):
+    store = state / "credential-resume-store"
+    host = fixture.start_host(store, None)
+    try:
+        session = "credential/idle"
+        fixture.configure(state, store, "credential-resume", session, "model-a")
+        before = fixture.command("inspect-session", "--store", store, "--session", session)
+        for kind, warning in (("configured", False), ("renewal_due", False),
+                ("missing", True), ("refresh_pending", True), ("malformed", True)):
+            home = state / f"resume-{kind}"
+            config = home / ".config/rui"
+            config.mkdir(parents=True, mode=0o700)
+            credential = config / "codex.json"
+            if kind in ("configured", "renewal_due"):
+                expiry = int(time.time()) + (3600 if kind == "configured" else -60)
+                payload = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).rstrip(b"=").decode()
+                codex_fixture.credentials(credential, access=f"e30.{payload}.c2ln")
+                credential.write_text(credential.read_text().replace("expires_at=4102444800", f"expires_at={expiry}"))
+            elif kind == "refresh_pending":
+                codex_fixture.credentials(credential, state=kind)
+            elif kind == "malformed":
+                credential.write_text("version=9\n")
+                credential.chmod(0o600)
+            installed = credential.read_bytes() if credential.exists() else None
+            master, slave = open_terminal()
+            child = subprocess.Popen([str(fixture.RUI), "--resume", session, "--store", str(store)],
+                cwd=workspace, env={**os.environ, "HOME": str(home)},
+                stdin=slave, stdout=slave, stderr=slave)
+            os.close(slave)
+            try:
+                output = read_terminal(master, "> ")
+                assert ("credential is unavailable or needs repair" in output) == warning, (kind, output)
+                assert "Provider: codex" in output and "Model: model-a" in output, output
+                detach_terminal(master, child)
+                assert (credential.read_bytes() if credential.exists() else None) == installed, kind
+                assert not (config / "requests").exists(), "resume captured new intent"
+                assert fixture.command("inspect-session", "--store", store, "--session", session) == before
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=5)
+                os.close(master)
+    finally:
+        fixture.stop_host(host)
 
 
 def action_ready(descriptor):
@@ -62,7 +211,7 @@ def action_ready(descriptor):
     assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
 
 
-def terminal_bulk(master, command, marker="rui> "):
+def terminal_bulk(master, command, marker="> "):
     fixture.wait_for(lambda: not termios.tcgetattr(master)[3] & termios.ICANON,
         "noncanonical terminal input")
     def send():
@@ -187,8 +336,7 @@ int fsync(int fd) {
         listing = terminal_step(master, "/requests")
         assert handle in listing and failed_notice in listing, listing
         assert invalid not in listing and unsupported not in listing, listing
-        terminal_step(master, "/exit", "Detached.")
-        assert entered.wait(timeout=5) == 0
+        detach_terminal(master, entered)
     finally:
         if entered.poll() is None:
             entered.kill()
@@ -196,6 +344,205 @@ int fsync(int fd) {
         os.close(master)
     print("saved capture owner: pinned original bytes, preference-independent recovery, failed announcement, "
         "sync uncertainty, listing asymmetry", flush=True)
+
+
+class ObservationProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    """Faults real client exchanges; primary reads still reach the real Host."""
+    daemon_threads = True
+
+    def __init__(self, path):
+        self.path = pathlib.Path(path)
+        self.backend = self.path.with_name("call-content-backend.sock")
+        self.path.rename(self.backend)
+        self.fault = None
+        self.hit = 0
+        self.exchanges = []
+        self.starts = []
+        self.fault_starts = []
+        self.fault_after_start = 0
+        self.order = threading.Lock()
+        self.before_exchange = None
+        self.page_end_delta = None
+        self.page_wrong_continuation = False
+        self.decisions = 0
+        super().__init__(str(self.path), ObservationExchange)
+        os.chmod(self.path, 0o600)
+        self.thread = threading.Thread(target=self.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.shutdown()
+        self.server_close()
+        self.thread.join(timeout=3)
+        self.path.unlink()
+        self.backend.rename(self.path)
+
+
+class ObservationExchange(socketserver.BaseRequestHandler):
+    def handle(self):
+        self.request.settimeout(15)
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = self.request.recv(4096)
+            assert chunk, "client closed before request headers"
+            data += chunk
+            assert len(data) <= 16384, "request headers exceed fixture bound"
+        head, body = data.split(b"\r\n\r\n", 1)
+        length = int(next(line.split(b":", 1)[1] for line in head.split(b"\r\n") if line.lower().startswith(b"content-length:")))
+        while len(body) < length:
+            chunk = self.request.recv(length - len(body))
+            assert chunk, "client closed before request body"
+            body += chunk
+        command = json.loads(body)
+        proxy = self.server
+        with proxy.order:
+            start_index = len(proxy.starts)
+            proxy.starts.append(command)
+        before_exchange = proxy.before_exchange
+        if before_exchange is not None and before_exchange(command, start_index) is False:
+            return  # Explicitly gated transport loss, before backend delivery.
+        if command["kind"] == "permission_decision":
+            proxy.decisions += 1
+        with proxy.order:
+            fault = proxy.fault
+            eligible = fault is not None and start_index >= proxy.fault_after_start
+        # Predicates may independently observe the Host through this proxy.
+        matched = eligible and fault(command)
+        with proxy.order:
+            hit = matched and proxy.fault is fault
+            if hit:
+                proxy.fault = None
+                proxy.hit += 1
+                proxy.fault_starts.append(start_index)
+        with socket.socket(socket.AF_UNIX) as backend:
+            backend.settimeout(15)
+            backend.connect(str(proxy.backend))
+            backend.sendall(head + b"\r\n\r\n" + body)
+            # Headers and transfer windows have explicit bounds independent of
+            # content length. Never retain a complete result in the relay.
+            response_head = bytearray()
+            while not response_head.endswith(b"\r\n\r\n"):
+                byte = backend.recv(1)
+                assert byte, "backend closed before response headers"
+                response_head.extend(byte)
+                assert len(response_head) <= 16384, "response headers exceed fixture bound"
+            response_head = bytes(response_head[:-4])
+            size = int(next(line.split(b":", 1)[1] for line in response_head.split(b"\r\n")
+                if line.lower().startswith(b"content-length:")))
+            altered_page = hit and (proxy.page_end_delta is not None or proxy.page_wrong_continuation)
+            truncated = hit and command["kind"] in ("read_result", "conversation_content")
+            if altered_page:
+                # Sixteen metadata-only conversation items fit in 4 KiB;
+                # content bodies never enter this exceptional JSON buffer.
+                assert size <= 4096, "page exceeds bounded metadata reply"
+            payload = bytearray()
+            count = 0
+            prefix = min(5000, max(0, size - 1)) if truncated else 0
+            if not hit or truncated:
+                self.request.sendall(response_head + b"\r\n\r\n")
+            disconnected = False
+            while chunk := backend.recv(4096):
+                try:
+                    if not disconnected and not hit:
+                        self.request.sendall(chunk)
+                    elif not disconnected and truncated and count < prefix:
+                        self.request.sendall(chunk[:prefix - count])
+                except (BrokenPipeError, ConnectionResetError):
+                    # Physical PTY closure intentionally disconnects the CLI;
+                    # drain/count the backend without retaining its suffix.
+                    disconnected = True
+                if altered_page:
+                    assert len(payload) + len(chunk) <= 4096
+                    payload.extend(chunk)
+                count += len(chunk)
+            assert count == size, (count, size)
+        proxy.exchanges.append((command, count))
+        if hit:
+            if command["kind"] in ("read_result", "conversation_content"):
+                pass  # The bounded partial prefix was already relayed.
+            elif proxy.page_end_delta is not None or proxy.page_wrong_continuation:
+                assert command["kind"] == "conversation_page" and int(command["end"]) > 0, command
+                page = json.loads(payload)
+                assert page["end"] == command["end"], (page, command)
+                if proxy.page_wrong_continuation:
+                    assert len(page["items"]) >= 2 and page["items"][0]["position"] != page["items"][-1]["position"], page
+                    page["more"] = True
+                    page["before_position"] = page["items"][0]["position"]
+                    page["before_ordinal"] = page["items"][0]["ordinal"]
+                else:
+                    changed_end = int(command["end"]) + proxy.page_end_delta
+                    page["end"] = str(changed_end)
+                    # Keep every item valid under the altered end, so rejection
+                    # proves end binding rather than incidental item validation.
+                    page["items"] = [item for item in page["items"] if int(item["position"]) <= changed_end]
+                payload = json.dumps(page).encode()
+                self.request.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: " + str(len(payload)).encode() + b"\r\n\r\n" + payload)
+            elif getattr(proxy, "canonical", False):
+                payload = b'{"version":"1","type":"invocation_error","code":"canonical_store_failure"}'
+                self.request.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: " + str(len(payload)).encode() + b"\r\n\r\n" + payload)
+            else:
+                # Incomplete transport is not evidence of a fenced Store.
+                self.request.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 80\r\n\r\n{")
+
+
+def observation_relay():
+    """The actual proxy forwards before EOF with N-independent Python storage."""
+    import tracemalloc
+
+    for size in (64 * 1024, 8 * 1024 * 1024):
+        prefix_consumed, release_eof = (threading.Event() for _ in range(2))
+        failures = []
+        class Backend(socketserver.BaseRequestHandler):
+            def handle(self):
+                try:
+                    self.request.recv(4096)
+                    self.request.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(size).encode() + b"\r\n\r\n")
+                    self.request.sendall(b"x" * 4096)
+                    assert prefix_consumed.wait(5), "relay did not forward before backend EOF"
+                    for _ in range((size - 4096) // 4096):
+                        self.request.sendall(b"x" * 4096)
+                    assert release_eof.wait(5), "EOF gate not released"
+                except Exception as err:
+                    failures.append(err)
+        with tempfile.TemporaryDirectory(prefix="rui-observation-relay-") as temporary:
+            path = pathlib.Path(temporary) / "relay.sock"
+            backend = socketserver.UnixStreamServer(str(path), Backend)
+            backend_thread = threading.Thread(target=backend.serve_forever, daemon=True)
+            backend_thread.start()
+            proxy = ObservationProxy(path)
+            tracemalloc.start()
+            try:
+                with socket.socket(socket.AF_UNIX) as client:
+                    client.settimeout(5)
+                    client.connect(str(path))
+                    body = b'{"kind":"read_result"}'
+                    client.sendall(b"POST /v1/read-result HTTP/1.1\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+                    head = bytearray()
+                    while not head.endswith(b"\r\n\r\n"):
+                        head.extend(client.recv(1))
+                    count = 0
+                    while count < size:
+                        assert select.select([client], [], [], 3)[0], "relay did not forward before backend EOF"
+                        chunk = client.recv(min(4096, size - count))
+                        assert chunk and chunk == b"x" * len(chunk)
+                        count += len(chunk)
+                        prefix_consumed.set()
+                    current, peak = tracemalloc.get_traced_memory()
+                    assert not proxy.exchanges, "backend EOF unexpectedly preceded the witness"
+                    assert peak < 256 * 1024, ("payload retained as N grows", size, current, peak)
+                    release_eof.set()
+                    assert client.recv(1) == b""
+                assert not failures, failures
+                assert proxy.exchanges == [({"kind": "read_result"}, size)], proxy.exchanges
+                print(f"Observation relay N={size}: consumed before backend EOF, traced live={current}, peak={peak}", flush=True)
+            finally:
+                prefix_consumed.set()
+                release_eof.set()
+                tracemalloc.stop()
+                proxy.close()
+                backend.shutdown()
+                backend.server_close()
+                backend_thread.join(timeout=5)
 
 
 def main():
@@ -526,8 +873,7 @@ def main():
             assert "Session: rui/" in welcome and "Provider: codex" in welcome, welcome
             assert "Model: gpt-6-luna" in welcome, welcome
             assert malformed.read_text() == "version=9\n"
-            assert "Detached." in terminal_step(master, "/exit", "Detached.")
-            assert explicit.wait(timeout=5) == 0
+            detach_terminal(master, explicit)
         finally:
             if explicit.poll() is None:
                 explicit.kill()
@@ -582,8 +928,7 @@ def main():
                     current = fixture.command("inspect-session", "--store", after,
                         "--session", f"rui/{handle}")
                     assert current["session"]["model"] == "gpt-6-luna", current
-                    assert "Detached." in terminal_step(master, "/exit", "Detached.")
-                    assert changing.wait(timeout=5) == 0
+                    detach_terminal(master, changing)
                 finally:
                     if changing.poll() is None:
                         changing.kill()
@@ -612,8 +957,7 @@ def main():
                 assert current["session"]["workspace"] == str(workspace.resolve()), current
                 assert json.loads(run(preferences_home, "recover", handle, "--json"))["answer"]["replayed"] is True
                 created.append(reference)
-                assert "Detached." in terminal_step(master, "/exit", "Detached.")
-                assert caller.wait(timeout=5) == 0
+                detach_terminal(master, caller)
             finally:
                 if caller.poll() is None:
                     caller.kill()
@@ -783,7 +1127,7 @@ def main():
             assert "Assistant: first answer" in terminal_step(master, f"/result {queued}")
             assert "Local recovery handles" in terminal_step(master, "/requests")
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
-            assert "No work to wait for." in terminal_step(master, "/wait")
+            assert "No work to wait for." in terminal_step(master, "/wait", before_prompt="No work to wait for.")
             assert "gpt-6-luna" in terminal_step(master, "/setup")
             login_prompt = terminal_step(master, "/login", "Provider: [c]")
             assert "Supported integration: Codex" in login_prompt and "defer leaves this Session" in login_prompt
@@ -904,8 +1248,7 @@ def main():
             status = terminal_step(master, "/status")
             assert status.count("Action requiring attention: ") == 2, status
             assert f"Action requiring attention: {pending}" in status and f"Action requiring attention: {running}" in status, status
-            terminal_step(master, "/exit", "Detached.")
-            assert entered.wait(timeout=5) == 0
+            detach_terminal(master, entered)
         finally:
             if entered.poll() is None:
                 entered.kill()
@@ -1238,8 +1581,7 @@ def main():
                 status = terminal_step(master, "/status")
                 assert "Current message: message\\n\\u001b[2J\\u202e" in status, status
                 assert "\x1b[2J" not in status and "\u202e" not in status, status
-                assert "Detached." in terminal_step(master, "/exit", "Detached.")
-                assert entered.wait(timeout=5) == 0
+                detach_terminal(master, entered)
             finally:
                 if entered.poll() is None:
                     entered.kill()
@@ -1262,8 +1604,7 @@ def main():
             status = terminal_step(master, "/status")
             assert "message\\n\\u001b[2J\\u202e: completed" in status, status
             assert "\x1b[2J" not in status and "\u202e" not in status, status
-            assert "Detached." in terminal_step(master, "/exit", "Detached.")
-            assert entered.wait(timeout=5) == 0
+            detach_terminal(master, entered)
         finally:
             if entered.poll() is None:
                 entered.kill()
@@ -1443,9 +1784,7 @@ def main():
             rejected = terminal_step(master, "A中e\u0301\x1b[D")
             assert "cannot place the terminal cursor reliably" in rejected and "--text FILE" in rejected, rejected
             assert len(endpoint.requests) == before, "uncertain display submitted a Message"
-            os.write(master, b"\x04")
-            assert "Detached. Host work continues." in read_terminal(master, "Detached.")
-            assert entered.wait(timeout=5) == 0
+            detach_terminal(master, entered, b"\x04")
             assert termios.tcgetattr(master)[3] & termios.ICANON
         finally:
             if entered.poll() is None:
@@ -1461,9 +1800,7 @@ def main():
             assert "Recent messages" not in read_terminal(master, "rui> ")
             fixture.wait_for(lambda: not termios.tcgetattr(master)[3] & termios.ICANON,
                 "terminal ready for Ctrl+C")
-            os.write(master, b"\x03")
-            assert "Detached. Host work continues." in read_terminal(master, "Detached.")
-            assert entered.wait(timeout=5) == 0
+            detach_terminal(master, entered, b"\x03")
             assert termios.tcgetattr(master)[3] & termios.ICANON
         finally:
             if entered.poll() is None:
@@ -1535,6 +1872,7 @@ def main():
             assert fixture.command("observe-command", "--store", store,
                 "--key", saved_key)["observation"]["status"] == "accepted"
         finally:
+            observation_continue.set()
             observation_release.set()
             if entered.poll() is None:
                 entered.kill()
