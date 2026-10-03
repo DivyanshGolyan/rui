@@ -1,6 +1,10 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const named_scratch = @import("named_scratch.zig");
+const c = @cImport({
+    @cInclude("unistd.h");
+    @cInclude("sys/stat.h");
+});
 
 pub const database_suffix = "/rui.sqlite3";
 pub const scratch_suffix = "/scratch";
@@ -24,6 +28,40 @@ pub const StoreLease = struct {
     paths: Paths,
     store_dir: std.Io.Dir,
     lock_file: std.Io.File,
+
+    pub const Observation = union(enum) { owned: Paths, unowned, access_failure };
+
+    /// Read-only observation, not lease acquisition or readiness. Returns
+    /// owned canonical paths by value; every probe descriptor closes here.
+    pub fn observe(io: std.Io, supplied_path: []const u8) Observation {
+        var store_dir = std.Io.Dir.cwd().openDir(io, supplied_path, .{}) catch |err| return switch (err) {
+            error.FileNotFound => .unowned,
+            else => .access_failure,
+        };
+        defer store_dir.close(io);
+        validatePrivateDirectory(store_dir, io) catch return .access_failure;
+        const paths = pathsFromOpenStore(store_dir, io) catch return .access_failure;
+        // A hostile FIFO must not wait for a writer; never follow or create
+        // a replacement lock node during observation.
+        const fd = std.posix.openat(store_dir.handle, "host.lock", .{
+            .ACCMODE = .RDONLY,
+            .NONBLOCK = true,
+            .NOFOLLOW = true,
+            .CLOEXEC = true,
+        }, 0) catch |err| return switch (err) {
+            error.FileNotFound => .unowned,
+            else => .access_failure,
+        };
+        const lock_file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+        defer lock_file.close(io);
+        const stat = lock_file.stat(io) catch return .access_failure;
+        if (stat.kind != .file) return .access_failure;
+        return switch (std.posix.errno(std.posix.system.flock(fd, std.posix.LOCK.SH | std.posix.LOCK.NB))) {
+            .SUCCESS => .unowned,
+            .AGAIN => .{ .owned = paths },
+            else => .access_failure,
+        };
+    }
 
     pub fn acquire(io: std.Io, supplied_path: []const u8) !StoreLease {
         var store_dir = try std.Io.Dir.cwd().createDirPathOpen(io, supplied_path, .{
@@ -86,6 +124,80 @@ pub fn resolveClientPaths(io: std.Io, supplied_path: []const u8) !Paths {
     defer store_dir.close(io);
     try validatePrivateDirectory(store_dir, io);
     return pathsFromOpenStore(store_dir, io);
+}
+
+/// Read-only destination check before authentication repair. Existing Stores
+/// retain their private-directory checks; absent explicit/HOME destinations
+/// must fit after canonicalizing their nearest existing parent. Serving still
+/// checks the actual created directory and acquires its lease against races.
+pub fn validateStoreDestination(io: std.Io, supplied_path: []const u8) !void {
+    if (supplied_path.len == 0 or !std.unicode.utf8ValidateSlice(supplied_path)) return error.InvalidStorePath;
+    for (supplied_path) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidStorePath;
+    _ = resolveClientPaths(io, supplied_path) catch |err| switch (err) {
+        error.FileNotFound => {
+            var parent = supplied_path;
+            while (true) {
+                parent = std.fs.path.dirname(parent) orelse ".";
+                var directory: ?std.Io.Dir = std.Io.Dir.cwd().openDir(io, parent, .{}) catch |parent_err| switch (parent_err) {
+                    error.FileNotFound => continue,
+                    else => return parent_err,
+                };
+                defer if (directory) |dir| dir.close(io);
+                var canonical: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
+                var length = try directory.?.realPath(io, &canonical);
+                var name_max = c.fpathconf(directory.?.handle, c._PC_NAME_MAX);
+                if (name_max <= 0) return error.StoreComponentLimitUnavailable;
+                // The handle anchors the existing prefix. Missing depth tracks
+                // virtual directories only; canceling them resumes real checks.
+                // Creation traverses even components later canceled by '..'.
+                var missing_depth: usize = 0;
+                const suffix = if (std.mem.eql(u8, parent, ".")) supplied_path else supplied_path[parent.len..];
+                var components = std.mem.tokenizeScalar(u8, suffix, '/');
+                while (components.next()) |component| {
+                    if (component.len > name_max) return error.NameTooLong;
+                    if (missing_depth == 0 and c.faccessat(directory.?.handle, ".", c.X_OK, 0) != 0) return error.AccessDenied;
+                    if (std.mem.eql(u8, component, ".")) continue;
+                    if (std.mem.eql(u8, component, "..")) {
+                        length = if (std.fs.path.dirname(canonical[0..length])) |up| up.len else 1;
+                        if (missing_depth != 0) {
+                            missing_depth -= 1;
+                            continue;
+                        }
+                    } else {
+                        const separator: usize = if (length == 1) 0 else 1;
+                        if (length + separator + component.len > canonical.len) return error.NameTooLong;
+                        if (separator != 0) canonical[length] = '/';
+                        @memcpy(canonical[length + separator ..][0..component.len], component);
+                        length += separator + component.len;
+                        if (missing_depth != 0) {
+                            missing_depth += 1;
+                            continue;
+                        }
+                        const stat = std.Io.Dir.cwd().statFile(io, canonical[0..length], .{ .follow_symlinks = false }) catch |stat_err| switch (stat_err) {
+                            error.FileNotFound => {
+                                if (c.faccessat(directory.?.handle, ".", c.W_OK | c.X_OK, 0) != 0) return error.AccessDenied;
+                                missing_depth = 1;
+                                continue;
+                            },
+                            else => return stat_err,
+                        };
+                        // Recursive creation rejects an existing symlink at a
+                        // prefix it visits, unlike opening the initial ancestor.
+                        if (stat.kind != .directory) return error.NotDir;
+                    }
+                    directory.?.close(io);
+                    directory = null;
+                    directory = try std.Io.Dir.cwd().openDir(io, canonical[0..length], .{});
+                    name_max = c.fpathconf(directory.?.handle, c._PC_NAME_MAX);
+                    if (name_max <= 0) return error.StoreComponentLimitUnavailable;
+                }
+                if (missing_depth == 0) try validatePrivateDirectory(directory.?, io);
+                try validateCanonicalPath(canonical[0..length]);
+                return;
+            }
+        },
+        else => return err,
+    };
 }
 
 fn pathsFromOpenStore(store_dir: std.Io.Dir, io: std.Io) !Paths {
@@ -253,10 +365,151 @@ test "Store paths canonicalize aliases to one socket" {
     try std.testing.expectEqualStrings(one.socket.slice(), two.socket.slice());
 }
 
+test "Store lease observation owns probe mechanics and releases every descriptor" {
+    const io = std.testing.io;
+    const descriptors = @import("descriptor_limit.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store", .{root});
+    const baseline = (try descriptors.observe(io)).open_descriptors;
+    for (0..16) |_| try std.testing.expect(StoreLease.observe(io, path) == .unowned);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "store", .{}));
+    try tmp.dir.createDir(io, "store", .fromMode(0o700));
+    for (0..16) |_| try std.testing.expect(StoreLease.observe(io, path) == .unowned);
+    try expectNoStoreEffects(path, io);
+    try std.testing.expectEqual(baseline, (try descriptors.observe(io)).open_descriptors);
+
+    try tmp.dir.symLink(io, "store", "alias", .{ .is_directory = true });
+    var alias_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const alias = try std.fmt.bufPrint(&alias_buffer, "{s}/alias", .{root});
+    {
+        var lease = try StoreLease.acquire(io, path);
+        defer lease.release();
+        const leased = (try descriptors.observe(io)).open_descriptors;
+        for (0..16) |_| {
+            const observation = StoreLease.observe(io, alias);
+            try std.testing.expect(observation == .owned);
+            try std.testing.expectEqualStrings(lease.paths.store.slice(), observation.owned.store.slice());
+            try std.testing.expectEqualStrings(lease.paths.socket.slice(), observation.owned.socket.slice());
+        }
+        try std.testing.expectEqual(leased, (try descriptors.observe(io)).open_descriptors);
+    }
+    for (0..16) |_| try std.testing.expect(StoreLease.observe(io, alias) == .unowned);
+    try std.testing.expectEqual(baseline, (try descriptors.observe(io)).open_descriptors);
+
+    try tmp.dir.deleteFile(io, "store/host.lock");
+    const target = try tmp.dir.createFile(io, "target", .{});
+    target.close(io);
+    try tmp.dir.symLink(io, "../target", "store/host.lock", .{});
+    for (0..16) |_| try std.testing.expect(StoreLease.observe(io, path) == .access_failure);
+    try tmp.dir.deleteFile(io, "store/host.lock");
+    try tmp.dir.createDir(io, "store/host.lock", .default_dir);
+    for (0..16) |_| try std.testing.expect(StoreLease.observe(io, path) == .access_failure);
+    try tmp.dir.deleteDir(io, "store/host.lock");
+    try std.testing.expectEqual(@as(c_int, 0), c.mkfifoat(tmp.dir.handle, "store/host.lock", 0o600));
+    for (0..16) |_| try std.testing.expect(StoreLease.observe(io, path) == .access_failure);
+    try tmp.dir.deleteFile(io, "store/host.lock");
+    var store = try tmp.dir.openDir(io, "store", .{ .iterate = true });
+    defer store.close(io);
+    try store.setPermissions(io, .fromMode(0o755));
+    for (0..16) |_| try std.testing.expect(StoreLease.observe(io, path) == .access_failure);
+    try std.testing.expectEqual(baseline + 1, (try descriptors.observe(io)).open_descriptors);
+}
+
 test "socket path uses the first 16 SHA-256 bytes in lowercase hex" {
     var buffer: [max_socket_path_bytes]u8 = undefined;
     const path = try socketPathForCanonical("/tmp/rui-stdlib-hex", &buffer);
     try std.testing.expect(std.mem.endsWith(u8, path, "/043ea4efef72c68973ebffcb0927e537.sock"));
+}
+
+test "absent destination preflight checks components but bounds canonical aliases" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root = root_buffer[0..root_len];
+    var path_buffer: [2048]u8 = undefined;
+    const overlong = try std.fmt.bufPrint(&path_buffer, "{s}/missing/{s}", .{ root, &([_]u8{'x'} ** 256) });
+    try std.testing.expectError(error.NameTooLong, validateStoreDestination(std.testing.io, overlong));
+    const canceled = try std.fmt.bufPrint(&path_buffer, "{s}/missing/{s}/../../store", .{ root, &([_]u8{'x'} ** 256) });
+    try std.testing.expectError(error.NameTooLong, validateStoreDestination(std.testing.io, canceled));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openDir(std.testing.io, "missing", .{}));
+    const alias = try std.fmt.bufPrint(&path_buffer, "{s}/new/{s}store", .{ root, "./" ** 260 });
+    try validateStoreDestination(std.testing.io, alias);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openDir(std.testing.io, "new", .{}));
+    var lease = try StoreLease.acquire(std.testing.io, alias);
+    defer lease.release();
+    var expected_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{s}/new/store", .{root});
+    try std.testing.expectEqualStrings(expected, lease.paths.store.slice());
+}
+
+test "absent destination preflight resumes filesystem checks after missing components cancel" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "other/deep");
+    try tmp.dir.symLink(io, "other/deep", "link", .{});
+    var insecure = try tmp.dir.createDirPathOpen(io, "insecure", .{ .open_options = .{ .iterate = true } });
+    defer insecure.close(io);
+    try insecure.setPermissions(io, .fromMode(0o755));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [2048]u8 = undefined;
+    const descriptors = @import("descriptor_limit.zig");
+    const baseline = (try descriptors.observe(io)).open_descriptors;
+    const symlink = try std.fmt.bufPrint(&path_buffer, "{s}/missing/../link/../store", .{root});
+    try std.testing.expectError(error.NotDir, validateStoreDestination(io, symlink));
+    const existing = try std.fmt.bufPrint(&path_buffer, "{s}/missing/../insecure", .{root});
+    try std.testing.expectError(error.InsecureDirectoryPermissions, validateStoreDestination(io, existing));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openDir(io, "missing", .{}));
+    const valid = try std.fmt.bufPrint(&path_buffer, "{s}/missing/../other/store", .{root});
+    try validateStoreDestination(io, valid);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openDir(io, "missing", .{}));
+    var lease = try StoreLease.acquire(io, valid);
+    lease.release();
+    const alias = try std.fmt.bufPrint(&path_buffer, "{s}/link/new-store", .{root});
+    try validateStoreDestination(io, alias);
+    var aliased = try StoreLease.acquire(io, alias);
+    aliased.release();
+    try std.testing.expectEqual(baseline, (try descriptors.observe(io)).open_descriptors);
+    if (std.c.geteuid() != 0) {
+        try insecure.setPermissions(io, .fromMode(0o500));
+        const denied = try std.fmt.bufPrint(&path_buffer, "{s}/insecure/missing/../../other/new", .{root});
+        try std.testing.expectError(error.AccessDenied, validateStoreDestination(io, denied));
+        try std.testing.expectError(error.FileNotFound, insecure.openDir(io, "missing", .{}));
+        try insecure.setPermissions(io, .fromMode(0o755));
+    }
+}
+
+test "absent destination preflight checks read-only ancestor reached through dot dot" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const target = "/sys/rui-preflight-never-created";
+    try std.testing.expectError(error.AccessDenied, validateStoreDestination(io, target));
+    var path_buffer: [2048]u8 = undefined;
+    var length = (try std.fmt.bufPrint(&path_buffer, "{s}/missing/", .{root})).len;
+    for (root) |byte| {
+        if (byte == '/') {
+            @memcpy(path_buffer[length..][0..3], "../");
+            length += 3;
+        }
+    }
+    @memcpy(path_buffer[length..][0..3], "../");
+    length += 3;
+    const tail = target[1..];
+    @memcpy(path_buffer[length..][0..tail.len], tail);
+    length += tail.len;
+    try std.testing.expectError(error.AccessDenied, validateStoreDestination(io, path_buffer[0..length]));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openDir(io, "missing", .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openDir(io, target, .{}));
 }
 
 test "Store path capacities follow the SQLite VFS and derived suffixes" {
