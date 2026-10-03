@@ -744,6 +744,194 @@ def resume_switch():
         shutil.rmtree(state)
 
 
+def activity_observation(modes=None):
+    """Fault authoritative Session metadata/content, not auxiliary narration."""
+    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-session-observation-")).resolve()
+    home, workspace, store = state / "home", state / "workspace", state / "store"
+    home.mkdir()
+    workspace.mkdir()
+    endpoint = fixture.SuccessEndpoint([])
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    host = proxy = None
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        proxy = ObservationProxy(host.rui_ready_fields["socket"])
+        for mode in modes or ("healthy", "mixed", "utf8-1", "utf8-2", "utf8-3",
+                "entry-head", "submission-head", "live-index", "name", "arguments",
+                "terminal-head", "permission", "canonical", "canonical-drain",
+                "inspection", "partial-answer", "action-output"):
+            session = "human/view-" + mode
+            ask = mode in ("permission", "inspection", "action-output")
+            run(home, "configure", "--store", store, "--session", session,
+                "--workspace", workspace, "--provider", "codex", "--model", "model-a",
+                "--tools", "bash", "--permission-mode", "ask" if ask else "bypass")
+            endpoint.responses.extend([
+                fixture.sse_tool_calls(mode + "-old", [("old-proposal", "old", "{}")]),
+                fixture.sse_answer(mode + "-old-answer", "old-reason", "old-message", "old answer")[0],
+            ])
+            old_key = admit(home, "message", "--store", store, "--session", session, "history")["request"]
+            fixture.wait_for(lambda: fixture.completed_observation(store, old_key), "historical call settled")
+            proxy.canonical = mode in ("canonical", "canonical-drain")
+            hits, first = proxy.hit, len(proxy.exchanges)
+            before, decisions_before = len(endpoint.requests), proxy.decisions
+            if mode in ("entry-head", "canonical"):
+                proxy.fault = lambda c: c["kind"] == "session_view"
+            master, slave = open_terminal()
+            entered = subprocess.Popen([str(fixture.RUI), "--resume", session, "--store", str(store)],
+                env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
+            os.close(slave)
+            try:
+                if mode in ("entry-head", "canonical"):
+                    output = read_terminal_end(master, entered)
+                    assert entered.returncode != 0 and "\r> \r\x1b[2C" not in output, output
+                    assert ("CanonicalStoreFailure" in output) == proxy.canonical, output
+                    assert proxy.hit == hits + 1 and len(endpoint.requests) == before
+                    continue
+                opening = read_terminal(master, "> ")
+                assert "old-proposal" in opening and "old answer" in opening, opening
+                assert "old-reason" not in opening, "private provider reasoning reached replay"
+                if mode in ("name", "arguments"):
+                    proxy.fault = lambda c, field=mode: c["kind"] == "session_call_content" and c["field"] == field
+                elif mode == "partial-answer":
+                    proxy.fault = lambda c: c["kind"] == "conversation_content" and c["ordinal"] == "0"
+                elif mode == "terminal-head":
+                    key = None
+                    proxy.fault = lambda c: c["kind"] == "session_view" and key is not None and fixture.completed_observation(store, key)
+                elif mode == "inspection":
+                    proxy.fault = lambda c: c["kind"] == "read_action_arguments"
+                tail = int(mode[-1]) if mode.startswith("utf8-") else 0
+                name = "bash" if not tail else "\x1b[0G" + "n" * (4096 - tail - 4) + "😀after-name"
+                arguments = json.dumps({"cmd": "printf x >> " + mode + "; # " + "a" * 12000,
+                    "timeout_ms": None}, separators=(",", ":"))
+                if tail:
+                    arguments = "\t" + "p" * (4096 - tail - 1) + "😀after-arguments"
+                if mode == "action-output":
+                    arguments = json.dumps({"cmd": "printf x >> action-output; # " + "a" * (2 * 1024 * 1024),
+                        "timeout_ms": None}, separators=(",", ":"))
+                answer = "original answer " + mode + ("x" * 12000 if mode == "partial-answer" else "")
+                calls = [(name, mode + "-call", arguments)]
+                if mode == "mixed":
+                    # Session scope intentionally includes another caller's Turn.
+                    endpoint.responses.extend([
+                        fixture.sse_tool_calls("foreign-turn", [("foreign-proposal", "foreign", "{}")]),
+                        fixture.sse_answer("foreign-answer", "reason", "message", "foreign answer")[0],
+                    ])
+                    foreign = admit(home, "message", "--store", store, "--session", session, "concurrent caller")["request"]
+                    fixture.wait_for(lambda: fixture.completed_observation(store, foreign), "concurrent Turn settlement")
+                    calls += [(f"missing-{n:02d}", f"mixed-{n}", "a" * 10000) for n in range(24)]
+                endpoint.responses.append(fixture.sse_tool_calls(mode + "-calls", calls))
+                if mode not in ("inspection", "action-output"):
+                    endpoint.responses.append(fixture.sse_answer(mode + "-answer", mode + "-reason", mode + "-message", answer)[0])
+                # Public one-shot admission pins the key independently of terminal timing.
+                if mode == "permission":
+                    os.write(master, b"unsent composition")
+                    read_terminal(master, "> unsent composition")
+                key = admit(home, "message", "--store", store, "--session", session, "one original message")["request"]
+                if mode in ("submission-head", "live-index", "canonical-drain"):
+                    # Arm only after the target's EOF-complete admission, not
+                    # before an unrelated idle Session poll.
+                    with proxy.order:
+                        admitted_before_fault = len(proxy.starts)
+                        proxy.fault_after_start = admitted_before_fault
+                        proxy.fault = lambda c: c["kind"] == "session_view" and c["session"] == session
+                fatal = mode in ("submission-head", "live-index", "name", "arguments",
+                    "terminal-head", "canonical-drain", "partial-answer")
+                if fatal:
+                    output = read_terminal_end(master, entered)
+                    assert entered.returncode != 0, output
+                    assert proxy.hit == hits + 1, (mode, proxy.hit, hits, output)
+                    if mode in ("submission-head", "live-index", "canonical-drain"):
+                        assert proxy.fault_starts[-1] >= admitted_before_fault, proxy.starts
+                        assert any(c["kind"] == "message" and c["key"] == key
+                            for c in proxy.starts[:admitted_before_fault]), proxy.starts
+                    assert ("CanonicalStoreFailure" in output) == proxy.canonical, output
+                    assert "Activity notices unavailable" not in output, output
+                    # A footer printed before the fault is not a resumed prompt;
+                    # process exit is the authority after failed rendering.
+                    if mode == "partial-answer":
+                        assert "original answer partial-answer" in output, output
+                elif mode == "action-output":
+                    # Content, not its preceding label, proves partial delivery
+                    # of the actual large arguments before physical closure.
+                    output = read_terminal(master, "a" * 4096)
+                    assert "printf x >> action-output" in output, output
+                    assert any(c["kind"] == "session_call_content" and c["field"] == "arguments"
+                        and c["session"] == session for c in proxy.starts), proxy.starts
+                    os.close(master)
+                    master = None
+                    assert entered.wait(timeout=10) != 0
+                    assert proxy.decisions == decisions_before and not (workspace / mode).exists()
+                    continue
+                elif ask:
+                    report = fixture.wait_for(lambda: fixture.command("inspect-session", "--store", store,
+                        "--session", session)["actionable_permissions"], "Action attention")
+                    attention = read_terminal(master, "Ctrl-G: inspect approval")
+                    assert "Allow once, deny, or later?" not in attention, attention
+                    if mode == "permission":
+                        if "> unsent composition" not in attention:
+                            attention = read_terminal(master, "> unsent composition", initial=attention)
+                        assert "> unsent composition" in attention, attention
+                        os.write(master, b"\x15")  # Explicitly discard the draft before the command.
+                    output = terminal_step(master, "/approve", "InvalidResponse" if mode == "inspection" else "[a/d/l] ")
+                    assert proxy.decisions == decisions_before, output
+                    if mode == "inspection":
+                        assert "[a/d/l] " not in output and proxy.hit == hits + 1, output
+                        assert not (workspace / mode).exists()
+                    else:
+                        output += terminal_step(master, "a", answer)
+                        assert (workspace / mode).read_text() == "x"
+                else:
+                    output = read_terminal(master, answer)
+                    assert output.count(answer) == 1 and "old-proposal" not in output, output
+                    assert "\x1b[0G" not in output, output
+                    if tail:
+                        assert "\\x1b[0G" in output and "😀after-name" in output and "😀after-arguments" in output, output
+                    elif mode == "mixed":
+                        assert output.count("Proposed tool: foreign-proposal\n") == 1 and all(output.count(f"Proposed tool: missing-{n:02d}\n") == 1 for n in range(24)), output
+                    else:
+                        assert arguments in output and "…" not in output, output
+                    assert "Proposed tool: " in output, output
+                if not fatal:
+                    detach_terminal(master, entered)
+                exchanges = proxy.exchanges[first:]
+                admissions = [c for c, _ in exchanges if c["kind"] == "message"]
+                assert len(admissions) == (2 if mode == "mixed" else 1), admissions
+                assert admissions[-1]["key"] == key, admissions
+                assert all(c.get("session", session) == session for c, _ in exchanges if c["kind"] in
+                    ("session_view", "session_call_content", "conversation_content", "message_content")), exchanges
+                ranges = [(c, size) for c, size in exchanges if c["kind"] == "session_call_content"]
+                # Each complete field is one synchronous stream, not one
+                # request per transport window or a truncated preview.
+                assert all(c.get("stream") is True and c["start"] == "0" for c, _ in ranges), ranges
+                if mode in ("healthy", "mixed") or tail:
+                    assert any(c["field"] == "arguments" and size == len(arguments.encode()) for c, size in ranges), ranges
+                if mode not in ("inspection",):
+                    fixture.wait_for(lambda: fixture.completed_observation(store, key), "saved answer despite presentation fault")
+                    assert json.loads(run(home, "result", key, "--json"))["answer"] == answer
+                    assert len(endpoint.requests) == before + (4 if mode == "mixed" else 2), endpoint.requests
+                else:
+                    assert len(endpoint.requests) == before + 1, endpoint.requests
+                assert proxy.decisions - decisions_before == int(mode == "permission")
+                print(f"Session view {mode}: scoped authoritative reads, immutable saved key, fatal partial output checked", flush=True)
+            finally:
+                proxy.fault = None
+                if entered.poll() is None:
+                    entered.kill()
+                    entered.wait(timeout=5)
+                if master is not None:
+                    os.close(master)
+    finally:
+        if proxy is not None:
+            proxy.close()
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+        shutil.rmtree(state)
+
+
 def main():
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-human-cli.")).resolve()
     home = state / "home"
@@ -2686,3 +2874,4 @@ if __name__ == "__main__":
     observation_relay()
     resume_switch()
     main()
+    activity_observation()
