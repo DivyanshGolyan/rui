@@ -618,6 +618,51 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     try enterSession(init, &.{ "--store", saved.store.slice(), "--session", saved.session.slice() });
 }
 
+fn chooseResumeSession(init: std.process.Init, destination: []const u8, reference: ?[]const u8) !?protocol.Bounded(protocol.max_session_bytes) {
+    var chosen: protocol.Bounded(protocol.max_session_bytes) = .{};
+    if (reference) |direct| {
+        try chosen.set(direct);
+    } else {
+        var cwd = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
+        defer cwd.close(init.io);
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        const length = try cwd.realPath(init.io, &workspace_buffer);
+        var all = false;
+        var cursor: client.SessionListCursor = .{};
+        while (true) {
+            const page = try sessionPage(init, destination, if (all) null else workspace_buffer[0..length], cursor, .interactive);
+            if (page.count == 0) std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No Sessions in this scope. Use a to show all Workspaces, or l to defer.\n") catch return error.SessionSelectionDisplayFailed;
+            for (page.references[0..page.count], 0..) |entry, i| {
+                var label: [32]u8 = undefined;
+                writeSafeField(init.io, try std.fmt.bufPrint(&label, "  {d}. ", .{i + 1}), entry.slice()) catch return error.SessionSelectionDisplayFailed;
+            }
+            std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Choose a number, n for next page, a for all Workspaces, or l to leave: ") catch return error.SessionSelectionDisplayFailed;
+            var choice_buffer: [32]u8 = undefined;
+            const choice = (TerminalEditor.readLine(init.io, &choice_buffer, "> ", false) catch |err| {
+                if (err == error.InteractiveInterrupted) return err;
+                return error.SessionSelectionTerminalFailed;
+            }) orelse return null;
+            if (std.mem.eql(u8, choice, "l")) return null;
+            if (std.mem.eql(u8, choice, "a")) {
+                all = true;
+                cursor = .{};
+                continue;
+            }
+            if (std.mem.eql(u8, choice, "n") and page.next != null) {
+                cursor = page.next.?;
+                continue;
+            }
+            const number = std.fmt.parseInt(usize, choice, 10) catch 0;
+            if (number != 0 and number <= page.count) {
+                chosen = page.references[number - 1];
+                break;
+            }
+            std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No Session selected; choose a listed number or defer.\n") catch return error.SessionSelectionDisplayFailed;
+        }
+    }
+    return chosen;
+}
+
 fn serve(init: std.process.Init, args: []const []const u8) !void {
     const io = init.io;
     var store_path: ?[]const u8 = null;
@@ -1071,7 +1116,7 @@ const Frontend = struct {
             try self.terminal.writer().print("rui: capture failed ({s}); nothing sent. {s}\n", .{ @errorName(err), if (restored) "Original draft restored." else "Original draft retained; /discard releases it without sending." });
             return;
         };
-        self.admission.install(captured);
+        self.admission.install(captured, message_text);
         self.terminal.captureReady();
         // Only invocation cleanup escapes start; a no-worker startup failure
         // publishes one certainty-preserving completion through the same slot.
@@ -1254,6 +1299,153 @@ fn writeSafePreview(io: std.Io, value: []const u8) !void {
     try writer.flush();
 }
 
+// One final-storage exchange, no events or duplicate request registry. The
+// worker only sends the immutable pinned capture; the terminal owns all output.
+test "Admission classification requires complete bound Message authority" {
+    const digest = [_]u8{0} ** 32;
+    const input = ",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}";
+    const accepted = "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"session\":\"s\",\"replayed\":false,\"status\":\"accepted\",\"admission\":\"7\"}" ++ input ++ ",\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}}";
+    try std.testing.expect((try Admission.classify(.{ .status = 200, .body = accepted }, "s", 1, &digest)) == .accepted);
+    const rejected = "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"session\":\"s\",\"replayed\":true,\"status\":\"rejected\",\"code\":\"session_not_found\"}" ++ input ++ "}";
+    const rejection = try Admission.classify(.{ .status = 200, .body = rejected }, "s", 1, &digest);
+    try std.testing.expect(rejection == .rejected);
+    try std.testing.expectEqualStrings(rejected, rejection.rejected.body);
+    const conflict = "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"session\":\"s\",\"replayed\":false,\"status\":\"conflict\",\"code\":\"idempotency_key_conflict\"}}";
+    try std.testing.expect((try Admission.classify(.{ .status = 409, .body = conflict }, "s", 1, &digest)) == .rejected);
+    try std.testing.expectError(error.InvalidObservation, Admission.classify(.{ .status = 200, .body = conflict }, "s", 1, &digest));
+    try std.testing.expectError(error.InvalidObservation, Admission.classify(.{ .status = 409, .body = accepted }, "s", 1, &digest));
+    try std.testing.expectError(error.InvalidObservation, Admission.classify(.{ .status = 200, .body = accepted }, "other", 1, &digest));
+    for ([_][]const u8{ accepted, rejected }) |body| {
+        try std.testing.expectError(error.InvalidObservation, Admission.classify(.{ .status = 200, .body = body }, "s", 2, &digest));
+        try std.testing.expectError(error.InvalidObservation, Admission.classify(.{ .status = 200, .body = body }, "s", 1, &@as([32]u8, @splat(1))));
+    }
+    const substitutions = [_]struct { from: []const u8, to: []const u8 }{
+        .{ .from = "\"version\":\"1\"", .to = "\"version\":\"2\"" },
+        .{ .from = "message_reply", .to = "configure_reply" },
+        .{ .from = "\"replayed\":false", .to = "\"replayed\":null" },
+        .{ .from = "\"status\":\"accepted\"", .to = "\"status\":\"unknown\"" },
+        .{ .from = "\"type\":\"text\"", .to = "\"type\":\"file\"" },
+        .{ .from = "\"bytes\":\"1\"", .to = "\"bytes\":\"2\"" },
+        .{ .from = "0000000000000000000000000000000000000000000000000000000000000000", .to = "1111111111111111111111111111111111111111111111111111111111111111" },
+        .{ .from = "\"status\":\"queued\"", .to = "\"status\":\"idle\"" },
+        .{ .from = "\"queued\",\"admission\":\"7\"", .to = "\"queued\",\"admission\":\"8\"" },
+    };
+    for (substitutions) |change| {
+        const at = std.mem.indexOf(u8, accepted, change.from).?;
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}{s}", .{ accepted[0..at], change.to, accepted[at + change.from.len ..] });
+        defer std.testing.allocator.free(body);
+        try std.testing.expectError(error.InvalidObservation, Admission.classify(.{ .status = 200, .body = body }, "s", 1, &digest));
+    }
+    // Every truncated prefix is uncertain, including a complete answer without
+    // the mandatory input/queue envelope. None may clear the captured draft.
+    for (0..accepted.len) |length| {
+        if (Admission.classify(.{ .status = 200, .body = accepted[0..length] }, "s", 1, &digest)) |_| {
+            return error.TruncatedAdmissionAccepted;
+        } else |_| {}
+    }
+    const missing_queue = "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"session\":\"s\",\"replayed\":false,\"status\":\"accepted\",\"admission\":\"7\"}" ++ input ++ "}";
+    if (Admission.classify(.{ .status = 200, .body = missing_queue }, "s", 1, &digest)) |_| return error.IncompleteAdmissionAccepted else |_| {}
+}
+
+test "Admission completion applies each bank effect once and retains original address" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const outcomes = [_]Admission.Result{ .accepted, .{ .rejected = .{ .status = 409, .body = "rejection" } }, .{ .unconfirmed = error.EndOfStream }, .{ .not_sent = error.ThreadQuotaExceeded }, .{ .unconfirmed = error.CanonicalStoreFailure } };
+    for (outcomes) |completion| {
+        for ([_]bool{ false, true }) |editing| {
+            var banks: [2][65536]u8 = undefined;
+            @memcpy(banks[0][0..8], "original");
+            @memcpy(banks[1][0..5], "later");
+            var terminal: SessionTerminal = .{
+                .io = io,
+                .editor = .{ .buffer = &banks[1], .length = if (editing) 5 else 0, .cursor = if (editing) 2 else 0 },
+                .spare = &.{},
+                .submitted = .{ .buffer = &banks[0], .length = 8, .cursor = 3 },
+                .original = undefined,
+                .raw = undefined,
+                .size = undefined,
+                .active = false,
+            };
+            var admission: Admission = .{};
+            defer admission.close(io);
+            var saved: client.CapturedIdentity = .{};
+            try saved.store.set("/original-store");
+            try saved.session.set("session-A");
+            try saved.key.set("original-key");
+            admission.install(.{ .file = try tmp.dir.createFile(io, "capture", .{ .read = true }), .length = 0, .saved = saved }, "original");
+            admission.slot.?.active.result = completion;
+            admission.done.store(true, .release);
+            // Recovery must not escape a published completion, even without a
+            // live worker (the no-worker startup-failure path).
+            try admission.recover();
+            try std.testing.expect(admission.done.load(.acquire));
+            const canonical = completion == .unconfirmed and completion.unconfirmed == error.CanonicalStoreFailure;
+            for (0..3) |_| {
+                if (canonical) {
+                    try std.testing.expectError(error.CanonicalStoreFailure, admission.takeCompletion(io, &terminal));
+                } else try admission.takeCompletion(io, &terminal);
+            }
+            const address = admission.messageAddress().?;
+            try std.testing.expectEqualStrings("/original-store", address.store.slice());
+            try std.testing.expectEqualStrings("session-A", address.session.slice());
+            try std.testing.expectEqualStrings("original-key", address.key.slice());
+            try std.testing.expectEqual(std.meta.activeTag(completion), std.meta.activeTag(admission.outcome().?));
+            try std.testing.expectEqual(completion != .accepted, admission.explanation_pending);
+            if (completion == .accepted or (completion == .rejected and !editing)) {
+                try std.testing.expect(terminal.submitted == null);
+                try std.testing.expect(admission.slot.? == .settled);
+            } else {
+                try std.testing.expectEqualStrings("original", terminal.submitted.?.buffer[0..terminal.submitted.?.length]);
+            }
+            try std.testing.expectEqualStrings(if (editing) "later" else if (completion == .rejected) "original" else "", terminal.draft());
+            try std.testing.expectEqual(@as(usize, if (editing) 2 else if (completion == .rejected) 3 else 0), terminal.editor.cursor);
+            if (canonical) {
+                // Neither once-consumption nor presentation backpressure may
+                // erase fatal invocation meaning at a later unwind boundary.
+                admission.explanation_pending = false;
+                try std.testing.expectError(error.CanonicalStoreFailure, admission.takeCompletion(io, &terminal));
+                var frontend: Frontend = .{ .init = undefined, .terminal = &terminal, .admission = &admission };
+                frontend.init.io = io;
+                try std.testing.expectError(error.CanonicalStoreFailure, frontend.finishRead(error.InteractiveInterrupted));
+                try std.testing.expectError(error.AdmissionMaskRestorationFailed, frontend.finishRead(error.AdmissionMaskRestorationFailed));
+            }
+            if (completion == .rejected and !editing) {
+                // Restored rejection, then a new Enter while its explanation
+                // is pending: the old receipt has no authority over ready.
+                terminal.editor.reset();
+                for ("fresh sealed") |byte| _ = terminal.editor.feed(byte);
+                terminal.submitted = terminal.editor;
+                terminal.editor = .{ .buffer = terminal.spare };
+                terminal.spare = &.{};
+                terminal.ready = true;
+                admission.discard(&terminal);
+                admission.discard(&terminal);
+                try std.testing.expect(terminal.submitted != null);
+                try std.testing.expectEqualStrings("fresh sealed", terminal.readyDraft().?);
+                try std.testing.expect(!admission.replaceable());
+            } else {
+                for (0..3) |_| admission.discard(&terminal);
+                try std.testing.expectEqual(completion == .not_sent or completion == .unconfirmed, terminal.submitted != null);
+            }
+        }
+    }
+}
+
+test "Admission failed retry startup preserves capture certainty through completion" {
+    var admission: Admission = .{ .slot = .{ .active = .{ .captured = undefined, .bytes = undefined, .digest = undefined } } };
+    admission.startupFailed(null, error.ThreadQuotaExceeded);
+    try std.testing.expect(admission.slot.?.active.result.? == .not_sent);
+    try std.testing.expect(admission.done.swap(false, .acq_rel));
+    const uncertain: Admission.Result = .{ .unconfirmed = error.EndOfStream };
+    admission.startupFailed(uncertain, error.AdmissionSignalMaskFailed);
+    try std.testing.expect(admission.slot.?.active.result.? == .unconfirmed);
+    try std.testing.expectEqual(error.EndOfStream, admission.slot.?.active.result.?.unconfirmed);
+    try admission.recover();
+    try std.testing.expect(admission.done.swap(false, .acq_rel));
+    try std.testing.expect(admission.thread == null);
+}
+
 const Admission = struct {
     const Result = union(enum) {
         accepted,
@@ -1263,7 +1455,7 @@ const Admission = struct {
     };
 
     const Slot = union(enum) {
-        active: struct { captured: client.CapturedRecord, result: ?Result = null },
+        active: struct { captured: client.CapturedRecord, bytes: u64, digest: [32]u8, result: ?Result = null },
         settled: struct { address: client.MessageAddress, result: Result },
     };
 
@@ -1280,9 +1472,9 @@ const Admission = struct {
         return !self.explanation_pending and (self.slot == null or self.slot.? == .settled);
     }
 
-    fn install(self: *Admission, captured: client.CapturedRecord) void {
+    fn install(self: *Admission, captured: client.CapturedRecord, text: []const u8) void {
         std.debug.assert(self.replaceable() and self.thread == null);
-        self.slot = .{ .active = .{ .captured = captured } };
+        self.slot = .{ .active = .{ .captured = captured, .bytes = text.len, .digest = protocol.contentDigest(text) } };
     }
 
     fn start(self: *Admission) !void {
@@ -1326,10 +1518,10 @@ const Admission = struct {
         const exchange: client.Requests = .{ .io = std.Io.Threaded.global_single_threaded.io(), .cancellation = &self.cancellation };
         const captured = &self.slot.?.active.captured;
         const reply = try exchange.sendCaptured(captured, null, &self.buffer);
-        return classify(reply, captured.saved.session.slice());
+        return classify(reply, captured.saved.session.slice(), self.slot.?.active.bytes, &self.slot.?.active.digest);
     }
 
-    fn classify(reply: client.CommandReply, session: []const u8) !Result {
+    fn classify(reply: client.CommandReply, session: []const u8, bytes: u64, expected_digest: *const [32]u8) !Result {
         try client.checkCanonicalFailure(reply);
         if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
         var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
@@ -1351,7 +1543,8 @@ const Admission = struct {
         const encoded = try stringField(input, "sha256");
         if (!std.mem.eql(u8, try stringField(input, "type"), "text") or encoded.len != 64) return error.InvalidObservation;
         _ = std.fmt.hexToBytes(&digest, encoded) catch return error.InvalidObservation;
-        _ = try std.fmt.parseInt(u64, try stringField(input, "bytes"), 10);
+        if (try std.fmt.parseInt(u64, try stringField(input, "bytes"), 10) != bytes or
+            !std.mem.eql(u8, &digest, expected_digest)) return error.InvalidObservation;
         if (std.mem.eql(u8, status, "rejected")) {
             if ((try stringField(answer, "code")).len == 0) return error.InvalidObservation;
             return .{ .rejected = reply };
@@ -1449,13 +1642,22 @@ const Admission = struct {
         // is bounded and remains owned until this optional diagnostic finishes.
         var bytes: [4 * (protocol.max_store_bytes + protocol.max_session_bytes + protocol.max_key_bytes) + 256]u8 = undefined;
         var out: std.Io.Writer = .fixed(&bytes);
-        out.print("Rui: Submission {s}. Saved request:\n", .{if (completion == .not_sent) "not sent" else @tagName(completion)}) catch unreachable;
-        writeField(&out, "Store: ", address.store.slice()) catch unreachable;
-        writeField(&out, "Session: ", address.session.slice()) catch unreachable;
-        writeField(&out, "Key: ", address.key.slice()) catch unreachable;
-        out.writeAll("Use rui recover KEY for the original request; do not submit replacement input.\n") catch unreachable;
+        formatFailure(&out, completion, address) catch unreachable;
         const vectors = [_]std.posix.iovec_const{.{ .base = out.buffer.ptr, .len = out.end }};
         writeTerminalDiagnostic(&vectors);
+    }
+
+    fn formatFailure(out: *std.Io.Writer, completion: Result, address: client.MessageAddress) !void {
+        try out.print("Rui: Submission {s}. Saved request:\n", .{if (completion == .not_sent) "not sent" else @tagName(completion)});
+        try writeField(out, "Store: ", address.store.slice());
+        try writeField(out, "Session: ", address.session.slice());
+        try writeField(out, "Key: ", address.key.slice());
+        try out.writeAll(switch (completion) {
+            .accepted => "Admission accepted, not proof of completion. Use rui result KEY to observe the original result.\n",
+            .rejected => "Definite rejection; the original request was not admitted.\n",
+            .not_sent => "Use rui recover KEY to send the same captured request.\n",
+            .unconfirmed => "Use rui recover KEY for the same identity; do not submit replacement input.\n",
+        });
     }
 
     fn join(self: *Admission) void {
@@ -1471,6 +1673,24 @@ const Admission = struct {
         self.slot = null;
     }
 };
+
+test "cycle3 admission failure guidance follows retained authority" {
+    const address = try client.MessageAddress.init("store\x1b", "session", "key\n");
+    const cases = .{
+        .{ @as(Admission.Result, .accepted), "Admission accepted, not proof of completion. Use rui result KEY to observe the original result.\n" },
+        .{ @as(Admission.Result, .{ .rejected = .{ .status = 409, .body = "" } }), "Definite rejection; the original request was not admitted.\n" },
+        .{ @as(Admission.Result, .{ .not_sent = error.TestFailure }), "Use rui recover KEY to send the same captured request.\n" },
+        .{ @as(Admission.Result, .{ .unconfirmed = error.TestFailure }), "Use rui recover KEY for the same identity; do not submit replacement input.\n" },
+    };
+    inline for (cases) |case| {
+        var buffer: [4096]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&buffer);
+        try Admission.formatFailure(&out, case[0], address);
+        try std.testing.expect(std.mem.endsWith(u8, out.buffered(), case[1]));
+        try std.testing.expect(std.mem.indexOfScalar(u8, out.buffered(), 0x1b) == null);
+        try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "Key: key\\n\n") != null);
+    }
+}
 
 const SessionContentSink = struct {
     out: *std.Io.Writer,
@@ -1627,6 +1847,451 @@ fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []cons
         reportAcceptedPresentationFailure(saved.key.slice(), err);
     };
     return null;
+}
+
+fn enterSessionWithHistory(init: std.process.Init, args: []const []const u8, replay: bool) !void {
+    if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) return error.InteractiveTerminalRequired;
+    var draft_buffers: [2][65536]u8 = undefined;
+    var terminal: SessionTerminal = undefined;
+    try terminal.init(init.io, &draft_buffers);
+    var admission: Admission = .{};
+    var frontend: Frontend = .{ .init = init, .terminal = &terminal, .admission = &admission };
+    const outcome: anyerror!void = entered: {
+        var next: ?SwitchSession = null;
+        var first = true;
+        while (true) {
+            const switched = (if (first)
+                enterSessionOnce(init, args, replay, null, &terminal, &admission, &frontend)
+            else
+                enterSessionOnce(init, &.{ "--store", next.?.store.slice(), "--session", next.?.session.slice() }, true, next.?.opening, &terminal, &admission, &frontend)) catch |err| break :entered err;
+            if (switched == null) break :entered {};
+            next = switched;
+            first = false;
+        }
+    };
+    // End terminal custody before potentially blocking transport joins, then
+    // classify once. Cleanup failure outranks even a recorded user interrupt.
+    frontend.cancel();
+    frontend.lane.join();
+    admission.join();
+    const completion = admission.takeCompletion(init.io, &terminal);
+    defer admission.close(init.io);
+    if (terminal.failure) |err| {
+        if (err != error.InteractiveInterrupted) {
+            admission.reportFailure();
+            return err;
+        }
+    }
+    // Mask cleanup is orthogonal to the request result. Both fatal meanings
+    // outrank successful interruption; terminal cleanup remains primary.
+    if (outcome) |_| {} else |err| {
+        if (err == error.AdmissionMaskRestorationFailed) {
+            admission.reportFailure();
+            return err;
+        }
+    }
+    completion catch |err| {
+        admission.reportFailure();
+        return err;
+    };
+    outcome catch |err| {
+        if (err == error.InteractiveInterrupted or (err == error.WriteFailed and terminal.failure != null and terminal.failure.? == error.InteractiveInterrupted)) return;
+        admission.reportFailure();
+        return err;
+    };
+}
+
+const SwitchSession = struct {
+    store: protocol.Bounded(protocol.max_store_bytes),
+    session: protocol.Bounded(protocol.max_session_bytes),
+    opening: PreparedOpening,
+};
+
+fn enterSessionOnce(init: std.process.Init, args: []const []const u8, replay: bool, prepared: ?PreparedOpening, terminal: *SessionTerminal, admission: *Admission, frontend: *Frontend) !?SwitchSession {
+    // Transferred opening custody also survives argument/path validation errors.
+    var pending_opening = prepared;
+    defer if (pending_opening) |opening| opening.close(init.io);
+    var store: ?[]const u8 = null;
+    var session_ref: ?[]const u8 = null;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session")) session_ref = try takeValue(args, &index) else return error.UnknownArgument;
+    }
+    const reference = session_ref orelse return usage();
+    if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
+        std.debug.print("rui --resume needs terminal input and output; use one-shot commands for scripts\n", .{});
+        return error.InteractiveTerminalRequired;
+    }
+    var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const chosen = try selectedStore(init, store, &fallback_buffer);
+    // Resolve aliases and enforce the Store's existing private/canonical selector
+    // before any Session request. Explicit --store does not read preferences.
+    const paths = platform.resolveClientPaths(init.io, chosen) catch |err| {
+        std.debug.print("rui: selected Store unavailable ({s}); check --store or rui setup; no alternate Store selected.\n", .{@errorName(err)});
+        return err;
+    };
+    const destination = paths.store.slice();
+    frontend.store = destination;
+    frontend.session = reference;
+    frontend.accepting = false;
+    defer frontend.accepting = false;
+    const out = terminal.writer();
+    var older: ?client.ConversationCursor = null;
+    var cursor: session_view.Cursor = .{};
+    var current: session_view.Page = undefined;
+    var displayed_result_turn: u64 = 0;
+    {
+        const opening = prepared orelse (prepareOpening(init, destination, reference, replay, frontend) catch |err| {
+            if (err == error.SessionNotConfigured) std.debug.print("rui: configure this Session before entering it\n", .{});
+            return err;
+        });
+        pending_opening = null;
+        defer opening.close(init.io);
+        current = opening.view;
+        // Metadata validation commits the target; content delivery may fail
+        // afterward, ending invocation custody rather than restoring old UI.
+        try renderSessionStatus(init, destination, reference, &opening.report, true, out);
+        if (replay) {
+            var credential_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const credential = credentialPath(init, &credential_buffer, false) catch null;
+            const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
+            const local = if (credential) |path| codex_auth.localStatus(path, now) catch null else null;
+            if (local == null or !local.?.usable()) {
+                try out.writeAll("Rui: Local Codex credential is unavailable or needs repair. Saved history remains inspectable; /login is optional and does not rebind this Session.\n");
+            }
+        }
+        renderSessionView(init.io, destination, reference, &current, true, out, &displayed_result_turn, frontend) catch |err| {
+            if (frontend.fatal(err)) return err;
+            return error.HistoryDisplayFailed;
+        };
+        cursor = current.continuation(.{});
+        if (current.end != 0) {
+            older = .{ .end = current.end };
+            for (current.items[0..current.count]) |item| {
+                if (item.kind == .user or item.kind == .assistant or item.kind == .tool_result) {
+                    older = .{ .end = current.end, .before_position = item.position, .before_ordinal = item.ordinal };
+                    break;
+                }
+            }
+        }
+    }
+    try out.writeAll("/help for commands; /exit detaches without stopping work.\n");
+    frontend.accepting = true;
+    while (true) {
+        try admission.takeCompletion(init.io, terminal);
+        try admission.explain(terminal);
+        var reply_buffer: client.ReplyBuffer = .{};
+        const next_page = try readRequest(frontend, init.io, client.sessionView, .{ destination, reference, cursor, &reply_buffer });
+        if (next_page.count != 0 or next_page.pending_total != current.pending_total or next_page.action != current.action or !std.meta.eql(next_page.work, current.work)) {
+            if (!terminal.output) try terminal.beginOutput();
+            try renderSessionView(init.io, destination, reference, &next_page, false, out, &displayed_result_turn, frontend);
+        }
+        current = next_page;
+        cursor = current.continuation(cursor);
+        var status: protocol.FixedJsonBuffer(256) = .{};
+        if (admission.thread != null) {
+            try status.append("Sending...");
+        } else if (admission.outcome()) |completion| {
+            switch (completion) {
+                .rejected => if (terminal.hasRetainedSubmission()) try status.append("/discard: rejected original"),
+                .not_sent => try status.append("Ctrl-R: submission not sent"),
+                .unconfirmed => try status.append("Ctrl-R: submission unconfirmed"),
+                .accepted => {},
+            }
+        }
+        if (status.len == 0) {
+            // Put actionable keys first: even a narrow clipped footer must
+            // retain the route to exact inspection/recovery, not an ID.
+            if (current.action != 0) try status.append("Ctrl-G: inspect approval");
+            if (current.work.status == .runnable or current.work.status == .in_flight) {
+                if (status.len != 0) try status.append(" | ");
+                try status.append("Working...");
+            }
+            if (current.pending_total != 0) {
+                if (status.len != 0) try status.append(" | ");
+                try status.appendFmt("{d} message{s} queued", .{ current.pending_total, if (current.pending_total == 1) "" else "s" });
+            }
+        }
+        if (terminal.output) try terminal.endOutput(status.slice());
+        const event = try terminal.poll(if (current.more) 0 else 100);
+        if (event == .none) continue;
+        // Detachment ends custody, not presentation. In particular, a stopped
+        // output flow must not delay an already recognized exit while erasing
+        // the footer; close restores policy without writing to the terminal.
+        switch (event) {
+            .eof, .interrupt => break,
+            else => {},
+        }
+        const ready_event = event == .submit and terminal.ready;
+        defer if (ready_event) terminal.finishReady();
+        defer if (event == .command) terminal.finishCommand();
+        const was_accepting = frontend.accepting;
+        frontend.accepting = false;
+        defer frontend.accepting = was_accepting;
+        try terminal.beginOutput();
+        const text = switch (event) {
+            .none => continue,
+            .recover => {
+                try admission.takeCompletion(init.io, terminal);
+                try admission.explain(terminal);
+                try admission.recover();
+                continue;
+            },
+            .approve => {
+                const detach = approveSessionAction(init, destination, reference, current.action, terminal, frontend) catch |err| blk: {
+                    if (frontend.fatal(err) or err == error.RenderScratchCleanupFailed) return err;
+                    try out.print("rui: Action unavailable or decision uncertain ({s}); check /requests before retrying\n", .{@errorName(err)});
+                    break :blk false;
+                };
+                if (detach) break;
+                continue;
+            },
+            .eof, .interrupt => unreachable,
+            .busy => {
+                try out.writeAll("Rui: Original admission is unresolved. /recover retransmits its immutable capture; no new message sent.\n");
+                continue;
+            },
+            .invalid, .overflow => {
+                terminal.clearDraft();
+                try out.writeAll("Rui: Input rejected; nothing sent.\n");
+                continue;
+            },
+            .submit, .command => |bytes| bytes,
+        };
+        if (text.len == 0) continue;
+        if (std.mem.eql(u8, text, "/approve")) {
+            const detach = approveSessionAction(init, destination, reference, current.action, terminal, frontend) catch |err| blk: {
+                if (frontend.fatal(err) or err == error.RenderScratchCleanupFailed) return err;
+                try out.print("rui: Action unavailable or decision uncertain ({s}); check /requests before retrying\n", .{@errorName(err)});
+                break :blk false;
+            };
+            if (detach) break;
+            continue;
+        }
+        if (std.mem.eql(u8, text, "/recover")) {
+            try admission.takeCompletion(init.io, terminal);
+            try admission.explain(terminal);
+            try admission.recover();
+            continue;
+        }
+        if (std.mem.eql(u8, text, "/discard")) {
+            admission.discard(terminal);
+            continue;
+        }
+        if (std.mem.eql(u8, text, "/help")) {
+            try out.writeAll("Rui: Ctrl-G inspects the current Action and Ctrl-R recovers the unresolved immutable capture, both preserving composition. /approve and /recover also work from an empty command line; /discard releases a definitely rejected draft, never an uncertain admission.\n");
+            try out.writeAll("Rui: /help  /status  /history  /resume [REF]  /wait  /requests  /result KEY  /setup [--store PATH] [--provider codex] [--model MODEL | --clear-model]  /login  /configure [settings]  /exit\n/help shows these commands; /status inspects this Session; /history reads an older public page; /resume switches to a saved Session without submitting; /wait follows selected work; /requests lists local recovery handles; /result KEY reads a saved answer. /setup reads local credential/Host status and saves defaults for future Sessions only; --clear-model restores recommendation inheritance; /login chooses Codex login or defers; /configure changes this Session; /exit detaches without stopping work.\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
+            continue;
+        }
+        if (std.mem.eql(u8, text, "/history")) {
+            if (older) |history_cursor| {
+                older = showConversationPage(init, destination, reference, history_cursor, frontend) catch |err| blk: {
+                    if (err == error.HistoryDisplayFailed or frontend.fatal(err)) return err;
+                    try out.print("rui: history unavailable ({s}); use /status or retry the same page\n", .{@errorName(err)});
+                    break :blk history_cursor;
+                };
+                if (older == null) try out.writeAll("Rui: End of saved public history.\n");
+            } else try out.writeAll("Rui: No older page in this traversal. Re-enter to inspect a fresh recent page.\n");
+            continue;
+        }
+        if (std.mem.eql(u8, text, "/resume") or std.mem.startsWith(u8, text, "/resume ")) {
+            const target = if (text.len == "/resume".len) "" else text["/resume ".len..];
+            const next = blk: {
+                try terminal.@"suspend"();
+                const selection = chooseResumeSession(init, destination, if (target.len == 0) null else target) catch |err| {
+                    if (fatalPresentation(err) or err == error.RenderScratchCleanupFailed or err == error.SessionSelectionDisplayFailed or err == error.SessionSelectionTerminalFailed) return err;
+                    try terminal.@"resume"();
+                    std.debug.print("rui: resume unavailable ({s}); active Session unchanged\n", .{@errorName(err)});
+                    continue;
+                };
+                // The transient owner restored before returning. Reacquire
+                // only for a selected/deferred/recoverable invocation, never
+                // on a fatal chooser exit that already ended input custody.
+                try terminal.@"resume"();
+                break :blk selection orelse continue;
+            };
+            var selected_store: protocol.Bounded(protocol.max_store_bytes) = .{};
+            try selected_store.set(destination);
+            const next_opening = prepareOpening(init, destination, next.slice(), true, frontend) catch |err| {
+                if (frontend.fatal(err) or err == error.RenderScratchCleanupFailed) return err;
+                std.debug.print("rui: resume unavailable ({s}); active Session unchanged\n", .{@errorName(err)});
+                continue;
+            };
+            return .{ .store = selected_store, .session = next, .opening = next_opening };
+        }
+        if (std.mem.eql(u8, text, "/login")) {
+            try terminal.@"suspend"();
+            const login_result = guideProviderLogin(init);
+            try terminal.@"resume"();
+            login_result catch |err| {
+                if (err != error.InteractiveInterrupted) return err;
+                try out.writeAll("Rui: Login deferred. Inspect saved work with /status or /result.\n");
+            };
+            continue;
+        }
+        const attention: ?Work = if (std.mem.eql(u8, text, "/setup") or std.mem.startsWith(u8, text, "/setup ")) blk: {
+            var setup_args: [7][]const u8 = undefined;
+            const count = interactiveTokens(text["/setup".len..], &setup_args) catch {
+                try out.writeAll("Usage: /setup [--store PATH] [--provider codex] [--model MODEL | --clear-model]; no changes saved.\n");
+                break :blk null;
+            };
+            try terminal.@"suspend"();
+            const setup_result = setup(init, setup_args[0..count]);
+            try terminal.@"resume"();
+            setup_result catch |err| {
+                if (fatalPresentation(err)) return err;
+                std.debug.print("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+            };
+            break :blk null;
+        } else if (std.mem.eql(u8, text, "/status")) blk: {
+            showSessionStatus(init, destination, reference, false, frontend) catch |err| {
+                if (frontend.fatal(err)) return err;
+                try out.print("rui: status: {s}\n", .{@errorName(err)});
+            };
+            break :blk null;
+        } else if (std.mem.eql(u8, text, "/requests")) blk: {
+            sessionRequests(init, destination, reference, out) catch |err| {
+                if (fatalPresentation(err)) return err;
+                try out.print("rui: requests: {s}\n", .{@errorName(err)});
+            };
+            break :blk null;
+        } else if (std.mem.eql(u8, text, "/wait"))
+            waitEnteredSession(frontend) catch |err| blk: {
+                if (frontend.fatal(err)) return err;
+                try out.print("rui: wait: {s}\n", .{@errorName(err)});
+                break :blk null;
+            }
+        else if (std.mem.startsWith(u8, text, "/result ")) blk: {
+            const saved = client.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
+                try out.print("rui: result key: {s}\n", .{@errorName(err)});
+                break :blk null;
+            };
+            showResult(init, &saved, .interactive, frontend) catch |err| {
+                if (frontend.fatal(err)) return err;
+                try out.print("rui: result: {s}\n", .{@errorName(err)});
+            };
+            break :blk null;
+        } else if (std.mem.eql(u8, text, "/configure") or std.mem.startsWith(u8, text, "/configure ")) blk: {
+            var config_args: [24][]const u8 = undefined;
+            config_args[0..4].* = .{ "--store", destination, "--session", reference };
+            var count: usize = 4;
+            var arguments: [20][]const u8 = undefined;
+            const argument_count = interactiveTokens(text["/configure".len..], &arguments) catch {
+                try out.writeAll("Rui: Usage: /configure --model MODEL [--tools bash] [--permission-mode ask|bypass] (settings for this Session only)\n");
+                break :blk null;
+            };
+            var next: usize = 0;
+            var valid = true;
+            while (next < argument_count) {
+                const flag = arguments[next];
+                next += 1;
+                const takes_value = std.mem.eql(u8, flag, "--workspace") or std.mem.eql(u8, flag, "--provider") or
+                    std.mem.eql(u8, flag, "--model") or std.mem.eql(u8, flag, "--instructions") or
+                    std.mem.eql(u8, flag, "--tools") or std.mem.eql(u8, flag, "--permission-mode") or
+                    std.mem.eql(u8, flag, "--output-schema");
+                if (!takes_value and !std.mem.eql(u8, flag, "--text-output")) {
+                    valid = false;
+                    break;
+                }
+                const value = if (takes_value and next < argument_count) arguments[next] else null;
+                if (takes_value and value != null) next += 1;
+                if ((takes_value and value == null) or count + (if (takes_value) @as(usize, 2) else 1) > config_args.len) {
+                    valid = false;
+                    break;
+                }
+                config_args[count] = flag;
+                count += 1;
+                if (value) |setting| {
+                    if (std.mem.eql(u8, setting, "-") and
+                        (std.mem.eql(u8, flag, "--instructions") or std.mem.eql(u8, flag, "--output-schema")))
+                    {
+                        try out.writeAll("Rui: Use a file for /configure content; terminal stdin belongs to this Session.\n");
+                        break :blk null;
+                    }
+                    config_args[count] = setting;
+                    count += 1;
+                }
+            }
+            if (valid and count > 4) {
+                configureEntered(init, config_args[0..count], true, frontend) catch |err| {
+                    if (frontend.fatal(err)) return err;
+                    try out.print("rui: configure: {s}; check /requests before retrying\n", .{@errorName(err)});
+                };
+            } else try out.writeAll("Rui: Usage: /configure --model MODEL [--tools bash] [--permission-mode ask|bypass] (settings for this Session only)\n");
+            break :blk null;
+        } else if (std.mem.startsWith(u8, text, "/") and !std.mem.startsWith(u8, text, "//")) blk: {
+            try out.writeAll("Rui: Unknown command. Type /help.\n");
+            break :blk null;
+        } else blk: {
+            if (!admission.replaceable()) {
+                try out.writeAll("Rui: Original admission is unresolved. /recover retransmits its immutable capture; no new message sent.\n");
+                break :blk null;
+            }
+            frontend.submit(text) catch |err| {
+                if (frontend.fatal(err)) return err;
+                try out.print("rui: capture failed ({s}); nothing sent\n", .{@errorName(err)});
+                break :blk null;
+            };
+            break :blk null;
+        };
+        // An explicit wait explains its return; it never opens approval.
+        if (attention != null) try out.writeAll("Rui: Approval is needed. Ctrl-G to inspect.\n");
+    }
+    if (terminal.active) terminal.writeAvailable(SessionTerminal.detach_notice);
+    return null;
+}
+
+/// True detaches without constructing a Permission Decision capture.
+fn approveSessionAction(init: std.process.Init, store: []const u8, session_ref: []const u8, id: u64, terminal: *SessionTerminal, frontend: *Frontend) !bool {
+    const out = terminal.writer();
+    terminal.beginApproval();
+    defer terminal.finishApproval();
+    if (id == 0) {
+        try out.writeAll("Rui: No Action requires attention.\n");
+        return false;
+    }
+    var id_buffer: [20]u8 = undefined;
+    const action = try std.fmt.bufPrint(&id_buffer, "{d}", .{id});
+    inspectEnteredAction(init, &.{ "--store", store, "--session", session_ref, "--action", action }, true, frontend) catch |err| {
+        if (err == error.TerminalTooNarrow and !frontend.fatal(err)) {
+            try out.writeAll("Rui: Widen the terminal to inspect this permission request; no decision sent. Use /wait after resizing.\n");
+            return false;
+        }
+        return err;
+    };
+    const choice = (terminal.readChoice(action_choice_prompt) catch |err| {
+        if (err == error.InteractiveInterrupted) return true;
+        if (err == error.InvalidTerminalInput) {
+            try out.writeAll("Rui: No decision sent.\n");
+            return false;
+        }
+        return err;
+    }) orelse return true;
+    if (std.mem.eql(u8, choice, "l")) {
+        try out.writeAll("Rui: No decision sent; use /wait to revisit.\n");
+        return false;
+    }
+    if (!std.mem.eql(u8, choice, "a") and !std.mem.eql(u8, choice, "d")) {
+        try out.writeAll("Rui: Choose a, d, or l. No decision sent.\n");
+        return false;
+    }
+    const decision: protocol.PermissionDecision = if (choice[0] == 'a') .allow_once else .deny;
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var reply_buffer: client.ReplyBuffer = .{};
+    var captured = try client.capturePermissionDecision(init.io, .{
+        .store = store,
+        .session = session_ref,
+        .action_id = id,
+        .decision = decision,
+    }, .{ .generated = try requestDirectory(init, &directory_buffer) });
+    const reply = blk: {
+        defer captured.close(init.io);
+        break :blk try readRequest(frontend, init.io, client.sendCaptured, .{ &captured, @as(?[]const u8, null), &reply_buffer });
+    };
+    try client.checkCanonicalFailure(reply);
+    const accepted = try acceptedReply(reply);
+    if (!accepted) try writeAdmissionTo(terminal.writer(), reply, null);
+    return false;
 }
 
 fn enterSession(init: std.process.Init, args: []const []const u8) !void {
@@ -2337,6 +3002,45 @@ const HistoryItem = struct {
     kind: []const u8,
     content: struct { bytes: []const u8, sha256: []const u8, display: []const u8 },
 };
+
+test "History continuation binds the last public item and descending ordinal ties" {
+    const content: @FieldType(HistoryItem, "content") = .{ .bytes = "1", .sha256 = "0000000000000000000000000000000000000000000000000000000000000000", .display = "omitted" };
+    var items = [_]HistoryItem{
+        .{ .position = "9", .ordinal = "3", .kind = "tool_result", .content = content },
+        .{ .position = "9", .ordinal = "2", .kind = "tool_result", .content = content },
+        .{ .position = "8", .ordinal = "0", .kind = "assistant", .content = content },
+    };
+    var page: HistoryPage = .{ .version = "1", .type = "conversation_page", .direction = "newest_first", .end = "10", .items = &items, .more = true, .before_position = "8", .before_ordinal = "0" };
+    const request: client.ConversationCursor = .{ .end = 10, .before_position = 9, .before_ordinal = 4 };
+    const next = (try page.continuation(request)).?;
+    try std.testing.expectEqual(@as(u64, 10), next.end);
+    try std.testing.expectEqual(@as(u64, 8), next.before_position);
+    try std.testing.expectEqual(@as(u64, 0), next.before_ordinal);
+    // A valid public item is not sufficient: continuation must be the last one.
+    page.before_position = "9";
+    page.before_ordinal = "2";
+    try std.testing.expectError(error.InvalidConversationPage, page.continuation(request));
+    page.before_position = "8";
+    page.before_ordinal = "0";
+    items[1].ordinal = "3";
+    try std.testing.expectError(error.InvalidConversationPage, page.continuation(request));
+    items[1].ordinal = "4";
+    try std.testing.expectError(error.InvalidConversationPage, page.continuation(request));
+    items[1].ordinal = "2";
+    try std.testing.expectError(error.InvalidConversationPage, page.continuation(.{ .end = 10, .before_position = 9, .before_ordinal = 3 }));
+    try std.testing.expectError(error.InvalidConversationPage, page.continuation(.{ .end = 11 }));
+    page.more = false;
+    try std.testing.expectError(error.InvalidConversationPage, page.continuation(request));
+    page.before_position = null;
+    page.before_ordinal = null;
+    try std.testing.expectEqual(@as(?client.ConversationCursor, null), try page.continuation(request));
+    page.items = &.{};
+    try std.testing.expectEqual(@as(?client.ConversationCursor, null), try page.continuation(.{}));
+    page.more = true;
+    page.before_position = "8";
+    page.before_ordinal = "0";
+    try std.testing.expectError(error.InvalidConversationPage, page.continuation(.{}));
+}
 
 const HistoryPage = struct {
     version: []const u8,
@@ -3223,6 +3927,26 @@ fn fatalPresentation(err: anyerror) bool {
         err == error.TerminalFlushFailed or err == error.TerminalInputClosed or err == error.IncompleteTerminalInput or err == error.IncompleteTerminalLine;
 }
 
+test "Frontend terminal custody distinguishes service failure from request outage" {
+    var terminal: SessionTerminal = .{ .io = std.testing.io, .editor = .{ .buffer = &.{} }, .spare = &.{}, .original = undefined, .raw = undefined, .size = undefined };
+    const frontend: Frontend = .{ .init = undefined, .terminal = &terminal, .admission = undefined };
+    try std.testing.expect(!frontend.fatal(error.HostUnavailable));
+    try std.testing.expect(!frontend.fatal(error.RequestWriteFailed));
+    try std.testing.expect(frontend.fatal(error.WriteFailed));
+    try std.testing.expect(frontend.fatal(error.IncompleteTerminalInput));
+    try std.testing.expect(frontend.fatal(error.IncompleteTerminalLine));
+    try std.testing.expect(frontend.fatal(error.TerminalInputClosed));
+    terminal.failure = error.InputOutput;
+    try std.testing.expect(frontend.fatal(error.RequestWriteFailed));
+    terminal.failure = null;
+    terminal.active = false;
+    // Classifying names alone cannot cover every OS/service failure. Losing
+    // custody is decisive even for an error normally recoverable from a worker.
+    try std.testing.expect(frontend.fatal(error.HostUnavailable));
+}
+
+// null is the selected message's terminal observation; an Action is only a hint
+// to inspect and decide against the Host's exact current target.
 fn followMessage(init: std.process.Init, saved: *const client.MessageAddress, presentation: Presentation, policy: FollowPolicy) !?Work {
     var last_queue: ?client.MessageObservation.State = null;
     var last_progress: ?@FieldType(client.MessageObservation.Progress, "status") = null;
@@ -3579,6 +4303,18 @@ test "Message attention retains replacement IDs while notices retain status and 
         const attention = FollowPolicy.follow_attention.attention(&observed).?;
         try std.testing.expectEqual(@as(u64, case[1]), attention.action.?);
         try std.testing.expectEqualStrings("Rui: An Action needs your choice while other work remains in flight.\n", try progressNotice(observed.state, attention.status, attention.action != null));
+        try std.testing.expect(FollowPolicy.session_blocked.attention(&observed) == null);
+    }
+}
+
+test "Message attention retains replacement IDs" {
+    const address = try client.MessageAddress.init("/store", "s", "k");
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\",\"queue\":{\"status\":\"processing\"},\"progress\":{\"status\":\"in_flight\",\"action\":\"";
+    inline for (.{ .{ "17", 17 }, .{ "71", 71 } }) |case| {
+        var observed = try client.MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ case[0] ++ "\"}}}" }, &address);
+        defer observed.deinit();
+        const attention = FollowPolicy.follow_attention.attention(&observed).?;
+        try std.testing.expectEqual(@as(u64, case[1]), attention.action.?);
         try std.testing.expect(FollowPolicy.session_blocked.attention(&observed) == null);
     }
 }
