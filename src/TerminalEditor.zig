@@ -21,8 +21,13 @@ paste_prefix_length: usize = 0,
 rejected: ?Event = null,
 plain_ascii: bool = true,
 
-const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow };
+pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow };
 const paste_end = "\x1b[201~";
+
+/// Retains the caller's storage, but discards all draft and decoder state.
+pub fn reset(self: *Editor) void {
+    self.* = .{ .buffer = self.buffer, .allow_paste = self.allow_paste };
+}
 
 /// Returns a slice borrowed from buffer until its caller next reuses it.
 /// No draft, terminal mode or buffered input survives a prompt.
@@ -38,23 +43,33 @@ pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool)
     mode.cc[@intFromEnum(std.posix.V.TIME)] = 0;
     try std.posix.tcsetattr(0, .FLUSH, mode);
 
-    // Always attempt both effects, even when rendering or input fails. Do
-    // not return an accepted line if either cleanup step is unconfirmed.
+    // Restore native mode independently of output, even on a fatal input
+    // result. Paste disable is one nonblocking attempt, never another wait.
     const result = drive(io, buffer, prompt, allow_paste);
-    const disabled = std.Io.File.stdout().writeStreamingAll(io, "\x1b[?2004l");
     const restored = std.posix.tcsetattr(0, .NOW, original);
+    const flags = std.c.fcntl(1, std.c.F.GETFL);
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    var disabled = false;
+    var flags_restored = false;
+    if (flags >= 0 and std.c.fcntl(1, std.c.F.SETFL, flags | nonblocking) == 0) {
+        const bytes = "\x1b[?2004l";
+        disabled = std.c.write(1, bytes.ptr, bytes.len) == bytes.len;
+        flags_restored = std.c.fcntl(1, std.c.F.SETFL, flags) == 0;
+    }
     restored catch return error.TerminalRestoreFailed;
-    disabled catch return error.TerminalCleanupFailed;
-    return try result;
+    if (!flags_restored) return error.TerminalCleanupFailed;
+    const line = try result;
+    // Detachment needs no diagnostic or newline; accepted input still cannot
+    // proceed with unconfirmed paste cleanup.
+    if (line != null and !disabled) return error.TerminalCleanupFailed;
+    return line;
 }
 
 fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]const u8 {
     const output = std.Io.File.stdout();
-    try output.writeStreamingAll(io, "\x1b[?2004h");
-    try output.writeStreamingAll(io, prompt);
     if (!allow_paste) {
-        // The exact Action is already printed. Nothing received before the
-        // complete fresh prompt may count as its decision.
+        // Discard typeahead after the exact Action is printed, before its
+        // choice prompt is published. Never flush prompt-visible input.
         if (termios.tcdrain(1) != 0 or termios.tcflush(0, termios.TCIFLUSH) != 0) return error.TerminalFlushFailed;
         // Borrowed fixture descriptor: prompt visibility alone does not prove
         // the input flush finished. Signal only after that boundary.
@@ -64,6 +79,8 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
             try ready.writeStreamingAll(io, "x");
         }
     }
+    try output.writeStreamingAll(io, "\x1b[?2004h");
+    try output.writeStreamingAll(io, prompt);
     var editor: Editor = .{ .buffer = buffer, .allow_paste = allow_paste };
     const initial_size = windowSize();
     var plain_prompt = true;
@@ -72,16 +89,17 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
     }
     var backspaces: usize = 0;
     var repaint_deadline: i96 = 0;
+    // Logical deletion is applied before parsing the next byte. Retain only
+    // the old physical row until a nonfatal, complete input may repaint it.
+    var pending_paint: ?struct { old_row: ?usize } = null;
     while (true) {
         if (backspaces != 0) {
             const remaining = repaint_deadline - std.Io.Clock.awake.now(io).nanoseconds;
-            if (remaining <= 0 or backspaces == editor.length) {
-                try paintTailDeletion(io, &editor, backspaces, prompt, initial_size);
-                backspaces = 0;
-                continue;
-            }
             var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
-            if (try std.posix.poll(&fds, @intCast(@divTrunc(remaining + 999_999, 1_000_000))) == 0) {
+            const milliseconds = if (remaining <= 0 or backspaces == editor.length) 0 else @divTrunc(remaining + 999_999, 1_000_000);
+            // Even an expired repaint yields to readable input. Its parsed
+            // event may end custody and make the old display irrelevant.
+            if (try std.posix.poll(&fds, @intCast(milliseconds)) == 0) {
                 try paintTailDeletion(io, &editor, backspaces, prompt, initial_size);
                 backspaces = 0;
                 continue;
@@ -93,11 +111,9 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
             // SS3 is recognized, allow a fragmented sequence to complete.
             if (try std.posix.poll(&fds, if (editor.escape == .esc) 80 else 2000) == 0) {
                 if (editor.paste or editor.partial_length != 0) {
-                    try output.writeStreamingAll(io, "\n");
                     return error.IncompleteTerminalInput;
                 }
                 if (editor.escape == .csi or editor.escape == .ss3) {
-                    try output.writeStreamingAll(io, "\n");
                     return error.IncompleteTerminalInput;
                 }
                 editor.escape = .none;
@@ -106,8 +122,8 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
         }
         var byte: [1]u8 = undefined;
         if (try std.posix.read(0, &byte) == 0) {
-            if (backspaces != 0) try paintTailDeletion(io, &editor, backspaces, prompt, initial_size);
-            return if (editor.length == 0) null else error.IncompleteTerminalLine;
+            if (backspaces != 0) editor.deleteTail(backspaces);
+            return if (editor.length == 0) error.TerminalInputClosed else error.IncompleteTerminalLine;
         }
         if ((byte[0] == 8 or byte[0] == 127) and editor.escape == .none and !editor.paste and
             editor.partial_length == 0 and editor.rejected == null and editor.cursor == editor.length and editor.length != 0)
@@ -115,7 +131,7 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
             // The last printable ASCII cell has a known width. Clear it in
             // place even when key repeats arrive slower than the batch window.
             const current_size = windowSize();
-            if (backspaces == 0 and plain_prompt and editor.plain_ascii and initial_size.row >= 2 and
+            if (backspaces == 0 and pending_paint == null and plain_prompt and editor.plain_ascii and initial_size.row >= 2 and
                 prompt.len + editor.length < initial_size.col and
                 current_size.col == initial_size.col and current_size.row == initial_size.row)
             {
@@ -128,7 +144,8 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
             continue;
         }
         if (backspaces != 0) {
-            try paintTailDeletion(io, &editor, backspaces, prompt, initial_size);
+            if (pending_paint == null) pending_paint = .{ .old_row = visibleRow(&editor, prompt.len, initial_size) };
+            editor.deleteTail(backspaces);
             backspaces = 0;
         }
         const may_edit = editor.cursor != editor.length or editor.escape != .none or
@@ -137,29 +154,26 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
         const old_length = editor.length;
         const event = editor.feed(byte[0]);
         switch (event) {
-            .none => {},
+            .eof => return null,
+            .interrupt => return error.InteractiveInterrupted,
+            .invalid => return error.InvalidTerminalInput,
+            .overflow => return error.StreamTooLong,
+            .none, .append, .redraw, .submit => {},
+        }
+        if (pending_paint) |pending| {
+            // Partial UTF-8 is decoder state, not displayable bytes. Preserve
+            // the row until completion or fatal input instead of rendering it.
+            if (editor.partial_length != 0) continue;
+            try redraw(io, &editor, prompt, initial_size, pending.old_row);
+            pending_paint = null;
+        } else switch (event) {
             .append => try output.writeStreamingAll(io, editor.buffer[old_length..editor.length]),
             .redraw => try redraw(io, &editor, prompt, initial_size, old_row),
-            .submit => {
-                try output.writeStreamingAll(io, "\n");
-                return editor.buffer[0..editor.length];
-            },
-            .eof => {
-                try output.writeStreamingAll(io, "\n");
-                return null;
-            },
-            .interrupt => {
-                try output.writeStreamingAll(io, "^C\n");
-                return error.InteractiveInterrupted;
-            },
-            .invalid => {
-                try output.writeStreamingAll(io, "\n");
-                return error.InvalidTerminalInput;
-            },
-            .overflow => {
-                try output.writeStreamingAll(io, "\n");
-                return error.StreamTooLong;
-            },
+            else => {},
+        }
+        if (event == .submit) {
+            try output.writeStreamingAll(io, "\n");
+            return editor.buffer[0..editor.length];
         }
     }
 }
@@ -220,7 +234,7 @@ fn visibleRow(editor: *const Editor, prompt_size: usize, size: std.posix.winsize
 
 // This transition is also the production byte-ingress path. Its result is
 // observable through the accepted line; no escape parser reads past a prompt.
-fn feed(self: *Editor, byte: u8) Event {
+pub fn feed(self: *Editor, byte: u8) Event {
     if (self.paste) return self.pasted(byte);
     if (self.escape != .none and (byte == 3 or byte == 4 or byte == '\r' or byte == '\n')) {
         self.escape = .none;
@@ -588,6 +602,43 @@ fn moveWord(self: *Editor, forward: bool) Event {
     if (forward) return self.move(self.length);
     if (cluster_start < self.cursor and self.word(cluster_start) and !in_word) word_start = cluster_start;
     return self.move(word_start);
+}
+
+test "transient native EOF discards pending deletion repaint" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var input: [2]std.posix.fd_t = undefined;
+    if (std.c.pipe(&input) != 0) return error.TestPipeFailed;
+    defer _ = std.c.close(input[0]);
+    const bytes = "é\x7f";
+    const written = std.c.write(input[1], bytes.ptr, bytes.len);
+    _ = std.c.close(input[1]);
+    try std.testing.expectEqual(@as(isize, bytes.len), written);
+    var output: [2]std.posix.fd_t = undefined;
+    if (std.c.pipe(&output) != 0) return error.TestPipeFailed;
+    defer _ = std.c.close(output[0]);
+    const child = std.c.fork();
+    if (child < 0) {
+        _ = std.c.close(output[1]);
+        return error.TestForkFailed;
+    }
+    if (child == 0) {
+        if (std.c.dup2(input[0], 0) < 0 or std.c.dup2(output[1], 1) < 0) std.c._exit(20);
+        var buffer: [32]u8 = undefined;
+        if (drive(std.Io.Threaded.global_single_threaded.io(), &buffer, "> ", true)) |_| {
+            std.c._exit(21);
+        } else |err| {
+            if (err != error.TerminalInputClosed) std.c._exit(22);
+        }
+        std.c._exit(0);
+    }
+    _ = std.c.close(output[1]);
+    var status: c_int = undefined;
+    try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+    try std.testing.expectEqual(@as(c_int, 0), status);
+    var rendered: [128]u8 = undefined;
+    const count = std.c.read(output[0], &rendered, rendered.len);
+    try std.testing.expect(count > 0);
+    try std.testing.expectEqualStrings("\x1b[?2004h> é", rendered[0..@intCast(count)]);
 }
 
 test "meta-backspace deletes a word without swallowing the next character" {
