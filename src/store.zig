@@ -13568,6 +13568,307 @@ test "content reader metadata and decode window remain bounded" {
     try std.testing.expect(@sizeOf(HistoricalReader) <= projection_read_window_bytes + 1024);
 }
 
+test "Session view retains pending boundary, shared Turn and failed outcomes across later admissions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = "direct/view";
+    try configureTestSession(&storage, "view-config", session);
+    try submitTestMessage(&storage, &tmp, "view-a", "view-a", session, "identical");
+    try submitTestMessage(&storage, &tmp, "view-b", "view-b", session, "identical");
+    const before = try storage.sessionView(session, .{});
+    try std.testing.expectEqual(@as(u64, 2), before.pending_total);
+    try std.testing.expectEqual(session_view.Work.Status.runnable, before.work.status);
+    try std.testing.expect(before.pending[0].message != before.pending[1].message);
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const pinned = try storage.sessionView(session, .{ .end = before.end });
+    try std.testing.expectEqual(@as(u64, 2), pinned.pending_total);
+    try std.testing.expectEqual(session_view.Work.Status.in_flight, pinned.work.status);
+    try std.testing.expectEqual(binding.turn_id, pinned.work.turn);
+    try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
+    var user_count: usize = 0;
+    var outcome_count: usize = 0;
+    const applied = try storage.sessionView(session, before.continuation(.{}));
+    for (applied.items[0..applied.count]) |item| switch (item.kind) {
+        .user => {
+            try std.testing.expectEqual(binding.turn_id, item.turn);
+            try std.testing.expectEqual(before.pending[user_count].message, item.message);
+            user_count += 1;
+        },
+        .outcome => {
+            try std.testing.expectEqualStrings("provider_http_422", item.codeText());
+            outcome_count += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), user_count);
+    try std.testing.expectEqual(@as(usize, 1), outcome_count);
+    try std.testing.expectEqual(@as(u64, 0), applied.pending_total);
+    try std.testing.expectEqual(session_view.Work.Status.idle, applied.work.status);
+    for (0..19) |i| {
+        var key: [32]u8 = undefined;
+        const text = try std.fmt.bufPrint(&key, "view-later-{d}", .{i});
+        try submitTestMessage(&storage, &tmp, text, text, session, "queued");
+    }
+    const before_stop = try storage.sessionView(session, .{ .recent = true });
+    var stop = try completeSessionStop("view-stop", session);
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    try std.testing.expectEqual(@as(u64, 19), (try storage.sessionView(session, .{ .end = before_stop.end, .recent = true })).pending_total);
+    var cursor: session_view.Cursor = .{};
+    var admissions: usize = 0;
+    var stops: usize = 0;
+    var failures: usize = 0;
+    while (true) {
+        const page = try storage.sessionView(session, cursor);
+        for (page.items[0..page.count]) |item| switch (item.kind) {
+            .admission => admissions += 1,
+            .stop => stops += 1,
+            .outcome => failures += 1,
+            else => {},
+        };
+        cursor = page.continuation(cursor);
+        if (!page.more) {
+            try std.testing.expectEqual(@as(u64, 0), page.pending_total);
+            break;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 21), admissions);
+    try std.testing.expectEqual(@as(usize, 1), failures);
+    try std.testing.expectEqual(@as(usize, 1), stops);
+    try std.testing.expectEqual(@as(usize, 0), (try storage.sessionView(session, cursor)).count);
+}
+
+test "Session view validates split tool continuations and late call provenance" {
+    const Damage = enum { none, foreign_operation, foreign_turn, missing_operation, missing_classification, foreign_action };
+    inline for (std.meta.tags(Damage)) |damage| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = "direct/view-tools";
+        try configureTestSession(&storage, "view-tools-config", session);
+        try configureTestSession(&storage, "view-tools-foreign", "direct/foreign");
+        try submitTestMessage(&storage, &tmp, "view-tools-input", "view-tools-message", session, "tools");
+        const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        var ids: [17][16]u8 = undefined;
+        var calls: [17]TestingCall = undefined;
+        for (&calls, 0..) |*call, i| {
+            const id = try std.fmt.bufPrint(&ids[i], "view-call-{d}", .{i});
+            call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+        }
+        try settleCallsForTesting(&storage, &tmp, first, "view-tools-output", &calls);
+        const source_end = try queryU64(storage.database, "SELECT max(session_position) FROM model_output_item WHERE item_kind=3");
+        const fixed = try storage.sessionView(session, .{ .position = source_end });
+        try std.testing.expectEqual(@as(usize, 16), fixed.count);
+        try std.testing.expect(fixed.more);
+        for (fixed.items[0..fixed.count], 0..) |item, i| {
+            try std.testing.expect(item.kind == .tool_result);
+            try std.testing.expectEqual(@as(u64, i + 1), item.ordinal);
+        }
+        const continuation = fixed.continuation(.{ .position = source_end });
+        const tail = try storage.sessionView(session, continuation);
+        try std.testing.expectEqual(@as(usize, 1), tail.count);
+        try std.testing.expectEqual(@as(u64, 17), tail.items[0].ordinal);
+        try std.testing.expect(!tail.more);
+        var drained = tail.continuation(continuation);
+        for (0..3) |_| {
+            const empty = try storage.sessionView(session, drained);
+            try std.testing.expectEqual(@as(usize, 0), empty.count);
+            drained = empty.continuation(drained);
+        }
+        const recent = try storage.sessionView(session, .{ .recent = true });
+        try std.testing.expectEqual(@as(usize, 16), recent.count);
+        for (recent.items[0..recent.count], 0..) |item, i| {
+            try std.testing.expectEqual(first.turn_id, item.turn);
+            try std.testing.expectEqual(@as(u64, i + 2), item.ordinal);
+        }
+        var opened = recent.continuation(.{ .recent = true });
+        for (0..3) |_| {
+            const empty = try storage.sessionView(session, opened);
+            try std.testing.expectEqual(@as(usize, 0), empty.count);
+            opened = empty.continuation(opened);
+        }
+        try std.testing.expectError(error.InvalidCursor, storage.sessionView(session, .{ .end = fixed.end, .position = continuation.position, .ordinal = 18 }));
+        try std.testing.expectError(error.InvalidCursor, storage.sessionView(session, .{ .end = fixed.end, .position = 1, .ordinal = 1 }));
+        try std.testing.expect(!storage.isFenced());
+        var next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        if (damage == .none) {
+            // A private-only response is valid intermediate continuation when
+            // a successor is queued; consume its public admission separately.
+            try submitTestMessage(&storage, &tmp, "view-private-input", "view-private-message", session, "later");
+            const admission = try storage.sessionView(session, drained);
+            try std.testing.expectEqual(@as(usize, 1), admission.count);
+            try std.testing.expect(admission.items[0].kind == .admission);
+            drained = admission.continuation(drained);
+            const source = try tmp.dir.createFile(std.testing.io, "view-private-source", .{ .read = true });
+            defer source.close(std.testing.io);
+            try source.writeStreamingAll(std.testing.io, "private");
+            try source.sync(std.testing.io);
+            var root: [protocol.max_store_bytes]u8 = undefined;
+            const root_length = try tmp.dir.realPath(std.testing.io, &root);
+            var used: std.atomic.Value(u64) = .init(0);
+            var retained: ?named_scratch.Owner = null;
+            var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..root_length], "view-private-work", .{ .used = &used, .limit = output_metadata_record_bytes }, false, &retained);
+            defer metadata.deinit();
+            try metadata.append(.{ .tag = .item, .kind = .reasoning, .ordinal = 0, .start = 0, .length = 7, .content_digest = protocol.contentDigest("private") });
+            try metadata.sealForRead();
+            try storage.settleModelSuccess(next, &.{ .source = source, .source_length = 7, .metadata = metadata.file, .item_count = 1, .call_count = 0, .answer_length = 0, .answer_digest = protocol.contentDigest(""), .response_id = .{}, .body_model = .{}, .openai_model = .{}, .x_openai_model = .{}, .request_id = .{} }, .{});
+            const gap = try storage.sessionView(session, drained);
+            try std.testing.expectEqual(@as(usize, 0), gap.count);
+            try std.testing.expect(gap.end > admission.end);
+            drained = gap.continuation(drained);
+            try std.testing.expectEqual(gap.end, drained.position);
+            try std.testing.expectEqual(@as(u64, 0), drained.end);
+            try std.testing.expectEqual(@as(u64, 0), drained.ordinal);
+            next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        }
+        const accepted = TestingCall{ .item_id = "ask", .name = "bash", .encoded_call_id = "ask", .decoded_call_id = "ask", .encoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}", .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}" };
+        try settleCallsForTesting(&storage, &tmp, next, "view-tools-next", &.{accepted});
+        try exec(storage.database, "PRAGMA foreign_keys=OFF");
+        switch (damage) {
+            .none => {},
+            .foreign_operation => try exec(storage.database, "UPDATE model_operation SET session_ref='direct/foreign' WHERE operation_id=(SELECT max(operation_id) FROM model_operation)"),
+            .foreign_turn => try exec(storage.database, "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id) SELECT turn_id+100,'direct/foreign',first_admission_id,input_cutoff,operation_id FROM turn; UPDATE model_operation SET turn_id=(SELECT max(turn_id) FROM turn) WHERE operation_id=(SELECT max(operation_id) FROM model_operation)"),
+            .missing_operation => try exec(storage.database, "DELETE FROM model_operation WHERE operation_id=(SELECT max(operation_id) FROM model_operation)"),
+            .missing_classification => try exec(storage.database, "DELETE FROM model_tool_call WHERE operation_id=(SELECT max(operation_id) FROM model_operation)"),
+            .foreign_action => try exec(storage.database, "UPDATE action_operation SET session_ref='direct/foreign'"),
+        }
+        if (damage == .none) {
+            const appended = try storage.sessionView(session, drained);
+            try std.testing.expectEqual(@as(usize, 2), appended.count);
+            try std.testing.expect(appended.items[0].kind == .user);
+            try std.testing.expect(appended.items[1].kind == .call);
+            try std.testing.expectEqual(next.operation_id, appended.items[1].operation);
+            try std.testing.expectEqual(first.turn_id, appended.items[1].turn);
+            const caught_up = appended.continuation(drained);
+            try std.testing.expectEqual(@as(usize, 0), (try storage.sessionView(session, caught_up)).count);
+            const page = try storage.sessionView(session, .{ .position = source_end });
+            try std.testing.expect(page.more);
+            const last = try storage.sessionView(session, page.continuation(.{ .position = source_end }));
+            try std.testing.expectEqual(@as(usize, 4), last.count);
+            try std.testing.expect(last.items[3].kind == .call);
+            try std.testing.expectEqual(first.turn_id, last.items[3].turn);
+        } else {
+            try std.testing.expectError(error.CorruptStore, storage.sessionView(session, .{ .position = source_end }));
+            try std.testing.expect(storage.isFenced());
+        }
+    }
+}
+
+test "Session view caught-up work is independent of consumed admission and stop history" {
+    const Counter = struct {
+        steps: u64 = 0,
+        fn trace(event: c_uint, context: ?*anyopaque, statement: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
+            if (event == c.SQLITE_TRACE_PROFILE) {
+                const counter: *@This() = @ptrCast(@alignCast(context.?));
+                counter.steps += @intCast(c.sqlite3_stmt_status(@ptrCast(statement.?), c.SQLITE_STMTSTATUS_VM_STEP, 0));
+            }
+            return 0;
+        }
+    };
+    const History = enum { applied, excluded, stops };
+    inline for (std.meta.tags(History)) |history| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = "direct/view-cost";
+        try configureTestSession(&storage, "view-cost-config", session);
+        var costs: [3]u64 = undefined;
+        var population: usize = 0;
+        for ([_]usize{ 10, 100, 1000 }, 0..) |target, sample| {
+            while (population < target) : (population += 1) {
+                var key: [32]u8 = undefined;
+                const message = try std.fmt.bufPrint(&key, "view-cost-message-{d}", .{population});
+                if (history != .stops) {
+                    try submitTestMessage(&storage, &tmp, "view-cost-content", message, session, "history");
+                    if (history == .applied) {
+                        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                        try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
+                    }
+                }
+                if (history == .stops or (history == .excluded and population + 1 == target)) {
+                    var stop_key: [32]u8 = undefined;
+                    var stop = try completeSessionStop(try std.fmt.bufPrint(&stop_key, "view-cost-stop-{d}", .{population}), session);
+                    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                }
+            }
+            const boundary = (try storage.sessionView(session, .{ .recent = true })).end;
+            var counter: Counter = .{};
+            try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_trace_v2(storage.database, c.SQLITE_TRACE_PROFILE, Counter.trace, &counter));
+            const page = try storage.sessionView(session, .{ .position = boundary });
+            _ = c.sqlite3_trace_v2(storage.database, 0, null, null);
+            try std.testing.expectEqual(@as(u64, 0), page.pending_total);
+            try std.testing.expectEqual(@as(usize, 0), page.count);
+            costs[sample] = counter.steps;
+        }
+        std.debug.print("Session view {s} history 10/100/1000 caught-up VM steps: {d}/{d}/{d}\n", .{ @tagName(history), costs[0], costs[1], costs[2] });
+        // Fixed seeks/probes may change empty/nonempty branches, but no row
+        // loop is justified by the already consumed historical population.
+        try std.testing.expect(costs[1] <= costs[0] + 64);
+        try std.testing.expect(costs[2] <= costs[0] + 64);
+    }
+}
+
+test "Message content keeps exact admission scope before application and after exclusion" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "message-content-config", "direct/message-content");
+    try configureTestSession(&storage, "message-content-foreign", "direct/message-foreign");
+    try submitTestMessage(&storage, &tmp, "message-content-a", "message-content-a", "direct/message-content", "identical");
+    try submitTestMessage(&storage, &tmp, "message-content-b", "message-content-b", "direct/message-content", "identical");
+    const first = (try storage.observeCommand("message-content-a")).message.?.queue.?.admission_id;
+    const second = (try storage.observeCommand("message-content-b")).message.?.queue.?.admission_id;
+    try std.testing.expect(first != second);
+    var request: protocol.MessageContent = .{ .admission_id = first };
+    try request.session.set("direct/message-content");
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    {
+        var reader = try storage.openMessageContent(request);
+        defer reader.close();
+        const count = try reader.read(0, &buffer);
+        try std.testing.expectEqualStrings("identical", buffer[0..count]);
+    }
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expectEqual(binding.turn_id, (try storage.observeCommand("message-content-a")).message.?.queue.?.state.processing.turn_id);
+    try std.testing.expectEqual(binding.turn_id, (try storage.observeCommand("message-content-b")).message.?.queue.?.state.processing.turn_id);
+    try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
+    try submitTestMessage(&storage, &tmp, "message-content-c", "message-content-c", "direct/message-content", "excluded");
+    request.admission_id = (try storage.observeCommand("message-content-c")).message.?.queue.?.admission_id;
+    var stop = try completeSessionStop("message-content-stop", "direct/message-content");
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    {
+        var reader = try storage.openMessageContent(request);
+        defer reader.close();
+        try std.testing.expectEqualStrings("excluded", buffer[0..try reader.read(0, &buffer)]);
+    }
+    request.start = 9;
+    try std.testing.expectError(error.RangeOutOfBounds, storage.openMessageContent(request));
+    request.start = 0;
+    try request.session.set("direct/message-foreign");
+    try std.testing.expectError(error.ContentNotFound, storage.openMessageContent(request));
+    request.admission_id = std.math.maxInt(u64);
+    try std.testing.expectError(error.ContentNotFound, storage.openMessageContent(request));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "Message content fences contradictory admission command provenance" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "message-corrupt-config", "direct/message-corrupt");
+    try submitTestMessage(&storage, &tmp, "message-corrupt", "message-corrupt", "direct/message-corrupt", "input");
+    var request: protocol.MessageContent = .{ .admission_id = (try storage.observeCommand("message-corrupt")).message.?.queue.?.admission_id };
+    try request.session.set("direct/message-corrupt");
+    try exec(storage.database, "UPDATE core_command SET accepted=0 WHERE command_key='message-corrupt'");
+    try std.testing.expectError(error.CorruptStore, storage.openMessageContent(request));
+    try std.testing.expect(storage.isFenced());
+}
+
 test "retry admission and exhausted recovery use their selection indexes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
