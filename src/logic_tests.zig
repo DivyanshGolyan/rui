@@ -5,4 +5,5 @@ test {
     _ = @import("named_scratch.zig");
     _ = @import("request_encoding.zig");
     _ = @import("TerminalEditor.zig");
+    _ = @import("TerminalText.zig");
 }
