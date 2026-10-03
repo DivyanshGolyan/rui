@@ -92,6 +92,9 @@ pub const Kind = enum {
     model_interruption,
     permission_decision,
     observe_command,
+    session_calls,
+    session_call_content,
+    message_content,
     read_result,
     read_action_call_id,
     read_action_arguments,
@@ -99,6 +102,7 @@ pub const Kind = enum {
     list_sessions,
     conversation_page,
     conversation_content,
+    session_view,
 };
 
 pub const ConfigureCommand = struct {
@@ -334,6 +338,9 @@ pub const Request = union(Kind) {
     model_interruption: ModelInterruptionCommand,
     permission_decision: PermissionDecisionCommand,
     observe_command: ObserveCommand,
+    session_calls: SessionCalls,
+    session_call_content: SessionCallContent,
+    message_content: MessageContent,
     read_result: ReadResult,
     read_action_call_id: ReadActionArguments,
     read_action_arguments: ReadActionArguments,
@@ -341,12 +348,13 @@ pub const Request = union(Kind) {
     list_sessions: ListSessions,
     conversation_page: ConversationPage,
     conversation_content: ConversationContent,
+    session_view: SessionView,
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content => {},
+            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .session_calls, .session_call_content, .message_content, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .session_view => {},
         }
     }
 
@@ -411,10 +419,14 @@ pub const ParseOptions = struct {
     fault_content_seal: bool = false,
     cleanup_failed: *bool,
     scratch_budget: ?ScratchBudget = null,
+    expected_kind: ?Kind = null,
+    deadline: ?i128 = null,
 };
 
 pub fn parseRequest(options: ParseOptions) !Request {
     var source = SocketBody.init(options.fd, options.content_length);
+    source.io = options.io;
+    source.deadline = options.deadline;
     var parser = Parser{ .source = &source, .options = options };
     var request = try parser.parse();
     errdefer request.removeTemporaryContent(options.io) catch {
@@ -424,9 +436,35 @@ pub fn parseRequest(options: ParseOptions) !Request {
     return request;
 }
 
+/// Absolute exchange budgets never renew on partial progress. Without a
+/// deadline, retain the ordinary transfer's existing inactivity wait.
+pub fn pollExchange(io: std.Io, fd: std.posix.fd_t, events: i16, deadline: ?i128) !void {
+    const end = deadline orelse {
+        var descriptors = [_]std.posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
+        if (try std.posix.poll(&descriptors, 60_000) == 0) return error.TransferInactive;
+        return;
+    };
+    while (true) {
+        const remaining = end - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+        if (remaining <= 0) return error.ExchangeDeadlineExceeded;
+        const milliseconds: i32 = @intCast(@min(60_000, @max(1, @divFloor(remaining, std.time.ns_per_ms))));
+        var descriptors = [_]std.c.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
+        // posix.poll retries EINTR with its original timeout. This budget
+        // instead recomputes from acceptance after every interrupted wait.
+        const result = std.c.poll(&descriptors, descriptors.len, milliseconds);
+        switch (std.posix.errno(result)) {
+            .SUCCESS => if (result > 0) return,
+            .INTR => {},
+            else => return error.PollFailed,
+        }
+    }
+}
+
 const SocketBody = struct {
     fd: std.posix.fd_t,
     remaining: u64,
+    io: std.Io = undefined,
+    deadline: ?i128 = null,
     buffer: [content_window_bytes]u8 = undefined,
     start: usize = 0,
     end: usize = 0,
@@ -444,12 +482,7 @@ const SocketBody = struct {
 
     fn refill(self: *SocketBody) !void {
         if (self.remaining == 0) return error.UnexpectedEndOfBody;
-        var poll_fd = [_]std.posix.pollfd{.{
-            .fd = self.fd,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        }};
-        if (try std.posix.poll(&poll_fd, 60_000) == 0) return error.TransferInactive;
+        try pollExchange(self.io, self.fd, std.posix.POLL.IN, self.deadline);
         const limit: usize = @intCast(@min(self.remaining, self.buffer.len));
         const count = try std.posix.read(self.fd, self.buffer[0..limit]);
         if (count == 0) return error.UnexpectedEndOfBody;
@@ -490,6 +523,12 @@ const Parser = struct {
             .permission_decision
         else if (kind_text.eql("observe_command"))
             .observe_command
+        else if (kind_text.eql("session_calls"))
+            .session_calls
+        else if (kind_text.eql("session_call_content"))
+            .session_call_content
+        else if (kind_text.eql("message_content"))
+            .message_content
         else if (kind_text.eql("read_result"))
             .read_result
         else if (kind_text.eql("read_action_call_id"))
@@ -504,9 +543,14 @@ const Parser = struct {
             .conversation_page
         else if (kind_text.eql("conversation_content"))
             .conversation_content
+        else if (kind_text.eql("session_view"))
+            .session_view
         else
             return error.UnknownCommand;
 
+        if (self.options.expected_kind) |expected| {
+            if (kind != expected) return error.RouteKindMismatch;
+        }
         try self.expectByte(',');
         try self.expectKey("store");
         var store: Bounded(max_store_bytes) = .{};
@@ -521,6 +565,9 @@ const Parser = struct {
             .model_interruption => .{ .model_interruption = try self.parseModelInterruption(store) },
             .permission_decision => .{ .permission_decision = try self.parsePermissionDecision(store) },
             .observe_command => .{ .observe_command = try self.parseObserve(store) },
+            .session_calls => .{ .session_calls = try self.parseSessionCalls(store) },
+            .session_call_content => .{ .session_call_content = try self.parseSessionCallContent(store) },
+            .message_content => .{ .message_content = try self.parseMessageContent(store) },
             .read_result => .{ .read_result = try self.parseReadResult(store) },
             .read_action_call_id => .{ .read_action_call_id = try self.parseReadActionArguments(store) },
             .read_action_arguments => .{ .read_action_arguments = try self.parseReadActionArguments(store) },
@@ -528,6 +575,7 @@ const Parser = struct {
             .list_sessions => .{ .list_sessions = try self.parseListSessions(store) },
             .conversation_page => .{ .conversation_page = try self.parseConversationPage(store) },
             .conversation_content => .{ .conversation_content = try self.parseConversationContent(store) },
+            .session_view => .{ .session_view = try self.parseSessionView(store) },
         };
         errdefer request.removeTemporaryContent(self.options.io) catch {
             self.options.cleanup_failed.* = true;
@@ -673,6 +721,84 @@ const Parser = struct {
         return request;
     }
 
+    fn parseSessionCalls(self: *Parser, store: Bounded(max_store_bytes)) !SessionCalls {
+        var request = SessionCalls{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("after_position");
+        if (!try self.consumeIf('n')) {
+            request.after_position = try self.readCanonicalU64();
+        } else {
+            try self.expectByte('u');
+            try self.expectByte('l');
+            try self.expectByte('l');
+        }
+        return request;
+    }
+
+    fn parseSessionCallContent(self: *Parser, store: Bounded(max_store_bytes)) !SessionCallContent {
+        var request = SessionCallContent{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("position");
+        request.position = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("field");
+        var field: Bounded(16) = .{};
+        try self.readSmallString(&field);
+        request.field = std.meta.stringToEnum(SessionCallContent.Field, field.slice()) orelse return error.InvalidField;
+        try self.expectByte(',');
+        try self.expectKey("start");
+        request.start = try self.readCanonicalU64();
+        if (try self.consumeIf(',')) {
+            var option: Bounded(16) = .{};
+            try self.readSmallString(&option);
+            try self.expectByte(':');
+            if (option.eql("length")) {
+                request.length = try self.readCanonicalU64();
+                if (request.length == 0 or request.length > content_window_bytes) return error.InvalidRange;
+            } else if (option.eql("stream")) {
+                for ("true") |byte| try self.expectByte(byte);
+                request.stream = true;
+            } else return error.InvalidField;
+        }
+        if (request.position == 0 or request.position > std.math.maxInt(i64) or
+            (request.stream and request.start != 0)) return error.InvalidCursor;
+        return request;
+    }
+
+    fn parseMessageContent(self: *Parser, store: Bounded(max_store_bytes)) !MessageContent {
+        var request = MessageContent{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("admission_id");
+        request.admission_id = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("start");
+        request.start = try self.readCanonicalU64();
+        if (try self.consumeIf(',')) {
+            var option: Bounded(16) = .{};
+            try self.readSmallString(&option);
+            try self.expectByte(':');
+            if (option.eql("length")) {
+                request.length = try self.readCanonicalU64();
+                if (request.length == 0 or request.length > content_window_bytes) return error.InvalidRange;
+            } else if (option.eql("stream")) {
+                for ("true") |byte| try self.expectByte(byte);
+                request.stream = true;
+            } else return error.InvalidField;
+        }
+        if (request.admission_id == 0 or request.admission_id > std.math.maxInt(i64) or
+            (request.stream and request.start != 0)) return error.InvalidCursor;
+        return request;
+    }
+
     fn readCanonicalU64(self: *Parser) !u64 {
         try self.expectByte('"');
         var digits: [20]u8 = undefined;
@@ -735,6 +861,37 @@ const Parser = struct {
         return request;
     }
 
+    fn parseSessionView(self: *Parser, store: Bounded(max_store_bytes)) !SessionView {
+        var request: SessionView = .{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("end");
+        request.cursor.end = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("position");
+        request.cursor.position = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("ordinal");
+        request.cursor.ordinal = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("recent");
+        const recent = try self.source.readByte();
+        const rest: []const u8 = switch (recent) {
+            't' => "rue",
+            'f' => "alse",
+            else => return error.InvalidCursor,
+        };
+        for (rest) |byte| try self.expectByte(byte);
+        request.cursor.recent = recent == 't';
+        if (request.cursor.end > std.math.maxInt(i64) or request.cursor.position > std.math.maxInt(i64) or request.cursor.ordinal > std.math.maxInt(i64) or
+            (request.cursor.end != 0 and request.cursor.position > request.cursor.end) or
+            (request.cursor.position == 0 and request.cursor.ordinal != 0) or
+            (request.cursor.recent and request.cursor.position != 0)) return error.InvalidCursor;
+        return request;
+    }
+
     fn parseConversationPage(self: *Parser, store: Bounded(max_store_bytes)) !ConversationPage {
         var request = ConversationPage{ .store = store };
         try self.expectByte(',');
@@ -771,8 +928,13 @@ const Parser = struct {
         try self.expectByte(',');
         try self.expectKey("start");
         request.start = try self.readCanonicalU64();
+        if (try self.consumeIf(',')) {
+            try self.expectKey("stream");
+            for ("true") |byte| try self.expectByte(byte);
+            request.stream = true;
+        }
         if (request.position == 0 or request.position > std.math.maxInt(i64) or
-            request.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
+            request.ordinal > std.math.maxInt(i64) or (request.stream and request.start != 0)) return error.InvalidCursor;
         return request;
     }
 
@@ -1126,6 +1288,11 @@ pub const max_observe_command_request_bytes =
     "{\"version\":\"1\",\"kind\":\"observe_command\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) +
     ",\"key\":".len + maximumJsonStringBytes(max_key_bytes) + "}".len;
+pub const max_session_calls_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"session_calls\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) +
+    ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"after_position\":\"".len + 20 + "\"}".len;
 pub const max_host_info_request_bytes =
     "{\"version\":\"1\",\"kind\":\"host_info\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) + "}".len;
@@ -1162,7 +1329,15 @@ pub const max_conversation_content_request_bytes =
     maximumJsonStringBytes(max_session_bytes) +
     ",\"position\":\"".len + 20 +
     "\",\"ordinal\":\"".len + 20 +
-    "\",\"start\":\"".len + 20 + "\"}".len;
+    "\",\"start\":\"".len + 20 + "\",\"stream\":true}".len;
+pub const max_session_call_content_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"session_call_content\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) + ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"position\":\"".len + 20 + "\",\"field\":\"arguments\",\"start\":\"".len + 20 + "\",\"length\":\"4096\"}".len;
+pub const max_message_content_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"message_content\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) + ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
+    ",\"admission_id\":\"".len + 20 + "\",\"start\":\"".len + 20 + "\",\"length\":\"4096\"}".len;
 pub const max_conversation_page_request_bytes =
     "{\"version\":\"1\",\"kind\":\"conversation_page\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) + ",\"session\":".len +
@@ -1170,11 +1345,17 @@ pub const max_conversation_page_request_bytes =
     ",\"end\":\"".len + 20 +
     "\",\"before_position\":\"".len + 20 +
     "\",\"before_ordinal\":\"".len + 20 + "\"}".len;
+pub const max_session_view_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"session_view\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) + ",\"session\":".len +
+    maximumJsonStringBytes(max_session_bytes) +
+    ",\"end\":\"".len + 20 + "\",\"position\":\"".len + 20 +
+    "\",\"ordinal\":\"".len + 20 + "\",\"recent\":false}".len;
 pub const max_client_request_bytes = @max(
-    @max(@max(max_observe_command_request_bytes, max_read_result_request_bytes), @max(max_host_info_request_bytes, max_host_stop_request_bytes)),
+    @max(@max(@max(max_observe_command_request_bytes, max_session_calls_request_bytes), max_read_result_request_bytes), @max(max_host_info_request_bytes, max_host_stop_request_bytes)),
     @max(
         @max(max_inspect_session_request_bytes, max_list_sessions_request_bytes),
-        @max(@max(max_read_action_arguments_request_bytes, max_read_action_call_id_request_bytes), @max(max_conversation_page_request_bytes, max_conversation_content_request_bytes)),
+        @max(@max(max_read_action_arguments_request_bytes, max_read_action_call_id_request_bytes), @max(@max(max_conversation_page_request_bytes, max_session_view_request_bytes), @max(max_conversation_content_request_bytes, @max(max_session_call_content_request_bytes, max_message_content_request_bytes)))),
     ),
 );
 
@@ -1303,7 +1484,13 @@ pub const max_host_info_response_bytes =
     "\",\"active_capacity\":\"".len + 20 +
     "\",\"capabilities\":{\"bash\":true,\"model\":true,\"managed_authentication\":true}}".len;
 pub const host_stop_ack = "{\"version\":\"1\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
-pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), host_stop_ack.len);
+pub const max_session_calls_response_bytes =
+    "{\"version\":\"1\",\"type\":\"session_calls\",\"position\":\"".len + 20 +
+    "\",\"call\":{\"turn\":\"".len + 20 + "\",\"operation\":\"".len + 20 + "\",\"ordinal\":\"".len + 20 +
+    "\",\"classification\":\"rejected\",\"rejection\":".len +
+    maximumJsonStringBytes(32) + ",\"name\":".len + max_content_reference_bytes +
+    ",\"arguments\":".len + max_content_reference_bytes + "}}".len;
+pub const max_response_bytes = @max(@max(@max(max_control_response_bytes, max_host_info_response_bytes), max_session_calls_response_bytes), host_stop_ack.len);
 pub const max_conversation_page_response_bytes =
     "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"".len + 20 +
     "\",\"items\":[".len + public_conversation_page_items * ("{\"position\":\"".len + 20 + "\",\"ordinal\":\"".len + 20 +
@@ -1363,6 +1550,7 @@ test "Request Store borrow remains in its active union payload" {
         .{ .session_stop = .{} },
         .{ .model_interruption = .{} },
         .{ .observe_command = .{} },
+        .{ .session_calls = .{} },
         .{ .read_result = .{} },
         .{ .inspect_session = .{} },
     };
@@ -1750,6 +1938,42 @@ test "Session report profile is closed and omission selects Current" {
             try std.testing.expectEqual(expected, request.inspect_session.profile);
         } else {
             try std.testing.expectError(error.UnknownReportProfile, parser.parse());
+        }
+    }
+}
+
+test "Message content wire validates identities and bounded ranges" {
+    const cases = [_]struct { suffix: []const u8, failure: ?anyerror = null }{
+        .{ .suffix = "\"1\",\"start\":\"0\"}" },
+        .{ .suffix = "\"9223372036854775807\",\"start\":\"0\",\"stream\":true}" },
+        .{ .suffix = "\"1\",\"start\":\"8\",\"length\":\"4096\"}" },
+        .{ .suffix = "\"0\",\"start\":\"0\"}", .failure = error.InvalidCursor },
+        .{ .suffix = "\"9223372036854775808\",\"start\":\"0\"}", .failure = error.InvalidCursor },
+        .{ .suffix = "\"01\",\"start\":\"0\"}", .failure = error.InvalidIdentity },
+        .{ .suffix = "\"1\",\"start\":\"1\",\"stream\":true}", .failure = error.InvalidCursor },
+        .{ .suffix = "\"1\",\"start\":\"0\",\"length\":\"4097\"}", .failure = error.InvalidRange },
+    };
+    for (cases) |case| {
+        var json_buffer: [512]u8 = undefined;
+        const json = try std.fmt.bufPrint(&json_buffer, "{{\"version\":\"1\",\"kind\":\"message_content\",\"store\":\"s\",\"session\":\"session\",\"admission_id\":{s}", .{case.suffix});
+        var source = SocketBody.init(-1, 0);
+        @memcpy(source.buffer[0..json.len], json);
+        source.end = json.len;
+        var cleanup_failed = false;
+        var parser = Parser{ .source = &source, .options = .{
+            .io = std.testing.io,
+            .fd = -1,
+            .content_length = json.len,
+            .scratch_path = "unused",
+            .request_number = 0,
+            .cleanup_failed = &cleanup_failed,
+        } };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parser.parse());
+        } else {
+            const request = (try parser.parse()).message_content;
+            try std.testing.expect(request.admission_id != 0);
+            try std.testing.expect(request.length <= content_window_bytes);
         }
     }
 }
