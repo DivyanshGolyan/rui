@@ -5,17 +5,21 @@ import json
 import os
 import pathlib
 import re
+import select
 import shlex
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 import bash_integration as bash_fixture
+import bash_lifecycle_integration as lifecycle_fixture
+import control_integration as control_fixture
 import dispatch_integration as fixture
 from host_process import HostDiagnostics, ReleaseGate, stop_process
-from host_status_integration import socket_path, status
+from host_status_integration import raw_info, socket_path, status, wait_for_descriptors
 
 
 RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
@@ -53,11 +57,236 @@ def request(sock, store, identity=None, *, extra=b""):
 def finish(stream, body):
     with stream:
         stream.sendall(body)
-        response = bytearray()
-        while chunk := stream.recv(4096):
-            response.extend(chunk)
-            assert len(response) < 8192
-    return bytes(response)
+        # Busy rejection can close with unread ingress, yielding reset after
+        # its complete framed reply. Match the real client's framing boundary.
+        head, response = control_fixture.read_http_response(stream, timeout=5)
+        lengths = [line.split(b":", 1)[1].strip() for line in head.split(b"\r\n")
+                   if line.lower().startswith(b"content-length:")]
+        assert len(lengths) == 1 and len(response) == int(lengths[0]) < 8192, (head, response)
+    return head + b"\r\n\r\n" + response
+
+
+def discovery(sock, store, *, length=None):
+    body = json.dumps({"version": "1", "kind": "host_info", "store": str(store.resolve())}).encode()
+    stream = socket.socket(socket.AF_UNIX)
+    try:
+        stream.settimeout(13)
+        stream.connect(str(sock))
+        stream.sendall(
+            b"POST /v1/host-info HTTP/1.1\r\nContent-Type: application/json\r\n"
+            + f"Content-Length: {len(body) if length is None else length}\r\n".encode()
+            + b"X-Rui-Wire-Version: 1\r\n\r\n"
+        )
+    except BaseException:
+        stream.close()
+        raise
+    return stream, body
+
+
+def info_reply(sock, store, *, kind="host_info"):
+    stream, body = discovery(sock, store)
+    if kind != "host_info":
+        body = body.replace(b'"host_info"', json.dumps(kind).encode())
+        # Use a same-length kind so the originally framed body stays complete.
+        assert kind == "configure"
+    return finish(stream, body)
+
+
+def after_discovery_release(exchange):
+    # A complete response does not establish handler close/release. Retry only
+    # the recognized busy observation; any other response reaches its assertion.
+    return fixture.wait_for(
+        lambda: (reply if b"discovery_capacity_exhausted" not in (reply := exchange()) else None),
+        "discovery admission reusable after prior exchange",
+    )
+
+
+def retain_discovery(sock, store, *, header=None):
+    # Opening a socket does not prove admission: a preceding exchange may
+    # still own discovery. Require a second discovery's semantic rejection
+    # while the first has neither a rejection nor EOF, all within one second.
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        began = time.monotonic()
+        if header is None:
+            held, _ = discovery(sock, store)
+        else:
+            held = socket.socket(socket.AF_UNIX)
+            held.settimeout(5)
+            held.connect(str(sock))
+            held.sendall(header)
+        retained = False
+        try:
+            reply = info_reply(sock, store)
+            held.setblocking(False)
+            try:
+                held.recv(1, socket.MSG_PEEK)
+            except BlockingIOError:
+                retained = reply.startswith(b"HTTP/1.1 503") and b"discovery_capacity_exhausted" in reply
+            except ConnectionResetError:
+                pass
+        finally:
+            if not retained:
+                held.close()
+        if retained:
+            assert time.monotonic() < deadline, "second discovery did not reject promptly"
+            held.settimeout(.1)
+            return held, began
+        time.sleep(.025)
+    raise AssertionError("second discovery must be rejected while one is retained")
+
+
+def resource_sample(pid):
+    if sys.platform != "linux":
+        return None
+    fields = dict(line.split(":", 1) for line in pathlib.Path(f"/proc/{pid}/status").read_text().splitlines() if ":" in line)
+    return {name: fields[name].strip() for name in ("VmRSS", "VmSize", "Threads")}
+
+
+def saturated_stop(state, *, competing):
+    store = state / ("competition" if competing else "fresh")
+    gate = ReleaseGate(state / ("competition-readers" if competing else "fresh-readers"))
+    # Persist setup before the measured Host starts. Reply completion from a
+    # configure/status probe is not a witness of its final admission release.
+    setup = fixture.start_host(store, None)
+    try:
+        bash_fixture.configure(state, store, "competition-config" if competing else "fresh-config", "direct/readers")
+    finally:
+        stop_process(setup)
+    host = fixture.start_host(store, None, "--test-phase-trace", "--test-inspection-reply-gate-path", gate.path)
+    diagnostics = HostDiagnostics(host)
+    readers = []
+    held = None
+    try:
+        # The fresh case does not pre-discover an instance. CLI must perform
+        # the whole discovery + protected-stop flow at ten ordinary occupants.
+        sock = socket_path(store)
+        readers = control_fixture.fill_complete_inspections(str(sock), str(store.resolve()), "direct/readers")
+        diagnostics.wait("inspection_captured", count=10, subject="direct/readers")
+        diagnostics.wait("test_gate_waiting", count=10, subject=str(gate.path))
+        baseline = wait_for_descriptors(host.pid) if sys.platform == "linux" else None
+        before = resource_sample(host.pid)
+        if competing:
+            # No earlier discovery owns this fresh Host. Two incomplete
+            # requests establish the cap without assuming connect order is
+            # classification order. Keep the winner, whichever it is.
+            pair = []
+            try:
+                for _ in range(2):
+                    stream, _ = discovery(sock, store)
+                    pair.append(stream)
+                ready, _, _ = select.select(pair, [], [], 1)
+                assert len(ready) == 1, "one competing discovery must reject promptly"
+                rejected = ready[0]
+                head, body = control_fixture.read_http_response(rejected, timeout=1)
+                assert head.startswith(b"HTTP/1.1 503") and b"discovery_capacity_exhausted" in body, (head, body)
+                held = next(stream for stream in pair if stream is not rejected)
+                held.setblocking(False)
+                try:
+                    observed = held.recv(1, socket.MSG_PEEK)
+                except BlockingIOError:
+                    pass
+                else:
+                    raise AssertionError(("retained discovery replied or closed", observed))
+                held.settimeout(.1)
+            finally:
+                for stream in pair:
+                    if stream is not held:
+                        stream.close()
+            assert status(store) == "owned_unavailable", "busy discovery lost owned-unavailable semantics"
+            held.close()
+            held = None
+            fixture.wait_for(lambda: info_reply(sock, store).startswith(b"HTTP/1.1 200"), "discovery reuse after disconnect")
+            control_fixture.assert_ordinary_capacity_busy(str(sock))
+
+            # Both content length and route kind are checked before any
+            # content-bearing parser can consume headroom or create scratch.
+            def oversized_body():
+                stream, _ = discovery(sock, store, length=3001)  # derived maximum is 2,997 bytes
+                return finish(stream, b"")
+
+            def malformed_body():
+                stream, _ = discovery(sock, store)
+                return finish(stream, b"not-json")
+
+            assert b"DiscoveryRequestTooLarge" in after_discovery_release(oversized_body)
+            assert b"invocation_error" in after_discovery_release(malformed_body)
+            mismatched = after_discovery_release(lambda: info_reply(sock, store, kind="configure"))
+            assert b"RouteKindMismatch" in mismatched, mismatched
+
+            def oversized_header():
+                with socket.socket(socket.AF_UNIX) as header:
+                    header.settimeout(3)
+                    header.connect(str(sock))
+                    header.sendall(b"POST /v1/host-info HTTP/1.1\r\n" + b"X: " + b"a" * 16384)
+                    return finish(header, b"")
+
+            assert b"HeaderTooLarge" in after_discovery_release(oversized_header)
+
+            # Six seconds of header trickle followed by body trickle cannot
+            # renew the ten-second budget from acceptance. Poll until EOF,
+            # rather than releasing this retained discovery ourselves.
+            held, began = retain_discovery(sock, store, header=b"POST /v1/host-info HTTP/1.1\r\nX-Slow: ")
+            while time.monotonic() - began < 6:
+                held.sendall(b"a")
+                time.sleep(.2)
+            held.sendall(b"\r\nContent-Type: application/json\r\nContent-Length: 2997\r\nX-Rui-Wire-Version: 1\r\n\r\n{")
+            while True:
+                try:
+                    chunk = held.recv(4096)
+                    if not chunk:
+                        break
+                except TimeoutError:
+                    held.sendall(b" ")
+                except (BrokenPipeError, ConnectionResetError):
+                    break
+                assert time.monotonic() - began < 12, "discovery trickle renewed its budget"
+            elapsed = time.monotonic() - began
+            assert 9 <= elapsed < 12, elapsed
+            held.close()
+            held = None
+            fixture.wait_for(lambda: info_reply(sock, store).startswith(b"HTTP/1.1 200"), "discovery reuse after deadline/errors")
+            if baseline is not None:
+                wait_for_descriptors(host.pid, baseline)
+            after = resource_sample(host.pid)
+            assert list((store / "scratch").iterdir()) == []
+            print(f"host discovery fixed-population resources (10 ordinary): {before} -> {after}; fd={len(baseline) if baseline else None}")
+            # These replies/EOF do not join their handlers. Exact release and
+            # subsequent control reuse are proved at the native owner boundary.
+            gate.release()
+            for reader in readers:
+                head, body = control_fixture.read_http_response(reader, timeout=5)
+                assert head.startswith(b"HTTP/1.1 200") and json.loads(body)["type"] == "session_report", (head, body)
+                reader.close()
+            readers.clear()
+            print("host discovery passed: bounded competition, hostile ingress, disconnect and deadline; no admission-release claim from EOF")
+            return
+        else:
+            stopped = subprocess.run([RUI, "host", "stop", "--store", store], capture_output=True, text=True, timeout=5)
+            assert stopped.returncode == 0 and "Stop acknowledged" in stopped.stdout, stopped
+            assert re.search(r"Host instance: ([0-9a-f]{32}) \(retry with --instance \1\)", stopped.stdout), stopped.stdout
+        assert gate.fd is not None and host.poll() is None, "stop required releasing ordinary readers"
+        assert status(store) == "owned_unavailable", "acknowledgement claimed lease release"
+        if held is not None:
+            held.close()
+            held = None
+        gate.release()
+        for reader in readers:
+            head, body = control_fixture.read_http_response(reader, timeout=5)
+            assert head.startswith(b"HTTP/1.1 200") and json.loads(body)["type"] == "session_report", (head, body)
+            reader.close()
+        readers.clear()
+        assert host.wait(timeout=5) != 0
+        assert status(store) == "unavailable"
+        print("host-stop saturation passed: ten captured ordinary readers; fresh CLI discovery + stop before release")
+    finally:
+        gate.release()
+        if held is not None:
+            held.close()
+        for reader in readers:
+            reader.close()
+        stop_process(host)
+        diagnostics.close()
 
 
 def mixed_effect_drain(provider_first):
@@ -178,6 +407,8 @@ def mixed_effect_drain(provider_first):
 def main():
     with tempfile.TemporaryDirectory(prefix="rui-host-stop-") as root:
         state = pathlib.Path(root)
+        saturated_stop(state, competing=False)
+        saturated_stop(state, competing=True)
         store = state / "store"
         gate = state / "bash-cleanup-gate"
         gate.write_text("held")
@@ -190,6 +421,7 @@ def main():
         replacement = None
         diagnostics = None
         pending = None
+        transferred = None
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
                                       "--test-bash-cleanup-gate-path", gate, "--test-phase-trace")
@@ -215,19 +447,18 @@ def main():
             assert int(occupied["custody_occupied"]) > 0, occupied
             held_fds = len(os.listdir(f"/proc/{host.pid}/fd")) if sys.platform == "linux" else None
 
-            # Both connections were accepted before shutdown. The second can
-            # retry its original instance after the listener has closed.
+            # Owned upload content proves ordinary classification before the
+            # stop needs headroom. Sending a request line alone cannot do that.
             pending, pending_body = request(sock, store, target)
-            transferred = socket.socket(socket.AF_UNIX)
-            transferred.settimeout(5)
-            transferred.connect(str(sock))
-            transferred.sendall(b"POST /v1/host-info HTTP/1.1\r\n")
+            transferred = lifecycle_fixture.hold_incomplete_connection(host, store)
             first = actor("stop", store, target, "after-commit")
             assert first == "TruncatedResponse", first
+            # A drop before admission also truncates the reply. Prove the
+            # first stop committed before the pending body could stop the Host.
+            fixture.wait_for(lambda: not sock.exists(), "listener closure before retry")
             retry = finish(pending, pending_body)
             assert retry.startswith(b"HTTP/1.1 200") and b'"status":"acknowledged"' in retry, retry
             pending = None
-            fixture.wait_for(lambda: not sock.exists(), "listener closure before cleanup")
             with socket.socket(socket.AF_UNIX) as newcomer:
                 try:
                     newcomer.connect(str(sock))
@@ -251,6 +482,7 @@ def main():
             if held_fds is not None:
                 assert drained_fds < held_fds, (held_fds, drained_fds)
             transferred.close()
+            transferred = None
             assert host.wait(timeout=10) != 0  # existing graceful owner reports EffectAwareShutdown
             diagnostics.close()
             diagnostics = None
@@ -284,6 +516,8 @@ def main():
             gate.unlink(missing_ok=True)
             if pending is not None:
                 pending.close()
+            if transferred is not None:
+                transferred.close()
             if diagnostics is not None and host is not None:
                 stop_process(host)
                 diagnostics.close()
