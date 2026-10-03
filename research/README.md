@@ -24,6 +24,8 @@ Maintained executable checks and recorded qualification live in [tests/qualifica
 
 [Terminal Unicode boundaries](rui-terminal-unicode-sources.md) compares strict UTF-8, grapheme segmentation and provisional cell-width evidence for bounded CLI editing; research behind the pinned utf8proc choice, not Mac display qualification.
 
+[Markdown parser candidates](markdown-parser-streaming-sources.md) compares MD4C, cmark-gfm and mdflow against Rui's forward terminal renderer using pinned source; none preserves answer-length-independent resident memory as an unmodified dependency.
+
 [Darwin child-status boundary](darwin-waitid-status-sources.md) compares pinned POSIX and XNU `waitid`/`waitpid` exit representations against a native Mac probe and Rui's Bash adapter. It identifies one reproduced mismatch; nearby boundaries are checks, not additional demonstrated defects.
 
 [Warm integration-test wall time](integration-test-wall-time-sources.md) cites Zig and Python primary sources for build scheduling and fixture shutdown, with measured Linux baselines and the fast/full gate boundary; it does not qualify platform latency or cold compilation.
