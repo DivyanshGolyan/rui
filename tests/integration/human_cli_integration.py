@@ -2870,8 +2870,55 @@ def main():
             print(f"retained human CLI failure state: {state}", file=sys.stderr)
 
 
+def bash_warnings():
+    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-bash-warnings-")).resolve()
+    home = state / "home"
+    home.mkdir()
+    workspace = state / "workspace"
+    workspace.mkdir()
+    store = state / "store"
+    host = fixture.start_host(store, None)
+    try:
+        for tools, permission, warns in (("none", "bypass", False),
+                ("edit", "bypass", False), ("bash", "ask", False), ("bash", "bypass", True),
+                ("bash,edit", "bypass", True)):
+            session = "warnings/" + tools + "-" + permission
+            run(home, "configure", "--store", store, "--session", session,
+                "--workspace", workspace, "--provider", "codex", "--model", "model-a",
+                "--tools", tools, "--permission-mode", permission)
+            listing = run(home, "sessions", "--store", store, "--all")
+            item = listing.split("Session: " + session + "\n", 1)[1].split("Session: ", 1)[0]
+            assert ("Bash runs without approval" in item) == warns, item
+            master, slave = open_terminal()
+            entered = subprocess.Popen([str(fixture.RUI), "--resume", session, "--store", str(store)],
+                env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
+            os.close(slave)
+            try:
+                opening = read_terminal(master, "> ")
+                assert ("Bash runs without approval" in opening) == warns, opening
+                assert ("Permission: bypass (Bash runs without approval)" in opening) == warns, opening
+                assert "Bash commands can run without asking you" not in opening, opening
+                status = terminal_step(master, "/status")
+                assert ("Bash commands can run without asking you" in status) == warns, status
+                if warns:
+                    terminal_step(master, '/configure --tools none')
+                    removed = terminal_step(master, "/status")
+                    assert "Bash commands can run without asking you" not in removed, removed
+                detach_terminal(master, entered)
+            finally:
+                if entered.poll() is None:
+                    entered.kill()
+                    entered.wait(timeout=5)
+                os.close(master)
+        print("Bash warnings: listing, opening and status require enabled Bash plus bypass")
+    finally:
+        fixture.stop_host(host)
+        shutil.rmtree(state)
+
+
 if __name__ == "__main__":
     observation_relay()
     resume_switch()
     main()
     activity_observation()
+    bash_warnings()
