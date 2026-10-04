@@ -967,8 +967,8 @@ test "oversized fence candidate is literal and does not enter code state" {
     for (0..128) |_| try renderer.feed("x");
     try renderer.feed("\n# heading\n");
     try renderer.finish();
-    try std.testing.expect(std.mem.startsWith(u8, output.written(), "```zig"));
-    try std.testing.expect(std.mem.endsWith(u8, output.written(), "\n\x1b[1mheading\x1b[0m\n"));
+    const expected = "```zig" ++ ("x" ** 128) ++ "\n\x1b[1mheading\x1b[0m\n";
+    try std.testing.expectEqualStrings(expected, output.written());
 }
 
 test "empty assistant content and empty fence add no text" {
@@ -1000,9 +1000,8 @@ test "unclosed and oversized fences remain literal and later headings still rend
     for (0..fence_limit) |_| try second.feed("x");
     try second.feed("\n```\n# next\n");
     try second.finish();
-    try std.testing.expect(std.mem.startsWith(u8, overflow.written(), "```sh\n"));
-    try std.testing.expect(std.mem.endsWith(u8, overflow.written(), "\n```\n\x1b[1mnext\x1b[0m\n"));
-    try std.testing.expectEqual(@as(usize, fence_limit + "```sh\n\n```\n# next\n".len - 2 + "\x1b[1m\x1b[0m".len), overflow.written().len);
+    const expected = "```sh\n" ++ ("x" ** fence_limit) ++ "\n```\n\x1b[1mnext\x1b[0m\n";
+    try std.testing.expectEqualStrings(expected, overflow.written());
 }
 
 test "fence overflow mid-line cannot reinterpret a suffix as the closing line" {
@@ -1013,7 +1012,8 @@ test "fence overflow mid-line cannot reinterpret a suffix as the closing line" {
     for (0..fence_limit - "```sh\n".len) |_| try renderer.feed("x");
     try renderer.feed("```\n# still code\n```\n# next\n");
     try renderer.finish();
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "```\n# still code\n```\n\x1b[1mnext\x1b[0m\n") != null);
+    const expected = "```sh\n" ++ ("x" ** (fence_limit - "```sh\n".len)) ++ "```\n# still code\n```\n\x1b[1mnext\x1b[0m\n";
+    try std.testing.expectEqualStrings(expected, output.written());
 }
 
 test "fence overflow immediately after a closing marker resumes markup" {
