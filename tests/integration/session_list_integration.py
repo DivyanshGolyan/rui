@@ -119,7 +119,7 @@ def main():
             assert len(json.dumps(after_growth[1]).encode()) < 4096
             safe = subprocess.run([RUI, "sessions", "--store", store, "--all"],
                 cwd=root, capture_output=True, text=True, timeout=10)
-            assert safe.returncode == 0 and "\\u0000" in safe.stdout and "\x00" not in safe.stdout, safe
+            assert safe.returncode == 0 and "\\x00" in safe.stdout and "\x00" not in safe.stdout, safe
             cursor = after_growth[1]["next"]
             seen = [item["reference"] for item in after_growth[1]["sessions"]]
             while cursor:

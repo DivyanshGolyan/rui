@@ -628,14 +628,34 @@ def main():
         (blocked_config / "preferences").chmod(0o600)
         (blocked_config / "requests").write_text("not a directory")
         codex_fixture.credentials(blocked_config / "codex.json")
+        sessions_before = run(preferences_home, "sessions", "--store", store, "--all", "--json")
         master, slave = pty.openpty()
+        original_mode = termios.tcgetattr(master)
         blocked = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
             env={**os.environ, "HOME": str(blocked_home)}, stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         try:
-            output = read_terminal(master, "configuration not confirmed")
-            assert "New Session intent" not in output and "request: " not in output, output
-            assert blocked.wait(timeout=5) != 0
+            # Capture fails before the send/uncertain-admission diagnostic.
+            output = read_terminal(master, "error: NotDir")
+            assert blocked.wait(timeout=5) == 1
+            # The reaped caller has closed its PTY. Include any final output
+            # before checking that no intent, handle or prompt escaped.
+            while True:
+                assert select.select([master], [], [], 0)[0], "failed caller retained its terminal"
+                try:
+                    tail = os.read(master, 65536)
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+                    break
+                if not tail:
+                    break
+                output += tail.decode(errors="replace")
+                assert len(output.encode()) < 1024 * 1024
+            assert "New Session intent" not in output and "request: " not in output and "rui> " not in output, output
+            assert termios.tcgetattr(master) == original_mode
+            assert (blocked_config / "requests").read_text() == "not a directory"
+            assert run(preferences_home, "sessions", "--store", store, "--all", "--json") == sessions_before
         finally:
             if blocked.poll() is None:
                 blocked.kill()
@@ -1201,7 +1221,7 @@ def main():
         os.close(slave)
         try:
             greeting = read_terminal(master, "rui> ")
-            assert "Session: human/name\\n\\u001b[2J\\u202e" in greeting, greeting
+            assert "Session: human/name\\n\\x1b[2J\\u202e" in greeting, greeting
             assert "\x1b[2J" not in greeting and "\u202e" not in greeting, greeting
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
@@ -1227,7 +1247,7 @@ def main():
             "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            assert waiter.stdout.readline() == "selected message: message\\n\\u001b[2J\\u202e\n"
+            assert waiter.stdout.readline() == "selected message: message\\n\\x1b[2J\\u202e\n"
             master, slave = pty.openpty()
             entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
                 "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
@@ -1236,7 +1256,7 @@ def main():
             try:
                 read_terminal(master, "rui> ")
                 status = terminal_step(master, "/status")
-                assert "Current message: message\\n\\u001b[2J\\u202e" in status, status
+                assert "Current message: message\\n\\x1b[2J\\u202e" in status, status
                 assert "\x1b[2J" not in status and "\u202e" not in status, status
                 assert "Detached." in terminal_step(master, "/exit", "Detached.")
                 assert entered.wait(timeout=5) == 0
@@ -1260,7 +1280,7 @@ def main():
             greeting = read_terminal(master, "rui> ")
             assert "Session: human/unsafe-key" in greeting, greeting
             status = terminal_step(master, "/status")
-            assert "message\\n\\u001b[2J\\u202e: completed" in status, status
+            assert "message\\n\\x1b[2J\\u202e: completed" in status, status
             assert "\x1b[2J" not in status and "\u202e" not in status, status
             assert "Detached." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
