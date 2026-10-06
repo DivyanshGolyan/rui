@@ -22,6 +22,8 @@ test {
     _ = @import("provider_output.zig");
     _ = @import("request_encoding.zig");
     _ = @import("tools.zig");
+    _ = @import("SessionTerminal.zig");
+    _ = @import("FrontendRead.zig");
     _ = @import("client.zig");
     _ = @import("cli.zig");
     _ = @import("TerminalText.zig");
