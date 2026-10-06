@@ -794,3 +794,150 @@ pub fn @"resume"(self: *Self) anyerror!void {
     self.deadline = if (incomplete(&self.editor)) std.Io.Clock.awake.now(self.io).nanoseconds + 2000000000 else null;
     self.output = true;
 }
+
+test "SessionTerminal layout clips rows without clipping exact draft" {
+    std.testing.refAllDecls(Self);
+    const plan = layout("a\n界é\n👩‍💻\nz", "a\n界é\n👩‍💻\nz".len, 8, 2);
+    try std.testing.expectEqual(@as(usize, 2), plan.first);
+    try std.testing.expectEqual(@as(usize, 2), plan.rows);
+    try std.testing.expectEqual(@as(usize, 1), plan.caret.col);
+    try std.testing.expectEqual(@as(usize, 3), layout("界é", "界é".len, 8, 2).caret.col);
+    try std.testing.expectEqual(@as(usize, 2), layout("👩‍💻", "👩‍💻".len, 8, 2).caret.col);
+    try std.testing.expectEqual(@as(usize, 8), layout("x\t", 2, 10, 2).caret.col);
+}
+
+test "SessionTerminal flag pair occupies two cells across cursor and wrap" {
+    const flag = "🇺🇸";
+    try std.testing.expectEqual(@as(usize, 2), layout(flag ++ "Z", flag.len, 8, 2).caret.col);
+    try std.testing.expectEqual(Position{ .row = 1, .col = 2 }, layout("xxxxxxx" ++ flag ++ "Z", 7 + flag.len, 8, 2).caret);
+    try std.testing.expectEqual(@as(usize, 1), layout("🇺", "🇺".len, 8, 2).caret.col);
+}
+
+test "SessionTerminal unresolved submission is immutable while the next draft changes" {
+    var buffers: [2][65536]u8 = undefined;
+    var owner: Self = .{ .io = std.testing.io, .editor = .{ .buffer = &buffers[0] }, .spare = &buffers[1], .original = undefined, .raw = undefined, .size = undefined };
+    for ("original") |byte| _ = owner.editor.feed(byte);
+    _ = owner.sealInput();
+    owner.captureReady();
+    try std.testing.expectEqual(@as(usize, 0), owner.draft().len);
+    for ("next") |byte| _ = owner.editor.feed(byte);
+    try std.testing.expectEqualStrings("original", owner.submitted.?.buffer[0..owner.submitted.?.length]);
+    try std.testing.expect(!owner.rejectSubmission());
+    owner.releaseSubmitted();
+    try std.testing.expectEqualStrings("next", owner.draft());
+    _ = owner.sealInput();
+    owner.captureReady();
+    try std.testing.expect(owner.rejectSubmission());
+    try std.testing.expectEqualStrings("next", owner.draft());
+    owner.editor.reset();
+    for ("fresh after rejection") |byte| _ = owner.editor.feed(byte);
+    _ = owner.sealInput();
+    owner.discardRejected();
+    try std.testing.expect(owner.submitted != null);
+    try std.testing.expectEqualStrings("fresh after rejection", owner.readyDraft().?);
+    owner.finishReady();
+}
+
+test "SessionTerminal command loan is independent of unresolved admission and next composition" {
+    var buffers: [2][65536]u8 = undefined;
+    var owner: Self = .{ .io = std.testing.io, .editor = .{ .buffer = &buffers[0] }, .spare = &buffers[1], .original = undefined, .raw = undefined, .size = undefined };
+    for ("original") |byte| _ = owner.editor.feed(byte);
+    _ = owner.sealInput();
+    owner.captureReady();
+    for ("/result old-key") |byte| _ = owner.editor.feed(byte);
+    const event = owner.holdCommand(owner.draft());
+    for ("next-draft") |byte| _ = owner.editor.feed(byte);
+    try std.testing.expectEqualStrings("/result old-key", event.command);
+    try std.testing.expectEqualStrings("original", owner.submitted.?.buffer[0..owner.submitted.?.length]);
+    owner.finishCommand();
+    try std.testing.expectEqualStrings("next-draft", owner.draft());
+    owner.releaseSubmitted();
+    owner.clearDraft();
+    _ = owner.holdCommand("/status");
+    for ("next message") |byte| _ = owner.editor.feed(byte);
+    _ = owner.sealInput();
+    owner.finishCommand();
+    try std.testing.expect(owner.ready);
+    try std.testing.expectEqualStrings("next message", owner.submitted.?.buffer[0..owner.submitted.?.length]);
+    owner.finishReady();
+}
+
+test "SessionTerminal Enter seals Message and command before subsequent input service" {
+    var buffers: [2][65536]u8 = undefined;
+    var owner: Self = .{ .io = std.testing.io, .editor = .{ .buffer = &buffers[0] }, .spare = &buffers[1], .original = undefined, .raw = undefined, .size = undefined };
+    for ("hello") |byte| _ = owner.editor.feed(byte);
+    const message = owner.sealInput();
+    _ = owner.editor.feed('!');
+    try std.testing.expectEqualStrings("hello", message.submit);
+    try std.testing.expectEqualStrings("hello", owner.readyDraft().?);
+    try std.testing.expectEqual(Event.busy, owner.sealInput());
+    try std.testing.expectEqualStrings("!", owner.draft());
+    owner.clearDraft();
+    for ("/status") |byte| _ = owner.editor.feed(byte);
+    const command = owner.sealInput();
+    for ("next") |byte| _ = owner.editor.feed(byte);
+    try std.testing.expectEqualStrings("/status", command.command);
+    try std.testing.expectEqualStrings("hello", message.submit);
+    try std.testing.expectEqualStrings("next", owner.draft());
+    owner.finishCommand();
+    owner.finishReady();
+    try std.testing.expect(owner.readyDraft() == null);
+    try std.testing.expectEqualStrings("next", owner.draft());
+}
+
+test "SessionTerminal exit detaches before a held command without treating escaped slash as exit" {
+    var buffers: [2][65536]u8 = undefined;
+    var owner: Self = .{ .io = std.testing.io, .editor = .{ .buffer = &buffers[0] }, .spare = &buffers[1], .original = undefined, .raw = undefined, .size = undefined };
+    const command = owner.holdCommand("/status");
+    for ("/exit") |byte| _ = owner.editor.feed(byte);
+    try std.testing.expectEqual(Event.eof, owner.sealInput());
+    try std.testing.expectEqualStrings("/status", command.command);
+    try std.testing.expect(owner.command_held and owner.submitted == null);
+    owner.clearDraft();
+    for ("//exit") |byte| _ = owner.editor.feed(byte);
+    const message = owner.sealInput();
+    try std.testing.expectEqualStrings("//exit", message.submit);
+    owner.finishCommand();
+    owner.finishReady();
+}
+
+test "SessionTerminal focused ingress expires before delayed tails and retires staging deadline" {
+    var buffers: [2][65536]u8 = undefined;
+    var owner: Self = .{ .io = std.testing.io, .editor = .{ .buffer = &buffers[0] }, .spare = &buffers[1], .original = undefined, .raw = undefined, .size = undefined };
+    for ("retained") |byte| _ = owner.editor.feed(byte);
+    for ([_]@FieldType(Self, "focus"){ .staging, .choice }) |focus| {
+        for ([_]u8{ '[', 'O' }) |prefix| {
+            owner.resetFocus(focus);
+            try owner.focusByte(27, 1000000000);
+            try std.testing.expectEqual(@as(i32, 80), try inputWait(&owner.focus_editor, &owner.focus_deadline, 1000000000, -1));
+            try owner.focusByte(prefix, 1020000000);
+            const due = owner.focus_deadline.?;
+            try std.testing.expectEqual(@as(i32, 1), try inputWait(&owner.focus_editor, &owner.focus_deadline, due - 1, 100));
+            try std.testing.expectError(error.IncompleteTerminalInput, owner.focusByte('C', due));
+            try std.testing.expect(owner.focus_editor.escape != .none);
+            try std.testing.expectEqualStrings("retained", owner.draft());
+            owner.resetFocus(focus);
+            try owner.focusByte(27, 1000000000);
+            try owner.focusByte(prefix, 1020000000);
+            try owner.focusByte('C', 3019999999);
+            try std.testing.expect(owner.focus_deadline == null);
+        }
+        owner.resetFocus(focus);
+        try owner.focusByte(27, 1000000000);
+        try owner.focusByte('l', 1080000000);
+        try std.testing.expectEqualStrings("l", owner.focus_editor.buffer[0..owner.focus_editor.length]);
+        try std.testing.expect(owner.focus_deadline == null);
+    }
+    owner.stageApproval();
+    try owner.focusByte(27, 1000000000);
+    try owner.focusByte('[', 1020000000);
+    owner.beginApproval();
+    try std.testing.expectEqual(@as(?i96, 3020000000), owner.focus_deadline);
+    owner.resetFocus(.choice); // The successful drain/flush transition.
+    try std.testing.expect(owner.focus_deadline == null);
+    try owner.focusByte('l', 5000000000);
+    try owner.focusByte('\n', 5000000001);
+    try std.testing.expectEqual(Editor.Event.submit, owner.focus_event);
+    owner.finishApproval();
+    try std.testing.expectEqualStrings("retained", owner.draft());
+}
