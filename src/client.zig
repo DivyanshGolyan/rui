@@ -1500,9 +1500,11 @@ pub fn checkCanonicalFailure(reply: CommandReply) !void {
         };
 
         code: Code = .other,
+        answer: struct { code: Code = .other } = .{},
     };
     // Reserve nesting first, including malformed N-opening-delimiter prefixes.
-    // Names/code decode one byte string at a time and free it before advancing.
+    // Names/code decode one byte string at a time and free it before advancing,
+    // including the answer field name before descending into its object.
     // With stack growth excluded, FBA grows/shrinks that last allocation in
     // place. Both byte arrays are bounded by stdlib's capacity growth formula.
     const capacity = comptime std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) +
@@ -1520,8 +1522,8 @@ pub fn checkCanonicalFailure(reply: CommandReply) !void {
         else => return error.InvalidResponse,
     };
     // Unknown values receive full syntax validation but no duplicate-key policy;
-    // only the consequential decoded code field must be unambiguous.
-    if (envelope.code == .canonical) return error.CanonicalStoreFailure;
+    // the decoded code, answer and answer.code fields must be unambiguous.
+    if (envelope.code == .canonical or envelope.answer.code == .canonical) return error.CanonicalStoreFailure;
 }
 
 test "canonical failure classifier validates complete string-only error envelope" {
@@ -1542,6 +1544,84 @@ test "canonical failure classifier validates complete string-only error envelope
     try checkCanonicalFailure(.{ .status = 503, .body = "{\"code\":\"unavailable\"}" });
     try checkCanonicalFailure(.{ .status = 500, .body = "{\"extra\":\"canonical_store_failure\"}" });
     try checkCanonicalFailure(.{ .status = 200, .body = "not an error envelope" });
+}
+
+test "canonical failure classifier validates nested command answer codes" {
+    for ([_][]const u8{
+        "{\"answer\":{\"code\":\"canonical_store_failure\"}}",
+        "{\"ans\\u0077er\":{\"co\\u0064e\":\"canonical_store_\\u0066ailure\"}}",
+        "{\"code\":\"other\",\"answer\":{\"code\":\"canonical_store_failure\"}}",
+        "{\"code\":\"canonical_store_failure\",\"answer\":{\"code\":\"other\"}}",
+        "{\"answer\":{\"code\":\"canonical_store_failure\",\"extra\":{\"x\":1,\"x\":2},\"extra\":null}}",
+    }) |body| try std.testing.expectError(error.CanonicalStoreFailure, checkCanonicalFailure(.{ .status = 500, .body = body }));
+    for ([_][]const u8{
+        "{\"answer\":{\"code\":\"canonical_store_failure\",\"co\\u0064e\":\"other\"}}",
+        "{\"answer\":{},\"ans\\u0077er\":{\"code\":\"canonical_store_failure\"}}",
+        "{\"answer\":{\"code\":\"canonical_store_failure\"},\"answer\":{}}",
+        "{\"answer\":{\"code\":\"canonical_store_failure\",\"extra\":[}}",
+        "{\"answer\":{\"code\":\"canonical_store_failure\"}} trailing",
+        "{\"answer\":{\"code\":null}}",
+        "{\"answer\":{\"code\":[99,97,110,111,110,105,99,97,108,95,115,116,111,114,101,95,102,97,105,108,117,114,101]}}",
+        "{\"answer\":null}",
+        "{\"answer\":[]}",
+        "{\"answer\":\"canonical_store_failure\"}",
+        "{\"code\":\"canonical_store_failure\",\"answer\":false}",
+    }) |body| try std.testing.expectError(error.InvalidResponse, checkCanonicalFailure(.{ .status = 500, .body = body }));
+    for ([_][]const u8{
+        "{}",
+        "{\"answer\":{}}",
+        "{\"answer\":{\"code\":\"unavailable\"}}",
+        "{\"answer\":{\"extra\":{\"code\":\"canonical_store_failure\"}}}",
+        "{\"extra\":{\"answer\":{\"code\":\"canonical_store_failure\"}}}",
+    }) |body| try checkCanonicalFailure(.{ .status = 503, .body = body });
+    try checkCanonicalFailure(.{ .status = 200, .body = "{\"answer\":{\"code\":\"canonical_store_failure\"}}" });
+}
+
+test "canonical failure classifier bounds nested maximum replies" {
+    var body: [protocol.max_response_bytes + 1]u8 = undefined;
+    const prefix = "{\"answer\":{\"code\":\"canonical_store_failure\",\"extra\":";
+    @memcpy(body[0..prefix.len], prefix);
+    const depth = (protocol.max_response_bytes - prefix.len - 3) / 2;
+    @memset(body[prefix.len..][0..depth], '[');
+    var length = prefix.len + depth;
+    body[length] = '0';
+    length += 1;
+    @memset(body[length..][0..depth], ']');
+    length += depth;
+    @memcpy(body[length..][0..2], "}}");
+    length += 2;
+    @memset(body[length..protocol.max_response_bytes], ' ');
+    try std.testing.expectError(error.CanonicalStoreFailure, checkCanonicalFailure(.{ .status = 500, .body = body[0..protocol.max_response_bytes] }));
+    body[protocol.max_response_bytes] = ' ';
+    try std.testing.expectError(error.InvalidResponse, checkCanonicalFailure(.{ .status = 500, .body = &body }));
+    @memset(body[prefix.len..protocol.max_response_bytes], '[');
+    try std.testing.expectError(error.InvalidResponse, checkCanonicalFailure(.{ .status = 500, .body = body[0..protocol.max_response_bytes] }));
+
+    // The escaped answer name is freed before recursion, then the long nested
+    // field name is freed before decoding code. No payload string is retained.
+    const field_prefix = "{\"ans\\u0077er\":{\"";
+    const field_suffix = "\":0,\"co\\u0064e\":\"canonical_store_\\u0066ailure\"}}";
+    @memcpy(body[0..field_prefix.len], field_prefix);
+    length = protocol.max_response_bytes - field_suffix.len - 6;
+    @memset(body[field_prefix.len..length], 'x');
+    @memcpy(body[length..][0..6], "\\u0078");
+    length += 6;
+    @memcpy(body[length..][0..field_suffix.len], field_suffix);
+    try std.testing.expectError(error.CanonicalStoreFailure, checkCanonicalFailure(.{ .status = 500, .body = body[0..protocol.max_response_bytes] }));
+
+    const names_prefix = "{\"answer\":{\"code\":\"canonical_store_failure\",";
+    @memcpy(body[0..names_prefix.len], names_prefix);
+    length = names_prefix.len;
+    const name = "\"\\u0061\":0,";
+    while (length + name.len + 2 <= protocol.max_response_bytes) {
+        @memcpy(body[length..][0..name.len], name);
+        length += name.len;
+    }
+    length -= 1;
+    @memcpy(body[length..][0..2], "}}");
+    length += 2;
+    @memset(body[length..protocol.max_response_bytes], ' ');
+    try std.testing.expectError(error.CanonicalStoreFailure, checkCanonicalFailure(.{ .status = 500, .body = body[0..protocol.max_response_bytes] }));
 }
 
 test "canonical failure classifier bounds deep wide and escaped maximum replies" {
