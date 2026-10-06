@@ -2519,7 +2519,7 @@ pub const Store = struct {
         if (request.end != 0 and (request.before_position > end or end >= current.next_position or
             end > std.math.maxInt(i64))) return error.InvalidCursor;
         if (request.before_position != 0) {
-            _ = self.publicConversationContentIdLocked(request.session.slice(), request.before_position, request.before_ordinal) catch |err| switch (err) {
+            _ = self.publicConversationContentLocked(request.session.slice(), request.before_position, request.before_ordinal) catch |err| switch (err) {
                 error.ContentNotFound => return error.InvalidCursor,
                 else => return err,
             };
@@ -2564,7 +2564,12 @@ pub const Store = struct {
             if (position <= 0 or ordinal < 0 or content_id <= 0 or
                 (kind != 1 and kind != 3 and kind != 4) or
                 (kind == 4) != (ordinal > 0)) return error.CorruptStore;
-            const metadata = try self.readContentMetadata(content_id);
+            // Do not filter damaged rows out of SQL: validate ordinary
+            // producers and the exposed content before publishing metadata.
+            const metadata = if (ordinal == 0)
+                (try self.publicConversationContentLocked(request.session.slice(), @intCast(position), 0)).metadata
+            else
+                try self.readPublicContentMetadata(content_id);
             page.items[page.count] = .{ .position = @intCast(position), .ordinal = @intCast(ordinal), .kind = switch (kind) {
                 1 => .user,
                 3 => .assistant,
@@ -2592,27 +2597,29 @@ pub const Store = struct {
     fn openPublicConversationContentLocked(self: *Store, request: protocol.ConversationContent) !ContentReader {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or
             request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
-        const content_id = try self.publicConversationContentIdLocked(request.session.slice(), request.position, request.ordinal);
-        const metadata = try self.readContentMetadata(content_id);
-        if (request.start > metadata.length) return error.RangeOutOfBounds;
-        return .{ .store = self, .content_id = content_id, .reference = .{ .length = metadata.length, .digest = metadata.digest }, .representation = if (try self.contentIsRaw(content_id, metadata.length)) .raw else .{ .projection = .{} } };
+        const content = try self.publicConversationContentLocked(request.session.slice(), request.position, request.ordinal);
+        if (request.start > content.metadata.length) return error.RangeOutOfBounds;
+        return .{ .store = self, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest }, .representation = if (try self.contentIsRaw(content.id, content.metadata.length)) .raw else .{ .projection = .{} } };
     }
 
-    fn publicConversationContentIdLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !i64 {
-        const statement = if (ordinal == 0)
-            try prepare(self.database, "SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND session_position=?2 AND entry_kind IN (1,3)")
-        else
-            try prepare(self.database, "SELECT coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_operation op " ++
-                "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
-                "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-                "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' AND call.call_ordinal+1=?3 " ++
-                "AND (SELECT max(coalesce(c.acceptance_position,a.acceptance_position)) FROM model_tool_call c " ++
-                "LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id)=?2 " ++
-                "AND (SELECT count(*) FROM model_tool_call c WHERE c.operation_id=op.operation_id)=" ++
-                "(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
-                "AND NOT EXISTS (SELECT 1 FROM model_tool_call c LEFT JOIN action_operation a " ++
-                "ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id " ++
-                "AND (coalesce(c.acceptance_position,a.acceptance_position) IS NULL OR coalesce(c.rejection_content_id,a.resolution_content_id) IS NULL))");
+    // A cursor and a byte reader resolve the same public identity and exposed
+    // metadata. Neither may accept a private or absent canonical result.
+    fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !struct { id: i64, metadata: ContentMetadata } {
+        if (ordinal == 0) {
+            const content_id = try self.publicOrdinaryContentLocked(session, position);
+            return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id) };
+        }
+        const statement = try prepare(self.database, "SELECT coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_operation op " ++
+            "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
+            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+            "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' AND call.call_ordinal+1=?3 " ++
+            "AND (SELECT max(coalesce(c.acceptance_position,a.acceptance_position)) FROM model_tool_call c " ++
+            "LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id)=?2 " ++
+            "AND (SELECT count(*) FROM model_tool_call c WHERE c.operation_id=op.operation_id)=" ++
+            "(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
+            "AND NOT EXISTS (SELECT 1 FROM model_tool_call c LEFT JOIN action_operation a " ++
+            "ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id " ++
+            "AND (coalesce(c.acceptance_position,a.acceptance_position) IS NULL OR coalesce(c.rejection_content_id,a.resolution_content_id) IS NULL))");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session);
         try bindU64(statement, 2, position);
@@ -2624,7 +2631,30 @@ pub const Store = struct {
         }
         const content_id = c.sqlite3_column_int64(statement, 0);
         if (content_id <= 0) return error.CorruptStore;
-        return content_id;
+        return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id) };
+    }
+
+    // One indexed ordinary identity owns provenance for pages, cursors and bytes.
+    // LEFT JOIN retains damaged dependencies so absence cannot hide corruption.
+    fn publicOrdinaryContentLocked(self: *Store, session: []const u8, position: u64) !i64 {
+        const statement = try prepare(self.database, "SELECT e.content_id,CASE WHEN c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
+            "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
+            "(e.entry_kind=3 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id AND o.resolution_content_id=e.content_id)) THEN 1 ELSE 0 END " ++
+            "FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
+            "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
+            "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
+            "LEFT JOIN content c ON c.content_id=e.content_id " ++
+            "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session);
+        try bindU64(statement, 2, position);
+        switch (c.sqlite3_step(statement)) {
+            c.SQLITE_DONE => return error.ContentNotFound,
+            c.SQLITE_ROW => {},
+            else => return error.ConversationReadFailed,
+        }
+        if (c.sqlite3_column_int(statement, 1) != 1) return error.CorruptStore;
+        return try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore;
     }
 
     pub fn captureSessionReport(
@@ -5881,16 +5911,24 @@ pub const Store = struct {
         return content_id;
     }
 
-    const ContentMetadata = struct { length: u64, digest: [32]u8 };
+    const ContentMetadata = struct { length: u64, digest: [32]u8, private: bool };
 
     fn readContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
-        const statement = try prepare(self.database, "SELECT byte_length,digest FROM content WHERE content_id=?1");
+        const statement = try prepare(self.database, "SELECT byte_length,digest,private FROM content WHERE content_id=?1");
         defer _ = c.sqlite3_finalize(statement);
         try bindI64(statement, 1, content_id);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
         const length = c.sqlite3_column_int64(statement, 0);
         if (length < 0) return error.CorruptStore;
-        return .{ .length = @intCast(length), .digest = try readDigest(statement, 1) };
+        return .{ .length = @intCast(length), .digest = try readDigest(statement, 1), .private = c.sqlite3_column_int(statement, 2) != 0 };
+    }
+
+    // Every public metadata/byte route validates the exposed content, never
+    // its projection backing: raw provider source rows are legitimately private.
+    fn readPublicContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
+        const metadata = try self.readContentMetadata(content_id);
+        if (metadata.private) return error.CorruptStore;
+        return metadata;
     }
 
     fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {
@@ -11060,9 +11098,179 @@ test "public content SQL failure fences Store instead of reporting absence" {
     };
     c.sqlite3_progress_handler(storage.database, 1, Interrupt.progress, null);
     defer c.sqlite3_progress_handler(storage.database, 0, null, null);
-    try std.testing.expectError(error.PublicContentReadFailed, storage.openPublicConversationContent(request));
+    // The shared provenance query is interrupted during preparation, before
+    // identity lookup can step. Either phase must retain the public fence.
+    try std.testing.expectError(error.StatementPrepareFailed, storage.openPublicConversationContent(request));
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.openPublicConversationContent(request));
+}
+
+test "public content SQLite step failure fences after successful preparation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "step-config", "direct/read-step");
+    try submitTestMessage(&storage, &tmp, "step-input", "step-key", "direct/read-step", "step text");
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    var request = protocol.ConversationContent{ .position = 1 };
+    try request.session.set("direct/read-step");
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{ .session = request.session, .position = 999 }));
+    try std.testing.expect(!storage.isFenced());
+    const Interrupt = struct {
+        database: *c.sqlite3,
+        interrupted_step: bool = false,
+
+        fn progress(context: ?*anyopaque) callconv(.c) c_int {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            var statement = c.sqlite3_next_stmt(self.database, null);
+            while (statement != null) : (statement = c.sqlite3_next_stmt(self.database, statement)) {
+                // Preparation may also invoke progress. Interrupt only a
+                // statement that has actually entered sqlite3_step.
+                if (c.sqlite3_stmt_busy(statement) != 0) {
+                    self.interrupted_step = true;
+                    return 1;
+                }
+            }
+            return 0;
+        }
+    };
+    var interrupt = Interrupt{ .database = storage.database };
+    c.sqlite3_progress_handler(storage.database, 1, Interrupt.progress, &interrupt);
+    defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+    try std.testing.expectError(error.ConversationReadFailed, storage.openPublicConversationContent(request));
+    try std.testing.expect(interrupt.interrupted_step);
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectError(error.StoreFenced, storage.openPublicConversationContent(request));
+}
+
+const TestingPublicReadRoute = enum { page, content, cursor };
+
+fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: bool) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "ordinary-config", "direct/corrupt");
+    try submitTestMessage(&storage, &tmp, "ordinary-input", "ordinary-key", "direct/corrupt", "public input");
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    var request = protocol.ConversationPage{};
+    try request.session.set("direct/corrupt");
+    const valid = try storage.publicConversationPage(request);
+    try std.testing.expectEqual(@as(usize, 1), valid.count);
+    try std.testing.expect(valid.items[0].kind == .user);
+    if (foreign_turn) {
+        try configureTestSession(&storage, "foreign-config", "direct/foreign");
+        try submitTestMessage(&storage, &tmp, "foreign-input", "foreign-key", "direct/foreign", "other input");
+        _ = (try storage.admitNextModelAttempt(.{})).?;
+        try exec(storage.database, "UPDATE conversation_entry SET turn_id=(SELECT turn_id FROM turn WHERE session_ref='direct/foreign') WHERE session_ref='direct/corrupt' AND entry_kind=1");
+    } else {
+        try exec(storage.database, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM conversation_entry WHERE session_ref='direct/corrupt' AND entry_kind=1)");
+    }
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+    request.end = valid.end;
+    if (route == .cursor) request.before_position = valid.items[0].position;
+    const result: anyerror!void = if (route == .content)
+        if (storage.openPublicConversationContent(.{ .session = request.session, .position = valid.items[0].position })) |reader_value| blk: {
+            var reader = reader_value;
+            reader.close();
+            break :blk {};
+        } else |err| err
+    else if (storage.publicConversationPage(request)) |_| {} else |err| err;
+    try std.testing.expectError(error.CorruptStore, result);
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectError(error.StoreFenced, storage.publicConversationPage(request));
+    try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+}
+
+test "public ordinary private bytes and cursor fence" {
+    try testingOrdinaryPublicCorruption(.content, false);
+    try testingOrdinaryPublicCorruption(.cursor, false);
+}
+
+test "public ordinary private page fences" {
+    try testingOrdinaryPublicCorruption(.page, false);
+}
+
+test "public foreign Turn bytes and cursor fence" {
+    try testingOrdinaryPublicCorruption(.content, true);
+    try testingOrdinaryPublicCorruption(.cursor, true);
+}
+
+test "public foreign Turn page fences" {
+    try testingOrdinaryPublicCorruption(.page, true);
+}
+
+fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { private, missing }) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "tool-config", "direct/corrupt-tool");
+    try submitTestMessage(&storage, &tmp, "tool-input", "tool-key", "direct/corrupt-tool", "run tool");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+    try settleCallsForTesting(&storage, &tmp, binding, "tool-output", &calls);
+    var request = protocol.ConversationPage{};
+    try request.session.set("direct/corrupt-tool");
+    const valid = try storage.publicConversationPage(request);
+    try std.testing.expectEqual(@as(usize, 2), valid.count);
+    const item = valid.items[0];
+    try std.testing.expect(item.kind == .tool_result and item.ordinal == 1);
+    {
+        var reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal });
+        defer reader.close();
+        var bytes: [64]u8 = undefined;
+        const count = try reader.read(0, &bytes);
+        try std.testing.expectEqualStrings("Unknown tool: unknown.", bytes[0..count]);
+    }
+    // Damage the exposed result after real settlement, not its legitimate
+    // private provider backing. Keep the complete group's identity visible.
+    switch (damage) {
+        .private => try exec(storage.database, "UPDATE content SET private=1 WHERE content_id=(SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=0)"),
+        .missing => {
+            try exec(storage.database, "PRAGMA foreign_keys=OFF");
+            try exec(storage.database, "DELETE FROM content WHERE content_id=(SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=0)");
+            try exec(storage.database, "PRAGMA foreign_keys=ON");
+        },
+    }
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+    request.end = valid.end;
+    if (route == .cursor) {
+        request.before_position = item.position;
+        request.before_ordinal = item.ordinal;
+    }
+    const result: anyerror!void = if (route == .content)
+        if (storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal })) |reader_value| blk: {
+            var reader = reader_value;
+            reader.close();
+            break :blk {};
+        } else |err| err
+    else if (storage.publicConversationPage(request)) |_| {} else |err| err;
+    try std.testing.expectError(error.CorruptStore, result);
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectError(error.StoreFenced, storage.publicConversationPage(request));
+    try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+}
+
+test "public private tool bytes fence" {
+    try testingToolPublicCorruption(.content, .private);
+}
+
+test "public private tool page fences" {
+    try testingToolPublicCorruption(.page, .private);
+}
+
+test "public private tool cursor fences" {
+    try testingToolPublicCorruption(.cursor, .private);
+}
+
+test "public completed tool group with missing exposed content fences" {
+    try testingToolPublicCorruption(.page, .missing);
+    try testingToolPublicCorruption(.content, .missing);
+    try testingToolPublicCorruption(.cursor, .missing);
 }
 
 test "private-only model output never becomes public conversation" {
@@ -11379,7 +11587,7 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expect((try later_view.nextEntry(position)) == null);
 }
 
-test "continued accepted output keeps model immutable" {
+test "continued accepted output keeps model immutable and public projection readable" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
@@ -11474,10 +11682,32 @@ test "continued accepted output keeps model immutable" {
     try std.testing.expectEqual(@as(usize, 2), public_page.count);
     try std.testing.expect(public_page.items[0].kind == .assistant);
     var public_reader = try storage.openPublicConversationContent(.{ .session = public_request.session, .position = public_page.items[0].position });
+    try std.testing.expect(public_reader.representation == .projection);
+    {
+        const backing = try prepare(storage.database, "SELECT exposed.private,source.private FROM answer_text_projection projection " ++
+            "JOIN content exposed ON exposed.content_id=projection.answer_content_id " ++
+            "JOIN content source ON source.content_id=projection.source_content_id WHERE projection.answer_content_id=?1");
+        defer _ = c.sqlite3_finalize(backing);
+        try bindI64(backing, 1, public_reader.content_id);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(backing));
+        try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_column_int(backing, 0));
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_column_int(backing, 1));
+        try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(backing));
+    }
     var decoded: [6]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 6), try public_reader.read(0, &decoded));
     try std.testing.expectEqualStrings("answer", &decoded);
     public_reader.close();
+    const before_answer = try storage.publicConversationPage(.{
+        .session = public_request.session,
+        .end = public_page.end,
+        .before_position = public_page.items[0].position,
+    });
+    try std.testing.expectEqual(@as(usize, 1), before_answer.count);
+    try std.testing.expect(before_answer.items[0].kind == .user);
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     {
         const resolution = try prepare(
             storage.database,
