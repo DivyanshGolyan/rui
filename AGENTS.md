@@ -1,21 +1,25 @@
 # Working on Rui
 
-Build the simplest complete runtime users can explain through ordinary work, failure and recovery. Prefer the simplest coherent final design over the smallest diff; justify machinery by required behavior or demonstrated cost.
+Build the simplest complete runtime users can explain through ordinary work, failure and recovery. Prefer a coherent final design over the smallest diff; justify machinery by required behavior or demonstrated cost.
 
-## Task router
+## Before work
 
-Read [README.md](README.md) for scope/status, affected [ARCHITECTURE.md](ARCHITECTURE.md) sections for accepted behavior/terminology/rationale, and applicable [VERIFICATION.md](VERIFICATION.md) cases for required evidence. GitHub issues own unresolved decisions; [issue #2](https://github.com/DivyanshGolyan/rui/issues/2) owns readiness. For issue-driven work, read the live issue, relevant discussion and dependencies; follow the latest accepted decision rather than historical planning instructions.
+Inspect the working-tree diff; preserve concurrent work. Read [README.md](README.md) for scope/status and affected [ARCHITECTURE.md](ARCHITECTURE.md) sections for accepted behavior.
 
-Read the following standards **before the corresponding work**; multiple routes can apply:
+Load applicable guidance before acting; routes combine:
 
-- **Design, implement or fix code, resources or build configuration:** [Implementation and design](CODING_STANDARDS.md#implementation-and-design), including owner transitions, resource/custody cleanup and performance constraints.
-- **Review code or design, or implement review findings:** [Review](CODING_STANDARDS.md#review), including the mandatory independent read-only opinion and programmer's lens. Reviews remain read-only unless fixes are requested.
-- **Write tests, verify changes or report evidence:** [Verification and evidence](CODING_STANDARDS.md#verification-and-evidence), including owner-boundary oracles and regression negative controls; use [canonical gates](VERIFICATION.md#canonical-gates) for required commands and cadence.
-- **Change documentation, terminology or decisions:** [Documentation maintenance](CODING_STANDARDS.md#documentation-maintenance), including single contract ownership and the no-parallel-ADR/glossary policy. Load `writing-for-agents` before editing skills, this file or Markdown reached from it.
-- **Use skills, manage issues or write PR descriptions:** [Repository tools and skill precedence](CODING_STANDARDS.md#repository-tools-and-skill-precedence).
+- **Implement, design, debug, change builds, or review engineering:** [Engineering](CODING_STANDARDS.md#engineering).
+- **Review, including documentation, or implement review findings:** [Review](CODING_STANDARDS.md#review). Reviews are read-only unless fixes are requested.
+- **Implement or review performance changes:** [Performance](CODING_STANDARDS.md#performance), including build-latency exceptions.
+- **Change documentation, terminology or decisions:** [Contract maintenance](CODING_STANDARDS.md#contract-maintenance). Load `writing-for-agents` before editing skills, this file or Markdown reached from it.
+- **Implement, test, verify or report:** [Evidence](CODING_STANDARDS.md#evidence) and applicable [Verification](VERIFICATION.md) cases.
+- **Issue work:** read the live issue, discussion and dependencies, then [issue guidance](docs/agents/issue-tracker.md) and [triage labels](docs/agents/triage-labels.md). Follow the latest accepted decision. [Issue #2](https://github.com/DivyanshGolyan/rui/issues/2) owns readiness.
+- **PR descriptions:** use `pr`.
 
-## Authority to act
+## Authority
 
-Inspect the working-tree diff before changes; preserve concurrent work. Carry authorized work through applicable verification and issue acceptance criteria without reopening settled choices. Resolve routine reversible choices from the contract and code. For unresolved consequential behavior/architecture/scope choices, missing access or authorization, first complete independent authorized work, then present bounded options, a recommendation and machinery/failure consequences.
+User instructions outrank skill guidelines; Rui's owning documentation governs repository policy over generic skills. Skills supply techniques, not authorization or contract homes. Resolve conflicts on that basis before asking; cite the exact skill instruction if it would pause or divert work.
 
-Implementation approval does not authorize pushing, creating/updating PRs or issues, closing issues, merging, deploying or other shared/irreversible effects. Obtain specific authorization unless already granted; prepare the local result first.
+Resolve reversible choices within the accepted contract. For unresolved consequential behavior, architecture or scope, missing access or authorization, complete independent authorized work first; present bounded options, a recommendation and machinery/failure consequences.
+
+Implementation approval does not authorize pushing, issue/PR mutations, closing, merging, deploying or other shared/irreversible effects. Obtain specific authorization.
