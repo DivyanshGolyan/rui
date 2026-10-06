@@ -6,21 +6,21 @@ Build the simplest complete runtime users can explain through ordinary work, fai
 
 Read [README.md](README.md) for scope/status, affected [ARCHITECTURE.md](ARCHITECTURE.md) sections for behavior/terminology, and applicable [VERIFICATION.md](VERIFICATION.md) cases for required evidence.
 
-Each requirement has one home. Edit its owning section and affected verification cases; keep rationale beside the contract. Remove superseded text rather than adding parallel ADRs, proposals, glossaries, summaries or amendment ledgers. Git preserves history. Keep [research/README.md](research/README.md) a compact index of reproducible evidence.
+Each requirement has one home. Edit its owning section and affected verification cases; keep rationale beside the contract. Remove superseded text rather than adding parallel ADRs, proposals, glossaries, summaries or amendment ledgers. Keep [research/README.md](research/README.md) a compact index of reproducible evidence.
 
 For issue-driven work, read the live issue, relevant discussion and dependencies. [Issue #2](https://github.com/DivyanshGolyan/rui/issues/2) owns readiness. Open issues hold unresolved decisions/research; implementation slices link accepted contracts and define proof. Follow the latest accepted decision, not historical planning instructions. Use technical judgment within scope; involve the user in consequential behavior or scope choices while continuing independent work.
 
-Inspect source before claiming implementation. Distinguish accepted behavior, prototype evidence, production qualification and remaining uncertainty.
+Distinguish accepted behavior, prototype evidence, production qualification and remaining uncertainty.
 
 ## Make changes
 
-Inspect the working-tree diff first; preserve concurrent work. Keep reviews read-only unless fixes are requested. Infer intent from the request and conversation; carry authorized work through implementation, applicable verification and issue acceptance criteria without reopening settled choices or stopping at a scaffold.
+Inspect the working-tree diff first; preserve concurrent work. Keep reviews read-only unless fixes are requested. Carry authorized work through implementation, applicable verification and issue acceptance criteria without reopening settled choices or stopping at a scaffold.
 
 Resolve routine reversible choices from the contract and code. Ask only for unresolved consequential product/architecture choices, missing access or authorization. Before asking, complete already-authorized independent work so the question is concrete and reviewable; give bounded options, a recommendation and their machinery/failure consequences.
 
 Implementation approval does not authorize pushing, creating/updating PRs or issues, closing issues, merging, deploying or other shared/irreversible effects. Obtain specific authorization unless already granted; prepare the local result first.
 
-Delegate bounded independent investigations when they save time or improve evidence, and obtain independent opinions on material design questions. Parallelize independent work where tools allow; continue settled work while it runs. Retain ownership of the core task, validate returned evidence and integrate results.
+Delegate bounded independent investigations when they save time or improve evidence, and obtain independent opinions on material design questions.
 
 Follow the [Zig 0.16 style guide](https://ziglang.org/documentation/0.16.0/#Style-Guide) and installed standard-library APIs: `TitleCase` for types/type-producing functions and files with top-level instance fields, `camelCase` for other functions, `snake_case` for values and namespace files. Name declarations in their full namespace without redundant prefixes or miscellaneous utility buckets. Keep helpers with their consumer until a shared responsibility warrants extraction.
 
@@ -45,7 +45,7 @@ Review simplicity alongside correctness in every PR and local review, including 
 - Trace affected design beyond changed lines to owning state/control flow, including existing causes of workarounds. Flag duplicated authority, scattered policy and dependencies on private representation, call order or cleanup details; connect each finding to the change.
 - Justify affected state, layers, caches, queues and per-slot allocations by required behavior or demonstrated cost. Prefer the smallest complete correction at the responsible owner, including removal/replacement, over another special case. More changed lines can be simpler; keep unrelated cleanup separate.
 - For each finding, identify code, scenario, consequence, smallest correction and guarantees to preserve. Quantify relevant memory multipliers; distinguish estimates from measurements.
-- Report actionable design consequences, excluding personal style, speculative extensibility and gate-enforced formatting. Passing tests does not waive simplicity review.
+- Report actionable design consequences, excluding personal style, speculative extensibility and gate-enforced formatting.
 
 For every review, obtain a read-only opinion from an agent independent of implementer and reviewer before implementing findings. Validate findings against the contract and owning state/control flow. Recommend the smallest complete correction, what can be removed, and how to verify memory and behavior. Prioritize simplicity, explainability and memory efficiency over implementation speed; require evidence before adding machinery.
 
@@ -61,7 +61,7 @@ For fast development feedback, keep Zig caches warm and run the narrowest releva
 
 For documentation, check contract preservation, references and `git diff --check`. Report changes, passed checks and material limits, including pre-existing failures and interrupted/unrun checks. State the actual delivery state: local, committed, published or deployed. Keep prototype, compile and process-crash evidence distinct from production and power-loss qualification.
 
-Lead with the main point in concise, concrete paragraphs; use lists only when they help. Distinguish observations, recommendations, decisions and evidence limits. Explain unfamiliar designs through concrete caller flows in small steps. Report meaningful findings or blockers rather than routine progress narration or canned summaries.
+Distinguish observations, recommendations, decisions and evidence limits. Explain unfamiliar designs through concrete caller flows in small steps.
 
 ## Documentation and repository tools
 
