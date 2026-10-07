@@ -307,10 +307,11 @@ pub const SessionListReply = union(enum) {
     failure: ReadFailure,
 
     /// Borrowed scratch/reply bytes are consumed here; returned facts own their
-    /// strings. This boundary is shared by CLI and later typed callers.
+    /// strings. The report body must start at file offset zero; bytes beyond its
+    /// advertised length are not part of this exchange. The file is not changed.
     pub fn decode(io: std.Io, file: std.Io.File, workspace: ?[]const u8, cursor: SessionListCursor, reply: ReportReply) !SessionListReply {
         return switch (reply) {
-            .report => .{ .page = try SessionListPage.read(io, file, workspace, cursor) },
+            .report => |report| .{ .page = try SessionListPage.read(io, file, report.bytes, workspace, cursor) },
             .command => |command| .{ .failure = try decodeReadFailure(command, false) },
         };
     }
@@ -377,9 +378,10 @@ pub const SessionListPage = struct {
     count: usize = 0,
     next: ?SessionListCursor = null,
 
-    /// Reads a complete report from caller-owned scratch, from byte zero.
+    /// Reads exactly [0, bytes) from caller-owned scratch, not its physical EOF.
     /// No file/resource escapes; malformed input never yields a partial page.
-    pub fn read(io: std.Io, file: std.Io.File, workspace: ?[]const u8, cursor: SessionListCursor) !SessionListPage {
+    pub fn read(io: std.Io, file: std.Io.File, bytes: u64, workspace: ?[]const u8, cursor: SessionListCursor) !SessionListPage {
+        if (bytes == 0) return error.InvalidSessionPage;
         cursor.validate() catch return error.InvalidSessionPage;
         const Rows = struct {
             rows: [protocol.session_list_page_size]Row = undefined,
@@ -404,14 +406,17 @@ pub const SessionListPage = struct {
             next: ?struct { after: JsonString(20), ceiling: JsonString(20) },
         };
         var input_buffer: [protocol.content_window_bytes]u8 = undefined;
-        var file_reader = file.reader(io, &input_buffer);
+        var file_reader = file.reader(io, &.{});
+        var body = file_reader.interface.limited(.limited64(bytes), &input_buffer);
         // One decoded maximum Workspace token, field names and scanner stack;
         // rows are fixed values, not allocator-backed collections or a DOM.
         var storage: [2 * protocol.max_workspace_bytes + protocol.content_window_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
-        var reader = std.json.Reader.init(fixed.allocator(), &file_reader.interface);
+        var reader = std.json.Reader.init(fixed.allocator(), &body.interface);
         defer reader.deinit();
         const wire = std.json.parseFromTokenSourceLeaky(Wire, fixed.allocator(), &reader, .{ .ignore_unknown_fields = true }) catch return error.InvalidSessionPage;
+        // Underlying physical EOF can precede the limit even after valid JSON.
+        if (body.remaining != .nothing) return error.InvalidSessionPage;
         if (!wire.version.eql("1") or !wire.type.eql("session_list")) return error.InvalidSessionPage;
         var result: SessionListPage = .{ .rows = wire.sessions.rows, .count = wire.sessions.count };
         for (result.rows[0..result.count], 0..) |*row, index| {
@@ -863,6 +868,7 @@ pub fn inspectSession(
 /// Streams one complete JSON page into destination. A non-200 reply borrows
 /// reply_buffer; a partial destination after an I/O error is not a valid page.
 /// Pass the response's next cursor and the same workspace for continuation.
+/// File writes begin at the caller's current offset, without rewind/truncation.
 pub fn listSessions(
     io: std.Io,
     store_path: []const u8,
@@ -3212,6 +3218,78 @@ test "Session list reply owns read failure facts without asserting absence or ad
     try std.testing.expectEqual(error.HostInvocationFailed, reply.failure.err());
 }
 
+test "Session list byte range rejects zero instead of decoding an older page" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "page", .{ .read = true });
+    defer file.close(io);
+    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}";
+    try file.writePositionalAll(io, wire, 0);
+    try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = 0 } }));
+}
+
+test "Session list byte range reads a shorter overwritten prefix without changing borrowed storage" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "page", .{ .read = true });
+    defer file.close(io);
+    const old = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"old\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"}],\"next\":null}";
+    const current = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}";
+    try file.writePositionalAll(io, old, 0);
+    try file.writePositionalAll(io, current, 0);
+    const reply = try SessionListReply.decode(io, file, "/w", .{}, .{ .report = .{ .bytes = current.len } });
+    try std.testing.expectEqual(@as(usize, 0), reply.page.count);
+    try std.testing.expectEqual(@as(?SessionListCursor, null), reply.page.next);
+    var bytes: [old.len]u8 = undefined;
+    try std.testing.expectEqual(old.len, try file.length(io));
+    try std.testing.expectEqual(old.len, try file.readPositionalAll(io, &bytes, 0));
+    try std.testing.expectEqualStrings(current, bytes[0..current.len]);
+    try std.testing.expectEqualStrings(old[current.len..], bytes[current.len..]);
+    var writer = std.Io.Writer.fixed(&bytes);
+    try reply.page.writeJson(&writer);
+    try std.testing.expectEqualStrings(current, writer.buffered());
+}
+
+test "Session list byte range rejects physical EOF before promised completion" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "page", .{ .read = true });
+    defer file.close(io);
+    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}";
+    try file.writePositionalAll(io, wire, 0);
+    try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = wire.len + 1 } }));
+}
+
+test "Session list byte range rejects a promise excluding the final delimiter" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "page", .{ .read = true });
+    defer file.close(io);
+    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}";
+    try file.writePositionalAll(io, wire, 0);
+    try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = wire.len - 1 } }));
+}
+
+test "Session list byte range validates junk inside and ignores junk outside the promise" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "page", .{ .read = true });
+    defer file.close(io);
+    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}";
+    try file.writePositionalAll(io, wire ++ "false", 0);
+    try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = wire.len + 5 } }));
+    const reply = try SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = wire.len } });
+    try std.testing.expectEqual(@as(usize, 0), reply.page.count);
+    try file.writePositionalAll(io, wire ++ " \n\r", 0);
+    const spaced = try SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = wire.len + 3 } });
+    try std.testing.expectEqual(@as(usize, 0), spaced.page.count);
+}
+
 test "Session list facts reject malformed metadata and consequential ambiguity" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -3228,7 +3306,7 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
         const file = try tmp.dir.createFile(io, std.fmt.comptimePrint("page-{d}", .{index}), .{ .read = true });
         defer file.close(io);
         try file.writePositionalAll(io, wire, 0);
-        try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, null, .{}));
+        try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, wire.len, null, .{}));
     }
     const prefix = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"s\",\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",";
     inline for (.{
@@ -3242,8 +3320,9 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
     }, 0..) |suffix, index| {
         const file = try tmp.dir.createFile(io, std.fmt.comptimePrint("row-{d}", .{index}), .{ .read = true });
         defer file.close(io);
-        try file.writePositionalAll(io, prefix ++ suffix ++ "}],\"next\":null}", 0);
-        try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, null, .{}));
+        const wire = prefix ++ suffix ++ "}],\"next\":null}";
+        try file.writePositionalAll(io, wire, 0);
+        try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, wire.len, null, .{}));
     }
 }
 
@@ -3274,8 +3353,9 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     }
     try writer.writeAll("],\"next\":{\"after\":\"19\",\"ceiling\":\"23\"}}");
     try writer.flush();
-    try std.testing.expect(try file.length(io) > protocol.content_window_bytes);
-    const page = try SessionListPage.read(io, file, &workspace, .{ .after = 11, .ceiling = 23 });
+    const length = try file.length(io);
+    try std.testing.expect(length > protocol.content_window_bytes);
+    const page = try SessionListPage.read(io, file, length, &workspace, .{ .after = 11, .ceiling = 23 });
     try std.testing.expectEqual(@as(usize, 8), page.count);
     try std.testing.expectEqual(@as(u64, 19), page.next.?.after);
     try std.testing.expectEqual(@as(u64, 23), page.next.?.ceiling);
@@ -3286,9 +3366,9 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
         try std.testing.expectEqualStrings(&model, row.model.slice());
         try std.testing.expect(row.tools.edit and !row.tools.bash and row.permission_mode == .bypass);
     }
-    try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, "/wrong", .{}));
-    try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, null, .{ .after = 19, .ceiling = 23 }));
-    try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, null, .{ .after = 11, .ceiling = 29 }));
+    try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, length, "/wrong", .{}));
+    try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, length, null, .{ .after = 19, .ceiling = 23 }));
+    try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, length, null, .{ .after = 11, .ceiling = 29 }));
 }
 
 test "control captures attain their exact worst-case request bounds" {
