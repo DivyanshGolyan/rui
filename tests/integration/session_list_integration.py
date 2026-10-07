@@ -8,8 +8,9 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 
-from host_process import start_ready_process, stop_process
+from host_process import HostDiagnostics, start_ready_process, stop_process
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -38,7 +39,87 @@ def linux_resources(pid):
     if not status.exists():
         return None
     rss = next(int(line.split()[1]) for line in status.read_text().splitlines() if line.startswith("VmRSS:"))
-    return {"rss_kib": rss, "fds": len(list(pathlib.Path(f"/proc/{pid}/fd").iterdir()))}
+    identities = {}
+    for entry in pathlib.Path(f"/proc/{pid}/fd").iterdir():
+        metadata = entry.stat()
+        identities[int(entry.name)] = (metadata.st_dev, metadata.st_ino,
+                                      metadata.st_mode, os.readlink(entry))
+    return {"rss_kib": rss, "fds": len(identities), "identities": identities}
+
+
+def trace_u64(record, field):
+    value = record.get(field, "")
+    assert isinstance(value, str) and 0 < len(value) <= 20 and value.isascii() and value.isdecimal(), (f"invalid trace {field}", record)
+    assert str(int(value)) == value and int(value) < 2**64, (f"invalid trace {field}", record)
+    return int(value)
+
+
+def released_resources(pid, diagnostics, invocation):
+    if sys.platform != "linux":
+        return None  # Native descriptor evidence remains Linux-only.
+    began_ns, ended_ns, deadline = invocation
+    with diagnostics.condition:
+        while True:
+            assert diagnostics.read_error is None, diagnostics.read_error
+            starts, releases, runs, sequences = {}, {}, set(), []
+            for record in diagnostics.records:
+                phase = record["rui_test_phase"]
+                assert isinstance(phase, str), record
+                if phase in ("release_probe_held", "release_probe_leaked"):
+                    continue  # Opt-in native proof records, not Host authority.
+                assert record.get("process") == str(pid) and record.get("clock") == "awake_ns", record
+                assert record.get("trace_lost") is False, record
+                for field in ("run", "sequence", "at_ns"):
+                    trace_u64(record, field)
+                sequences.append(int(record["sequence"]))
+                runs.add(record["run"])
+                assert len(runs) == 1, runs
+                if not (phase.startswith("connection_request_") or phase == "connection_resources_released"):
+                    continue
+                assert record.get("subject_kind") == "request_number", record
+                trace_u64(record, "subject")
+                subject = record["subject"]
+                if phase == "connection_resources_released":
+                    trace_u64(record, "scratch_used_bytes")  # Every release, not just the selected one.
+                namespace = (record["process"], record["run"], record["subject_kind"], subject)
+                target = releases if phase == "connection_resources_released" else starts
+                assert namespace not in target, ("duplicate exchange milestone", record)
+                target[namespace] = record
+            assert sequences == sorted(set(sequences)), sequences
+            if sequences:
+                assert sequences[0] > 0, sequences
+                assert sequences == list(range(sequences[0], sequences[0] + len(sequences))), ("trace sequence gap", sequences)
+            assert releases.keys() <= starts.keys(), ("orphan release", releases)
+            current = [(key, record) for key, record in starts.items()
+                       if record["rui_test_phase"] == "connection_request_list_sessions"
+                       and began_ns <= int(record["at_ns"]) <= ended_ns]
+            assert len(current) <= 1, ("ambiguous native exchange", current)
+            if current:
+                current_identity, start = current[0]
+                prefix = {key: record for key, record in starts.items()
+                          if int(record["sequence"]) <= int(start["sequence"])}
+                # The controlled fresh Host has no unobserved callers. Missing
+                # starts must not conceal an earlier pending cleanup owner.
+                assert len(prefix) == int(current_identity[3]) + 1, prefix
+                assert {int(key[3]) for key in prefix} == set(range(len(prefix))), prefix
+                if prefix.keys() <= releases.keys():
+                    for identity, record in prefix.items():
+                        assert int(releases[identity]["sequence"]) > int(record["sequence"]), identity
+                        assert int(releases[identity]["at_ns"]) >= int(record["at_ns"]), identity
+                    last_release = max((releases[key] for key in prefix), key=lambda record: int(record["sequence"]))
+                    assert last_release["scratch_used_bytes"] == "0", ("retained scratch charge", last_release)
+                    assert time.monotonic() <= deadline, "release exceeded original command budget"
+                    census = linux_resources(pid)
+                    assert census is not None, "Host vanished before resource census"
+                    return census
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, ("missing exchange release within original command budget", diagnostics.records[-8:])
+            diagnostics.condition.wait(remaining)
+
+
+def assert_resources(baseline, current):
+    assert current["fds"] == baseline["fds"], (baseline, current)
+    assert current["identities"] == baseline["identities"], (baseline, current)
 
 
 def main():
@@ -52,24 +133,30 @@ def main():
         home.mkdir()
         original_home = os.environ.get("HOME")
         os.environ["HOME"] = str(home)
-        process, fields = start_ready_process([RUI, "serve", "--store", store, "--active-capacity", "1"], required_fields={"execution": "unavailable"})
+        process, fields = start_ready_process([RUI, "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"], required_fields={"execution": "unavailable"})
+        diagnostics = HostDiagnostics(process)
         try:
             address = fields["socket"]
+            latest_invocation = None
             def base(kind):
                 return {"version": "1", "kind": kind, "store": str(store)}
 
             def listing(workspace=None, cursor=None):
+                nonlocal latest_invocation
                 cursor = cursor or {"after": "0", "ceiling": "0"}
+                began_ns = time.monotonic_ns()
+                deadline = time.monotonic() + 10
                 result = subprocess.run(
                     [CLIENT, store, workspace if workspace is not None else "-", cursor["after"], cursor["ceiling"]],
                     capture_output=True, timeout=10,
                 )
+                latest_invocation = (began_ns, time.monotonic_ns(), deadline)
                 assert result.returncode == 0, (result.returncode, result.stderr[-2000:])
                 return 200, json.loads(result.stdout)
 
             initial = listing()
             assert initial == (200, {"version": "1", "type": "session_list", "sessions": [], "next": None}), initial
-            baseline = linux_resources(process.pid)
+            baseline = released_resources(process.pid, diagnostics, latest_invocation)
             # A rejected configuration creates a request fact but no Session.
             def configure(key, reference, workspace, complete=True):
                 config = {
@@ -128,13 +215,17 @@ def main():
                 seen.extend(item["reference"] for item in page["sessions"])
                 cursor = page["next"]
             assert seen == [names[i] for i in (0, 1, 2, 4, 5, 6, 7, 8, 9)] + ["later", long_reference] + [f"dormant/{i:03}" for i in range(88)]
-            grown = linux_resources(process.pid)
+            grown = released_resources(process.pid, diagnostics, latest_invocation)
             if baseline and grown:
-                assert grown["fds"] == baseline["fds"], (baseline, grown)
+                assert_resources(baseline, grown)
             assert list(home.iterdir()) == [], "Host discovery unexpectedly wrote a local request registry"
             assert list((store / "scratch").iterdir()) == [], "named list capture leaked scratch"
             print(f"Session list native Host: fresh HOME, exact keyset, 100 dormant, long reference, idle resources 0→100: {baseline}→{grown}")
         finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=10)
+            diagnostics.close()  # Drain stderr before stop_process closes it.
             stop_process(process)
             if original_home is None:
                 del os.environ["HOME"]
