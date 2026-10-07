@@ -2925,6 +2925,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, trace_
         const prior = host.classification_clients.fetchSub(1, .acq_rel);
         std.debug.assert(prior > 0);
         classification_held = false;
+        traceSubject(host, "ordinary_classification_released", "route", @tagName(route));
     }
     const header = try header_reader.finish(route);
     if (header.route == .unsupported_control) {

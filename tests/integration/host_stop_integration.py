@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 import bash_integration as bash_fixture
 import dispatch_integration as fixture
@@ -22,10 +23,38 @@ RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
 fixture.RUI = RUI
 
 
-def actor(*args):
-    result = subprocess.run([ACTOR, *map(str, args)], capture_output=True, text=True, timeout=10)
+def actor(*args, timeout=10):
+    result = subprocess.run([ACTOR, *map(str, args)], capture_output=True, text=True, timeout=timeout)
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
+
+
+def exchange_phase(diagnostics, phase, began_ns, deadline, **fields):
+    # This isolated Host has one fixture issuer. Earlier buffered milestones
+    # cannot satisfy this invocation; ambiguous or lost evidence is failure.
+    with diagnostics.condition:
+        while True:
+            assert diagnostics.read_error is None, diagnostics.read_error
+            matches = [record for record in diagnostics.records
+                       if record["rui_test_phase"] == phase
+                       and int(record["at_ns"]) >= began_ns
+                       and all(record.get(name) == value for name, value in fields.items())]
+            assert len(matches) <= 1, ("ambiguous exchange phase", matches)
+            if matches:
+                record = matches[0]
+                assert record.get("process") == str(diagnostics.process.pid), record
+                assert record.get("clock") == "awake_ns" and record.get("trace_lost") is False, record
+                for field in ("run", "sequence", "at_ns"):
+                    value = record.get(field, "")
+                    assert isinstance(value, str) and value.isascii() and value.isdecimal(), record
+                    assert str(int(value)) == value and 0 < int(value) < 2**64, record
+                assert record["run"] == diagnostics.records[0]["run"], record
+                assert int(record["at_ns"]) <= time.monotonic_ns(), record
+                assert time.monotonic() <= deadline, "exchange phase exceeded original stop budget"
+                return record
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, ("missing exchange phase within original stop budget", phase)
+            diagnostics.condition.wait(remaining)
 
 
 def instance(store):
@@ -215,14 +244,24 @@ def main():
             assert int(occupied["custody_occupied"]) > 0, occupied
             held_fds = len(os.listdir(f"/proc/{host.pid}/fd")) if sys.platform == "linux" else None
 
-            # Both connections were accepted before shutdown. The second can
-            # retry its original instance after the listener has closed.
+            # Share the original ten-second actor budget with synchronization;
+            # connects and header writes alone do not establish classification.
+            deadline = time.monotonic() + 10
+            began_ns = time.monotonic_ns()
             pending, pending_body = request(sock, store, target)
+            pending_phase = exchange_phase(diagnostics, "connection_request_host_stop", began_ns, deadline,
+                                           subject_kind="request_number")
+            assert not diagnostics.matching("connection_resources_released", subject=pending_phase["subject"])
+            began_ns = time.monotonic_ns()
             transferred = socket.socket(socket.AF_UNIX)
             transferred.settimeout(5)
             transferred.connect(str(sock))
             transferred.sendall(b"POST /v1/host-info HTTP/1.1\r\n")
-            first = actor("stop", store, target, "after-commit")
+            transferred_phase = exchange_phase(diagnostics, "ordinary_classification_released", began_ns, deadline,
+                                               subject_kind="route", subject="host_info")
+            assert int(transferred_phase["sequence"]) > int(pending_phase["sequence"])
+            assert time.monotonic() < deadline, "classification exceeded original stop budget"
+            first = actor("stop", store, target, "after-commit", timeout=deadline - time.monotonic())
             assert first == "TruncatedResponse", first
             retry = finish(pending, pending_body)
             assert retry.startswith(b"HTTP/1.1 200") and b'"status":"acknowledged"' in retry, retry
