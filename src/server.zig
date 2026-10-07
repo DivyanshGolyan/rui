@@ -164,10 +164,13 @@ const Host = struct {
         try launch(context);
     }
 
-    fn clientFinished(self: *Host) void {
+    fn clientFinished(self: *Host, trace_request_number: ?u64) void {
         self.drain_mutex.lockUncancelable(self.io);
         const prior = self.active_clients.fetchSub(1, .acq_rel);
         std.debug.assert(prior > 0);
+        // Test-only census witness before final drain unlock, not thread exit.
+        if (trace_request_number) |request_number|
+            traceRequest(self, "connection_resources_released", request_number, self.scratch_used.load(.acquire));
         self.drain_condition.broadcast(self.io);
         self.drain_mutex.unlock(self.io);
     }
@@ -386,7 +389,7 @@ pub fn serve(
         }
         const previous = host.active_clients.fetchAdd(1, .acq_rel);
         if (previous >= max_clients) {
-            host.clientFinished();
+            host.clientFinished(null);
             sendStatic(io, stream.socket.handle, 503, "busy", "connection_capacity_exhausted") catch {};
             stream.close(io);
             continue;
@@ -394,14 +397,14 @@ pub fn serve(
         const previous_classification = host.classification_clients.fetchAdd(1, .acq_rel);
         if (previous_classification >= control_headroom) {
             _ = host.classification_clients.fetchSub(1, .acq_rel);
-            host.clientFinished();
+            host.clientFinished(null);
             sendStatic(io, stream.socket.handle, 503, "busy", "classification_capacity_exhausted") catch {};
             stream.close(io);
             continue;
         }
         const connection = allocator.create(Connection) catch {
             _ = host.classification_clients.fetchSub(1, .acq_rel);
-            host.clientFinished();
+            host.clientFinished(null);
             stream.close(io);
             continue;
         };
@@ -413,7 +416,7 @@ pub fn serve(
         const thread = std.Thread.spawn(.{ .stack_size = connection_stack_bytes }, connectionMain, .{connection}) catch {
             allocator.destroy(connection);
             _ = host.classification_clients.fetchSub(1, .acq_rel);
-            host.clientFinished();
+            host.clientFinished(null);
             stream.close(io);
             continue;
         };
@@ -2396,6 +2399,21 @@ fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subjec
     writeTestTrace(host, &trace);
 }
 
+fn traceRequest(host: *Host, phase: []const u8, request_number: u64, scratch_used_bytes: ?u64) void {
+    if (!host.faults.test_phase_trace) return;
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"rui_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.appendFmt(
+        ",\"at_ns\":\"{d}\",\"subject_kind\":\"request_number\",\"subject\":\"{d}\"",
+        .{ nowNs(host), request_number },
+    ) catch return;
+    if (scratch_used_bytes) |used|
+        trace.appendFmt(",\"scratch_used_bytes\":\"{d}\"", .{used}) catch return;
+    trace.append("}") catch return;
+    writeTestTrace(host, &trace);
+}
+
 fn traceAttemptRollback(host: *Host) void {
     if (!host.faults.test_phase_trace) return;
     // Sample after this reservation is released, before another owner turn
@@ -2840,14 +2858,16 @@ fn connectionMain(connection: *Connection) void {
     const host = connection.host;
     const stream = connection.stream;
     const accepted_at_ns = connection.accepted_at_ns;
+    // Owned here through handler defers and connection-resource release.
+    var trace_request_number: ?u64 = null;
     defer {
         stream.close(host.io);
         host.allocator.destroy(connection);
         // This is the last Host access: drain may release the stack owner as
         // soon as the active population reaches zero.
-        host.clientFinished();
+        host.clientFinished(trace_request_number);
     }
-    handleConnection(host, stream.socket.handle, accepted_at_ns) catch |err| {
+    handleConnection(host, stream.socket.handle, accepted_at_ns, &trace_request_number) catch |err| {
         sendStatic(host.io, stream.socket.handle, 400, "invocation_error", @errorName(err)) catch {};
     };
 }
@@ -2883,7 +2903,7 @@ const Header = struct {
     instance: ?protocol.InstanceId = null,
 };
 
-fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void {
+fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, trace_request_number: *?u64) !void {
     var classification_held = true;
     defer if (classification_held) {
         _ = host.classification_clients.fetchSub(1, .acq_rel);
@@ -2923,6 +2943,12 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
     const request_number = nextRequestNumber(host) catch {
         return respondStatic(host.io, fd, 500, "invocation_error", "request_identity_exhausted");
     };
+    if (host.faults.test_phase_trace) {
+        trace_request_number.* = request_number;
+        switch (header.route) {
+            inline else => |selected_route| traceRequest(host, "connection_request_" ++ @tagName(selected_route), request_number, null),
+        }
+    }
     var cleanup_failed = false;
     var request = protocol.parseRequest(.{
         .io = host.io,
@@ -5115,7 +5141,7 @@ test "control response variants fit exact worst-case JSON bounds" {
 fn finishTestClient(host: *Host, release: *std.atomic.Value(bool), completed: *std.atomic.Value(bool)) void {
     while (!release.load(.acquire)) std.atomic.spinLoopHint();
     completed.store(true, .release);
-    host.clientFinished();
+    host.clientFinished(null);
 }
 
 test "shutdown drain retains stack-owned Host until active clients finish" {
