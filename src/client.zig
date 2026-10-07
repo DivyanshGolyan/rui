@@ -1791,17 +1791,6 @@ const Utf8Validator = struct {
     }
 };
 
-fn sendBytes(
-    io: std.Io,
-    paths: *const platform.Paths,
-    route: []const u8,
-    body: []const u8,
-    drop_reply: ?[]const u8,
-    reply_buffer: *ReplyBuffer,
-) !CommandReply {
-    return sendSource(.{ .io = io }, paths, route, body.len, null, body, drop_reply, null, reply_buffer, null);
-}
-
 // Transfers this one socket to the response reader; every failure closes here.
 fn openRead(requests: Requests, paths: *const platform.Paths, comptime route: []const u8, body: []const u8) !std.posix.fd_t {
     const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
@@ -2067,25 +2056,13 @@ fn readResultResponseSink(
     reply_buffer: *ReplyBuffer,
 ) !ResultReply {
     reply_buffer.len = 0;
-    const io = requests.io;
     const head = try readResponseHeadUntil(requests, fd, 60_000, null);
     if (head.status != 200) {
         if (head.kind != .command_json) return error.InvalidResponse;
         return .{ .command = try readCommandBodyUntil(requests, fd, head, reply_buffer, null) };
     }
     if (head.kind != .result_text) return error.InvalidResponse;
-    var remaining = head.content_length;
-    var buffer: [protocol.content_window_bytes]u8 = undefined;
-    while (remaining != 0) {
-        const wanted: usize = @intCast(@min(remaining, buffer.len));
-        const count = try readRequest(requests, fd, buffer[0..wanted], std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s);
-        if (count == 0) return error.TruncatedResponse;
-        if (@TypeOf(sink) == std.Io.File)
-            try sink.writeStreamingAll(io, buffer[0..count])
-        else
-            try sink.feed(buffer[0..count]);
-        remaining -= count;
-    }
+    try readResponseBody(requests, fd, head.content_length, sink);
     return .{ .answer = .{ .bytes = head.content_length } };
 }
 
@@ -2096,14 +2073,21 @@ fn readReportResponse(
     reply_buffer: *ReplyBuffer,
 ) !ReportReply {
     reply_buffer.len = 0;
-    const io = requests.io;
     const head = try readResponseHeadUntil(requests, fd, 60_000, null);
     if (head.status != 200) {
         if (head.kind != .command_json) return error.InvalidResponse;
         return .{ .command = try readCommandBodyUntil(requests, fd, head, reply_buffer, null) };
     }
     if (head.kind != .command_json) return error.InvalidResponse;
-    var remaining = head.content_length;
+    try readResponseBody(requests, fd, head.content_length, sink);
+    return .{ .report = .{ .bytes = head.content_length } };
+}
+
+// One delivery policy for answer/report windows. The socket caller and sink
+// keep custody through the last feed; completion has no retrospective stop.
+fn readResponseBody(requests: Requests, fd: std.posix.fd_t, length: u64, sink: anytype) !void {
+    const io = requests.io;
+    var remaining = length;
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     while (remaining != 0) {
         const wanted: usize = @intCast(@min(remaining, buffer.len));
@@ -2115,7 +2099,6 @@ fn readReportResponse(
             try sink.feed(buffer[0..count]);
         remaining -= count;
     }
-    return .{ .report = .{ .bytes = head.content_length } };
 }
 
 fn readCommandBodyUntil(requests: Requests, fd: std.posix.fd_t, head: ResponseHead, reply_buffer: *ReplyBuffer, until: ?i128) !CommandReply {
