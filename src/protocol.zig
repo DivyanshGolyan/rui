@@ -288,6 +288,7 @@ pub const ConversationContent = struct {
     position: u64 = 0,
     ordinal: u64 = 0,
     start: u64 = 0,
+    stream: bool = false,
 };
 
 pub const Request = union(Kind) {
@@ -736,8 +737,13 @@ const Parser = struct {
         try self.expectByte(',');
         try self.expectKey("start");
         request.start = try self.readCanonicalU64();
+        if (try self.consumeIf(',')) {
+            try self.expectKey("stream");
+            for ("true") |byte| try self.expectByte(byte);
+            request.stream = true;
+        }
         if (request.position == 0 or request.position > std.math.maxInt(i64) or
-            request.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
+            request.ordinal > std.math.maxInt(i64) or (request.stream and request.start != 0)) return error.InvalidCursor;
         return request;
     }
 
@@ -1127,7 +1133,7 @@ pub const max_conversation_content_request_bytes =
     maximumJsonStringBytes(max_session_bytes) +
     ",\"position\":\"".len + 20 +
     "\",\"ordinal\":\"".len + 20 +
-    "\",\"start\":\"".len + 20 + "\"}".len;
+    "\",\"start\":\"".len + 20 + "\",\"stream\":true}".len;
 pub const max_conversation_page_request_bytes =
     "{\"version\":\"1\",\"kind\":\"conversation_page\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) + ",\"session\":".len +
@@ -1583,6 +1589,32 @@ test "observation needs no scratch at a full budget" {
     const request = try parser.parse();
     try std.testing.expect(request == .observe_command);
     try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
+}
+
+test "Conversation content stream wire requires start zero and literal true" {
+    const cases = [_]struct { suffix: []const u8, stream: bool = false, failure: ?anyerror = null }{
+        .{ .suffix = "\"0\"}" },
+        .{ .suffix = "\"0\",\"stream\":true}", .stream = true },
+        .{ .suffix = "\"1\",\"stream\":true}", .failure = error.InvalidCursor },
+        .{ .suffix = "\"0\",\"stream\":false}", .failure = error.InvalidJsonShape },
+        .{ .suffix = "\"0\",\"stream\":\"true\"}", .failure = error.InvalidJsonShape },
+        .{ .suffix = "\"0\",\"stream\":true,\"stream\":true}", .failure = error.InvalidJsonShape },
+    };
+    for (cases) |case| {
+        var buffer: [512]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"1\",\"kind\":\"conversation_content\",\"store\":\"s\",\"session\":\"x\",\"position\":\"1\",\"ordinal\":\"0\",\"start\":{s}", .{case.suffix});
+        var source = SocketBody.init(-1, 0);
+        @memcpy(source.buffer[0..json.len], json);
+        source.end = json.len;
+        var cleanup_failed = false;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .cleanup_failed = &cleanup_failed } };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parser.parse());
+        } else {
+            const request = (try parser.parse()).conversation_content;
+            try std.testing.expectEqual(case.stream, request.stream);
+        }
+    }
 }
 
 test "conversation cursor parser rejects unfixed and malformed continuations" {
