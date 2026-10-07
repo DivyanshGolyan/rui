@@ -3,9 +3,11 @@
 
 import json
 import os
+import sys
 import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from host_process import HostDiagnostics
 
@@ -20,6 +22,7 @@ def check_classification_oracle(run_actor):
         actor_started = threading.Event()
         released = threading.Event()
         waited = False
+        last_sample = None
         deadline = time.monotonic() + 10
 
         def publish(record):
@@ -43,18 +46,28 @@ def check_classification_oracle(run_actor):
             boundary.set()
             return original_wait(timeout)
 
+        def observed_monotonic():
+            nonlocal last_sample
+            assert threading.current_thread() is worker, "fixture clock observed outside oracle worker"
+            last_sample = time.monotonic()
+            return last_sample
+
         def invoke(*args, timeout):
             actor_started.set()
             boundary.set()
             assert released.is_set(), "actor launched before classification notification"
             assert args == ("stop", "fixture-store", "fixture-instance", "after-commit"), args
-            assert 0 < timeout <= deadline - began_ns / 1e9, timeout
+            assert last_sample is not None, "fixture clock was not sampled"
+            assert 0 < timeout == deadline - last_sample, ("actor did not receive exact remaining budget", timeout)
             return "TruncatedResponse"
 
         def run():
             try:
-                results.append(run_actor(diagnostics, began_ns, deadline, pending,
-                                         "fixture-store", "fixture-instance", invoke=invoke))
+                # Forward real time unchanged; observe the operand without a native clock seam.
+                clock = SimpleNamespace(monotonic=observed_monotonic, monotonic_ns=time.monotonic_ns)
+                with patch.object(sys.modules[run_actor.__module__], "time", clock):
+                    results.append(run_actor(diagnostics, began_ns, deadline, pending,
+                                             "fixture-store", "fixture-instance", invoke=invoke))
             except BaseException as error:
                 errors.append(error)
             finally:
