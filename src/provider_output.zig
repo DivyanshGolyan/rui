@@ -483,14 +483,9 @@ fn validateReasoning(io: std.Io, file: std.Io.File, fields: ItemFields) !void {
     try optionalCompleted(io, file, try fields.get("status"));
     if (try fields.get("text") != null) return error.UnsupportedProviderOutput;
     const encrypted = (try fields.get("encrypted_content")) orelse return error.ContinuationUnavailable;
-    var ignored: protocol.Bounded(max_evidence_bytes) = .{};
-    const parsed = readString(io, file, encrypted, &ignored) catch |err| switch (err) {
-        error.ProviderValueTooLong => blk: {
-            var source = try FileSource.init(io, file, encrypted);
-            break :blk try parseString(&source, null);
-        },
-        else => return err,
-    };
+    var source = try FileSource.init(io, file, encrypted);
+    const parsed = try parseString(&source, null);
+    try source.expectEnd();
     if (parsed.decoded_length == 0) return error.ContinuationUnavailable;
     const field_names = [_][]const u8{ "summary", "content" };
     const type_names = [_][]const u8{ "summary_text", "reasoning_text" };
@@ -502,11 +497,9 @@ fn validateReasoning(io: std.Io, file: std.Io.File, fields: ItemFields) !void {
                 var kind: protocol.Bounded(max_evidence_bytes) = .{};
                 _ = try readString(io, file, try block_fields.required("type"), &kind);
                 if (!kind.eql(type_name)) return error.UnsupportedProviderOutput;
-                var text: protocol.Bounded(max_evidence_bytes) = .{};
-                _ = readString(io, file, try block_fields.required("text"), &text) catch |err| switch (err) {
-                    error.ProviderValueTooLong => {},
-                    else => return err,
-                };
+                var text = try FileSource.init(io, file, try block_fields.required("text"));
+                _ = try parseString(&text, null);
+                try text.expectEnd();
             }
         }
     }
@@ -622,7 +615,6 @@ const Added = struct {
 fn itemIdentity(io: std.Io, file: std.Io.File, item: Range) !struct {
     kind: store.OutputItemKind,
     id_digest: [32]u8,
-    content_digest: [32]u8,
 } {
     const fields = try readFields(io, file, item, &.{ "type", "id" });
     var kind_name: protocol.Bounded(max_evidence_bytes) = .{};
@@ -638,7 +630,6 @@ fn itemIdentity(io: std.Io, file: std.Io.File, item: Range) !struct {
     return .{
         .kind = kind,
         .id_digest = try stringDigest(io, file, try fields.required("id")),
-        .content_digest = try contentDigestRange(io, file, item),
     };
 }
 
@@ -668,10 +659,11 @@ fn validateCompleted(
     var index: u64 = 0;
     while (try array.next()) |terminal_item| {
         const identity = try itemIdentity(io, file, terminal_item);
+        const content_digest = try contentDigestRange(io, file, terminal_item);
         const record = try reader.nextItem() orelse return error.ContradictoryProviderOutput;
         if (record.ordinal != index or record.kind != identity.kind or
             !std.mem.eql(u8, &record.id_digest, &identity.id_digest) or
-            !std.mem.eql(u8, &record.content_digest, &identity.content_digest)) return error.ContradictoryProviderOutput;
+            !std.mem.eql(u8, &record.content_digest, &content_digest)) return error.ContradictoryProviderOutput;
         index += 1;
     }
     // The managed stream can omit the repeated items from response.completed.
