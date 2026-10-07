@@ -359,8 +359,8 @@ def committed_cases(state):
                 assert database.execute("SELECT count(*) FROM core_command WHERE command_key=?", (key,)).fetchone() == (1,)
             finally:
                 database.close()
-        # Reads/observations have no operation answer either; raw routes retain
-        # the full envelope, while typed follow fails instead of fabricating work.
+        # Keyed reads retain typed diagnostics and the queried key; the distinct
+        # inspection/report route remains outside this owner correction.
         for route, args in (
             ("/v1/observe-command", ["observe-command", "--key", key]),
             ("/v1/read-result", ["read-result", "--key", key]),
@@ -370,7 +370,9 @@ def committed_cases(state):
             try:
                 result = invoke(home, *args, "--store", store)
                 expect_fatal(result)
-                assert json.loads(result.stdout) == ERROR, result
+                expected = ERROR if route == "/v1/inspect-session" else {
+                    "key": key, "error": {"status": 500, "type": ERROR["type"], "code": ERROR["code"]}}
+                assert json.loads(result.stdout) == expected, result
                 assert len(proxy.exchanges) == 1, (route, proxy.exchanges)
             finally:
                 proxy.close()
@@ -484,12 +486,86 @@ def interactive_cases(state, binding=False, null_code=False):
     print(f"{'null' if null_code else 'binding' if binding else 'canonical'} PTY: Configure/Message/Permission/bare creation fail before outcome interpretation, restore terminal and retain original capture", flush=True)
 
 
+def keyed_observation_cases(state, only="keyed"):
+    home = state / only
+    home.mkdir(mode=0o700)
+    store = home / "store"
+    endpoint = fixture.SuccessEndpoint([fixture.ResponseSpec(b"permanent failure", {}, 422)])
+    endpoint_thread = threading.Thread(target=endpoint.serve_forever)
+    endpoint_thread.start()
+    host = None
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        kinds = ("configure", "message", "session_stop", "model_interruption", "permission_decision")
+        commands = (["configure", "--workspace", state, "--provider", "codex", "--model", "model-a"],
+            ["message", "submitted bytes"], ["stop-session"],
+            ["interrupt-model", "--turn", "733", "--operation", "911"], ["allow-action", "--action", "721"])
+        keys = {}
+        for kind, command in zip(kinds, commands):
+            args = [*command, "--store", store, "--session", "s"]
+            args += ["--json"] if kind == "message" else ["--record", home / f"{kind}.json", "--key", kind]
+            submitted = invoke(home, *args)
+            assert submitted.returncode == 0, submitted
+            key = json.loads(submitted.stdout.splitlines()[0])["request"] if kind == "message" else kind
+            keys[kind] = key
+            observed = json.loads(invoke(home, "observe-command", "--store", store, "--key", key).stdout)["observation"]
+            assert observed["kind"] == kind and observed["target"] == "s", observed
+            assert observed["status"] == ("rejected" if kind in ("model_interruption", "permission_decision") else "accepted"), observed
+            if kind == "message":
+                fixture.wait_for(lambda: fixture.observe(store, key).get("result"), "accepted Message's terminal outcome")
+        key = keys["message"]
+        def rewrite(response, omitted=False):
+            head, body = response.split(b"\r\n\r\n", 1)
+            value = json.loads(body)
+            observation = value["observation"]
+            if omitted:
+                assert observation["status"] == "accepted" and "processing" in observation and "result" in observation, observation
+                del observation["processing"]
+            else:
+                observation["wire_only"] = "must-not-be-presented"
+            encoded = json.dumps(value, indent=2, ensure_ascii=True).encode()
+            return (head.split(b"\r\n", 1)[0] + b"\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: "
+                + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
+        for omitted in (False, True):
+            if only == "keyed-bindings" and not omitted or only == "keyed-output" and omitted:
+                continue
+            proxy = ReplyProxy(host, "/v1/observe-command", lambda response: rewrite(response, omitted))
+            try:
+                for args in (["observe-command", "--store", store, "--key", key], ["result", key, "--json"], ["follow", key, "--json"]):
+                    result = invoke(home, *args)
+                    if omitted:
+                        assert result.returncode != 0 and "InvalidObservation" in result.stderr, ("omitted processing binding was confirmed", result)
+                        assert not result.stdout, result
+                    else:
+                        assert result.returncode == 0 and "must-not-be-presented" not in result.stdout, ("unknown DOM leaked", result)
+                        rendered = json.loads(result.stdout)["observation"]
+                        assert rendered["status"] == "accepted" and rendered["result"]["status"] == "failed", ("accepted request confused with failed work", rendered)
+                        assert all(field in rendered for field in ("input", "queue", "processing")), rendered
+            finally:
+                proxy.close()
+        human = invoke(home, "result", key)
+        assert human.returncode == 0 and "admitted: accepted\nresult: failed\n" in human.stdout, human
+        unavailable = invoke(home, "read-result", "--store", store, "--key", "never-submitted")
+        assert unavailable.returncode != 0 and json.loads(unavailable.stdout) == {
+            "key": "never-submitted", "error": {"status": 409, "type": "result_unavailable", "code": "result_not_found"}}, unavailable
+    finally:
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        endpoint_thread.join(timeout=5)
+        assert not endpoint_thread.is_alive(), "keyed provider fixture did not join"
+    print(f"{only}: five actual operation observations, accepted request vs failed work; typed result/follow and diagnostics passed", flush=True)
+
+
 def main(selected="all"):
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-canonical-failure."))
     completed = False
     try:
-        assert selected in ("all", "producers", "committed", "interactive", "bindings", "nulls", "binding-interactive", "null-interactive", "presentation"), selected
-        for name, case in (("producers", producer_cases), ("committed", committed_cases), ("interactive", interactive_cases), ("bindings", binding_cases), ("nulls", lambda path: binding_cases(path, null_code=True)), ("binding-interactive", lambda path: interactive_cases(path, binding=True)), ("null-interactive", lambda path: interactive_cases(path, null_code=True)), ("presentation", presentation_cases)):
+        assert selected in ("all", "producers", "committed", "interactive", "bindings", "nulls", "binding-interactive", "null-interactive", "presentation", "keyed", "keyed-bindings", "keyed-output"), selected
+        if selected in ("keyed-bindings", "keyed-output"):
+            keyed_observation_cases(state, selected)
+        for name, case in (("producers", producer_cases), ("committed", committed_cases), ("interactive", interactive_cases), ("bindings", binding_cases), ("nulls", lambda path: binding_cases(path, null_code=True)), ("binding-interactive", lambda path: interactive_cases(path, binding=True)), ("null-interactive", lambda path: interactive_cases(path, null_code=True)), ("presentation", presentation_cases), ("keyed", keyed_observation_cases)):
             if selected in ("all", name):
                 case(state)
         completed = True

@@ -1368,8 +1368,15 @@ fn observe(init: std.process.Init, args: []const []const u8) !void {
     const target = key orelse return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const reply = try client.observeCommand(io, try selectedStore(init, store_path, &selected_buffer), target, &reply_buffer);
-    try writeCommandReply(io, reply);
-    if (reply.status != 200) return error.HostInvocationFailed;
+    const observation = try checkedObservation(io, reply, target);
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
+    try writer.interface.writeAll("{\"version\":\"1\",\"type\":\"command_observation\",\"key\":");
+    try std.json.Stringify.value(observation.key.slice(), .{}, &writer.interface);
+    try writer.interface.writeAll(",\"observation\":");
+    try observation.writeJson(&writer.interface);
+    try writer.interface.writeAll("}\n");
+    try writer.flush();
 }
 
 fn inspect(init: std.process.Init, args: []const []const u8) !void {
@@ -1437,9 +1444,9 @@ fn readResult(init: std.process.Init, args: []const []const u8) !void {
     );
     switch (reply) {
         .answer => {},
-        .command => |command_reply| {
-            try writeCommandReply(io, command_reply);
-            return error.HostInvocationFailed;
+        .failure => |failure| {
+            try writeReadFailure(io, failure, target);
+            return failure.err();
         },
     }
 }
@@ -1481,6 +1488,28 @@ fn writeCommandReply(io: std.Io, reply: client.CommandReply) !void {
     try std.Io.File.stdout().writeStreamingAll(io, reply.body);
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
     try client.checkCanonicalFailure(reply);
+}
+
+fn writeReadFailure(io: std.Io, failure: client.ReadFailure, key: []const u8) !void {
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
+    try std.json.Stringify.value(.{ .key = key, .@"error" = .{
+        .status = failure.status,
+        .type = failure.diagnostic.type.slice(),
+        .code = failure.diagnostic.code.slice(),
+    } }, .{}, &writer.interface);
+    try writer.interface.writeByte('\n');
+    try writer.flush();
+}
+
+fn checkedObservation(io: std.Io, reply: client.ObservationReply, key: []const u8) !client.CommandObservation {
+    return switch (reply) {
+        .observation => |observation| observation,
+        .failure => |failure| {
+            try writeReadFailure(io, failure, key);
+            return failure.err();
+        },
+    };
 }
 
 fn requestDirectory(init: std.process.Init, buffer: []u8) ![]const u8 {
@@ -1881,12 +1910,10 @@ fn result(init: std.process.Init, args: []const []const u8) !void {
 
 fn showResult(init: std.process.Init, saved: *const client.MessageAddress, presentation: Presentation) !void {
     const json = presentation == .json;
-    var observed = try client.observeMessage(init.io, std.heap.c_allocator, saved);
-    defer observed.deinit();
-    const state = observed.state;
+    const observed = try checkedObservation(init.io, try client.observeMessage(init.io, saved), saved.key.slice());
+    const state = observed.state();
     if (presentation == .interactive and state != .completed) {
         const notice = switch (state) {
-            .accepted => "Rui: This Message was accepted; observe its original request for the result.\n",
             .queued => "Rui: This saved Message has no answer yet; it remains queued.\n",
             .processing => "Rui: This saved Message is being processed; observe the same request rather than sending it again.\n",
             .rejected => "Rui: This submission was rejected; no work was admitted.\n",
@@ -1895,16 +1922,16 @@ fn showResult(init: std.process.Init, saved: *const client.MessageAddress, prese
             .completed => unreachable,
         };
         try std.Io.File.stdout().writeStreamingAll(init.io, notice);
-        if (observed.code) |code| {
+        if (observed.failureCode()) |code| {
             try writeSafeField(init.io, "Rui: Code: ", code);
             if (std.mem.eql(u8, code, "indeterminate"))
                 try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: The command may have run. Rui did not rerun it; inspect saved work before choosing a next action.\n");
         }
     } else if (!json and presentation != .interactive) {
         var line: [256]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "result: {s}\n", .{@tagName(state)}));
-        if (observed.code) |code|
-            try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "code: {s}\n", .{code}));
+        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "admitted: {s}\nresult: {s}\n", .{ @tagName(observed.status), @tagName(state) }));
+        if (observed.failureCode()) |code|
+            try writeSafeField(init.io, "code: ", code);
     }
     if (state != .completed) {
         if (json) {
@@ -1922,9 +1949,9 @@ fn showResult(init: std.process.Init, saved: *const client.MessageAddress, prese
         defer file.close(init.io);
         var read_buffer: client.ReplyBuffer = .{};
         const answer = try client.readResult(init.io, saved.store.slice(), saved.key.slice(), file, &read_buffer);
-        if (answer == .command) {
-            try writeCommandReply(init.io, answer.command);
-            return error.ResultReadFailed;
+        if (answer == .failure) {
+            try writeReadFailure(init.io, answer.failure, saved.key.slice());
+            return answer.failure.err();
         }
         try std.Io.File.stdout().writeStreamingAll(init.io, "{\"observation\":");
         var buffer: [protocol.content_window_bytes]u8 = undefined;
@@ -1940,9 +1967,9 @@ fn showResult(init: std.process.Init, saved: *const client.MessageAddress, prese
     const answer = try client.readResult(init.io, saved.store.slice(), saved.key.slice(), std.Io.File.stdout(), &read_buffer);
     switch (answer) {
         .answer => {},
-        .command => |reply| {
-            try writeCommandReply(init.io, reply);
-            return error.ResultReadFailed;
+        .failure => |failure| {
+            try writeReadFailure(init.io, failure, saved.key.slice());
+            return failure.err();
         },
     }
     try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
@@ -2213,7 +2240,7 @@ fn showActionable(io: std.Io, file: std.Io.File, json: bool) !void {
     }
 }
 
-fn writeFollowOutcome(init: std.process.Init, observation: *const client.MessageObservation, presentation: Presentation) !void {
+fn writeFollowOutcome(init: std.process.Init, observation: *const client.CommandObservation, presentation: Presentation) !void {
     if (presentation == .interactive) return;
     if (presentation == .json) {
         try std.Io.File.stdout().writeStreamingAll(init.io, "{\"return\":\"outcome\",\"observation\":");
@@ -2224,7 +2251,7 @@ fn writeFollowOutcome(init: std.process.Init, observation: *const client.Message
         try std.Io.File.stdout().writeStreamingAll(init.io, "}\n");
     } else {
         var line: [128]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "return: outcome\nstatus: {s}\n", .{@tagName(observation.state)}));
+        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "return: outcome\nadmitted: {s}\nstatus: {s}\n", .{ @tagName(observation.status), @tagName(observation.state()) }));
     }
 }
 
@@ -2242,8 +2269,8 @@ const FollowPolicy = enum {
     session_blocked,
     terminal_only,
 
-    fn attention(self: FollowPolicy, observation: *const client.MessageObservation) ?client.MessageObservation.Progress {
-        if (observation.state.terminal()) return null;
+    fn attention(self: FollowPolicy, observation: *const client.CommandObservation) ?client.CommandObservation.Progress {
+        if (observation.state().terminal()) return null;
         const progress = observation.progress orelse return null;
         if (progress.action == null) return null;
         return switch (self) {
@@ -2254,7 +2281,7 @@ const FollowPolicy = enum {
     }
 };
 
-fn progressNotice(queue: client.MessageObservation.State, status: @FieldType(client.MessageObservation.Progress, "status"), has_action: bool) ![]const u8 {
+fn progressNotice(queue: client.CommandObservation.State, status: @FieldType(client.CommandObservation.Progress, "status"), has_action: bool) ![]const u8 {
     if (queue == .queued) {
         if (status == .waiting_for_permission) return "Rui: Your message is queued behind work needing a decision.\n";
         if (status == .in_flight) return if (has_action)
@@ -2276,14 +2303,13 @@ fn progressNotice(queue: client.MessageObservation.State, status: @FieldType(cli
 // null is the selected message's terminal observation; an Action is only a hint
 // to inspect and decide against the Host's exact current target.
 fn followMessage(init: std.process.Init, saved: *const client.MessageAddress, presentation: Presentation, policy: FollowPolicy) !?Work {
-    var last_queue: ?client.MessageObservation.State = null;
-    var last_progress: ?@FieldType(client.MessageObservation.Progress, "status") = null;
+    var last_queue: ?client.CommandObservation.State = null;
+    var last_progress: ?@FieldType(client.CommandObservation.Progress, "status") = null;
     var last_action = false;
     var unchanged_polls: u8 = 0;
     while (true) {
-        var observed = try client.observeMessage(init.io, std.heap.c_allocator, saved);
-        defer observed.deinit();
-        if (observed.state.terminal()) {
+        const observed = try checkedObservation(init.io, try client.observeMessage(init.io, saved), saved.key.slice());
+        if (observed.state().terminal()) {
             try writeFollowOutcome(init, &observed, presentation);
             return null;
         }
@@ -2293,16 +2319,16 @@ fn followMessage(init: std.process.Init, saved: *const client.MessageAddress, pr
         // replacement ID still targets attention but does not reset reminders.
         const progress_status = if (observed.progress) |progress| progress.status else null;
         const has_action = if (observed.progress) |progress| progress.action != null else false;
-        if (presentation == .interactive and (last_queue == null or last_queue.? != observed.state or last_progress != progress_status or last_action != has_action)) {
+        if (presentation == .interactive and (last_queue == null or last_queue.? != observed.state() or last_progress != progress_status or last_action != has_action)) {
             if (observed.progress) |progress|
-                try std.Io.File.stdout().writeStreamingAll(init.io, try progressNotice(observed.state, progress.status, progress.action != null));
-            last_queue = observed.state;
+                try std.Io.File.stdout().writeStreamingAll(init.io, try progressNotice(observed.state(), progress.status, progress.action != null));
+            last_queue = observed.state();
             last_progress = progress_status;
             last_action = has_action;
             unchanged_polls = 0;
         } else if (presentation == .interactive and observed.progress != null and observed.progress.?.status == .in_flight) {
             if (unchanged_polls == 99) {
-                try std.Io.File.stdout().writeStreamingAll(init.io, if (observed.state == .queued) "Rui: Still queued behind work in flight.\n" else "Rui: Work is still in flight.\n");
+                try std.Io.File.stdout().writeStreamingAll(init.io, if (observed.state() == .queued) "Rui: Still queued behind work in flight.\n" else "Rui: Work is still in flight.\n");
                 unchanged_polls = 0;
             } else unchanged_polls += 1;
         }
@@ -2477,7 +2503,7 @@ test "interactive progress distinguishes queued dependency from selected work" {
 
 test "Message follow policies use decoded facts without inventing progress" {
     const address = try client.MessageAddress.init("/store", "original/session", "original-key");
-    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"original-key\",\"observation\":{\"kind\":\"message\",\"target\":\"original/session\",\"status\":\"accepted\",\"queue\":{\"status\":\"queued\"}";
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"original-key\",\"observation\":{\"kind\":\"message\",\"target\":\"original/session\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ "00" ** 32 ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"23\"}";
     // Independent expectations: ordinary follow sees attention alongside a
     // progressing sibling, Session wait sees only blocked progress, terminal
     // wait sees neither. Missing progress grants no attention or runnable fact.
@@ -2487,11 +2513,10 @@ test "Message follow policies use decoded facts without inventing progress" {
         .{ ",\"progress\":{\"status\":\"in_flight\",\"action\":null}}}", false, false },
         .{ ",\"progress\":{\"status\":\"in_flight\",\"action\":\"17\"}}}", true, false },
         .{ ",\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"29\"}}}", true, true },
-        .{ ",\"result\":{\"status\":\"failed\",\"code\":\"original_failure\"},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"31\"}}}", false, false },
+        .{ ",\"processing\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"result\":{\"status\":\"failed\",\"code\":\"original_failure\"},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"31\"}}}", false, false },
     };
     inline for (cases) |case| {
-        var observed = try client.MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ case[0] }, &address);
-        defer observed.deinit();
+        const observed = try (try client.CommandObservation.parse(.{ .status = 200, .body = prefix ++ case[0] }, address.key.slice())).forMessage(&address);
         try std.testing.expectEqual(case[1], FollowPolicy.follow_attention.attention(&observed) != null);
         try std.testing.expectEqual(case[2], FollowPolicy.session_blocked.attention(&observed) != null);
         try std.testing.expect(FollowPolicy.terminal_only.attention(&observed) == null);
@@ -2501,13 +2526,12 @@ test "Message follow policies use decoded facts without inventing progress" {
 
 test "Message attention retains replacement IDs while notices retain status and presence" {
     const address = try client.MessageAddress.init("/store", "s", "k");
-    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\",\"queue\":{\"status\":\"processing\"},\"progress\":{\"status\":\"in_flight\",\"action\":\"";
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ "00" ** 32 ++ "\"},\"queue\":{\"status\":\"processing\",\"admission\":\"23\"},\"processing\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"},\"progress\":{\"status\":\"in_flight\",\"action\":\"";
     inline for (.{ .{ "17", 17 }, .{ "71", 71 } }) |case| {
-        var observed = try client.MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ case[0] ++ "\"}}}" }, &address);
-        defer observed.deinit();
+        const observed = try (try client.CommandObservation.parse(.{ .status = 200, .body = prefix ++ case[0] ++ "\"}}}" }, address.key.slice())).forMessage(&address);
         const attention = FollowPolicy.follow_attention.attention(&observed).?;
         try std.testing.expectEqual(@as(u64, case[1]), attention.action.?);
-        try std.testing.expectEqualStrings("Rui: An Action needs your choice while other work remains in flight.\n", try progressNotice(observed.state, attention.status, attention.action != null));
+        try std.testing.expectEqualStrings("Rui: An Action needs your choice while other work remains in flight.\n", try progressNotice(observed.state(), attention.status, attention.action != null));
         try std.testing.expect(FollowPolicy.session_blocked.attention(&observed) == null);
     }
 }

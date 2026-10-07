@@ -267,6 +267,26 @@ pub const ResultReply = union(enum) {
     command: CommandReply,
 };
 
+pub const ObservationReply = union(enum) {
+    observation: CommandObservation,
+    failure: ReadFailure,
+};
+
+pub const ResultReadReply = union(enum) {
+    answer: struct { bytes: u64 },
+    failure: ReadFailure,
+};
+
+/// Owned diagnostic; an unsuccessful read says nothing about prior admission.
+pub const ReadFailure = struct {
+    status: u16,
+    diagnostic: InvocationDiagnostic,
+
+    pub fn err(self: ReadFailure) error{ CanonicalStoreFailure, HostInvocationFailed } {
+        return if (self.diagnostic.code.eql("canonical_store_failure")) error.CanonicalStoreFailure else error.HostInvocationFailed;
+    }
+};
+
 pub const ReportReply = union(enum) {
     report: struct { bytes: u64 },
     command: CommandReply,
@@ -361,13 +381,15 @@ pub fn observeCommand(
     store_path: []const u8,
     key: []const u8,
     reply_buffer: *ReplyBuffer,
-) !CommandReply {
+) !ObservationReply {
     reply_buffer.len = 0;
     if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
     const paths = try platform.resolveClientPaths(io, store_path);
     var body: protocol.RequestBuffer = .{};
     try renderReadRequest(&body, "observe_command", paths.store.slice(), "key", key, null, null);
-    return sendBytes(io, &paths, "/v1/observe-command", body.slice(), null, reply_buffer);
+    const reply = try sendBytes(io, &paths, "/v1/observe-command", body.slice(), null, reply_buffer);
+    if (reply.status != 200) return .{ .failure = try decodeReadFailure(reply, false) };
+    return .{ .observation = try CommandObservation.parse(reply, key) };
 }
 
 /// An owned selected address, independent of any local request capture.
@@ -386,19 +408,29 @@ pub const MessageAddress = struct {
     }
 };
 
-/// Owns decoded storage. Code slices borrow it until deinit, independently of
-/// the reply buffer. Consumers use facts and writeJson, never the parsed tree.
-pub const MessageObservation = struct {
-    state: State,
-    code: ?[]const u8 = null,
-    processing_turn: ?u64 = null,
+/// Owned scalar facts survive reply-buffer reuse. No DOM, payload or allocator
+/// lifetime is retained. Admission status is distinct from the Message result.
+pub const CommandObservation = struct {
+    key: protocol.Bounded(protocol.max_key_bytes),
+    status: enum { absent, accepted, rejected },
+    kind: ?std.meta.Tag(MutationTarget) = null,
+    target: ?protocol.Bounded(protocol.max_session_bytes) = null,
+    code: ?protocol.Bounded(96) = null,
+    revision: ?u64 = null,
+    created: ?bool = null,
+    input: ?ContentReference = null,
+    queue: ?struct { status: enum { queued, processing, excluded, completed, failed, cancelled }, admission: u64 } = null,
+    processing: ?struct { turn: u64, operation: u64, attempt: u64 } = null,
+    result: ?struct { status: enum { completed, failed, cancelled }, code: ?protocol.Bounded(96), text: ?ContentReference } = null,
     progress: ?Progress = null,
-    storage: *Storage,
+    selection: ?struct { turn: ?u64, admission_cutoff: u64 } = null,
+    completion: ?enum { pending, completed } = null,
+    interruption_target: ?struct { session: protocol.Bounded(protocol.max_session_bytes), turn: u64, operation: u64 } = null,
+    permission_target: ?struct { action: u64, decision: protocol.PermissionDecision } = null,
 
-    const Storage = opaque {};
+    pub const ContentReference = struct { bytes: u64, digest: [32]u8 };
 
     pub const State = enum {
-        accepted,
         queued,
         processing,
         rejected,
@@ -419,108 +451,187 @@ pub const MessageObservation = struct {
         action: ?u64,
     };
 
-    pub fn deinit(self: *MessageObservation) void {
-        const parsed: *std.json.Parsed(std.json.Value) = @ptrCast(@alignCast(self.storage));
-        parsed.deinit();
-        self.* = undefined;
+    pub fn state(self: *const CommandObservation) State {
+        std.debug.assert(self.kind == .message and self.status != .absent);
+        if (self.status == .rejected) return .rejected;
+        // A terminal result wins over coarser queue/progress hints. Admission
+        // remains accepted; a later failure is not a submission rejection.
+        if (self.result) |result| return switch (result.status) {
+            .completed => .completed,
+            .failed => .failed,
+            .cancelled => .cancelled,
+        };
+        return if (self.queue.?.status == .queued) .queued else .processing;
     }
 
-    /// Writes the complete supported observation, including fields not consumed
-    /// by typed facts. No second serialized payload or typed reconstruction.
-    pub fn writeJson(self: *const MessageObservation, writer: *std.Io.Writer) !void {
-        const parsed: *const std.json.Parsed(std.json.Value) = @ptrCast(@alignCast(self.storage));
-        try std.json.Stringify.value(parsed.value.object.get("observation").?, .{}, writer);
+    /// Borrowed from this owned value, not from the receive buffer.
+    pub fn failureCode(self: *const CommandObservation) ?[]const u8 {
+        if (self.code) |*code| return code.slice();
+        if (self.result) |*result| if (result.code) |*code| return code.slice();
+        return null;
     }
 
-    pub fn parse(allocator: std.mem.Allocator, reply: CommandReply, address: *const MessageAddress) !MessageObservation {
+    pub fn forMessage(self: CommandObservation, address: *const MessageAddress) !CommandObservation {
+        if (!self.key.eql(address.key.slice())) return error.RequestBindingMismatch;
+        if (self.status == .absent) return error.RequestNotAdmitted;
+        if (self.kind != .message or !self.target.?.eql(address.session.slice())) return error.RequestBindingMismatch;
+        return self;
+    }
+
+    /// Semantic output of supported facts only, with decimal identity strings.
+    pub fn writeJson(self: *const CommandObservation, writer: *std.Io.Writer) !void {
+        try writer.print("{{\"status\":\"{s}\"", .{@tagName(self.status)});
+        if (self.kind) |kind| try writer.print(",\"kind\":\"{s}\",\"target\":", .{@tagName(kind)});
+        if (self.target) |*target| try std.json.Stringify.value(target.slice(), .{}, writer);
+        if (self.code) |*code| {
+            try writer.writeAll(",\"code\":");
+            try std.json.Stringify.value(code.slice(), .{}, writer);
+        }
+        if (self.revision) |revision| try writer.print(",\"revision\":\"{d}\",\"created\":{}", .{ revision, self.created.? });
+        if (self.input) |input| {
+            try writer.writeAll(",\"input\":");
+            try writeContentReference(writer, input);
+        }
+        if (self.queue) |queue| try writer.print(",\"queue\":{{\"status\":\"{s}\",\"admission\":\"{d}\"}}", .{ @tagName(queue.status), queue.admission });
+        if (self.processing) |binding| try writer.print(",\"processing\":{{\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{ binding.turn, binding.operation, binding.attempt });
+        if (self.result) |result| {
+            try writer.print(",\"result\":{{\"status\":\"{s}\"", .{@tagName(result.status)});
+            if (result.code) |*code| {
+                try writer.writeAll(",\"code\":");
+                try std.json.Stringify.value(code.slice(), .{}, writer);
+            }
+            if (result.text) |text| {
+                try writer.writeAll(",\"text\":");
+                try writeContentReference(writer, text);
+            }
+            try writer.writeByte('}');
+        }
+        if (self.progress) |progress| {
+            try writer.print(",\"progress\":{{\"status\":\"{s}\",\"action\":", .{@tagName(progress.status)});
+            if (progress.action) |action| try writer.print("\"{d}\"", .{action}) else try writer.writeAll("null");
+            try writer.writeByte('}');
+        }
+        if (self.selection) |selection| {
+            try writer.writeAll(",\"selection\":{\"turn\":");
+            if (selection.turn) |turn| try writer.print("\"{d}\"", .{turn}) else try writer.writeAll("null");
+            try writer.print(",\"admission_cutoff\":\"{d}\"}},\"completion\":{{\"status\":\"{s}\"}}", .{ selection.admission_cutoff, @tagName(self.completion.?) });
+        }
+        if (self.interruption_target) |*target| {
+            try writer.writeAll(",\"interruption_target\":{\"session\":");
+            try std.json.Stringify.value(target.session.slice(), .{}, writer);
+            try writer.print(",\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation });
+        }
+        if (self.permission_target) |target| try writer.print(",\"permission_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{ target.action, @tagName(target.decision) });
+        try writer.writeByte('}');
+    }
+
+    fn writeContentReference(writer: *std.Io.Writer, reference: ContentReference) !void {
+        try writer.print("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ reference.bytes, std.fmt.bytesToHex(reference.digest, .lower) });
+    }
+
+    pub fn parse(reply: CommandReply, key: []const u8) !CommandObservation {
         try checkCanonicalFailure(reply);
         if (reply.status != 200) return error.ObservationFailed;
         if (reply.body.len > protocol.max_response_bytes) return error.ResponseTooLarge;
-        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, reply.body, .{ .allocate = .alloc_always, .parse_numbers = false });
-        errdefer parsed.deinit();
-        const root = parsed.value;
-        if (!std.mem.eql(u8, try observationString(root, "version"), protocol.wire_version) or
-            !std.mem.eql(u8, try observationString(root, "type"), "command_observation")) return error.InvalidObservation;
-        if (!std.mem.eql(u8, try observationString(root, "key"), address.key.slice())) return error.RequestBindingMismatch;
-        const observation = try observationField(root, "observation");
-        const status = try observationString(observation, "status");
-        if (std.mem.eql(u8, status, "absent")) return error.RequestNotAdmitted;
-        if (!std.mem.eql(u8, try observationString(observation, "kind"), "message") or
-            !std.mem.eql(u8, try observationString(observation, "target"), address.session.slice())) return error.RequestBindingMismatch;
+        const Ref = struct { type: JsonEnum(enum { text }), bytes: JsonString(20), sha256: JsonString(64) };
+        const Facts = struct {
+            status: JsonEnum(@FieldType(CommandObservation, "status")),
+            kind: OmittableJson(JsonEnum(std.meta.Tag(MutationTarget))) = .{},
+            target: OmittableJson(JsonString(protocol.max_session_bytes)) = .{},
+            code: OmittableJson(JsonString(96)) = .{},
+            revision: OmittableJson(JsonString(20)) = .{},
+            created: OmittableJson(bool) = .{},
+            input: OmittableJson(Ref) = .{},
+            queue: OmittableJson(struct { status: JsonEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "queue")).optional.child, "status")), admission: JsonString(20) }) = .{},
+            processing: OmittableJson(struct { turn: JsonString(20), operation: JsonString(20), attempt: JsonString(20) }) = .{},
+            result: OmittableJson(struct { status: JsonEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "result")).optional.child, "status")), code: OmittableJson(JsonString(96)) = .{}, text: OmittableJson(Ref) = .{} }) = .{},
+            progress: OmittableJson(struct { status: JsonEnum(@FieldType(Progress, "status")), action: ?JsonString(20) }) = .{},
+            selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
+            completion: OmittableJson(struct { status: JsonEnum(@typeInfo(@FieldType(CommandObservation, "completion")).optional.child) }) = .{},
+            interruption_target: OmittableJson(struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
+            permission_target: OmittableJson(struct { action: JsonString(20), decision: JsonEnum(protocol.PermissionDecision) }) = .{},
+        };
+        const Wire = struct { version: JsonString(8), type: JsonString(32), key: JsonString(protocol.max_key_bytes), observation: Facts, code: OmittableJson(JsonString(96)) = .{}, answer: OmittableJson(struct {}) = .{} };
+        const capacity = comptime std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.max_response_bytes);
+        var storage: [capacity]u8 = undefined;
+        var fixed = std.heap.FixedBufferAllocator.init(&storage);
+        var scanner = std.json.Scanner.initCompleteInput(fixed.allocator(), reply.body);
+        defer scanner.deinit();
+        scanner.ensureTotalStackCapacity(protocol.max_response_bytes) catch unreachable;
+        const wire = std.json.parseFromTokenSourceLeaky(Wire, fixed.allocator(), &scanner, .{ .ignore_unknown_fields = true }) catch return error.InvalidObservation;
+        if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("command_observation") or wire.code.value != null or wire.answer.value != null) return error.InvalidObservation;
+        if (!wire.key.eql(key)) return error.RequestBindingMismatch;
+        const facts = wire.observation;
+        var observed: CommandObservation = .{ .key = wire.key.value, .status = facts.status.value, .kind = if (facts.kind.value) |kind| kind.value else null, .created = facts.created.value };
+        inline for (.{ "target", "code" }) |name| if (@field(facts, name).value) |value| {
+            @field(observed, name) = value.value;
+        };
+        if (facts.revision.value) |value| observed.revision = try mutationId(value, false);
+        if (facts.input.value) |value| observed.input = try decodeReference(value);
+        if (facts.queue.value) |value| observed.queue = .{ .status = value.status.value, .admission = try mutationId(value.admission, false) };
+        if (facts.processing.value) |value| observed.processing = .{ .turn = try mutationId(value.turn, false), .operation = try mutationId(value.operation, false), .attempt = try mutationId(value.attempt, true) };
+        if (facts.result.value) |value| observed.result = .{ .status = value.status.value, .code = if (value.code.value) |code| code.value else null, .text = if (value.text.value) |text| try decodeReference(text) else null };
+        if (facts.progress.value) |value| observed.progress = .{ .status = value.status.value, .action = if (value.action) |action| try mutationId(action, false) else null };
+        if (facts.selection.value) |value| observed.selection = .{ .turn = if (value.turn) |turn| try mutationId(turn, false) else null, .admission_cutoff = try mutationId(value.admission_cutoff, true) };
+        if (facts.completion.value) |value| observed.completion = value.status.value;
+        if (facts.interruption_target.value) |value| observed.interruption_target = .{ .session = value.session.value, .turn = try mutationId(value.turn, true), .operation = try mutationId(value.operation, true) };
+        if (facts.permission_target.value) |value| observed.permission_target = .{ .action = try mutationId(value.action, true), .decision = value.decision.value };
+        try observed.validate();
+        return observed;
+    }
 
-        // Store the private lifetime record in the parser's existing arena: no
-        // independent allocation owner or second copy of the observation tree.
-        const storage = try parsed.arena.allocator().create(@TypeOf(parsed));
-        storage.* = parsed;
-        var result: MessageObservation = .{ .state = .accepted, .storage = @ptrCast(storage) };
-        if (std.mem.eql(u8, status, "rejected")) {
-            result.state = .rejected;
-            result.code = try observationCode(observation);
-            return result;
-        }
-        if (!std.mem.eql(u8, status, "accepted")) return error.InvalidObservation;
-        if (observation.object.get("processing")) |processing|
-            result.processing_turn = try observationId(try observationField(processing, "turn"));
-        // The selected Message's terminal result wins over queue/progress hints,
-        // including an excluded queue and a successor's permission attention.
-        if (observation.object.get("result")) |terminal_result| {
-            const outcome = try observationString(terminal_result, "status");
-            result.state = std.meta.stringToEnum(State, outcome) orelse return error.InvalidObservation;
-            if (result.state != .completed and result.state != .failed and result.state != .cancelled) return error.InvalidObservation;
-            result.code = try observationCode(terminal_result);
-            return result;
-        }
-        if (observation.object.get("queue")) |queue| {
-            const queued = try observationString(queue, "status");
-            result.state = std.meta.stringToEnum(State, queued) orelse return error.InvalidObservation;
-            if (result.state != .queued and result.state != .processing) return error.InvalidObservation;
-        }
-        if (observation.object.get("progress")) |progress| {
-            const progress_status = std.meta.stringToEnum(@FieldType(Progress, "status"), try observationString(progress, "status")) orelse return error.InvalidObservation;
-            const action = try observationField(progress, "action");
-            const action_id: ?u64 = switch (action) {
-                .null => null,
-                else => try observationId(action),
-            };
-            if (progress_status == .waiting_for_permission and action_id == null) return error.InvalidObservation;
-            result.progress = .{ .status = progress_status, .action = action_id };
-        }
+    fn decodeReference(value: anytype) !ContentReference {
+        var result: ContentReference = .{ .bytes = try mutationId(value.bytes, true), .digest = undefined };
+        if (value.sha256.slice().len != 64) return error.InvalidObservation;
+        _ = std.fmt.hexToBytes(&result.digest, value.sha256.slice()) catch return error.InvalidObservation;
         return result;
+    }
+
+    fn validate(self: *const CommandObservation) !void {
+        if (self.status == .absent) {
+            inline for (.{ "kind", "target", "code", "revision", "created", "input", "queue", "processing", "result", "progress", "selection", "completion", "interruption_target", "permission_target" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
+            return;
+        }
+        const kind = self.kind orelse return error.InvalidObservation;
+        if (self.target == null or self.target.?.len == 0) return error.InvalidObservation;
+        if ((self.status == .rejected) != (self.code != null)) return error.InvalidObservation;
+        if (self.code) |code| if (code.len == 0) return error.InvalidObservation;
+        const accepted = self.status == .accepted;
+        if ((self.revision != null) != (accepted and kind == .configure) or (self.created != null) != (accepted and kind == .configure)) return error.InvalidObservation;
+        if ((self.selection != null) != (accepted and kind == .session_stop) or (self.completion != null) != (accepted and kind == .session_stop)) return error.InvalidObservation;
+        if ((self.interruption_target != null) != (kind == .model_interruption) or (self.permission_target != null) != (kind == .permission_decision)) return error.InvalidObservation;
+        if (self.interruption_target) |target| if (!target.session.eql(self.target.?.slice())) return error.RequestBindingMismatch;
+        if (kind != .message or !accepted) {
+            if (self.queue != null or self.processing != null or self.result != null or self.progress != null or (kind != .message and self.input != null)) return error.InvalidObservation;
+            return;
+        }
+        if (self.input == null or self.queue == null) return error.InvalidObservation;
+        const queue = self.queue.?;
+        if (queue.status != .queued and queue.status != .excluded and self.processing == null) return error.InvalidObservation;
+        if ((queue.status == .excluded or queue.status == .completed or queue.status == .failed or queue.status == .cancelled) and self.result == null) return error.InvalidObservation;
+        if (queue.status == .excluded and self.processing != null) return error.InvalidObservation;
+        if (self.result) |result| {
+            if (queue.status == .excluded) {
+                if (result.status != .cancelled) return error.InvalidObservation;
+            } else if (self.processing == null) return error.InvalidObservation;
+            if ((queue.status == .completed and result.status != .completed) or
+                (queue.status == .failed and result.status != .failed) or
+                (queue.status == .cancelled and result.status != .cancelled)) return error.InvalidObservation;
+            if (result.status == .completed) {
+                if (result.text == null or result.code != null or self.processing == null) return error.InvalidObservation;
+            } else if (result.text != null or result.code == null or result.code.?.len == 0) return error.InvalidObservation;
+        }
+        if (self.progress) |progress| if (progress.status == .waiting_for_permission and progress.action == null) return error.InvalidObservation;
     }
 };
 
-fn observationField(value: std.json.Value, name: []const u8) !std.json.Value {
-    if (value != .object) return error.InvalidObservation;
-    return value.object.get(name) orelse error.InvalidObservation;
-}
-
-fn observationString(value: std.json.Value, name: []const u8) ![]const u8 {
-    const field = try observationField(value, name);
-    if (field != .string) return error.InvalidObservation;
-    return field.string;
-}
-
-fn observationId(value: std.json.Value) !u64 {
-    if (value != .string or value.string.len == 0) return error.InvalidObservation;
-    for (value.string) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidObservation;
-    const id = std.fmt.parseInt(u64, value.string, 10) catch return error.InvalidObservation;
-    if (id == 0) return error.InvalidObservation;
-    return id;
-}
-
-fn observationCode(value: std.json.Value) !?[]const u8 {
-    if (value != .object) return error.InvalidObservation;
-    if (value.object.get("code")) |code| {
-        if (code != .string) return error.InvalidObservation;
-        return code.string;
-    }
-    return null;
-}
-
-pub fn observeMessage(io: std.Io, allocator: std.mem.Allocator, address: *const MessageAddress) !MessageObservation {
+pub fn observeMessage(io: std.Io, address: *const MessageAddress) !ObservationReply {
     var buffer: ReplyBuffer = .{};
     const reply = try observeCommand(io, address.store.slice(), address.key.slice(), &buffer);
-    return MessageObservation.parse(allocator, reply, address);
+    return switch (reply) {
+        .observation => |observation| .{ .observation = try observation.forMessage(address) },
+        .failure => reply,
+    };
 }
 
 pub fn readResult(
@@ -529,7 +640,7 @@ pub fn readResult(
     key: []const u8,
     destination: std.Io.File,
     reply_buffer: *ReplyBuffer,
-) !ResultReply {
+) !ResultReadReply {
     return readResultWithSink(io, store_path, key, destination, reply_buffer);
 }
 
@@ -541,7 +652,7 @@ pub fn readResultStream(
     key: []const u8,
     sink: anytype,
     reply_buffer: *ReplyBuffer,
-) !ResultReply {
+) !ResultReadReply {
     return readResultWithSink(io, store_path, key, sink, reply_buffer);
 }
 
@@ -551,7 +662,7 @@ fn readResultWithSink(
     key: []const u8,
     sink: anytype,
     reply_buffer: *ReplyBuffer,
-) !ResultReply {
+) !ResultReadReply {
     reply_buffer.len = 0;
     if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
     const paths = try platform.resolveClientPaths(io, store_path);
@@ -565,7 +676,10 @@ fn readResultWithSink(
     const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/read-result HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{body.len});
     try writeAll(fd, header);
     try writeAll(fd, body.slice());
-    return readResultResponseSink(io, fd, sink, reply_buffer);
+    return switch (try readResultResponseSink(io, fd, sink, reply_buffer)) {
+        .answer => |answer| .{ .answer = .{ .bytes = answer.bytes } },
+        .command => |reply| .{ .failure = try decodeReadFailure(reply, true) },
+    };
 }
 
 pub fn inspectSession(
@@ -759,6 +873,24 @@ fn JsonString(comptime limit: usize) type {
     };
 }
 
+// The stdlib also accepts numeric enum tags. Host facts require named strings;
+// their closed vocabulary derives the token bound, with JsonString's lifetime.
+fn JsonEnum(comptime T: type) type {
+    const limit = comptime blk: {
+        var longest: usize = 0;
+        for (@typeInfo(T).@"enum".fields) |field| longest = @max(longest, field.name.len);
+        break :blk longest;
+    };
+    return struct {
+        value: T,
+
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            const string = try JsonString(limit).jsonParse(allocator, source, options);
+            return .{ .value = std.meta.stringToEnum(T, string.slice()) orelse return error.InvalidEnumTag };
+        }
+    };
+}
+
 // The containing field's default represents omission. A present field must
 // parse as T, not ?T: JSON null cannot stand in for an absent outcome/diagnostic.
 fn OmittableJson(comptime T: type) type {
@@ -778,6 +910,30 @@ fn mutationId(value: JsonString(20), allow_zero: bool) !u64 {
     const id = std.fmt.parseInt(u64, bytes, 10) catch return error.InvalidResponse;
     if (!allow_zero and id == 0) return error.InvalidResponse;
     return id;
+}
+
+fn decodeReadFailure(reply: CommandReply, result_read: bool) !ReadFailure {
+    if (reply.body.len > protocol.max_response_bytes) return error.InvalidResponse;
+    const Wire = struct {
+        version: JsonString(8),
+        type: JsonString(32),
+        code: JsonString(96),
+        observation: OmittableJson(struct {}) = .{},
+        answer: OmittableJson(struct {}) = .{},
+    };
+    const capacity = comptime std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.max_response_bytes);
+    var storage: [capacity]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var scanner = std.json.Scanner.initCompleteInput(fixed.allocator(), reply.body);
+    defer scanner.deinit();
+    scanner.ensureTotalStackCapacity(protocol.max_response_bytes) catch unreachable;
+    const wire = std.json.parseFromTokenSourceLeaky(Wire, fixed.allocator(), &scanner, .{ .ignore_unknown_fields = true }) catch return error.InvalidResponse;
+    if (wire.observation.value != null or wire.answer.value != null) return error.InvalidResponse;
+    const failure: ReadFailure = .{ .status = reply.status, .diagnostic = .{ .type = wire.type.value, .code = wire.code.value } };
+    try validateInvocationDiagnostic(reply.status, wire.version.slice(), failure.diagnostic);
+    if (wire.type.eql("result_unavailable") and (!result_read or reply.status != 409 or
+        (!wire.code.eql("result_not_found") and !wire.code.eql("result_not_ready") and !wire.code.eql("result_failed")))) return error.InvalidResponse;
+    return failure;
 }
 
 /// One operation boundary for synchronous callers and a later worker. No
@@ -1900,8 +2056,8 @@ fn validateInvocationDiagnostic(status: u16, version: []const u8, diagnostic: In
     if (diagnostic.code.eql("canonical_store_failure") and (status != 500 or !diagnostic.type.eql("invocation_error"))) return error.InvalidResponse;
 }
 
-// Read/inspection callers retain their representation; mutation callers own
-// typed diagnostics from their single operation-envelope parse instead.
+// Remaining snapshot/report/Action callers check canonical failure here;
+// mutation and keyed-read callers own diagnostics from their envelope parse.
 pub fn checkCanonicalFailure(reply: CommandReply) !void {
     if (reply.status == 200) return;
     if (reply.body.len > protocol.max_response_bytes) return error.InvalidResponse;
@@ -3117,125 +3273,129 @@ test "truncated result body leaves only an unsuccessful destination prefix" {
     try std.testing.expectEqual(@as(u64, 2), try destination.length(std.testing.io));
 }
 
-test "Message observation retains selected Turn independently of terminal progress" {
+test "keyed observation retains request acceptance independently of later work" {
     const address = try MessageAddress.init("/store", "s", "k");
-    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"s\",\"status\":\"accepted\",\"processing\":{\"turn\":\"37\"},";
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"s\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ "ab" ** 32 ++ "\"},\"queue\":{\"status\":\"processing\",\"admission\":\"23\"},\"processing\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
     inline for (.{
-        .{ "\"queue\":{\"status\":\"processing\"}}}", MessageObservation.State.processing },
-        .{ "\"result\":{\"status\":\"completed\"},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"91\"}}}", MessageObservation.State.completed },
-        .{ "\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}}}", MessageObservation.State.failed },
-        .{ "\"result\":{\"status\":\"cancelled\"}}}", MessageObservation.State.cancelled },
+        .{ "}}", CommandObservation.State.processing },
+        .{ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"19\",\"sha256\":\"" ++ "cd" ** 32 ++ "\"}},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"91\"}}}", CommandObservation.State.completed },
+        .{ ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}}}", CommandObservation.State.failed },
+        .{ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}}}", CommandObservation.State.cancelled },
     }) |case| {
-        var observed = try MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ case[0] }, &address);
-        defer observed.deinit();
-        try std.testing.expectEqual(case[1], observed.state);
-        try std.testing.expectEqual(@as(?u64, 37), observed.processing_turn);
-        try std.testing.expect(observed.progress == null);
+        const observed = try (try CommandObservation.parse(.{ .status = 200, .body = prefix ++ case[0] }, "k")).forMessage(&address);
+        try std.testing.expectEqual(.accepted, observed.status);
+        try std.testing.expectEqual(case[1], observed.state());
+        try std.testing.expectEqual(@as(u64, 37), observed.processing.?.turn);
+        try std.testing.expectEqual(@as(u64, 41), observed.processing.?.operation);
+        try std.testing.expectEqual(@as(u64, 0), observed.processing.?.attempt);
+        try std.testing.expectEqual(@as(u64, 23), observed.queue.?.admission);
+        if (observed.state() == .completed) try std.testing.expectEqual(@as(u64, 19), observed.result.?.text.?.bytes);
+        var output: [protocol.max_response_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try observed.writeJson(&writer);
+        const json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+        defer json.deinit();
+        try std.testing.expectEqualStrings("accepted", json.value.object.get("status").?.string);
     }
 }
 
-test "Message observation preserves binding outcomes and absent progress" {
-    const address = try MessageAddress.init("/store", "original/session", "original-key");
-    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"original-key\",\"observation\":{\"kind\":\"message\",\"target\":\"original/session\",";
-    const cases = .{
-        .{ "\"status\":\"accepted\"}}", MessageObservation.State.accepted, null },
-        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"queued\"}}}", MessageObservation.State.queued, null },
-        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"processing\"}}}", MessageObservation.State.processing, null },
-        .{ "\"status\":\"rejected\",\"code\":\"unknown_session\"}}", MessageObservation.State.rejected, "unknown_session" },
-        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"processing\"},\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"19\"}}}", MessageObservation.State.failed, "provider_http_422" },
-        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"excluded\"},\"result\":{\"status\":\"cancelled\",\"code\":\"session_stopped\"}}}", MessageObservation.State.cancelled, "session_stopped" },
-        .{ "\"status\":\"accepted\",\"queue\":{\"status\":\"completed\"},\"result\":{\"status\":\"completed\"}}}", MessageObservation.State.completed, null },
-    };
-    inline for (cases) |case| {
-        var observed = try MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ case[0] }, &address);
-        defer observed.deinit();
-        try std.testing.expectEqual(case[1], observed.state);
-        const expected_code: ?[]const u8 = case[2];
-        if (expected_code) |code| try std.testing.expectEqualStrings(code, observed.code.?) else try std.testing.expect(observed.code == null);
-        try std.testing.expect(observed.progress == null);
-        try std.testing.expect(observed.processing_turn == null);
-    }
-    const other_session = try MessageAddress.init("/store", "later/session", "original-key");
-    const other_key = try MessageAddress.init("/store", "original/session", "later-key");
-    const completed: CommandReply = .{ .status = 200, .body = prefix ++ "\"status\":\"accepted\",\"result\":{\"status\":\"completed\"}}}" };
-    try std.testing.expectError(error.RequestBindingMismatch, MessageObservation.parse(std.testing.allocator, completed, &other_session));
-    try std.testing.expectError(error.RequestBindingMismatch, MessageObservation.parse(std.testing.allocator, completed, &other_key));
-    try std.testing.expectError(error.InvalidResponse, MessageObservation.parse(std.testing.allocator, .{ .status = 503, .body = "" }, &address));
-    try std.testing.expectError(error.ObservationFailed, MessageObservation.parse(std.testing.allocator, .{ .status = 503, .body = "{\"code\":\"host_unavailable\"}" }, &address));
-    try std.testing.expectError(error.CanonicalStoreFailure, MessageObservation.parse(std.testing.allocator, .{ .status = 500, .body = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}" }, &address));
-    try std.testing.expectError(error.RequestNotAdmitted, MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ "\"status\":\"absent\"}}" }, &address));
-    try std.testing.expectError(error.RequestBindingMismatch, MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"original-key\",\"observation\":{\"status\":\"accepted\",\"kind\":\"configure\",\"target\":\"original/session\"}}" }, &address));
+test "keyed observation distinguishes named statuses and omitted fields from numeric tags and null" {
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"target\":\"s\",\"code\":\"unknown_session\",";
+    inline for (.{ "\"status\":2,\"kind\":\"message\"}}", "\"status\":\"2\",\"kind\":\"message\"}}", "\"status\":\"rejected\",\"kind\":1}}" }) |fields|
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ fields }, "k"));
+    const absent = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"absent\"";
+    inline for (.{ "kind", "target", "code", "revision", "created", "input", "queue", "processing", "result", "progress", "selection", "completion", "interruption_target", "permission_target" }) |field|
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = absent ++ ",\"" ++ field ++ "\":null}}" }, "k"));
 }
 
-test "Message observation rejects malformed facts rather than work failures" {
-    const address = try MessageAddress.init("/store", "s", "k");
-    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"s\",\"status\":\"accepted\",";
+test "keyed observation validates all five operation shapes and binding" {
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"target\":\"s\",";
     inline for (.{
-        "\"processing\":null}}",
-        "\"processing\":{}}}",
-        "\"processing\":{\"turn\":7}}}",
-        "\"processing\":{\"turn\":\"0\"}}}",
-        "\"processing\":{\"turn\":\"+7\"}}}",
-        "\"processing\":{\"turn\":\"18446744073709551616\"}}}",
-        "\"queue\":null}}",
-        "\"queue\":{\"status\":\"excluded\"}}}",
-        "\"result\":{\"status\":\"processing\"}}}",
-        "\"result\":{\"status\":\"failed\",\"code\":17}}}",
-        "\"progress\":{\"status\":\"invented\",\"action\":null}}}",
-        "\"progress\":{\"status\":\"waiting_for_permission\",\"action\":null}}}",
-        "\"progress\":{\"status\":\"in_flight\"}}}",
-        "\"progress\":{\"status\":\"in_flight\",\"action\":17}}}",
-        "\"progress\":{\"status\":\"in_flight\",\"action\":\"0\"}}}",
-        "\"progress\":{\"status\":\"in_flight\",\"action\":\"+7\"}}}",
-        "\"progress\":{\"status\":\"in_flight\",\"action\":\"18446744073709551616\"}}}",
-    }) |suffix| try std.testing.expectError(error.InvalidObservation, MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ suffix }, &address));
-    inline for (.{ "{}", "[]", "{\"version\":\"2\"}", "{\"version\":\"1\",\"type\":\"wrong\"}" }) |body|
-        try std.testing.expectError(error.InvalidObservation, MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = body }, &address));
-    try std.testing.expectError(error.DuplicateField, MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = prefix ++ "\"queue\":{\"status\":\"queued\",\"status\":\"processing\"}}}" }, &address));
-    var oversized: [protocol.max_response_bytes + 1]u8 = undefined;
-    try std.testing.expectError(error.ResponseTooLarge, MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = &oversized }, &address));
-}
-
-test "Message observation owns decoded strings and writes complete JSON after reply reuse" {
-    const address = try MessageAddress.init("/store", "s", "k");
-    const observation = "{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"digest\"},\"queue\":{\"status\":\"processing\",\"admission\":\"41\"},\"processing\":{\"turn\":\"3\",\"operation\":\"9\",\"attempt\":\"15\"},\"result\":{\"status\":\"failed\",\"code\":\"plain_code\"},\"extra\":{\"precise\":123456789012345678901234567890,\"decimal\":0.123456789012345678901234567890,\"items\":[true,null,\"line\\n\\u001b\"]}}";
-    const body = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":" ++ observation ++ "}";
-    var reply_storage: [body.len]u8 = undefined;
-    @memcpy(&reply_storage, body);
-    var observed = try MessageObservation.parse(std.testing.allocator, .{ .status = 200, .body = &reply_storage }, &address);
-    defer observed.deinit();
-    @memset(&reply_storage, 'x');
-    try std.testing.expectEqualStrings("plain_code", observed.code.?);
-    try std.testing.expectEqual(@as(?u64, 3), observed.processing_turn);
-    var output: [body.len]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&output);
-    try observed.writeJson(&writer);
-    try std.testing.expectEqualStrings(observation, writer.buffered());
-    var too_small = std.Io.Writer.fixed(&.{});
-    try std.testing.expectError(error.WriteFailed, observed.writeJson(&too_small));
-}
-
-test "Message observation releases storage across allocation failures and repeated polls" {
-    const Harness = struct {
-        fn run(allocator: std.mem.Allocator) !void {
-            const address = try MessageAddress.init("/store", "s", "k");
-            const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\",";
-            var observed = try MessageObservation.parse(allocator, .{ .status = 200, .body = prefix ++ "\"queue\":{\"status\":\"processing\"},\"progress\":{\"status\":\"in_flight\",\"action\":\"18446744073709551615\"}}}" }, &address);
-            defer observed.deinit();
-            try std.testing.expectEqual(std.math.maxInt(u64), observed.progress.?.action.?);
-            var invalid = MessageObservation.parse(allocator, .{ .status = 200, .body = prefix ++ "\"progress\":{\"status\":\"in_flight\",\"action\":false}}}" }, &address) catch |err| switch (err) {
-                error.InvalidObservation => return,
-                else => return err,
-            };
-            invalid.deinit();
-            return error.ExpectedInvalidObservation;
-        }
-    };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
-    for (0..100) |_| {
-        var tracked = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        try Harness.run(tracked.allocator());
-        try std.testing.expectEqual(tracked.allocated_bytes, tracked.freed_bytes);
-        try std.testing.expectEqual(tracked.allocations, tracked.deallocations);
+        .{ "configure", ",\"revision\":\"31\",\"created\":true", "" },
+        .{ "message", ",\"input\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ "00" ** 32 ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"13\"}", "" },
+        .{ "session_stop", ",\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"},\"completion\":{\"status\":\"completed\"}", "" },
+        .{ "model_interruption", ",\"interruption_target\":{\"session\":\"s\",\"turn\":\"3\",\"operation\":\"7\"}", ",\"interruption_target\":{\"session\":\"s\",\"turn\":\"0\",\"operation\":\"0\"}" },
+        .{ "permission_decision", ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}", ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}" },
+    }) |case| {
+        const accepted = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"" ++ case[1] ++ "}}";
+        const observed = try CommandObservation.parse(.{ .status = 200, .body = accepted }, "k");
+        try std.testing.expectEqualStrings(case[0], @tagName(observed.kind.?));
+        try std.testing.expectEqual(.accepted, observed.status);
+        var output: [protocol.max_response_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try observed.writeJson(&writer);
+        try std.testing.expectEqualStrings("{\"status\":\"accepted\",\"kind\":\"" ++ case[0] ++ "\",\"target\":\"s\"" ++ case[1] ++ "}", writer.buffered());
+        try std.testing.expectError(error.RequestBindingMismatch, CommandObservation.parse(.{ .status = 200, .body = accepted }, "other"));
+        const rejected = try CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"rejected\",\"code\":\"unknown_session\"" ++ case[2] ++ "}}" }, "k");
+        try std.testing.expectEqual(.rejected, rejected.status);
+        try std.testing.expectEqualStrings("unknown_session", rejected.failureCode().?);
+        writer = std.Io.Writer.fixed(&output);
+        try rejected.writeJson(&writer);
+        try std.testing.expectEqualStrings("{\"status\":\"rejected\",\"kind\":\"" ++ case[0] ++ "\",\"target\":\"s\",\"code\":\"unknown_session\"" ++ case[2] ++ "}", writer.buffered());
+        // Missing operation-specific metadata must not turn into confirmation.
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"}}" }, "k"));
     }
+    const absent = try CommandObservation.parse(.{ .status = 200, .body = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"absent\"}}" }, "k");
+    const address = try MessageAddress.init("/store", "s", "k");
+    try std.testing.expectError(error.RequestNotAdmitted, absent.forMessage(&address));
+    const rejection = try CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"message\",\"status\":\"rejected\",\"code\":\"unknown_session\"}}" }, "k");
+    const other = try MessageAddress.init("/store", "other", "k");
+    try std.testing.expectError(error.RequestBindingMismatch, rejection.forMessage(&other));
+}
+
+test "keyed observation rejects malformed consequential fields before outcome interpretation" {
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"s\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ "ab" ** 32 ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}";
+    inline for (.{
+        ",\"processing\":null}}",                              ",\"processing\":{}}}",                                      ",\"processing\":{\"turn\":7}}}",
+        ",\"result\":{\"status\":\"processing\"}}}",           ",\"result\":{\"status\":\"completed\"}}}",                  ",\"result\":{\"status\":\"failed\",\"code\":17}}}",
+        ",\"result\":{\"status\":\"failed\",\"code\":null}}}", ",\"progress\":{\"status\":\"invented\",\"action\":null}}}", ",\"progress\":{\"status\":\"waiting_for_permission\",\"action\":null}}}",
+        ",\"progress\":{\"status\":\"in_flight\"}}}",          ",\"progress\":{\"status\":\"in_flight\",\"action\":17}}}",  ",\"result\":{\"status\":\"failed\",\"code\":\"saved_failure\"},\"progress\":false}}",
+        ",\"revision\":\"1\"}}",                               ",\"code\":null}}",                                          ",\"target\":null}}",
+    }) |suffix| try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ suffix }, "k"));
+    inline for (.{ "0", "+7", "07", "18446744073709551616" }) |id|
+        try std.testing.expectError(error.InvalidResponse, CommandObservation.parse(.{ .status = 200, .body = prefix ++ ",\"progress\":{\"status\":\"in_flight\",\"action\":\"" ++ id ++ "\"}}}" }, "k"));
+    inline for (.{ "{}", "[]", "{\"version\":\"2\"}", "{\"version\":\"1\",\"type\":\"wrong\"}" }) |body|
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
+    try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ ",\"queue\":{\"status\":\"queued\",\"admission\":\"9\"}}}" }, "k"));
+    var oversized: [protocol.max_response_bytes + 1]u8 = undefined;
+    try std.testing.expectError(error.ResponseTooLarge, CommandObservation.parse(.{ .status = 200, .body = &oversized }, "k"));
+}
+
+test "keyed observation owns supported strings without retaining unknown DOM across polls" {
+    const observation = "{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s/µ\",\"code\":\"line\\ncode\"}";
+    const body = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s\\u002fµ\",\"code\":\"line\\ncode\",\"unknown\":{\"precise\":123456789012345678901234567890,\"items\":[true,null,\"discard\"]}}}";
+    for (0..100) |_| {
+        var storage = body.*;
+        const observed = try CommandObservation.parse(.{ .status = 200, .body = &storage }, "k");
+        @memset(&storage, 'x');
+        try std.testing.expectEqualStrings("line\ncode", observed.failureCode().?);
+        var output: [body.len]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try observed.writeJson(&writer);
+        try std.testing.expectEqualStrings(observation, writer.buffered());
+        var too_small = std.Io.Writer.fixed(&.{});
+        try std.testing.expectError(error.WriteFailed, observed.writeJson(&too_small));
+    }
+}
+
+test "keyed observation read diagnostics are owned without claiming admission" {
+    const wire = "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\",\"unknown\":[1,2,3]}";
+    var storage = wire.*;
+    const busy = try decodeReadFailure(.{ .status = 503, .body = &storage }, false);
+    @memset(&storage, 'x');
+    try std.testing.expectEqual(@as(u16, 503), busy.status);
+    try std.testing.expectEqualStrings("ordinary_capacity_exhausted", busy.diagnostic.code.slice());
+    try std.testing.expectEqual(error.HostInvocationFailed, busy.err());
+    const fatal = try decodeReadFailure(.{ .status = 500, .body = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}" }, false);
+    try std.testing.expectEqual(error.CanonicalStoreFailure, fatal.err());
+    inline for (.{ "result_not_found", "result_not_ready", "result_failed" }) |code| {
+        const reply: CommandReply = .{ .status = 409, .body = "{\"version\":\"1\",\"type\":\"result_unavailable\",\"code\":\"" ++ code ++ "\"}" };
+        try std.testing.expectEqualStrings(code, (try decodeReadFailure(reply, true)).diagnostic.code.slice());
+        try std.testing.expectError(error.InvalidResponse, decodeReadFailure(reply, false));
+    }
+    inline for (.{ "null", "{}" }) |value|
+        try std.testing.expectError(error.InvalidResponse, decodeReadFailure(.{ .status = 500, .body = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\",\"observation\":" ++ value ++ "}" }, false));
+    std.debug.print("keyed facts bytes={d}; reply bytes={d}; fixed parser scratch={d}; no retained allocator/DOM\n", .{
+        @sizeOf(CommandObservation), @sizeOf(ReplyBuffer), std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.max_response_bytes),
+    });
 }
