@@ -188,11 +188,13 @@ class Exchange(socketserver.BaseRequestHandler):
         self.request.sendall(response)
 
 
-def wrong_target(response):
+def wrong_target(response, null_code=False):
     head, body = response.split(b"\r\n\r\n", 1)
     value = json.loads(body)
     answer = value["answer"]
-    if "target" in answer:
+    if null_code:
+        value["code"] = None
+    elif "target" in answer:
         answer["target"]["operation"] = str(int(answer["target"]["operation"]) + 1)
     elif "action" in answer:
         answer["decision"] = "allow_once" if answer["decision"] == "deny" else "deny"
@@ -253,8 +255,10 @@ def presentation_cases(state):
     print("mutation presentation: typed explicit/human/JSON facts and noncanonical diagnostics, original escaped identity; no Host wire passthrough", flush=True)
 
 
-def binding_cases(state):
-    home = state / "binding"
+def binding_cases(state, null_code=False):
+    home = state / ("nulls" if null_code else "binding")
+    reason = "InvalidResponse" if null_code else "RequestBindingMismatch"
+    rewrite = lambda response: wrong_target(response, null_code=null_code)
     home.mkdir(mode=0o700)
     store = home / "store"
     host = fixture.start_host(store, None)
@@ -275,10 +279,10 @@ def binding_cases(state):
                 record = home / f"{name}-{mode}.json"
                 args = [*command, "--store", store, "--session", "original/session"]
                 args += ["--record", record, "--key", f"{name}-{mode}"] if mode == "raw" else (["--json"] if mode == "json" else [])
-                proxy = ReplyProxy(host, route, wrong_target)
+                proxy = ReplyProxy(host, route, rewrite)
                 try:
                     result = invoke(home, *args)
-                    assert result.returncode != 0 and "RequestBindingMismatch" in result.stderr, result
+                    assert result.returncode != 0 and reason in result.stderr, result
                     assert "admitted:" not in result.stdout and "replayed:" not in result.stdout, result
                 finally:
                     proxy.close()
@@ -289,16 +293,16 @@ def binding_cases(state):
                     record = home / ".config/rui/requests" / f"{key}.json"
                 assert record.read_bytes() == request
                 expect_mutation_error(result, saved, human=mode == "human", status=200,
-                    reason="RequestBindingMismatch", diagnostic=None)
+                    reason=reason, diagnostic=None)
                 for recovery in (["retry", "--store", store, "--record", record, "--kind", kind],
                         *([["recover", key, "--json"]] if mode != "raw" else [])):
-                    proxy = ReplyProxy(host, route, wrong_target)
+                    proxy = ReplyProxy(host, route, rewrite)
                     try:
                         failed = invoke(home, *recovery)
-                        assert failed.returncode != 0 and "RequestBindingMismatch" in failed.stderr, failed
+                        assert failed.returncode != 0 and reason in failed.stderr, failed
                     finally:
                         proxy.close()
-                    expect_mutation_error(failed, saved, status=200, reason="RequestBindingMismatch", diagnostic=None)
+                    expect_mutation_error(failed, saved, status=200, reason=reason, diagnostic=None)
                     assert record.read_bytes() == request
                 recovered = invoke(home, "retry", "--store", store, "--record", record, "--kind", kind)
                 assert recovered.returncode == 0 and json.loads(recovered.stdout)["answer"]["replayed"] is True, recovered
@@ -308,7 +312,7 @@ def binding_cases(state):
                 assert record.read_bytes() == request
     finally:
         fixture.stop_host(host)
-    print("mutation bindings: five typed explicit/human/JSON/retry/recover callers reject wrong Session, digest, target or decision; original-key replay preserved", flush=True)
+    print(f"mutation {'nulls' if null_code else 'bindings'}: five typed explicit/human/JSON/retry/recover callers reject {'present null code' if null_code else 'wrong Session, digest, target or decision'}; original-key replay preserved", flush=True)
 
 
 def committed_cases(state):
@@ -381,10 +385,13 @@ def committed_cases(state):
     print("canonical callers: committed-then-fatal retains original key/bytes, replay not resubmit; observation/read errors passed", flush=True)
 
 
-def interactive_cases(state, binding=False):
+def interactive_cases(state, binding=False, null_code=False):
     import human_cli_integration as human
     import codex_integration as codex
-    home = state / ("binding-interactive" if binding else "interactive")
+    binding = binding or null_code  # Both are recoverable unconfirmed replies.
+    reason = "InvalidResponse" if null_code else "RequestBindingMismatch"
+    rewrite = (lambda response: wrong_target(response, null_code=null_code)) if binding else None
+    home = state / ("null-interactive" if null_code else "binding-interactive" if binding else "interactive")
     home.mkdir()
     store = home / "store"
     endpoint = fixture.SuccessEndpoint([fixture.sse_tool_calls("canonical-tool", [("bash", "canonical-call",
@@ -413,19 +420,19 @@ def interactive_cases(state, binding=False):
             caller = None
             try:
                 if line is None:
-                    proxy = ReplyProxy(host, route, wrong_target if binding else None)
+                    proxy = ReplyProxy(host, route, rewrite)
                 caller = subprocess.Popen([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                     pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 if line is not None:
                     human.read_terminal(master, "rui> ")
-                    proxy = ReplyProxy(host, route, wrong_target if binding else None)
+                    proxy = ReplyProxy(host, route, rewrite)
                     os.write(master, (line + "\n").encode())
                     if route == "/v1/control/permission-decision":
                         human.read_terminal(master, "Allow once, deny, or later?")
                         human.action_ready(ready_read)
                         os.write(master, b"d\n")
-                output = "" if route == "/v1/observe-command" else human.read_terminal(master, "RequestBindingMismatch" if binding else "canonical_store_failure")
+                output = "" if route == "/v1/observe-command" else human.read_terminal(master, reason if binding else "canonical_store_failure")
                 if binding:
                     assert "other/session" not in output and '"answer"' not in output, output
                 if binding and line is not None:
@@ -438,7 +445,7 @@ def interactive_cases(state, binding=False):
                 else:
                     assert caller.wait(timeout=10) != 0, "fatal mutation resumed the Session prompt"
                 errors = caller.stderr.read().decode()
-                assert ("RequestBindingMismatch" if binding else "CanonicalStoreFailure") in errors, errors
+                assert (reason if binding else "CanonicalStoreFailure") in errors, errors
                 if route == "/v1/observe-command":
                     assert "Message accepted" in errors and "do not resubmit it" in errors and "admission may be uncertain" not in errors, errors
                 # Drain before checking that there is no later prompt/success.
@@ -474,15 +481,15 @@ def interactive_cases(state, binding=False):
         endpoint.server_close()
         endpoint_thread.join(timeout=5)
         assert not endpoint_thread.is_alive(), "provider fixture did not join"
-    print(f"{'binding' if binding else 'canonical'} PTY: Configure/Message/Permission/bare creation fail before outcome interpretation, restore terminal and retain original capture", flush=True)
+    print(f"{'null' if null_code else 'binding' if binding else 'canonical'} PTY: Configure/Message/Permission/bare creation fail before outcome interpretation, restore terminal and retain original capture", flush=True)
 
 
 def main(selected="all"):
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-canonical-failure."))
     completed = False
     try:
-        assert selected in ("all", "producers", "committed", "interactive", "bindings", "binding-interactive", "presentation"), selected
-        for name, case in (("producers", producer_cases), ("committed", committed_cases), ("interactive", interactive_cases), ("bindings", binding_cases), ("binding-interactive", lambda path: interactive_cases(path, binding=True)), ("presentation", presentation_cases)):
+        assert selected in ("all", "producers", "committed", "interactive", "bindings", "nulls", "binding-interactive", "null-interactive", "presentation"), selected
+        for name, case in (("producers", producer_cases), ("committed", committed_cases), ("interactive", interactive_cases), ("bindings", binding_cases), ("nulls", lambda path: binding_cases(path, null_code=True)), ("binding-interactive", lambda path: interactive_cases(path, binding=True)), ("null-interactive", lambda path: interactive_cases(path, null_code=True)), ("presentation", presentation_cases)):
             if selected in ("all", name):
                 case(state)
         completed = True

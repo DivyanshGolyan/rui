@@ -3472,6 +3472,59 @@ test "canonical failure classifier accepts every production mutation failure env
     }
 }
 
+// Test-only DOM edits let every witness start from an actual producer reply;
+// production continues to parse once into bounded values, without a DOM.
+fn expectMutationFieldPresence(body: []const u8, status: u16, session: []const u8, target: @import("client.zig").MutationTarget) !void {
+    const client = @import("client.zig");
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const Section = struct { path: []const []const u8, fields: []const []const u8 };
+    const sections = [_]Section{
+        .{ .path = &.{}, .fields = &.{ "version", "type", "code", "answer", "input", "queue", "execution", "completion" } },
+        .{ .path = &.{"answer"}, .fields = &.{ "status", "replayed", "session", "code", "revision", "created", "admission", "action", "decision", "selection", "target" } },
+        .{ .path = &.{"input"}, .fields = &.{ "type", "bytes", "sha256" } },
+        .{ .path = &.{"queue"}, .fields = &.{ "status", "admission" } },
+        .{ .path = &.{"execution"}, .fields = &.{ "status", "reason" } },
+        .{ .path = &.{"completion"}, .fields = &.{"status"} },
+        .{ .path = &.{ "answer", "selection" }, .fields = &.{ "turn", "admission_cutoff" } },
+        .{ .path = &.{ "answer", "target" }, .fields = &.{ "session", "turn", "operation" } },
+    };
+    for (sections) |section| {
+        var object = &parsed.value;
+        for (section.path) |part| object = object.object.getPtr(part) orelse break else {
+            for (section.fields) |field| {
+                const original = object.object.get(field);
+                try object.object.put(parsed.arena.allocator(), field, .null);
+                const encoded = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
+                defer allocator.free(encoded);
+                const decoded = client.decodeMutationReply(.{ .status = status, .body = encoded }, session, target);
+                const nullable_turn = section.path.len == 2 and std.mem.eql(u8, section.path[1], "selection") and std.mem.eql(u8, field, "turn");
+                if (nullable_turn) {
+                    try std.testing.expectEqual(@as(?u64, null), (try decoded.answer).result.accepted.session_stop.turn);
+                } else {
+                    std.testing.expectError(error.InvalidResponse, decoded.answer) catch |err| {
+                        std.debug.print("null witness: operation={s}, HTTP={d}, path={any}, field={s}\n", .{ @tagName(target), status, section.path, field });
+                        return err;
+                    };
+                    try std.testing.expect(!decoded.isAccepted());
+                    try std.testing.expect(decoded.diagnostic == null);
+                    try std.testing.expectEqualStrings(session, decoded.context.session.slice());
+                }
+                // Every field emitted by these producers is required for its
+                // particular outcome; nullable turn is required, not optional.
+                _ = object.object.orderedRemove(field);
+                if (original) |value| {
+                    const omitted = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
+                    defer allocator.free(omitted);
+                    try std.testing.expectError(error.InvalidResponse, client.decodeMutationReply(.{ .status = status, .body = omitted }, session, target).answer);
+                    try object.object.put(parsed.arena.allocator(), field, value);
+                }
+            }
+        }
+    }
+}
+
 test "mutation decoder validates all five actual producers and preserved domain answers" {
     const client = @import("client.zig");
     const session = "original/é\n";
@@ -3518,6 +3571,7 @@ test "mutation decoder validates all five actual producers and preserved domain 
                 const status: u16 = if (result == .conflict) 409 else if (result == .infrastructure_failure) 500 else 200;
                 const decoded = client.decodeMutationReply(.{ .status = status, .body = response.slice() }, session, target);
                 try std.testing.expectEqual(status, decoded.status);
+                try expectMutationFieldPresence(response.slice(), status, session, target);
                 if (result == .infrastructure_failure) {
                     try std.testing.expectError(error.CanonicalStoreFailure, decoded.answer);
                     continue;
@@ -3537,6 +3591,17 @@ test "mutation decoder validates all five actual producers and preserved domain 
                     .model_interruption, .permission_decision => {},
                 };
             }
+        }
+        if (index == 2) {
+            var idle = accepted;
+            idle.accepted.selection.selected_turn_id = null;
+            idle.accepted.completion = .completed;
+            var response: protocol.ResponseBuffer = .{};
+            try render(&response, &command, idle);
+            const answer = try client.decodeMutationReply(.{ .status = 200, .body = response.slice() }, session, target).answer;
+            try std.testing.expectEqual(@as(?u64, null), answer.result.accepted.session_stop.turn);
+            try std.testing.expectEqual(.completed, answer.result.accepted.session_stop.completion);
+            try expectMutationFieldPresence(response.slice(), 200, session, target);
         }
     }
 }
