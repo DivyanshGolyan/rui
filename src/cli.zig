@@ -980,12 +980,14 @@ fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []cons
     };
     const next = followMessage(init, &saved, .interactive, .follow_attention) catch |err| {
         reportAcceptedPresentationFailure(saved.key.slice(), err);
+        if (err == error.CanonicalStoreFailure) return err;
         return null;
     };
     if (next) |attention|
         return .{ .work = attention, .message = saved.key };
     showResult(init, &saved, .interactive) catch |err| {
         reportAcceptedPresentationFailure(saved.key.slice(), err);
+        if (err == error.CanonicalStoreFailure) return err;
     };
     return null;
 }
@@ -1054,13 +1056,17 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
             } else setup(init, setup_args[0..count]) catch |err| std.debug.print("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
             break :blk null;
         } else if (std.mem.eql(u8, text, "/status")) blk: {
-            showSessionStatus(init, destination, reference, false) catch |err| std.debug.print("rui: status: {s}\n", .{@errorName(err)});
+            showSessionStatus(init, destination, reference, false) catch |err| {
+                if (err == error.CanonicalStoreFailure) return err;
+                std.debug.print("rui: status: {s}\n", .{@errorName(err)});
+            };
             break :blk null;
         } else if (std.mem.eql(u8, text, "/requests")) blk: {
             sessionRequests(init, destination, reference) catch |err| std.debug.print("rui: requests: {s}\n", .{@errorName(err)});
             break :blk null;
         } else if (std.mem.eql(u8, text, "/wait"))
             waitForSession(init, destination, reference, .interactive, false) catch |err| blk: {
+                if (err == error.CanonicalStoreFailure) return err;
                 std.debug.print("rui: wait: {s}\n", .{@errorName(err)});
                 break :blk null;
             }
@@ -1069,7 +1075,10 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
                 std.debug.print("rui: result key: {s}\n", .{@errorName(err)});
                 break :blk null;
             };
-            showResult(init, &saved, .interactive) catch |err| std.debug.print("rui: result: {s}\n", .{@errorName(err)});
+            showResult(init, &saved, .interactive) catch |err| {
+                if (err == error.CanonicalStoreFailure) return err;
+                std.debug.print("rui: result: {s}\n", .{@errorName(err)});
+            };
             break :blk null;
         } else if (std.mem.eql(u8, text, "/configure") or std.mem.startsWith(u8, text, "/configure ")) blk: {
             var config_args: [24][]const u8 = undefined;
@@ -1113,7 +1122,10 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
                 }
             }
             if (valid and count > 4) {
-                configure(init, config_args[0..count], true) catch |err| std.debug.print("rui: configure: {s}; check /requests before retrying\n", .{@errorName(err)});
+                configure(init, config_args[0..count], true) catch |err| {
+                    std.debug.print("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
+                    if (err == error.CanonicalStoreFailure) return err;
+                };
             } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Usage: /configure --model MODEL [--tools bash] [--permission-mode ask|bypass] (settings for this Session only)\n");
             break :blk null;
         } else if (std.mem.startsWith(u8, text, "/") and !std.mem.startsWith(u8, text, "//")) blk: {
@@ -1122,6 +1134,7 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         } else blk: {
             const message_text = if (std.mem.startsWith(u8, text, "//")) text[1..] else text;
             break :blk sessionMessage(init, destination, reference, message_text) catch |err| {
+                if (err == error.CanonicalStoreFailure) return err;
                 std.debug.print("rui: message: {s}; admission may be uncertain. Check /requests and recover the original handle before sending new work\n", .{@errorName(err)});
                 break :blk null;
             };
@@ -1130,6 +1143,7 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
             if (err == error.InteractiveInterrupted) break;
             if (err == error.TerminalRestoreFailed or err == error.TerminalCleanupFailed or err == error.TerminalFlushFailed or err == error.IncompleteTerminalInput) return err;
             std.debug.print("rui: Action observation or decision failed: {s}; check /requests and /status\n", .{@errorName(err)});
+            if (err == error.CanonicalStoreFailure) return err;
         };
     }
     try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Detached. Host work continues.\n");
@@ -1481,6 +1495,7 @@ fn readActionContent(init: std.process.Init, args: []const []const u8, field: en
 fn writeCommandReply(io: std.Io, reply: client.CommandReply) !void {
     try std.Io.File.stdout().writeStreamingAll(io, reply.body);
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
+    try client.checkCanonicalFailure(reply);
 }
 
 fn requestDirectory(init: std.process.Init, buffer: []u8) ![]const u8 {
@@ -1522,11 +1537,26 @@ fn testGate(io: std.Io, name: [*:0]const u8) !void {
 
 fn writeAdmission(io: std.Io, reply: client.CommandReply, json_handle: ?[]const u8) !void {
     if (json_handle) |handle| {
-        var line: [112]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"event\":\"admission\",\"request\":\"{s}\",\"admission\":", .{handle}));
+        const is_answer = reply.status == 200 or reply.status == 409;
+        var line: [128]u8 = undefined;
+        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"event\":\"{s}\",\"request\":\"{s}\",\"{s}\":", .{
+            if (is_answer) "admission" else "invocation_error",
+            handle,
+            if (is_answer) "admission" else "error",
+        }));
         try std.Io.File.stdout().writeStreamingAll(io, reply.body);
-        return std.Io.File.stdout().writeStreamingAll(io, "}\n");
+        try std.Io.File.stdout().writeStreamingAll(io, "}\n");
+        try client.checkCanonicalFailure(reply);
+        if (!is_answer) return error.HostInvocationFailed;
+        return;
     }
+    // Invocation errors contain no admission answer. Preserve their wire data
+    // without manufacturing rejection, replay status or certainty of absence.
+    if (reply.status != 200 and reply.status != 409) {
+        try writeCommandReply(io, reply);
+        return error.HostInvocationFailed;
+    }
+    try client.checkCanonicalFailure(reply);
     var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
     defer parsed.deinit();
     const answer = try objectField(parsed.value, "answer");
@@ -1817,7 +1847,10 @@ fn showResult(init: std.process.Init, saved: *const client.MessageAddress, prese
         defer file.close(init.io);
         var read_buffer: client.ReplyBuffer = .{};
         const answer = try client.readResult(init.io, saved.store.slice(), saved.key.slice(), file, &read_buffer);
-        if (answer != .answer) return error.ResultReadFailed;
+        if (answer == .command) {
+            try writeCommandReply(init.io, answer.command);
+            return error.ResultReadFailed;
+        }
         try std.Io.File.stdout().writeStreamingAll(init.io, "{\"observation\":");
         var buffer: [protocol.content_window_bytes]u8 = undefined;
         var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
@@ -1832,7 +1865,10 @@ fn showResult(init: std.process.Init, saved: *const client.MessageAddress, prese
     const answer = try client.readResult(init.io, saved.store.slice(), saved.key.slice(), std.Io.File.stdout(), &read_buffer);
     switch (answer) {
         .answer => {},
-        .command => return error.ResultReadFailed,
+        .command => |reply| {
+            try writeCommandReply(init.io, reply);
+            return error.ResultReadFailed;
+        },
     }
     try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
 }
@@ -2043,7 +2079,10 @@ fn inspectWork(init: std.process.Init, store: []const u8, session_ref: []const u
     const reply = try client.inspectSession(init.io, store, session_ref, .current, file, &response);
     switch (reply) {
         .report => {},
-        .command => return error.ObservationFailed,
+        .command => |command| {
+            try writeCommandReply(init.io, command);
+            return error.ObservationFailed;
+        },
     }
     var input_buffer: [protocol.content_window_bytes]u8 = undefined;
     var file_reader = file.reader(init.io, &input_buffer);
@@ -2230,11 +2269,17 @@ fn inspectAction(init: std.process.Init, args: []const []const u8, interactive: 
     var call_bytes: u64 = 0;
     if (!interactive) {
         const call = try client.readActionCallId(io, selected, reference, target, file, &buffer);
-        if (call != .answer) return error.ActionReadFailed;
+        if (call == .command) {
+            try writeCommandReply(io, call.command);
+            return error.ActionReadFailed;
+        }
         call_bytes = call.answer.bytes;
     }
     const arguments = try client.readActionArguments(io, selected, reference, target, file, &buffer);
-    if (arguments != .answer) return error.ActionReadFailed;
+    if (arguments == .command) {
+        try writeCommandReply(io, arguments.command);
+        return error.ActionReadFailed;
+    }
     var line: [96]u8 = undefined;
     if (json) {
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"action\":\"{d}\",\"call_id\":\"", .{target}));

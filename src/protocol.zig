@@ -1162,13 +1162,9 @@ pub const max_session_stop_conflict_reply_bytes =
     "{\"version\":\"1\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"conflict\",\"replayed\":false,\"session\":".len +
     maximumJsonStringBytes(max_session_bytes) +
     ",\"code\":\"idempotency_key_conflict\"},\"completion\":{\"status\":\"unavailable\"}}".len;
-pub const max_session_stop_infrastructure_reply_bytes =
-    "{\"version\":\"1\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"infrastructure_failure\",\"replayed\":false,\"session\":".len +
-    maximumJsonStringBytes(max_session_bytes) +
-    ",\"code\":\"canonical_store_failure\"},\"completion\":{\"status\":\"unavailable\"}}".len;
 pub const max_session_stop_reply_bytes = @max(
     @max(max_session_stop_accepted_reply_bytes, max_session_stop_rejected_reply_bytes),
-    @max(max_session_stop_conflict_reply_bytes, max_session_stop_infrastructure_reply_bytes),
+    max_session_stop_conflict_reply_bytes,
 );
 
 const max_model_interruption_target_bytes =
@@ -1187,13 +1183,9 @@ pub const max_model_interruption_conflict_reply_bytes =
     model_interruption_reply_prefix_bytes + "conflict".len +
     "\",\"replayed\":false,\"target\":".len + max_model_interruption_target_bytes +
     ",\"code\":\"idempotency_key_conflict\"}}".len;
-pub const max_model_interruption_infrastructure_reply_bytes =
-    model_interruption_reply_prefix_bytes + "infrastructure_failure".len +
-    "\",\"replayed\":false,\"target\":".len + max_model_interruption_target_bytes +
-    ",\"code\":\"canonical_store_failure\"}}".len;
 pub const max_model_interruption_reply_bytes = @max(
     @max(max_model_interruption_accepted_reply_bytes, max_model_interruption_rejected_reply_bytes),
-    @max(max_model_interruption_conflict_reply_bytes, max_model_interruption_infrastructure_reply_bytes),
+    max_model_interruption_conflict_reply_bytes,
 );
 
 const permission_decision_reply_prefix_bytes =
@@ -1201,12 +1193,9 @@ const permission_decision_reply_prefix_bytes =
 const max_permission_decision_target_bytes =
     "\",\"replayed\":false,\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
     ",\"action\":\"".len + 20 + "\",\"decision\":\"allow_once\"".len;
-pub const max_permission_decision_reply_bytes = @max(
-    permission_decision_reply_prefix_bytes + "infrastructure_failure".len + max_permission_decision_target_bytes +
-        ",\"code\":\"canonical_store_failure\"}}".len,
+pub const max_permission_decision_reply_bytes =
     permission_decision_reply_prefix_bytes + "rejected".len + max_permission_decision_target_bytes +
-        ",\"code\":\"".len + max_permission_decision_rejection_code_bytes + "\"}}".len,
-);
+    ",\"code\":\"".len + max_permission_decision_rejection_code_bytes + "\"}}".len;
 
 const control_observation_prefix_bytes =
     "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":".len +

@@ -3429,6 +3429,7 @@ fn renderConfigureReply(
     command: *const protocol.ConfigureCommand,
     result: store_module.ConfigureReply,
 ) !void {
+    if (result == .infrastructure_failure) return renderStatic(response, "invocation_error", "canonical_store_failure");
     try response.append("{\"version\":\"1\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"");
     try response.append(@tagName(result));
     const replayed = switch (result) {
@@ -3448,9 +3449,7 @@ fn renderConfigureReply(
         .conflict => {
             try response.append(",\"code\":\"idempotency_key_conflict\"");
         },
-        .infrastructure_failure => {
-            try response.append(",\"code\":\"canonical_store_failure\"");
-        },
+        .infrastructure_failure => unreachable,
         .accepted => {},
     }
     if (result == .accepted) {
@@ -3465,21 +3464,12 @@ fn renderConfigureReply(
 
 test "canonical failure classifier accepts every production mutation failure envelope" {
     const client = @import("client.zig");
-    var response = protocol.ResponseBuffer{};
-    try renderConfigureReply(&response, &.{}, .infrastructure_failure);
-    try std.testing.expectError(error.CanonicalStoreFailure, client.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
-    response = .{};
-    try renderMessageReply(&response, &.{}, .infrastructure_failure);
-    try std.testing.expectError(error.CanonicalStoreFailure, client.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
-    response = .{};
-    try renderSessionStopReply(&response, &.{}, .infrastructure_failure);
-    try std.testing.expectError(error.CanonicalStoreFailure, client.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
-    response = .{};
-    try renderModelInterruptionReply(&response, &.{}, .infrastructure_failure);
-    try std.testing.expectError(error.CanonicalStoreFailure, client.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
-    response = .{};
-    try renderPermissionDecisionReply(&response, &.{}, .infrastructure_failure);
-    try std.testing.expectError(error.CanonicalStoreFailure, client.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
+    inline for (.{ renderConfigureReply, renderMessageReply, renderSessionStopReply, renderModelInterruptionReply, renderPermissionDecisionReply }) |render| {
+        var response = protocol.ResponseBuffer{};
+        try render(&response, &.{}, .infrastructure_failure);
+        try std.testing.expectEqualStrings("{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}", response.slice());
+        try std.testing.expectError(error.CanonicalStoreFailure, client.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
+    }
 }
 
 fn renderMessageReply(
@@ -3487,6 +3477,7 @@ fn renderMessageReply(
     command: *const protocol.MessageCommand,
     result: store_module.MessageReply,
 ) !void {
+    if (result == .infrastructure_failure) return renderStatic(response, "invocation_error", "canonical_store_failure");
     try response.append("{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"");
     try response.append(@tagName(result));
     try response.append("\",\"replayed\":");
@@ -3506,9 +3497,7 @@ fn renderMessageReply(
         .conflict => {
             try response.append(",\"code\":\"idempotency_key_conflict\"");
         },
-        .infrastructure_failure => {
-            try response.append(",\"code\":\"canonical_store_failure\"");
-        },
+        .infrastructure_failure => unreachable,
         .accepted => |value| {
             try response.appendFmt(",\"admission\":\"{d}\"", .{value.admission_id});
         },
@@ -3534,6 +3523,7 @@ fn renderSessionStopReply(
     command: *const protocol.SessionStopCommand,
     result: store_module.SessionStopReply,
 ) !void {
+    if (result == .infrastructure_failure) return renderStatic(response, "invocation_error", "canonical_store_failure");
     try response.append("{\"version\":\"1\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"");
     try response.append(@tagName(result));
     const replayed = switch (result) {
@@ -3556,7 +3546,7 @@ fn renderSessionStopReply(
             try response.appendJsonString(@tagName(value.code));
         },
         .conflict => try response.append(",\"code\":\"idempotency_key_conflict\""),
-        .infrastructure_failure => try response.append(",\"code\":\"canonical_store_failure\""),
+        .infrastructure_failure => unreachable,
     }
     try response.append("},\"completion\":{\"status\":\"");
     switch (result) {
@@ -3571,6 +3561,7 @@ fn renderModelInterruptionReply(
     command: *const protocol.ModelInterruptionCommand,
     result: store_module.ModelInterruptionReply,
 ) !void {
+    if (result == .infrastructure_failure) return renderStatic(response, "invocation_error", "canonical_store_failure");
     try response.append("{\"version\":\"1\",\"type\":\"model_interruption_reply\",\"answer\":{\"status\":\"");
     try response.append(@tagName(result));
     const replayed = switch (result) {
@@ -3590,7 +3581,7 @@ fn renderModelInterruptionReply(
             try response.appendJsonString(@tagName(value.code));
         },
         .conflict => try response.append(",\"code\":\"idempotency_key_conflict\""),
-        .infrastructure_failure => try response.append(",\"code\":\"canonical_store_failure\""),
+        .infrastructure_failure => unreachable,
         .accepted => {},
     }
     try response.append("}}");
@@ -3601,6 +3592,7 @@ fn renderPermissionDecisionReply(
     command: *const protocol.PermissionDecisionCommand,
     result: store_module.PermissionDecisionReply,
 ) !void {
+    if (result == .infrastructure_failure) return renderStatic(response, "invocation_error", "canonical_store_failure");
     try response.append("{\"version\":\"1\",\"type\":\"permission_decision_reply\",\"answer\":{\"status\":\"");
     try response.append(@tagName(result));
     const replayed = switch (result) {
@@ -3621,7 +3613,7 @@ fn renderPermissionDecisionReply(
             try response.appendJsonString(@tagName(value.code));
         },
         .conflict => try response.append(",\"code\":\"idempotency_key_conflict\""),
-        .infrastructure_failure => try response.append(",\"code\":\"canonical_store_failure\""),
+        .infrastructure_failure => unreachable,
         .accepted => {},
     }
     try response.append("}}");
@@ -3742,12 +3734,16 @@ fn appendHex(response: *protocol.ResponseBuffer, bytes: *const [32]u8) !void {
 
 fn sendStatic(io: std.Io, fd: std.posix.fd_t, status: u16, kind: []const u8, code: []const u8) !void {
     var response: protocol.ResponseBuffer = .{};
+    try renderStatic(&response, kind, code);
+    try writeHttp(io, fd, status, response.slice());
+}
+
+fn renderStatic(response: *protocol.ResponseBuffer, kind: []const u8, code: []const u8) !void {
     try response.append("{\"version\":\"1\",\"type\":");
     try response.appendJsonString(kind);
     try response.append(",\"code\":");
     try response.appendJsonString(code);
     try response.append("}");
-    try writeHttp(io, fd, status, response.slice());
 }
 
 fn respondStatic(io: std.Io, fd: std.posix.fd_t, status: u16, kind: []const u8, code: []const u8) void {
@@ -4737,10 +4733,12 @@ test "control response variants fit exact worst-case JSON bounds" {
         .code = .invalid_session_reference,
     } }, protocol.max_session_stop_rejected_reply_bytes);
     try Cases.expectStop(&stop_command, .conflict, protocol.max_session_stop_conflict_reply_bytes);
+    // Canonical faults use the fixed invocation error, not a command answer.
+    const canonical_error = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}";
     try Cases.expectStop(
         &stop_command,
         .infrastructure_failure,
-        protocol.max_session_stop_infrastructure_reply_bytes,
+        canonical_error.len,
     );
 
     try Cases.expectInterruption(
@@ -4760,7 +4758,7 @@ test "control response variants fit exact worst-case JSON bounds" {
     try Cases.expectInterruption(
         &interruption_command,
         .infrastructure_failure,
-        protocol.max_model_interruption_infrastructure_reply_bytes,
+        canonical_error.len,
     );
 
     var stop_accepted = store_module.CommandObservation{
