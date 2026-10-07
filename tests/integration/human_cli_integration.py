@@ -735,7 +735,7 @@ def main():
         assert terminal_waiter.poll() is None, "terminal-only wait returned on permission"
         queued = admit(home, "message", "--store", store, "--session", session,
             "queued behind permission")["request"]
-        assert run(home, "result", queued) == "result: queued\n"
+        assert run(home, "result", queued) == "admitted: accepted\nresult: queued\n"
         queued_fact = fixture.command("observe-command", "--store", store, "--key", queued)["observation"]
         assert queued_fact["queue"]["status"] == "queued" and queued_fact["progress"] == {
             "status": "waiting_for_permission", "action": action}, queued_fact
@@ -765,7 +765,7 @@ def main():
         exact = json.loads(run(home, "inspect-action", "--store", store, "--session", session,
             "--action", action, "--json"))
         assert exact == {"action": action, "call_id": control_call, "arguments": control_arguments}, exact
-        assert run(home, "result", first) == "result: processing\n"
+        assert run(home, "result", first) == "admitted: accepted\nresult: processing\n"
         assert not counter.exists()
 
         lost_decision = run(home, "allow-action", "--store", store, "--session", session,
@@ -782,7 +782,7 @@ def main():
         stale = admit(home, "deny-action", "--store", store, "--session", session,
             "--action", action)
         assert stale["admission"]["answer"]["status"] == "rejected", stale
-        assert run(home, "result", queued) == "result: completed\nfirst answer\n"
+        assert run(home, "result", queued) == "admitted: accepted\nresult: completed\nfirst answer\n"
         current = fixture.command("inspect-session", "--store", store, "--session", session)
         assert current["selected_message"] is None and [r["message"] for r in current["recent_messages"]] == [queued, first], current
         assert [r["outcome"] for r in current["recent_messages"]] == ["completed", "completed"], current
@@ -855,7 +855,7 @@ def main():
                 entered.kill()
                 entered.wait(timeout=5)
             os.close(master)
-        assert run(home, "follow", queued) == "return: outcome\nstatus: completed\n"
+        assert run(home, "follow", queued) == "return: outcome\nadmitted: accepted\nstatus: completed\n"
         assert run(home, "recover", stale["request"]) == (
             f"Store: {store}\nSession: {session}\nkey: {stale['request']}\n"
             f"target Action: {action}; decision: deny\n"
@@ -867,7 +867,7 @@ def main():
             f"request: {stale_key}\nStore: {store}\nSession: {session}\nkey: {stale_key}\n"
             f"target Action: {action}; decision: deny\n"
             "admitted: rejected\nreplayed: false\ncode: action_not_pending\n"), stale_default
-        assert run(home, "result", first) == "result: completed\nfirst answer\n"
+        assert run(home, "result", first) == "admitted: accepted\nresult: completed\nfirst answer\n"
         completed_result = json.loads(run(home, "result", first, "--json", environment=render_environment))
         assert completed_result["answer"] == "first answer"
         assert completed_result["observation"]["result"]["status"] == "completed"
@@ -900,8 +900,8 @@ def main():
         initial_recovery = json.loads(run(home, "recover", second, "--json"))["answer"]
         assert initial_recovery["status"] == "accepted" and initial_recovery["replayed"] is False
         fixture.wait_for(lambda: fixture.completed_observation(store, second), "second saved answer")
-        assert run(home, "result", first) == "result: completed\nfirst answer\n"
-        assert run(home, "result", second) == "result: completed\nsecond answer\n"
+        assert run(home, "result", first) == "admitted: accepted\nresult: completed\nfirst answer\n"
+        assert run(home, "result", second) == "admitted: accepted\nresult: completed\nsecond answer\n"
         assert counter.read_text() == "x" and len(endpoint.requests) == 3
 
         fixture.stop_host(host)
@@ -947,7 +947,7 @@ def main():
         fixture.wait_for(lambda: sibling_started.exists(), "approved sibling in flight")
         attention = run(home, "follow", sibling_key, "--json")
         assert json.loads(attention) == {"return": "attention", "status": "in_flight", "action": pending}, attention
-        assert run(home, "result", sibling_key) == "result: processing\n"
+        assert run(home, "result", sibling_key) == "admitted: accepted\nresult: processing\n"
         master, slave = pty.openpty()
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", sibling_session], env={**os.environ, "HOME": str(home)},
@@ -971,7 +971,7 @@ def main():
                 entered.wait(timeout=5)
             os.close(master)
         fixture.wait_for(lambda: fixture.completed_observation(store, sibling_key), "sibling outcome")
-        assert run(home, "result", sibling_key) == "result: completed\nsiblings done\n"
+        assert run(home, "result", sibling_key) == "admitted: accepted\nresult: completed\nsiblings done\n"
         assert sibling_effect.read_text() == "y" and counter.read_text() == "x"
 
         failure_release = threading.Event()
@@ -987,7 +987,7 @@ def main():
         fixture.wait_for(lambda: len(endpoint.requests) == 6, "held first failed Turn")
         queued_key = admit(home, "message", "--store", store, "--session", failure_session,
             "queued successor")["request"]
-        assert run(home, "result", queued_key) == "result: queued\n"
+        assert run(home, "result", queued_key) == "admitted: accepted\nresult: queued\n"
         follower = subprocess.Popen([str(fixture.RUI), "follow", failed_key],
             env={**os.environ, "HOME": str(home)}, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         time.sleep(0.15)
@@ -997,9 +997,9 @@ def main():
         failure_release.set()
         fixture.wait_for(lambda: fixture.command("observe-command", "--store", store,
             "--key", failed_key)["observation"].get("result"), "failed first Turn")
-        assert run(home, "result", failed_key) == "result: failed\ncode: provider_http_422\n"
+        assert run(home, "result", failed_key) == "admitted: accepted\nresult: failed\ncode: provider_http_422\n"
         fixture.wait_for(lambda: fixture.completed_observation(store, queued_key), "queued successor")
-        assert run(home, "result", queued_key) == "result: completed\nsuccessor done\n"
+        assert run(home, "result", queued_key) == "admitted: accepted\nresult: completed\nsuccessor done\n"
         master, slave = pty.openpty()
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", failure_session], env={**os.environ, "HOME": str(home)},
@@ -1030,20 +1030,20 @@ def main():
         fixture.wait_for(lambda: len(endpoint.requests) == 8, "held stopped Turn")
         excluded_key = admit(home, "message", "--store", store, "--session", stop_session,
             "queued when stopped")["request"]
-        assert run(home, "result", excluded_key) == "result: queued\n"
+        assert run(home, "result", excluded_key) == "admitted: accepted\nresult: queued\n"
         stopped = fixture.command("stop-session", "--store", store, "--session", stop_session,
             "--record", state / "stop.json", "--key", "human-stop")
         assert stopped["answer"]["status"] == "accepted", stopped
         stop_release.set()
         fixture.wait_for(lambda: fixture.command("observe-command", "--store", store,
             "--key", stopped_key)["observation"].get("result"), "stopped Turn")
-        assert run(home, "result", stopped_key).startswith("result: cancelled\n")
-        assert run(home, "result", excluded_key) == "result: cancelled\ncode: session_stopped\n"
+        assert run(home, "result", stopped_key).startswith("admitted: accepted\nresult: cancelled\n")
+        assert run(home, "result", excluded_key) == "admitted: accepted\nresult: cancelled\ncode: session_stopped\n"
 
         rejected = admit(home, "message", "--store", store, "--session", "human/absent",
             "unknown session")
         assert rejected["admission"]["answer"]["status"] == "rejected", rejected
-        assert run(home, "result", rejected["request"]) == "result: rejected\ncode: unknown_session\n"
+        assert run(home, "result", rejected["request"]) == "admitted: rejected\nresult: rejected\ncode: unknown_session\n"
         assert run(home, "recover", rejected["request"]) == (
             f"Store: {store}\nSession: human/absent\nkey: {rejected['request']}\n"
             "admitted: rejected\nreplayed: true\ncode: unknown_session\n")
@@ -1076,7 +1076,7 @@ def main():
         assert failed_observation == "", failed_observation
         host = fixture.start_host(store, url)
         assert json.loads(run(home, "recover", first, "--json"))["answer"]["replayed"] is True
-        assert run(home, "result", first) == "result: completed\nfirst answer\n"
+        assert run(home, "result", first) == "admitted: accepted\nresult: completed\nfirst answer\n"
         recovered_session = fixture.command("inspect-session", "--store", store, "--session", session)
         assert recovered_session["selected_message"] is None
         assert [row["message"] for row in recovered_session["recent_messages"]] == [second, queued, first]
@@ -1099,13 +1099,13 @@ def main():
         assert "next: rui follow" not in prior_receipt
         fixture.wait_for(lambda: len(endpoint.requests) == 10, "held predecessor request")
         message_a = admit(home, "message", "--store", store, "--session", race_session, "A")["request"]
-        assert run(home, "result", message_a) == "result: queued\n"
+        assert run(home, "result", message_a) == "admitted: accepted\nresult: queued\n"
         race_follower = subprocess.Popen([str(fixture.RUI), "follow", message_a, "--json"],
             env={**os.environ, "HOME": str(home), "RUI_TEST_FOLLOW_GATE": str(race_gate)},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         fixture.wait_for(lambda: pathlib.Path(f"{race_gate}.ready").exists(), "queued A observed by follower")
         assert race_follower.poll() is None
-        assert run(home, "result", message_a) == "result: queued\n"
+        assert run(home, "result", message_a) == "admitted: accepted\nresult: queued\n"
         race_predecessor_release.set()
         fixture.wait_for(lambda: len(endpoint.requests) == 11, "A processing request")
         race_waiter = subprocess.Popen([str(fixture.RUI), "wait-session", "--store", str(store),
