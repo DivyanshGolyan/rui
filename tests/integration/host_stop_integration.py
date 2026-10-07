@@ -57,6 +57,14 @@ def exchange_phase(diagnostics, phase, began_ns, deadline, **fields):
             diagnostics.condition.wait(remaining)
 
 
+def actor_after_classification(diagnostics, began_ns, deadline, pending_phase, store, target, *, invoke=actor):
+    transferred_phase = exchange_phase(diagnostics, "ordinary_classification_released", began_ns, deadline,
+                                       subject_kind="route", subject="host_info")
+    assert int(transferred_phase["sequence"]) > int(pending_phase["sequence"])
+    assert time.monotonic() < deadline, "classification exceeded original stop budget"
+    return invoke("stop", store, target, "after-commit", timeout=deadline - time.monotonic())
+
+
 def instance(store):
     match = re.fullmatch(r"ready ([0-9a-f]{32}) \d+ true (?:true|false) (?:true|false)", status(store))
     assert match, status(store)
@@ -257,11 +265,7 @@ def main():
             transferred.settimeout(5)
             transferred.connect(str(sock))
             transferred.sendall(b"POST /v1/host-info HTTP/1.1\r\n")
-            transferred_phase = exchange_phase(diagnostics, "ordinary_classification_released", began_ns, deadline,
-                                               subject_kind="route", subject="host_info")
-            assert int(transferred_phase["sequence"]) > int(pending_phase["sequence"])
-            assert time.monotonic() < deadline, "classification exceeded original stop budget"
-            first = actor("stop", store, target, "after-commit", timeout=deadline - time.monotonic())
+            first = actor_after_classification(diagnostics, began_ns, deadline, pending_phase, store, target)
             assert first == "TruncatedResponse", first
             retry = finish(pending, pending_body)
             assert retry.startswith(b"HTTP/1.1 200") and b'"status":"acknowledged"' in retry, retry
@@ -336,6 +340,8 @@ def main():
 
 
 if __name__ == "__main__":
+    from host_stop_integration_test import check_classification_oracle
+    check_classification_oracle(actor_after_classification)
     mixed_effect_drain(True)
     mixed_effect_drain(False)
     main()
