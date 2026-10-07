@@ -700,7 +700,9 @@ def main():
             env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=5).stderr
         assert config["request"] in json.loads(run(home, "requests", "--json"))
         assert json.loads(run(home, "recover", config["request"], "--json"))["answer"]["replayed"] is True
-        assert run(home, "recover", config["request"]) == "admitted: accepted\nreplayed: true\n"
+        assert run(home, "recover", config["request"]) == (
+            f"Store: {store}\nSession: {session}\nkey: {config['request']}\n"
+            "admitted: accepted\nreplayed: true\nrevision: 1; created: true\n")
 
         text = state / "input"
         text.write_text("first input")
@@ -854,10 +856,17 @@ def main():
                 entered.wait(timeout=5)
             os.close(master)
         assert run(home, "follow", queued) == "return: outcome\nstatus: completed\n"
-        assert run(home, "recover", stale["request"]) == "admitted: rejected\nreplayed: true\ncode: action_not_pending\n"
+        assert run(home, "recover", stale["request"]) == (
+            f"Store: {store}\nSession: {session}\nkey: {stale['request']}\n"
+            f"target Action: {action}; decision: deny\n"
+            "admitted: rejected\nreplayed: true\ncode: action_not_pending\n")
         stale_default = run(home, "deny-action", "--store", store, "--session", session,
             "--action", action)
-        assert stale_default.splitlines()[1:] == ["admitted: rejected", "replayed: false", "code: action_not_pending"], stale_default
+        stale_key = stale_default.splitlines()[0].removeprefix("request: ")
+        assert stale_default == (
+            f"request: {stale_key}\nStore: {store}\nSession: {session}\nkey: {stale_key}\n"
+            f"target Action: {action}; decision: deny\n"
+            "admitted: rejected\nreplayed: false\ncode: action_not_pending\n"), stale_default
         assert run(home, "result", first) == "result: completed\nfirst answer\n"
         completed_result = json.loads(run(home, "result", first, "--json", environment=render_environment))
         assert completed_result["answer"] == "first answer"
@@ -1035,7 +1044,9 @@ def main():
             "unknown session")
         assert rejected["admission"]["answer"]["status"] == "rejected", rejected
         assert run(home, "result", rejected["request"]) == "result: rejected\ncode: unknown_session\n"
-        assert run(home, "recover", rejected["request"]) == "admitted: rejected\nreplayed: true\ncode: unknown_session\n"
+        assert run(home, "recover", rejected["request"]) == (
+            f"Store: {store}\nSession: human/absent\nkey: {rejected['request']}\n"
+            "admitted: rejected\nreplayed: true\ncode: unknown_session\n")
 
         large_answer = "x" * 4095 + "🍰" + "y" * (128 * 1024)
         endpoint.responses.append(fixture.sse_answer("large-answer", "large-reason",

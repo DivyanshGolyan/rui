@@ -32,6 +32,36 @@ def expect_fatal(result):
     assert "no work was admitted" not in result.stdout, result
 
 
+def expect_mutation_error(result, saved, *, human=False, status=500,
+        reason="CanonicalStoreFailure", diagnostic=ERROR):
+    """Original request context, never the substituted reply's claimed target."""
+    context = {field: saved[field] for field in ("store", "key", "kind")}
+    context["session"] = saved["target"]["session"] if "target" in saved else saved["session"]
+    if human:
+        for label, field in (("Store", "store"), ("Session", "session"), ("key", "key")):
+            escaped = json.dumps(context[field], ensure_ascii=False)[1:-1]
+            assert f"{label}: {escaped}\n" in result.stdout, result
+        assert f"invocation: {reason} (HTTP {status}); outcome unconfirmed\n" in result.stdout, result
+        if diagnostic:
+            assert f"type: {diagnostic['type']}\ncode: {diagnostic['code']}\n" in result.stdout, result
+        assert '"version"' not in result.stdout and '"answer"' not in result.stdout, result
+        return
+    observed = json.loads(result.stdout.splitlines()[-1])
+    if "event" in observed:
+        assert observed["event"] == "invocation_error" and observed["request"] == saved["key"], observed
+        observed = observed["error"]
+    expected = {"context": context, "error": {
+        "status": str(status), "reason": reason, "certainty": "unconfirmed",
+        "type": diagnostic["type"] if diagnostic else None,
+        "code": diagnostic["code"] if diagnostic else None,
+    }}
+    if "target" in saved:
+        expected["request_target"] = {field: saved["target"][field] for field in ("turn", "operation")}
+    elif saved["kind"] == "permission_decision":
+        expected["request_target"] = {field: saved[field] for field in ("action", "decision")}
+    assert observed == expected, observed
+
+
 def producer_cases(state):
     text = state / "input"
     text.write_text("original mutation bytes")
@@ -61,20 +91,17 @@ def producer_cases(state):
                     args += ["--json"]
                 result = invoke(home, *args)
                 expect_fatal(result)
-                if mode == "raw":
-                    assert json.loads(result.stdout) == ERROR, result
-                elif mode == "json":
+                if mode == "json":
                     captured, failed = map(json.loads, result.stdout.splitlines())
                     key = captured["request"]
                     assert captured == {"event": "captured", "request": key}, captured
-                    assert failed == {"event": "invocation_error", "request": key, "error": ERROR}, failed
-                else:
-                    assert result.stdout.splitlines()[-1] == ERROR_BYTES.decode(), result
+                elif mode == "human":
                     key = result.stdout.splitlines()[0].removeprefix("request: ")
                 if mode != "raw":
                     record = home / ".config/rui/requests" / f"{key}.json"
                 original = record.read_bytes()
                 assert json.loads(original)["key"] == key, original
+                expect_mutation_error(result, json.loads(original), human=mode == "human")
                 # The production fault must fence/shut down, not just return a
                 # fixture-owned fatal reply while the Host keeps admitting.
                 assert host.wait(timeout=10) != 0, "Store fault did not fence the Host"
@@ -86,26 +113,29 @@ def producer_cases(state):
                     try:
                         recovered = invoke(home, "recover", key, *recovery_mode)
                         expect_fatal(recovered)
-                        assert json.loads(recovered.stdout) == ERROR and record.read_bytes() == original, recovered
+                        expect_mutation_error(recovered, json.loads(original), human=not recovery_mode)
+                        assert record.read_bytes() == original, recovered
                     finally:
                         fixture.stop_host(host)
             host = fixture.start_host(store, None, "--fault", "before-commit")
             try:
                 retried = invoke(home, "retry", "--store", store, "--record", record, "--kind", kind)
                 expect_fatal(retried)
-                assert json.loads(retried.stdout) == ERROR and record.read_bytes() == original, retried
+                expect_mutation_error(retried, json.loads(original))
+                assert record.read_bytes() == original, retried
             finally:
                 fixture.stop_host(host)
-    print("canonical producers: all five fenced HTTP mutation owners; raw/human/JSON and five retry kinds passed", flush=True)
+    print("canonical producers: all five fenced HTTP mutation owners; typed explicit/human/JSON diagnostics and five retry kinds passed", flush=True)
 
 
 class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     """Forward the real request, drain its reply, replace only the selected route."""
-    def __init__(self, host, route):
+    def __init__(self, host, route, rewrite=None):
         self.path = pathlib.Path(host.rui_ready_fields["socket"])
         self.backend = self.path.with_suffix(".canonical-backend")
         self.path.rename(self.backend)
         self.route = route
+        self.rewrite = rewrite
         self.exchanges = []
         super().__init__(str(self.path), Exchange)
         os.chmod(self.path, 0o600)
@@ -149,10 +179,136 @@ class Exchange(socketserver.BaseRequestHandler):
         route = head.split(b" ")[1].decode()
         if route == self.server.route:
             self.server.exchanges.append((body, response))
-            response = (b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n"
-                b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
-                + str(len(ERROR_BYTES)).encode() + b"\r\n\r\n" + ERROR_BYTES)
+            if self.server.rewrite is not None:
+                response = self.server.rewrite(response)
+            else:
+                response = (b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n"
+                    b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
+                    + str(len(ERROR_BYTES)).encode() + b"\r\n\r\n" + ERROR_BYTES)
         self.request.sendall(response)
+
+
+def wrong_target(response):
+    head, body = response.split(b"\r\n\r\n", 1)
+    value = json.loads(body)
+    answer = value["answer"]
+    if "target" in answer:
+        answer["target"]["operation"] = str(int(answer["target"]["operation"]) + 1)
+    elif "action" in answer:
+        answer["decision"] = "allow_once" if answer["decision"] == "deny" else "deny"
+    elif "input" in value:
+        value["input"]["sha256"] = "00" * 32
+    else:
+        answer["session"] = "other/session"
+    encoded = json.dumps(value, separators=(",", ":")).encode()
+    return (head.split(b"\r\n", 1)[0] + b"\r\nContent-Type: application/json\r\n"
+        b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
+        + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
+
+
+def presentation_cases(state):
+    home = state / "presentation"
+    home.mkdir(mode=0o700)
+    store = home / "store"
+    host = fixture.start_host(store, None)
+    try:
+        for fatal in (False, True):
+            def rewrite(response):
+                value = json.loads(response.split(b"\r\n\r\n", 1)[1])
+                if fatal:
+                    value = {"version": "1", "type": "busy", "code": "ordinary_capacity_exhausted"}
+                value["wire_only"] = "must-not-be-presented"
+                encoded = json.dumps(value, indent=2, ensure_ascii=True).encode()
+                return ((b"HTTP/1.1 503 Unavailable" if fatal else b"HTTP/1.1 200 OK")
+                    + b"\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
+                    + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
+            for mode in ("explicit", "human", "json"):
+                record = home / f"{fatal}-{mode}.json"
+                args = ["configure", "--store", store, "--session", 'original/µ"',
+                    "--workspace", state, "--provider", "codex", "--model", "model-a"]
+                args += ["--record", record, "--key", 'explicit/µ"'] if mode == "explicit" else (["--json"] if mode == "json" else [])
+                proxy = ReplyProxy(host, "/v1/configure", rewrite)
+                try:
+                    result = invoke(home, *args)
+                finally:
+                    proxy.close()
+                saved = json.loads(proxy.exchanges[0][0])
+                assert "must-not-be-presented" not in result.stdout and '"version"' not in result.stdout, result
+                if fatal:
+                    assert result.returncode != 0 and "HostInvocationFailed" in result.stderr, result
+                    expect_mutation_error(result, saved, human=mode == "human", status=503,
+                        reason="HostInvocationFailed", diagnostic={"type": "busy", "code": "ordinary_capacity_exhausted"})
+                else:
+                    assert result.returncode == 0, result
+                    if mode == "human":
+                        assert "admitted: accepted" in result.stdout and "revision:" in result.stdout, result
+                    else:
+                        rendered = json.loads(result.stdout.splitlines()[-1])
+                        if mode == "json":
+                            rendered = rendered["admission"]
+                        assert rendered["answer"] == json.loads(proxy.exchanges[0][1].split(b"\r\n\r\n", 1)[1])["answer"], rendered
+                        assert rendered["context"]["key"] == saved["key"] and rendered["context"]["session"] == saved["session"], rendered
+    finally:
+        fixture.stop_host(host)
+    print("mutation presentation: typed explicit/human/JSON facts and noncanonical diagnostics, original escaped identity; no Host wire passthrough", flush=True)
+
+
+def binding_cases(state):
+    home = state / "binding"
+    home.mkdir(mode=0o700)
+    store = home / "store"
+    host = fixture.start_host(store, None)
+    text = home / "input"
+    text.write_text("a\nµ")
+    commands = (
+        ("configure", "/v1/configure", ["configure", "--workspace", state, "--provider", "codex", "--model", "model-a"]),
+        ("message", "/v1/message", ["message", "--text", text]),
+        ("session-stop", "/v1/control/session-stop", ["stop-session"]),
+        ("model-interruption", "/v1/control/model-interruption", ["interrupt-model", "--turn", "3", "--operation", "11"]),
+        ("permission-decision", "/v1/control/permission-decision", ["deny-action", "--action", "7"]),
+        ("permission-allow", "/v1/control/permission-decision", ["allow-action", "--action", "7"]),
+    )
+    try:
+        for name, route, command in commands:
+            kind = "permission-decision" if name == "permission-allow" else name
+            for mode in (("raw", "human", "json") if kind in ("configure", "message", "permission-decision") else ("raw",)):
+                record = home / f"{name}-{mode}.json"
+                args = [*command, "--store", store, "--session", "original/session"]
+                args += ["--record", record, "--key", f"{name}-{mode}"] if mode == "raw" else (["--json"] if mode == "json" else [])
+                proxy = ReplyProxy(host, route, wrong_target)
+                try:
+                    result = invoke(home, *args)
+                    assert result.returncode != 0 and "RequestBindingMismatch" in result.stderr, result
+                    assert "admitted:" not in result.stdout and "replayed:" not in result.stdout, result
+                finally:
+                    proxy.close()
+                request, original_reply = proxy.exchanges[0]
+                saved = json.loads(request)
+                key = saved["key"]
+                if mode != "raw":
+                    record = home / ".config/rui/requests" / f"{key}.json"
+                assert record.read_bytes() == request
+                expect_mutation_error(result, saved, human=mode == "human", status=200,
+                    reason="RequestBindingMismatch", diagnostic=None)
+                for recovery in (["retry", "--store", store, "--record", record, "--kind", kind],
+                        *([["recover", key, "--json"]] if mode != "raw" else [])):
+                    proxy = ReplyProxy(host, route, wrong_target)
+                    try:
+                        failed = invoke(home, *recovery)
+                        assert failed.returncode != 0 and "RequestBindingMismatch" in failed.stderr, failed
+                    finally:
+                        proxy.close()
+                    expect_mutation_error(failed, saved, status=200, reason="RequestBindingMismatch", diagnostic=None)
+                    assert record.read_bytes() == request
+                recovered = invoke(home, "retry", "--store", store, "--record", record, "--kind", kind)
+                assert recovered.returncode == 0 and json.loads(recovered.stdout)["answer"]["replayed"] is True, recovered
+                if mode != "raw":
+                    recovered = invoke(home, "recover", key, "--json")
+                    assert recovered.returncode == 0 and json.loads(recovered.stdout)["answer"]["replayed"] is True, recovered
+                assert record.read_bytes() == request
+    finally:
+        fixture.stop_host(host)
+    print("mutation bindings: five typed explicit/human/JSON/retry/recover callers reject wrong Session, digest, target or decision; original-key replay preserved", flush=True)
 
 
 def committed_cases(state):
@@ -184,8 +340,8 @@ def committed_cases(state):
             assert saved["key"] == key and saved["store"] == str(store.resolve()) and saved["session"] == "original/session", saved
             if mode == "json":
                 captured, failed = map(json.loads, result.stdout.splitlines())
-                assert failed == {"event": "invocation_error", "request": key, "error": ERROR}, failed
                 assert captured == {"event": "captured", "request": key}, captured
+            expect_mutation_error(result, saved, human=mode == "human")
             for recovery_mode in ([], ["--json"]):
                 recovered = invoke(home, "recover", key, *recovery_mode)
                 assert recovered.returncode == 0, recovered
@@ -225,10 +381,10 @@ def committed_cases(state):
     print("canonical callers: committed-then-fatal retains original key/bytes, replay not resubmit; observation/read errors passed", flush=True)
 
 
-def interactive_cases(state):
+def interactive_cases(state, binding=False):
     import human_cli_integration as human
     import codex_integration as codex
-    home = state / "interactive"
+    home = state / ("binding-interactive" if binding else "interactive")
     home.mkdir()
     store = home / "store"
     endpoint = fixture.SuccessEndpoint([fixture.sse_tool_calls("canonical-tool", [("bash", "canonical-call",
@@ -246,6 +402,8 @@ def interactive_cases(state):
         for route, line in (("/v1/configure", "/configure --permission-mode ask"),
                 ("/v1/message", "original terminal bytes"), ("/v1/control/permission-decision", "/wait"),
                 ("/v1/configure", None), ("/v1/observe-command", "confirmed terminal bytes")):
+            if binding and route == "/v1/observe-command":
+                continue  # Streaming observation belongs to the subsequent unit.
             master, slave = pty.openpty()
             original_terminal = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
@@ -255,28 +413,42 @@ def interactive_cases(state):
             caller = None
             try:
                 if line is None:
-                    proxy = ReplyProxy(host, route)
+                    proxy = ReplyProxy(host, route, wrong_target if binding else None)
                 caller = subprocess.Popen([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                     pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 if line is not None:
                     human.read_terminal(master, "rui> ")
-                    proxy = ReplyProxy(host, route)
+                    proxy = ReplyProxy(host, route, wrong_target if binding else None)
                     os.write(master, (line + "\n").encode())
                     if route == "/v1/control/permission-decision":
                         human.read_terminal(master, "Allow once, deny, or later?")
                         human.action_ready(ready_read)
                         os.write(master, b"d\n")
-                output = "" if route == "/v1/observe-command" else human.read_terminal(master, "canonical_store_failure")
-                assert caller.wait(timeout=10) != 0, "fatal mutation resumed the Session prompt"
+                output = "" if route == "/v1/observe-command" else human.read_terminal(master, "RequestBindingMismatch" if binding else "canonical_store_failure")
+                if binding:
+                    assert "other/session" not in output and '"answer"' not in output, output
+                if binding and line is not None:
+                    # Keep the existing recoverable invocation-error workflow;
+                    # only canonical Store failure requires fatal detachment.
+                    if "rui> " not in output:
+                        output += human.read_terminal(master, "rui> ")
+                    os.write(master, b"/exit\n")
+                    assert caller.wait(timeout=10) == 0, "explicit detachment failed"
+                else:
+                    assert caller.wait(timeout=10) != 0, "fatal mutation resumed the Session prompt"
                 errors = caller.stderr.read().decode()
-                assert "CanonicalStoreFailure" in errors, errors
+                assert ("RequestBindingMismatch" if binding else "CanonicalStoreFailure") in errors, errors
                 if route == "/v1/observe-command":
                     assert "Message accepted" in errors and "do not resubmit it" in errors and "admission may be uncertain" not in errors, errors
                 # Drain before checking that there is no later prompt/success.
                 while select.select([master], [], [], 0.05)[0]:
                     output += os.read(master, 65536).decode(errors="replace")
-                assert "rui> " not in output and "Detached." not in output and "admitted:" not in output, output
+                assert "admitted:" not in output and "Configured." not in output, output
+                if route != "/v1/observe-command":
+                    assert "You: " not in output, output
+                if not binding or line is None:
+                    assert "rui> " not in output and "Detached." not in output, output
                 assert termios.tcgetattr(slave) == original_terminal, "fatal invocation did not restore the terminal"
                 request, reply = proxy.exchanges[0]
                 decoded = json.loads(reply.split(b"\r\n\r\n", 1)[1])
@@ -302,15 +474,15 @@ def interactive_cases(state):
         endpoint.server_close()
         endpoint_thread.join(timeout=5)
         assert not endpoint_thread.is_alive(), "provider fixture did not join"
-    print("canonical PTY: Configure/Message/Permission/bare creation fail before outcome interpretation, restore terminal and retain original capture", flush=True)
+    print(f"{'binding' if binding else 'canonical'} PTY: Configure/Message/Permission/bare creation fail before outcome interpretation, restore terminal and retain original capture", flush=True)
 
 
 def main(selected="all"):
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-canonical-failure."))
     completed = False
     try:
-        assert selected in ("all", "producers", "committed", "interactive"), selected
-        for name, case in (("producers", producer_cases), ("committed", committed_cases), ("interactive", interactive_cases)):
+        assert selected in ("all", "producers", "committed", "interactive", "bindings", "binding-interactive", "presentation"), selected
+        for name, case in (("producers", producer_cases), ("committed", committed_cases), ("interactive", interactive_cases), ("bindings", binding_cases), ("binding-interactive", lambda path: interactive_cases(path, binding=True)), ("presentation", presentation_cases)):
             if selected in ("all", name):
                 case(state)
         completed = True

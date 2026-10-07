@@ -3472,6 +3472,75 @@ test "canonical failure classifier accepts every production mutation failure env
     }
 }
 
+test "mutation decoder validates all five actual producers and preserved domain answers" {
+    const client = @import("client.zig");
+    const session = "original/é\n";
+    const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
+    inline for (.{ renderConfigureReply, renderMessageReply, renderSessionStopReply, renderModelInterruptionReply, renderPermissionDecisionReply }, 0..) |render, index| {
+        const Command = @typeInfo(@typeInfo(@TypeOf(render)).@"fn".params[1].type.?).pointer.child;
+        const Reply = @typeInfo(@TypeOf(render)).@"fn".params[2].type.?;
+        var command: Command = .{};
+        try command.session.set(session);
+        if (index == 3) {
+            command.turn_id = 3;
+            command.operation_id = 11;
+        }
+        if (index == 4) command.action_id = 7;
+        const target: client.MutationTarget = switch (index) {
+            0 => .configure,
+            1 => .{ .message = .{ .bytes = content.length, .digest = content.digest } },
+            2 => .session_stop,
+            3 => .{ .model_interruption = .{ .turn = 3, .operation = 11 } },
+            4 => .{ .permission_decision = .{ .action = 7, .decision = .deny } },
+            else => unreachable,
+        };
+        const accepted: Reply = switch (index) {
+            0 => .{ .accepted = .{ .replayed = true, .revision = 13, .created = false } },
+            1 => .{ .accepted = .{ .replayed = true, .admission_id = 17, .content = content } },
+            2 => .{ .accepted = .{ .replayed = true, .selection = .{ .selected_turn_id = 19, .admission_cutoff = 23 }, .completion = .pending } },
+            3, 4 => .{ .accepted = .{ .replayed = true } },
+            else => unreachable,
+        };
+        const rejected: Reply = if (index == 1)
+            .{ .rejected = .{ .replayed = true, .code = .unknown_session, .content = content } }
+        else
+            .{ .rejected = .{ .replayed = true, .code = .invalid_session_reference } };
+        for ([_]Reply{ accepted, rejected, .conflict, .infrastructure_failure }) |initial| {
+            for ([_]bool{ false, true }) |replayed| {
+                var result = initial;
+                switch (result) {
+                    .accepted => |*value| value.replayed = replayed,
+                    .rejected => |*value| value.replayed = replayed,
+                    else => {},
+                }
+                var response: protocol.ResponseBuffer = .{};
+                try render(&response, &command, result);
+                const status: u16 = if (result == .conflict) 409 else if (result == .infrastructure_failure) 500 else 200;
+                const decoded = client.decodeMutationReply(.{ .status = status, .body = response.slice() }, session, target);
+                try std.testing.expectEqual(status, decoded.status);
+                if (result == .infrastructure_failure) {
+                    try std.testing.expectError(error.CanonicalStoreFailure, decoded.answer);
+                    continue;
+                }
+                const answer = try decoded.answer;
+                try std.testing.expectEqualStrings(@tagName(result), @tagName(answer.result));
+                try std.testing.expectEqual(result != .conflict and replayed, answer.replayed);
+                try std.testing.expectError(error.RequestBindingMismatch, client.decodeMutationReply(.{ .status = status, .body = response.slice() }, "other/session", target).answer);
+                if (result == .accepted) switch (answer.result.accepted) {
+                    .configure => |value| try std.testing.expectEqual(@as(u64, 13), value.revision),
+                    .message => |value| try std.testing.expectEqual(@as(u64, 17), value.admission),
+                    .session_stop => |value| {
+                        try std.testing.expectEqual(@as(?u64, 19), value.turn);
+                        try std.testing.expectEqual(@as(u64, 23), value.admission_cutoff);
+                        try std.testing.expectEqual(.pending, value.completion);
+                    },
+                    .model_interruption, .permission_decision => {},
+                };
+            }
+        }
+    }
+}
+
 fn renderMessageReply(
     response: *protocol.ResponseBuffer,
     command: *const protocol.MessageCommand,

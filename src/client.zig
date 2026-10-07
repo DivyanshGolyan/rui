@@ -306,35 +306,23 @@ fn renderReadRequest(
     try body.append("}");
 }
 
-pub fn stopSession(io: std.Io, input: SessionStopInput, reply_buffer: *ReplyBuffer) !CommandReply {
+pub fn stopSession(io: std.Io, input: SessionStopInput, reply_buffer: *ReplyBuffer) !MutationReply {
     reply_buffer.len = 0;
     const paths = try platform.resolveClientPaths(io, input.store);
     try validateIdentityInputs(input.key, input.session);
-    try captureSessionStop(io, &paths, input);
-    return sendRecord(
-        io,
-        &paths,
-        input.record,
-        "/v1/control/session-stop",
-        input.drop_reply,
-        reply_buffer,
-    );
+    var captured = try captureSessionStop(io, &paths, input);
+    defer captured.close(io);
+    return sendCaptured(io, &captured, input.drop_reply, reply_buffer);
 }
 
-pub fn interruptModel(io: std.Io, input: ModelInterruptionInput, reply_buffer: *ReplyBuffer) !CommandReply {
+pub fn interruptModel(io: std.Io, input: ModelInterruptionInput, reply_buffer: *ReplyBuffer) !MutationReply {
     reply_buffer.len = 0;
     const paths = try platform.resolveClientPaths(io, input.store);
     try validateIdentityInputs(input.key, input.session);
     if (input.turn_id == 0 or input.operation_id == 0) return error.InvalidTarget;
-    try captureModelInterruption(io, &paths, input);
-    return sendRecord(
-        io,
-        &paths,
-        input.record,
-        "/v1/control/model-interruption",
-        input.drop_reply,
-        reply_buffer,
-    );
+    var captured = try captureModelInterruption(io, &paths, input);
+    defer captured.close(io);
+    return sendCaptured(io, &captured, input.drop_reply, reply_buffer);
 }
 
 pub fn retry(
@@ -343,7 +331,7 @@ pub fn retry(
     record: []const u8,
     kind: []const u8,
     reply_buffer: *ReplyBuffer,
-) !CommandReply {
+) !MutationReply {
     reply_buffer.len = 0;
     const paths = try platform.resolveClientPaths(io, store_path);
     const route = if (std.mem.eql(u8, kind, "configure"))
@@ -358,7 +346,14 @@ pub fn retry(
         "/v1/control/permission-decision"
     else
         return error.InvalidRetryKind;
-    return sendRecord(io, &paths, record, route, null, reply_buffer);
+    var file = try std.Io.Dir.cwd().openFile(io, record, .{});
+    defer file.close(io);
+    const binding = try readCapturedBinding(io, &file);
+    if (!binding.saved.store.eql(paths.store.slice()) or !std.mem.eql(u8, route, binding.target.route())) return error.RequestBindingMismatch;
+    const reply = try sendSource(io, &paths, route, try file.length(io), &file, null, null, null, reply_buffer, null);
+    var result = decodeMutationReply(reply, binding.saved.session.slice(), binding.target);
+    result.context = binding.saved;
+    return result;
 }
 
 pub fn observeCommand(
@@ -685,6 +680,315 @@ fn validateIdentityInputs(key: []const u8, session: []const u8) !void {
         !std.unicode.utf8ValidateSlice(session)) return error.InvalidSession;
 }
 
+pub const MutationTarget = union(enum) {
+    configure,
+    message: struct { bytes: u64, digest: [32]u8 },
+    session_stop,
+    model_interruption: struct { turn: u64, operation: u64 },
+    permission_decision: struct { action: u64, decision: protocol.PermissionDecision },
+
+    fn route(self: MutationTarget) []const u8 {
+        return switch (self) {
+            .configure => "/v1/configure",
+            .message => "/v1/message",
+            .session_stop => "/v1/control/session-stop",
+            .model_interruption => "/v1/control/model-interruption",
+            .permission_decision => "/v1/control/permission-decision",
+        };
+    }
+};
+
+pub const MutationAnswer = struct {
+    result: union(enum) {
+        accepted: union(enum) {
+            configure: struct { revision: u64, created: bool },
+            message: struct { admission: u64 },
+            session_stop: struct { turn: ?u64, admission_cutoff: u64, completion: enum { pending, completed } },
+            model_interruption,
+            permission_decision,
+        },
+        rejected: protocol.Bounded(96),
+        conflict,
+    },
+    replayed: bool,
+};
+
+pub const InvocationDiagnostic = struct {
+    type: protocol.Bounded(32),
+    code: protocol.Bounded(96),
+};
+
+/// Owned facts and original request context survive buffer reuse and capture
+/// closure. An answer error is unconfirmed, never rejection or noncommit.
+pub const MutationReply = struct {
+    status: u16,
+    diagnostic: ?InvocationDiagnostic = null,
+    context: CapturedIdentity = .{},
+    target: MutationTarget,
+    answer: error{ CanonicalStoreFailure, HostInvocationFailed, InvalidResponse, RequestBindingMismatch }!MutationAnswer,
+
+    pub fn isAccepted(self: MutationReply) bool {
+        const answer = self.answer catch return false;
+        return answer.result == .accepted;
+    }
+};
+
+fn JsonString(comptime limit: usize) type {
+    return struct {
+        value: protocol.Bounded(limit) = .{},
+
+        fn slice(self: *const @This()) []const u8 {
+            return self.value.slice();
+        }
+
+        fn eql(self: *const @This(), value: []const u8) bool {
+            return self.value.eql(value);
+        }
+
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, _: std.json.ParseOptions) !@This() {
+            if (try source.peekNextTokenType() != .string) return error.UnexpectedToken;
+            const token = try source.nextAllocMax(allocator, .alloc_if_needed, limit);
+            defer if (token == .allocated_string) allocator.free(token.allocated_string);
+            var result: @This() = .{};
+            result.value.set(switch (token) {
+                .string, .allocated_string => |value| value,
+                else => unreachable,
+            }) catch return error.InvalidCharacter;
+            return result;
+        }
+    };
+}
+
+fn mutationId(value: JsonString(20), allow_zero: bool) !u64 {
+    const bytes = value.slice();
+    if (bytes.len == 0 or (bytes.len > 1 and bytes[0] == '0')) return error.InvalidResponse;
+    for (bytes) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidResponse;
+    const id = std.fmt.parseInt(u64, bytes, 10) catch return error.InvalidResponse;
+    if (!allow_zero and id == 0) return error.InvalidResponse;
+    return id;
+}
+
+/// One operation boundary for synchronous callers and a later worker. No
+/// workflow, terminal, retry or certainty transition is made by this decoder.
+pub fn decodeMutationReply(reply: CommandReply, session: []const u8, target: MutationTarget) MutationReply {
+    var result: MutationReply = .{ .status = reply.status, .target = target, .answer = error.InvalidResponse };
+    result.context.session.set(session) catch return result;
+    result.answer = decodeMutationAnswer(reply, session, target, &result.diagnostic);
+    return result;
+}
+
+fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: MutationTarget, diagnostic: *?InvocationDiagnostic) @FieldType(MutationReply, "answer") {
+    if (reply.body.len > protocol.max_response_bytes) return error.InvalidResponse;
+    const Wire = struct {
+        version: JsonString(8),
+        type: JsonString(32),
+        code: ?JsonString(96) = null,
+        answer: ?struct {
+            status: JsonString(16),
+            replayed: bool,
+            session: ?JsonString(protocol.max_session_bytes) = null,
+            code: ?JsonString(96) = null,
+            revision: ?JsonString(20) = null,
+            created: ?bool = null,
+            admission: ?JsonString(20) = null,
+            action: ?JsonString(20) = null,
+            decision: ?JsonString(16) = null,
+            selection: ?struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) } = null,
+            target: ?struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) } = null,
+        } = null,
+        input: ?struct { type: JsonString(8), bytes: JsonString(20), sha256: JsonString(64) } = null,
+        queue: ?struct { status: JsonString(16), admission: JsonString(20) } = null,
+        execution: ?struct { status: JsonString(16), reason: ?JsonString(64) = null } = null,
+        completion: ?struct { status: JsonString(16) } = null,
+    };
+    // Strings are copied into bounded values and immediately freed. Reserve
+    // scanner nesting first, as in the canonical classifier; no payload arena.
+    const capacity = comptime std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.max_response_bytes);
+    var storage: [capacity]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var scanner = std.json.Scanner.initCompleteInput(fixed.allocator(), reply.body);
+    defer scanner.deinit();
+    scanner.ensureTotalStackCapacity(protocol.max_response_bytes) catch unreachable;
+    const wire = std.json.parseFromTokenSourceLeaky(Wire, fixed.allocator(), &scanner, .{ .ignore_unknown_fields = true }) catch return error.InvalidResponse;
+    if (wire.code) |code| {
+        if (wire.answer != null or wire.input != null or wire.queue != null or wire.execution != null or wire.completion != null) return error.InvalidResponse;
+        const parsed = InvocationDiagnostic{ .type = wire.type.value, .code = code.value };
+        try validateInvocationDiagnostic(reply.status, wire.version.slice(), parsed);
+        diagnostic.* = parsed;
+        if (parsed.code.eql("canonical_store_failure")) return error.CanonicalStoreFailure;
+        return error.HostInvocationFailed;
+    }
+    if (reply.status != 200 and reply.status != 409) return error.InvalidResponse;
+    const expected_type = switch (target) {
+        .configure => "configuration_reply",
+        .message => "message_reply",
+        .session_stop => "session_stop_reply",
+        .model_interruption => "model_interruption_reply",
+        .permission_decision => "permission_decision_reply",
+    };
+    if (!wire.version.eql("1") or !wire.type.eql(expected_type) or wire.code != null) return error.InvalidResponse;
+    const answer = wire.answer orelse return error.InvalidResponse;
+    if (target == .model_interruption) {
+        const echoed = answer.target orelse return error.InvalidResponse;
+        if (answer.session != null or !echoed.session.eql(session) or try mutationId(echoed.turn, true) != target.model_interruption.turn or
+            try mutationId(echoed.operation, true) != target.model_interruption.operation) return error.RequestBindingMismatch;
+    } else {
+        if (answer.target != null or !(answer.session orelse return error.InvalidResponse).eql(session)) return error.RequestBindingMismatch;
+    }
+    if (target == .permission_decision) {
+        if (try mutationId(answer.action orelse return error.InvalidResponse, true) != target.permission_decision.action or
+            !(answer.decision orelse return error.InvalidResponse).eql(@tagName(target.permission_decision.decision))) return error.RequestBindingMismatch;
+    } else if (answer.action != null or answer.decision != null) return error.InvalidResponse;
+    const accepted = answer.status.eql("accepted");
+    const conflict = answer.status.eql("conflict");
+    if ((!accepted and !conflict and !answer.status.eql("rejected")) or (reply.status == 409) != conflict) return error.InvalidResponse;
+    if (accepted) {
+        if (answer.code != null) return error.InvalidResponse;
+    } else {
+        const code = answer.code orelse return error.InvalidResponse;
+        if (code.slice().len == 0 or answer.revision != null or answer.created != null or answer.admission != null or answer.selection != null) return error.InvalidResponse;
+        if (conflict and (!code.eql("idempotency_key_conflict") or answer.replayed)) return error.InvalidResponse;
+    }
+    var value: @FieldType(@FieldType(MutationAnswer, "result"), "accepted") = undefined;
+    switch (target) {
+        .configure => {
+            const execution = wire.execution orelse return error.InvalidResponse;
+            if (!execution.status.eql("unavailable") or !(execution.reason orelse return error.InvalidResponse).eql("direct_reply_does_not_wait_for_model_processing")) return error.InvalidResponse;
+            if (accepted) value = .{ .configure = .{ .revision = try mutationId(answer.revision orelse return error.InvalidResponse, false), .created = answer.created orelse return error.InvalidResponse } };
+        },
+        .message => |expected| {
+            if (!(wire.execution orelse return error.InvalidResponse).status.eql("queued")) return error.InvalidResponse;
+            if (conflict) {
+                if (wire.input != null or wire.queue != null) return error.InvalidResponse;
+            } else {
+                const input = wire.input orelse return error.InvalidResponse;
+                var digest: [32]u8 = undefined;
+                if (!input.type.eql("text") or input.sha256.slice().len != 64) return error.InvalidResponse;
+                _ = std.fmt.hexToBytes(&digest, input.sha256.slice()) catch return error.InvalidResponse;
+                if (try mutationId(input.bytes, true) != expected.bytes or !std.mem.eql(u8, &digest, &expected.digest)) return error.RequestBindingMismatch;
+                if (accepted) {
+                    const admission = try mutationId(answer.admission orelse return error.InvalidResponse, false);
+                    const queue = wire.queue orelse return error.InvalidResponse;
+                    if (!queue.status.eql("queued") or try mutationId(queue.admission, false) != admission) return error.InvalidResponse;
+                    value = .{ .message = .{ .admission = admission } };
+                } else if (wire.queue != null) return error.InvalidResponse;
+            }
+        },
+        .session_stop => {
+            const completion = wire.completion orelse return error.InvalidResponse;
+            if (accepted) {
+                const selection = answer.selection orelse return error.InvalidResponse;
+                value = .{ .session_stop = .{
+                    .turn = if (selection.turn) |turn| try mutationId(turn, false) else null,
+                    .admission_cutoff = try mutationId(selection.admission_cutoff, true),
+                    .completion = std.meta.stringToEnum(@FieldType(@FieldType(@TypeOf(value), "session_stop"), "completion"), completion.status.slice()) orelse return error.InvalidResponse,
+                } };
+            } else if (!completion.status.eql("unavailable")) return error.InvalidResponse;
+        },
+        .model_interruption => if (accepted) {
+            value = .model_interruption;
+        },
+        .permission_decision => if (accepted) {
+            value = .permission_decision;
+        },
+    }
+    if ((target != .configure and (answer.revision != null or answer.created != null)) or
+        (target != .message and (answer.admission != null or wire.input != null or wire.queue != null)) or
+        (target != .session_stop and (answer.selection != null or wire.completion != null))) return error.InvalidResponse;
+    return .{
+        .replayed = answer.replayed,
+        .result = if (accepted) .{ .accepted = value } else if (conflict) .conflict else .{ .rejected = answer.code.?.value },
+    };
+}
+
+test "mutation decoder checks binding queue ambiguity and fixed reply bounds" {
+    const digest = protocol.contentDigest("a\nµ");
+    const target: MutationTarget = .{ .message = .{ .bytes = 4, .digest = digest } };
+    const prefix = "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"a/\\u00e9\",\"admission\":\"7\"}";
+    var suffix_storage: [256]u8 = undefined;
+    const suffix = try std.fmt.bufPrint(&suffix_storage, ",\"input\":{{\"type\":\"text\",\"bytes\":\"4\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"7\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{std.fmt.bytesToHex(digest, .lower)});
+    var body: [protocol.max_response_bytes + 1]u8 = undefined;
+    const valid = try std.fmt.bufPrint(&body, "{s}{s}", .{ prefix, suffix });
+    const reply: CommandReply = .{ .status = 200, .body = valid };
+    try std.testing.expectEqual(@as(u64, 7), (try decodeMutationReply(reply, "a/é", target).answer).result.accepted.message.admission);
+    try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(reply, "b/é", target).answer);
+    var changed = target;
+    changed.message.bytes = 5;
+    try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(reply, "a/é", changed).answer);
+    changed = target;
+    changed.message.digest[3] ^= 1;
+    try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(reply, "a/é", changed).answer);
+    try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 409, .body = valid }, "a/é", target).answer);
+    @memset(body[valid.len..protocol.max_response_bytes], ' ');
+    _ = try decodeMutationReply(.{ .status = 200, .body = body[0..protocol.max_response_bytes] }, "a/é", target).answer;
+    body[protocol.max_response_bytes] = ' ';
+    try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = &body }, "a/é", target).answer);
+    for ([_][]const u8{
+        "{\"version\":1,\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"a/é\",\"admission\":\"7\"}",
+        "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"sta\\u0074us\":\"rejected\",\"replayed\":false,\"session\":\"a/é\",\"admission\":\"7\"}",
+        "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"a/é\",\"admission\":\"07\"}",
+        "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"a/é\",\"code\":\"unknown_session\"}",
+    }) |invalid_prefix| {
+        const invalid = try std.fmt.bufPrint(&body, "{s}{s}", .{ invalid_prefix, suffix });
+        try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = invalid }, "a/é", target).answer);
+    }
+    const conflicting_queue = try std.fmt.bufPrint(&body, "{s},\"input\":{{\"type\":\"text\",\"bytes\":\"4\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"8\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{ prefix, std.fmt.bytesToHex(digest, .lower) });
+    try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = conflicting_queue }, "a/é", target).answer);
+    const malformed = try std.fmt.bufPrint(&body, "{s}{s} trailing", .{ prefix, suffix });
+    try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = malformed }, "a/é", target).answer);
+}
+
+test "mutation decoder preserves invalid-target domain rejection not false fatal certainty" {
+    const body = "{\"version\":\"1\",\"type\":\"model_interruption_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":true,\"target\":{\"session\":\"s\",\"turn\":\"0\",\"operation\":\"18446744073709551615\"},\"code\":\"invalid_target\"}}";
+    const target: MutationTarget = .{ .model_interruption = .{ .turn = 0, .operation = std.math.maxInt(u64) } };
+    const answer = try decodeMutationReply(.{ .status = 200, .body = body }, "s", target).answer;
+    try std.testing.expectEqualStrings("invalid_target", answer.result.rejected.slice());
+    try std.testing.expect(answer.replayed);
+    for ([_][]const u8{
+        "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"unavailable\"}",
+        "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"infrastructure_failure\",\"code\":\"canonical_store_failure\"}}",
+    }) |unknown| {
+        const reply = decodeMutationReply(.{ .status = 500, .body = unknown }, "s", target);
+        try std.testing.expectError(if (std.mem.indexOf(u8, unknown, "unavailable") != null) error.HostInvocationFailed else error.InvalidResponse, reply.answer);
+        try std.testing.expect(!reply.isAccepted());
+        if (std.mem.indexOf(u8, unknown, "unavailable") != null)
+            try std.testing.expectEqualStrings("unavailable", reply.diagnostic.?.code.slice());
+    }
+}
+
+test "mutation diagnostics own complete validated metadata without raw reply lifetime" {
+    const body = "{\"version\":\"1\",\"type\":\"invocation_error\",\"co\\u0064e\":\"busy\\u002fµ\",\"extra\":[{}]}";
+    var bytes: [body.len]u8 = body.*;
+    const reply = decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
+    @memset(&bytes, 'x');
+    try std.testing.expectError(error.HostInvocationFailed, reply.answer);
+    try std.testing.expect(reply.diagnostic != null);
+    try std.testing.expectEqualStrings("busy/µ", reply.diagnostic.?.code.slice());
+    try std.testing.expectEqualStrings("invocation_error", reply.diagnostic.?.type.slice());
+    try std.testing.expectEqualStrings("original/session", reply.context.session.slice());
+    for ([_][]const u8{
+        "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"capacity_exhausted\"}",
+    }, [_]u16{ 500, 503 }) |valid, status| {
+        const value = decodeMutationReply(.{ .status = status, .body = valid }, "s", .configure);
+        try std.testing.expectError(if (status == 500) error.CanonicalStoreFailure else error.HostInvocationFailed, value.answer);
+        try std.testing.expect(value.diagnostic != null);
+    }
+    const prefix = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"busy\"";
+    for ([_][]const u8{
+        prefix ++ ",\"co\\u0064e\":\"other\"}",
+        prefix ++ ",\"extra\":[}",
+        prefix ++ "} trailing",
+        prefix ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false}}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"canonical_store_failure\"}",
+        "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":[98]}",
+    }) |invalid| {
+        const value = decodeMutationReply(.{ .status = 500, .body = invalid }, "s", .configure);
+        try std.testing.expectError(error.InvalidResponse, value.answer);
+        try std.testing.expect(value.diagnostic == null);
+    }
+}
+
 pub const CapturedIdentity = struct {
     store: protocol.Bounded(protocol.max_store_bytes) = .{},
     key: protocol.Bounded(protocol.max_key_bytes) = .{},
@@ -724,6 +1028,7 @@ pub const CapturedRecord = struct {
     file: std.Io.File,
     length: u64,
     saved: CapturedIdentity,
+    target: MutationTarget,
 
     pub fn identity(self: *const CapturedRecord) *const CapturedIdentity {
         return &self.saved;
@@ -750,16 +1055,28 @@ fn requestPath(directory: []const u8, handle: []const u8, buffer: []u8) ![]const
     return std.fmt.bufPrint(buffer, "{s}/{s}.json", .{ directory, handle });
 }
 
-// Generated recovery intentionally supports only configure/message/permission
-// decisions. Stop/interruption retain the explicit retry route, not a new parser.
+// Generated recovery still supports configure/message/permission decisions;
+// controls retain the explicit retry route.
 pub fn openCaptured(io: std.Io, directory: []const u8, handle: []const u8) !CapturedRecord {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try requestPath(directory, handle, &path_buffer);
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     errdefer file.close(io);
+    const binding = try readCapturedBinding(io, &file);
+    if (!binding.saved.key.eql(handle)) return error.InvalidRequestRecord;
+    _ = try capturedRoute(&binding.saved);
+    return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target };
+}
+
+/// Metadata-only projection for listing/following; cannot authorize a send or
+/// an admission. Historical payloads are not traversed by these callers.
+pub fn inspectCaptured(io: std.Io, directory: []const u8, handle: []const u8) !CapturedIdentity {
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var file = try std.Io.Dir.cwd().openFile(io, try requestPath(directory, handle, &path_buffer), .{});
+    defer file.close(io);
     const saved = try readCapturedIdentity(io, &file, handle);
     _ = try capturedRoute(&saved);
-    return .{ .file = file, .length = try file.length(io), .saved = saved };
+    return saved;
 }
 
 fn capturedRoute(saved: *const CapturedIdentity) ![]const u8 {
@@ -769,10 +1086,110 @@ fn capturedRoute(saved: *const CapturedIdentity) ![]const u8 {
     return error.InvalidRequestRecord;
 }
 
-pub fn sendCaptured(io: std.Io, captured: *CapturedRecord, drop_reply: ?[]const u8, reply_buffer: *ReplyBuffer) !CommandReply {
+pub fn sendCaptured(io: std.Io, captured: *CapturedRecord, drop_reply: ?[]const u8, reply_buffer: *ReplyBuffer) !MutationReply {
     reply_buffer.len = 0;
     const paths = try platform.resolveClientPaths(io, captured.saved.store.slice());
-    return sendSource(io, &paths, try capturedRoute(&captured.saved), captured.length, &captured.file, null, drop_reply, null, reply_buffer, null);
+    const reply = try sendSource(io, &paths, captured.target.route(), captured.length, &captured.file, null, drop_reply, null, reply_buffer, null);
+    var result = decodeMutationReply(reply, captured.saved.session.slice(), captured.target);
+    result.context = captured.saved;
+    return result;
+}
+
+const CapturedText = struct {
+    bytes: u64 = 0,
+    digest: [32]u8 = undefined,
+
+    pub fn jsonParse(_: std.mem.Allocator, source: anytype, _: std.json.ParseOptions) !CapturedText {
+        if (try source.peekNextTokenType() != .string) return error.UnexpectedToken;
+        var result: CapturedText = .{};
+        var hash = protocol.contentHasher();
+        var utf8: Utf8Validator = .{};
+        while (true) {
+            const token = try source.next();
+            const bytes: []const u8 = switch (token) {
+                .string, .partial_string => |bytes| bytes,
+                .partial_string_escaped_1 => |*bytes| bytes,
+                .partial_string_escaped_2 => |*bytes| bytes,
+                .partial_string_escaped_3 => |*bytes| bytes,
+                .partial_string_escaped_4 => |*bytes| bytes,
+                else => return error.UnexpectedToken,
+            };
+            if (bytes.len > protocol.max_sqlite_content_bytes - result.bytes) return error.ValueTooLong;
+            result.bytes += bytes.len;
+            utf8.feed(bytes) catch return error.InvalidCharacter;
+            hash.update(bytes);
+            if (token == .string) break;
+        }
+        if (!utf8.complete()) return error.InvalidCharacter;
+        hash.final(&result.digest);
+        return result;
+    }
+};
+
+const CapturedConfiguration = struct {
+    pub fn jsonParse(_: std.mem.Allocator, source: anytype, _: std.json.ParseOptions) !CapturedConfiguration {
+        if (try source.peekNextTokenType() != .object_begin) return error.UnexpectedToken;
+        // Configuration/domain meaning belongs to Store. Validate syntax only;
+        // large instructions/schema strings stay in the record, not memory.
+        try source.skipValue();
+        return .{};
+    }
+};
+
+fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: CapturedIdentity, target: MutationTarget } {
+    const Fields = struct {
+        version: JsonString(8),
+        kind: JsonString(32),
+        store: JsonString(protocol.max_store_bytes),
+        key: JsonString(protocol.max_key_bytes),
+        session: ?JsonString(protocol.max_session_bytes) = null,
+        configuration: ?CapturedConfiguration = null,
+        require_model: ?bool = null,
+        text: ?struct { state: JsonString(8), value: CapturedText } = null,
+        action: ?JsonString(20) = null,
+        decision: ?JsonString(16) = null,
+        target: ?struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) } = null,
+    };
+    var input: [protocol.content_window_bytes]u8 = undefined;
+    var file_reader = file.reader(io, &input);
+    // Producer grammar nests at most four levels. Bounded metadata/name scratch
+    // also covers escaped names; exhaustion rejects the record, never truncates.
+    var storage: [2048]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var reader = std.json.Reader.init(fixed.allocator(), &file_reader.interface);
+    defer reader.deinit();
+    const fields = std.json.parseFromTokenSourceLeaky(Fields, fixed.allocator(), &reader, .{ .allocate = .alloc_if_needed, .max_value_len = protocol.max_store_bytes }) catch return file_reader.err orelse error.InvalidRequestRecord;
+    if (!fields.version.eql("1")) return error.InvalidRequestRecord;
+    const kind = std.meta.stringToEnum(std.meta.Tag(MutationTarget), fields.kind.slice()) orelse return error.InvalidRequestRecord;
+    var saved: CapturedIdentity = .{ .store = fields.store.value, .key = fields.key.value, .kind = fields.kind.value };
+    if (kind == .model_interruption) {
+        if (fields.session != null) return error.InvalidRequestRecord;
+        saved.session = (fields.target orelse return error.InvalidRequestRecord).session.value;
+    } else saved.session = (fields.session orelse return error.InvalidRequestRecord).value;
+    const target: MutationTarget = switch (kind) {
+        .configure => blk: {
+            if (fields.configuration == null) return error.InvalidRequestRecord;
+            break :blk .configure;
+        },
+        .message => blk: {
+            const text = fields.text orelse return error.InvalidRequestRecord;
+            if (!text.state.eql("value")) return error.InvalidRequestRecord;
+            break :blk .{ .message = .{ .bytes = text.value.bytes, .digest = text.value.digest } };
+        },
+        .session_stop => .session_stop,
+        .model_interruption => .{ .model_interruption = .{
+            .turn = mutationId(fields.target.?.turn, true) catch return error.InvalidRequestRecord,
+            .operation = mutationId(fields.target.?.operation, true) catch return error.InvalidRequestRecord,
+        } },
+        .permission_decision => .{ .permission_decision = .{
+            .action = mutationId(fields.action orelse return error.InvalidRequestRecord, true) catch return error.InvalidRequestRecord,
+            .decision = std.meta.stringToEnum(protocol.PermissionDecision, (fields.decision orelse return error.InvalidRequestRecord).slice()) orelse return error.InvalidRequestRecord,
+        } },
+    };
+    if ((kind != .configure and (fields.configuration != null or fields.require_model != null)) or
+        (kind != .message and fields.text != null) or (kind != .model_interruption and fields.target != null) or
+        (kind != .permission_decision and (fields.action != null or fields.decision != null))) return error.InvalidRequestRecord;
+    return .{ .saved = saved, .target = target };
 }
 
 // Capture writes identity first, before variable content. Recover the bounded
@@ -870,7 +1287,7 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
     return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, "message");
 }
 
-fn captureSessionStop(io: std.Io, paths: *const platform.Paths, input: SessionStopInput) !void {
+fn captureSessionStop(io: std.Io, paths: *const platform.Paths, input: SessionStopInput) !CapturedRecord {
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, input.record, &output_buffer);
     errdefer capture.abort();
@@ -881,14 +1298,14 @@ fn captureSessionStop(io: std.Io, paths: *const platform.Paths, input: SessionSt
     try capture.write(",\"session\":");
     try capture.writeJsonString(input.session);
     try capture.write("}");
-    try capture.commit();
+    return finishCapture(io, &capture, paths.store.slice(), input.key, input.session, "session_stop");
 }
 
 fn captureModelInterruption(
     io: std.Io,
     paths: *const platform.Paths,
     input: ModelInterruptionInput,
-) !void {
+) !CapturedRecord {
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, input.record, &output_buffer);
     errdefer capture.abort();
@@ -904,7 +1321,7 @@ fn captureModelInterruption(
         input.operation_id,
     });
     try capture.write(suffix);
-    try capture.commit();
+    return finishCapture(io, &capture, paths.store.slice(), input.key, input.session, "model_interruption");
 }
 
 pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, target: CaptureTarget) !CapturedRecord {
@@ -934,7 +1351,10 @@ fn finishCapture(io: std.Io, capture: *Capture, store: []const u8, key: []const 
     // A post-publication directory-sync failure returns no transmissible owner,
     // but abort preserves the published name for later explicit recovery.
     try capture.commit();
-    return .{ .file = file, .length = try file.length(io), .saved = saved };
+    const length = try file.length(io);
+    const binding = try readCapturedBinding(io, &file);
+    if (!binding.saved.store.eql(store) or !binding.saved.key.eql(key) or !binding.saved.session.eql(session) or !binding.saved.kind.eql(kind)) return error.InvalidRequestRecord;
+    return .{ .file = file, .length = length, .saved = saved, .target = binding.target };
 }
 
 const Capture = struct {
@@ -1158,20 +1578,6 @@ const Utf8Validator = struct {
         return self.used == 0;
     }
 };
-
-fn sendRecord(
-    io: std.Io,
-    paths: *const platform.Paths,
-    record: []const u8,
-    route: []const u8,
-    drop_reply: ?[]const u8,
-    reply_buffer: *ReplyBuffer,
-) !CommandReply {
-    var file = try std.Io.Dir.cwd().openFile(io, record, .{});
-    defer file.close(io);
-    const length = try file.length(io);
-    return sendSource(io, paths, route, length, &file, null, drop_reply, null, reply_buffer, null);
-}
 
 fn sendBytes(
     io: std.Io,
@@ -1476,8 +1882,14 @@ fn readCommandBodyUntil(io: std.Io, fd: std.posix.fd_t, head: ResponseHead, repl
     return .{ .status = head.status, .body = reply_buffer.slice() };
 }
 
-// Invocation failure diagnoses the Store, not the command's durable outcome.
-// Raw callers retain the complete reply and classify it before interpreting it.
+// Shared authority rule for operation replies and static read/error envelopes.
+fn validateInvocationDiagnostic(status: u16, version: []const u8, diagnostic: InvocationDiagnostic) error{InvalidResponse}!void {
+    if (status == 200 or !std.mem.eql(u8, version, "1") or diagnostic.type.len == 0 or diagnostic.code.len == 0) return error.InvalidResponse;
+    if (diagnostic.code.eql("canonical_store_failure") and (status != 500 or !diagnostic.type.eql("invocation_error"))) return error.InvalidResponse;
+}
+
+// Read/inspection callers retain their representation; mutation callers own
+// typed diagnostics from their single operation-envelope parse instead.
 pub fn checkCanonicalFailure(reply: CommandReply) !void {
     if (reply.status == 200) return;
     if (reply.body.len > protocol.max_response_bytes) return error.InvalidResponse;
@@ -1528,7 +1940,10 @@ pub fn checkCanonicalFailure(reply: CommandReply) !void {
     // Unknown values receive full syntax validation but no duplicate-key policy;
     // version, type and code alone establish invocation-error authority.
     if (envelope.code == .canonical) {
-        if (reply.status != 500 or envelope.version != .version_1 or envelope.type != .invocation_error) return error.InvalidResponse;
+        var diagnostic: InvocationDiagnostic = .{ .type = .{}, .code = .{} };
+        diagnostic.code.set("canonical_store_failure") catch unreachable;
+        if (envelope.type == .invocation_error) diagnostic.type.set("invocation_error") catch unreachable;
+        try validateInvocationDiagnostic(reply.status, if (envelope.version == .version_1) "1" else "", diagnostic);
         return error.CanonicalStoreFailure;
     }
 }
@@ -1895,6 +2310,35 @@ test "capture configure derives Session from captured key and retains model admi
     try std.testing.expectEqualStrings(expected, recovered.identity().session.slice());
 }
 
+test "capture mutation binding streams complete escaped input and rejects late ambiguity" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var text: [3 * protocol.content_window_bytes + 7]u8 = undefined;
+    @memset(&text, 'x');
+    @memcpy(text[4093..][0..7], "\x00\n€µ");
+    var captured = try captureMessage(io, .{ .store = root, .session = "s/µ", .text = &text, .text_path = "" }, .{ .generated = root });
+    const saved = captured.saved;
+    const expected = protocol.contentDigest(&text);
+    try std.testing.expectEqual(@as(u64, text.len), captured.target.message.bytes);
+    try std.testing.expectEqualSlices(u8, &expected, &captured.target.message.digest);
+    captured.close(io);
+    var recovered = try openCaptured(io, root, saved.key.slice());
+    try std.testing.expectEqualSlices(u8, &expected, &recovered.target.message.digest);
+    recovered.close(io);
+    // Listing is an identity projection, not permission to transmit. It must
+    // not traverse every historical payload to recover one local handle.
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var file = try std.Io.Dir.cwd().openFile(io, try requestPath(root, saved.key.slice(), &path), .{ .mode = .read_write });
+    defer file.close(io);
+    try file.writePositionalAll(io, " trailing", try file.length(io));
+    try std.testing.expectEqualStrings("s/µ", (try inspectCaptured(io, root, saved.key.slice())).session.slice());
+    try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, root, saved.key.slice()));
+}
+
 test "capture returns original identity before send and preserves empty explicit keys" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -1905,6 +2349,9 @@ test "capture returns original identity before send and preserves empty explicit
     const input: MessageInput = .{ .store = root, .session = "original/é", .text_path = "", .text = "original\ntext" };
     var generated = try captureMessage(io, input, .{ .generated = root });
     const saved = generated.identity().*;
+    const target = generated.target;
+    try std.testing.expectEqual(@as(u64, 13), generated.target.message.bytes);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest("original\ntext"), &generated.target.message.digest);
     const descriptor = generated.file.handle;
     {
         defer generated.close(io);
@@ -1923,6 +2370,7 @@ test "capture returns original identity before send and preserves empty explicit
     var recovered = try openCaptured(io, root, saved.key.slice());
     defer recovered.close(io);
     try std.testing.expectEqualStrings(saved.key.slice(), recovered.identity().key.slice());
+    try std.testing.expectEqualDeep(target, recovered.target);
     var record: [2048]u8 = undefined;
     const n = try recovered.file.readPositionalAll(io, &record, 0);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, record[0..n], .{});
@@ -2004,6 +2452,7 @@ test "capture retransmits complete original bytes after a lost reply" {
         if (Peer.failure) |err| return err;
         if (reply) {
             try std.testing.expectEqual(@as(u16, 200), (try result).status);
+            try std.testing.expectError(error.InvalidResponse, (try result).answer);
         } else try std.testing.expectError(error.TruncatedResponse, result);
         try std.testing.expectEqualStrings("owned-key", captured.identity().key.slice());
     }
@@ -2123,6 +2572,8 @@ test "capture recovery closes rejected records and retains only its reader lifet
         "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"target\":{\"session\":\"original\",\"turn\":\"1\",\"operation\":\"2\"}}",
         "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"other\",\"session\":\"original\",\"text\":{}}",
         "{\"version\":\"1\",\"kind\":\"unknown\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{}}",
+        "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{\"state\":\"value\",\"value\":\"a\",\"val\\u0075e\":\"b\"}}",
+        "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{\"state\":\"value\",\"value\":[97]}}",
     }) |bytes| {
         const file = try tmp.dir.createFile(io, filename, .{});
         try file.writeStreamingAll(io, bytes);
@@ -2427,12 +2878,13 @@ test "control captures attain their exact worst-case request bounds" {
         "{s}/records/stop-record",
         .{root_buffer[0..root_length]},
     );
-    try captureSessionStop(std.testing.io, &paths, .{
+    var stop_capture = try captureSessionStop(std.testing.io, &paths, .{
         .store = "unused",
         .record = stop_path,
         .key = &escaped_key,
         .session = &escaped_session,
     });
+    defer stop_capture.close(std.testing.io);
     const stop_file = try std.Io.Dir.cwd().openFile(std.testing.io, stop_path, .{});
     defer stop_file.close(std.testing.io);
     try std.testing.expectEqual(
@@ -2446,7 +2898,7 @@ test "control captures attain their exact worst-case request bounds" {
         "{s}/records/interruption-record",
         .{root_buffer[0..root_length]},
     );
-    try captureModelInterruption(std.testing.io, &paths, .{
+    var interruption_capture = try captureModelInterruption(std.testing.io, &paths, .{
         .store = "unused",
         .record = interruption_path,
         .key = &escaped_key,
@@ -2454,6 +2906,7 @@ test "control captures attain their exact worst-case request bounds" {
         .turn_id = std.math.maxInt(u64),
         .operation_id = std.math.maxInt(u64),
     });
+    defer interruption_capture.close(std.testing.io);
     const interruption_file = try std.Io.Dir.cwd().openFile(std.testing.io, interruption_path, .{});
     defer interruption_file.close(std.testing.io);
     try std.testing.expectEqual(
