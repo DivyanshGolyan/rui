@@ -1190,6 +1190,25 @@ pub const ContentReader = struct {
         return self.store.readOwnedContent(self, start, destination);
     }
 
+    /// Read public byte coordinates without exposing the saved representation.
+    /// The nonempty caller window also discards preceding projected bytes;
+    /// backward ranges restart decoding, never retain a payload or seek index.
+    pub fn readRange(self: *ContentReader, start: u64, destination: []u8) !usize {
+        std.debug.assert(self.active and destination.len > 0);
+        if (destination.len > content_window_bytes) return error.WindowTooLarge;
+        if (start > self.reference.length) return error.RangeOutOfBounds;
+        if (self.representation == .projection) {
+            if (start < self.representation.projection.decoded_position) self.representation.projection = .{};
+            var offset = self.representation.projection.decoded_position;
+            while (offset < start) {
+                const wanted: usize = @intCast(@min(start - offset, destination.len));
+                _ = try self.read(offset, destination[0..wanted]);
+                offset += wanted;
+            }
+        }
+        return self.read(start, destination);
+    }
+
     pub fn close(self: *ContentReader) void {
         std.debug.assert(self.active);
         self.active = false;
@@ -2605,21 +2624,29 @@ pub const Store = struct {
     // A cursor and a byte reader resolve the same public identity and exposed
     // metadata. Neither may accept a private or absent canonical result.
     fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !struct { id: i64, metadata: ContentMetadata } {
-        if (ordinal == 0) {
-            const content_id = try self.publicOrdinaryContentLocked(session, position);
-            return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id) };
-        }
-        const statement = try prepare(self.database, "SELECT coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_operation op " ++
-            "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
-            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-            "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' AND call.call_ordinal+1=?3 " ++
-            "AND (SELECT max(coalesce(c.acceptance_position,a.acceptance_position)) FROM model_tool_call c " ++
-            "LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id)=?2 " ++
-            "AND (SELECT count(*) FROM model_tool_call c WHERE c.operation_id=op.operation_id)=" ++
-            "(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
-            "AND NOT EXISTS (SELECT 1 FROM model_tool_call c LEFT JOIN action_operation a " ++
-            "ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id " ++
-            "AND (coalesce(c.acceptance_position,a.acceptance_position) IS NULL OR coalesce(c.rejection_content_id,a.resolution_content_id) IS NULL))");
+        // One indexed ordinary identity owns provenance for pages, cursors and
+        // bytes. LEFT JOIN retains damage instead of hiding dependencies.
+        const statement = try prepare(self.database, if (ordinal == 0)
+            "SELECT e.content_id,CASE WHEN c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
+                "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
+                "(e.entry_kind=3 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id AND o.resolution_content_id=e.content_id)) THEN 1 ELSE 0 END " ++
+                "FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
+                "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
+                "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
+                "LEFT JOIN content c ON c.content_id=e.content_id " ++
+                "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)"
+        else
+            "SELECT coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_operation op " ++
+                "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
+                "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+                "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' AND call.call_ordinal+1=?3 " ++
+                "AND (SELECT max(coalesce(c.acceptance_position,a.acceptance_position)) FROM model_tool_call c " ++
+                "LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id)=?2 " ++
+                "AND (SELECT count(*) FROM model_tool_call c WHERE c.operation_id=op.operation_id)=" ++
+                "(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
+                "AND NOT EXISTS (SELECT 1 FROM model_tool_call c LEFT JOIN action_operation a " ++
+                "ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id " ++
+                "AND (coalesce(c.acceptance_position,a.acceptance_position) IS NULL OR coalesce(c.rejection_content_id,a.resolution_content_id) IS NULL))");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session);
         try bindU64(statement, 2, position);
@@ -2627,34 +2654,12 @@ pub const Store = struct {
         switch (c.sqlite3_step(statement)) {
             c.SQLITE_ROW => {},
             c.SQLITE_DONE => return error.ContentNotFound,
-            else => return error.PublicContentReadFailed,
+            else => return if (ordinal == 0) error.ConversationReadFailed else error.PublicContentReadFailed,
         }
+        if (ordinal == 0 and c.sqlite3_column_int(statement, 1) != 1) return error.CorruptStore;
         const content_id = c.sqlite3_column_int64(statement, 0);
         if (content_id <= 0) return error.CorruptStore;
         return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id) };
-    }
-
-    // One indexed ordinary identity owns provenance for pages, cursors and bytes.
-    // LEFT JOIN retains damaged dependencies so absence cannot hide corruption.
-    fn publicOrdinaryContentLocked(self: *Store, session: []const u8, position: u64) !i64 {
-        const statement = try prepare(self.database, "SELECT e.content_id,CASE WHEN c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
-            "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
-            "(e.entry_kind=3 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id AND o.resolution_content_id=e.content_id)) THEN 1 ELSE 0 END " ++
-            "FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
-            "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
-            "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
-            "LEFT JOIN content c ON c.content_id=e.content_id " ++
-            "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)");
-        defer _ = c.sqlite3_finalize(statement);
-        try bindText(statement, 1, session);
-        try bindU64(statement, 2, position);
-        switch (c.sqlite3_step(statement)) {
-            c.SQLITE_DONE => return error.ContentNotFound,
-            c.SQLITE_ROW => {},
-            else => return error.ConversationReadFailed,
-        }
-        if (c.sqlite3_column_int(statement, 1) != 1) return error.CorruptStore;
-        return try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore;
     }
 
     pub fn captureSessionReport(
@@ -5440,6 +5445,7 @@ pub const Store = struct {
                     if (cursor.pending_start < cursor.pending_end) {
                         const count = @min(destination.len - filled, cursor.pending_end - cursor.pending_start);
                         @memcpy(destination[filled..][0..count], cursor.pending[cursor.pending_start..][0..count]);
+                        cursor.hash.update(destination[filled..][0..count]);
                         cursor.pending_start += count;
                         cursor.decoded_position += count;
                         filled += count;
@@ -5470,6 +5476,13 @@ pub const Store = struct {
                 if (cursor.decoded_position == reader.reference.length and
                     (cursor.pending_start != cursor.pending_end or cursor.encoded_position != cursor.encoded_end or
                         cursor.part_decoded != cursor.expected_decoded)) return error.CorruptStore;
+                // Complete-stream consistency, not authentication of an earlier
+                // range. Positioning discards participate in the same hash.
+                if (cursor.decoded_position == reader.reference.length) {
+                    // finalResult mutates: preserve state for repeated EOF reads.
+                    var hash = cursor.hash;
+                    if (!std.mem.eql(u8, &hash.finalResult(), &reader.reference.digest)) return error.CorruptStore;
+                }
             },
         }
         return destination.len;
@@ -5990,6 +6003,7 @@ const projection_read_window_bytes = 4 * 1024;
 
 // One cursor per open reader, independent of answer size and part count.
 const ProjectionCursor = struct {
+    hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
     next_part: u64 = 0,
     decoded_position: u64 = 0,
     source_id: i64 = 0,
@@ -11368,6 +11382,197 @@ test "public tool-result cursor crosses a completed group boundary" {
     var result: [64]u8 = undefined;
     const size = try reader.read(0, &result);
     try std.testing.expectEqualStrings("Unknown tool: unknown.", result[0..size]);
+}
+
+fn testingPublicProjection(
+    storage: *Store,
+    tmp: *std.testing.TmpDir,
+    parts: []const struct { encoded: []const u8, decoded: []const u8 },
+) !protocol.ConversationContent {
+    try configureTestSession(storage, "projection-config", "direct/projection");
+    try submitTestMessage(storage, tmp, "projection-input", "projection-key", "direct/projection", "input");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var source_buffer: [16 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&source_buffer);
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    var metadata_used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var metadata = try OutputMetadataWriter.init(std.testing.io, root_buffer[0..root_length], "projection-metadata", .{ .used = &metadata_used, .limit = 4096 }, false, &retained);
+    defer metadata.deinit();
+    var digest = protocol.contentHasher();
+    var decoded_length: u64 = 0;
+    try writer.writeByte('[');
+    for (parts, 0..) |part, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.writeByte('"');
+        try metadata.append(.{ .tag = .text, .start = writer.buffered().len, .length = part.encoded.len, .decoded_length = part.decoded.len });
+        try writer.writeAll(part.encoded);
+        try writer.writeByte('"');
+        digest.update(part.decoded);
+        decoded_length += part.decoded.len;
+    }
+    try writer.writeByte(']');
+    const bytes = writer.buffered();
+    try metadata.append(.{ .tag = .item, .kind = .message, .start = 0, .length = bytes.len, .content_digest = protocol.contentDigest(bytes) });
+    try metadata.sealForRead();
+    const source = try tmp.dir.createFile(std.testing.io, "projection-source", .{ .read = true });
+    defer source.close(std.testing.io);
+    try source.writeStreamingAll(std.testing.io, bytes);
+    try source.sync(std.testing.io);
+    const output = ValidatedOutput{
+        .source = source,
+        .source_length = bytes.len,
+        .metadata = metadata.file,
+        .item_count = 1,
+        .call_count = 0,
+        .answer_length = decoded_length,
+        .answer_digest = digest.finalResult(),
+        .response_id = .{},
+        .body_model = .{},
+        .openai_model = .{},
+        .x_openai_model = .{},
+        .request_id = .{},
+    };
+    try storage.settleModelSuccess(binding, &output, .{});
+    var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+    try session.set("direct/projection");
+    const page = try storage.publicConversationPage(.{ .session = session });
+    try std.testing.expect(page.items[0].kind == .assistant);
+    return .{ .session = session, .position = page.items[0].position };
+}
+
+test "public projected content equal-length repoint fences at complete-stream EOF" {
+    for ([_]bool{ false, true }) |range| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const request = try testingPublicProjection(&storage, &tmp, &.{
+            .{ .encoded = "a" ** 2500, .decoded = "a" ** 2500 },
+            .{ .encoded = "b" ** 2500, .decoded = "b" ** 2500 },
+        });
+        // Repoint to another valid, equal-length field in the same private source.
+        // Metadata/provenance stay valid, but the complete public identity differs.
+        try exec(storage.database, "UPDATE answer_text_projection SET encoded_start=(SELECT encoded_start FROM answer_text_projection WHERE part_ordinal=1) WHERE part_ordinal=0");
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+        var reader = try storage.openPublicConversationContent(request);
+        defer reader.close();
+        var bytes: [4096]u8 = undefined;
+        // An earlier range is not authenticated by an eventual EOF comparison.
+        try std.testing.expectEqual(@as(usize, 4096), try reader.read(0, &bytes));
+        try std.testing.expectEqualStrings("b" ** 4096, &bytes);
+        try std.testing.expect(!storage.isFenced());
+        // Both serial consumption and a range that discards the middle must
+        // include every decoded byte in complete-stream consistency checking.
+        try std.testing.expectError(error.CorruptStore, if (range) reader.readRange(4990, &bytes) else reader.read(4096, &bytes));
+        try std.testing.expect(storage.isFenced());
+        try std.testing.expectError(error.StoreFenced, reader.read(5000, &bytes));
+        try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+    }
+}
+
+test "public projected content ranges own positioning across windows and scalar splits" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const expected = "x" ** 4094 ++ "é中🙂\n\\\"/tail";
+    const request = try testingPublicProjection(&storage, &tmp, &.{
+        .{ .encoded = "x" ** 4094 ++ "\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/", .decoded = "x" ** 4094 ++ "é中🙂\n\\\"/" },
+        .{ .encoded = "", .decoded = "" },
+        .{ .encoded = "tail", .decoded = "tail" },
+    });
+    var reader = try storage.openPublicConversationContent(request);
+    const reference = reader.reference;
+    try std.testing.expectEqual(@as(u64, expected.len), reference.length);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(expected), &reference.digest);
+    var bytes: [5]u8 = undefined;
+    // Nonmonotonic byte positions force both forward discard and a reset.
+    for ([_]u64{ 4095, 0, 4096, expected.len - 1, expected.len, expected.len, 1, 4094 }) |start| {
+        const count = try reader.readRange(start, &bytes);
+        const wanted = @min(bytes.len, expected.len - start);
+        try std.testing.expectEqual(wanted, count);
+        try std.testing.expectEqualStrings(expected[@intCast(start)..][0..count], bytes[0..count]);
+        try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+    }
+    try std.testing.expectError(error.RangeOutOfBounds, reader.readRange(expected.len + 1, &bytes));
+    var oversized: [ContentReader.content_window_bytes + 1]u8 = undefined;
+    try std.testing.expectError(error.WindowTooLarge, reader.readRange(0, &oversized));
+    try std.testing.expect(!storage.isFenced());
+    reader.close();
+    try std.testing.expectEqualStrings("é中", &bytes);
+    // Copied bytes and immutable identity survive closing the reader.
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(expected), &reference.digest);
+}
+
+test "public projected content empty identity and repeated EOF" {
+    for ([_]bool{ false, true }) |corrupt| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        // Empty assistant output has no Conversation row. Exercise the
+        // canonical projected reader directly, as used by empty call fields.
+        _ = try storage.importBytesContent("", false, false);
+        try exec(storage.database, "UPDATE content SET payload=NULL WHERE byte_length=0");
+        const digest = protocol.contentDigest(if (corrupt) "not empty" else "");
+        if (corrupt) {
+            // Persist corruption before opening: no mutation of a reader's
+            // trusted reference can substitute for a damaged canonical row.
+            const statement = try prepare(storage.database, "UPDATE content SET digest=?1 WHERE payload IS NULL AND byte_length=0");
+            defer _ = c.sqlite3_finalize(statement);
+            try bindBlob(statement, 1, &digest);
+            try expectDone(statement);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+        }
+        var reader = try storage.openContent(.{ .length = 0, .digest = digest });
+        defer reader.close();
+        var bytes: [1]u8 = undefined;
+        if (corrupt) {
+            try std.testing.expectError(error.CorruptStore, reader.readRange(0, &bytes));
+            try std.testing.expect(storage.isFenced());
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), try reader.readRange(0, &bytes));
+            try std.testing.expectEqual(@as(usize, 0), try reader.readRange(0, &bytes));
+            try std.testing.expect(!storage.isFenced());
+        }
+        try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+    }
+}
+
+test "public projected content range positioning preserves decoding and backing faults" {
+    for ([_]bool{ false, true }) |missing| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const request = try testingPublicProjection(&storage, &tmp, &.{
+            .{ .encoded = "\\n", .decoded = "\n" },
+            .{ .encoded = "z", .decoded = "z" },
+        });
+        if (missing) {
+            try exec(storage.database, "PRAGMA foreign_keys=OFF");
+            try exec(storage.database, "DELETE FROM content WHERE content_id=(SELECT source_content_id FROM answer_text_projection LIMIT 1)");
+            try exec(storage.database, "PRAGMA foreign_keys=ON");
+        } else {
+            const invalid_source = try storage.importBytesContent("\"\\q\"", true, false);
+            const statement = try prepare(storage.database, "UPDATE answer_text_projection SET source_content_id=?1,encoded_start=1 WHERE part_ordinal=0");
+            defer _ = c.sqlite3_finalize(statement);
+            try bindI64(statement, 1, invalid_source);
+            try expectDone(statement);
+        }
+        var reader = try storage.openPublicConversationContent(request);
+        defer reader.close();
+        var bytes: [1]u8 = undefined;
+        try std.testing.expectError(if (missing) error.ContentReadFailed else error.InvalidJsonEscape, reader.readRange(1, &bytes));
+        try std.testing.expect(storage.isFenced());
+        try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+    }
 }
 
 test "definite rejections retain decisions without retaining payloads" {

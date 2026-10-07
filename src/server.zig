@@ -3224,34 +3224,13 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
                 },
             };
             defer reader.close();
-            // Projection readers are sequential. Skip earlier decoded bytes in
-            // the same bounded window; no transaction spans socket delivery.
+            // Store owns public positioning/decoding; no transaction or BLOB
+            // handle survives this read into socket delivery.
             var buffer: [protocol.content_window_bytes]u8 = undefined;
-            const count: usize = @intCast(@min(reader.reference.length - command.start, buffer.len));
-            var offset: u64 = 0;
-            switch (reader.representation) {
-                .raw => offset = command.start,
-                .projection => {
-                    while (offset < command.start) {
-                        const wanted: usize = @intCast(@min(command.start - offset, buffer.len));
-                        if (reader.read(offset, buffer[0..wanted]) catch |err| {
-                            fenceDispatch(host, "conversation content", err);
-                            return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
-                        } != wanted) {
-                            fenceDispatch(host, "conversation content", error.ShortCanonicalRead);
-                            return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
-                        }
-                        offset += wanted;
-                    }
-                },
-            }
-            if (reader.read(offset, buffer[0..count]) catch |err| {
+            const count = reader.readRange(command.start, &buffer) catch |err| {
                 fenceDispatch(host, "conversation content", err);
                 return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
-            } != count) {
-                fenceDispatch(host, "conversation content", error.ShortCanonicalRead);
-                return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
-            }
+            };
             var header_buffer: [320]u8 = undefined;
             const content_header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ count, reader.reference.length, command.start + count });
             writeAll(fd, content_header) catch return;
