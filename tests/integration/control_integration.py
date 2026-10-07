@@ -795,18 +795,57 @@ def prove_pre_handoff_stop(state):
         assert replayed["answer"]["status"] == "accepted", replayed
         assert replayed["answer"]["replayed"] is True, replayed
         milestones.wait("control_hint_published", subject="pre-handoff-stop")
-        milestones.wait(
+        release_deadline = time.monotonic() + 8
+        superseded = milestones.wait(
             "canonical_handoff_superseded",
             operation=prepared["operation"],
-            timeout=8,
-        )
+            timeout=release_deadline - time.monotonic(),
+        )[0]
+        assert superseded["trace_lost"] is False, superseded
+        # The marker precedes finishCustodyNow. Only the same execution owner's
+        # next lifecycle boundary proves that the superseded branch returned.
+        with milestones.condition:
+            while True:
+                boundaries = [
+                    record for record in milestones.records
+                    if record["rui_test_phase"] == "lifecycle_boundary"
+                    and record["process"] == superseded["process"]
+                    and record["run"] == superseded["run"]
+                    and int(record["sequence"]) > int(superseded["sequence"])
+                    and int(record["at_ns"]) >= int(superseded["at_ns"])
+                ]
+                if boundaries:
+                    boundary = boundaries[0]
+                    assert boundary["trace_lost"] is False, boundary
+                    break
+                remaining = release_deadline - time.monotonic()
+                assert remaining > 0, ("missing post-superseded execution boundary", superseded)
+                milestones.condition.wait(remaining)
         assert endpoint.count() == 0, endpoint.count()
-        execution = inspect_execution(store, "phase/pre-handoff")
-        assert execution["dispatch_fenced"] is False, execution
-        assert execution["custody_occupied"] == "0", execution
+        execution = None
+        while True:
+            remaining = release_deadline - time.monotonic()
+            assert remaining > 0, ("superseded custody did not release within 8s", execution, boundary)
+            execution = inspect_execution(store, "phase/pre-handoff", timeout=remaining)
+            assert execution["dispatch_fenced"] is False, execution
+            assert execution["scratch_used_bytes"] == "0", execution
+            if execution["custody_occupied"] == "0":
+                assert time.monotonic() <= release_deadline, ("late custody release", execution)
+                break
+            # Inspection can sample a temporary no-work admission reservation;
+            # require an actual zero, never an allowance or a stable idle census.
+            time.sleep(min(0.01, max(0, release_deadline - time.monotonic())))
         assert not milestones.matching(
             "transport_handoff_committed", operation=prepared["operation"]
         )
+        assert endpoint.count() == 0, endpoint.count()
+        print("pre-handoff release:", json.dumps({
+            "superseded": superseded,
+            "execution_boundary": boundary,
+            "execution": execution,
+            "release_budget_seconds": 8,
+            "release_elapsed_seconds": 8 - (release_deadline - time.monotonic()),
+        }), flush=True)
     finally:
         if process is not None:
             stop_process(process)
