@@ -426,7 +426,7 @@ pub const SessionListPage = struct {
         if (wire.next) |next| {
             const after = mutationId(next.after, false) catch return error.InvalidSessionPage;
             const ceiling = mutationId(next.ceiling, false) catch return error.InvalidSessionPage;
-            if (result.count != protocol.session_list_page_size or after <= cursor.after or after > ceiling or
+            if (result.count != protocol.session_list_page_size or after <= cursor.after or after >= ceiling or
                 ceiling > std.math.maxInt(i64) or (cursor.after != 0 and ceiling != cursor.ceiling)) return error.InvalidSessionPage;
             result.next = .{ .after = after, .ceiling = ceiling };
         }
@@ -3369,6 +3369,18 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, length, "/wrong", .{}));
     try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, length, null, .{ .after = 19, .ceiling = 23 }));
     try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, length, null, .{ .after = 11, .ceiling = 29 }));
+    // A next cursor needs a ninth row strictly beyond the eighth row's after.
+    const tail = "],\"next\":{\"after\":\"19\",\"ceiling\":\"23\"}}";
+    const prefix_length = length - tail.len;
+    try file.writePositionalAll(io, "],\"next\":{\"after\":\"23\",\"ceiling\":\"23\"}}", prefix_length);
+    try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, &workspace, .{}, .{ .report = .{ .bytes = length } }));
+    // Eight rows with no ninth row are valid, as is a terminal request probe.
+    const terminal = "],\"next\":null}";
+    try file.writePositionalAll(io, terminal, prefix_length);
+    const last = try SessionListReply.decode(io, file, &workspace, .{}, .{ .report = .{ .bytes = prefix_length + terminal.len } });
+    try std.testing.expectEqual(@as(usize, 8), last.page.count);
+    try std.testing.expectEqual(@as(?SessionListCursor, null), last.page.next);
+    try (SessionListCursor{ .after = 23, .ceiling = 23 }).validate();
 }
 
 test "control captures attain their exact worst-case request bounds" {
