@@ -5479,6 +5479,15 @@ pub const Store = struct {
                 // Complete-stream consistency, not authentication of an earlier
                 // range. Positioning discards participate in the same hash.
                 if (cursor.decoded_position == reader.reference.length) {
+                    // Empty text records are legitimate; any unvisited nonempty
+                    // part contradicts EOF, even beyond empty rows/ordinal gaps.
+                    const tail = try prepare(self.database, "SELECT EXISTS(SELECT 1 FROM answer_text_projection " ++
+                        "WHERE answer_content_id=?1 AND part_ordinal>=?2 AND (encoded_length!=0 OR decoded_length!=0))");
+                    defer _ = c.sqlite3_finalize(tail);
+                    try bindI64(tail, 1, reader.content_id);
+                    try bindU64(tail, 2, cursor.next_part);
+                    if (c.sqlite3_step(tail) != c.SQLITE_ROW) return error.ContentReadFailed;
+                    if (c.sqlite3_column_int(tail, 0) != 0) return error.CorruptStore;
                     // finalResult mutates: preserve state for repeated EOF reads.
                     var hash = cursor.hash;
                     if (!std.mem.eql(u8, &hash.finalResult(), &reader.reference.digest)) return error.CorruptStore;
@@ -11471,6 +11480,68 @@ test "public projected content equal-length repoint fences at complete-stream EO
         try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     }
+}
+
+test "public projected content EOF rejects nonempty trailing parts" {
+    for ([_]u64{ 7, 8 }) |start| {
+        for ([_]struct { ordinal: u64, encoded: u64, decoded: u64 }{
+            .{ .ordinal = 3, .encoded = 1, .decoded = 1 },
+            .{ .ordinal = 4, .encoded = 1, .decoded = 0 },
+            .{ .ordinal = 4, .encoded = 0, .decoded = 1 },
+        }) |tail| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const request = try testingPublicProjection(&storage, &tmp, &.{
+                .{ .encoded = "prefix-x", .decoded = "prefix-x" },
+                .{ .encoded = "", .decoded = "" },
+                .{ .encoded = "", .decoded = "" },
+            });
+            {
+                // Keep the advertised prefix/digest intact. The unexpected
+                // tail follows empty parts and can also follow an ordinal gap.
+                const insert = try prepare(storage.database, "INSERT INTO answer_text_projection " ++
+                    "SELECT answer_content_id,?1,source_content_id,encoded_start,?2,?3 FROM answer_text_projection WHERE part_ordinal=0");
+                defer _ = c.sqlite3_finalize(insert);
+                try bindU64(insert, 1, tail.ordinal);
+                try bindU64(insert, 2, tail.encoded);
+                try bindU64(insert, 3, tail.decoded);
+                try expectDone(insert);
+                try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+            }
+            var reader = try storage.openPublicConversationContent(request);
+            defer reader.close();
+            var bytes: [1]u8 = undefined;
+            try std.testing.expectError(error.CorruptStore, reader.readRange(start, &bytes));
+            try std.testing.expect(storage.isFenced());
+            try std.testing.expectError(error.StoreFenced, reader.readRange(8, &bytes));
+            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+        }
+    }
+}
+
+test "public projected content trailing empty parts retain final byte and repeated EOF" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const request = try testingPublicProjection(&storage, &tmp, &.{
+        .{ .encoded = "prefix-x", .decoded = "prefix-x" },
+        .{ .encoded = "", .decoded = "" },
+        .{ .encoded = "", .decoded = "" },
+    });
+    var reader = try storage.openPublicConversationContent(request);
+    defer reader.close();
+    var bytes: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try reader.readRange(7, &bytes));
+    try std.testing.expectEqualStrings("x", &bytes);
+    try std.testing.expectEqual(@as(usize, 0), try reader.readRange(8, &bytes));
+    try std.testing.expectEqual(@as(usize, 0), try reader.readRange(8, &bytes));
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
 }
 
 test "public projected content ranges own positioning across windows and scalar splits" {

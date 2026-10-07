@@ -14,6 +14,7 @@ import threading
 from control_integration import (
     StreamingEndpoint,
     configure,
+    encode_sse,
     inspect_execution,
     message,
     raw_request,
@@ -156,6 +157,10 @@ def projected_ranges():
         def do_POST(self):
             self.rfile.read(int(self.headers["Content-Length"]))
             body = successful_sse(1, "x" * 4094 + "é中🙂\n\\\"/tail")
+            events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith(b"data: ")]
+            for item in (events[1]["item"], events[2]["response"]["output"][0]):
+                item["content"].extend({"type": "output_text", "text": "", "annotations": []} for _ in range(2))
+            body = encode_sse(events)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Content-Length", str(len(body)))
@@ -193,7 +198,7 @@ def projected_ranges():
         item = page["items"][0]
         domain = b"rui/content/v1"
         assert item["content"]["sha256"] == hashlib.sha256(len(domain).to_bytes(8, "big") + domain + expected).hexdigest(), item
-        for start in (0, 4095, 4096, len(expected) - 1, len(expected), 1):
+        for start in (0, 4095, 4096, len(expected) - 1, len(expected), len(expected), 1):
             head, data = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", "direct/projection",
                 position=item["position"], ordinal="0", start=str(start))
             assert head.startswith(b"HTTP/1.1 200 "), (head, data)
@@ -201,15 +206,35 @@ def projected_ranges():
             assert f"X-Rui-Content-Bytes: {len(expected)}\r\n".encode() in head, head
             assert f"X-Rui-Next-Offset: {start + len(data)}\r\n".encode() in head, head
         wait_for(lambda: inspect_execution(store, "direct/projection")["custody_occupied"] == "0", "projected result cleanup")
-        # Corrupt only while stopped. Change one encoded byte without changing
-        # syntax, decoded length or the public reference, then reopen the Host.
+        # Production preserves empty text records at the tail. Add a nonempty
+        # part beyond those rows and an ordinal gap, leaving prefix/digest intact.
         stop_process(process)
         process = None
         with sqlite3.connect(store / "rui.sqlite3") as database:
-            source, start, payload = database.execute(
-                "SELECT p.source_content_id,p.encoded_start,c.payload FROM answer_text_projection p "
-                "JOIN content c ON c.content_id=p.source_content_id LIMIT 1"
+            answer, source, start, payload = database.execute(
+                "SELECT p.answer_content_id,p.source_content_id,p.encoded_start,c.payload FROM answer_text_projection p "
+                "JOIN content c ON c.content_id=p.source_content_id WHERE p.part_ordinal=0"
             ).fetchone()
+            assert database.execute(
+                "SELECT part_ordinal,encoded_length,decoded_length FROM answer_text_projection "
+                "WHERE answer_content_id=? AND part_ordinal>0 ORDER BY part_ordinal", (answer,)
+            ).fetchall() == [(1, 0, 0), (2, 0, 0)]
+            database.execute("INSERT INTO answer_text_projection VALUES(?,?,?,?,?,?)", (answer, 4, source, start, 1, 1))
+        # Restart separately: the first canonical failure fences the running
+        # Store and may not substitute for the second offset's EOF-tail witness.
+        for offset in (len(expected) - 1, len(expected)):
+            process, fields = start_host(store, provider)
+            head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", "direct/projection",
+                position=item["position"], ordinal="0", start=str(offset))
+            assert head.startswith(b"HTTP/1.1 500 "), (offset, head, body)
+            assert json.loads(body)["code"] == "canonical_store_failure", body
+            print(f"projected nonempty-tail offset {offset}: canonical corruption HTTP 500")
+            stop_process(process)
+            process = None
+        # Retain the distinct original digest-substitution witness, without
+        # allowing the extra-tail rejection to mask it.
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            database.execute("DELETE FROM answer_text_projection WHERE answer_content_id=? AND part_ordinal=4", (answer,))
             assert payload[start:start + 1] == b"x"
             database.execute("UPDATE content SET payload=? WHERE content_id=?", (payload[:start] + b"y" + payload[start + 1:], source))
         process, fields = start_host(store, provider)
@@ -219,7 +244,7 @@ def projected_ranges():
             position=item["position"], ordinal="0", start=str(len(expected) - 1))
         assert head.startswith(b"HTTP/1.1 500 "), (head, body)
         assert json.loads(body)["code"] == "canonical_store_failure", body
-        print("projected Conversation ranges: exact escaped/multibyte bytes, EOF, restart and final-range corruption fence passed")
+        print("projected Conversation ranges: exact escaped/multibyte bytes, healthy trailing empties, repeated EOF, tail and digest corruption fences passed")
     finally:
         if process is not None:
             stop_process(process)
