@@ -351,7 +351,9 @@ pub fn retry(
     const binding = try readCapturedBinding(io, &file);
     if (!binding.saved.store.eql(paths.store.slice()) or !std.mem.eql(u8, route, binding.target.route())) return error.RequestBindingMismatch;
     const reply = try sendSource(io, &paths, route, try file.length(io), &file, null, null, null, reply_buffer, null);
-    return decodeMutationReply(reply, binding.saved.session.slice(), binding.target);
+    var result = decodeMutationReply(reply, binding.saved.session.slice(), binding.target);
+    result.context = binding.saved;
+    return result;
 }
 
 pub fn observeCommand(
@@ -711,11 +713,18 @@ pub const MutationAnswer = struct {
     replayed: bool,
 };
 
-/// Raw bytes borrow the caller's ReplyBuffer until reuse. Typed facts are values
-/// independent of both that buffer and the closed captured-record descriptor.
-/// An answer error means unconfirmed invocation, never a rejection/noncommit.
+pub const InvocationDiagnostic = struct {
+    type: protocol.Bounded(32),
+    code: protocol.Bounded(96),
+};
+
+/// Owned facts and original request context survive buffer reuse and capture
+/// closure. An answer error is unconfirmed, never rejection or noncommit.
 pub const MutationReply = struct {
-    raw: CommandReply,
+    status: u16,
+    diagnostic: ?InvocationDiagnostic = null,
+    context: CapturedIdentity = .{},
+    target: MutationTarget,
     answer: error{ CanonicalStoreFailure, HostInvocationFailed, InvalidResponse, RequestBindingMismatch }!MutationAnswer,
 
     pub fn isAccepted(self: MutationReply) bool {
@@ -762,18 +771,19 @@ fn mutationId(value: JsonString(20), allow_zero: bool) !u64 {
 /// One operation boundary for synchronous callers and a later worker. No
 /// workflow, terminal, retry or certainty transition is made by this decoder.
 pub fn decodeMutationReply(reply: CommandReply, session: []const u8, target: MutationTarget) MutationReply {
-    return .{ .raw = reply, .answer = decodeMutationAnswer(reply, session, target) };
+    var result: MutationReply = .{ .status = reply.status, .target = target, .answer = error.InvalidResponse };
+    result.context.session.set(session) catch return result;
+    result.answer = decodeMutationAnswer(reply, session, target, &result.diagnostic);
+    return result;
 }
 
-fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: MutationTarget) @FieldType(MutationReply, "answer") {
-    checkCanonicalFailure(reply) catch |err| return if (err == error.CanonicalStoreFailure) err else error.InvalidResponse;
-    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
+fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: MutationTarget, diagnostic: *?InvocationDiagnostic) @FieldType(MutationReply, "answer") {
     if (reply.body.len > protocol.max_response_bytes) return error.InvalidResponse;
     const Wire = struct {
         version: JsonString(8),
         type: JsonString(32),
         code: ?JsonString(96) = null,
-        answer: struct {
+        answer: ?struct {
             status: JsonString(16),
             replayed: bool,
             session: ?JsonString(protocol.max_session_bytes) = null,
@@ -785,7 +795,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
             decision: ?JsonString(16) = null,
             selection: ?struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) } = null,
             target: ?struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) } = null,
-        },
+        } = null,
         input: ?struct { type: JsonString(8), bytes: JsonString(20), sha256: JsonString(64) } = null,
         queue: ?struct { status: JsonString(16), admission: JsonString(20) } = null,
         execution: ?struct { status: JsonString(16), reason: ?JsonString(64) = null } = null,
@@ -800,6 +810,15 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
     defer scanner.deinit();
     scanner.ensureTotalStackCapacity(protocol.max_response_bytes) catch unreachable;
     const wire = std.json.parseFromTokenSourceLeaky(Wire, fixed.allocator(), &scanner, .{ .ignore_unknown_fields = true }) catch return error.InvalidResponse;
+    if (wire.code) |code| {
+        if (wire.answer != null or wire.input != null or wire.queue != null or wire.execution != null or wire.completion != null) return error.InvalidResponse;
+        const parsed = InvocationDiagnostic{ .type = wire.type.value, .code = code.value };
+        try validateInvocationDiagnostic(reply.status, wire.version.slice(), parsed);
+        diagnostic.* = parsed;
+        if (parsed.code.eql("canonical_store_failure")) return error.CanonicalStoreFailure;
+        return error.HostInvocationFailed;
+    }
+    if (reply.status != 200 and reply.status != 409) return error.InvalidResponse;
     const expected_type = switch (target) {
         .configure => "configuration_reply",
         .message => "message_reply",
@@ -808,7 +827,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
         .permission_decision => "permission_decision_reply",
     };
     if (!wire.version.eql("1") or !wire.type.eql(expected_type) or wire.code != null) return error.InvalidResponse;
-    const answer = wire.answer;
+    const answer = wire.answer orelse return error.InvalidResponse;
     if (target == .model_interruption) {
         const echoed = answer.target orelse return error.InvalidResponse;
         if (answer.session != null or !echoed.session.eql(session) or try mutationId(echoed.turn, true) != target.model_interruption.turn or
@@ -930,9 +949,43 @@ test "mutation decoder preserves invalid-target domain rejection not false fatal
         "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"infrastructure_failure\",\"code\":\"canonical_store_failure\"}}",
     }) |unknown| {
         const reply = decodeMutationReply(.{ .status = 500, .body = unknown }, "s", target);
-        try std.testing.expectError(error.HostInvocationFailed, reply.answer);
+        try std.testing.expectError(if (std.mem.indexOf(u8, unknown, "unavailable") != null) error.HostInvocationFailed else error.InvalidResponse, reply.answer);
         try std.testing.expect(!reply.isAccepted());
-        try std.testing.expectEqualStrings(unknown, reply.raw.body);
+        if (std.mem.indexOf(u8, unknown, "unavailable") != null)
+            try std.testing.expectEqualStrings("unavailable", reply.diagnostic.?.code.slice());
+    }
+}
+
+test "mutation diagnostics own complete validated metadata without raw reply lifetime" {
+    const body = "{\"version\":\"1\",\"type\":\"invocation_error\",\"co\\u0064e\":\"busy\\u002fµ\",\"extra\":[{}]}";
+    var bytes: [body.len]u8 = body.*;
+    const reply = decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
+    @memset(&bytes, 'x');
+    try std.testing.expectError(error.HostInvocationFailed, reply.answer);
+    try std.testing.expect(reply.diagnostic != null);
+    try std.testing.expectEqualStrings("busy/µ", reply.diagnostic.?.code.slice());
+    try std.testing.expectEqualStrings("invocation_error", reply.diagnostic.?.type.slice());
+    try std.testing.expectEqualStrings("original/session", reply.context.session.slice());
+    for ([_][]const u8{
+        "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"capacity_exhausted\"}",
+    }, [_]u16{ 500, 503 }) |valid, status| {
+        const value = decodeMutationReply(.{ .status = status, .body = valid }, "s", .configure);
+        try std.testing.expectError(if (status == 500) error.CanonicalStoreFailure else error.HostInvocationFailed, value.answer);
+        try std.testing.expect(value.diagnostic != null);
+    }
+    const prefix = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"busy\"";
+    for ([_][]const u8{
+        prefix ++ ",\"co\\u0064e\":\"other\"}",
+        prefix ++ ",\"extra\":[}",
+        prefix ++ "} trailing",
+        prefix ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false}}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"canonical_store_failure\"}",
+        "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":[98]}",
+    }) |invalid| {
+        const value = decodeMutationReply(.{ .status = 500, .body = invalid }, "s", .configure);
+        try std.testing.expectError(error.InvalidResponse, value.answer);
+        try std.testing.expect(value.diagnostic == null);
     }
 }
 
@@ -1037,7 +1090,9 @@ pub fn sendCaptured(io: std.Io, captured: *CapturedRecord, drop_reply: ?[]const 
     reply_buffer.len = 0;
     const paths = try platform.resolveClientPaths(io, captured.saved.store.slice());
     const reply = try sendSource(io, &paths, captured.target.route(), captured.length, &captured.file, null, drop_reply, null, reply_buffer, null);
-    return decodeMutationReply(reply, captured.saved.session.slice(), captured.target);
+    var result = decodeMutationReply(reply, captured.saved.session.slice(), captured.target);
+    result.context = captured.saved;
+    return result;
 }
 
 const CapturedText = struct {
@@ -1827,8 +1882,14 @@ fn readCommandBodyUntil(io: std.Io, fd: std.posix.fd_t, head: ResponseHead, repl
     return .{ .status = head.status, .body = reply_buffer.slice() };
 }
 
-// Invocation failure diagnoses the Store, not the command's durable outcome.
-// Raw callers retain the complete reply and classify it before interpreting it.
+// Shared authority rule for operation replies and static read/error envelopes.
+fn validateInvocationDiagnostic(status: u16, version: []const u8, diagnostic: InvocationDiagnostic) error{InvalidResponse}!void {
+    if (status == 200 or !std.mem.eql(u8, version, "1") or diagnostic.type.len == 0 or diagnostic.code.len == 0) return error.InvalidResponse;
+    if (diagnostic.code.eql("canonical_store_failure") and (status != 500 or !diagnostic.type.eql("invocation_error"))) return error.InvalidResponse;
+}
+
+// Read/inspection callers retain their representation; mutation callers own
+// typed diagnostics from their single operation-envelope parse instead.
 pub fn checkCanonicalFailure(reply: CommandReply) !void {
     if (reply.status == 200) return;
     if (reply.body.len > protocol.max_response_bytes) return error.InvalidResponse;
@@ -1879,7 +1940,10 @@ pub fn checkCanonicalFailure(reply: CommandReply) !void {
     // Unknown values receive full syntax validation but no duplicate-key policy;
     // version, type and code alone establish invocation-error authority.
     if (envelope.code == .canonical) {
-        if (reply.status != 500 or envelope.version != .version_1 or envelope.type != .invocation_error) return error.InvalidResponse;
+        var diagnostic: InvocationDiagnostic = .{ .type = .{}, .code = .{} };
+        diagnostic.code.set("canonical_store_failure") catch unreachable;
+        if (envelope.type == .invocation_error) diagnostic.type.set("invocation_error") catch unreachable;
+        try validateInvocationDiagnostic(reply.status, if (envelope.version == .version_1) "1" else "", diagnostic);
         return error.CanonicalStoreFailure;
     }
 }
@@ -2387,7 +2451,7 @@ test "capture retransmits complete original bytes after a lost reply" {
         peer.join();
         if (Peer.failure) |err| return err;
         if (reply) {
-            try std.testing.expectEqual(@as(u16, 200), (try result).raw.status);
+            try std.testing.expectEqual(@as(u16, 200), (try result).status);
             try std.testing.expectError(error.InvalidResponse, (try result).answer);
         } else try std.testing.expectError(error.TruncatedResponse, result);
         try std.testing.expectEqualStrings("owned-key", captured.identity().key.slice());

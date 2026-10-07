@@ -1521,28 +1521,39 @@ fn testGate(io: std.Io, name: [*:0]const u8) !void {
 }
 
 fn writeMutationReply(io: std.Io, reply: client.MutationReply, json_handle: ?[]const u8, human: bool) !void {
-    if (json_handle) |handle| {
-        const is_answer = if (reply.answer) |_| true else |_| false;
-        var line: [128]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"event\":\"{s}\",\"request\":\"{s}\",\"{s}\":", .{
-            if (is_answer) "admission" else "invocation_error",
-            handle,
-            if (is_answer) "admission" else "error",
-        }));
-        try std.Io.File.stdout().writeStreamingAll(io, reply.raw.body);
-        try std.Io.File.stdout().writeStreamingAll(io, "}\n");
+    if (json_handle != null or !human) {
+        var buffer: [protocol.content_window_bytes]u8 = undefined;
+        var output = std.Io.File.stdout().writerStreaming(io, &buffer);
+        const writer = &output.interface;
+        if (json_handle) |handle| {
+            const is_answer = if (reply.answer) |_| true else |_| false;
+            try writer.print("{{\"event\":\"{s}\",\"request\":", .{if (is_answer) "admission" else "invocation_error"});
+            try std.json.Stringify.value(handle, .{}, writer);
+            try writer.print(",\"{s}\":", .{if (is_answer) "admission" else "error"});
+        }
+        try writeMutationJson(writer, reply);
+        if (json_handle != null) try writer.writeByte('}');
+        try writer.writeByte('\n');
+        try output.flush();
         _ = try reply.answer;
         return;
     }
-    if (!human) {
-        try std.Io.File.stdout().writeStreamingAll(io, reply.raw.body);
-        try std.Io.File.stdout().writeStreamingAll(io, "\n");
-        _ = try reply.answer;
-        return;
+    try writeSafeField(io, "Store: ", reply.context.store.slice());
+    try writeSafeField(io, "Session: ", reply.context.session.slice());
+    try writeSafeField(io, "key: ", reply.context.key.slice());
+    var target_line: [128]u8 = undefined;
+    switch (reply.target) {
+        .model_interruption => |target| try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&target_line, "target Turn: {d}; Operation: {d}\n", .{ target.turn, target.operation })),
+        .permission_decision => |target| try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&target_line, "target Action: {d}; decision: {s}\n", .{ target.action, @tagName(target.decision) })),
+        else => {},
     }
     const answer = reply.answer catch |err| {
-        try std.Io.File.stdout().writeStreamingAll(io, reply.raw.body);
-        try std.Io.File.stdout().writeStreamingAll(io, "\n");
+        var line: [128]u8 = undefined;
+        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "invocation: {s} (HTTP {d}); outcome unconfirmed\n", .{ @errorName(err), reply.status }));
+        if (reply.diagnostic) |diagnostic| {
+            try writeSafeField(io, "type: ", diagnostic.type.slice());
+            try writeSafeField(io, "code: ", diagnostic.code.slice());
+        }
         return err;
     };
     var line: [128]u8 = undefined;
@@ -1553,11 +1564,92 @@ fn writeMutationReply(io: std.Io, reply: client.MutationReply, json_handle: ?[]c
         .rejected => |*code| code.slice(),
         .conflict => "idempotency_key_conflict",
     };
-    if (code) |value| {
-        try std.Io.File.stdout().writeStreamingAll(io, "code: ");
-        try std.Io.File.stdout().writeStreamingAll(io, value);
-        try std.Io.File.stdout().writeStreamingAll(io, "\n");
+    if (code) |value| try writeSafeField(io, "code: ", value);
+    if (answer.result == .accepted) switch (answer.result.accepted) {
+        .configure => |value| try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "revision: {d}; created: {}\n", .{ value.revision, value.created })),
+        .message => |value| try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "queue admission: {d}\n", .{value.admission})),
+        .session_stop => |value| {
+            if (value.turn) |turn| try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "selected Turn: {d}\n", .{turn})) else try writeSafeField(io, "selected Turn: ", "none");
+            try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "admission cutoff: {d}; completion: {s}\n", .{ value.admission_cutoff, @tagName(value.completion) }));
+        },
+        .model_interruption, .permission_decision => {},
+    };
+}
+
+// Presentation of owned facts only: no wire representation or second parser.
+fn writeMutationJson(writer: *std.Io.Writer, reply: client.MutationReply) !void {
+    try writer.writeAll("{\"context\":");
+    try std.json.Stringify.value(.{
+        .store = reply.context.store.slice(),
+        .session = reply.context.session.slice(),
+        .key = reply.context.key.slice(),
+        .kind = reply.context.kind.slice(),
+    }, .{}, writer);
+    switch (reply.target) {
+        .model_interruption => |target| try writer.print(",\"request_target\":{{\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation }),
+        .permission_decision => |target| try writer.print(",\"request_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{ target.action, @tagName(target.decision) }),
+        else => {},
     }
+    const answer = reply.answer catch |err| {
+        try writer.print(",\"error\":{{\"status\":\"{d}\",\"reason\":\"{s}\",\"certainty\":\"unconfirmed\",\"type\":", .{ reply.status, @errorName(err) });
+        try std.json.Stringify.value(if (reply.diagnostic) |diagnostic| diagnostic.type.slice() else null, .{}, writer);
+        try writer.writeAll(",\"code\":");
+        try std.json.Stringify.value(if (reply.diagnostic) |diagnostic| diagnostic.code.slice() else null, .{}, writer);
+        try writer.writeAll("}}");
+        return;
+    };
+    try writer.print(",\"answer\":{{\"status\":\"{s}\",\"replayed\":{}", .{ @tagName(answer.result), answer.replayed });
+    if (reply.target == .model_interruption) {
+        try writer.writeAll(",\"target\":{\"session\":");
+        try std.json.Stringify.value(reply.context.session.slice(), .{}, writer);
+        try writer.print(",\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ reply.target.model_interruption.turn, reply.target.model_interruption.operation });
+    } else {
+        try writer.writeAll(",\"session\":");
+        try std.json.Stringify.value(reply.context.session.slice(), .{}, writer);
+    }
+    if (reply.target == .permission_decision) try writer.print(",\"action\":\"{d}\",\"decision\":\"{s}\"", .{ reply.target.permission_decision.action, @tagName(reply.target.permission_decision.decision) });
+    switch (answer.result) {
+        .accepted => |accepted| switch (accepted) {
+            .configure => |value| try writer.print(",\"revision\":\"{d}\",\"created\":{}", .{ value.revision, value.created }),
+            .message => |value| try writer.print(",\"admission\":\"{d}\"", .{value.admission}),
+            .session_stop => |value| {
+                try writer.writeAll(",\"selection\":{\"turn\":");
+                if (value.turn) |turn| try writer.print("\"{d}\"", .{turn}) else try writer.writeAll("null");
+                try writer.print(",\"admission_cutoff\":\"{d}\"}}", .{value.admission_cutoff});
+            },
+            .model_interruption, .permission_decision => {},
+        },
+        .rejected => |code| {
+            try writer.writeAll(",\"code\":");
+            try std.json.Stringify.value(code.slice(), .{}, writer);
+        },
+        .conflict => try writer.writeAll(",\"code\":\"idempotency_key_conflict\""),
+    }
+    try writer.writeByte('}');
+    if (reply.target == .message and answer.result != .conflict) {
+        const input = reply.target.message;
+        try writer.print(",\"input\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ input.bytes, std.fmt.bytesToHex(input.digest, .lower) });
+        if (answer.result == .accepted) try writer.print(",\"queue\":{{\"status\":\"queued\",\"admission\":\"{d}\"}}", .{answer.result.accepted.message.admission});
+    }
+    if (reply.target == .session_stop) try writer.print(",\"completion\":{{\"status\":\"{s}\"}}", .{if (answer.result == .accepted) @tagName(answer.result.accepted.session_stop.completion) else "unavailable"});
+    try writer.writeByte('}');
+}
+
+test "mutation JSON renders owned diagnostics and context with bounded writer" {
+    const wire = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"busy\\u002fµ\",\"wire_only\":true}";
+    var bytes: [wire.len]u8 = wire.*;
+    var reply = client.decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
+    try reply.context.store.set("/store");
+    try reply.context.key.set("original\"key");
+    try reply.context.kind.set("configure");
+    @memset(&bytes, 'x');
+    var buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeMutationJson(&writer, reply);
+    try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/store\",\"session\":\"original/session\",\"key\":\"original\\\"key\",\"kind\":\"configure\"},\"error\":{\"status\":\"409\",\"reason\":\"HostInvocationFailed\",\"certainty\":\"unconfirmed\",\"type\":\"invocation_error\",\"code\":\"busy/µ\"}}", writer.buffered());
+    var tiny: [1]u8 = undefined;
+    var failing = std.Io.Writer.fixed(&tiny);
+    try std.testing.expectError(error.WriteFailed, writeMutationJson(&failing, reply));
 }
 
 fn objectField(value: std.json.Value, name: []const u8) !std.json.Value {

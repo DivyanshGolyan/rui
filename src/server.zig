@@ -3517,7 +3517,7 @@ test "mutation decoder validates all five actual producers and preserved domain 
                 try render(&response, &command, result);
                 const status: u16 = if (result == .conflict) 409 else if (result == .infrastructure_failure) 500 else 200;
                 const decoded = client.decodeMutationReply(.{ .status = status, .body = response.slice() }, session, target);
-                try std.testing.expectEqualStrings(response.slice(), decoded.raw.body);
+                try std.testing.expectEqual(status, decoded.status);
                 if (result == .infrastructure_failure) {
                     try std.testing.expectError(error.CanonicalStoreFailure, decoded.answer);
                     continue;
@@ -3525,7 +3525,7 @@ test "mutation decoder validates all five actual producers and preserved domain 
                 const answer = try decoded.answer;
                 try std.testing.expectEqualStrings(@tagName(result), @tagName(answer.result));
                 try std.testing.expectEqual(result != .conflict and replayed, answer.replayed);
-                try std.testing.expectError(error.RequestBindingMismatch, client.decodeMutationReply(decoded.raw, "other/session", target).answer);
+                try std.testing.expectError(error.RequestBindingMismatch, client.decodeMutationReply(.{ .status = status, .body = response.slice() }, "other/session", target).answer);
                 if (result == .accepted) switch (answer.result.accepted) {
                     .configure => |value| try std.testing.expectEqual(@as(u64, 13), value.revision),
                     .message => |value| try std.testing.expectEqual(@as(u64, 17), value.admission),
