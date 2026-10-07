@@ -3233,8 +3233,8 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64) !void 
             };
             var header_buffer: [320]u8 = undefined;
             const content_header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ count, reader.reference.length, command.start + count });
-            writeAll(fd, content_header) catch return;
-            writeAll(fd, buffer[0..count]) catch {};
+            writeAll(host.io, fd, content_header) catch return;
+            writeAll(host.io, fd, buffer[0..count]) catch {};
         },
     }
 }
@@ -3870,39 +3870,36 @@ fn deliverResponse(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8
 }
 
 fn deliverContent(io: std.Io, fd: std.posix.fd_t, reader: *store_module.ContentReader) !void {
-    _ = io;
     var header_buffer: [256]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{reader.reference.length});
-    try writeAll(fd, header);
+    try writeAll(io, fd, header);
     var buffer: [store_module.ContentReader.content_window_bytes]u8 = undefined;
     var offset: u64 = 0;
     while (offset < reader.reference.length) {
         const wanted: usize = @intCast(@min(reader.reference.length - offset, buffer.len));
         const count = try reader.read(offset, buffer[0..wanted]);
         if (count != wanted) return error.ShortCanonicalRead;
-        try writeAll(fd, buffer[0..count]);
+        try writeAll(io, fd, buffer[0..count]);
         offset += count;
     }
 }
 
 fn deliverReport(io: std.Io, fd: std.posix.fd_t, report: *store_module.SessionReport) !void {
-    _ = io;
     var header_buffer: [256]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{report.length});
-    try writeAll(fd, header);
+    try writeAll(io, fd, header);
     var buffer: [store_module.SessionReport.read_window_bytes]u8 = undefined;
     var offset: u64 = 0;
     while (offset < report.length) {
         const wanted: usize = @intCast(@min(report.length - offset, buffer.len));
         const count = try report.read(offset, buffer[0..wanted]);
         if (count != wanted) return error.ShortReportRead;
-        try writeAll(fd, buffer[0..count]);
+        try writeAll(io, fd, buffer[0..count]);
         offset += count;
     }
 }
 
 fn writeHttp(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8) !void {
-    _ = io;
     const reason = switch (status) {
         200 => "OK",
         400 => "Bad Request",
@@ -3915,24 +3912,214 @@ fn writeHttp(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8) !voi
     };
     var header_buffer: [256]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ status, reason, body.len });
-    try writeAll(fd, header);
-    try writeAll(fd, body);
+    try writeAll(io, fd, header);
+    try writeAll(io, fd, body);
 }
 
-fn writeAll(fd: std.posix.fd_t, bytes: []const u8) !void {
+fn writeAll(io: std.Io, fd: std.posix.fd_t, bytes: []const u8) !void {
+    // Reply delivery is terminal for this connection. Change mode here, not
+    // at accept: request ingress retains its existing blocking policy.
+    const flags = std.c.fcntl(fd, std.c.F.GETFL);
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    if (flags < 0 or (flags & nonblocking == 0 and std.c.fcntl(fd, std.c.F.SETFL, flags | nonblocking) < 0)) return error.WriteFailed;
+
+    // Each available window starts its own inactivity budget. Store/report
+    // production between windows is not socket inactivity; only positive
+    // writes renew this budget, never readiness, AGAIN or INTR.
+    var end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s;
     var offset: usize = 0;
     while (offset < bytes.len) {
-        var poll_fd = [_]std.posix.pollfd{.{
+        const remaining = end - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+        if (remaining <= 0) return error.TransferInactive;
+        const milliseconds: c_int = @intCast(@divTrunc(remaining + std.time.ns_per_ms - 1, std.time.ns_per_ms));
+        var poll_fd = [_]std.c.pollfd{.{
             .fd = fd,
             .events = std.posix.POLL.OUT,
             .revents = 0,
         }};
-        if (try std.posix.poll(&poll_fd, 60_000) == 0) return error.TransferInactive;
+        // Unlike posix.poll's EINTR retry, recompute the remaining budget.
+        const ready = std.c.poll(&poll_fd, poll_fd.len, milliseconds);
+        switch (std.posix.errno(ready)) {
+            .SUCCESS => if (ready == 0) continue,
+            .INTR => continue,
+            else => return error.PollFailed,
+        }
+        if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= end) return error.TransferInactive;
         const count = std.c.write(fd, bytes[offset..].ptr, bytes.len - offset);
-        if (count < 0) return error.WriteFailed;
+        if (count < 0) switch (std.posix.errno(count)) {
+            .AGAIN, .INTR => continue,
+            else => return error.WriteFailed,
+        };
         if (count == 0) return error.ConnectionClosed;
         offset += @intCast(count);
+        end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s;
     }
+}
+
+test "reply delivery establishes nonblocking only when sending" {
+    var sockets: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+    defer _ = std.c.close(sockets[0]);
+    defer _ = std.c.close(sockets[1]);
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(sockets[0], std.c.F.GETFL) & nonblocking);
+    try writeAll(std.testing.io, sockets[0], "a\xc3\xa9\x00z");
+    var actual: [5]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 5), std.c.read(sockets[1], &actual, actual.len));
+    try std.testing.expectEqualSlices(u8, "a\xc3\xa9\x00z", &actual);
+    try std.testing.expectEqual(nonblocking, std.c.fcntl(sockets[0], std.c.F.GETFL) & nonblocking);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(sockets[1], std.c.F.GETFL) & nonblocking);
+}
+
+test "reply delivery renews on short writes and excludes production between windows" {
+    const Peer = struct {
+        fd: std.posix.fd_t,
+        actual: [65536]u8 = undefined,
+        used: usize = 0,
+        writes: usize = 0,
+        at: i96 = 0,
+
+        fn now(context: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const before = self.used;
+            while (self.used < self.actual.len) {
+                const count = std.c.read(self.fd, self.actual[self.used..].ptr, self.actual.len - self.used);
+                if (count < 0) {
+                    std.debug.assert(std.posix.errno(count) == .AGAIN);
+                    break;
+                }
+                std.debug.assert(count > 0);
+                self.used += @intCast(count);
+            }
+            if (self.used != before) {
+                self.writes += 1;
+                self.at += 30 * std.time.ns_per_s;
+            }
+            return .fromNanoseconds(self.at);
+        }
+    };
+    var sockets: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+    defer _ = std.c.close(sockets[0]);
+    defer _ = std.c.close(sockets[1]);
+    var capacity: c_int = 1024;
+    try std.posix.setsockopt(sockets[0], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&capacity));
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(sockets[1], std.c.F.SETFL, nonblocking));
+    var peer: Peer = .{ .fd = sockets[1] };
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Peer.now;
+    const io: std.Io = .{ .userdata = &peer, .vtable = &vtable };
+    var expected: [65536]u8 = undefined;
+    for (&expected, 0..) |*byte, index| byte.* = @intCast((index * 17 + 29) % 251);
+    try writeAll(io, sockets[0], &expected);
+    try std.testing.expectEqualSlices(u8, &expected, peer.actual[0..peer.used]);
+    try std.testing.expect(peer.writes >= 3);
+    try std.testing.expect(peer.at > 60 * std.time.ns_per_s);
+    // A producer can take longer than the socket inactivity interval before
+    // offering its next window; the next write still gets a fresh budget.
+    peer.used = 0;
+    peer.at += 120 * std.time.ns_per_s;
+    try writeAll(io, sockets[0], "next\x00window");
+    try std.testing.expectEqualSlices(u8, "next\x00window", peer.actual[0..peer.used]);
+}
+
+test "reply delivery retries actual AGAIN without renewing inactivity" {
+    const Race = struct {
+        fd: std.posix.fd_t,
+        calls: usize = 0,
+        filled: usize = 0,
+
+        fn now(context: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            if (self.calls == 3) {
+                // Invalidate the successful poll: another writer fills this
+                // socket before the production write. It must return AGAIN.
+                const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+                std.debug.assert(std.c.fcntl(self.fd, std.c.F.GETFL) & nonblocking != 0);
+                const bytes = [_]u8{0x69} ** 1024;
+                while (true) {
+                    const count = std.c.write(self.fd, &bytes, bytes.len);
+                    if (count < 0) {
+                        std.debug.assert(std.posix.errno(count) == .AGAIN);
+                        break;
+                    }
+                    std.debug.assert(count > 0);
+                    self.filled += @intCast(count);
+                }
+            }
+            return .fromNanoseconds(if (self.calls > 3) @as(i96, @intCast(self.calls - 3)) * 60 * std.time.ns_per_s else 0);
+        }
+    };
+    var sockets: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+    defer _ = std.c.close(sockets[0]);
+    defer _ = std.c.close(sockets[1]);
+    var race: Race = .{ .fd = sockets[0] };
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Race.now;
+    const io: std.Io = .{ .userdata = &race, .vtable = &vtable };
+    try std.testing.expectError(error.TransferInactive, writeAll(io, sockets[0], "not delivered"));
+    try std.testing.expect(race.filled > 0);
+    try std.testing.expectEqual(@as(usize, 4), race.calls);
+}
+
+test "reply delivery interrupted poll consumes the existing inactivity budget" {
+    const Interrupt = struct {
+        var hits: std.atomic.Value(u32) = .init(0);
+        target: std.c.pthread_t,
+        fd: std.posix.fd_t,
+        stop: std.atomic.Value(bool) = .init(false),
+
+        fn signal(_: std.posix.SIG) callconv(.c) void {
+            _ = hits.fetchAdd(1, .monotonic);
+        }
+
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            return .fromNanoseconds(@as(i96, hits.load(.monotonic)) * 20 * std.time.ns_per_s);
+        }
+
+        fn run(self: *@This()) void {
+            const io = std.Io.Threaded.global_single_threaded.io();
+            const limit = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 3 * std.time.ns_per_s;
+            while (!self.stop.load(.acquire)) {
+                std.Io.sleep(io, .fromMilliseconds(5), .awake) catch unreachable;
+                if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= limit) {
+                    // Bound even a mutant that keeps retrying poll with the
+                    // original timeout. This is test cleanup, not Host policy.
+                    _ = std.c.shutdown(self.fd, std.c.SHUT.RDWR);
+                    return;
+                }
+                _ = std.c.pthread_kill(self.target, .USR1);
+            }
+        }
+    };
+    var sockets: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+    defer _ = std.c.close(sockets[0]);
+    defer _ = std.c.close(sockets[1]);
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(sockets[0], std.c.F.SETFL, nonblocking));
+    const bytes = [_]u8{0x53} ** 1024;
+    while (std.c.write(sockets[0], &bytes, bytes.len) >= 0) {}
+    try std.testing.expectEqual(std.posix.E.AGAIN, std.posix.errno(@as(isize, -1)));
+    var old_action: std.posix.Sigaction = undefined;
+    const action: std.posix.Sigaction = .{ .handler = .{ .handler = Interrupt.signal }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    std.posix.sigaction(.USR1, &action, &old_action);
+    defer std.posix.sigaction(.USR1, &old_action, null);
+    Interrupt.hits.store(0, .monotonic);
+    var interrupt: Interrupt = .{ .target = std.c.pthread_self(), .fd = sockets[0] };
+    const thread = try std.Thread.spawn(.{}, Interrupt.run, .{&interrupt});
+    defer {
+        interrupt.stop.store(true, .release);
+        thread.join();
+    }
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Interrupt.now;
+    const io: std.Io = .{ .userdata = null, .vtable = &vtable };
+    try std.testing.expectError(error.TransferInactive, writeAll(io, sockets[0], "not delivered"));
+    try std.testing.expect(Interrupt.hits.load(.monotonic) >= 3);
 }
 
 test "connection populations preserve two control places" {
