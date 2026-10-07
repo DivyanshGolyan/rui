@@ -759,6 +759,18 @@ fn JsonString(comptime limit: usize) type {
     };
 }
 
+// The containing field's default represents omission. A present field must
+// parse as T, not ?T: JSON null cannot stand in for an absent outcome/diagnostic.
+fn OmittableJson(comptime T: type) type {
+    return struct {
+        value: ?T = null,
+
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            return .{ .value = try std.json.innerParse(T, allocator, source, options) };
+        }
+    };
+}
+
 fn mutationId(value: JsonString(20), allow_zero: bool) !u64 {
     const bytes = value.slice();
     if (bytes.len == 0 or (bytes.len > 1 and bytes[0] == '0')) return error.InvalidResponse;
@@ -782,24 +794,24 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
     const Wire = struct {
         version: JsonString(8),
         type: JsonString(32),
-        code: ?JsonString(96) = null,
-        answer: ?struct {
+        code: OmittableJson(JsonString(96)) = .{},
+        answer: OmittableJson(struct {
             status: JsonString(16),
             replayed: bool,
-            session: ?JsonString(protocol.max_session_bytes) = null,
-            code: ?JsonString(96) = null,
-            revision: ?JsonString(20) = null,
-            created: ?bool = null,
-            admission: ?JsonString(20) = null,
-            action: ?JsonString(20) = null,
-            decision: ?JsonString(16) = null,
-            selection: ?struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) } = null,
-            target: ?struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) } = null,
-        } = null,
-        input: ?struct { type: JsonString(8), bytes: JsonString(20), sha256: JsonString(64) } = null,
-        queue: ?struct { status: JsonString(16), admission: JsonString(20) } = null,
-        execution: ?struct { status: JsonString(16), reason: ?JsonString(64) = null } = null,
-        completion: ?struct { status: JsonString(16) } = null,
+            session: OmittableJson(JsonString(protocol.max_session_bytes)) = .{},
+            code: OmittableJson(JsonString(96)) = .{},
+            revision: OmittableJson(JsonString(20)) = .{},
+            created: OmittableJson(bool) = .{},
+            admission: OmittableJson(JsonString(20)) = .{},
+            action: OmittableJson(JsonString(20)) = .{},
+            decision: OmittableJson(JsonString(16)) = .{},
+            selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
+            target: OmittableJson(struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
+        }) = .{},
+        input: OmittableJson(struct { type: JsonString(8), bytes: JsonString(20), sha256: JsonString(64) }) = .{},
+        queue: OmittableJson(struct { status: JsonString(16), admission: JsonString(20) }) = .{},
+        execution: OmittableJson(struct { status: JsonString(16), reason: OmittableJson(JsonString(64)) = .{} }) = .{},
+        completion: OmittableJson(struct { status: JsonString(16) }) = .{},
     };
     // Strings are copied into bounded values and immediately freed. Reserve
     // scanner nesting first, as in the canonical classifier; no payload arena.
@@ -810,8 +822,8 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
     defer scanner.deinit();
     scanner.ensureTotalStackCapacity(protocol.max_response_bytes) catch unreachable;
     const wire = std.json.parseFromTokenSourceLeaky(Wire, fixed.allocator(), &scanner, .{ .ignore_unknown_fields = true }) catch return error.InvalidResponse;
-    if (wire.code) |code| {
-        if (wire.answer != null or wire.input != null or wire.queue != null or wire.execution != null or wire.completion != null) return error.InvalidResponse;
+    if (wire.code.value) |code| {
+        if (wire.answer.value != null or wire.input.value != null or wire.queue.value != null or wire.execution.value != null or wire.completion.value != null) return error.InvalidResponse;
         const parsed = InvocationDiagnostic{ .type = wire.type.value, .code = code.value };
         try validateInvocationDiagnostic(reply.status, wire.version.slice(), parsed);
         diagnostic.* = parsed;
@@ -826,58 +838,58 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
         .model_interruption => "model_interruption_reply",
         .permission_decision => "permission_decision_reply",
     };
-    if (!wire.version.eql("1") or !wire.type.eql(expected_type) or wire.code != null) return error.InvalidResponse;
-    const answer = wire.answer orelse return error.InvalidResponse;
+    if (!wire.version.eql("1") or !wire.type.eql(expected_type) or wire.code.value != null) return error.InvalidResponse;
+    const answer = wire.answer.value orelse return error.InvalidResponse;
     if (target == .model_interruption) {
-        const echoed = answer.target orelse return error.InvalidResponse;
-        if (answer.session != null or !echoed.session.eql(session) or try mutationId(echoed.turn, true) != target.model_interruption.turn or
+        const echoed = answer.target.value orelse return error.InvalidResponse;
+        if (answer.session.value != null or !echoed.session.eql(session) or try mutationId(echoed.turn, true) != target.model_interruption.turn or
             try mutationId(echoed.operation, true) != target.model_interruption.operation) return error.RequestBindingMismatch;
     } else {
-        if (answer.target != null or !(answer.session orelse return error.InvalidResponse).eql(session)) return error.RequestBindingMismatch;
+        if (answer.target.value != null or !(answer.session.value orelse return error.InvalidResponse).eql(session)) return error.RequestBindingMismatch;
     }
     if (target == .permission_decision) {
-        if (try mutationId(answer.action orelse return error.InvalidResponse, true) != target.permission_decision.action or
-            !(answer.decision orelse return error.InvalidResponse).eql(@tagName(target.permission_decision.decision))) return error.RequestBindingMismatch;
-    } else if (answer.action != null or answer.decision != null) return error.InvalidResponse;
+        if (try mutationId(answer.action.value orelse return error.InvalidResponse, true) != target.permission_decision.action or
+            !(answer.decision.value orelse return error.InvalidResponse).eql(@tagName(target.permission_decision.decision))) return error.RequestBindingMismatch;
+    } else if (answer.action.value != null or answer.decision.value != null) return error.InvalidResponse;
     const accepted = answer.status.eql("accepted");
     const conflict = answer.status.eql("conflict");
     if ((!accepted and !conflict and !answer.status.eql("rejected")) or (reply.status == 409) != conflict) return error.InvalidResponse;
     if (accepted) {
-        if (answer.code != null) return error.InvalidResponse;
+        if (answer.code.value != null) return error.InvalidResponse;
     } else {
-        const code = answer.code orelse return error.InvalidResponse;
-        if (code.slice().len == 0 or answer.revision != null or answer.created != null or answer.admission != null or answer.selection != null) return error.InvalidResponse;
+        const code = answer.code.value orelse return error.InvalidResponse;
+        if (code.slice().len == 0 or answer.revision.value != null or answer.created.value != null or answer.admission.value != null or answer.selection.value != null) return error.InvalidResponse;
         if (conflict and (!code.eql("idempotency_key_conflict") or answer.replayed)) return error.InvalidResponse;
     }
     var value: @FieldType(@FieldType(MutationAnswer, "result"), "accepted") = undefined;
     switch (target) {
         .configure => {
-            const execution = wire.execution orelse return error.InvalidResponse;
-            if (!execution.status.eql("unavailable") or !(execution.reason orelse return error.InvalidResponse).eql("direct_reply_does_not_wait_for_model_processing")) return error.InvalidResponse;
-            if (accepted) value = .{ .configure = .{ .revision = try mutationId(answer.revision orelse return error.InvalidResponse, false), .created = answer.created orelse return error.InvalidResponse } };
+            const execution = wire.execution.value orelse return error.InvalidResponse;
+            if (!execution.status.eql("unavailable") or !(execution.reason.value orelse return error.InvalidResponse).eql("direct_reply_does_not_wait_for_model_processing")) return error.InvalidResponse;
+            if (accepted) value = .{ .configure = .{ .revision = try mutationId(answer.revision.value orelse return error.InvalidResponse, false), .created = answer.created.value orelse return error.InvalidResponse } };
         },
         .message => |expected| {
-            if (!(wire.execution orelse return error.InvalidResponse).status.eql("queued")) return error.InvalidResponse;
+            if (!(wire.execution.value orelse return error.InvalidResponse).status.eql("queued")) return error.InvalidResponse;
             if (conflict) {
-                if (wire.input != null or wire.queue != null) return error.InvalidResponse;
+                if (wire.input.value != null or wire.queue.value != null) return error.InvalidResponse;
             } else {
-                const input = wire.input orelse return error.InvalidResponse;
+                const input = wire.input.value orelse return error.InvalidResponse;
                 var digest: [32]u8 = undefined;
                 if (!input.type.eql("text") or input.sha256.slice().len != 64) return error.InvalidResponse;
                 _ = std.fmt.hexToBytes(&digest, input.sha256.slice()) catch return error.InvalidResponse;
                 if (try mutationId(input.bytes, true) != expected.bytes or !std.mem.eql(u8, &digest, &expected.digest)) return error.RequestBindingMismatch;
                 if (accepted) {
-                    const admission = try mutationId(answer.admission orelse return error.InvalidResponse, false);
-                    const queue = wire.queue orelse return error.InvalidResponse;
+                    const admission = try mutationId(answer.admission.value orelse return error.InvalidResponse, false);
+                    const queue = wire.queue.value orelse return error.InvalidResponse;
                     if (!queue.status.eql("queued") or try mutationId(queue.admission, false) != admission) return error.InvalidResponse;
                     value = .{ .message = .{ .admission = admission } };
-                } else if (wire.queue != null) return error.InvalidResponse;
+                } else if (wire.queue.value != null) return error.InvalidResponse;
             }
         },
         .session_stop => {
-            const completion = wire.completion orelse return error.InvalidResponse;
+            const completion = wire.completion.value orelse return error.InvalidResponse;
             if (accepted) {
-                const selection = answer.selection orelse return error.InvalidResponse;
+                const selection = answer.selection.value orelse return error.InvalidResponse;
                 value = .{ .session_stop = .{
                     .turn = if (selection.turn) |turn| try mutationId(turn, false) else null,
                     .admission_cutoff = try mutationId(selection.admission_cutoff, true),
@@ -892,12 +904,12 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
             value = .permission_decision;
         },
     }
-    if ((target != .configure and (answer.revision != null or answer.created != null)) or
-        (target != .message and (answer.admission != null or wire.input != null or wire.queue != null)) or
-        (target != .session_stop and (answer.selection != null or wire.completion != null))) return error.InvalidResponse;
+    if ((target != .configure and (answer.revision.value != null or answer.created.value != null)) or
+        (target != .message and (answer.admission.value != null or wire.input.value != null or wire.queue.value != null)) or
+        (target != .session_stop and (answer.selection.value != null or wire.completion.value != null))) return error.InvalidResponse;
     return .{
         .replayed = answer.replayed,
-        .result = if (accepted) .{ .accepted = value } else if (conflict) .conflict else .{ .rejected = answer.code.?.value },
+        .result = if (accepted) .{ .accepted = value } else if (conflict) .conflict else .{ .rejected = answer.code.value.?.value },
     };
 }
 
@@ -957,7 +969,7 @@ test "mutation decoder preserves invalid-target domain rejection not false fatal
 }
 
 test "mutation diagnostics own complete validated metadata without raw reply lifetime" {
-    const body = "{\"version\":\"1\",\"type\":\"invocation_error\",\"co\\u0064e\":\"busy\\u002fµ\",\"extra\":[{}]}";
+    const body = "{\"version\":\"1\",\"type\":\"invocation_error\",\"co\\u0064e\":\"busy\\u002fµ\",\"extra\":[null,{}]}";
     var bytes: [body.len]u8 = body.*;
     const reply = decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
     @memset(&bytes, 'x');
