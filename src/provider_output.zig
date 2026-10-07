@@ -928,7 +928,7 @@ fn testingObject(tmp: *std.testing.TmpDir, bytes: []const u8) !FileSource {
     return FileSource.init(std.testing.io, file, .{ .start = 0, .length = bytes.len });
 }
 
-const TestingValidation = struct { output: Validated, metadata_bytes: u64 };
+const TestingValidation = struct { output: Validated, metadata_bytes: u64, first_item: store.OutputMetadataRecord };
 
 fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64) !TestingValidation {
     const source = try tmp.dir.createFile(std.testing.io, "provider-sse", .{ .read = true });
@@ -950,9 +950,144 @@ fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limi
     errdefer metadata.deinit();
     const validated = try validate(std.testing.io, source, bytes.len, &metadata, .{});
     const metadata_bytes = used.load(.acquire);
+    var reader = try store.OutputMetadataReader.init(std.testing.io, metadata.file, validated.item_count);
+    const first_item = (try reader.nextItem()).?;
     metadata.deinit();
     source.close(std.testing.io);
-    return .{ .output = validated, .metadata_bytes = metadata_bytes };
+    return .{ .output = validated, .metadata_bytes = metadata_bytes, .first_item = first_item };
+}
+
+fn testingReasoningSse(reasoning: []const u8, terminal_reasoning: []const u8) ![]u8 {
+    const answer = "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}";
+    return std.fmt.allocPrint(
+        std.testing.allocator,
+        "data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s}}}\n\n" ++
+            "data: {{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{s}}}\n\n" ++
+            "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"response\",\"status\":\"completed\",\"output\":[{s},{s}]}}}}\n\n",
+        .{ reasoning, answer, terminal_reasoning, answer },
+    );
+}
+
+test "provider reasoning strings preserve raw items across evidence and file window boundaries" {
+    const values = .{
+        "a" ** 255,
+        "b" ** 256,
+        "c" ** 257,
+        "\\u0041" ** 8192 ++ "\\u00e9\\u4e2d\\uD83D\\uDE42",
+    };
+    inline for (values) |value| {
+        const reasoning = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{\"type\":\"reasoning\",\"id\":\"r1\",\"encrypted_content\":\"{s}\",\"summary\":[{{\"type\":\"summary_text\",\"text\":\"{s}\"}}]," ++
+                "\"content\":[{{\"type\":\"reasoning_text\",\"text\":\"{s}\"}}],\"created_by\":\"kept\",\"future\":{{\"raw\":null}}}}",
+            .{ value, value, value },
+        );
+        defer std.testing.allocator.free(reasoning);
+        const sse = try testingReasoningSse(reasoning, reasoning);
+        defer std.testing.allocator.free(sse);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const accepted = try validateTestingSse(&tmp, sse, 64 * 1024);
+        try std.testing.expectEqual(@as(u64, 2), accepted.output.item_count);
+        try std.testing.expectEqual(@as(u64, 0), accepted.output.call_count);
+        try std.testing.expectEqual(@as(u64, 2), accepted.output.answer_length);
+        try std.testing.expectEqualSlices(u8, &protocol.contentDigest("ok"), &accepted.output.answer_digest);
+        const item = accepted.first_item;
+        try std.testing.expectEqual(store.OutputItemKind.reasoning, item.kind);
+        try std.testing.expectEqual(@as(u64, 0), item.ordinal);
+        try std.testing.expectEqual(reasoning.len, item.length);
+        try std.testing.expectEqualStrings(reasoning, sse[@intCast(item.start)..][0..@intCast(item.length)]);
+        // Expected complete raw bytes include response-only and unknown fields,
+        // not a decoded or normalized spelling of the reasoning strings.
+        try std.testing.expectEqualSlices(u8, &protocol.contentDigest(reasoning), &item.content_digest);
+    }
+}
+
+test "provider reasoning validation rejects wrong types duplicates and malformed suffixes" {
+    const prefix = "a" ** 257;
+    const cases = .{
+        .{ "\"summary\":[]", error.ContinuationUnavailable },
+        .{ "\"encrypted_content\":\"\"", error.ContinuationUnavailable },
+        .{ "\"encrypted_content\":null", error.ExpectedJsonString },
+        .{ "\"encrypted_content\":17", error.ExpectedJsonString },
+        .{ "\"encrypted_content\":{}", error.ExpectedJsonString },
+        .{ "\"encrypted_content\":\"opaque\",\"text\":null", error.UnsupportedProviderOutput },
+        .{ "\"encrypted_content\":\"opaque\",\"status\":\"in_progress\"", error.UnsupportedProviderOutput },
+        .{ "\"encrypted_content\":\"opaque\",\"encr\\u0079pted_content\":\"second\"", error.DuplicateJsonField },
+        .{ "\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"summary_text\",\"text\":null}]", error.ExpectedJsonString },
+        .{ "\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":{}}]", error.ExpectedJsonString },
+        .{ "\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"reasoning_text\",\"text\":\"x\"}]", error.UnsupportedProviderOutput },
+        .{ "\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"summary_text\",\"text\":\"x\"}]", error.UnsupportedProviderOutput },
+        .{ "\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"summary_text\"}]", error.MissingProviderField },
+        .{ "\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"a\",\"te\\u0078t\":\"b\"}]", error.DuplicateJsonField },
+        .{ "\"encrypted_content\":\"" ++ prefix ++ "\\q\"", error.InvalidJsonEscape },
+        .{ "\"encrypted_content\":\"" ++ prefix ++ "\xff\"", error.InvalidJsonUtf8 },
+        .{ "\"encrypted_content\":\"" ++ prefix ++ "\xe2\"", error.InvalidJsonUtf8 },
+        .{ "\"encrypted_content\":\"" ++ prefix ++ "\\uD800x\"", error.InvalidJsonSurrogate },
+        .{ "\"encrypted_content\":\"" ++ prefix ++ "\\uDC00\"", error.InvalidJsonSurrogate },
+        .{ "\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"" ++ prefix ++ "\\uD800\\u0041\"}]", error.InvalidJsonSurrogate },
+        .{ "\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"" ++ prefix ++ "\\q\"}]", error.InvalidJsonEscape },
+        .{ "\"encrypted_content\":\"opaque\",\"future\":[1,]", error.InvalidJsonValue },
+    };
+    inline for (cases) |case| {
+        const reasoning = try std.fmt.allocPrint(std.testing.allocator, "{{\"type\":\"reasoning\",\"id\":\"r1\",{s}}}", .{case[0]});
+        defer std.testing.allocator.free(reasoning);
+        const sse = try testingReasoningSse(reasoning, reasoning);
+        defer std.testing.allocator.free(sse);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try std.testing.expectError(case[1], validateTestingSse(&tmp, sse, 64 * 1024));
+    }
+
+    // Nonempty means decoded bytes, not visible characters; summary/content
+    // text may be empty and escaped consequential keys keep their meaning.
+    const valid = "{\"type\":\"reasoning\",\"id\":\"r1\",\"encr\\u0079pted_content\":\"\\u0000\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"\"}]}";
+    const sse = try testingReasoningSse(valid, valid);
+    defer std.testing.allocator.free(sse);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectEqual(@as(u64, 2), (try validateTestingSse(&tmp, sse, 64 * 1024)).output.item_count);
+}
+
+test "provider added identity permits incomplete content but terminal agreement requires exact bytes" {
+    const done = "{\"type\":\"reasoning\",\"id\":\"r1\",\"status\":\"completed\",\"encrypted_content\":\"opaque\",\"future\":\"one\"}";
+    const added_items = .{
+        .{ "{\"type\":\"reasoning\",\"id\":\"r1\",\"status\":\"in_progress\",\"encrypted_content\":\"\"}", false },
+        .{ "{\"type\":\"reasoning\",\"id\":\"other\"}", true },
+        .{ "{\"type\":\"message\",\"id\":\"r1\"}", true },
+    };
+    const tail = try testingReasoningSse(done, done);
+    defer std.testing.allocator.free(tail);
+    inline for (added_items) |case| {
+        const sse = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{s}}}\n\n{s}",
+            .{ case[0], tail },
+        );
+        defer std.testing.allocator.free(sse);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        if (case[1]) {
+            try std.testing.expectError(error.ContradictoryProviderOutput, validateTestingSse(&tmp, sse, 64 * 1024));
+        } else {
+            const accepted = try validateTestingSse(&tmp, sse, 64 * 1024);
+            try std.testing.expectEqual(@as(u64, 2), accepted.output.item_count);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(done), &accepted.first_item.content_digest);
+        }
+    }
+
+    const changed_terminal = .{
+        "{\"type\":\"reasoning\",\"id\":\"r1\",\"status\":\"completed\",\"encrypted_content\":\"different\",\"future\":\"one\"}",
+        "{\"type\":\"reasoning\",\"id\":\"r1\",\"status\":\"completed\",\"encrypted_content\":\"o\\u0070aque\",\"future\":\"one\"}",
+        "{\"type\":\"reasoning\",\"id\":\"r1\",\"status\":\"completed\",\"encrypted_content\":\"opaque\",\"future\":\"two\"}",
+    };
+    inline for (changed_terminal) |terminal| {
+        const sse = try testingReasoningSse(done, terminal);
+        defer std.testing.allocator.free(sse);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try std.testing.expectError(error.ContradictoryProviderOutput, validateTestingSse(&tmp, sse, 64 * 1024));
+    }
 }
 
 test "provider preserves ordered trustworthy function call envelopes" {
