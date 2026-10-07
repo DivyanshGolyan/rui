@@ -101,11 +101,12 @@ def producer_cases(state):
 
 class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     """Forward the real request, drain its reply, replace only the selected route."""
-    def __init__(self, host, route):
+    def __init__(self, host, route, rewrite=None):
         self.path = pathlib.Path(host.rui_ready_fields["socket"])
         self.backend = self.path.with_suffix(".canonical-backend")
         self.path.rename(self.backend)
         self.route = route
+        self.rewrite = rewrite
         self.exchanges = []
         super().__init__(str(self.path), Exchange)
         os.chmod(self.path, 0o600)
@@ -149,10 +150,89 @@ class Exchange(socketserver.BaseRequestHandler):
         route = head.split(b" ")[1].decode()
         if route == self.server.route:
             self.server.exchanges.append((body, response))
-            response = (b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n"
-                b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
-                + str(len(ERROR_BYTES)).encode() + b"\r\n\r\n" + ERROR_BYTES)
+            if self.server.rewrite is not None:
+                response = self.server.rewrite(response)
+            else:
+                response = (b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n"
+                    b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
+                    + str(len(ERROR_BYTES)).encode() + b"\r\n\r\n" + ERROR_BYTES)
         self.request.sendall(response)
+
+
+def wrong_target(response):
+    head, body = response.split(b"\r\n\r\n", 1)
+    value = json.loads(body)
+    answer = value["answer"]
+    if "target" in answer:
+        answer["target"]["operation"] = str(int(answer["target"]["operation"]) + 1)
+    elif "action" in answer:
+        answer["decision"] = "allow_once" if answer["decision"] == "deny" else "deny"
+    elif "input" in value:
+        value["input"]["sha256"] = "00" * 32
+    else:
+        answer["session"] = "other/session"
+    encoded = json.dumps(value, separators=(",", ":")).encode()
+    return (head.split(b"\r\n", 1)[0] + b"\r\nContent-Type: application/json\r\n"
+        b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
+        + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
+
+
+def binding_cases(state):
+    home = state / "binding"
+    home.mkdir(mode=0o700)
+    store = home / "store"
+    host = fixture.start_host(store, None)
+    text = home / "input"
+    text.write_text("a\nµ")
+    commands = (
+        ("configure", "/v1/configure", ["configure", "--workspace", state, "--provider", "codex", "--model", "model-a"]),
+        ("message", "/v1/message", ["message", "--text", text]),
+        ("session-stop", "/v1/control/session-stop", ["stop-session"]),
+        ("model-interruption", "/v1/control/model-interruption", ["interrupt-model", "--turn", "3", "--operation", "11"]),
+        ("permission-decision", "/v1/control/permission-decision", ["deny-action", "--action", "7"]),
+        ("permission-allow", "/v1/control/permission-decision", ["allow-action", "--action", "7"]),
+    )
+    try:
+        for name, route, command in commands:
+            kind = "permission-decision" if name == "permission-allow" else name
+            for mode in (("raw", "human", "json") if kind in ("configure", "message", "permission-decision") else ("raw",)):
+                record = home / f"{name}-{mode}.json"
+                args = [*command, "--store", store, "--session", "original/session"]
+                args += ["--record", record, "--key", f"{name}-{mode}"] if mode == "raw" else (["--json"] if mode == "json" else [])
+                proxy = ReplyProxy(host, route, wrong_target)
+                try:
+                    result = invoke(home, *args)
+                    assert result.returncode != 0 and "RequestBindingMismatch" in result.stderr, result
+                    assert "admitted:" not in result.stdout and "replayed:" not in result.stdout, result
+                finally:
+                    proxy.close()
+                request, original_reply = proxy.exchanges[0]
+                saved = json.loads(request)
+                key = saved["key"]
+                if mode != "raw":
+                    record = home / ".config/rui/requests" / f"{key}.json"
+                assert record.read_bytes() == request
+                observed = json.loads(result.stdout.splitlines()[-1])
+                expected = json.loads(wrong_target(original_reply).split(b"\r\n\r\n", 1)[1])
+                assert observed == ({"event": "invocation_error", "request": key, "error": expected} if mode == "json" else expected), observed
+                for recovery in (["retry", "--store", store, "--record", record, "--kind", kind],
+                        *([["recover", key, "--json"]] if mode != "raw" else [])):
+                    proxy = ReplyProxy(host, route, wrong_target)
+                    try:
+                        failed = invoke(home, *recovery)
+                        assert failed.returncode != 0 and "RequestBindingMismatch" in failed.stderr, failed
+                    finally:
+                        proxy.close()
+                    assert record.read_bytes() == request
+                recovered = invoke(home, "retry", "--store", store, "--record", record, "--kind", kind)
+                assert recovered.returncode == 0 and json.loads(recovered.stdout)["answer"]["replayed"] is True, recovered
+                if mode != "raw":
+                    recovered = invoke(home, "recover", key, "--json")
+                    assert recovered.returncode == 0 and json.loads(recovered.stdout)["answer"]["replayed"] is True, recovered
+                assert record.read_bytes() == request
+    finally:
+        fixture.stop_host(host)
+    print("mutation bindings: five current callers/raw/human/JSON/retry/recover reject wrong Session, digest, target or decision; original-key replay preserved", flush=True)
 
 
 def committed_cases(state):
@@ -225,10 +305,10 @@ def committed_cases(state):
     print("canonical callers: committed-then-fatal retains original key/bytes, replay not resubmit; observation/read errors passed", flush=True)
 
 
-def interactive_cases(state):
+def interactive_cases(state, binding=False):
     import human_cli_integration as human
     import codex_integration as codex
-    home = state / "interactive"
+    home = state / ("binding-interactive" if binding else "interactive")
     home.mkdir()
     store = home / "store"
     endpoint = fixture.SuccessEndpoint([fixture.sse_tool_calls("canonical-tool", [("bash", "canonical-call",
@@ -246,6 +326,8 @@ def interactive_cases(state):
         for route, line in (("/v1/configure", "/configure --permission-mode ask"),
                 ("/v1/message", "original terminal bytes"), ("/v1/control/permission-decision", "/wait"),
                 ("/v1/configure", None), ("/v1/observe-command", "confirmed terminal bytes")):
+            if binding and route == "/v1/observe-command":
+                continue  # Streaming observation belongs to the subsequent unit.
             master, slave = pty.openpty()
             original_terminal = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
@@ -255,28 +337,41 @@ def interactive_cases(state):
             caller = None
             try:
                 if line is None:
-                    proxy = ReplyProxy(host, route)
+                    proxy = ReplyProxy(host, route, wrong_target if binding else None)
                 caller = subprocess.Popen([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                     pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 if line is not None:
                     human.read_terminal(master, "rui> ")
-                    proxy = ReplyProxy(host, route)
+                    proxy = ReplyProxy(host, route, wrong_target if binding else None)
                     os.write(master, (line + "\n").encode())
                     if route == "/v1/control/permission-decision":
                         human.read_terminal(master, "Allow once, deny, or later?")
                         human.action_ready(ready_read)
                         os.write(master, b"d\n")
-                output = "" if route == "/v1/observe-command" else human.read_terminal(master, "canonical_store_failure")
-                assert caller.wait(timeout=10) != 0, "fatal mutation resumed the Session prompt"
+                marker = "other/session" if route == "/v1/configure" else ('"sha256"' if route == "/v1/message" else '"decision"')
+                output = "" if route == "/v1/observe-command" else human.read_terminal(master, marker if binding else "canonical_store_failure")
+                if binding and line is not None:
+                    # Keep the existing recoverable invocation-error workflow;
+                    # only canonical Store failure requires fatal detachment.
+                    if "rui> " not in output:
+                        output += human.read_terminal(master, "rui> ")
+                    os.write(master, b"/exit\n")
+                    assert caller.wait(timeout=10) == 0, "explicit detachment failed"
+                else:
+                    assert caller.wait(timeout=10) != 0, "fatal mutation resumed the Session prompt"
                 errors = caller.stderr.read().decode()
-                assert "CanonicalStoreFailure" in errors, errors
+                assert ("RequestBindingMismatch" if binding else "CanonicalStoreFailure") in errors, errors
                 if route == "/v1/observe-command":
                     assert "Message accepted" in errors and "do not resubmit it" in errors and "admission may be uncertain" not in errors, errors
                 # Drain before checking that there is no later prompt/success.
                 while select.select([master], [], [], 0.05)[0]:
                     output += os.read(master, 65536).decode(errors="replace")
-                assert "rui> " not in output and "Detached." not in output and "admitted:" not in output, output
+                assert "admitted:" not in output and "Configured." not in output, output
+                if route != "/v1/observe-command":
+                    assert "You: " not in output, output
+                if not binding or line is None:
+                    assert "rui> " not in output and "Detached." not in output, output
                 assert termios.tcgetattr(slave) == original_terminal, "fatal invocation did not restore the terminal"
                 request, reply = proxy.exchanges[0]
                 decoded = json.loads(reply.split(b"\r\n\r\n", 1)[1])
@@ -302,15 +397,15 @@ def interactive_cases(state):
         endpoint.server_close()
         endpoint_thread.join(timeout=5)
         assert not endpoint_thread.is_alive(), "provider fixture did not join"
-    print("canonical PTY: Configure/Message/Permission/bare creation fail before outcome interpretation, restore terminal and retain original capture", flush=True)
+    print(f"{'binding' if binding else 'canonical'} PTY: Configure/Message/Permission/bare creation fail before outcome interpretation, restore terminal and retain original capture", flush=True)
 
 
 def main(selected="all"):
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-canonical-failure."))
     completed = False
     try:
-        assert selected in ("all", "producers", "committed", "interactive"), selected
-        for name, case in (("producers", producer_cases), ("committed", committed_cases), ("interactive", interactive_cases)):
+        assert selected in ("all", "producers", "committed", "interactive", "bindings", "binding-interactive"), selected
+        for name, case in (("producers", producer_cases), ("committed", committed_cases), ("interactive", interactive_cases), ("bindings", binding_cases), ("binding-interactive", lambda path: interactive_cases(path, binding=True))):
             if selected in ("all", name):
                 case(state)
         completed = True

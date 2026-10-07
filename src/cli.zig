@@ -575,8 +575,8 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
             return err;
         };
     };
-    if (!try acceptedReply(reply)) {
-        try writeAdmission(init.io, reply, null);
+    if (!reply.isAccepted()) {
+        try writeMutationReply(init.io, reply, null, true);
         return error.SessionConfigurationRejected;
     }
     try enterSession(init, &.{ "--store", saved.store.slice(), "--session", saved.session.slice() });
@@ -771,15 +771,14 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
         }
         break :blk try client.sendCaptured(io, &captured, drop_reply, &reply_buffer);
     };
-    const accepted = if (human and interactive) try acceptedReply(reply) else false;
-    if (human and (!interactive or !accepted)) try writeAdmission(io, reply, if (json) saved.key.slice() else null) else if (!human) try writeCommandReply(io, reply);
+    const accepted = human and interactive and reply.isAccepted();
+    if (!interactive or !accepted) try writeMutationReply(io, reply, if (human and json) saved.key.slice() else null, human);
     if (human and interactive and accepted) try std.Io.File.stdout().writeStreamingAll(io, "Rui: Configured.\n");
     if (human and !json and !interactive) {
         var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "configuration: {s} in {s}\n", .{ saved.session.slice(), saved.store.slice() }));
-        if (try acceptedReply(reply)) try std.Io.File.stdout().writeStreamingAll(io, "next: rui session (same Store and Session)\n");
+        if (reply.isAccepted()) try std.Io.File.stdout().writeStreamingAll(io, "next: rui session (same Store and Session)\n");
     }
-    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
 }
 
 fn message(init: std.process.Init, args: []const []const u8) !void {
@@ -820,20 +819,12 @@ fn message(init: std.process.Init, args: []const []const u8) !void {
         }
         break :blk try client.sendCaptured(io, &captured, drop_reply, &reply_buffer);
     };
-    if (human) try writeAdmission(io, reply, if (json) saved.key.slice() else null) else try writeCommandReply(io, reply);
+    try writeMutationReply(io, reply, if (human and json) saved.key.slice() else null, human);
     if (human and !json) {
         var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "message: {s} in {s}\n", .{ input.session, input.store }));
-        if (try acceptedReply(reply)) try std.Io.File.stdout().writeStreamingAll(io, "next: rui session (same Store and Session)\n");
+        if (reply.isAccepted()) try std.Io.File.stdout().writeStreamingAll(io, "next: rui session (same Store and Session)\n");
     }
-    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
-}
-
-fn acceptedReply(reply: client.CommandReply) !bool {
-    if (reply.status != 200) return false;
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
-    defer parsed.deinit();
-    return std.mem.eql(u8, try stringField(try objectField(parsed.value, "answer"), "status"), "accepted");
 }
 
 const Attention = struct {
@@ -970,9 +961,8 @@ fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []cons
         break :blk try client.sendCaptured(init.io, &captured, null, &reply_buffer);
     };
     const saved = try client.MessageAddress.init(identity.store.slice(), identity.session.slice(), identity.key.slice());
-    const accepted = try acceptedReply(reply);
-    if (!accepted) try writeAdmission(init.io, reply, null);
-    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
+    const accepted = reply.isAccepted();
+    if (!accepted) try writeMutationReply(init.io, reply, null, true);
     if (!accepted) return null;
     writeSafeField(init.io, "You: ", text) catch |err| {
         reportAcceptedPresentationFailure(saved.key.slice(), err);
@@ -1179,9 +1169,8 @@ fn interactiveAction(init: std.process.Init, store: []const u8, session_ref: []c
             defer captured.close(init.io);
             break :blk try client.sendCaptured(init.io, &captured, null, &reply_buffer);
         };
-        const accepted = try acceptedReply(reply);
-        if (!accepted) try writeAdmission(init.io, reply, null);
-        if (reply.status != 200) return;
+        const accepted = reply.isAccepted();
+        if (!accepted) try writeMutationReply(init.io, reply, null, true);
         if (!accepted) return;
         pending = try followMessage(init, &saved, .interactive, .follow_attention);
         if (pending == null) try showResult(init, &saved, .interactive);
@@ -1264,8 +1253,7 @@ fn stopSession(init: std.process.Init, args: []const []const u8) !void {
     input.store = try selectedStore(init, explicit_store, &selected_buffer);
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.stopSession(io, input, &reply_buffer);
-    try writeCommandReply(io, reply);
-    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
+    try writeMutationReply(io, reply, null, false);
 }
 
 fn interruptModel(init: std.process.Init, args: []const []const u8) !void {
@@ -1303,8 +1291,7 @@ fn interruptModel(init: std.process.Init, args: []const []const u8) !void {
     input.store = try selectedStore(init, explicit_store, &selected_buffer);
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.interruptModel(io, input, &reply_buffer);
-    try writeCommandReply(io, reply);
-    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
+    try writeMutationReply(io, reply, null, false);
 }
 
 fn decideAction(init: std.process.Init, args: []const []const u8, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
@@ -1349,8 +1336,7 @@ fn decideAction(init: std.process.Init, args: []const []const u8, decision: @Fie
         }
         break :blk try client.sendCaptured(io, &captured, drop_reply, &reply_buffer);
     };
-    if (human) try writeAdmission(io, reply, if (json) saved.key.slice() else null) else try writeCommandReply(io, reply);
-    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
+    try writeMutationReply(io, reply, if (human and json) saved.key.slice() else null, human);
 }
 
 fn retry(io: std.Io, args: []const []const u8) !void {
@@ -1365,8 +1351,7 @@ fn retry(io: std.Io, args: []const []const u8) !void {
     }
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.retry(io, store_path orelse return usage(), record orelse return usage(), kind orelse return usage(), &reply_buffer);
-    try writeCommandReply(io, reply);
-    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
+    try writeMutationReply(io, reply, null, false);
 }
 
 fn observe(init: std.process.Init, args: []const []const u8) !void {
@@ -1535,41 +1520,42 @@ fn testGate(io: std.Io, name: [*:0]const u8) !void {
     }
 }
 
-fn writeAdmission(io: std.Io, reply: client.CommandReply, json_handle: ?[]const u8) !void {
+fn writeMutationReply(io: std.Io, reply: client.MutationReply, json_handle: ?[]const u8, human: bool) !void {
     if (json_handle) |handle| {
-        const is_answer = reply.status == 200 or reply.status == 409;
+        const is_answer = if (reply.answer) |_| true else |_| false;
         var line: [128]u8 = undefined;
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"event\":\"{s}\",\"request\":\"{s}\",\"{s}\":", .{
             if (is_answer) "admission" else "invocation_error",
             handle,
             if (is_answer) "admission" else "error",
         }));
-        try std.Io.File.stdout().writeStreamingAll(io, reply.body);
+        try std.Io.File.stdout().writeStreamingAll(io, reply.raw.body);
         try std.Io.File.stdout().writeStreamingAll(io, "}\n");
-        try client.checkCanonicalFailure(reply);
-        if (!is_answer) return error.HostInvocationFailed;
+        _ = try reply.answer;
         return;
     }
-    // Invocation errors contain no admission answer. Preserve their wire data
-    // without manufacturing rejection, replay status or certainty of absence.
-    if (reply.status != 200 and reply.status != 409) {
-        try writeCommandReply(io, reply);
-        return error.HostInvocationFailed;
+    if (!human) {
+        try std.Io.File.stdout().writeStreamingAll(io, reply.raw.body);
+        try std.Io.File.stdout().writeStreamingAll(io, "\n");
+        _ = try reply.answer;
+        return;
     }
-    try client.checkCanonicalFailure(reply);
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, reply.body, .{});
-    defer parsed.deinit();
-    const answer = try objectField(parsed.value, "answer");
-    const status = try stringField(answer, "status");
+    const answer = reply.answer catch |err| {
+        try std.Io.File.stdout().writeStreamingAll(io, reply.raw.body);
+        try std.Io.File.stdout().writeStreamingAll(io, "\n");
+        return err;
+    };
     var line: [128]u8 = undefined;
-    try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "admitted: {s}\n", .{status}));
-    const replayed = try objectField(answer, "replayed");
-    if (replayed != .bool) return error.InvalidObservation;
-    try std.Io.File.stdout().writeStreamingAll(io, if (replayed.bool) "replayed: true\n" else "replayed: false\n");
-    if (answer.object.get("code")) |code| {
-        if (code != .string) return error.InvalidObservation;
+    try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "admitted: {s}\n", .{@tagName(answer.result)}));
+    try std.Io.File.stdout().writeStreamingAll(io, if (answer.replayed) "replayed: true\n" else "replayed: false\n");
+    const code: ?[]const u8 = switch (answer.result) {
+        .accepted => null,
+        .rejected => |*code| code.slice(),
+        .conflict => "idempotency_key_conflict",
+    };
+    if (code) |value| {
         try std.Io.File.stdout().writeStreamingAll(io, "code: ");
-        try std.Io.File.stdout().writeStreamingAll(io, code.string);
+        try std.Io.File.stdout().writeStreamingAll(io, value);
         try std.Io.File.stdout().writeStreamingAll(io, "\n");
     }
 }
@@ -1589,9 +1575,7 @@ const SavedRequest = client.CapturedIdentity;
 
 fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var captured = try client.openCaptured(init.io, try requestDirectory(init, &directory_buffer), handle);
-    defer captured.close(init.io);
-    return captured.identity().*;
+    return client.inspectCaptured(init.io, try requestDirectory(init, &directory_buffer), handle);
 }
 
 const SessionPage = struct {
@@ -1791,8 +1775,7 @@ fn recover(init: std.process.Init, args: []const []const u8) !void {
         defer captured.close(init.io);
         break :blk try client.sendCaptured(init.io, &captured, null, &buffer);
     };
-    if (json) try writeCommandReply(init.io, reply) else try writeAdmission(init.io, reply, null);
-    if (reply.status != 200 and reply.status != 409) return error.HostInvocationFailed;
+    try writeMutationReply(init.io, reply, null, !json);
 }
 
 fn result(init: std.process.Init, args: []const []const u8) !void {
