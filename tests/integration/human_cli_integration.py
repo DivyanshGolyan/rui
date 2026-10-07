@@ -62,6 +62,21 @@ def action_ready(descriptor):
     assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
 
 
+def provider_prompt(master, ready, command=None):
+    # Initial prompts use a fresh pipe. Later prompts must not consume an
+    # unread notification from an earlier choice as readiness for this one.
+    if command is not None:
+        assert not select.select([ready], [], [], 0)[0], "stale provider readiness"
+        os.write(master, (command + "\n").encode())
+    deadline = time.monotonic() + 15
+    output = read_terminal(master, "Provider: [c]", timeout=deadline - time.monotonic())
+    remaining = deadline - time.monotonic()
+    assert remaining > 0 and select.select([ready], [], [], remaining)[0], "provider input flush did not finish"
+    assert os.read(ready, 1) == b"x", "provider caller exited before readiness"
+    assert not select.select([ready], [], [], 0)[0], "extra provider readiness"
+    return output
+
+
 def terminal_bulk(master, command, marker="rui> "):
     fixture.wait_for(lambda: not termios.tcgetattr(master)[3] & termios.ICANON,
         "noncanonical terminal input")
@@ -479,12 +494,21 @@ def main():
         assert not (no_tty_home / ".local/share/rui/store").exists(), "non-TTY invocation changed the Store"
         before_missing = set(run(preferences_home, "requests").splitlines())
         master, slave = pty.openpty()
-        deferred = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
-            env={**os.environ, "HOME": str(preferences_home)},
-            stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
+        ready_read, ready_write = os.pipe()
         try:
-            offered = read_terminal(master, "Provider: [c]")
+            deferred = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+                env={**os.environ, "HOME": str(preferences_home),
+                    "RUI_TEST_ACTION_READY_FD": str(ready_write)},
+                pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+        except BaseException:
+            os.close(master)
+            os.close(ready_read)
+            raise
+        finally:
+            os.close(slave)
+            os.close(ready_write)
+        try:
+            offered = provider_prompt(master, ready_read)
             assert "No locally ready provider" in offered and "Codex login" in offered, offered
             assert "No new Session created" in terminal_step(master, "d", "No new Session created")
             assert deferred.wait(timeout=5) == 0
@@ -493,6 +517,7 @@ def main():
             if deferred.poll() is None:
                 deferred.kill()
                 deferred.wait(timeout=5)
+            os.close(ready_read)
             os.close(master)
         explicit_home = state / "explicit-home"
         explicit_config = explicit_home / ".config/rui"
@@ -501,13 +526,22 @@ def main():
         malformed.write_text("version=9\n")
         malformed.chmod(0o600)
         master, slave = pty.openpty()
-        explicit = subprocess.Popen([str(fixture.RUI), "--store", str(store),
-            "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
-            env={**os.environ, "HOME": str(explicit_home)},
-            stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
+        ready_read, ready_write = os.pipe()
         try:
-            assert "No locally ready provider" in read_terminal(master, "Provider: [c]")
+            explicit = subprocess.Popen([str(fixture.RUI), "--store", str(store),
+                "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
+                env={**os.environ, "HOME": str(explicit_home),
+                    "RUI_TEST_ACTION_READY_FD": str(ready_write)},
+                pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+        except BaseException:
+            os.close(master)
+            os.close(ready_read)
+            raise
+        finally:
+            os.close(slave)
+            os.close(ready_write)
+        try:
+            assert "No locally ready provider" in provider_prompt(master, ready_read)
             # Another client installs a fixture credential while this caller
             # waits for a choice. Its explicit selectors must still bypass the
             # malformed prospective defaults when it rechecks readiness.
@@ -534,18 +568,28 @@ def main():
             if explicit.poll() is None:
                 explicit.kill()
                 explicit.wait(timeout=5)
+            os.close(ready_read)
             os.close(master)
         # The credential arrives while the prompt is open, then expires
         # before the choice. Readiness must use the post-choice clock.
         (explicit_config / "codex.json").unlink()
         master, slave = pty.openpty()
-        expiring = subprocess.Popen([str(fixture.RUI), "--store", str(store),
-            "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
-            env={**os.environ, "HOME": str(explicit_home)},
-            stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
+        ready_read, ready_write = os.pipe()
         try:
-            assert "No locally ready provider" in read_terminal(master, "Provider: [c]")
+            expiring = subprocess.Popen([str(fixture.RUI), "--store", str(store),
+                "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
+                env={**os.environ, "HOME": str(explicit_home),
+                    "RUI_TEST_ACTION_READY_FD": str(ready_write)},
+                pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+        except BaseException:
+            os.close(master)
+            os.close(ready_read)
+            raise
+        finally:
+            os.close(slave)
+            os.close(ready_write)
+        try:
+            assert "No locally ready provider" in provider_prompt(master, ready_read)
             expiry = int(time.time()) + 2
             credential_file = explicit_config / "codex.json"
             codex_fixture.credentials(credential_file)
@@ -559,6 +603,7 @@ def main():
             if expiring.poll() is None:
                 expiring.kill()
                 expiring.wait(timeout=5)
+            os.close(ready_read)
             os.close(master)
         longer_store = state / "another-longer-store-selector"
         other_host = fixture.start_host(longer_store, url)
@@ -569,12 +614,21 @@ def main():
                 assert "Saved defaults" in run(changing_home, "setup", "--store", before,
                     "--provider", "codex", "--model", "gpt-6-luna")
                 master, slave = pty.openpty()
-                changing = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
-                    env={**os.environ, "HOME": str(changing_home)},
-                    stdin=slave, stdout=slave, stderr=slave)
-                os.close(slave)
+                ready_read, ready_write = os.pipe()
                 try:
-                    assert "No locally ready provider" in read_terminal(master, "Provider: [c]")
+                    changing = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+                        env={**os.environ, "HOME": str(changing_home),
+                            "RUI_TEST_ACTION_READY_FD": str(ready_write)},
+                        pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+                except BaseException:
+                    os.close(master)
+                    os.close(ready_read)
+                    raise
+                finally:
+                    os.close(slave)
+                    os.close(ready_write)
+                try:
+                    assert "No locally ready provider" in provider_prompt(master, ready_read)
                     assert "Saved defaults" in run(changing_home, "setup", "--store", after)
                     codex_fixture.credentials(changing_home / ".config/rui/codex.json")
                     welcome = terminal_step(master, "d")
@@ -590,6 +644,7 @@ def main():
                     if changing.poll() is None:
                         changing.kill()
                         changing.wait(timeout=5)
+                    os.close(ready_read)
                     os.close(master)
         finally:
             fixture.stop_host(other_host)
@@ -789,10 +844,19 @@ def main():
         assert json.loads(run(home, "wait-session", "--store", store, "--session", session,
             "--json")) == {"return": "idle"}
         master, slave = pty.openpty()
-        entered = subprocess.Popen([str(fixture.RUI), "session", "--session", session],
-            env={**os.environ, "HOME": str(preferences_home)},
-            stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
+        ready_read, ready_write = os.pipe()
+        try:
+            entered = subprocess.Popen([str(fixture.RUI), "session", "--session", session],
+                env={**os.environ, "HOME": str(preferences_home),
+                    "RUI_TEST_ACTION_READY_FD": str(ready_write)},
+                pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+        except BaseException:
+            os.close(master)
+            os.close(ready_read)
+            raise
+        finally:
+            os.close(slave)
+            os.close(ready_write)
         try:
             greeting = read_terminal(master, "rui> ")
             assert f"Session: {session}" in greeting and f"Workspace (Bash cwd): {workspace.resolve()}" in greeting, greeting
@@ -809,16 +873,16 @@ def main():
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             assert "No work to wait for." in terminal_step(master, "/wait")
             assert "gpt-6-luna" in terminal_step(master, "/setup")
-            login_prompt = terminal_step(master, "/login", "Provider: [c]")
+            login_prompt = provider_prompt(master, ready_read, "/login")
             assert "Supported integration: Codex" in login_prompt and "defer leaves this Session" in login_prompt
             assert "Login deferred" in terminal_step(master, "d")
             assert not credential.exists(), "deferred login created credentials"
-            invalid_prompt = terminal_step(master, "/login", "Provider: [c]")
+            invalid_prompt = provider_prompt(master, ready_read, "/login")
             assert "Codex" in invalid_prompt
             assert "No login or preference change" in terminal_step(master, "x")
-            terminal_step(master, "/login", "Provider: [c]")
+            provider_prompt(master, ready_read, "/login")
             assert "No login or preference change" in terminal_step(master, "12345678901234567")
-            terminal_step(master, "/login", "Provider: [c]")
+            provider_prompt(master, ready_read, "/login")
             os.write(master, b"\xff\n")
             assert "No login or preference change" in read_terminal(master, "rui> ")
             assert "Permission: ask" in terminal_step(master, "/status")
@@ -854,6 +918,7 @@ def main():
             if entered.poll() is None:
                 entered.kill()
                 entered.wait(timeout=5)
+            os.close(ready_read)
             os.close(master)
         assert run(home, "follow", queued) == "return: outcome\nadmitted: accepted\nstatus: completed\n"
         assert run(home, "recover", stale["request"]) == (
