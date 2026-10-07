@@ -392,6 +392,406 @@ pub const ReportReply = union(enum) {
     command: CommandReply,
 };
 
+pub const CurrentReply = union(enum) {
+    unconfigured,
+    current: Current,
+    failure: ReadFailure,
+
+    /// The caller retains immutable, offset-zero scratch through any traversal.
+    pub fn decode(io: std.Io, file: std.Io.File, session: []const u8, reply: ReportReply) !CurrentReply {
+        return switch (reply) {
+            .command => |command| .{ .failure = try decodeReadFailure(command, false) },
+            .report => |report| Current.read(io, file, report.bytes, session, NoAttention{}) catch return error.InvalidObservation,
+        };
+    }
+
+    pub fn writeJson(self: *const CurrentReply, io: std.Io, file: std.Io.File, writer: *std.Io.Writer) !void {
+        return switch (self.*) {
+            .unconfigured => writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}"),
+            .current => |*current| current.writeJson(io, file, writer),
+            .failure => |failure| failure.err(),
+        };
+    }
+};
+
+/// Fixed owned facts; the variable attention population stays in borrowed scratch.
+pub const Current = struct {
+    pub const Id = ReportNumber(false);
+    pub const Count = ReportNumber(true);
+    pub const Reference = struct {
+        bytes: Count,
+        sha256: JsonString(64),
+        type: OmittableJson(JsonEnum(enum { text })) = .{},
+
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Reference {
+            const Wire = struct { bytes: Count, sha256: JsonString(64), type: @FieldType(Reference, "type") = .{} };
+            const wire = try std.json.innerParse(Wire, allocator, source, options);
+            var digest: [32]u8 = undefined;
+            if (wire.sha256.slice().len != 64) return error.InvalidObservation;
+            _ = std.fmt.hexToBytes(&digest, wire.sha256.slice()) catch return error.InvalidObservation;
+            return .{ .bytes = wire.bytes, .sha256 = wire.sha256, .type = wire.type };
+        }
+
+        pub fn jsonStringify(self: Reference, jw: anytype) !void {
+            try writeObject(self, jw);
+        }
+    };
+    pub const Settings = struct {
+        reference: JsonString(protocol.max_session_bytes),
+        workspace: JsonString(protocol.max_workspace_bytes),
+        provider: JsonEnum(protocol.Provider),
+        model: JsonString(protocol.max_model_bytes),
+        revision: Id,
+        tools: ReportTools,
+        permission_mode: JsonEnum(enum { ask, bypass }),
+        instructions: Reference,
+        output_schema: ?Reference,
+        // Omission is not evidence of provider default on older producers.
+        reasoning_effort: OmittableJson(?JsonEnum(enum { none, low, medium, high, xhigh, max })) = .{},
+
+        pub fn jsonStringify(self: Settings, jw: anytype) !void {
+            try writeObject(self, jw);
+        }
+    };
+    pub const Work = struct {
+        status: JsonEnum(enum { idle, runnable, in_flight, waiting_for_permission, completed, cancelled, failed }),
+        turn: OmittableJson(Id) = .{},
+        operation: OmittableJson(Id) = .{},
+        latest_outcome: ?struct { code: JsonString(96), content: ?Reference },
+
+        pub fn jsonStringify(self: Work, jw: anytype) !void {
+            try writeObject(self, jw);
+        }
+    };
+    pub const Recent = struct { turn: Id, message: JsonString(protocol.max_key_bytes), outcome: JsonString(96) };
+    pub const Execution = struct {
+        status: JsonEnum(enum { partial, unavailable }),
+        reason: OmittableJson(JsonEnum(enum { session_not_found })) = .{},
+        dispatch_fenced: OmittableJson(bool) = .{},
+        custody_occupied: OmittableJson(Count) = .{},
+        scratch_used_bytes: OmittableJson(Count) = .{},
+        unavailable: OmittableJson(struct {
+            pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+                if (try source.next() != .array_begin) return error.InvalidObservation;
+                _ = try std.json.innerParse(JsonEnum(enum { structured_output }), allocator, source, options);
+                if (try source.next() != .array_end) return error.InvalidObservation;
+                return .{};
+            }
+
+            pub fn jsonStringify(_: @This(), jw: anytype) !void {
+                try jw.write([_][]const u8{"structured_output"});
+            }
+        }) = .{},
+
+        pub fn jsonStringify(self: Execution, jw: anytype) !void {
+            try writeObject(self, jw);
+        }
+    };
+    pub const Attention = union(enum) {
+        unresolved: struct {
+            action: Id,
+            parent_operation: Id,
+            call_ordinal: Count,
+            tool: JsonEnum(enum { bash }),
+            permission_revision: Id,
+            authorization: JsonEnum(enum { pending, bypass, allow_once }),
+            call_id: Reference,
+            arguments: Reference,
+        },
+        resolved: struct {
+            action: Id,
+            parent_operation: Id,
+            call_ordinal: Count,
+            code: JsonString(32),
+            acceptance_position: Id,
+            result: Reference,
+        },
+        rejected: struct {
+            parent_operation: Id,
+            call_ordinal: Count,
+            code: JsonString(32),
+            acceptance_position: Id,
+            result: Reference,
+            item_id: Reference,
+            name: Reference,
+            call_id: Reference,
+            arguments: Reference,
+        },
+        actionable: struct { action: Id, permission_revision: Id },
+    };
+
+    settings: Settings,
+    pending_messages: u64,
+    work: Work,
+    selected_message: ?JsonString(protocol.max_key_bytes),
+    recent: [10]Recent,
+    recent_count: usize,
+    action_total: u64,
+    rejected_total: u64,
+    actionable_count: u64,
+    first_action: ?u64,
+    indeterminate_count: u64,
+    first_indeterminate: ?u64,
+    execution: Execution,
+    bytes: u64,
+
+    fn writeObject(value: anytype, jw: anytype) !void {
+        try jw.beginObject();
+        inline for (@typeInfo(@TypeOf(value)).@"struct".fields) |field| {
+            const item = @field(value, field.name);
+            const present = if (comptime std.meta.hasFn(@TypeOf(item), "isPresent")) item.isPresent() else true;
+            if (present) {
+                try jw.objectField(field.name);
+                try jw.write(item);
+            }
+        }
+        try jw.endObject();
+    }
+
+    /// Effectful traversal requires the same immutable offset-zero capture
+    /// successfully decoded into these facts. Row slices expire at visit return.
+    /// The caller owns the file through all synchronous callbacks and return.
+    pub fn traverse(self: *const Current, io: std.Io, file: std.Io.File, sink: anytype) !void {
+        _ = try read(io, file, self.bytes, self.settings.reference.slice(), sink);
+    }
+
+    pub fn writeJson(self: *const Current, io: std.Io, file: std.Io.File, writer: *std.Io.Writer) !void {
+        try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":");
+        try std.json.Stringify.value(self.settings, .{}, writer);
+        try writer.print(",\"pending_messages\":\"{d}\",\"work\":", .{self.pending_messages});
+        try std.json.Stringify.value(self.work, .{}, writer);
+        try writer.writeAll(",\"selected_message\":");
+        try std.json.Stringify.value(self.selected_message, .{}, writer);
+        try writer.writeAll(",\"recent_messages\":");
+        try std.json.Stringify.value(self.recent[0..self.recent_count], .{}, writer);
+        try writer.print(",\"actions\":{{\"count\":\"{d}\",\"unresolved\":", .{self.action_total});
+        try self.writeArray(io, file, .unresolved, writer);
+        try writer.writeAll(",\"resolved\":");
+        try self.writeArray(io, file, .resolved, writer);
+        try writer.print("}},\"rejected_calls\":{{\"count\":\"{d}\",\"items\":", .{self.rejected_total});
+        try self.writeArray(io, file, .rejected, writer);
+        try writer.writeAll("},\"actionable_permissions\":");
+        try self.writeArray(io, file, .actionable, writer);
+        try writer.writeAll(",\"execution\":");
+        try std.json.Stringify.value(self.execution, .{}, writer);
+        try writer.writeAll("}");
+    }
+
+    fn writeArray(self: *const Current, io: std.Io, file: std.Io.File, tag: std.meta.Tag(Attention), writer: *std.Io.Writer) !void {
+        const Sink = struct {
+            writer: *std.Io.Writer,
+            tag: std.meta.Tag(Attention),
+            first: bool = true,
+            fn visit(sink: *@This(), item: Attention) !void {
+                switch (item) {
+                    inline else => |row, kind| if (kind == sink.tag) {
+                        if (!sink.first) try sink.writer.writeAll(",");
+                        try std.json.Stringify.value(row, .{}, sink.writer);
+                        sink.first = false;
+                    },
+                }
+            }
+        };
+        var sink: Sink = .{ .writer = writer, .tag = tag };
+        try writer.writeAll("[");
+        try self.traverse(io, file, &sink);
+        try writer.writeAll("]");
+    }
+
+    fn read(io: std.Io, file: std.Io.File, bytes: u64, session: []const u8, sink: anytype) !CurrentReply {
+        const RecentRows = struct {
+            rows: [10]Recent = undefined,
+            count: usize = 0,
+            pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+                if (try source.next() != .array_begin) return error.InvalidObservation;
+                var result: @This() = .{};
+                while (try source.peekNextTokenType() != .array_end) {
+                    if (result.count == result.rows.len) return error.InvalidObservation;
+                    const row = try std.json.innerParse(Recent, allocator, source, options);
+                    if (row.outcome.slice().len == 0) return error.InvalidObservation;
+                    for (result.rows[0..result.count]) |prior| if (prior.message.eql(row.message.slice())) return error.InvalidObservation;
+                    result.rows[result.count] = row;
+                    result.count += 1;
+                }
+                _ = try source.next();
+                return result;
+            }
+        };
+        const Wire = struct {
+            version: JsonString(8),
+            type: JsonEnum(enum { session_report }),
+            profile: JsonEnum(enum { current }),
+            session: ?Settings,
+            pending_messages: Count,
+            work: OmittableJson(Work) = .{},
+            selected_message: OmittableJson(?JsonString(protocol.max_key_bytes)) = .{},
+            recent_messages: OmittableJson(RecentRows) = .{},
+            actions: OmittableJson(struct { count: Count, unresolved: AttentionRows(.unresolved), resolved: AttentionRows(.resolved) }) = .{},
+            rejected_calls: OmittableJson(struct { count: Count, items: AttentionRows(.rejected) }) = .{},
+            actionable_permissions: OmittableJson(AttentionRows(.actionable)) = .{},
+            execution: Execution,
+        };
+        if (bytes == 0) return error.InvalidObservation;
+        var input: [protocol.content_window_bytes]u8 = undefined;
+        var file_reader = file.reader(io, &.{});
+        var body = file_reader.interface.limited(.limited64(bytes), &input);
+        // Nesting storage survives rows; leaf tokens are separately freed after
+        // copying into owned fields, never underneath a live scanner stack.
+        var scanner_storage: [protocol.content_window_bytes]u8 = undefined;
+        var scanner_allocator = std.heap.FixedBufferAllocator.init(&scanner_storage);
+        var token_storage: [2 * protocol.max_workspace_bytes]u8 = undefined;
+        var token_allocator = std.heap.FixedBufferAllocator.init(&token_storage);
+        var reader = std.json.Reader.init(scanner_allocator.allocator(), &body.interface);
+        defer reader.deinit();
+        var source: CurrentSource(@TypeOf(sink)) = .{ .reader = &reader, .sink = sink };
+        const wire = try std.json.parseFromTokenSourceLeaky(Wire, token_allocator.allocator(), &source, .{ .ignore_unknown_fields = true });
+        if (body.remaining != .nothing or !wire.version.eql("1")) return error.InvalidObservation;
+        const execution = wire.execution;
+        const settings = wire.session orelse {
+            if (wire.pending_messages.value != 0 or execution.status.value != .unavailable or execution.reason.value == null or
+                execution.dispatch_fenced.value != null or execution.custody_occupied.value != null or execution.scratch_used_bytes.value != null or execution.unavailable.value != null or
+                wire.work.value != null or wire.selected_message.value != null or wire.recent_messages.value != null or wire.actions.value != null or
+                wire.rejected_calls.value != null or wire.actionable_permissions.value != null) return error.InvalidObservation;
+            return .unconfigured;
+        };
+        if (!settings.reference.eql(session) or !std.fs.path.isAbsolute(settings.workspace.slice()) or settings.model.slice().len == 0 or
+            settings.instructions.type.value != null or (if (settings.output_schema) |schema| schema.type.value != null else false) or
+            execution.status.value != .partial or execution.reason.value != null or execution.dispatch_fenced.value == null or
+            execution.custody_occupied.value == null or execution.scratch_used_bytes.value == null or execution.unavailable.value == null) return error.InvalidObservation;
+        const work = wire.work.value orelse return error.InvalidObservation;
+        if ((work.turn.value == null) != (work.operation.value == null) or (work.latest_outcome != null and work.turn.value == null)) return error.InvalidObservation;
+        if (work.latest_outcome) |outcome| {
+            if (outcome.code.slice().len == 0 or (if (outcome.content) |content| content.type.value != null else false)) return error.InvalidObservation;
+        }
+        const recent = wire.recent_messages.value orelse return error.InvalidObservation;
+        const actions = wire.actions.value orelse return error.InvalidObservation;
+        const rejected = wire.rejected_calls.value orelse return error.InvalidObservation;
+        const actionable = wire.actionable_permissions.value orelse return error.InvalidObservation;
+        if (rejected.count.value != rejected.items.count or actions.count.value < actions.unresolved.count + actions.resolved.count or actionable.count > actions.unresolved.count) return error.InvalidObservation;
+        return .{ .current = .{
+            .settings = settings,
+            .pending_messages = wire.pending_messages.value,
+            .work = work,
+            .selected_message = wire.selected_message.value orelse return error.InvalidObservation,
+            .recent = recent.rows,
+            .recent_count = recent.count,
+            .action_total = actions.count.value,
+            .rejected_total = rejected.count.value,
+            .actionable_count = actionable.count,
+            .first_action = actionable.first,
+            .indeterminate_count = actions.resolved.indeterminate,
+            .first_indeterminate = actions.resolved.first_indeterminate,
+            .execution = execution,
+            .bytes = bytes,
+        } };
+    }
+};
+
+const NoAttention = struct {
+    fn visit(_: @This(), _: Current.Attention) !void {}
+};
+
+fn ReportNumber(comptime allow_zero: bool) type {
+    return struct {
+        value: u64,
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            const text = try JsonString(20).jsonParse(allocator, source, options);
+            const value = try mutationId(text, allow_zero);
+            if (value > std.math.maxInt(i64)) return error.InvalidObservation;
+            return .{ .value = value };
+        }
+
+        pub fn jsonStringify(self: @This(), jw: anytype) !void {
+            var bytes: [20]u8 = undefined;
+            try jw.write(std.fmt.bufPrint(&bytes, "{d}", .{self.value}) catch unreachable);
+        }
+    };
+}
+
+const ReportTools = struct {
+    bash: bool = false,
+    edit: bool = false,
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !ReportTools {
+        if (try source.next() != .array_begin) return error.InvalidObservation;
+        var result: ReportTools = .{};
+        while (try source.peekNextTokenType() != .array_end) {
+            const tool = try std.json.innerParse(JsonEnum(enum { bash, edit }), allocator, source, options);
+            switch (tool.value) {
+                .bash => {
+                    if (result.bash) return error.DuplicateField;
+                    result.bash = true;
+                },
+                .edit => {
+                    if (result.edit) return error.DuplicateField;
+                    result.edit = true;
+                },
+            }
+        }
+        _ = try source.next();
+        return result;
+    }
+
+    pub fn jsonStringify(self: ReportTools, jw: anytype) !void {
+        try jw.beginArray();
+        if (self.bash) try jw.write("bash");
+        if (self.edit) try jw.write("edit");
+        try jw.endArray();
+    }
+};
+
+fn CurrentSource(comptime Sink: type) type {
+    return struct {
+        reader: *std.json.Reader,
+        sink: Sink,
+        pub const NextError = anyerror;
+        pub const PeekError = anyerror;
+        pub const AllocError = anyerror;
+        pub fn next(self: *@This()) !std.json.Token {
+            return self.reader.next();
+        }
+        pub fn peekNextTokenType(self: *@This()) !std.json.TokenType {
+            return self.reader.peekNextTokenType();
+        }
+        pub fn nextAllocMax(self: *@This(), allocator: std.mem.Allocator, when: std.json.AllocWhen, limit: usize) !std.json.Token {
+            return self.reader.nextAllocMax(allocator, when, limit);
+        }
+        pub fn skipValue(self: *@This()) !void {
+            return self.reader.skipValue();
+        }
+    };
+}
+
+fn AttentionRows(comptime tag: std.meta.Tag(Current.Attention)) type {
+    return struct {
+        count: u64 = 0,
+        first: ?u64 = null,
+        indeterminate: u64 = 0,
+        first_indeterminate: ?u64 = null,
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            if (try source.next() != .array_begin) return error.InvalidObservation;
+            var result: @This() = .{};
+            while (try source.peekNextTokenType() != .array_end) {
+                const row = try std.json.innerParse(@FieldType(Current.Attention, @tagName(tag)), allocator, source, options);
+                inline for (@typeInfo(@TypeOf(row)).@"struct".fields) |field| {
+                    if (field.type == Current.Reference and @field(row, field.name).type.value == null) return error.InvalidObservation;
+                }
+                if ((tag == .resolved or tag == .rejected) and row.code.slice().len == 0) return error.InvalidObservation;
+                if (tag != .rejected) {
+                    if (result.first == null) result.first = row.action.value;
+                }
+                if (tag == .resolved and row.code.eql("indeterminate")) {
+                    result.indeterminate += 1;
+                    if (result.first_indeterminate == null) result.first_indeterminate = row.action.value;
+                }
+                try source.sink.visit(@unionInit(Current.Attention, @tagName(tag), row));
+                result.count += 1;
+            }
+            _ = try source.next();
+            return result;
+        }
+    };
+}
+
 pub const SessionListCursor = struct {
     after: u64 = 0,
     ceiling: u64 = 0,
@@ -1058,12 +1458,16 @@ fn JsonString(comptime limit: usize) type {
     return struct {
         value: protocol.Bounded(limit) = .{},
 
-        fn slice(self: *const @This()) []const u8 {
+        pub fn slice(self: *const @This()) []const u8 {
             return self.value.slice();
         }
 
         fn eql(self: *const @This(), value: []const u8) bool {
             return self.value.eql(value);
+        }
+
+        pub fn jsonStringify(self: @This(), jw: anytype) !void {
+            try jw.write(self.value.slice());
         }
 
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, _: std.json.ParseOptions) !@This() {
@@ -1091,6 +1495,10 @@ fn JsonEnum(comptime T: type) type {
     return struct {
         value: T,
 
+        pub fn jsonStringify(self: @This(), jw: anytype) !void {
+            try jw.write(@tagName(self.value));
+        }
+
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
             const string = try JsonString(limit).jsonParse(allocator, source, options);
             return .{ .value = std.meta.stringToEnum(T, string.slice()) orelse return error.InvalidEnumTag };
@@ -1103,6 +1511,13 @@ fn JsonEnum(comptime T: type) type {
 fn OmittableJson(comptime T: type) type {
     return struct {
         value: ?T = null,
+
+        pub fn isPresent(self: @This()) bool {
+            return self.value != null;
+        }
+        pub fn jsonStringify(self: @This(), jw: anytype) !void {
+            try jw.write(self.value);
+        }
 
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
             return .{ .value = try std.json.innerParse(T, allocator, source, options) };
@@ -3855,6 +4270,174 @@ test "keyed observation read diagnostics are owned without claiming admission" {
     std.debug.print("keyed facts bytes={d}; reply bytes={d}; fixed parser scratch={d}; no retained allocator/DOM\n", .{
         @sizeOf(CommandObservation), @sizeOf(ReplyBuffer), std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.max_response_bytes),
     });
+}
+
+test "Current facts preserve explicit unconfigured and promised range" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "current", .{ .read = true });
+    defer file.close(io);
+    const wire = "{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}";
+    try file.writePositionalAll(io, wire ++ "false", 0);
+    try std.testing.expect((try CurrentReply.decode(io, file, "unknown", .{ .report = .{ .bytes = wire.len } })) == .unconfigured);
+    inline for (.{ 0, wire.len - 1, wire.len + 1, wire.len + 6 }) |length|
+        try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "unknown", .{ .report = .{ .bytes = length } }));
+}
+
+test "Current facts retain settings selected empty key and ten recent bindings" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "current", .{ .read = true });
+    defer file.close(io);
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    var output = file.writerStreaming(io, &buffer);
+    const writer = &output.interface;
+    const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ "0123456789abcdef" ** 4 ++ "\"}";
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[\"edit\"],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null},\"pending_messages\":\"2\",\"work\":{\"status\":\"runnable\",\"turn\":\"37\",\"operation\":\"91\",\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"selected_message\":\"\",\"recent_messages\":[");
+    for (0..10) |i| {
+        if (i != 0) try writer.writeAll(",");
+        try writer.print("{{\"turn\":\"{d}\",\"message\":\"key/{d}\",\"outcome\":\"completed\"}}", .{ 30 - i, i });
+    }
+    try writer.writeAll("],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"3\",\"scratch_used_bytes\":\"123\",\"unavailable\":[\"structured_output\"]}}");
+    try output.flush();
+    const bytes = try file.length(io);
+    const reply = try CurrentReply.decode(io, file, "s", .{ .report = .{ .bytes = bytes } });
+    const facts = &reply.current;
+    try std.testing.expectEqualStrings("exact\x01model", facts.settings.model.slice());
+    try std.testing.expectEqual(@as(u64, 17), facts.settings.revision.value);
+    try std.testing.expect(facts.settings.tools.edit and !facts.settings.tools.bash);
+    try std.testing.expectEqual(@as(u64, 7), facts.settings.instructions.bytes.value);
+    try std.testing.expect(facts.settings.reasoning_effort.value == null and facts.selected_message != null);
+    try std.testing.expectEqualStrings("", facts.selected_message.?.slice());
+    try std.testing.expectEqual(@as(u64, 91), facts.work.operation.value.?.value);
+    try std.testing.expectEqual(@as(usize, 10), facts.recent_count);
+    for (facts.recent[0..10], 0..) |row, i| try std.testing.expectEqual(@as(u64, 30 - i), row.turn.value);
+    try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "other", .{ .report = .{ .bytes = bytes } }));
+    var rendered: [4096]u8 = undefined;
+    var json = std.Io.Writer.fixed(&rendered);
+    try facts.writeJson(io, file, &json);
+    try std.testing.expect(std.mem.indexOf(u8, json.buffered(), "\"revision\":\"17\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.buffered(), "reasoning_effort") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json.buffered(), "\"selected_message\":\"\"") != null);
+    try file.writePositionalAll(io, "x", 0);
+    try std.testing.expectEqualStrings("exact\x01model", facts.settings.model.slice());
+}
+
+test "Current facts traverse every attention row and preserve metadata with fixed scratch" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "current", .{ .read = true });
+    defer file.close(io);
+    const rendered = try tmp.dir.createFile(io, "rendered", .{ .read = true });
+    defer rendered.close(io);
+    const reference = "{\"type\":\"text\",\"bytes\":\"13\",\"sha256\":\"" ++ "ab" ** 32 ++ "\"}";
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    var output = file.writerStreaming(io, &buffer);
+    const writer = &output.interface;
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\",\"edit\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ "00" ** 32 ++ "\"},\"output_schema\":null,\"reasoning_effort\":null},\"pending_messages\":\"0\",\"work\":{\"status\":\"waiting_for_permission\",\"turn\":\"7\",\"operation\":\"19\",\"latest_outcome\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
+    for (0..257) |i| {
+        if (i != 0) try writer.writeAll(",");
+        try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i });
+        try writer.writeAll(reference ++ ",\"arguments\":" ++ reference ++ "}");
+    }
+    try writer.writeAll("],\"resolved\":[");
+    for (0..257) |i| {
+        if (i != 0) try writer.writeAll(",");
+        try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"11\",\"call_ordinal\":\"{d}\",\"code\":\"indeterminate\",\"acceptance_position\":\"{d}\",\"result\":", .{ i + 1001, i, i + 71 });
+        try writer.writeAll(reference ++ "}");
+    }
+    try writer.writeAll("]},\"rejected_calls\":{\"count\":\"257\",\"items\":[");
+    for (0..257) |i| {
+        if (i != 0) try writer.writeAll(",");
+        try writer.print("{{\"parent_operation\":\"11\",\"call_ordinal\":\"{d}\",\"code\":\"unknown_tool\",\"acceptance_position\":\"{d}\",\"result\":", .{ i + 1000, i + 5001 });
+        try writer.writeAll(reference ++ ",\"item_id\":" ++ reference ++ ",\"name\":" ++ reference ++ ",\"call_id\":" ++ reference ++ ",\"arguments\":" ++ reference ++ "}");
+    }
+    try writer.writeAll("]},\"actionable_permissions\":[");
+    for (0..257) |i| {
+        if (i != 0) try writer.writeAll(",");
+        try writer.print("{{\"action\":\"{d}\",\"permission_revision\":\"23\"}}", .{i + 31});
+    }
+    try writer.writeAll("],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"3\",\"scratch_used_bytes\":\"987\",\"unavailable\":[\"structured_output\"]},\"extension\":\"");
+    try writer.splatByteAll('x', 20000);
+    try writer.writeAll("\"}");
+    try output.flush();
+    const bytes = try file.length(io);
+    const reply = try CurrentReply.decode(io, file, "s", .{ .report = .{ .bytes = bytes } });
+    const facts = &reply.current;
+    try std.testing.expectEqual(@as(u64, 257), facts.actionable_count);
+    try std.testing.expectEqual(@as(u64, 257), facts.indeterminate_count);
+    try std.testing.expectEqual(@as(u64, 1001), facts.first_indeterminate.?);
+    try std.testing.expect(facts.settings.reasoning_effort.value != null and facts.settings.reasoning_effort.value.? == null);
+    const Sink = struct {
+        counts: [4]usize = @splat(0),
+        pub fn visit(self: *@This(), attention: Current.Attention) !void {
+            const kind = @intFromEnum(attention);
+            const i = self.counts[kind];
+            switch (attention) {
+                .unresolved => |row| {
+                    try std.testing.expectEqual(@as(u64, 31 + i), row.action.value);
+                    try std.testing.expectEqual(@as(u64, 19), row.parent_operation.value);
+                    try std.testing.expectEqual(@as(u64, i), row.call_ordinal.value);
+                    try std.testing.expectEqual(@as(u64, 13), row.arguments.bytes.value);
+                    try std.testing.expectEqualStrings("ab" ** 32, row.call_id.sha256.slice());
+                },
+                .resolved => |row| {
+                    try std.testing.expectEqual(@as(u64, 1001 + i), row.action.value);
+                    try std.testing.expectEqual(@as(u64, 71 + i), row.acceptance_position.value);
+                    try std.testing.expectEqualStrings("indeterminate", row.code.slice());
+                },
+                .rejected => |row| {
+                    try std.testing.expectEqual(@as(u64, 1000 + i), row.call_ordinal.value);
+                    try std.testing.expectEqual(@as(u64, 5001 + i), row.acceptance_position.value);
+                    try std.testing.expectEqualStrings("unknown_tool", row.code.slice());
+                    try std.testing.expectEqual(@as(u64, 13), row.name.bytes.value);
+                },
+                .actionable => |row| {
+                    try std.testing.expectEqual(@as(u64, 31 + i), row.action.value);
+                    try std.testing.expectEqual(@as(u64, 23), row.permission_revision.value);
+                },
+            }
+            self.counts[kind] += 1;
+        }
+    };
+    var sink: Sink = .{};
+    try facts.traverse(io, file, &sink);
+    try std.testing.expectEqual([4]usize{ 257, 257, 257, 257 }, sink.counts);
+    var json = rendered.writerStreaming(io, &buffer);
+    try reply.writeJson(io, file, &json.interface);
+    try json.flush();
+    const roundtrip = try CurrentReply.decode(io, rendered, "s", .{ .report = .{ .bytes = try rendered.length(io) } });
+    var again: Sink = .{};
+    try roundtrip.current.traverse(io, rendered, &again);
+    try std.testing.expectEqual(sink.counts, again.counts);
+    const Failing = struct {
+        pub fn visit(_: @This(), _: Current.Attention) !void {
+            return error.SinkFailed;
+        }
+    };
+    try std.testing.expectError(error.SinkFailed, facts.traverse(io, file, Failing{}));
+    try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "s", .{ .report = .{ .bytes = bytes + 1 } }));
+    var prefix: [2048]u8 = undefined;
+    try std.testing.expectEqual(prefix.len, try file.readPositionalAll(io, &prefix, 0));
+    inline for (.{
+        .{ "\"version\":\"1\"", "\"version\":\"2\"" },
+        .{ "\"tools\":[\"bash\",\"edit\"]", "\"tools\":[\"edit\",\"edit\"]" },
+        .{ "\"turn\":\"7\"", "\"turn\":\"0\"" },
+        .{ "\"operation\":\"19\"", "\"operation\":\"00\"" },
+        .{ "\"selected_message\"", "\"ignored__message\"" },
+        .{ "\"type\":\"text\"", "\"meta\":\"text\"" },
+        .{ "ab" ** 32, "xz" ** 32 },
+    }) |case| {
+        const offset = std.mem.indexOf(u8, &prefix, case[0]).?;
+        try file.writePositionalAll(io, case[1], offset);
+        try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "s", .{ .report = .{ .bytes = bytes } }));
+        try file.writePositionalAll(io, case[0], offset);
+    }
+    try std.testing.expectEqual(bytes, try file.length(io));
+    std.debug.print("Current facts={d}B, fixed scanner/token/input=16384B, capture={d}B; 4x257 rows, no population allocation\n", .{ @sizeOf(Current), bytes });
 }
 
 test "transport cancellation preserves caller capture and rejects before path access" {
