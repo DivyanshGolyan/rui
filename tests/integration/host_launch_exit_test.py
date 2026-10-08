@@ -2,12 +2,14 @@
 """Host-launch reader oracle, run by its fixture; not native Host qualification."""
 
 from contextlib import contextmanager
+import errno
 import os
 import pty
 import subprocess
 import sys
 import time
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 
 @contextmanager
@@ -34,6 +36,27 @@ def child_pty(source):
 
 
 def check_exit_reader(wait_for_exit):
+    owner = sys.modules[wait_for_exit.__module__]
+    # Exercise both platform EOF forms independently of this machine and
+    # ensure unrelated read failures do not become successful EOF/reap.
+    for effect in (b"", OSError(errno.EIO, "PTY EOF"), OSError(errno.EBADF, "bad descriptor")):
+        caller = SimpleNamespace(args=["adapter"], wait=Mock(return_value=17))
+        output = bytearray(b"entry:")
+        with patch.object(owner.select, "select", return_value=([123], [], [])), \
+                patch.object(owner.os, "read", side_effect=[effect]):
+            if isinstance(effect, OSError) and effect.errno == errno.EBADF:
+                try:
+                    wait_for_exit(caller, 123, output, time.monotonic() + 5)
+                except OSError as error:
+                    assert error.errno == errno.EBADF, error
+                else:
+                    raise AssertionError("unexpected read failure accepted as EOF")
+                caller.wait.assert_not_called()
+            else:
+                assert wait_for_exit(caller, 123, output, time.monotonic() + 5) == 17
+                caller.wait.assert_called_once()
+        assert output == b"entry:", "EOF/error changed retained transcript"
+
     # More than three read windows, asymmetric ends, and a nonzero exit:
     # neither waiting before reading nor dropping late bytes can pass.
     payload = b"head:" + b"a" * 131072 + b"b" * 65531 + b":tail"
@@ -54,7 +77,6 @@ raise SystemExit(17)
     # EOF is not child exit. Observe the actual monotonic operand to require
     # exactly the remaining allowance, not a fresh five seconds at reap.
     with child_pty("import os,time; os.close(1); os.close(2); time.sleep(30)") as (caller, master):
-        owner = sys.modules[wait_for_exit.__module__]
         deadline = time.monotonic() + 0.2
         original_wait = caller.wait
         original_clock = time.monotonic
