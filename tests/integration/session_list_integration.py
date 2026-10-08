@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 
-from host_process import HostDiagnostics, start_ready_process, stop_process
+from host_process import HostDiagnostics, canonical_fixture_root, start_ready_process, stop_process
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -124,7 +124,7 @@ def assert_resources(baseline, current):
 
 def main():
     with tempfile.TemporaryDirectory(prefix="rui-session-list-") as temporary:
-        root = pathlib.Path(temporary)
+        root = canonical_fixture_root(temporary)
         store = root / "store"
         store.mkdir(mode=0o700)
         other = root / "other"

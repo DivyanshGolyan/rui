@@ -23,7 +23,7 @@ from control_integration import (
     successful_sse,
     wait_for,
 )
-from host_process import TestHTTPServer, stop_process
+from host_process import TestHTTPServer, canonical_fixture_root, stop_process
 
 
 def request(socket_path, store, route, kind, session, **fields):
@@ -43,7 +43,7 @@ def host_resources(pid):
 
 
 def main():
-    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-conversation-page-"))
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-conversation-page-"))
     store = state / "store"
     store.mkdir(mode=0o700)
     endpoint = StreamingEndpoint()
@@ -54,6 +54,14 @@ def main():
         process, fields = start_host(store, f"http://127.0.0.1:{endpoint.server_address[1]}/responses")
         socket_path = fields["socket"]
         configure(state, store, "page-config", "direct/page")
+        # Raw wire identities are exact, even when an alias selects this Store
+        # through the production Client. Keep this deliberate alias unnormalized.
+        alias = state / "store-alias"
+        alias.symlink_to(store, target_is_directory=True)
+        head, body = request(socket_path, alias, "/v1/conversation-page", "conversation_page", "direct/page",
+            end="0", before_position="0", before_ordinal="0")
+        assert head.startswith(b"HTTP/1.1 409 "), (head, body)
+        assert json.loads(body) == {"version": "1", "type": "invocation_error", "code": "wrong_store_identity"}, body
         head, body = request(socket_path, store, "/v1/conversation-page", "conversation_page", "direct/page",
             end="0", before_position="0", before_ordinal="0")
         assert head.startswith(b"HTTP/1.1 200 "), (head, body)
@@ -177,7 +185,7 @@ def projected_ranges():
         def log_message(self, _format, *_args):
             pass
 
-    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-projected-ranges-"))
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-projected-ranges-"))
     store = state / "store"
     store.mkdir(mode=0o700)
     endpoint = TestHTTPServer(("127.0.0.1", 0), Handler)
@@ -286,7 +294,7 @@ def whole_stream_shape(length):
             pass
 
     with tempfile.TemporaryDirectory(prefix="rui-whole-stream-") as root:
-        state = pathlib.Path(root)
+        state = canonical_fixture_root(root)
         store = state / "store"
         store.mkdir(mode=0o700)
         endpoint = TestHTTPServer(("127.0.0.1", 0), Handler)
