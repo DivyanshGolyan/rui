@@ -2890,6 +2890,8 @@ const Route = enum {
     conversation_content,
     proposal_page,
     proposal_field,
+    activity_page,
+    activity_content,
     unsupported_control,
 
     fn isControl(self: Route) bool {
@@ -2992,6 +2994,8 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, trace_
         .conversation_content => header.route == .conversation_content,
         .proposal_page => header.route == .proposal_page,
         .proposal_field => header.route == .proposal_field,
+        .activity_page => header.route == .activity_page,
+        .activity_content => header.route == .activity_content,
     };
     if (!route_matches) {
         return respondStatic(host.io, fd, 400, "invocation_error", "route_kind_mismatch");
@@ -3285,6 +3289,30 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, trace_
             defer reader.close();
             try deliverPublicContent(host, fd, &reader, 0, true);
         },
+        .activity_page => |command| {
+            const page = host.store.activityPage(command) catch |err| switch (err) {
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, "activity_unavailable", @errorName(err)),
+                else => {
+                    fenceDispatch(host, "activity page", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                },
+            };
+            var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+            var out = std.Io.Writer.fixed(&buffer);
+            try page.writeJson(&out);
+            deliverResponse(host.io, fd, 200, out.buffered());
+        },
+        .activity_content => |command| {
+            var reader = host.store.openActivityContent(command) catch |err| switch (err) {
+                error.ContentNotFound => return respondStatic(host.io, fd, 409, "activity_unavailable", @errorName(err)),
+                else => {
+                    fenceDispatch(host, "activity content", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                },
+            };
+            defer reader.close();
+            try deliverPublicContent(host, fd, &reader, 0, true);
+        },
     }
 }
 
@@ -3428,6 +3456,10 @@ const HeaderReader = struct {
             .proposal_page
         else if (std.mem.eql(u8, path, "/v1/proposal-field"))
             .proposal_field
+        else if (std.mem.eql(u8, path, "/v1/activity-page"))
+            .activity_page
+        else if (std.mem.eql(u8, path, "/v1/activity-content"))
+            .activity_content
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
             .unsupported_control
         else
