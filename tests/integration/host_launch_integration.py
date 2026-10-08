@@ -24,6 +24,93 @@ RUI = pathlib.Path(sys.argv[1]).resolve()
 COMMAND_TIMEOUT = 16
 
 
+LAUNCH_PROBE = r"""
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+extern int rui_launch_detached(const char *, const char *const *, size_t);
+
+int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "launch") == 0) {
+        int pipe_fds[2];
+        if (pipe(pipe_fds) != 0) return 90;
+        int high = fcntl(pipe_fds[1], F_DUPFD, 200);
+        if (high != 200) return 91;
+        if (fcntl(pipe_fds[0], F_SETFL, O_NONBLOCK) < 0) return 92;
+        if (fcntl(pipe_fds[0], F_SETFD, FD_CLOEXEC) < 0) return 93;
+        struct sigaction ignored = {0}, previous, observed;
+        ignored.sa_handler = SIG_IGN;
+        sigemptyset(&ignored.sa_mask);
+        if (sigaction(SIGCHLD, &ignored, &previous) != 0) return 94;
+        const char *child_argv[] = {argv[0], "witness", "", "two words",
+            "--not-a-launch-option", "final", NULL};
+        int result = rui_launch_detached(argv[0], child_argv, 6);
+        if (sigaction(SIGCHLD, NULL, &observed) != 0) return 95;
+        if (sigaction(SIGCHLD, &previous, NULL) != 0) return 96;
+        if (result != 0) return 97;
+        if (observed.sa_handler != SIG_IGN) return 98;
+        if (fcntl(pipe_fds[0], F_GETFD) != FD_CLOEXEC ||
+            !(fcntl(pipe_fds[0], F_GETFL) & O_NONBLOCK) ||
+            fcntl(high, F_GETFD) != 0) return 99;
+        close(high);
+        close(pipe_fds[1]);
+        close(pipe_fds[0]);
+        return 0;
+    }
+    FILE *output = fopen(getenv("RUI_LAUNCH_PROBE_OUTPUT"), "wb");
+    if (!output) return 100;
+    for (int i = 0; i < argc; i++)
+        if (fwrite(argv[i], 1, strlen(argv[i]) + 1, output) != strlen(argv[i]) + 1) return 101;
+    const char *keys[] = {"RUI_LAUNCH_PROBE_VALUE", "RUI_LAUNCH_PROBE_EMPTY", "HOME"};
+    for (size_t i = 0; i < 3; i++) {
+        const char *value = getenv(keys[i]);
+        if (!value) value = "missing";
+        if (fwrite(value, 1, strlen(value) + 1, output) != strlen(value) + 1) return 102;
+    }
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof(cwd))) return 103;
+    if (fwrite(cwd, 1, strlen(cwd) + 1, output) != strlen(cwd) + 1) return 104;
+    errno = 0;
+    int closed = fcntl(200, F_GETFD) == -1 && errno == EBADF;
+    if (fputs(closed ? "closed" : "inherited", output) < 0) return 105;
+    if (fclose(output) != 0) return 106;
+    return 0;
+}
+"""
+
+
+def assert_launch_adapter(root, env):
+    # Link the production adapter, including Darwin's early same-executable
+    # helper, without adding application policy or a production test hook.
+    source, actor = root / "launch-probe.c", root / "launch-probe"
+    source.write_text(LAUNCH_PROBE)
+    adapter = pathlib.Path(__file__).resolve().parents[2] / "src/host_launch.c"
+    subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(source), str(adapter),
+                    "-pthread", "-o", str(actor)], check=True)
+    output = root / "launch-probe-output"
+    probe_env = {**env, "RUI_LAUNCH_PROBE_OUTPUT": str(output),
+                 "RUI_LAUNCH_PROBE_VALUE": "inherited = value / λ",
+                 "RUI_LAUNCH_PROBE_EMPTY": ""}
+    result = subprocess.run([actor, "launch"], cwd=root, env=probe_env,
+                            capture_output=True, timeout=5)
+    assert result.returncode == 0, result
+    expected = [str(actor), "witness", "", "two words", "--not-a-launch-option", "final",
+                probe_env["RUI_LAUNCH_PROBE_VALUE"], "", env["HOME"], "/", "closed"]
+    deadline = time.monotonic() + 5
+    while True:
+        observed = output.read_bytes() if output.exists() else b""
+        if observed.endswith(b"closed") or observed.endswith(b"inherited"):
+            break
+        assert time.monotonic() < deadline, observed
+        time.sleep(0.01)
+    assert observed.split(b"\0") == [part.encode() for part in expected], observed
+
+
 def environment(home, credential):
     return {
         **os.environ,
@@ -154,6 +241,7 @@ def main():
         home.mkdir(mode=0o700)
         credential = root / "credentials" / "missing.json"
         env = environment(home, credential)
+        assert_launch_adapter(root, env)
 
         # A held lease is attached, not replaced or reconfigured.
         held_store = root / "held-store"
@@ -281,6 +369,9 @@ def main():
         # recoverable Session without any separate serve terminal.
         bare_home = root / "bare-home"
         bare_home.mkdir(mode=0o700)
+        # macOS's temporary root may have symlink ancestors. Supply canonical
+        # fixture HOME without relaxing the credential owner's no-symlink rule.
+        bare_home = bare_home.resolve(strict=True)
         bare_store = bare_home / ".local/share/rui/store"
         bare_credential_dir = bare_home / ".config/rui"
         bare_credential_dir.mkdir(parents=True, mode=0o700)
