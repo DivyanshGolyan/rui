@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import select
 import shlex
 import shutil
 import signal
@@ -13,6 +14,67 @@ import threading
 
 import bash_integration as bash_fixture
 import dispatch_integration as fixture
+
+
+def publish_bash_pid(path):
+    temporary = shlex.quote(str(path.with_suffix(".tmp")))
+    return (
+        f"printf '%s' \"$$\" > {temporary} && "
+        f"mv {temporary} {shlex.quote(str(path))}"
+    )
+
+
+def prove_pid_publication(root):
+    state = root / "PID publication"
+    state.mkdir(mode=0o700)
+    path = state / "bash-pid"
+    # Bash applies the function's redirection before entering it. Hold that
+    # exact boundary, not a scheduling delay, before allowing the PID write.
+    command = (
+        "printf() { builtin printf r >&2; "
+        "IFS= read -r release || return; builtin printf \"$@\"; }; "
+        f"{publish_bash_pid(path)}; status=$?; exit \"$status\""
+    )
+    child = subprocess.Popen(
+        ["bash", "-c", command],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        fixture.wait_for(
+            lambda: select.select([child.stderr], [], [], 0)[0],
+            "PID publisher entered redirected printf",
+        )
+        assert child.stderr.read(1) == b"r"
+        assert not path.exists(), "PID identity visible before printf completed"
+        _, stderr = child.communicate(b"release\n", timeout=8)
+        assert child.returncode == 0, stderr
+        assert path.read_text() == str(child.pid), "incomplete published PID"
+        assert int(path.read_text()) == child.pid
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=8)
+
+    # An ordinary, ungated publisher must still publish its exact Bash PID.
+    path.unlink()
+    child = subprocess.Popen(
+        ["bash", "-c", f"{publish_bash_pid(path)}; status=$?; exit \"$status\""],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        _, stderr = child.communicate(timeout=8)
+        assert child.returncode == 0, stderr
+        assert path.read_text() == str(child.pid)
+        assert int(path.read_text()) == child.pid
+        assert list(state.iterdir()) == [path], "unreleased publication temporary"
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=8)
+    print(json.dumps({"bash_pid_publication": "passed"}, sort_keys=True))
 
 
 def endpoint_for(name, command):
@@ -207,6 +269,10 @@ def main():
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-bash-lifecycle."))
     completed = False
     try:
+        prove_pid_publication(root)
+        if sys.argv[2:] == ["--pid-publication-only"]:
+            completed = True
+            return
         name = "lifecycle-observe"
         state = root / name
         state.mkdir(mode=0o700)
@@ -214,7 +280,7 @@ def main():
         bash_pid_path = state / "bash-pid"
         endpoint, thread, endpoint_url = endpoint_for(
             name,
-            f"printf $$ > {bash_pid_path}; trap '' TERM; sleep 30",
+            f"{publish_bash_pid(bash_pid_path)} && trap '' TERM && sleep 30",
         )
         host = None
         try:
@@ -263,7 +329,7 @@ def main():
         command_release = state / "command-release"
         endpoint, thread, endpoint_url = endpoint_for(
             name,
-            f"printf $$ > {bash_pid_path}; "
+            f"{publish_bash_pid(bash_pid_path)} && "
             f"while [ ! -e {command_release} ]; do sleep 0.01; done",
         )
         host = None
