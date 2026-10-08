@@ -929,7 +929,9 @@ def main():
                                    ('/setup --model ""', "InvalidPreferenceModel")):
                 assert error in terminal_step(master, command)
                 assert interactive_saved.read_bytes() == cleared_preferences
-            assert "Model: model-a" in terminal_step(master, "/status")
+            assert "Permission: ask" in terminal_step(master, "/status")
+            active = fixture.command("inspect-session", "--store", store, "--session", session)["session"]
+            assert active["model"] == "model-a" and active["permission_mode"] == "ask", active
             assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model gpt-6-luna")
             spaced_store = state / "spaced store"
             spaced_store.mkdir(mode=0o700)
