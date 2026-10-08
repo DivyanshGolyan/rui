@@ -297,11 +297,13 @@ def main():
         assert "choose a supported provider" in fresh_setup and "Host: unavailable" in fresh_setup
         assert not (preferences_home / ".config").exists(), "inspection created private state"
         # The shorter preferences path fits while the unsaved Store fallback
-        # does not. A provider-only update must fail before publication.
+        # does not. Independent provider publication still succeeds.
         max_path = os.pathconf(preferences_home, "PC_PATH_MAX")
         long_home = str(preferences_home) + "/." * ((max_path - 16 - len(str(preferences_home))) // 2)
-        assert run(long_home, "setup", "--provider", "codex", success=False) == ""
-        assert not (preferences_home / ".config/rui/preferences").exists()
+        oversized_setup = run(long_home, "setup", "--provider", "codex")
+        assert "Saved defaults" in oversized_setup and "Store unavailable" in oversized_setup
+        assert "no alternate Store selected" in oversized_setup and "Host: unavailable" in oversized_setup
+        assert (preferences_home / ".config/rui/preferences").read_text().endswith("provider=codex\nmodel=\n")
         invalid_home = os.fsencode(state) + b"/home-\xff"
         try:
             os.mkdir(invalid_home, mode=0o700)
@@ -363,7 +365,13 @@ def main():
         retired_store.mkdir(mode=0o700)
         assert "Saved defaults" in run(preferences_home, "setup", "--store", retired_store)
         retired_store.rmdir()
-        assert run(preferences_home, "setup", success=False) == ""
+        unavailable_setup = run(preferences_home, "setup")
+        assert str(retired_store) in unavailable_setup and "Store unavailable" in unavailable_setup
+        assert "no alternate Store selected" in unavailable_setup and "Host: unavailable" in unavailable_setup
+        assert "Saved defaults" in run(preferences_home, "setup", "--clear-model")
+        assert saved.read_text().endswith("provider=codex\nmodel=\n")
+        assert f"store={retired_store}\n" in saved.read_text()
+        assert "Saved defaults" in run(preferences_home, "setup", "--model", "gpt-6-luna")
         assert "Saved defaults" in run(preferences_home, "setup", "--store", store)
         assert f"store={store.resolve()}\n" in saved.read_text()
         credential = saved.parent / "codex.json"
@@ -395,7 +403,9 @@ def main():
         assert "credential: error" in run(preferences_home, "setup")
         credential.unlink()
         assert run(preferences_home, "setup", "--provider", "other", success=False) == ""
-        assert run(preferences_home, "setup", "--model", "other-model", success=False) == ""
+        assert "Saved defaults" in run(preferences_home, "setup", "--model", "other-model")
+        assert saved.read_text().endswith("model=other-model\n")
+        assert "Saved defaults" in run(preferences_home, "setup", "--model", "gpt-6-luna")
         assert saved.read_text().endswith("model=gpt-6-luna\n")
         assert run(preferences_home, "setup", "--store", state / "missing", success=False) == ""
         assert saved.read_text().endswith("model=gpt-6-luna\n")
@@ -426,11 +436,11 @@ def main():
         assert "Saved defaults" in run(preferences_home, "setup", "--store", store)
         assert saved.read_text().endswith("provider=retired\nmodel=old-model\n")
         assert "Saved defaults" in run(preferences_home, "setup", "--provider", "codex")
-        assert saved.read_text().endswith("provider=codex\nmodel=gpt-6-luna\n")
+        assert saved.read_text().endswith("provider=codex\nmodel=\n")
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
         assert "Saved defaults" in run(preferences_home, "setup", "--provider", "codex", "--model", "gpt-6-luna")
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=old-model\n")
-        assert "saved model is unsupported; no fallback" in run(preferences_home, "setup")
+        assert "Next Session: codex / old-model" in run(preferences_home, "setup")
         assert "Saved defaults" in run(preferences_home, "setup", "--model", "gpt-6-luna")
         saved.rename(saved.parent / "preferences.backup")
         sole = run(preferences_home, "setup")
@@ -919,7 +929,7 @@ def main():
             assert "Permission: ask" in terminal_step(master, "/status")
             assert not credential.exists()
             assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model gpt-6-luna")
-            assert "active Session unchanged" in terminal_step(master, "/setup --model other-model")
+            assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model other-model")
             interactive_saved = preferences_home / ".config/rui/preferences"
             assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --clear-model")
             assert interactive_saved.read_text().endswith("provider=codex\nmodel=\n")

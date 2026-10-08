@@ -1,6 +1,9 @@
 const std = @import("std");
 const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalText = @import("TerminalText.zig");
+const SessionFrontend = @import("SessionFrontend.zig");
+const SessionView = @import("SessionView.zig");
+const ClientTask = @import("ClientTask.zig");
 const client = @import("client.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
@@ -103,9 +106,42 @@ fn credentialPath(init: std.process.Init, buffer: []u8, create: bool) ![]const u
     return std.fmt.bufPrint(buffer, "{s}/.config/rui/codex.json", .{home});
 }
 
+// One-shot output writes its selected file; persistent commands lend the same
+// bounded worker rendezvous. Neither worker ever borrows the terminal itself.
+const Output = struct {
+    io: std.Io,
+    task: ?*ClientTask = null,
+
+    pub fn feed(self: Output, bytes: []const u8) !void {
+        if (self.task) |task| return task.feed(bytes);
+        try std.Io.File.stdout().writeStreamingAll(self.io, bytes);
+    }
+
+    fn field(self: Output, label: []const u8, value: []const u8) !void {
+        try self.feed(label);
+        try SessionView.text(self, value);
+        try self.feed("\n");
+    }
+
+    fn diagnostic(self: Output, comptime format: []const u8, args: anytype) void {
+        if (self.task == null) return std.debug.print(format, args);
+        // Diagnostic values here are bounded error names, never payloads.
+        var storage: [1024]u8 = undefined;
+        const line = std.fmt.bufPrint(&storage, format, args) catch return;
+        self.feed(line) catch {}; // Original command failure remains primary.
+    }
+};
+
 fn setup(init: std.process.Init, args: []const []const u8) !void {
+    return setupUsing(init, args, .{ .io = init.io }) catch |err| {
+        if (err == error.UnknownArgument) return usage();
+        return err;
+    };
+}
+
+fn setupUsing(init: std.process.Init, args: []const []const u8, output: Output) !void {
     const home = init.environ_map.get("HOME") orelse {
-        std.debug.print("rui: setup needs an absolute HOME; no preferences saved.\n", .{});
+        output.diagnostic("rui: setup needs an absolute HOME; no preferences saved.\n", .{});
         return error.HomeUnavailable;
     };
     var edit: preferences.Edit = .{};
@@ -122,76 +158,81 @@ fn setup(init: std.process.Init, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, flag, "--clear-model")) {
             if (edit.model == .set) return error.ConflictingPreferenceModelEdit;
             edit.model = .clear;
-        } else return usage();
+        } else return error.UnknownArgument;
     }
     var credential_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
     const readiness: provider_selection.Readiness = blk: {
         const path = credentialPath(init, &credential_buffer, false) catch break :blk .credential_error;
-        break :blk if (codex_credentials.localStatus(path, now)) |state| switch (state) {
+        break :blk if (codex_auth.localStatus(path, now)) |state| switch (state) {
             .missing => .missing,
             .configured => .configured,
+            .renewal_due => .renewal_due,
             .refresh_required => .refresh_required,
         } else |_| .credential_error;
     };
     const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep;
     const values = (if (changed) preferences.update(home, edit, readiness) else preferences.load(home)) catch |err| {
         if (err == error.PreferenceDirectorySyncFailed) {
-            std.debug.print("rui: setup save durability unconfirmed; inspect HOME/.config/rui/preferences before another update. No Session changed.\n", .{});
+            output.diagnostic("rui: setup save durability unconfirmed; inspect HOME/.config/rui/preferences before another update. No Session changed.\n", .{});
         } else if (err == error.UnsupportedPreferenceProvider) {
-            std.debug.print("rui: setup supports only --provider codex; no preferences saved.\n", .{});
+            output.diagnostic("rui: setup supports only --provider codex; no preferences saved.\n", .{});
         } else if (err == error.PreferenceProviderRequired) {
-            std.debug.print("rui: setup needs --provider codex with --model; no preferences saved.\n", .{});
+            output.diagnostic("rui: setup needs --provider codex with --model; no preferences saved.\n", .{});
         } else if (err == error.UnsupportedPreferenceModel) {
-            std.debug.print("rui: setup supports only exact model gpt-6-luna for Codex; no preferences saved. Existing Sessions are unchanged.\n", .{});
+            output.diagnostic("rui: setup model is not supported by the selected adapter; no preferences saved. Existing Sessions are unchanged.\n", .{});
         } else if (err == error.InvalidPreferenceModel) {
-            std.debug.print("rui: setup model must be 1–256 printable non-space ASCII bytes; no preferences saved.\n", .{});
+            output.diagnostic("rui: setup model must be 1–256 printable non-space ASCII bytes; no preferences saved.\n", .{});
         } else if (err == error.InvalidPreferenceStore or err == error.FileNotFound) {
-            std.debug.print("rui: setup Store must be an existing private, canonicalizable absolute directory; no alternate Store selected.\n", .{});
-        } else std.debug.print("rui: setup {s}: {s}; inspect HOME/.config/rui/preferences and its private directory before retrying. No alternate Store selected.\n", .{ if (changed) "save failed" else "read failed", @errorName(err) });
+            output.diagnostic("rui: setup Store must be an existing private, canonicalizable absolute directory; no alternate Store selected.\n", .{});
+        } else output.diagnostic("rui: setup {s}: {s}; inspect HOME/.config/rui/preferences and its private directory before retrying. No alternate Store selected.\n", .{ if (changed) "save failed" else "read failed", @errorName(err) });
         return err;
     };
     var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const selected_store = if (values.store.len != 0) values.store.slice() else try preferences.defaultStore(home, &fallback_buffer);
+    const prospective_store: ?[]const u8 = if (values.store.len != 0) values.store.slice() else preferences.defaultStore(home, &fallback_buffer) catch null;
+    const available_store: ?platform.Paths = if (prospective_store) |path| platform.resolveClientPaths(init.io, path) catch null else null;
     // Preferences are local hints, not Session settings or Host facts.
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (changed) "Saved defaults for future Sessions. Active Session unchanged.\n" else "Defaults (read only):\n");
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Store: ");
-    try writeSafeText(init.io, selected_store);
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (values.store.len != 0) " (saved)\n" else " (HOME fallback)\n");
-    try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) values.provider.slice() else "not selected");
-    try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
-    var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
+    try output.feed(if (changed) "Saved defaults for future Sessions. Active Session unchanged.\n" else "Defaults (read only):\n");
+    try output.feed("Store: ");
+    try SessionView.text(output, prospective_store orelse "unavailable");
+    try output.feed(if (values.store.len != 0) " (saved)\n" else " (HOME fallback)\n");
+    if (available_store == null) try output.feed("Store unavailable: destination cannot be selected; no alternate Store selected.\n");
+    try output.field("Provider: ", if (values.provider.len != 0) values.provider.slice() else "not selected");
+    try output.field("Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
+    var line_buffer: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
     const codex = provider_selection.codex(readiness);
     const local_status = switch (readiness) {
         .configured => "Codex credential: configured locally (remote acceptance not checked).\n",
+        .renewal_due => "Codex credential: usable locally; renewal due at dispatch (remote acceptance not checked).\n",
         .missing => "Codex credential: missing.\n",
         .refresh_required => "Codex credential: refresh required; a pending refresh may require login.\n",
         .credential_error => "Codex credential: error reading private Rui credential; inspect it before use.\n",
     };
-    try std.Io.File.stdout().writeStreamingAll(init.io, local_status);
+    try output.feed(local_status);
     const selection: ?provider_selection.Selection = provider_selection.resolve(&.{codex}, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch |err| blk: {
         const advice: []const u8 = switch (err) {
             error.UnsupportedSelectionProvider => "Next Session: saved provider is unsupported; no fallback. Repair with `rui setup --provider codex --model gpt-6-luna`.\n",
             error.UnsupportedSelectionModel => "Next Session: saved model is unsupported; no fallback. Repair with `rui setup --provider codex --model gpt-6-luna`.\n",
         };
-        try std.Io.File.stdout().writeStreamingAll(init.io, advice);
+        try output.feed(advice);
         break :blk null;
     };
     if (selection) |choice| switch (choice) {
-        .chooser => try std.Io.File.stdout().writeStreamingAll(init.io, "Next Session: choose a supported provider; Codex login: `rui login codex`.\n"),
+        .chooser => try output.feed("Next Session: choose a supported provider; Codex login: `rui login codex`.\n"),
         .selected => |selected| {
             const note: []const u8 = switch (selected.readiness) {
                 .configured => "local credential configured; remote acceptance not checked",
+                .renewal_due => "local credential usable; renewal due at dispatch; remote acceptance not checked",
                 .missing => "credential missing; run `rui login codex`. No fallback",
                 .refresh_required => "credential refresh required; login may be required. No fallback",
                 .credential_error => "credential error; inspect private Rui credential or log in. No fallback",
             };
-            const line = try std.fmt.bufPrint(&output, "Next Session: {s} / {s} ({s}).\n", .{ selected.provider, selected.model, note });
-            try std.Io.File.stdout().writeStreamingAll(init.io, line);
+            const line = try std.fmt.bufPrint(&line_buffer, "Next Session: {s} / {s} ({s}).\n", .{ selected.provider, selected.model, note });
+            try output.feed(line);
         },
     };
     // Host capabilities are startup facts, not credential or Session state.
-    const host_details: []const u8 = switch (client.hostStatus(init.io, selected_store)) {
+    const host_details: []const u8 = if (available_store) |paths| switch (client.hostStatus(init.io, paths.store.slice())) {
         .ready => |current| if (current.capabilities.managed_authentication and current.capabilities.model)
             "Host: managed Codex enabled (credentials checked locally, not by status).\n"
         else
@@ -200,8 +241,8 @@ fn setup(init: std.process.Init, args: []const []const u8) !void {
         .owned_unavailable => "Host: owned but unavailable; inspect before submitting work.\n",
         .incompatible => "Host: incompatible; inspect before submitting work.\n",
         .access_failure => "Host: access failure; inspect Store permissions.\n",
-    };
-    try std.Io.File.stdout().writeStreamingAll(init.io, host_details);
+    } else "Host: unavailable; Store unavailable; setup does not start it.\n";
+    try output.feed(host_details);
 }
 
 // The caller owns buffer. Explicit destinations never consult preferences;
@@ -240,7 +281,7 @@ fn host(init: std.process.Init, args: []const []const u8) !void {
     }
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, explicit, &fallback);
-    if (start) return startHost(init, selected);
+    if (start) return startHost(init, selected, false);
     if (stop) return stopHost(init.io, selected, target);
     switch (client.hostStatus(init.io, selected)) {
         .ready => |ready| {
@@ -291,12 +332,14 @@ fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Insta
     }
 }
 
-fn startHost(init: std.process.Init, selected: []const u8) !void {
+fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
     const io = init.io;
     switch (client.hostStatus(io, selected)) {
         .ready => |ready| {
-            try std.Io.File.stdout().writeStreamingAll(io, "Rui: Attached to the ready Host; its existing capacity and capabilities win.\n");
-            try writeHostDiagnostics(io, ready.store.slice());
+            if (!quiet) {
+                try std.Io.File.stdout().writeStreamingAll(io, "Rui: Attached to the ready Host; its existing capacity and capabilities win.\n");
+                try writeHostDiagnostics(io, ready.store.slice());
+            }
             return;
         },
         .incompatible => return error.IncompatibleHost,
@@ -330,9 +373,11 @@ fn startHost(init: std.process.Init, selected: []const u8) !void {
     while (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < until) {
         switch (client.hostStatusUntil(io, paths.store.slice(), until)) {
             .ready => |ready| {
-                var line: [100]u8 = undefined;
-                try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "Rui: Host ready (active capacity {d}); existing settings win.\n", .{ready.active_capacity}));
-                try writeHostDiagnostics(io, ready.store.slice());
+                if (!quiet) {
+                    var line: [100]u8 = undefined;
+                    try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "Rui: Host ready (active capacity {d}); existing settings win.\n", .{ready.active_capacity}));
+                    try writeHostDiagnostics(io, ready.store.slice());
+                }
                 return;
             },
             .incompatible => return error.IncompatibleHost,
@@ -361,19 +406,21 @@ fn login(init: std.process.Init, args: []const []const u8, interactive: bool, co
     if (loginInterrupted()) return error.LoginInterrupted;
     // Preflight needs only a safe snapshot, not the refresh owner's lock or
     // generation. Installation rereads under its exclusive lock after winning.
-    const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
-    _ = try codex_credentials.localStatus(path, now);
+    {
+        var existing: codex_credentials.Record = undefined;
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&existing));
+        _ = try codex_credentials.readSnapshotInto(path, &existing);
+    }
     if (loginInterrupted()) return error.LoginInterrupted;
     try provider.initialize();
     defer provider.deinitialize();
     var tokens = if (interactive)
         try exchange(init.io, struct {
             fn display(code: []const u8) !void {
-                const output = std.Io.File.stdout();
                 const io = std.Io.Threaded.global_single_threaded.io();
-                try output.writeStreamingAll(io, "Open https://auth.openai.com/codex/device and enter code: ");
-                try output.writeStreamingAll(io, code);
-                try output.writeStreamingAll(io, "\n");
+                try loginOutput(io, "Open https://auth.openai.com/codex/device and enter code: ");
+                try loginOutput(io, code);
+                try loginOutput(io, "\n");
             }
         }.display, loginInterrupted)
     else
@@ -406,16 +453,26 @@ fn login(init: std.process.Init, args: []const []const u8, interactive: bool, co
     // The preference attempt must run even if the terminal receipt cannot be
     // written. Installation and future defaults have independent outcomes.
     const default_outcome = preferences.fillProviderAfterLogin(home);
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Codex credential installed. Remote model acceptance is not established. Current Session unchanged.\n");
+    try loginOutput(init.io, "Rui: Codex credential installed. Remote model acceptance is not established. Current Session unchanged.\n");
     const added = default_outcome catch |err| {
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Credential installed, but future defaults were not saved or durability is uncertain (");
-        try std.Io.File.stdout().writeStreamingAll(init.io, @errorName(err));
-        return std.Io.File.stdout().writeStreamingAll(init.io, "). Inspect rui setup; active Session unchanged.\n");
+        try loginOutput(init.io, "Rui: Credential installed, but future defaults were not saved or durability is uncertain (");
+        try loginOutput(init.io, @errorName(err));
+        return loginOutput(init.io, "). Inspect rui setup; active Session unchanged.\n");
     };
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (added)
-        "Rui: No provider default existed; Codex selected for future Sessions (gpt-6-luna).\n"
+    try loginOutput(init.io, if (added)
+        "Rui: No provider default existed; Codex selected for future Sessions; model recommendation remains unpinned.\n"
     else
         "Rui: Existing provider default unchanged.\n");
+}
+
+// The auth API takes a context-free display callback. This thread-local loan
+// exists only in the joined persistent command worker; one-shot login retains
+// its original stdout/diagnostic behavior, and auth never owns terminal output.
+threadlocal var login_task: ?*ClientTask = null;
+
+fn loginOutput(io: std.Io, bytes: []const u8) !void {
+    if (login_task) |task| return task.feed(bytes);
+    try std.Io.File.stdout().writeStreamingAll(io, bytes);
 }
 
 const LoginState = enum(u8) { cancellable, cancelled, publishing };
@@ -448,6 +505,18 @@ fn onLoginInterrupt(_: std.posix.SIG) callconv(.c) void {
 
 fn loginInterrupted() bool {
     return login_state.load(.acquire) == .cancelled;
+}
+
+test "persistent login local cancellation preserves publication winner" {
+    defer login_state.store(.cancellable, .release);
+    login_state.store(.cancellable, .release);
+    onLoginInterrupt(.INT);
+    try std.testing.expect(loginInterrupted());
+    try std.testing.expectEqual(.cancelled, login_state.load(.acquire));
+    login_state.store(.publishing, .release);
+    onLoginInterrupt(.INT);
+    try std.testing.expect(!loginInterrupted());
+    try std.testing.expectEqual(.publishing, login_state.load(.acquire));
 }
 
 test "login owner preserves interruption, publication and independent defaults" {
@@ -663,7 +732,7 @@ test "login owner preserves interruption, publication and independent defaults" 
         } else {
             const defaults = try preferences.load(home);
             try std.testing.expectEqualStrings(if (before or case == .credential_failure or case == .missing_home) "" else "codex", defaults.provider.slice());
-            try std.testing.expectEqualStrings(if (before or case == .credential_failure or case == .missing_home) "" else "gpt-6-luna", defaults.model.slice());
+            try std.testing.expectEqualStrings("", defaults.model.slice());
         }
         try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, "new-synthetic-refresh") == null);
         try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, codex_auth.fixture_access_token) == null);
@@ -733,9 +802,14 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     var store: ?[]const u8 = null;
     var explicit_provider: ?[]const u8 = null;
     var explicit_model: ?[]const u8 = null;
+    var resume_ref: ?[]const u8 = null;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
-        if (std.mem.eql(u8, args[index], "--store") and store == null) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--provider") and explicit_provider == null) explicit_provider = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--model") and explicit_model == null) explicit_model = try takeValue(args, &index) else return usage();
+        if (std.mem.eql(u8, args[index], "--store") and store == null) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--provider") and explicit_provider == null) explicit_provider = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--model") and explicit_model == null) explicit_model = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--resume") and resume_ref == null) resume_ref = try takeValue(args, &index) else return usage();
+    }
+    if (resume_ref) |reference| {
+        if (explicit_provider != null or explicit_model != null) return usage();
+        return enterSession(init, if (store) |destination| &.{ "--store", destination, "--session", reference } else &.{ "--session", reference });
     }
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
         std.debug.print("rui needs terminal input and output to create a Session; use explicit one-shot commands for scripts. No Host or Session changed.\n", .{});
@@ -748,57 +822,58 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     const workspace = workspace_buffer[0..workspace_length];
 
     const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
-    var defaults: preferences.Values = .{};
-    // Explicit Store bypasses even a damaged preference file; provider/model
-    // preferences remain independent of the Store selector.
-    defaults = blk: {
-        break :blk preferences.load(home) catch |err| {
-            if (store != null and explicit_provider != null and explicit_model != null) break :blk preferences.Values{};
-            std.debug.print("rui: private setup defaults unreadable ({s}); inspect rui setup before creating a Session.\n", .{@errorName(err)});
-            return err;
-        };
+    // No read, lock or validation of unused preferences when all selectors
+    // are explicit. Partial selection still needs the saved binding hints.
+    var defaults: preferences.Values = if (store != null and explicit_provider != null and explicit_model != null) .{} else preferences.load(home) catch |err| {
+        std.debug.print("rui: private setup defaults unreadable ({s}); inspect rui setup before creating a Session.\n", .{@errorName(err)});
+        return err;
     };
+    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var selected_store = store orelse (if (defaults.store.len != 0) defaults.store.slice() else try preferences.defaultStore(home, &fallback));
+    try preflightNewSession(init.io, selected_store);
     var credential_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const credential = try credentialPath(init, &credential_buffer, false);
     const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
-    const readiness: provider_selection.Readiness = if (codex_credentials.localStatus(credential, now)) |state| switch (state) {
+    const readiness: provider_selection.Readiness = if (codex_auth.localStatus(credential, now)) |state| switch (state) {
         .missing => .missing,
         .configured => .configured,
+        .renewal_due => .renewal_due,
         .refresh_required => .refresh_required,
     } else |_| .credential_error;
     var selection = provider_selection.resolve(&.{provider_selection.codex(readiness)}, explicit_provider, explicit_model, if (defaults.provider.len == 0) null else defaults.provider.slice(), if (defaults.model.len == 0) null else defaults.model.slice()) catch |err| {
         std.debug.print("rui: unsupported prospective provider/model ({s}); inspect rui setup or select codex / gpt-6-luna. No Session created.\n", .{@errorName(err)});
         return err;
     };
-    if (selection == .chooser or selection.selected.readiness != .configured) {
+    if (selection == .chooser or !selection.selected.readiness.usable()) {
         try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No locally ready provider for a new Session. Choose Codex login or defer; saved work remains inspectable.\n");
         try guideProviderLogin(init);
         // Explicit destination and binding never depend on the preference file,
         // including after a login whose future-default save failed.
         if (store == null or explicit_provider == null or explicit_model == null)
             defaults = try preferences.load(home);
+        selected_store = store orelse (if (defaults.store.len != 0) defaults.store.slice() else try preferences.defaultStore(home, &fallback));
+        try preflightNewSession(init.io, selected_store);
         const after_choice: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
-        const updated = codex_credentials.localStatus(credential, after_choice) catch |err| {
+        const updated = codex_auth.localStatus(credential, after_choice) catch |err| {
             std.debug.print("rui: credential still unreadable ({s}); inspect rui setup. No Session created.\n", .{@errorName(err)});
             return err;
         };
         selection = provider_selection.resolve(&.{provider_selection.codex(switch (updated) {
             .missing => .missing,
             .configured => .configured,
+            .renewal_due => .renewal_due,
             .refresh_required => .refresh_required,
         })}, explicit_provider, explicit_model, if (defaults.provider.len == 0) null else defaults.provider.slice(), if (defaults.model.len == 0) null else defaults.model.slice()) catch |err| {
             std.debug.print("rui: unsupported prospective provider/model after login ({s}); inspect rui setup. No Session created.\n", .{@errorName(err)});
             return err;
         };
-        if (selection == .chooser or selection.selected.readiness != .configured) {
+        if (selection == .chooser or !selection.selected.readiness.usable()) {
             try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No new Session created. Use rui setup or rui login codex when ready; existing work is unchanged.\n");
             return;
         }
     }
     const selected = selection.selected;
-    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const selected_store = store orelse (if (defaults.store.len != 0) defaults.store.slice() else try preferences.defaultStore(home, &fallback));
-    try startHost(init, selected_store);
+    try startHost(init, selected_store, true);
     const paths = try platform.resolveClientPaths(init.io, selected_store);
     const destination = paths.store.slice();
     const ready = switch (client.hostStatus(init.io, destination)) {
@@ -818,7 +893,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
         .provider = .{ .present = true, .value = selected.provider },
         .model = .{ .present = true, .value = selected.model },
         .tools = "bash",
-        .permission_mode = .{ .present = true, .value = "ask" },
+        .permission_mode = .{ .present = true, .value = "bypass" },
     }, .{ .generated = try requestDirectory(init, &directory_buffer) });
     const saved = captured.identity().*;
     var reply_buffer: client.ReplyBuffer = .{};
@@ -836,6 +911,17 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
         return error.SessionConfigurationRejected;
     }
     try enterSession(init, &.{ "--store", saved.store.slice(), "--session", saved.session.slice() });
+}
+
+fn preflightNewSession(io: std.Io, destination: []const u8) !void {
+    try platform.validateStoreDestination(io, destination);
+    switch (client.hostStatus(io, destination)) {
+        .ready => |ready| if (!ready.capabilities.model) return error.HostModelUnavailable,
+        .unavailable => {},
+        .owned_unavailable => return error.HostReadinessUnconfirmed,
+        .incompatible => return error.IncompatibleHost,
+        .access_failure => return error.StoreAccessFailed,
+    }
 }
 
 fn serve(init: std.process.Init, args: []const []const u8) !void {
@@ -990,6 +1076,14 @@ fn parseRetryWaits(value: []const u8) ![3]u64 {
 }
 
 fn configure(init: std.process.Init, args: []const []const u8, interactive: bool) !void {
+    var accepted: ?client.CapturedIdentity = null;
+    return configureUsing(init, args, interactive, .{ .io = init.io }, .{ .io = init.io }, &accepted) catch |err| {
+        if (err == error.InvalidArguments) return usage();
+        return err;
+    };
+}
+
+fn configureUsing(init: std.process.Init, args: []const []const u8, interactive: bool, output: Output, caller: client.Requests, accepted_original: *?client.CapturedIdentity) !void {
     const io = init.io;
     var json = false;
     var input = client.ConfigureInput{
@@ -1011,7 +1105,7 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
         } else if (std.mem.eql(u8, arg, "--session")) input.session = .{ .named = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--workspace")) input.workspace = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--model")) input.model = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--instructions")) input.instructions = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--tools")) input.tools = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--permission-mode")) input.permission_mode = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--output-schema")) input.output_schema = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--text-output")) input.output_schema = .{ .state = .explicit_null } else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
-    if (input.session.named.len == 0 or (location.record.len == 0) != !key_seen) return usage();
+    if (input.session.named.len == 0 or (location.record.len == 0) != !key_seen) return error.InvalidArguments;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, explicit_store, &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1025,11 +1119,14 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
         if (human and !interactive) {
             if (json) try announceCaptureJson(io, saved.key.slice()) else try announceCapture(io, saved.key.slice());
         }
-        break :blk try client.sendCaptured(io, &captured, drop_reply, &reply_buffer);
+        break :blk try caller.sendCaptured(&captured, drop_reply, &reply_buffer);
     };
+    if (reply.isAccepted()) accepted_original.* = saved;
     const accepted = human and interactive and reply.isAccepted();
-    if (!interactive or !accepted) try writeMutationReply(io, reply, if (human and json) saved.key.slice() else null, human);
-    if (human and interactive and accepted) try std.Io.File.stdout().writeStreamingAll(io, "Rui: Configured.\n");
+    if (!interactive or !accepted) {
+        if (output.task != null) try frontendMutation(output, reply) else try writeMutationReply(io, reply, if (human and json) saved.key.slice() else null, human);
+    }
+    if (human and interactive and accepted) try output.feed("Rui: Configured.\n");
     if (human and !json and !interactive) {
         var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "configuration: {s} in {s}\n", .{ saved.session.slice(), saved.store.slice() }));
@@ -1238,6 +1335,307 @@ fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []cons
 }
 
 fn enterSession(init: std.process.Init, args: []const []const u8) !void {
+    var store: ?[]const u8 = null;
+    var session_ref: ?[]const u8 = null;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session")) session_ref = try takeValue(args, &index) else return error.UnknownArgument;
+    }
+    if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) return error.InteractiveTerminalRequired;
+    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, store, &fallback));
+    var directory: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const scratch = try renderScratch(init);
+    defer scratch.close(init.io);
+    try SessionFrontend.run(init, paths.store.slice(), session_ref orelse return error.SessionRequired, try requestDirectory(init, &directory), scratch, .{ .parse = interactiveTokens, .run = persistentCommand });
+}
+
+fn persistentCommand(owner: *SessionFrontend, args: []const []const u8) !void {
+    const init = owner.init;
+    const store = owner.store.slice();
+    const session_ref = owner.session.slice();
+    const name = args[0];
+    if (std.mem.eql(u8, name, "/help") and args.len == 1) {
+        try owner.write("Rui: /help /status /wait /requests /result KEY /setup [settings] /login /configure [settings] /resume REF /recover [KEY] /discard /approve /history /exit\nCtrl-R recovers original captured intent, never a new Message. Ctrl-G deliberately inspects a pending Action; attention never takes your draft. /discard abandons only a definite rejection. /resume stages metadata before switching. /exit detaches without cancelling Host work. Prefix // to send a leading slash.\n");
+    } else if (std.mem.eql(u8, name, "/status") and args.len == 1) {
+        const current = try owner.call(SessionView.inspectCurrent, .{ store, session_ref, owner.scratch });
+        try frontendField(owner, "Session: ", current.settings.reference.slice());
+        try frontendField(owner, "Store: ", store);
+        try frontendField(owner, "Workspace (Bash cwd): ", current.settings.workspace.slice());
+        try frontendField(owner, "Provider: ", @tagName(current.settings.provider.value));
+        try frontendField(owner, "Model: ", current.settings.model.slice());
+        try frontendField(owner, "Permission: ", @tagName(current.settings.permission_mode.value));
+        try frontendField(owner, "Work: ", @tagName(current.work.status.value));
+        if (current.selected_message) |selected| try frontendField(owner, "Current message: ", selected.slice());
+        if (current.pending_messages != 0) {
+            var number: [20]u8 = undefined;
+            try frontendField(owner, "Pending messages: ", try std.fmt.bufPrint(&number, "{d}", .{current.pending_messages}));
+        }
+        try owner.stream(streamFrontendAttention, .{ &current, owner.scratch });
+        if (current.recent_count != 0) try owner.write("Recent messages (use /result KEY for an answer):\n");
+        for (current.recent[0..current.recent_count]) |recent| {
+            try owner.write("  ");
+            try SessionView.text(FrontendSink{ .owner = owner }, recent.message.slice());
+            try frontendField(owner, ": ", recent.outcome.slice());
+        }
+    } else if (std.mem.eql(u8, name, "/requests") and args.len == 1) {
+        try owner.stream(runFrontendRequests, .{ init, store, session_ref });
+    } else if (std.mem.eql(u8, name, "/wait") and args.len == 1) {
+        const current = try owner.call(SessionView.inspectCurrent, .{ store, session_ref, owner.scratch });
+        const key = current.selected_message orelse return owner.write("Rui: No work to wait for.\n");
+        const saved = try client.MessageAddress.init(store, session_ref, key.slice());
+        if (current.actionable_count != 0) try owner.stream(streamFrontendAttention, .{ &current, owner.scratch });
+        while (true) {
+            const observed = switch (try owner.call(client.Requests.observeMessage, .{&saved})) {
+                .observation => |value| value,
+                .failure => |failure| return failure.err(),
+            };
+            if (observed.state().terminal()) break;
+            if (FollowPolicy.session_blocked.attention(&observed) != null) {
+                try owner.write("Rui: Permission attention; Ctrl-G inspects an exact Action.\n");
+                return;
+            }
+            try owner.pause(250);
+        }
+        try frontendResult(owner, &saved);
+    } else if (std.mem.eql(u8, name, "/result") and args.len == 2) {
+        const saved = try client.MessageAddress.init(store, session_ref, args[1]);
+        try frontendResult(owner, &saved);
+    } else if (std.mem.eql(u8, name, "/recover") and args.len == 2) {
+        var accepted: ?client.CapturedIdentity = null;
+        defer if (accepted) |original| {
+            owner.accepted_original = original;
+        };
+        try owner.stream(runFrontendRecover, .{ init, args[1], &accepted });
+    } else if (std.mem.eql(u8, name, "/setup")) {
+        try owner.stream(runFrontendSetup, .{ init, args[1..] });
+    } else if (std.mem.eql(u8, name, "/login") and args.len == 1) {
+        var interrupt = LoginInterrupt.init();
+        defer interrupt.deinit();
+        std.debug.assert(owner.command_cancel == null);
+        owner.command_cancel = struct {
+            fn cancel() void {
+                onLoginInterrupt(.INT);
+            }
+        }.cancel;
+        defer owner.command_cancel = null;
+        var choice_buffer: [16]u8 = undefined;
+        const choice = (try owner.choose(&choice_buffer, prepareFrontendLogin, .{})) orelse return;
+        if (std.mem.eql(u8, choice, "d")) return owner.write("Rui: Login deferred. Inspect saved work with /status or /result.\n");
+        if (!std.mem.eql(u8, choice, "c")) return owner.write("Rui: Choose c or d. No login or preference change.\n");
+        try owner.write("Rui: Starting Codex device login. The printed code is for the provider page only; waiting for its answer.\n");
+        try owner.stream(runFrontendLogin, .{init});
+    } else if (std.mem.eql(u8, name, "/configure")) {
+        var flags: [28][]const u8 = undefined;
+        if (args.len + 3 > flags.len) return error.TooManyArguments;
+        for (args[1..], 0..) |flag, i| if ((std.mem.eql(u8, flag, "--instructions") or std.mem.eql(u8, flag, "--output-schema")) and
+            i + 2 < args.len and std.mem.eql(u8, args[i + 2], "-")) return error.InteractiveFileInputRequired;
+        flags[0..4].* = .{ "--store", store, "--session", session_ref };
+        @memcpy(flags[4..][0 .. args.len - 1], args[1..]);
+        var accepted: ?client.CapturedIdentity = null;
+        defer if (accepted) |original| {
+            owner.accepted_original = original;
+        };
+        try owner.stream(runFrontendConfigure, .{ init, flags[0 .. args.len + 3], &accepted });
+    } else if (std.mem.eql(u8, name, "/approve") and args.len == 1) {
+        var action: ?u64 = null;
+        var choice_buffer: [64]u8 = undefined;
+        const choice = (try owner.choose(&choice_buffer, prepareFrontendApproval, .{&action})) orelse return;
+        if (std.mem.eql(u8, choice, "a") or std.mem.eql(u8, choice, "d")) {
+            var captured = try owner.call(captureFrontendDecision, .{ store, session_ref, action.?, @as(protocol.PermissionDecision, if (choice[0] == 'a') .allow_once else .deny), owner.directory });
+            defer captured.close(init.io);
+            var reply: client.ReplyBuffer = .{};
+            const attempt: anyerror!client.MutationAnswer = blk: {
+                const decision = owner.call(client.Requests.sendCaptured, .{ &captured, @as(?[]const u8, null), &reply }) catch |err| break :blk err;
+                break :blk decision.answer;
+            };
+            const answer = attempt catch |err| {
+                if (err == error.CanonicalStoreFailure) return err;
+                try owner.write("Rui: Decision unconfirmed; /requests lists the original saved handle. Recover only that record, never replacement intent.\n");
+                try frontendField(owner, "Original key: ", captured.saved.key.slice());
+                return err;
+            };
+            switch (answer.result) {
+                .accepted => {},
+                .rejected => |code| try frontendField(owner, "Rui: Decision rejected: ", code.slice()),
+                .conflict => try owner.write("Rui: Decision binding conflict; recover only the original record.\n"),
+            }
+        } else try owner.write("Rui: No decision sent; deliberate fresh a/d/l + Enter required.\n");
+    } else {
+        try owner.write("Rui: Unknown command or arguments; /help lists real paths.\n");
+    }
+}
+
+fn prepareFrontendLogin(owner: *SessionFrontend) !bool {
+    try owner.write("Rui: Supported integration: Codex. Login stores Rui-owned credentials; defer leaves this Session and Host work unchanged.\nProvider: [c] Codex login, [d] defer > ");
+    return true;
+}
+
+fn streamFrontendAttention(caller: client.Requests, current: *const client.Current, scratch: std.Io.File, task: *ClientTask) !void {
+    const Sink = struct {
+        output: Output,
+        pub fn visit(self: @This(), row: client.Current.Attention) !void {
+            const action: u64 = switch (row) {
+                .actionable => |value| value.action.value,
+                .resolved => |value| if (std.mem.eql(u8, value.code.slice(), "indeterminate")) value.action.value else return,
+                else => return,
+            };
+            var number: [20]u8 = undefined;
+            try self.output.field(if (row == .actionable) "Pending Action: " else "Indeterminate Action (may have run): ", try std.fmt.bufPrint(&number, "{d}", .{action}));
+        }
+    };
+    try current.traverse(caller.io, scratch, Sink{ .output = .{ .io = caller.io, .task = task } });
+    if (current.indeterminate_count != 0) try task.feed("Rui: The command may have run; Rui did not replay it. Check its effects before deciding what to do next.\n");
+}
+
+fn runFrontendSetup(_: client.Requests, init: std.process.Init, args: []const []const u8, task: *ClientTask) !void {
+    setupUsing(init, args, .{ .io = init.io, .task = task }) catch |err| {
+        if (err == error.CanonicalStoreFailure or err == error.Cancelled) return err;
+        try task.feed("Rui: Setup failed; active Session unchanged.\n");
+    };
+}
+
+fn runFrontendRequests(_: client.Requests, init: std.process.Init, store: []const u8, session_ref: []const u8, task: *ClientTask) !void {
+    sessionRequestsUsing(init, store, session_ref, .{ .io = init.io, .task = task }) catch |err| {
+        if (err == error.CanonicalStoreFailure or err == error.Cancelled) return err;
+        try task.feed("Rui: Local recovery records unavailable; no work changed.\n");
+    };
+}
+
+fn runFrontendConfigure(caller: client.Requests, init: std.process.Init, args: []const []const u8, accepted: *?client.CapturedIdentity, task: *ClientTask) !void {
+    const output: Output = .{ .io = init.io, .task = task };
+    configureUsing(init, args, true, output, caller, accepted) catch |err| {
+        if (err == error.CanonicalStoreFailure or err == error.Cancelled) return err;
+        if (accepted.* != null) {
+            try output.feed("Rui: Original configuration accepted; receipt failed. Inspect the same saved request, never replace intent.\n");
+            return;
+        }
+        try output.feed("Rui: Configuration not confirmed; /requests lists the original saved handle. Recover only that record, never replacement intent.\n");
+        try output.field("Invocation error: ", @errorName(err));
+    };
+}
+
+fn runFrontendRecover(caller: client.Requests, init: std.process.Init, handle: []const u8, accepted: *?client.CapturedIdentity, task: *ClientTask) !void {
+    const output: Output = .{ .io = init.io, .task = task };
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory = try requestDirectory(init, &directory_buffer);
+    recoverFrontendRecord(caller, directory, handle, accepted, output) catch |err| {
+        if (err == error.CanonicalStoreFailure or err == error.Cancelled) return err;
+        try output.field("Original key: ", handle);
+        try output.field("Rui: Recovery not confirmed: ", @errorName(err));
+    };
+}
+
+fn recoverFrontendRecord(caller: client.Requests, directory: []const u8, handle: []const u8, accepted: *?client.CapturedIdentity, output: Output) !void {
+    var captured = try client.openCaptured(caller.io, directory, handle);
+    defer captured.close(caller.io);
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = try caller.sendCaptured(&captured, null, &reply_buffer);
+    if (reply.isAccepted()) accepted.* = captured.saved;
+    try frontendMutation(output, reply);
+}
+
+fn frontendMutation(output: Output, reply: client.MutationReply) !void {
+    try output.field("Store: ", reply.context.store.slice());
+    try output.field("Session: ", reply.context.session.slice());
+    try output.field("Original key: ", reply.context.key.slice());
+    const answer = reply.answer catch |err| {
+        try output.field("Rui: Outcome unconfirmed: ", @errorName(err));
+        return err;
+    };
+    switch (answer.result) {
+        .accepted => try output.feed("Rui: Original request accepted.\n"),
+        .rejected => |code| try output.field("Rui: Original request rejected: ", code.slice()),
+        .conflict => try output.feed("Rui: Original binding conflict; nothing replaced.\n"),
+    }
+}
+
+fn runFrontendLogin(_: client.Requests, init: std.process.Init, task: *ClientTask) !void {
+    std.debug.assert(login_task == null);
+    login_task = task;
+    defer login_task = null;
+    login(init, &.{"codex"}, true, codex_auth.login) catch |err| {
+        // Network denial and local publication uncertainty are caller data,
+        // not terminal failures. A failed output rendezvous still propagates.
+        try task.feed(switch (err) {
+            error.LoginInterrupted => "Rui: Login interrupted. Check credentials and future defaults before retrying.\n",
+            error.LoginDenied => "Rui: Login denied. No provider preference changed; retry /login if intended.\n",
+            error.LoginExpired => "Rui: Login expired. No provider preference changed; retry /login for a fresh code.\n",
+            else => "Rui: Login failed or credential save unconfirmed. Inspect rui setup before retrying; no Session binding changed.\n",
+        });
+    };
+}
+
+fn prepareFrontendApproval(owner: *SessionFrontend, action: *?u64) !bool {
+    const store = owner.store.slice();
+    const session_ref = owner.session.slice();
+    const current = try owner.call(SessionView.inspectCurrent, .{ store, session_ref, owner.scratch });
+    action.* = current.first_action;
+    const target = action.* orelse {
+        try owner.write("Rui: No currently actionable permission.\n");
+        return false;
+    };
+    var number: [20]u8 = undefined;
+    try frontendField(owner, "Action ", try std.fmt.bufPrint(&number, "{d}", .{target}));
+    try owner.write("Bash arguments: \"");
+    var reply: client.ReplyBuffer = .{};
+    const arguments = try owner.stream(streamFrontendAction, .{ store, session_ref, target, &reply });
+    if (arguments == .command) return error.ActionReadFailed;
+    try owner.write("\"\nAllow once, deny, or later? [a/d/l] ");
+    return true;
+}
+
+fn streamFrontendAction(caller: client.Requests, store: []const u8, session_ref: []const u8, action: u64, reply: *client.ReplyBuffer, task: *@import("ClientTask.zig")) !client.ResultReply {
+    var escaped: SessionView.Escaped(@TypeOf(task)) = .{ .sink = task, .text = .{ .mode = .line } };
+    const arguments = try caller.readActionArguments(store, session_ref, action, &escaped, reply);
+    try escaped.finish();
+    return arguments;
+}
+
+fn captureFrontendDecision(caller: client.Requests, store: []const u8, session_ref: []const u8, action: u64, decision: protocol.PermissionDecision, directory: []const u8) !client.CapturedRecord {
+    return client.capturePermissionDecision(caller.io, .{ .store = store, .session = session_ref, .action_id = action, .decision = decision }, .{ .generated = directory });
+}
+
+const FrontendSink = struct {
+    owner: *SessionFrontend,
+    pub fn feed(self: @This(), bytes: []const u8) !void {
+        try self.owner.write(bytes);
+    }
+};
+
+fn frontendField(owner: *SessionFrontend, label: []const u8, value: []const u8) !void {
+    try owner.write(label);
+    try SessionView.text(FrontendSink{ .owner = owner }, value);
+    try owner.write("\n");
+}
+
+fn frontendResult(owner: *SessionFrontend, saved: *const client.MessageAddress) !void {
+    const observed = switch (try owner.call(client.Requests.observeMessage, .{saved})) {
+        .observation => |value| value,
+        .failure => |failure| return failure.err(),
+    };
+    const state = observed.state();
+    if (state != .completed) {
+        try frontendField(owner, "Rui: Message outcome: ", @tagName(state));
+        return;
+    }
+    try owner.write("\n--- Assistant ---\n");
+    var reply: client.ReplyBuffer = .{};
+    const answer = try owner.stream(streamFrontendResult, .{ saved.store.slice(), saved.key.slice(), &reply });
+    if (answer == .failure) return answer.failure.err();
+    try owner.write("\n");
+}
+
+fn streamFrontendResult(caller: client.Requests, store: []const u8, key: []const u8, reply: *client.ReplyBuffer, task: *@import("ClientTask.zig")) !client.ResultReadReply {
+    var escaped: SessionView.Escaped(@TypeOf(task)) = .{ .sink = task, .text = .{ .mode = .multiline } };
+    const answer = try caller.readResultStream(store, key, &escaped, reply);
+    try escaped.finish();
+    return answer;
+}
+
+// Retained privately until persistent consumers and their failure gates replace
+// every old caller. It is not another public entry or recovery authority.
+fn enterSessionLegacy(init: std.process.Init, args: []const []const u8) !void {
     var store: ?[]const u8 = null;
     var session_ref: ?[]const u8 = null;
     var index: usize = 0;
@@ -1466,10 +1864,14 @@ fn interactiveTokens(input: []u8, tokens: [][]const u8) !usize {
 }
 
 fn sessionRequests(init: std.process.Init, store: []const u8, session_ref: []const u8) !void {
+    return sessionRequestsUsing(init, store, session_ref, .{ .io = init.io });
+}
+
+fn sessionRequestsUsing(init: std.process.Init, store: []const u8, session_ref: []const u8, output: Output) !void {
     const canonical = try platform.resolveClientPaths(init.io, store);
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory = try requestDirectory(init, &path);
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Local recovery handles (not Host work status):\n");
+    try output.feed("Rui: Local recovery handles (not Host work status):\n");
     var dir = std.Io.Dir.cwd().openDir(init.io, directory, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
@@ -1483,7 +1885,7 @@ fn sessionRequests(init: std.process.Init, store: []const u8, session_ref: []con
         const saved = savedRequest(init, handle) catch continue;
         if (!saved.store.eql(canonical.store.slice()) or !saved.session.eql(session_ref)) continue;
         var line: [100]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "  {s} ({s})\n", .{ handle, saved.kind.slice() }));
+        try output.feed(try std.fmt.bufPrint(&line, "  {s} ({s})\n", .{ handle, saved.kind.slice() }));
     }
 }
 
