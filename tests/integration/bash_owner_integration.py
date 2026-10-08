@@ -9,7 +9,7 @@ import threading
 import bash_integration as bash_fixture
 import dispatch_integration as fixture
 from control_integration import raw_request
-from host_process import start_ready_process
+from host_process import canonical_fixture_root, start_ready_process
 
 
 def execution_idle(store, session):
@@ -77,7 +77,7 @@ def stage_action(state, store, name, command):
 
 
 def main():
-    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-bash-owner."))
+    root = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-bash-owner."))
     state = root / "state"
     state.mkdir(mode=0o700)
     store = root / "store"

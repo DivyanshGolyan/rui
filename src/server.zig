@@ -4028,22 +4028,45 @@ test "Conversation stream native delivery decodes once and closes on failed hand
     try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &sockets));
     defer _ = std.c.close(sockets[0]);
     defer _ = std.c.close(sockets[1]);
+    const Peer = struct {
+        fd: std.posix.fd_t,
+        received: [expected.len + 320]u8 = undefined,
+        used: usize = 0,
+        failed: bool = false,
+
+        fn drain(self: *@This()) void {
+            while (self.used < self.received.len) {
+                const count = std.c.read(self.fd, self.received[self.used..].ptr, self.received.len - self.used);
+                if (count < 0) {
+                    if (std.posix.errno(count) == .INTR) continue;
+                    self.failed = true;
+                    return;
+                }
+                if (count == 0) return;
+                self.used += @intCast(count);
+            }
+            self.failed = true; // A full buffer is not evidence of EOF.
+        }
+    };
+    var peer = Peer{ .fd = sockets[1] };
     storage.testing_content_work = .{};
-    try deliverConversationContent(&host, sockets[0], command);
+    {
+        // Drain during delivery: the response exceeds Darwin's socket queue.
+        // The parent owns both FDs and keeps peer storage alive until join,
+        // including when delivery fails before the assertions below.
+        const thread = try std.Thread.spawn(.{}, Peer.drain, .{&peer});
+        defer {
+            _ = std.c.shutdown(sockets[0], std.c.SHUT.WR);
+            thread.join();
+        }
+        try deliverConversationContent(&host, sockets[0], command);
+    }
     try std.testing.expectEqual(@as(u64, expected.len), storage.testing_content_work.decoded.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
     try std.testing.expect(!storage.isFenced());
-    _ = std.c.shutdown(sockets[0], std.c.SHUT.WR);
-    var received: [expected.len + 320]u8 = undefined;
-    var used: usize = 0;
-    while (true) {
-        const count = std.c.read(sockets[1], received[used..].ptr, received.len - used);
-        try std.testing.expect(count >= 0);
-        if (count == 0) break;
-        used += @intCast(count);
-    }
-    const body_start = (std.mem.indexOf(u8, received[0..used], "\r\n\r\n") orelse return error.MissingHeaders) + 4;
-    try std.testing.expectEqualStrings(expected, received[body_start..used]);
+    try std.testing.expect(!peer.failed);
+    const body_start = (std.mem.indexOf(u8, peer.received[0..peer.used], "\r\n\r\n") orelse return error.MissingHeaders) + 4;
+    try std.testing.expectEqualStrings(expected, peer.received[body_start..peer.used]);
     // Failed delivery is not canonical corruption; the one reader still closes
     // without traversing the rest of the content or keeping caller storage.
     storage.testing_content_work = .{};

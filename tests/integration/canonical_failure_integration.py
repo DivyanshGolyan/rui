@@ -17,6 +17,7 @@ import threading
 import time
 
 import dispatch_integration as fixture
+from host_process import canonical_fixture_root
 
 ERROR = {"version": "1", "type": "invocation_error", "code": "canonical_store_failure"}
 ERROR_BYTES = json.dumps(ERROR, separators=(",", ":")).encode()
@@ -576,7 +577,7 @@ def keyed_observation_cases(state, only="keyed"):
 
 
 def main(selected="all"):
-    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-canonical-failure."))
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-canonical-failure."))
     completed = False
     try:
         assert selected in ("all", "producers", "committed", "interactive", "bindings", "nulls", "binding-interactive", "null-interactive", "presentation", "keyed", "keyed-bindings", "keyed-output"), selected
