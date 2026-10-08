@@ -215,6 +215,8 @@ int fsync(int fd) {
 
 def main():
     import canonical_failure_integration
+    import terminal_restoration_integration
+    terminal_restoration_integration.main()
     canonical_failure_integration.main()
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-human-cli."))
     home = state / "home"

@@ -42,7 +42,9 @@ pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool)
     // not return an accepted line if either cleanup step is unconfirmed.
     const result = drive(io, buffer, prompt, allow_paste);
     const disabled = std.Io.File.stdout().writeStreamingAll(io, "\x1b[?2004l");
-    const restored = std.posix.tcsetattr(0, .NOW, original);
+    // Drain output and discard this prompt's queued input before restoring.
+    // NOW also leaves Darwin's PENDIN set when re-entering canonical mode.
+    const restored = std.posix.tcsetattr(0, .FLUSH, original);
     restored catch return error.TerminalRestoreFailed;
     disabled catch return error.TerminalCleanupFailed;
     return try result;
