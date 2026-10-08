@@ -1613,8 +1613,18 @@ def main():
             read_terminal(master, "rui> ")
             before = set(run(home, "requests").splitlines())
             os.write(master, b"observe after Host loss\n")
-            fixture.wait_for(lambda: pathlib.Path(f"{observation_gate}.ready").exists(),
-                "accepted Message observed before Host crash")
+            # Own PTY output credit until the coherent observation gate, then
+            # transfer reading back to the prompt helper. Keep the same budget.
+            deadline = time.monotonic() + 8
+            transcript = bytearray()
+            while True:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, "timed out waiting for accepted Message observed before Host crash"
+                if pathlib.Path(f"{observation_gate}.ready").exists():
+                    break
+                if select.select([master], [], [], min(remaining, 0.025))[0]:
+                    transcript.extend(os.read(master, 65536))
+                    assert len(transcript) < 1024 * 1024, "unexpected unbounded terminal output"
             after = set(run(home, "requests").splitlines())
             assert len(after - before) == 1, (before, after)
             saved_key = (after - before).pop()
@@ -1622,7 +1632,9 @@ def main():
                 "--key", saved_key)["observation"]["status"] == "accepted"
             fixture.crash_host(host, state, "accepted-before-observation-loss")
             pathlib.Path(f"{observation_gate}.release").touch()
-            lost = read_terminal(master, "rui> ")
+            lost = (transcript.decode(errors="replace").replace("\r\n", "\n")
+                .replace("\x1b[?2004h", "").replace("\x1b[?2004l", ""))
+            lost += read_terminal(master, "rui> ")
             assert "Message accepted, but later observation or presentation failed" in lost, lost
             assert f"rui result {saved_key}" in lost, lost
             assert "admission may be uncertain" not in lost and "do not resubmit it" in lost, lost
