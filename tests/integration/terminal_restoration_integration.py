@@ -296,6 +296,10 @@ def main(selected=None):
                     os.write(master, b"\n")
                     assert select.select([slave], [], [], 5)[0], "canonical input did not resume"
                     assert os.read(slave, 4096) == b"\n", "restoration retained old queued typeahead"
+                    if separate:
+                        # The stdout reader cannot consume this terminal's echo.
+                        assert select.select([master], [], [], 0)[0], "canonical echo did not reach input terminal"
+                        assert os.read(master, 4096) == b"\r\n", "unexpected split input-terminal echo"
                     after = set(records.glob("*.json"))
                     assert len(after - before) == 1
                     saved = json.loads((after - before).pop().read_text())
