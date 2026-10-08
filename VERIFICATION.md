@@ -272,6 +272,8 @@ Leave an idle or continuously productive writer outside the original group. Snap
 
 Inject a failure that leaves child/group retirement or safe resource reclamation unconfirmed. Require no fabricated completion or early custody release; the owner fences admission and safely retries cleanup at low frequency. A signaling failure alone does not fence admission when independent evidence establishes retirement and reclamation. This does not establish successful shutdown.
 
+Publish fixture PID identities by writing an adjacent temporary file and renaming only after the write succeeds; pathname existence must mean completed publication before strict parsing. Hold real Bash immediately after redirection but before `printf` writes: the final name must remain absent, then publish the exact child PID after release; retain an ungated completed-publication control. Direct-to-final publication must fail the early-visibility assertion. Keep the original eight-second identity waits and all retirement, recovery, Store-lease, connection-drain and cleanup assertions; this fixture proof does not establish a production lifecycle failure.
+
 At the production `serviceAt`/termination boundary, inject a capture observation failure at supplied time `t`. Assert grace is inactive before `t + 100 ms`, activates at that instant, and a repeated termination request cannot move either grace or cleanup deadline. Keep pipes closed while reap/group confirmation remains unresolved and assert the execution is still ineligible for release. The deterministic path must use only supplied time; inspect the native path to require a fresh observation after potentially blocking pipe work.
 
 #### Cross-scenario lifecycle matrix
