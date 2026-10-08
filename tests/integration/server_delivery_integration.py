@@ -17,6 +17,7 @@ import time
 import control_integration as control
 import dispatch_integration as model
 from host_process import stop_process
+from host_process import canonical_fixture_root
 
 
 def exchange(sock, store, route, kind, **fields):
@@ -59,7 +60,7 @@ def resources(pid):
 
 def main():
     with tempfile.TemporaryDirectory(prefix="rui-reply-") as root:
-        state = pathlib.Path(root)
+        state = canonical_fixture_root(root)
         store = state / "store"
         store.mkdir(mode=0o700)
         text = "é中\n" + "asymmetric-0123456789\n" * 12_000
@@ -98,6 +99,9 @@ def main():
             full = resources(host.pid)
             head, _ = exchange(sock, store, "/v1/observe-command", "observe_command", key="reply-message")
             assert b" 503 " in head, head
+            discovery_head, discovery_body = exchange(sock, store, "/v1/host-info", "host_info")
+            assert discovery_head.startswith(b"HTTP/1.1 200 "), discovery_head
+            assert json.loads(discovery_body)["store"] == str(store), discovery_body
             # A committed idle stop fits protected capacity while all ten
             # ordinary writers remain held; it cannot revoke the saved answer.
             assert control.stop_session(state, store, "reply-stop", "direct/reply")["answer"]["status"] == "accepted"
@@ -110,8 +114,9 @@ def main():
 
             assert control.wait_for(reclaimed, "disconnected place release") == expected
             assert int(control.inspect_execution(store, "direct/reply")["scratch_used_bytes"]) > 0
+            held.append(hold_reply(sock, store, "/v1/read-result", "read_result", key="reply-message"))
             print(json.dumps({"phase": "held", "baseline": baseline, "held": full}), flush=True)
-            # No reader rescue: nine unread peers remain open for the real
+            # No reader rescue: ten unread peers remain open for the real
             # production inactivity interval. Shutdown must drain them itself.
             started = time.monotonic()
             host_head, host_body = exchange(sock, store, "/v1/host-info", "host_info")

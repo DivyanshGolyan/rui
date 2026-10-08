@@ -36,7 +36,7 @@ def check_classification_oracle(run_actor):
         began_ns = time.monotonic_ns()
         # A buffered release from an earlier exchange cannot permit the actor.
         publish(dict(pending, rui_test_phase="ordinary_classification_released", subject_kind="route",
-                     subject="host_info", sequence="2", at_ns=str(began_ns - 1)))
+                     subject="observe", sequence="2", at_ns=str(began_ns - 1)))
         diagnostics.wait("ordinary_classification_released", timeout=max(0, deadline - time.monotonic()))
         original_wait = diagnostics.condition.wait
 
@@ -85,7 +85,7 @@ def check_classification_oracle(run_actor):
                 assert waited and not errors, ("oracle never entered condition wait", errors)
                 released.set()
                 publish(dict(pending, rui_test_phase="ordinary_classification_released", subject_kind="route",
-                             subject="host_info", sequence="3", at_ns=str(time.monotonic_ns())))
+                             subject="observe", sequence="3", at_ns=str(time.monotonic_ns())))
             worker.join(max(0, deadline - time.monotonic()))
             assert not worker.is_alive(), "oracle did not finish within original stop budget"
             assert not errors, errors

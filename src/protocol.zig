@@ -510,10 +510,14 @@ pub const ParseOptions = struct {
     fault_content_seal: bool = false,
     cleanup_failed: *bool,
     scratch_budget: ?ScratchBudget = null,
+    expected_kind: ?Kind = null,
+    deadline: ?i128 = null,
 };
 
 pub fn parseRequest(options: ParseOptions) !Request {
     var source = SocketBody.init(options.fd, options.content_length);
+    source.io = options.io;
+    source.deadline = options.deadline;
     var parser = Parser{ .source = &source, .options = options };
     var request = try parser.parse();
     errdefer request.removeTemporaryContent(options.io) catch {
@@ -523,9 +527,37 @@ pub fn parseRequest(options: ParseOptions) !Request {
     return request;
 }
 
+// Discovery uses one absolute budget. Ordinary ingress keeps its existing
+// refill inactivity wait; progress cannot extend an absolute exchange.
+pub fn pollExchange(io: std.Io, fd: std.posix.fd_t, events: i16, deadline: ?i128) !void {
+    const end = deadline orelse {
+        var descriptors = [_]std.posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
+        if (try std.posix.poll(&descriptors, 60_000) == 0) return error.TransferInactive;
+        return;
+    };
+    while (true) {
+        const remaining = end - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+        if (remaining <= 0) return error.ExchangeDeadlineExceeded;
+        const milliseconds: c_int = @intCast(@min(60_000, @divTrunc(remaining + std.time.ns_per_ms - 1, std.time.ns_per_ms)));
+        var descriptors = [_]std.c.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
+        // Recompute after EINTR rather than retrying the original timeout.
+        const result = std.c.poll(&descriptors, descriptors.len, milliseconds);
+        switch (std.posix.errno(result)) {
+            .SUCCESS => if (result > 0) {
+                if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= end) return error.ExchangeDeadlineExceeded;
+                return;
+            },
+            .INTR => {},
+            else => return error.PollFailed,
+        }
+    }
+}
+
 const SocketBody = struct {
     fd: std.posix.fd_t,
     remaining: u64,
+    io: std.Io = undefined,
+    deadline: ?i128 = null,
     buffer: [content_window_bytes]u8 = undefined,
     start: usize = 0,
     end: usize = 0,
@@ -543,12 +575,7 @@ const SocketBody = struct {
 
     fn refill(self: *SocketBody) !void {
         if (self.remaining == 0) return error.UnexpectedEndOfBody;
-        var poll_fd = [_]std.posix.pollfd{.{
-            .fd = self.fd,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        }};
-        if (try std.posix.poll(&poll_fd, 60_000) == 0) return error.TransferInactive;
+        try pollExchange(self.io, self.fd, std.posix.POLL.IN, self.deadline);
         const limit: usize = @intCast(@min(self.remaining, self.buffer.len));
         const count = try std.posix.read(self.fd, self.buffer[0..limit]);
         if (count == 0) return error.UnexpectedEndOfBody;
@@ -614,6 +641,9 @@ const Parser = struct {
         else
             return error.UnknownCommand;
 
+        if (self.options.expected_kind) |expected| {
+            if (kind != expected) return error.RouteKindMismatch;
+        }
         try self.expectByte(',');
         try self.expectKey("store");
         var store: Bounded(max_store_bytes) = .{};
