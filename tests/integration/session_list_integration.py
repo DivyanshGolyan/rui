@@ -235,3 +235,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    from session_list_facts_integration import main as facts_main
+    facts_main()

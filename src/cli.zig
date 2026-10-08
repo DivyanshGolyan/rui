@@ -1939,128 +1939,41 @@ fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
     return client.inspectCaptured(init.io, try requestDirectory(init, &directory_buffer), handle);
 }
 
-const SessionPage = struct {
-    references: [protocol.session_list_page_size]protocol.Bounded(protocol.max_session_bytes) = [_]protocol.Bounded(protocol.max_session_bytes){.{}} ** protocol.session_list_page_size,
-    count: usize = 0,
-    next: ?client.SessionListCursor = null,
-};
-
-fn parseSessionPage(init: std.process.Init, file: std.Io.File, show: bool) !SessionPage {
-    var input_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var file_reader = file.reader(init.io, &input_buffer);
-    var reader = std.json.Reader.init(std.heap.c_allocator, &file_reader.interface);
-    defer reader.deinit();
-    if ((try reader.next()) != .object_begin) return error.InvalidSessionPage;
-    var page: SessionPage = .{};
-    var valid_type = false;
-    var found_sessions = false;
-    while (true) {
-        const field = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 64);
-        defer freeToken(field);
-        if (field == .object_end) break;
-        const name = try tokenString(field);
-        if (std.mem.eql(u8, name, "type")) {
-            const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 32);
-            defer freeToken(value);
-            valid_type = std.mem.eql(u8, try tokenString(value), "session_list");
-        } else if (std.mem.eql(u8, name, "sessions")) {
-            if ((try reader.next()) != .array_begin) return error.InvalidSessionPage;
-            found_sessions = true;
-            while (true) {
-                const item = try reader.next();
-                if (item == .array_end) break;
-                if (item != .object_begin or page.count == page.references.len) return error.InvalidSessionPage;
-                var reference: protocol.Bounded(protocol.max_session_bytes) = .{};
-                var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
-                var provider_name: protocol.Bounded(32) = .{};
-                var model: protocol.Bounded(protocol.max_model_bytes) = .{};
-                var permission: protocol.Bounded(16) = .{};
-                var bash = false;
-                var edit = false;
-                while (true) {
-                    const item_field = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 64);
-                    defer freeToken(item_field);
-                    if (item_field == .object_end) break;
-                    const item_name = try tokenString(item_field);
-                    if (std.mem.eql(u8, item_name, "reference") or std.mem.eql(u8, item_name, "workspace") or
-                        std.mem.eql(u8, item_name, "provider") or std.mem.eql(u8, item_name, "model") or
-                        std.mem.eql(u8, item_name, "permission_mode"))
-                    {
-                        const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, protocol.max_workspace_bytes);
-                        defer freeToken(value);
-                        const text = try tokenString(value);
-                        if (std.mem.eql(u8, item_name, "reference")) try reference.set(text) else if (std.mem.eql(u8, item_name, "workspace")) try workspace.set(text) else if (std.mem.eql(u8, item_name, "provider")) try provider_name.set(text) else if (std.mem.eql(u8, item_name, "model")) try model.set(text) else try permission.set(text);
-                    } else if (std.mem.eql(u8, item_name, "tools")) {
-                        if ((try reader.next()) != .array_begin) return error.InvalidSessionPage;
-                        while (true) {
-                            const tool = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 16);
-                            defer freeToken(tool);
-                            if (tool == .array_end) break;
-                            const name_text = try tokenString(tool);
-                            if (std.mem.eql(u8, name_text, "bash")) bash = true else if (std.mem.eql(u8, name_text, "edit")) edit = true else return error.InvalidSessionPage;
-                        }
-                    } else try reader.skipValue();
-                }
-                if (reference.len == 0 or workspace.len == 0 or provider_name.len == 0 or model.len == 0 or permission.len == 0) return error.InvalidSessionPage;
-                page.references[page.count] = reference;
-                page.count += 1;
-                if (show) {
-                    try writeSafeField(init.io, "Session: ", reference.slice());
-                    try writeSafeField(init.io, "  Workspace: ", workspace.slice());
-                    try writeSafeField(init.io, "  Provider: ", provider_name.slice());
-                    try writeSafeField(init.io, "  Model: ", model.slice());
-                    try std.Io.File.stdout().writeStreamingAll(init.io, if (bash and edit) "  Tools: Bash, Edit\n" else if (bash) "  Tools: Bash\n" else if (edit) "  Tools: Edit\n" else "  Tools: none\n");
-                    try writeSafeField(init.io, "  Permission: ", permission.slice());
-                    if (permission.eql("bypass")) try std.Io.File.stdout().writeStreamingAll(init.io, "  Rui: Bash runs without approval.\n");
-                }
-            }
-        } else if (std.mem.eql(u8, name, "next")) {
-            const next = try reader.next();
-            if (next == .null) continue;
-            if (next != .object_begin) return error.InvalidSessionPage;
-            var cursor: client.SessionListCursor = .{};
-            while (true) {
-                const cursor_field = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 64);
-                defer freeToken(cursor_field);
-                if (cursor_field == .object_end) break;
-                const cursor_name = try tokenString(cursor_field);
-                if (std.mem.eql(u8, cursor_name, "after") or std.mem.eql(u8, cursor_name, "ceiling")) {
-                    const value = try reader.nextAllocMax(std.heap.c_allocator, .alloc_if_needed, 20);
-                    defer freeToken(value);
-                    const number = try std.fmt.parseInt(u64, try tokenString(value), 10);
-                    if (std.mem.eql(u8, cursor_name, "after")) cursor.after = number else cursor.ceiling = number;
-                } else try reader.skipValue();
-            }
-            if (cursor.after == 0 or cursor.ceiling < cursor.after) return error.InvalidSessionPage;
-            page.next = cursor;
-        } else try reader.skipValue();
-    }
-    if (!valid_type or !found_sessions or (try reader.next()) != .end_of_document or
-        (page.next != null and page.count == 0)) return error.InvalidSessionPage;
-    return page;
-}
-
-fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, cursor: client.SessionListCursor, presentation: Presentation) !SessionPage {
+fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, cursor: client.SessionListCursor, presentation: Presentation) !struct { count: usize, next: ?client.SessionListCursor } {
     const file = try renderScratch(init);
     defer file.close(init.io);
     var buffer: client.ReplyBuffer = .{};
     const reply = try client.listSessions(init.io, store, workspace, cursor, file, &buffer);
-    if (reply != .report) return error.SessionListUnavailable;
-    const page = try parseSessionPage(init, file, false);
+    const decoded = try client.SessionListReply.decode(init.io, file, workspace, cursor, reply);
+    const page = switch (decoded) {
+        .page => |*page| page,
+        .failure => |failure| {
+            var bytes: [256]u8 = undefined;
+            var writer = std.Io.File.stderr().writerStreaming(init.io, &bytes);
+            try std.json.Stringify.value(.{ .status = failure.status, .type = failure.diagnostic.type.slice(), .code = failure.diagnostic.code.slice() }, .{}, &writer.interface);
+            try writer.interface.writeAll("\n");
+            try writer.interface.flush();
+            return failure.err();
+        },
+    };
     if (presentation == .json) {
         var bytes: [protocol.content_window_bytes]u8 = undefined;
-        var offset: u64 = 0;
-        while (offset < reply.report.bytes) {
-            const count = try file.readPositionalAll(init.io, bytes[0..@intCast(@min(reply.report.bytes - offset, bytes.len))], offset);
-            if (count == 0) return error.TruncatedSessionPage;
-            try std.Io.File.stdout().writeStreamingAll(init.io, bytes[0..count]);
-            offset += count;
-        }
-        try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+        var writer = std.Io.File.stdout().writerStreaming(init.io, &bytes);
+        try page.writeJson(&writer.interface);
+        try writer.interface.writeAll("\n");
+        try writer.interface.flush();
     } else if (presentation == .human) {
-        _ = try parseSessionPage(init, file, true);
+        for (page.rows[0..page.count]) |*row| {
+            try writeSafeField(init.io, "Session: ", row.reference.slice());
+            try writeSafeField(init.io, "  Workspace: ", row.workspace.slice());
+            try writeSafeField(init.io, "  Provider: ", @tagName(row.provider));
+            try writeSafeField(init.io, "  Model: ", row.model.slice());
+            try std.Io.File.stdout().writeStreamingAll(init.io, if (row.tools.bash and row.tools.edit) "  Tools: Bash, Edit\n" else if (row.tools.bash) "  Tools: Bash\n" else if (row.tools.edit) "  Tools: Edit\n" else "  Tools: none\n");
+            try writeSafeField(init.io, "  Permission: ", @tagName(row.permission_mode));
+            if (row.permission_mode == .bypass) try std.Io.File.stdout().writeStreamingAll(init.io, "  Rui: Bash runs without approval.\n");
+        }
     }
-    return page;
+    return .{ .count = page.count, .next = page.next };
 }
 
 fn sessions(init: std.process.Init, args: []const []const u8) !void {
