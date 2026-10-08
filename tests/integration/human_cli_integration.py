@@ -18,6 +18,7 @@ import termios
 import threading
 import time
 
+from host_process import canonical_fixture_root
 import dispatch_integration as fixture
 import codex_integration as codex_fixture
 
@@ -216,7 +217,7 @@ int fsync(int fd) {
 def main():
     import canonical_failure_integration
     canonical_failure_integration.main()
-    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-human-cli."))
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-human-cli."))
     home = state / "home"
     home.mkdir()
     store = state / "store"
