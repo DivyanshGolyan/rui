@@ -309,6 +309,13 @@ pub const PublicConversationPage = struct {
     more: bool = false,
 };
 
+pub const ProposalPage = struct {
+    end: u64,
+    items: [protocol.proposal_page_items]protocol.ProposalMetadata = undefined,
+    count: usize = 0,
+    more: bool = false,
+};
+
 pub const MessageObservation = struct {
     content: ContentReference,
     queue: ?AcceptedMessageQueue = null,
@@ -2663,6 +2670,122 @@ pub const Store = struct {
         const content_id = c.sqlite3_column_int64(statement, 0);
         if (content_id <= 0) return error.CorruptStore;
         return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id) };
+    }
+
+    pub fn proposalPage(self: *Store, request: protocol.ProposalPage) !ProposalPage {
+        try request.validate();
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        return self.proposalPageLocked(request) catch |err| switch (err) {
+            error.SessionNotFound, error.InvalidCursor => err,
+            else => self.fenceReadFailure(err),
+        };
+    }
+
+    fn proposalPageLocked(self: *Store, request: protocol.ProposalPage) !ProposalPage {
+        const session = (try self.readSession(request.session.slice())) orelse return error.SessionNotFound;
+        const end = request.end orelse session.next_position - 1;
+        if (end >= session.next_position) return error.InvalidCursor;
+        if (request.after != 0) {
+            _ = self.proposalLocked(request.session.slice(), request.after) catch |err| switch (err) {
+                error.ContentNotFound => return error.InvalidCursor,
+                else => return err,
+            };
+        }
+        var page: ProposalPage = .{ .end = end };
+        // The immutable accepted item owns discovery, including rejected calls.
+        // Do not filter on live Actions, permissions or Turn state.
+        const statement = try prepare(self.database, "SELECT session_position FROM model_output_item " ++
+            "WHERE session_ref=?1 AND session_position>?2 AND session_position<=?3 AND item_kind=3 " ++
+            "ORDER BY session_position LIMIT 17");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, request.session.slice());
+        try bindU64(statement, 2, request.after);
+        try bindU64(statement, 3, end);
+        while (true) {
+            const result = c.sqlite3_step(statement);
+            if (result == c.SQLITE_DONE) break;
+            if (result != c.SQLITE_ROW) return error.ProposalReadFailed;
+            if (page.count == page.items.len) {
+                page.more = true;
+                break;
+            }
+            const position = try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore;
+            page.items[page.count] = (try self.proposalLocked(request.session.slice(), @intCast(position))).metadata;
+            page.count += 1;
+        }
+        return page;
+    }
+
+    const ProposalIdentity = struct { metadata: protocol.ProposalMetadata, content_ids: [4]i64 };
+
+    // The page, continuation cursor and byte route share one provenance check.
+    // LEFT JOIN keeps missing/contradictory owners visible as corruption.
+    fn proposalLocked(self: *Store, session: []const u8, position: u64) !ProposalIdentity {
+        const statement = try prepare(self.database, "SELECT item.operation_id,op.turn_id,call.call_ordinal,action.action_id,call.rejection_code," ++
+            "call.item_id_content_id,call.name_content_id,call.call_id_content_id,call.arguments_content_id," ++
+            "CASE WHEN op.session_ref=item.session_ref AND t.session_ref=item.session_ref AND " ++
+            "op.resolution_code='tool_calls' AND op.attempt_ordinal=item.attempt_ordinal AND " ++
+            "source.content_id IS NOT NULL AND source.private=1 AND " ++
+            "((call.rejection_code IS NOT NULL AND action.action_id IS NULL AND call.acceptance_position IS NOT NULL AND " ++
+            "rejection.content_id IS NOT NULL AND rejection.private=0) OR " ++
+            "(call.rejection_code IS NULL AND action.action_id IS NOT NULL AND action.session_ref=item.session_ref)) " ++
+            "THEN 1 ELSE 0 END FROM model_output_item item " ++
+            "LEFT JOIN model_operation op ON op.operation_id=item.operation_id LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
+            "LEFT JOIN content source ON source.content_id=item.content_id " ++
+            "LEFT JOIN model_tool_call call ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal " ++
+            "LEFT JOIN content rejection ON rejection.content_id=call.rejection_content_id " ++
+            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+            "WHERE item.session_ref=?1 AND item.session_position=?2 AND item.item_kind=3");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session);
+        try bindU64(statement, 2, position);
+        switch (c.sqlite3_step(statement)) {
+            c.SQLITE_ROW => {},
+            c.SQLITE_DONE => return error.ContentNotFound,
+            else => return error.ProposalReadFailed,
+        }
+        if (c.sqlite3_column_int(statement, 9) != 1) return error.CorruptStore;
+        const ordinal = c.sqlite3_column_int64(statement, 2);
+        if (ordinal < 0 or c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) return error.CorruptStore;
+        var result: ProposalIdentity = .{ .metadata = .{
+            .position = position,
+            .operation = @intCast(try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore),
+            .turn = @intCast(try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore),
+            .call_ordinal = @intCast(ordinal),
+            .action = if (try readNullablePositiveI64(statement, 3)) |action| @intCast(action) else null,
+            .rejection = null,
+            .fields = undefined,
+        }, .content_ids = undefined };
+        if (c.sqlite3_column_type(statement, 4) != c.SQLITE_NULL) {
+            var code: protocol.Bounded(32) = .{};
+            try readText(statement, 4, &code);
+            result.metadata.rejection = std.meta.stringToEnum(protocol.ProposalRejection, code.slice()) orelse return error.CorruptStore;
+        }
+        for (&result.content_ids, &result.metadata.fields, 0..) |*id, *field, index| {
+            id.* = try readNullablePositiveI64(statement, @intCast(5 + index)) orelse return error.CorruptStore;
+            const metadata = try self.readPublicContentMetadata(id.*);
+            field.* = .{ .length = metadata.length, .digest = metadata.digest };
+        }
+        return result;
+    }
+
+    pub fn openProposalField(self: *Store, request: protocol.ReadProposalField) !ContentReader {
+        if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        const identity = self.proposalLocked(request.session.slice(), request.position) catch |err| switch (err) {
+            error.ContentNotFound => return err,
+            else => return self.fenceReadFailure(err),
+        };
+        const index = @intFromEnum(request.field);
+        const field = identity.metadata.fields[index];
+        const raw = self.contentIsRaw(identity.content_ids[index], field.length) catch |err| return self.fenceReadFailure(err);
+        return .{ .store = self, .content_id = identity.content_ids[index], .reference = .{ .length = field.length, .digest = field.digest }, .representation = if (raw) .raw else .{ .projection = .{} } };
     }
 
     pub fn captureSessionReport(
@@ -12830,4 +12953,28 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(outcomes));
     try std.testing.expectEqual(@as(i64, 6101), c.sqlite3_column_int64(outcomes, 0));
     try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(outcomes, 1));
+}
+
+test "proposal callable cursor domain preserves healthy Store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSessionAsk(&storage, "proposal-config", "direct/proposal", true);
+    var request: protocol.ProposalPage = .{};
+    try request.session.set("direct/proposal");
+    request.end = std.math.maxInt(u64);
+    try std.testing.expectError(error.InvalidCursor, storage.proposalPage(request));
+    request.end = null;
+    request.after = 1;
+    try std.testing.expectError(error.InvalidCursor, storage.proposalPage(request));
+    request.end = 0;
+    request.after = std.math.maxInt(u64);
+    try std.testing.expectError(error.InvalidCursor, storage.proposalPage(request));
+    request.after = 0;
+    const page = try storage.proposalPage(request);
+    try std.testing.expectEqual(@as(u64, 0), page.end);
+    try std.testing.expectEqual(@as(usize, 0), page.count);
+    try std.testing.expect(!page.more and !storage.isFenced());
+    try std.testing.expectError(error.ContentNotFound, storage.openProposalField(.{ .position = std.math.maxInt(u64) }));
 }
