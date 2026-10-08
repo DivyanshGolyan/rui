@@ -202,6 +202,30 @@ def main():
                     assert process.wait(timeout=5) == 1, "canonical corruption did not fence Host"
                     stop_process(process)
                     process = None
+            # A valid public replacement is still the wrong accepted item ID.
+            # Exercise both routes independently before asserting, so the old
+            # path demonstrates successful fabrication on each native read.
+            substituted = []
+            for mode, first_arg, second_arg in (("page", first["end"], 0),
+                    ("field", items[1]["position"], "item_id"),
+                    ("page", first["end"], items[1]["position"])):
+                with sqlite3.connect(store / "rui.sqlite3") as db:
+                    saved.backup(db)
+                    db.execute("UPDATE model_tool_call SET item_id_content_id=(SELECT item_id_content_id "
+                        "FROM model_tool_call WHERE call_ordinal=2 AND operation_id=(SELECT min(operation_id) FROM model_tool_call)) "
+                        "WHERE call_ordinal=1 AND operation_id=(SELECT min(operation_id) FROM model_tool_call)")
+                process, fields = start_host(store, provider)
+                result = subprocess.run([str(CALLER), mode, str(store), SESSION, str(first_arg), str(second_arg)],
+                    capture_output=True, timeout=10)
+                substituted.append((mode, second_arg, result.returncode, len(result.stdout)))
+                if result.returncode != 0:
+                    assert result.stdout == b"", "contradictory item ID delivered a prefix"
+                    assert process.wait(timeout=5) == 1, "item ID contradiction did not fence Host"
+                elif mode == "field":
+                    assert result.stdout == b"proposal-item-2", "replacement fixture changed"
+                stop_process(process)
+                process = None
+            assert all(code != 0 for _, _, code, _ in substituted), ("substituted item ID accepted", substituted)
             with sqlite3.connect(store / "rui.sqlite3") as db:
                 saved.backup(db)
             saved.close()

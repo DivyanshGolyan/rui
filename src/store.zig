@@ -10,7 +10,7 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 17;
+pub const schema_version: u32 = 18;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 const complete_tool_results_sql =
@@ -2728,7 +2728,7 @@ pub const Store = struct {
             "call.item_id_content_id,call.name_content_id,call.call_id_content_id,call.arguments_content_id," ++
             "CASE WHEN op.session_ref=item.session_ref AND t.session_ref=item.session_ref AND " ++
             "op.resolution_code='tool_calls' AND op.attempt_ordinal=item.attempt_ordinal AND " ++
-            "source.content_id IS NOT NULL AND source.private=1 AND " ++
+            "source.content_id IS NOT NULL AND source.private=1 AND item_id.digest=item.item_id_digest AND " ++
             "((call.rejection_code IS NOT NULL AND action.action_id IS NULL AND call.acceptance_position IS NOT NULL AND " ++
             "rejection.content_id IS NOT NULL AND rejection.private=0) OR " ++
             "(call.rejection_code IS NULL AND action.action_id IS NOT NULL AND action.session_ref=item.session_ref)) " ++
@@ -2736,6 +2736,7 @@ pub const Store = struct {
             "LEFT JOIN model_operation op ON op.operation_id=item.operation_id LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
             "LEFT JOIN content source ON source.content_id=item.content_id " ++
             "LEFT JOIN model_tool_call call ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal " ++
+            "LEFT JOIN content item_id ON item_id.content_id=call.item_id_content_id " ++
             "LEFT JOIN content rejection ON rejection.content_id=call.rejection_content_id " ++
             "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
             "WHERE item.session_ref=?1 AND item.session_position=?2 AND item.item_kind=3");
