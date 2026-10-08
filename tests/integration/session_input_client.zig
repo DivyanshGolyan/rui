@@ -38,9 +38,11 @@ const Capturer = struct {
     }
 };
 
-fn seal(input: *Input, bytes: []const u8) !void {
+fn seal(input: *Input, bytes: []const u8) !Input.Ticket {
     for (bytes) |byte| _ = input.feed(byte);
-    try std.testing.expectEqual(.message, std.meta.activeTag(input.feed('\r')));
+    const event = input.feed('\r');
+    try std.testing.expectEqual(.message, std.meta.activeTag(event));
+    return event.message;
 }
 
 fn expectDraft(view: Input.View, text: []const u8, cursor: usize) !void {
@@ -56,16 +58,16 @@ fn sampleBoundary() !void {
 fn captureFailure(io: std.Io, store: []const u8, record: []const u8) !void {
     var input: Input = undefined;
     input.init();
-    try seal(&input, "original\x1b[D");
+    const ticket = try seal(&input, "original\x1b[D");
     const capturer: Capturer = .{ .io = io, .input = &input, .store = store, .session = "opening/original", .record = record, .key = "capture-failed", .later = "next\x1b[D" };
-    try std.testing.expectError(error.InsecureRecordDirectory, input.capture(capturer));
+    try std.testing.expectError(error.InsecureRecordDirectory, input.capture(ticket, capturer));
     try expectDraft(input.retained().?, "original", 7);
     try expectDraft(input.composition(), "next", 3);
     try std.testing.expectEqual(.capture_failed, input.submissionState().?);
-    try std.testing.expectError(error.SubmissionUnresolved, input.capture(capturer));
+    try std.testing.expectError(error.SubmissionUnresolved, input.capture(ticket, capturer));
     // Borrow was released even on real I/O failure; this is a custody failure,
     // not a still-live callback or evidence that publication never happened.
-    try std.testing.expectError(error.SubmissionNotCaptured, input.resolve(.accepted));
+    try std.testing.expectError(error.SubmissionNotCaptured, input.resolve(ticket, .accepted));
 }
 
 fn publicationFailure(io: std.Io, store: []const u8, record: []const u8) !void {
@@ -78,7 +80,7 @@ fn publicationFailure(io: std.Io, store: []const u8, record: []const u8) !void {
     vtable.fileLength = Failure.length; // Actual post-publication production path.
     var input: Input = undefined;
     input.init();
-    try seal(&input, "published\x1b[D");
+    const ticket = try seal(&input, "published\x1b[D");
     var capturer: Capturer = .{
         .io = .{ .userdata = io.userdata, .vtable = &vtable },
         .input = &input,
@@ -88,7 +90,7 @@ fn publicationFailure(io: std.Io, store: []const u8, record: []const u8) !void {
         .key = "01234567-89ab-4cde-8fab-0123456789ab",
         .later = "following\x1b[D",
     };
-    try std.testing.expectError(error.AccessDenied, input.capture(capturer));
+    try std.testing.expectError(error.AccessDenied, input.capture(ticket, capturer));
     try std.testing.expectEqual(.capture_failed, input.submissionState().?);
     try expectDraft(input.retained().?, "published", 8);
     try expectDraft(input.composition(), "following", 8);
@@ -96,13 +98,13 @@ fn publicationFailure(io: std.Io, store: []const u8, record: []const u8) !void {
     var reply_buffer: client.ReplyBuffer = .{};
     const observed = try client.observeCommand(io, store, capturer.key, &reply_buffer);
     try std.testing.expectEqual(.absent, observed.observation.status);
-    try std.testing.expectError(error.SubmissionUnresolved, input.capture(capturer));
-    var captured = try input.recover(capturer);
+    try std.testing.expectError(error.SubmissionUnresolved, input.capture(ticket, capturer));
+    var captured = try input.recover(ticket, capturer);
     defer captured.close(io);
     try expectDraft(input.retained().?, "published", 8);
     const reply = try client.sendCaptured(io, &captured, null, &reply_buffer);
     try std.testing.expect(reply.isAccepted() and !(try reply.answer).replayed);
-    try input.resolve(.accepted);
+    try input.resolve(ticket, .accepted);
     try expectDraft(input.composition(), "following", 8);
 }
 
@@ -127,9 +129,9 @@ pub fn main(init: std.process.Init) !void {
         .key = "original",
         .later = "next!\x1b[D",
     };
-    try seal(&input, "aéZ\x1b[D");
+    const original = try seal(&input, "aéZ\x1b[D");
     {
-        var captured = try input.capture(capturer);
+        var captured = try input.capture(original, capturer);
         defer captured.close(init.io);
         try std.testing.expectEqual(.not_sent, input.submissionState().?);
         // Fail a real announcement after publication; it cannot reopen capture.
@@ -140,13 +142,13 @@ pub fn main(init: std.process.Init) !void {
             failed = true;
         };
         try std.testing.expect(failed);
-        try std.testing.expectError(error.SubmissionUnresolved, input.capture(capturer));
+        try std.testing.expectError(error.SubmissionUnresolved, input.capture(original, capturer));
         try std.testing.expectError(error.TruncatedResponse, client.sendCaptured(init.io, &captured, "after-commit", &reply_buffer));
-        try input.resolve(.unconfirmed);
+        try input.resolve(original, .unconfirmed);
         var stop: client.Cancellation = .{};
         stop.requestStop();
         try std.testing.expectError(error.Cancelled, (client.Requests{ .io = init.io, .cancellation = &stop }).sendCaptured(&captured, null, &reply_buffer));
-        try input.resolve(.not_sent);
+        try input.resolve(original, .not_sent);
         try std.testing.expectEqual(.unconfirmed, input.submissionState().?);
         try std.testing.expectEqual(.busy, std.meta.activeTag(input.feed('\r')));
         capturer.store = args[2]; // Future selection, not recovery authority.
@@ -155,19 +157,22 @@ pub fn main(init: std.process.Init) !void {
         try std.testing.expectEqualStrings("opening/original", captured.identity().session.slice());
         const reply = try client.sendCaptured(init.io, &captured, null, &reply_buffer);
         try std.testing.expect(reply.isAccepted() and (try reply.answer).replayed);
-        try input.resolve(.accepted);
+        try input.resolve(original, .accepted);
         try expectDraft(input.composition(), "next!", 4);
     }
     capturer.record = try std.fmt.bufPrint(&path_buffer, "{s}/next.json", .{args[3]});
     capturer.key = "next";
     capturer.later = "";
-    try std.testing.expectEqual(.message, std.meta.activeTag(input.feed('\r')));
+    const next = try seal(&input, "");
     {
-        var captured = try input.capture(capturer);
+        var captured = try input.capture(next, capturer);
         defer captured.close(init.io);
+        // A duplicate result for original cannot release the newly captured next.
+        try std.testing.expectError(error.SubmissionChanged, input.resolve(original, .accepted));
+        try expectDraft(input.retained().?, "next!", 4);
         const reply = try client.sendCaptured(init.io, &captured, null, &reply_buffer);
         try std.testing.expect(reply.isAccepted() and !(try reply.answer).replayed);
-        try input.resolve(.accepted);
+        try input.resolve(next, .accepted);
     }
     capturer.store = args[1];
     capturer.session = "missing";
@@ -175,19 +180,19 @@ pub fn main(init: std.process.Init) !void {
         capturer.record = try std.fmt.bufPrint(&path_buffer, "{s}/{s}.json", .{ args[3], key });
         capturer.key = key;
         capturer.later = if (std.mem.eql(u8, key, "retain")) "new\x1b[D" else "";
-        if (std.mem.eql(u8, key, "restore")) try seal(&input, "badé!\x1b[D") else try std.testing.expectEqual(.message, std.meta.activeTag(input.feed('\r')));
-        var captured = try input.capture(capturer);
+        const ticket = try seal(&input, if (std.mem.eql(u8, key, "restore")) "badé!\x1b[D" else "");
+        var captured = try input.capture(ticket, capturer);
         defer captured.close(init.io);
         const reply = try client.sendCaptured(init.io, &captured, null, &reply_buffer);
         try std.testing.expectEqual(.rejected, std.meta.activeTag((try reply.answer).result));
-        try input.resolve(.rejected);
+        try input.resolve(ticket, .rejected);
         if (std.mem.eql(u8, key, "restore")) {
             try expectDraft(input.composition(), "badé!", 5);
             try std.testing.expect(input.submissionState() == null);
         } else {
             try expectDraft(input.retained().?, "badé!", 5);
             try expectDraft(input.composition(), "new", 2);
-            try input.discardRejected();
+            try input.discardRejected(ticket);
             try expectDraft(input.composition(), "new", 2);
         }
     }
@@ -195,17 +200,17 @@ pub fn main(init: std.process.Init) !void {
     for ("\x1b[200~") |byte| _ = input.feed(byte);
     for (0..65_532) |_| _ = input.feed('x');
     for ("\nµZ\x1b[201~") |byte| _ = input.feed(byte);
-    try std.testing.expectEqual(.message, std.meta.activeTag(input.feed('\r')));
+    const complete = try seal(&input, "");
     capturer.record = try std.fmt.bufPrint(&path_buffer, "{s}/complete.json", .{args[3]});
     capturer.session = "opening/original";
     capturer.key = "complete";
     capturer.later = "kept\x1b[D";
     {
-        var captured = try input.capture(capturer);
+        var captured = try input.capture(complete, capturer);
         defer captured.close(init.io);
         const reply = try client.sendCaptured(init.io, &captured, null, &reply_buffer);
         try std.testing.expect(reply.isAccepted() and !(try reply.answer).replayed);
-        try input.resolve(.accepted);
+        try input.resolve(complete, .accepted);
         try expectDraft(input.composition(), "kept", 3);
     }
     var output: [256]u8 = undefined;
