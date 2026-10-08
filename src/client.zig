@@ -519,6 +519,7 @@ pub const SessionListPage = struct {
         if (body.remaining != .nothing) return error.InvalidSessionPage;
         if (!wire.version.eql("1") or !wire.type.eql("session_list")) return error.InvalidSessionPage;
         var result: SessionListPage = .{ .rows = wire.sessions.rows, .count = wire.sessions.count };
+        if (cursor.after != 0 and cursor.after == cursor.ceiling and result.count != 0) return error.InvalidSessionPage;
         for (result.rows[0..result.count], 0..) |*row, index| {
             if (workspace) |scope| if (!row.workspace.eql(scope)) return error.InvalidSessionPage;
             for (result.rows[0..index]) |*previous| if (previous.reference.eql(row.reference.slice())) return error.InvalidSessionPage;
@@ -3400,6 +3401,27 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
         try file.writePositionalAll(io, wire, 0);
         try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, wire.len, null, .{}));
     }
+}
+
+test "Session list terminal cursor accepts only empty rows without rejecting initial or continuing pages" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "terminal", .{ .read = true });
+    defer file.close(io);
+    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"}],\"next\":null}";
+    try file.writePositionalAll(io, wire, 0);
+    inline for (.{ SessionListCursor{}, SessionListCursor{ .after = 7, .ceiling = 8 } }) |cursor| {
+        const reply = try SessionListReply.decode(io, file, null, cursor, .{ .report = .{ .bytes = wire.len } });
+        try std.testing.expectEqual(@as(usize, 1), reply.page.count);
+        try std.testing.expectEqual(@as(?SessionListCursor, null), reply.page.next);
+    }
+    try std.testing.expectError(error.InvalidSessionPage, SessionListReply.decode(io, file, null, .{ .after = 7, .ceiling = 7 }, .{ .report = .{ .bytes = wire.len } }));
+    const empty = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}";
+    try file.writePositionalAll(io, empty, 0);
+    const reply = try SessionListReply.decode(io, file, null, .{ .after = 7, .ceiling = 7 }, .{ .report = .{ .bytes = empty.len } });
+    try std.testing.expectEqual(@as(usize, 0), reply.page.count);
+    try std.testing.expectEqual(@as(?SessionListCursor, null), reply.page.next);
 }
 
 test "Session list facts attain eight maximum escaped rows and bind the continuation cohort" {
