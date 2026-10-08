@@ -17,6 +17,16 @@ pub const Values = struct {
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
 };
 
+pub const Change = union(enum) { keep, set: []const u8 };
+
+/// Borrows set strings through update. Keep omits an override; the existing
+/// provider-selection rules still apply when another binding field is set.
+pub const Edit = struct {
+    store: Change = .keep,
+    provider: Change = .keep,
+    model: union(enum) { keep, set: []const u8, clear } = .keep,
+};
+
 pub fn directoryPath(home: []const u8, buffer: []u8) ![]const u8 {
     try validateHome(home);
     return std.fmt.bufPrint(buffer, "{s}/.config/rui", .{home}) catch error.PreferencePathTooLong;
@@ -89,30 +99,60 @@ pub fn load(home: []const u8) !Values {
 
 /// Serializes read/modify/write for competing setup callers. A failed write or
 /// rename leaves the previous complete file; post-rename sync failure is uncertain.
-pub fn update(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model: ?[]const u8, readiness: provider_selection.Readiness) !Values {
-    return (try save(home, store, provider, model, readiness, false)).?;
+pub fn update(home: []const u8, edit: Edit, readiness: provider_selection.Readiness) !Values {
+    return (try save(home, edit, readiness, false)).?;
 }
 
 /// Under the same preference lock as setup, keep an existing provider choice.
 /// Null means no change was published; credentials are owned separately.
 pub fn fillProviderAfterLogin(home: []const u8) !bool {
-    return (try save(home, null, "codex", "gpt-6-luna", .configured, true)) != null;
+    return (try save(home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-6-luna" } }, .configured, true)) != null;
 }
 
-fn save(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model: ?[]const u8, readiness: provider_selection.Readiness, only_if_unset: bool) !?Values {
+/// Apply only to the locked snapshot. Clear removes the saved model without
+/// resolving or persisting a replacement; ordinary set/keep retains setup policy.
+fn apply(saved: Values, edit: Edit, readiness: provider_selection.Readiness) !Values {
+    var values = saved;
+    if (edit.store == .set) {
+        const paths = try platform.resolveClientPaths(io, edit.store.set);
+        values.store.set(paths.store.slice()) catch return error.InvalidPreferenceStore;
+    }
+    if (edit.model == .clear) {
+        if (edit.provider == .set) values.provider.set(edit.provider.set) catch unreachable;
+        values.model = .{};
+    } else if (edit.provider == .set or edit.model == .set) {
+        const supported = provider_selection.codex(readiness);
+        const choice = provider_selection.resolve(&.{supported}, if (edit.provider == .set) edit.provider.set else null, if (edit.model == .set) edit.model.set else null, if (saved.provider.len != 0) saved.provider.slice() else null, if (saved.model.len != 0) saved.model.slice() else null) catch |err| switch (err) {
+            error.UnsupportedSelectionProvider => return error.UnsupportedPreferenceProvider,
+            error.UnsupportedSelectionModel => return error.UnsupportedPreferenceModel,
+        };
+        switch (choice) {
+            .chooser => return error.PreferenceProviderRequired,
+            .selected => |selected| {
+                values.provider.set(selected.provider) catch unreachable;
+                values.model.set(selected.model) catch unreachable;
+            },
+        }
+    }
+    return values;
+}
+
+fn save(home: []const u8, edit: Edit, readiness: provider_selection.Readiness, only_if_unset: bool) !?Values {
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = try directoryPath(home, &path);
-    if (provider) |value| {
-        if (!std.mem.eql(u8, value, "codex")) return error.UnsupportedPreferenceProvider;
+    if (edit.provider == .set) {
+        if (!std.mem.eql(u8, edit.provider.set, "codex")) return error.UnsupportedPreferenceProvider;
     }
-    if (model) |value| {
+    if (edit.model == .set) {
+        const value = edit.model.set;
         if (value.len == 0 or value.len > protocol.max_model_bytes) return error.InvalidPreferenceModel;
         for (value) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidPreferenceModel;
         const supported = provider_selection.codex(.missing);
         _ = provider_selection.resolve(&.{supported}, "codex", value, null, null) catch
             return error.UnsupportedPreferenceModel;
     }
-    if (store) |value| {
+    if (edit.store == .set) {
+        const value = edit.store.set;
         if (!std.fs.path.isAbsolute(value)) return error.InvalidPreferenceStore;
         for (value) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidPreferenceStore;
         _ = try platform.resolveClientPaths(io, value);
@@ -153,25 +193,7 @@ fn save(home: []const u8, store: ?[]const u8, provider: ?[]const u8, model: ?[]c
         try validate(&saved);
         if (saved.provider.len != 0) return null;
     }
-    var values = saved;
-    if (store) |value| {
-        const paths = try platform.resolveClientPaths(io, value);
-        values.store.set(paths.store.slice()) catch return error.InvalidPreferenceStore;
-    }
-    if (provider != null or model != null) {
-        const supported = provider_selection.codex(readiness);
-        const choice = provider_selection.resolve(&.{supported}, provider, model, if (saved.provider.len != 0) saved.provider.slice() else null, if (saved.model.len != 0) saved.model.slice() else null) catch |err| switch (err) {
-            error.UnsupportedSelectionProvider => return error.UnsupportedPreferenceProvider,
-            error.UnsupportedSelectionModel => return error.UnsupportedPreferenceModel,
-        };
-        switch (choice) {
-            .chooser => return error.PreferenceProviderRequired,
-            .selected => |selected| {
-                values.provider.set(selected.provider) catch unreachable;
-                values.model.set(selected.model) catch unreachable;
-            },
-        }
-    }
+    const values = try apply(saved, edit, readiness);
     try validate(&values);
     // A provider/model-only edit must not publish defaults whose fallback
     // Store cannot be selected by the very next setup or Session caller.
@@ -261,4 +283,79 @@ test "login fills only a missing provider under the preference lock" {
     try std.testing.expect(!try fillProviderAfterLogin(home));
     const saved = try load(home);
     try std.testing.expect(saved.provider.eql("legacy") and saved.model.eql("legacy-model"));
+}
+
+test "preference edits distinguish model keep set and clear without publishing recommendations" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(io, &home_buffer);
+    const home = home_buffer[0..len];
+    const pinned = try update(home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-6-luna" } }, .missing);
+    try std.testing.expect(pinned.provider.eql("codex") and pinned.model.eql("gpt-6-luna"));
+    const kept = try update(home, .{}, .credential_error);
+    try std.testing.expect(kept.provider.eql("codex") and kept.model.eql("gpt-6-luna"));
+    const cleared = try update(home, .{ .model = .clear }, .configured);
+    try std.testing.expect(cleared.provider.eql("codex") and cleared.model.len == 0);
+    try std.testing.expect((try load(home)).model.len == 0);
+    try std.testing.expect(!try fillProviderAfterLogin(home));
+    try std.testing.expect((try load(home)).model.len == 0);
+    const reset = try update(home, .{ .model = .{ .set = "gpt-6-luna" } }, .refresh_required);
+    try std.testing.expect(reset.model.eql("gpt-6-luna"));
+    try std.testing.expectError(error.InvalidPreferenceModel, update(home, .{ .model = .{ .set = "" } }, .configured));
+    try std.testing.expect((try load(home)).model.eql("gpt-6-luna"));
+}
+
+test "preference edits clear only model while ordinary edits retain selection policy" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(io, &home_buffer);
+    const home = home_buffer[0..len];
+    _ = try fillProviderAfterLogin(home);
+    var config = try tmp.dir.openDir(io, ".config/rui", .{});
+    defer config.close(io);
+    const cases = .{
+        .{ "", "", Edit{ .model = .clear }, "", "" },
+        .{ "legacy", "retired-model", Edit{ .model = .clear }, "legacy", "" },
+        .{ "legacy", "retired-model", Edit{ .provider = .{ .set = "codex" }, .model = .clear }, "codex", "" },
+        .{ "legacy", "retired-model", Edit{ .provider = .{ .set = "codex" } }, "codex", "gpt-6-luna" },
+        .{ "", "", Edit{ .model = .{ .set = "gpt-6-luna" } }, "codex", "gpt-6-luna" },
+        .{ "legacy", "retired-model", Edit{}, "legacy", "retired-model" },
+    };
+    inline for (cases) |case| {
+        const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
+        try file.writeStreamingAll(io, "version=1\nstore=\nprovider=" ++ case[0] ++ "\nmodel=" ++ case[1] ++ "\n");
+        file.close(io);
+        const result = try update(home, case[2], .configured);
+        try std.testing.expectEqualStrings(case[3], result.provider.slice());
+        try std.testing.expectEqualStrings(case[4], result.model.slice());
+        const reloaded = try load(home);
+        try std.testing.expectEqualStrings(case[3], reloaded.provider.slice());
+        try std.testing.expectEqualStrings(case[4], reloaded.model.slice());
+    }
+}
+
+test "preference edits clear cannot bypass deleted Store validation but replacement repairs it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(io, &home_buffer);
+    const home = home_buffer[0..len];
+    try tmp.dir.createDir(io, "old", .fromMode(0o700));
+    try tmp.dir.createDir(io, "replacement", .fromMode(0o700));
+    var old_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var replacement_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const old = try std.fmt.bufPrint(&old_buffer, "{s}/old", .{home});
+    const replacement = try std.fmt.bufPrint(&replacement_buffer, "{s}/replacement", .{home});
+    const before = try update(home, .{ .store = .{ .set = old }, .provider = .{ .set = "codex" } }, .missing);
+    try tmp.dir.deleteDir(io, "old");
+    try std.testing.expectError(error.FileNotFound, update(home, .{ .model = .clear }, .configured));
+    var config = try tmp.dir.openDir(io, ".config/rui", .{});
+    defer config.close(io);
+    const unchanged = try read(config);
+    try std.testing.expect(unchanged.store.eql(before.store.slice()) and unchanged.model.eql("gpt-6-luna"));
+    const repaired = try update(home, .{ .store = .{ .set = replacement }, .model = .clear }, .missing);
+    try std.testing.expect(repaired.store.eql(replacement) and repaired.provider.eql("codex") and repaired.model.len == 0);
+    try std.testing.expect((try load(home)).store.eql(replacement));
 }

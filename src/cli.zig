@@ -108,13 +108,21 @@ fn setup(init: std.process.Init, args: []const []const u8) !void {
         std.debug.print("rui: setup needs an absolute HOME; no preferences saved.\n", .{});
         return error.HomeUnavailable;
     };
-    var store: ?[]const u8 = null;
-    var selected_provider: ?[]const u8 = null;
-    var model: ?[]const u8 = null;
+    var edit: preferences.Edit = .{};
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const flag = args[index];
-        if (std.mem.eql(u8, flag, "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, flag, "--provider")) selected_provider = try takeValue(args, &index) else if (std.mem.eql(u8, flag, "--model")) model = try takeValue(args, &index) else return usage();
+        if (std.mem.eql(u8, flag, "--store")) {
+            edit.store = .{ .set = try takeValue(args, &index) };
+        } else if (std.mem.eql(u8, flag, "--provider")) {
+            edit.provider = .{ .set = try takeValue(args, &index) };
+        } else if (std.mem.eql(u8, flag, "--model")) {
+            if (edit.model == .clear) return error.ConflictingPreferenceModelEdit;
+            edit.model = .{ .set = try takeValue(args, &index) };
+        } else if (std.mem.eql(u8, flag, "--clear-model")) {
+            if (edit.model == .set) return error.ConflictingPreferenceModelEdit;
+            edit.model = .clear;
+        } else return usage();
     }
     var credential_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
@@ -126,8 +134,8 @@ fn setup(init: std.process.Init, args: []const []const u8) !void {
             .refresh_required => .refresh_required,
         } else |_| .credential_error;
     };
-    const changed = store != null or selected_provider != null or model != null;
-    const values = (if (changed) preferences.update(home, store, selected_provider, model, readiness) else preferences.load(home)) catch |err| {
+    const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep;
+    const values = (if (changed) preferences.update(home, edit, readiness) else preferences.load(home)) catch |err| {
         if (err == error.PreferenceDirectorySyncFailed) {
             std.debug.print("rui: setup save durability unconfirmed; inspect HOME/.config/rui/preferences before another update. No Session changed.\n", .{});
         } else if (err == error.UnsupportedPreferenceProvider) {
@@ -1272,7 +1280,7 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         if (text.len == 0) continue;
         if (std.mem.eql(u8, text, "/exit")) break;
         if (std.mem.eql(u8, text, "/help")) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: /help  /status  /wait  /requests  /result KEY  /setup [--store PATH] [--provider codex] [--model gpt-6-luna]  /login  /configure [settings]  /exit\n/help shows these commands; /status inspects this Session; /wait follows selected work; /requests lists local recovery handles; /result KEY reads a saved answer. /setup reads local credential/Host status and saves defaults for future Sessions only; /login chooses Codex login or defers; /configure changes this Session; /exit detaches without stopping work.\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: /help  /status  /wait  /requests  /result KEY  /setup [--store PATH] [--provider codex] [--model gpt-6-luna | --clear-model]  /login  /configure [settings]  /exit\n/help shows these commands; /status inspects this Session; /wait follows selected work; /requests lists local recovery handles; /result KEY reads a saved answer. /setup reads local credential/Host status and saves defaults for future Sessions only; /login chooses Codex login or defers; /configure changes this Session; /exit detaches without stopping work.\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
             continue;
         }
         if (std.mem.eql(u8, text, "/login")) {
@@ -1285,12 +1293,10 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         const attention: ?Attention = if (std.mem.eql(u8, text, "/setup") or std.mem.startsWith(u8, text, "/setup ")) blk: {
             var setup_args: [6][]const u8 = undefined;
             const count = interactiveTokens(input_buffer["/setup".len..text.len], &setup_args) catch {
-                try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /setup [--store PATH] [--provider codex] [--model gpt-6-luna]; no changes saved.\n");
+                try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /setup [--store PATH] [--provider codex] [--model gpt-6-luna | --clear-model]; no changes saved.\n");
                 break :blk null;
             };
-            if (count % 2 != 0) {
-                try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /setup [--store PATH] [--provider codex] [--model gpt-6-luna]; no changes saved.\n");
-            } else setup(init, setup_args[0..count]) catch |err| std.debug.print("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+            setup(init, setup_args[0..count]) catch |err| std.debug.print("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
             break :blk null;
         } else if (std.mem.eql(u8, text, "/status")) blk: {
             showSessionStatus(init, destination, reference, false) catch |err| {
@@ -2444,8 +2450,9 @@ fn usage() error{InvalidArguments} {
         \\    Attach or detach a capacity-8 managed Host; existing Host settings win.
         \\  rui host stop [--store PATH] [--instance HEX]
         \\    Stop the observed Host, affecting all Store work; retry a lost reply only with the same instance.
-        \\  rui setup [--store PATH] [--provider codex] [--model gpt-6-luna]
+        \\  rui setup [--store PATH] [--provider codex] [--model gpt-6-luna | --clear-model]
         \\    Inspect prospective selection, local credential and Host status; save defaults only with flags.
+        \\    --clear-model removes only the saved model; prospective recommendation is unchanged.
         \\    Selected Store must exist and pass canonical/private checks.
         \\  rui sessions [--store PATH] [--all] [--json]
         \\    List configured Sessions here or in all Workspaces; --json emits one bounded page per line.

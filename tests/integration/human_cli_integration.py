@@ -39,6 +39,33 @@ def admit(home, *args):
     return admission
 
 
+def preference_edits(home, store):
+    """Exact saved intent, independent of prospective recommendation output."""
+    run(home, "setup", "--store", store, "--provider", "codex", "--model", "gpt-6-luna")
+    saved = home / ".config/rui/preferences"
+    pinned = f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
+    cleared = f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=\n"
+    assert saved.read_text() == pinned
+    run(home, "setup", "--store", store)
+    assert saved.read_text() == pinned, "omitted model lost its selection"
+    assert "Model: not selected" in run(home, "setup", "--clear-model")
+    assert saved.read_text() == cleared, "clear persisted a recommendation or retained the model"
+    run(home, "setup")
+    assert saved.read_text() == cleared, "inspection persisted a recommendation"
+    for flags in (("--clear-model", "--model", "gpt-6-luna"),
+                  ("--model", "gpt-6-luna", "--clear-model"), ("--model", "")):
+        run(home, "setup", *flags, success=False)
+        assert saved.read_text() == cleared, "rejected edit changed preferences"
+    saved.write_text(pinned.replace("provider=codex", "provider=retired").replace("gpt-6-luna", "old-model"))
+    run(home, "setup", "--clear-model")
+    assert saved.read_text() == cleared.replace("provider=codex", "provider=retired")
+    assert "saved provider is unsupported; no fallback" in run(home, "setup")
+    run(home, "setup", "--provider", "codex", "--clear-model")
+    assert saved.read_text() == cleared
+    run(home, "setup", "--model", "gpt-6-luna")
+    assert saved.read_text() == pinned
+
+
 def read_terminal(master, marker, timeout=15):
     output = b""
     deadline = time.monotonic() + timeout
@@ -300,6 +327,7 @@ def main():
             "--provider", "codex", "--model", "gpt-6-luna")
         saved = preferences_home / ".config/rui/preferences"
         assert saved.read_text() == f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
+        preference_edits(preferences_home, store)
         original_preferences = saved.read_text()
         saved.write_text(original_preferences.replace("model=gpt-6-luna", "model=family=variant"))
         assert saved.read_text().endswith("provider=codex\nmodel=family=variant\n")
@@ -889,6 +917,17 @@ def main():
             assert not credential.exists()
             assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model gpt-6-luna")
             assert "active Session unchanged" in terminal_step(master, "/setup --model other-model")
+            interactive_saved = preferences_home / ".config/rui/preferences"
+            assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --clear-model")
+            assert interactive_saved.read_text().endswith("provider=codex\nmodel=\n")
+            cleared_preferences = interactive_saved.read_bytes()
+            for command, error in (("/setup --clear-model --model gpt-6-luna", "ConflictingPreferenceModelEdit"),
+                                   ("/setup --model gpt-6-luna --clear-model", "ConflictingPreferenceModelEdit"),
+                                   ('/setup --model ""', "InvalidPreferenceModel")):
+                assert error in terminal_step(master, command)
+                assert interactive_saved.read_bytes() == cleared_preferences
+            assert "Model: model-a" in terminal_step(master, "/status")
+            assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model gpt-6-luna")
             spaced_store = state / "spaced store"
             spaced_store.mkdir(mode=0o700)
             assert "Saved defaults for future Sessions" in terminal_step(master, f'/setup --store "{spaced_store}"')
