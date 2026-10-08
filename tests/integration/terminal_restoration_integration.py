@@ -201,7 +201,7 @@ def main(selected=None):
         source, library = state / "probe.c", state / "probe.so"
         source.write_text(PROBE)
         subprocess.run(["cc", "-dynamiclib" if sys.platform == "darwin" else "-shared",
-            "-fPIC", str(source), "-o", str(library)], check=True)
+            "-fPIC", str(source), *(["-ldl"] if sys.platform == "linux" else []), "-o", str(library)], check=True)
         check_forwarding(state, library)
         if selected == "forwarding":
             completed = True
