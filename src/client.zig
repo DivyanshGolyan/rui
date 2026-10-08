@@ -279,7 +279,8 @@ fn validHostUnavailable(body: []const u8) bool {
     if (!std.mem.eql(u8, reply.type, "busy")) return false;
     return std.mem.eql(u8, reply.code, "connection_capacity_exhausted") or
         std.mem.eql(u8, reply.code, "classification_capacity_exhausted") or
-        std.mem.eql(u8, reply.code, "ordinary_capacity_exhausted");
+        std.mem.eql(u8, reply.code, "ordinary_capacity_exhausted") or
+        std.mem.eql(u8, reply.code, "discovery_capacity_exhausted");
 }
 
 fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
@@ -345,6 +346,7 @@ test "Host unavailable replies require a known complete error" {
         "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"connection_capacity_exhausted\"}",
         "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"classification_capacity_exhausted\"}",
         "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\"}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}",
         "{\"version\":\"1\",\"type\":\"host_unavailable\",\"code\":\"dispatch_fenced\"}",
     }) |body| try std.testing.expect(validHostUnavailable(body));
     for ([_][]const u8{
@@ -353,6 +355,12 @@ test "Host unavailable replies require a known complete error" {
         "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"dispatch_fenced\"}",
         "{\"version\":\"1\",\"type\":\"host_unavailable\",\"code\":\"unknown\"}",
         "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\",\"code\":\"ordinary_capacity_exhausted\"}",
+        "{\"version\":\"2\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}",
+        "{\"version\":\"1\",\"type\":\"host_unavailable\",\"code\":\"discovery_capacity_exhausted\"}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted_other\"}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"nested\":{\"code\":\"discovery_capacity_exhausted\"}}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\",\"code\":\"discovery_capacity_exhausted\"}",
+        "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"",
     }) |body| try std.testing.expect(!validHostUnavailable(body));
 }
 
