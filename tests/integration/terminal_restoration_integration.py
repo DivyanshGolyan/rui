@@ -16,6 +16,7 @@ import time
 import canonical_failure_integration as canonical
 import dispatch_integration as fixture
 import human_cli_integration as human
+from host_process import canonical_fixture_root
 
 
 PROBE = r"""
@@ -191,7 +192,7 @@ def check_forwarding(state, library):
 
 
 def main(selected=None):
-    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-terminal-restoration.")).resolve()
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-terminal-restoration."))
     home = state / "home"
     home.mkdir()
     store = state / "store"
