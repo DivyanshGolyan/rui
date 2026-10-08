@@ -55,6 +55,16 @@ def kind(row):
     return next(iter(row["value"]))
 
 
+def idle_resources(pid, path):
+    # Response completion is not connection cleanup; wait for owned peer FDs.
+    peers = {f"socket:[{r[6]}]" for line in pathlib.Path("/proc/net/unix").read_text().splitlines()[1:]
+        if len(r := line.split()) == 8 and r[7] == path and int(r[3], 16) == 0}
+    try:
+        if any(os.readlink(fd) in peers for fd in pathlib.Path(f"/proc/{pid}/fd").iterdir()): return None
+    except FileNotFoundError: return None  # An observed descriptor just closed.
+    return host_resources(pid)
+
+
 def mock_reply(path, store, mode, body, advertised=None, ok=False):
     path = pathlib.Path(path)
     path.unlink(missing_ok=True)
@@ -116,6 +126,11 @@ def main():
             empty_end, empty = history(store)
             assert empty == []
             baseline = host_resources(process.pid)
+            if baseline is not None:
+                with socket.socket(socket.AF_UNIX) as held:
+                    held.connect(fields["socket"])
+                    wait_for(lambda: idle_resources(process.pid, fields["socket"]) is None, "held peer excluded from idle census")
+                baseline = wait_for(lambda: idle_resources(process.pid, fields["socket"]), "idle reader baseline")
             message(state, store, "first", SESSION, TEXT)
             pending_end, pending = wait_for(lambda: (h := history(store)) and (h if len([r for r in h[1] if kind(r) == "call"]) == 18 else None), "complete pending proposals")
             assert [kind(r) for r in pending[:2]] == ["admission", "user"]
