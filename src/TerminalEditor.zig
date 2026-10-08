@@ -41,8 +41,17 @@ pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool)
     // Always attempt both effects, even when rendering or input fails. Do
     // not return an accepted line if either cleanup step is unconfirmed.
     const result = drive(io, buffer, prompt, allow_paste);
-    const disabled = std.Io.File.stdout().writeStreamingAll(io, "\x1b[?2004l");
-    // Drain output and discard this prompt's queued input before restoring.
+    const disabled: anyerror!void = blk: {
+        std.Io.File.stdout().writeStreamingAll(io, "\x1b[?2004l") catch |err| break :blk err;
+        // Input and output may be different terminals. Confirm transmission
+        // on stdout before releasing this prompt's accepted input.
+        while (true) switch (std.posix.errno(termios.tcdrain(1))) {
+            .SUCCESS => break :blk,
+            .INTR => {},
+            else => break :blk error.TerminalCleanupFailed,
+        };
+    };
+    // Discard this prompt's queued input before restoring exact attributes.
     // NOW also leaves Darwin's PENDIN set when re-entering canonical mode.
     const restored = std.posix.tcsetattr(0, .FLUSH, original);
     restored catch return error.TerminalRestoreFailed;

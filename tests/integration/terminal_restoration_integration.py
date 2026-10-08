@@ -27,6 +27,8 @@ PROBE = r"""
 #include <termios.h>
 #include <unistd.h>
 
+static int disabled = 0;
+
 static void record(const char *text) {
     int fd = open(getenv("RUI_TERMINAL_PROBE"), O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (fd < 0 || write(fd, text, strlen(text)) != (ssize_t)strlen(text)) _exit(90);
@@ -45,6 +47,7 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
             record("output-stopped\n");
         }
         record("disable\n");
+        disabled = 1;
         if (!strcmp(fault, "disable") || !strcmp(fault, "both")) {
             errno = EIO;
             return -1;
@@ -53,12 +56,36 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
     return real_writev(fd, iov, count);
 }
 
+static int probe_tcdrain(int fd) {
+    int (*real_tcdrain)(int) = dlsym(RTLD_NEXT, "tcdrain");
+    if (fd == 1 && disabled) {
+        record("drain\n");
+        const char *fault = getenv("RUI_TERMINAL_FAULT");
+        static int interrupted = 0;
+        if (!strcmp(fault, "drain") || !strcmp(fault, "drain-both") || !strcmp(fault, "drain-incomplete")) {
+            errno = ENOTTY;
+            return -1;
+        }
+        if (!strcmp(fault, "drain-eintr") && !interrupted) {
+            interrupted = 1;
+            errno = EINTR;
+            return -1;
+        }
+        if (!strcmp(fault, "drain-held")) {
+            record("drain-held\n");
+            while (access(getenv("RUI_TERMINAL_DRAIN_RELEASE"), F_OK)) usleep(1000);
+        }
+        disabled = 0;
+    }
+    return real_tcdrain(fd);
+}
+
 static int probe_tcsetattr(int fd, int action, const struct termios *attrs) {
     int (*real_tcsetattr)(int, int, const struct termios *) = dlsym(RTLD_NEXT, "tcsetattr");
     if (fd == 0 && (attrs->c_lflag & ICANON)) {
         record(action == TCSAFLUSH ? "restore-flush\n" : "restore-other\n");
         const char *fault = getenv("RUI_TERMINAL_FAULT");
-        if (!strcmp(fault, "restore") || !strcmp(fault, "both")) {
+        if (!strcmp(fault, "restore") || !strcmp(fault, "both") || !strcmp(fault, "drain-both")) {
             errno = ENOTTY;
             return -1;
         }
@@ -72,15 +99,17 @@ static int probe_tcsetattr(int fd, int action, const struct termios *attrs) {
     pair_##original __attribute__((section("__DATA,__interpose"))) = \
         { (const void *)&replacement, (const void *)&original };
 INTERPOSE(probe_writev, writev)
+INTERPOSE(probe_tcdrain, tcdrain)
 INTERPOSE(probe_tcsetattr, tcsetattr)
 #else
 ssize_t writev(int fd, const struct iovec *iov, int count) { return probe_writev(fd, iov, count); }
+int tcdrain(int fd) { return probe_tcdrain(fd); }
 int tcsetattr(int fd, int action, const struct termios *attrs) { return probe_tcsetattr(fd, action, attrs); }
 #endif
 """
 
 
-def main():
+def main(selected=None):
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-terminal-restoration.")).resolve()
     home = state / "home"
     home.mkdir()
@@ -95,19 +124,26 @@ def main():
         source.write_text(PROBE)
         subprocess.run(["cc", "-dynamiclib" if sys.platform == "darwin" else "-shared",
             "-fPIC", str(source), "-o", str(library)], check=True)
-        for case in ("queued", "exit", "interrupt", "incomplete", "disable", "restore", "both",
-                "disable-incomplete", "restore-incomplete", "both-incomplete", "output"):
+        cases = ("queued", "exit", "interrupt", "incomplete", "disable", "restore", "both",
+            "disable-incomplete", "restore-incomplete", "both-incomplete", "output",
+            "drain", "drain-both", "drain-incomplete", "drain-eintr", "drain-held")
+        assert selected is None or selected in cases, selected
+        for case in cases if selected is None else (selected,):
             master, slave = pty.openpty()
             original = termios.tcgetattr(slave)
+            separate = case.startswith("drain")
+            output_master, output_slave = pty.openpty() if separate else (master, slave)
             log = state / f"probe-{case}.log"
+            drain_release = state / f"drain-{case}.release"
             records = home / ".config/rui/requests"
             before = set(records.glob("*.json"))
             env = {**os.environ, "HOME": str(home)}
-            fault = case.split("-", 1)[0]
-            injected = fault in ("disable", "restore", "both", "output")
+            fault = case if separate else case.split("-", 1)[0]
+            injected = separate or fault in ("disable", "restore", "both", "output")
             if injected:
                 env.update({"DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
-                    "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": fault})
+                    "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": fault,
+                    "RUI_TERMINAL_DRAIN_RELEASE": str(drain_release)})
             received, release = threading.Event(), threading.Event()
 
             def hold_reply(response):
@@ -120,14 +156,23 @@ def main():
             try:
                 caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
                     "--session", "terminal/restoration"], env=env,
-                    stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-                human.read_terminal(master, "rui> ")
+                    stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
+                human.read_terminal(output_master, "rui> ")
                 proxy = canonical.ReplyProxy(host, "/v1/configure", hold_reply)
                 payload = {"exit": b"/exit\n", "interrupt": b"\x03", "incomplete": b"\xc3"}.get(
                     case, b"/configure --permission-mode ask\nSTALE")
                 if case.endswith("-incomplete"):
                     payload = b"\xc3"
                 os.write(master, payload)
+                if separate:
+                    fixture.wait_for(lambda: received.is_set() or (log.exists() and "drain" in log.read_text()),
+                        "stdout drain or premature handoff")
+                    assert log.exists() and "drain" in log.read_text(), "accepted input bypassed stdout drain"
+                if case == "drain-held":
+                    fixture.wait_for(lambda: "drain-held" in log.read_text(), "injected stdout drain wait")
+                    assert caller.poll() is None and not received.is_set() and not proxy.exchanges
+                    assert set(records.glob("*.json")) == before and not termios.tcgetattr(slave)[3] & termios.ICANON
+                    drain_release.touch()
                 if case == "output":
                     fixture.wait_for(lambda: log.exists() and "output-stopped" in log.read_text(),
                         "cleanup output flow stopped")
@@ -135,7 +180,7 @@ def main():
                     assert set(records.glob("*.json")) == before, "blocked cleanup released accepted input"
                     assert not termios.tcgetattr(slave)[3] & termios.ICANON
                     termios.tcflow(slave, termios.TCOON)
-                if case in ("queued", "output"):
+                if case in ("queued", "output", "drain-eintr", "drain-held"):
                     assert received.wait(15), "post-cleanup request did not reach Host"
                     assert termios.tcgetattr(slave) == original, "handoff did not restore exact attributes"
                     os.write(master, b"\n")
@@ -147,35 +192,43 @@ def main():
                     assert saved["kind"] == "configure" and saved["session"] == "terminal/restoration", saved
                     assert json.loads(proxy.exchanges[0][0]) == saved, "Host received different captured bytes"
                     release.set()
-                    human.read_terminal(master, "rui> ")
-                    human.terminal_step(master, "/exit", "Detached.")
+                    human.read_terminal(output_master, "rui> ")
+                    os.write(master, b"/exit\n")
+                    human.read_terminal(output_master, "Detached.")
                     assert caller.wait(timeout=5) == 0
                     if injected:
-                        assert log.read_text().splitlines() == ["output-stopped", "disable", "restore-flush",
-                            "disable", "restore-flush"], log.read_text()
+                        first = (["output-stopped", "disable", "drain", "restore-flush"] if case == "output"
+                            else ["disable", "drain", "drain", "restore-flush"] if case == "drain-eintr"
+                            else ["disable", "drain", "drain-held", "restore-flush"])
+                        last = ["disable", "drain"] + (["drain-held"] if case == "drain-held" else []) + ["restore-flush"]
+                        assert log.read_text().splitlines() == first + last, log.read_text()
                 else:
                     assert caller.wait(timeout=7) == (0 if case in ("exit", "interrupt") else 1)
                     errors = caller.stderr.read().decode()
                     output = b""
-                    while select.select([master], [], [], 0)[0]:
-                        output += os.read(master, 65536)
+                    while select.select([output_master], [], [], 0)[0]:
+                        output += os.read(output_master, 65536)
                         assert len(output) < 1024 * 1024, "unbounded failed-prompt output"
                     assert b"rui> " not in output and b"Configured." not in output, output
                     if fault not in ("disable", "both"):
                         assert b"\x1b[?2004l" in output, "paste disable did not reach terminal"
                     expected = {"incomplete": "IncompleteTerminalInput", "disable": "TerminalCleanupFailed",
-                        "restore": "TerminalRestoreFailed", "both": "TerminalRestoreFailed"}.get(fault)
+                        "restore": "TerminalRestoreFailed", "both": "TerminalRestoreFailed",
+                        "drain": "TerminalCleanupFailed", "drain-both": "TerminalRestoreFailed",
+                        "drain-incomplete": "TerminalCleanupFailed"}.get(fault)
                     if expected:
                         assert expected in errors, errors
                     assert set(records.glob("*.json")) == before, "failed/empty prompt captured a request"
                     assert not received.is_set() and not proxy.exchanges, "failed cleanup sent to Host"
                     if injected:
-                        assert log.read_text().splitlines() == ["disable", "restore-flush"], log.read_text()
-                    if fault not in ("restore", "both"):
+                        assert log.read_text().splitlines() == ["disable"] + (
+                            [] if fault in ("disable", "both") else ["drain"]) + ["restore-flush"], log.read_text()
+                    if fault not in ("restore", "both", "drain-both"):
                         assert termios.tcgetattr(slave) == original, "exit did not restore exact attributes"
                 print(f"terminal restoration: {case} passed", flush=True)
             finally:
                 termios.tcflow(slave, termios.TCOON)
+                drain_release.touch()
                 release.set()
                 if proxy is not None:
                     proxy.close()
@@ -188,6 +241,9 @@ def main():
                 termios.tcsetattr(slave, termios.TCSAFLUSH, original)
                 os.close(master)
                 os.close(slave)
+                if separate:
+                    os.close(output_master)
+                    os.close(output_slave)
         completed = True
     finally:
         if host is not None:
@@ -199,4 +255,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[2] if len(sys.argv) == 3 else None)
