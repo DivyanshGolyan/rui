@@ -3,6 +3,7 @@
 import http.server
 import json
 import os
+import pathlib
 import selectors
 import subprocess
 import threading
@@ -11,6 +12,11 @@ import time
 
 READINESS_LIMIT = 16 * 1024
 STDERR_TAIL_LIMIT = 16 * 1024
+
+
+def canonical_fixture_root(path):
+    """Resolve a newly created private root before deriving fixture identities."""
+    return pathlib.Path(path).resolve(strict=True)
 
 
 class TestHTTPServer(http.server.ThreadingHTTPServer):

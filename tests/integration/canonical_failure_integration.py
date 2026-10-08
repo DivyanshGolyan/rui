@@ -14,6 +14,7 @@ import sys
 import tempfile
 import termios
 import threading
+import time
 
 import dispatch_integration as fixture
 
@@ -434,7 +435,10 @@ def interactive_cases(state, binding=False, null_code=False):
                         human.read_terminal(master, "Allow once, deny, or later?")
                         human.action_ready(ready_read)
                         os.write(master, b"d\n")
-                output = "" if route == "/v1/observe-command" else human.read_terminal(master, reason if binding else "canonical_store_failure")
+                if route == "/v1/observe-command":
+                    output = ""
+                else:
+                    output = human.read_terminal(master, reason if binding else "canonical_store_failure")
                 if binding:
                     assert "other/session" not in output and '"answer"' not in output, output
                 if binding and line is not None:
@@ -443,9 +447,22 @@ def interactive_cases(state, binding=False, null_code=False):
                     if "rui> " not in output:
                         output += human.read_terminal(master, "rui> ")
                     os.write(master, b"/exit\n")
-                    assert caller.wait(timeout=10) == 0, "explicit detachment failed"
+                # Supply output credit during the original exit budget for
+                # fatal cleanup and recoverable explicit detachment alike.
+                deadline = time.monotonic() + 10
+                transcript = bytearray()
+                while caller.poll() is None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(caller.args, 10)
+                    if select.select([master], [], [], min(remaining, 0.05))[0]:
+                        transcript.extend(os.read(master, 65536))
+                        assert len(transcript) < 1024 * 1024, "unexpected unbounded terminal output"
+                output += transcript.decode(errors="replace")
+                if binding and line is not None:
+                    assert caller.returncode == 0, "explicit detachment failed"
                 else:
-                    assert caller.wait(timeout=10) != 0, "fatal mutation resumed the Session prompt"
+                    assert caller.returncode != 0, "fatal mutation resumed the Session prompt"
                 errors = caller.stderr.read().decode()
                 assert (reason if binding else "CanonicalStoreFailure") in errors, errors
                 if route == "/v1/observe-command":
