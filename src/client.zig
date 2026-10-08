@@ -100,6 +100,137 @@ pub const Requests = struct {
     pub fn readActionCallId(self: Requests, store_path: []const u8, session: []const u8, action_id: u64, destination: std.Io.File, reply_buffer: *ReplyBuffer) !ResultReply {
         return readActionContent(self, store_path, session, action_id, "read_action_call_id", "/v1/read-action-call-id", destination, reply_buffer);
     }
+
+    /// Returns owned metadata only; no scratch, payload or traversal escapes.
+    pub fn proposalPage(self: Requests, store_path: []const u8, session: []const u8, cursor: ProposalCursor) !ProposalPageReply {
+        try self.check();
+        try validateIdentityInputs("", session);
+        try (protocol.ProposalPage{ .end = cursor.end, .after = cursor.after }).validate();
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try renderReadRequest(&body, "proposal_page", paths.store.slice(), "session", session, null, null);
+        body.len -= 1;
+        try body.append(",\"end\":");
+        if (cursor.end) |end| try body.appendFmt("\"{d}\"", .{end}) else try body.append("null");
+        try body.appendFmt(",\"after\":\"{d}\"}}", .{cursor.after});
+        const fd = try openRead(self, &paths, "/v1/proposal-page", body.slice());
+        defer self.io.vtable.netClose(self.io.userdata, &.{fd});
+        const Sink = struct {
+            buffer: protocol.FixedJsonBuffer(protocol.max_proposal_page_response_bytes) = .{},
+            pub fn feed(s: *@This(), bytes: []const u8) !void {
+                try s.buffer.append(bytes);
+            }
+        };
+        var sink: Sink = .{};
+        var reply_buffer: ReplyBuffer = .{};
+        return switch (try readReportResponse(self, fd, &sink, &reply_buffer)) {
+            .report => .{ .page = try ProposalPage.parse(sink.buffer.slice(), cursor) },
+            .command => |reply| .{ .failure = try decodeReadFailure(reply, false) },
+        };
+    }
+
+    /// Complete bytes once, through the ordinary synchronous sink contract.
+    /// Failure may follow delivered prefix bytes; it never returns success then.
+    pub fn readProposalField(self: Requests, store_path: []const u8, session: []const u8, position: u64, field: ProposalField, sink: anytype) !?ReadFailure {
+        try self.check();
+        try validateIdentityInputs("", session);
+        if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidTarget;
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try renderReadRequest(&body, "proposal_field", paths.store.slice(), "session", session, null, null);
+        body.len -= 1;
+        try body.appendFmt(",\"position\":\"{d}\",\"field\":\"{s}\"}}", .{ position, @tagName(field) });
+        const fd = try openRead(self, &paths, "/v1/proposal-field", body.slice());
+        defer self.io.vtable.netClose(self.io.userdata, &.{fd});
+        const head = try readResponseHeadUntil(self, fd, 60_000, null);
+        if (head.status != 200) {
+            if (head.kind != .command_json) return error.InvalidResponse;
+            var reply_buffer: ReplyBuffer = .{};
+            return try decodeReadFailure(try readCommandBodyUntil(self, fd, head, &reply_buffer, null), false);
+        }
+        if (head.kind != .content_bytes or head.total != head.content_length or head.next != head.content_length) return error.InvalidResponse;
+        try readResponseBody(self, fd, head.content_length, sink);
+        return null;
+    }
+};
+
+pub const ProposalField = protocol.ProposalField;
+pub const ProposalCursor = struct { end: ?u64 = null, after: u64 = 0 };
+pub const ProposalPageReply = union(enum) { page: ProposalPage, failure: ReadFailure };
+pub const ProposalPage = struct {
+    end: u64,
+    items: [protocol.proposal_page_items]protocol.ProposalMetadata = undefined,
+    count: usize = 0,
+    more: bool,
+
+    pub fn continuation(self: *const ProposalPage) ?ProposalCursor {
+        return if (self.more) .{ .end = self.end, .after = self.items[self.count - 1].position } else null;
+    }
+
+    pub fn parse(bytes: []const u8, cursor: ProposalCursor) !ProposalPage {
+        if (bytes.len > protocol.max_proposal_page_response_bytes) return error.InvalidProposalPage;
+        try (protocol.ProposalPage{ .end = cursor.end, .after = cursor.after }).validate();
+        const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
+        const Item = struct {
+            position: JsonString(20),
+            operation: JsonString(20),
+            turn: JsonString(20),
+            call_ordinal: JsonString(20),
+            action: ?JsonString(20),
+            rejection: ?JsonEnum(protocol.ProposalRejection),
+            fields: struct { item_id: Ref, name: Ref, call_id: Ref, arguments: Ref },
+        };
+        const Items = struct {
+            values: [protocol.proposal_page_items]Item = undefined,
+            count: usize = 0,
+            pub fn jsonParse(a: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+                if (try source.next() != .array_begin) return error.UnexpectedToken;
+                var result: @This() = .{};
+                while (try source.peekNextTokenType() != .array_end) {
+                    if (result.count == result.values.len) return error.LengthMismatch;
+                    result.values[result.count] = try std.json.innerParse(Item, a, source, options);
+                    result.count += 1;
+                }
+                _ = try source.next();
+                return result;
+            }
+        };
+        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), items: Items, more: bool };
+        // Fixed scanner storage; no payload tokens or history-sized allocation.
+        var storage: [2 * protocol.max_proposal_page_response_bytes]u8 = undefined;
+        var fixed = std.heap.FixedBufferAllocator.init(&storage);
+        const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{}) catch return error.InvalidProposalPage;
+        if (!wire.version.eql("1") or !wire.type.eql("proposal_page")) return error.InvalidProposalPage;
+        var page: ProposalPage = .{ .end = try mutationId(wire.end, true), .count = wire.items.count, .more = wire.more };
+        if (page.end > std.math.maxInt(i64) or (cursor.end != null and cursor.end.? != page.end) or
+            page.end < cursor.after or (page.more and page.count != page.items.len)) return error.InvalidProposalPage;
+        var previous = cursor.after;
+        for (wire.items.values[0..wire.items.count], page.items[0..page.count]) |item, *result| {
+            result.* = .{
+                .position = try mutationId(item.position, false),
+                .operation = try mutationId(item.operation, false),
+                .turn = try mutationId(item.turn, false),
+                .call_ordinal = try mutationId(item.call_ordinal, true),
+                .action = if (item.action) |action| try mutationId(action, false) else null,
+                .rejection = if (item.rejection) |code| code.value else null,
+                .fields = undefined,
+            };
+            if (result.position <= previous or result.position > page.end or result.operation > std.math.maxInt(i64) or
+                result.turn > std.math.maxInt(i64) or result.call_ordinal > std.math.maxInt(i64) or
+                (result.action != null) == (result.rejection != null) or
+                (result.action != null and result.action.? > std.math.maxInt(i64))) return error.InvalidProposalPage;
+            inline for (comptime std.meta.tags(ProposalField), 0..) |field, index| {
+                const reference = @field(item.fields, @tagName(field));
+                if (reference.sha256.slice().len != 64) return error.InvalidProposalPage;
+                result.fields[index].length = try mutationId(reference.bytes, true);
+                if (result.fields[index].length > std.math.maxInt(i64)) return error.InvalidProposalPage;
+                _ = std.fmt.hexToBytes(&result.fields[index].digest, reference.sha256.slice()) catch return error.InvalidProposalPage;
+            }
+            previous = result.position;
+        }
+        if (page.more and previous >= page.end) return error.InvalidProposalPage;
+        return page;
+    }
 };
 
 pub const OptionalText = struct {

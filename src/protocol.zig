@@ -99,6 +99,8 @@ pub const Kind = enum {
     list_sessions,
     conversation_page,
     conversation_content,
+    proposal_page,
+    proposal_field,
 };
 
 pub const ConfigureCommand = struct {
@@ -291,6 +293,38 @@ pub const ConversationContent = struct {
     stream: bool = false,
 };
 
+pub const ProposalField = enum { item_id, name, call_id, arguments };
+pub const ProposalRejection = enum { unknown_tool, invalid_arguments, tool_unavailable };
+pub const proposal_page_items = 16;
+pub const ProposalMetadata = struct {
+    position: u64,
+    operation: u64,
+    turn: u64,
+    call_ordinal: u64,
+    action: ?u64,
+    rejection: ?ProposalRejection,
+    fields: [4]struct { length: u64, digest: [32]u8 }, // ProposalField order.
+};
+pub const ProposalPage = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    end: ?u64 = null, // Null captures; zero freezes an empty traversal.
+    after: u64 = 0,
+
+    pub fn validate(self: ProposalPage) !void {
+        if (self.after > std.math.maxInt(i64)) return error.InvalidCursor;
+        if (self.end) |end| {
+            if (end > std.math.maxInt(i64) or self.after > end) return error.InvalidCursor;
+        } else if (self.after != 0) return error.InvalidCursor;
+    }
+};
+pub const ReadProposalField = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    position: u64 = 0,
+    field: ProposalField = .item_id,
+};
+
 pub const Request = union(Kind) {
     host_info: struct { store: Bounded(max_store_bytes) = .{} },
     host_stop: struct { store: Bounded(max_store_bytes) = .{} },
@@ -307,12 +341,14 @@ pub const Request = union(Kind) {
     list_sessions: ListSessions,
     conversation_page: ConversationPage,
     conversation_content: ConversationContent,
+    proposal_page: ProposalPage,
+    proposal_field: ReadProposalField,
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content => {},
+            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .proposal_page, .proposal_field => {},
         }
     }
 
@@ -470,6 +506,10 @@ const Parser = struct {
             .conversation_page
         else if (kind_text.eql("conversation_content"))
             .conversation_content
+        else if (kind_text.eql("proposal_page"))
+            .proposal_page
+        else if (kind_text.eql("proposal_field"))
+            .proposal_field
         else
             return error.UnknownCommand;
 
@@ -494,6 +534,8 @@ const Parser = struct {
             .list_sessions => .{ .list_sessions = try self.parseListSessions(store) },
             .conversation_page => .{ .conversation_page = try self.parseConversationPage(store) },
             .conversation_content => .{ .conversation_content = try self.parseConversationContent(store) },
+            .proposal_page => .{ .proposal_page = try self.parseProposalPage(store) },
+            .proposal_field => .{ .proposal_field = try self.parseProposalField(store) },
         };
         errdefer request.removeTemporaryContent(self.options.io) catch {
             self.options.cleanup_failed.* = true;
@@ -744,6 +786,40 @@ const Parser = struct {
         }
         if (request.position == 0 or request.position > std.math.maxInt(i64) or
             request.ordinal > std.math.maxInt(i64) or (request.stream and request.start != 0)) return error.InvalidCursor;
+        return request;
+    }
+
+    fn parseProposalPage(self: *Parser, store: Bounded(max_store_bytes)) !ProposalPage {
+        var request = ProposalPage{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("end");
+        if (try self.consumeIf('n')) {
+            for ("ull") |byte| try self.expectByte(byte);
+        } else request.end = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("after");
+        request.after = try self.readCanonicalU64();
+        try request.validate();
+        return request;
+    }
+
+    fn parseProposalField(self: *Parser, store: Bounded(max_store_bytes)) !ReadProposalField {
+        var request = ReadProposalField{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("position");
+        request.position = try self.readCanonicalU64();
+        if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.InvalidCursor;
+        try self.expectByte(',');
+        try self.expectKey("field");
+        var field: Bounded(16) = .{};
+        try self.readSmallString(&field);
+        request.field = std.meta.stringToEnum(ProposalField, field.slice()) orelse return error.InvalidField;
         return request;
     }
 
@@ -1148,6 +1224,10 @@ pub const max_client_request_bytes = @max(
         @max(@max(max_read_action_arguments_request_bytes, max_read_action_call_id_request_bytes), @max(max_conversation_page_request_bytes, max_conversation_content_request_bytes)),
     ),
 );
+
+// Both proposal requests are smaller than the existing Conversation page
+// maximum (two shorter cursor keys or one position and a closed field).
+pub const max_proposal_page_response_bytes = 160 + proposal_page_items * (240 + 4 * 144);
 
 const max_session_stop_rejection_code_bytes = "invalid_session_reference".len;
 const max_model_interruption_rejection_code_bytes = "invalid_session_reference".len;
