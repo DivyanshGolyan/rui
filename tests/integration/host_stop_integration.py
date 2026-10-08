@@ -59,7 +59,7 @@ def exchange_phase(diagnostics, phase, began_ns, deadline, **fields):
 
 def actor_after_classification(diagnostics, began_ns, deadline, pending_phase, store, target, *, invoke=actor):
     transferred_phase = exchange_phase(diagnostics, "ordinary_classification_released", began_ns, deadline,
-                                       subject_kind="route", subject="host_info")
+                                       subject_kind="route", subject="observe")
     assert int(transferred_phase["sequence"]) > int(pending_phase["sequence"])
     assert time.monotonic() < deadline, "classification exceeded original stop budget"
     return invoke("stop", store, target, "after-commit", timeout=deadline - time.monotonic())
@@ -264,7 +264,7 @@ def main():
             transferred = socket.socket(socket.AF_UNIX)
             transferred.settimeout(5)
             transferred.connect(str(sock))
-            transferred.sendall(b"POST /v1/host-info HTTP/1.1\r\n")
+            transferred.sendall(b"POST /v1/observe-command HTTP/1.1\r\n")
             first = actor_after_classification(diagnostics, began_ns, deadline, pending_phase, store, target)
             assert first == "TruncatedResponse", first
             retry = finish(pending, pending_body)

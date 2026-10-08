@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, start_ready_process, stop_process
+from host_process import HostDiagnostics, canonical_fixture_root, start_ready_process, stop_process
 
 
 RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
@@ -100,14 +100,7 @@ def raw_info(sock, store, instance=None, *, kind="host_info", route="host-info",
             + f"Content-Length: {len(payload)}\r\n".encode()
             + header + b"\r\n" + payload
         )
-        response = bytearray()
-        while True:
-            chunk = stream.recv(4096)
-            if not chunk:
-                break
-            response.extend(chunk)
-            assert len(response) < 8192
-    return bytes(response)
+        return complete_response(stream)
 
 
 def wait_for_descriptors(pid, expected=None, timeout=5):
@@ -125,9 +118,207 @@ def wait_for_descriptors(pid, expected=None, timeout=5):
         time.sleep(.01)
 
 
+def complete_response(stream):
+    response = bytearray()
+    while True:
+        try:
+            chunk = stream.recv(4096)
+        except ConnectionResetError:
+            # Early route/kind rejection leaves hostile bytes unread. Reset
+            # can terminate a complete reply, but never certify a prefix.
+            break
+        if not chunk:
+            break
+        response.extend(chunk)
+        assert len(response) < 8192, response
+    head, body = response.split(b"\r\n\r\n", 1)
+    lengths = [line.split(b":", 1)[1].strip() for line in head.split(b"\r\n")[1:]
+               if line.lower().startswith(b"content-length:")]
+    assert len(lengths) == 1 and int(lengths[0]) == len(body), (head, body)
+    return bytes(response)
+
+
+def held_request(store, route, length=512, *, complete_headers=True):
+    stream = socket.socket(socket.AF_UNIX)
+    stream.settimeout(2)
+    stream.connect(str(socket_path(store)))
+    stream.sendall(f"POST /v1/{route} HTTP/1.1\r\n".encode())
+    if complete_headers:
+        stream.sendall((f"Host: local\r\nContent-Type: application/json\r\n"
+                       f"X-Rui-Wire-Version: 1\r\nContent-Length: {length}\r\n\r\n").encode())
+    return stream
+
+
+def correlated_phase(diagnostics, phase, began_ns, **fields):
+    deadline = time.monotonic() + 2
+    with diagnostics.condition:
+        while True:
+            records = diagnostics.matching(phase, **fields)
+            current = [record for record in records if int(record["at_ns"]) >= began_ns]
+            if current:
+                break
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, (phase, diagnostics.tail())
+            diagnostics.condition.wait(remaining)
+    assert len(current) == 1, (phase, current)
+    record = current[0]
+    assert record["process"] == str(diagnostics.process.pid), record
+    assert record["clock"] == "awake_ns" and record["trace_lost"] is False, record
+    assert record["run"] == records[0]["run"], record
+    return record
+
+
+def protected_saturation(root):
+    store = root / "saturated"
+    host, _ = start(store, 1, "--test-phase-trace")
+    diagnostics = HostDiagnostics(host)
+    held = []
+    try:
+        diagnostics.wait("lifecycle_boundary")
+        initial = status(store)
+        identity = initial.split()[1]
+        assert initial.startswith("ready "), initial
+        assert b'"type":"host_info"' in raw_info(socket_path(store), store)
+        baseline = wait_for_descriptors(host.pid) if sys.platform == "linux" else None
+        began = time.monotonic()
+        for index in range(10):
+            began_ns = time.monotonic_ns()
+            held.append(held_request(store, "message", complete_headers=False))
+            # A full request line, not accept/backlog population, establishes
+            # each ordinary borrower. Each milestone belongs to this issuer.
+            records = diagnostics.wait("ordinary_classification_released", count=index + 1,
+                                       timeout=2, subject_kind="route", subject="message")
+            record = records[index]
+            assert int(record["at_ns"]) >= began_ns and record["trace_lost"] is False, record
+            assert record["process"] == str(host.pid) and record["clock"] == "awake_ns", record
+            assert record["run"] == records[0]["run"], records
+            assert index == 0 or int(record["sequence"]) > int(records[index - 1]["sequence"]), records
+        observed = status(store)
+        assert observed == initial, ("status lost ordinary headroom", observed)
+        began_ns = time.monotonic_ns()
+        held.append(held_request(store, "host-info"))
+        pending = correlated_phase(diagnostics, "connection_request_host_info", began_ns)
+        assert not diagnostics.matching("connection_resources_released", subject=pending["subject"])
+        busy_started = time.monotonic()
+        busy = raw_info(socket_path(store), store)
+        assert busy.startswith(b"HTTP/1.1 503") and b"discovery_capacity_exhausted" in busy, busy
+        assert time.monotonic() - busy_started < 2, "discovery busy reply exceeded bound"
+        assert time.monotonic() - began < 5, "fixture consumed ordinary borrowers' acceptance budget"
+        ack = raw_info(socket_path(store), store, identity,
+                       kind="host_stop", route="control/host-stop")
+        assert ack.startswith(b"HTTP/1.1 200") and json.loads(ack.split(b"\r\n\r\n", 1)[1]) == {
+            "version": "1", "type": "host_stop_reply", "status": "acknowledged"}, ack
+        deadline = time.monotonic() + 2
+        while socket_path(store).exists():
+            assert time.monotonic() < deadline, "stop did not close listener"
+            time.sleep(.01)
+        assert host.poll() is None, "Host exited with borrowers held"
+        with (store / "host.lock").open("rb") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                raise AssertionError("lease released with borrowers held")
+        if baseline is not None:
+            snapshot = wait_for_descriptors(host.pid)
+            assert len(snapshot) <= len(baseline) + 11, (baseline, snapshot)
+        for stream in held:
+            stream.close()
+        held.clear()
+        host.wait(timeout=5)
+        diagnostics.close()
+        assert host.returncode != 0, diagnostics.tail()  # EffectAwareShutdown, not a forced kill.
+        # Resource release is before the final drain unlock, not thread retirement.
+        release = diagnostics.matching("connection_resources_released", subject=pending["subject"])
+        assert len(release) == 1 and release[0]["scratch_used_bytes"] == "0", release
+        assert release[0]["run"] == pending["run"] and int(release[0]["sequence"]) > int(pending["sequence"]), release
+        assert status(store) == "unavailable"
+        with (store / "host.lock").open("rb") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        for stream in held:
+            stream.close()
+        stop_process(host)
+        diagnostics.close()
+
+
+def hostile_discovery(root):
+    store = root / "hostile"
+    host, _ = start(store, 1, "--test-phase-trace", "--fault", "content-acquire")
+    diagnostics = HostDiagnostics(host)
+    try:
+        diagnostics.wait("lifecycle_boundary")
+        assert b'"type":"host_info"' in raw_info(socket_path(store), store)
+        baseline = wait_for_descriptors(host.pid) if sys.platform == "linux" else None
+        for kind, extra in (("message", {"key": "hostile", "session": "hostile/session", "text": {"state": "value", "value": "x" * 128}}),
+                            ("configure", {"key": "hostile", "session": "hostile/session", "configuration": {
+                                "workspace": {"state": "omitted"}, "provider": {"state": "omitted"},
+                                "model": {"state": "omitted"}, "instructions": {"state": "value", "value": "x" * 128}}})):
+            response = raw_info(socket_path(store), store, kind=kind, extra=extra)
+            assert b"RouteKindMismatch" in response and b"InjectedContentAcquireFailure" not in response, response
+            assert list((store / "scratch").iterdir()) == [], "hostile discovery created scratch"
+            observed = raw_info(socket_path(store), store, kind="observe_command", route="observe-command", extra={"key": "hostile"})
+            assert b'"status":"absent"' in observed, observed
+            assert status(store).startswith("ready ")
+        with held_request(store, "host-info", length=1000000) as stream:
+            response = complete_response(stream)
+        assert response.startswith(b"HTTP/1.1 400") and b"DiscoveryRequestTooLarge" in response, response
+        assert list((store / "scratch").iterdir()) == []
+        assert b'"type":"host_info"' in raw_info(socket_path(store), store)
+        if baseline is not None:
+            wait_for_descriptors(host.pid, baseline)
+    finally:
+        stop_process(host)
+        diagnostics.close()
+
+
+def discovery_body_deadline(root):
+    store = root / "deadline"
+    host, _ = start(store, 1, "--test-phase-trace")
+    diagnostics = HostDiagnostics(host)
+    response = bytearray()
+    try:
+        accepted = time.monotonic()
+        with held_request(store, "host-info", complete_headers=False) as stream:
+            # Header time is charged to the same original acceptance budget.
+            time.sleep(2)
+            stream.sendall(b"Host: local\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 512\r\n\r\n")
+            diagnostics.wait("connection_request_host_info", timeout=2)
+            prefix = json.dumps({"version": "1", "kind": "host_info", "store": str(store)}).encode()[:-1]
+            stream.sendall(prefix)
+            stream.settimeout(.5)
+            closed = False
+            while time.monotonic() - accepted < 11.5:
+                try:
+                    stream.sendall(b" ")
+                    chunk = stream.recv(4096)
+                    if not chunk:
+                        closed = True
+                        break
+                    response.extend(chunk)
+                    assert len(response) < 8192, response
+                except socket.timeout:
+                    continue
+                except (BrokenPipeError, ConnectionResetError):
+                    closed = True
+                    break
+            elapsed = time.monotonic() - accepted
+            assert closed and 9 <= elapsed < 11.5, ("body deadline not acceptance-derived 10s", elapsed, bytes(response), diagnostics.tail())
+        assert status(store).startswith("ready ")
+        assert list((store / "scratch").iterdir()) == []
+    finally:
+        stop_process(host)
+        diagnostics.close()
+
+
 def main():
     prove_fragmented_request()
     with tempfile.TemporaryDirectory(prefix="rui-host-info-") as root:
+        root = canonical_fixture_root(root)
+        protected_saturation(root)
+        hostile_discovery(root)
+        discovery_body_deadline(root)
         store = pathlib.Path(root) / "store"
         home = pathlib.Path(root) / "home"
         home.mkdir(mode=0o700)
