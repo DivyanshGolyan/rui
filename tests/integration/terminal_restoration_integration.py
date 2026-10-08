@@ -151,6 +151,27 @@ def main(selected=None):
                 assert release.wait(15), "terminal witness did not release reply"
                 return response
 
+            output = bytearray()
+            reader_stop = threading.Event()
+            reader_errors = []
+            reader = None
+
+            def drain_output():
+                try:
+                    while not reader_stop.is_set() or select.select([output_master], [], [], 0)[0]:
+                        if select.select([output_master], [], [], 0.05)[0]:
+                            output.extend(os.read(output_master, 65536))
+                            assert len(output) < 1024 * 1024, "unbounded prompt output"
+                except BaseException as error:
+                    reader_errors.append(error)
+
+            def stop_reader():
+                if reader is not None:
+                    reader_stop.set()
+                    reader.join(timeout=5)
+                    assert not reader.is_alive(), "terminal output reader did not join"
+                    assert not reader_errors, reader_errors
+
             caller = None
             proxy = None
             try:
@@ -158,6 +179,10 @@ def main(selected=None):
                     "--session", "terminal/restoration"], env=env,
                     stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
                 human.read_terminal(output_master, "rui> ")
+                # A terminal consumes output while Rui drains it. Withholding
+                # PTY reads here would conflate peer credit with finalization.
+                reader = threading.Thread(target=drain_output)
+                reader.start()
                 proxy = canonical.ReplyProxy(host, "/v1/configure", hold_reply)
                 payload = {"exit": b"/exit\n", "interrupt": b"\x03", "incomplete": b"\xc3"}.get(
                     case, b"/configure --permission-mode ask\nSTALE")
@@ -191,6 +216,8 @@ def main(selected=None):
                     saved = json.loads((after - before).pop().read_text())
                     assert saved["kind"] == "configure" and saved["session"] == "terminal/restoration", saved
                     assert json.loads(proxy.exchanges[0][0]) == saved, "Host received different captured bytes"
+                    stop_reader()  # Transfer the sole output-reader role before the held reply is released.
+                    assert b"\x1b[?2004l" in output, "paste disable did not reach terminal"
                     release.set()
                     human.read_terminal(output_master, "rui> ")
                     os.write(master, b"/exit\n")
@@ -205,10 +232,7 @@ def main(selected=None):
                 else:
                     assert caller.wait(timeout=7) == (0 if case in ("exit", "interrupt") else 1)
                     errors = caller.stderr.read().decode()
-                    output = b""
-                    while select.select([output_master], [], [], 0)[0]:
-                        output += os.read(output_master, 65536)
-                        assert len(output) < 1024 * 1024, "unbounded failed-prompt output"
+                    stop_reader()
                     assert b"rui> " not in output and b"Configured." not in output, output
                     if fault not in ("disable", "both"):
                         assert b"\x1b[?2004l" in output, "paste disable did not reach terminal"
@@ -237,8 +261,12 @@ def main(selected=None):
                         caller.kill()
                         caller.wait(timeout=5)
                     caller.stderr.close()
-                # Failed-restoration cases intentionally leave raw mode behind.
+                # Dispose only after owned writers stop. Discard residual
+                # fixture output rather than waiting for its transmission.
+                termios.tcflush(output_slave, termios.TCOFLUSH)
+                termios.tcflush(slave, termios.TCOFLUSH)
                 termios.tcsetattr(slave, termios.TCSAFLUSH, original)
+                stop_reader()
                 os.close(master)
                 os.close(slave)
                 if separate:
