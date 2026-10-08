@@ -18,10 +18,11 @@ pub const std_options: std.Options = .{
     .signal_stack_size = if (std.debug.default_enable_segfault_handler) 1 << 18 else null,
 };
 
-extern "c" fn rui_launch_detached(executable: [*:0]const u8, store: [*:0]const u8) c_int;
+extern "c" fn rui_launch_detached(executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize) c_int;
 
 test "detached launcher reports exec failure before claiming Host readiness" {
-    try std.testing.expectEqual(@as(c_int, 2), rui_launch_detached("/rui-no-such-executable", "/rui-no-such-store"));
+    const argv = [_:null]?[*:0]const u8{"/rui-no-such-executable"};
+    try std.testing.expectEqual(@as(c_int, 2), rui_launch_detached(argv[0].?, &argv, argv.len));
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -305,7 +306,14 @@ fn startHost(init: std.process.Init, selected: []const u8) !void {
     executable_buffer[length] = 0;
     var store_buffer: [protocol.max_store_bytes + 1]u8 = undefined;
     const store_z = try std.fmt.bufPrintZ(&store_buffer, "{s}", .{paths.store.slice()});
-    const launched = rui_launch_detached(@ptrCast(&executable_buffer), store_z.ptr);
+    // Application policy lives here. The synchronous native launcher borrows
+    // these terminated strings and pointer framing through exec/error handoff;
+    // all storage is prepared before any detach fork.
+    const argv = [_:null]?[*:0]const u8{
+        @ptrCast(&executable_buffer), "serve", "--store", store_z.ptr,
+        "--active-capacity",          "8",     "--codex",
+    };
+    const launched = rui_launch_detached(argv[0].?, &argv, argv.len);
     if (launched != 0) {
         std.debug.print("rui: detached Host could not execute (OS error {d}); Store ownership was not inferred.\n", .{launched});
         return error.HostLaunchFailed;

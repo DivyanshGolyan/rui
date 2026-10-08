@@ -24,25 +24,25 @@ static void fail_child(int report, int code) {
 #if defined(__APPLE__)
 /* The spawn action gives the helper only /dev/null stdio and descriptor 3.
  * After exec the helper restores CLOEXEC before making its final child. */
-int rui_launch_helper(const char *executable, const char *store) {
+static int launch_helper(char *const *argv) {
     if (fcntl(3, F_SETFD, FD_CLOEXEC) < 0) fail_child(3, errno);
     if (setsid() < 0) fail_child(3, errno);
     pid_t child = fork();
     if (child < 0) fail_child(3, errno);
     if (child > 0) _exit(0);
     if (chdir("/") < 0) fail_child(3, errno);
-    const char *argv[] = {executable, "serve", "--store", store,
-        "--active-capacity", "8", "--codex", NULL};
-    execv(executable, (char *const *)argv);
+    execv(argv[0], argv);
     fail_child(3, errno);
     return 127;
 }
 
 __attribute__((constructor(101))) static void early_launch_helper(void) {
-    if (*_NSGetArgc() != 4) return;
+    if (*_NSGetArgc() < 3) return;
     char **args = *_NSGetArgv();
     if (strcmp(args[1], "--launch-helper") != 0) return;
-    _exit(rui_launch_helper(args[2], args[3]));
+    /* OS-provided terminated argv is in final storage before the helper fork
+     * and before ordinary Zig initialization. */
+    _exit(launch_helper(&args[2]));
 }
 #endif
 
@@ -81,8 +81,21 @@ int rui_write_readiness(int fd, const unsigned char *data, size_t length) {
 
 /* Returns zero after exec, or an errno-style failure. The grandchild has no
  * terminal/session or inherited descriptor; its lifetime is independent of
- * this caller. Readiness and ownership are established separately by Rui. */
-static int launch_detached(const char *executable, const char *store) {
+ * this caller. Readiness and ownership are established separately by Rui.
+ * Borrow the caller's bounded, terminated argv through exec/error handoff;
+ * argv[0] is executable and argc excludes the NULL terminator. */
+static int launch_detached(const char *executable, const char *const *argv, size_t argc) {
+#if defined(__APPLE__)
+    /* Transport framing only; application policy belongs to the caller.
+     * Prepare before spawn, not in the post-fork grandchild. */
+    const char *helper[argc + 3];
+    helper[0] = executable;
+    helper[1] = "--launch-helper";
+    for (size_t i = 0; i < argc; i++) helper[i + 2] = argv[i];
+    helper[argc + 2] = NULL;
+#else
+    (void)argc;
+#endif
     int channel[2];
     if (pipe(channel) != 0) return errno;
     int report = fcntl(channel[1], F_DUPFD_CLOEXEC, 4);
@@ -108,7 +121,6 @@ static int launch_detached(const char *executable, const char *store) {
     }
     err = posix_spawn_file_actions_adddup2(&actions, report, 3);
     if (err != 0) goto attributes_done;
-    const char *helper[] = {executable, "--launch-helper", executable, store, NULL};
     pid_t child = -1;
     err = posix_spawn(&child, executable, &actions, &attributes, (char *const *)helper, environ);
 attributes_done:
@@ -151,8 +163,6 @@ spawn_done:
         if (fcntl(report, F_SETFD, FD_CLOEXEC) < 0) fail_child(report, errno);
         closefrom(4);
         if (chdir("/") < 0) fail_child(report, errno);
-        const char *argv[] = {executable, "serve", "--store", store,
-            "--active-capacity", "8", "--codex", NULL};
         execv(executable, (char *const *)argv);
         fail_child(report, errno);
     }
@@ -176,14 +186,14 @@ spawn_done:
     return read_error;
 }
 
-int rui_launch_detached(const char *executable, const char *store) {
+int rui_launch_detached(const char *executable, const char *const *argv, size_t argc) {
     struct sigaction previous, normal = {0};
     normal.sa_handler = SIG_DFL;
     sigemptyset(&normal.sa_mask);
     if (sigaction(SIGCHLD, &normal, &previous) != 0) return errno;
     // The helper must remain waitable even when the caller inherited
     // SIG_IGN or SA_NOCLDWAIT. Its Host grandchild also inherits SIG_DFL.
-    int result = launch_detached(executable, store);
+    int result = launch_detached(executable, argv, argc);
     int restore_error = sigaction(SIGCHLD, &previous, NULL) == 0 ? 0 : errno;
     return result != 0 ? result : restore_error;
 }
