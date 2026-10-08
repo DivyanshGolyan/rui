@@ -164,6 +164,21 @@ pub fn build(b: *std.Build) void {
     proposal_integration.addArtifactArg(release_safe);
     proposal_integration.addArtifactArg(proposal_client);
     b.step("proposal-integration", "Run historical proposal discovery and complete typed Client reads").dependOn(&proposal_integration.step);
+    const activity_client = b.addExecutable(.{
+        .name = "rui-activity-client-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/activity_client.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    activity_client.root_module.link_libc = true;
+    activity_client.root_module.addImport("rui_client", read_client);
+    const activity_integration = b.addSystemCommand(&.{"python3"});
+    activity_integration.addFileArg(b.path("tests/integration/activity_integration.py"));
+    activity_integration.addArtifactArg(release_safe);
+    activity_integration.addArtifactArg(activity_client);
+    b.step("activity-integration", "Run complete Session activity reads and typed Client consumption").dependOn(&activity_integration.step);
     const integration = b.addSystemCommand(&.{"sh"});
     integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     integration.addArtifactArg(release_safe);
@@ -366,6 +381,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addArtifactArg(host_status_actor);
     fast_integrations.addArtifactArg(session_list_client);
     fast_integrations.addArtifactArg(proposal_client);
+    fast_integrations.addArtifactArg(activity_client);
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.step.dependOn(&release.step);
     fast_integrations.step.dependOn(&run_evaluator_host.step);
@@ -383,6 +399,7 @@ pub fn build(b: *std.Build) void {
     process_integrations.addArtifactArg(host_status_actor);
     process_integrations.addArtifactArg(session_list_client);
     process_integrations.addArtifactArg(proposal_client);
+    process_integrations.addArtifactArg(activity_client);
     const full_evaluator = b.addSystemCommand(&.{"python3"});
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     full_evaluator.addArtifactArg(evaluator);

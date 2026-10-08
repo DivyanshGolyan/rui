@@ -142,17 +142,65 @@ pub const Requests = struct {
         try body.appendFmt(",\"position\":\"{d}\",\"field\":\"{s}\"}}", .{ position, @tagName(field) });
         const fd = try openRead(self, &paths, "/v1/proposal-field", body.slice());
         defer self.io.vtable.netClose(self.io.userdata, &.{fd});
-        const head = try readResponseHeadUntil(self, fd, 60_000, null);
-        if (head.status != 200) {
-            if (head.kind != .command_json) return error.InvalidResponse;
-            var reply_buffer: ReplyBuffer = .{};
-            return try decodeReadFailure(try readCommandBodyUntil(self, fd, head, &reply_buffer, null), false);
-        }
-        if (head.kind != .content_bytes or head.total != head.content_length or head.next != head.content_length) return error.InvalidResponse;
-        try readResponseBody(self, fd, head.content_length, sink);
-        return null;
+        return readPublicContentResponse(self, fd, sink);
+    }
+
+    pub fn activityPage(self: Requests, store_path: []const u8, session: []const u8, cursor: ActivityCursor) !ActivityPageReply {
+        try self.check();
+        try validateIdentityInputs("", session);
+        try cursor.validate();
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try renderReadRequest(&body, "activity_page", paths.store.slice(), "session", session, null, null);
+        body.len -= 1;
+        try body.append(",\"end\":");
+        if (cursor.end) |end| try body.appendFmt("\"{d}\"", .{end}) else try body.append("null");
+        try body.appendFmt(",\"position\":\"{d}\",\"ordinal\":", .{cursor.position});
+        if (cursor.ordinal) |ordinal| try body.appendFmt("\"{d}\"", .{ordinal}) else try body.append("null");
+        try body.appendFmt(",\"direction\":\"{s}\"}}", .{@tagName(cursor.direction)});
+        const fd = try openRead(self, &paths, "/v1/activity-page", body.slice());
+        defer self.io.vtable.netClose(self.io.userdata, &.{fd});
+        const Sink = struct {
+            buffer: protocol.FixedJsonBuffer(protocol.max_activity_page_response_bytes) = .{},
+            pub fn feed(s: *@This(), bytes: []const u8) !void {
+                try s.buffer.append(bytes);
+            }
+        };
+        var sink: Sink = .{};
+        var buffer: ReplyBuffer = .{};
+        return switch (try readReportResponse(self, fd, &sink, &buffer)) {
+            .report => .{ .page = try ActivityPage.parse(sink.buffer.slice(), cursor) },
+            .command => |reply| .{ .failure = try decodeReadFailure(reply, false) },
+        };
+    }
+
+    /// Complete scoped bytes once; callers still use readProposalField for calls.
+    pub fn readActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, sink: anytype) !?ReadFailure {
+        try self.check();
+        try validateIdentityInputs("", session);
+        if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try renderReadRequest(&body, "activity_content", paths.store.slice(), "session", session, null, null);
+        body.len -= 1;
+        try body.appendFmt(",\"position\":\"{d}\",\"ordinal\":\"{d}\"}}", .{ position, ordinal });
+        const fd = try openRead(self, &paths, "/v1/activity-content", body.slice());
+        defer self.io.vtable.netClose(self.io.userdata, &.{fd});
+        return readPublicContentResponse(self, fd, sink);
     }
 };
+
+fn readPublicContentResponse(requests: Requests, fd: std.posix.fd_t, sink: anytype) !?ReadFailure {
+    const head = try readResponseHeadUntil(requests, fd, 60_000, null);
+    if (head.status != 200) {
+        if (head.kind != .command_json) return error.InvalidResponse;
+        var reply_buffer: ReplyBuffer = .{};
+        return try decodeReadFailure(try readCommandBodyUntil(requests, fd, head, &reply_buffer, null), false);
+    }
+    if (head.kind != .content_bytes or head.total != head.content_length or head.next != head.content_length) return error.InvalidResponse;
+    try readResponseBody(requests, fd, head.content_length, sink);
+    return null;
+}
 
 pub const ProposalField = protocol.ProposalField;
 pub const ProposalCursor = struct { end: ?u64 = null, after: u64 = 0 };
@@ -230,6 +278,107 @@ pub const ProposalPage = struct {
         }
         if (page.more and previous >= page.end) return error.InvalidProposalPage;
         return page;
+    }
+};
+
+pub const ActivityCursor = struct {
+    end: ?u64 = null,
+    position: u64 = 0,
+    ordinal: ?u64 = null,
+    direction: @FieldType(protocol.ActivityPage, "direction") = .forward,
+    pub fn validate(self: ActivityCursor) !void {
+        try (protocol.ActivityPage{ .end = self.end, .position = self.position, .ordinal = self.ordinal, .direction = self.direction }).validate();
+    }
+};
+pub const ActivityPageReply = union(enum) { page: ActivityPage, failure: ReadFailure };
+pub const ActivityPage = struct {
+    facts: protocol.ActivityFacts,
+
+    pub fn continuation(self: *const ActivityPage) ?ActivityCursor {
+        const facts = &self.facts;
+        if (!facts.more) return null;
+        const last = facts.items[facts.count - 1];
+        return .{ .end = facts.end, .position = last.position, .ordinal = last.ordinal, .direction = facts.direction };
+    }
+
+    pub fn parse(bytes: []const u8, cursor: ActivityCursor) !ActivityPage {
+        try cursor.validate();
+        if (bytes.len > protocol.max_activity_page_response_bytes) return error.InvalidActivityPage;
+        const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
+        const Fact = protocol.ActivityItem;
+        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), content: Ref };
+        const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [4]Ref };
+        const Outcome = struct { turn: JsonString(20), operation: JsonString(20), code: JsonString(96), content: ?Ref };
+        const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: Ref, call: Call, tool_result: Ref, outcome: Outcome, stop: Stop } };
+        const Items = struct {
+            values: [16]Item = undefined,
+            count: usize = 0,
+            pub fn jsonParse(a: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+                if (try source.next() != .array_begin) return error.UnexpectedToken;
+                var result: @This() = .{};
+                while (try source.peekNextTokenType() != .array_end) {
+                    if (result.count == result.values.len) return error.LengthMismatch;
+                    result.values[result.count] = try std.json.innerParse(Item, a, source, options);
+                    result.count += 1;
+                }
+                _ = try source.next();
+                return result;
+            }
+        };
+        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool };
+        var storage: [2 * protocol.max_activity_page_response_bytes]u8 = undefined;
+        var fixed = std.heap.FixedBufferAllocator.init(&storage);
+        const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{}) catch return error.InvalidActivityPage;
+        var page: ActivityPage = .{ .facts = .{ .end = try id(wire.end, true), .direction = wire.direction.value, .more = wire.more, .count = wire.items.count } };
+        if (!wire.version.eql("1") or !wire.type.eql("activity_page") or page.facts.direction != cursor.direction or
+            (cursor.end != null and cursor.end.? != page.facts.end) or cursor.position > page.facts.end or
+            (wire.more and wire.items.count != 16)) return error.InvalidActivityPage;
+        var position = cursor.position;
+        var ordinal = cursor.ordinal;
+        for (wire.items.values[0..wire.items.count], page.facts.items[0..wire.items.count]) |item, *fact| {
+            fact.* = .{ .position = try id(item.position, false), .ordinal = try id(item.ordinal, true), .value = undefined };
+            const after = fact.position > position or (ordinal != null and fact.position == position and fact.ordinal > ordinal.?);
+            const before = fact.position < position or (ordinal != null and fact.position == position and fact.ordinal < ordinal.?);
+            if (fact.position > page.facts.end or (position != 0 and !(if (cursor.direction == .forward) after else before)) or
+                ((item.value == .tool_result) != (fact.ordinal != 0))) return error.InvalidActivityPage;
+            switch (item.value) {
+                .admission, .user => |message| {
+                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content) };
+                    if ((value.state == .applied) != (value.turn != null) or (item.value == .user and value.state != .applied)) return error.InvalidActivityPage;
+                    fact.value = if (item.value == .user) .{ .user = value } else .{ .admission = value };
+                },
+                .assistant, .tool_result => |reference| fact.value = if (item.value == .assistant) .{ .assistant = try content(reference) } else .{ .tool_result = try content(reference) },
+                .call => |call| {
+                    var value: Fact.Call = .{ .position = fact.position, .operation = try id(call.operation, false), .turn = try id(call.turn, false), .call_ordinal = try id(call.call_ordinal, true), .action = if (call.action) |action| try id(action, false) else null, .rejection = if (call.rejection) |code| code.value else null, .fields = undefined };
+                    if ((value.action != null) == (value.rejection != null)) return error.InvalidActivityPage;
+                    for (call.fields, &value.fields) |reference, *field| {
+                        const decoded = try content(reference);
+                        field.* = .{ .length = decoded.length, .digest = decoded.digest };
+                    }
+                    fact.value = .{ .call = value };
+                },
+                .outcome => |outcome| {
+                    if (outcome.code.slice().len == 0 or (outcome.code.eql("completed") != (outcome.content != null))) return error.InvalidActivityPage;
+                    fact.value = .{ .outcome = .{ .turn = try id(outcome.turn, false), .operation = try id(outcome.operation, false), .code = outcome.code.value, .content = if (outcome.content) |reference| try content(reference) else null } };
+                },
+                .stop => |stop| fact.value = .{ .stop = .{ .key = stop.key.value, .turn = if (stop.turn) |turn| try id(turn, false) else null, .cutoff = try id(stop.cutoff, true), .completion = stop.completion.value } },
+            }
+            position = fact.position;
+            ordinal = fact.ordinal;
+        }
+        return page;
+    }
+
+    fn id(value: anytype, zero: bool) !u64 {
+        const result = try mutationId(value, zero);
+        if (result > std.math.maxInt(i64)) return error.InvalidActivityPage;
+        return result;
+    }
+    fn content(value: anytype) !protocol.ActivityItem.Content {
+        const reference = try CommandObservation.decodeReference(value);
+        if (reference.bytes > protocol.max_sqlite_content_bytes) return error.InvalidActivityPage;
+        return .{ .length = reference.bytes, .digest = reference.digest };
     }
 };
 
