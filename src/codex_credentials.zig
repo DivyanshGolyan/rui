@@ -491,6 +491,61 @@ test "local credential status is observational at expiry and pending refresh" {
     try std.testing.expectEqual(State.refresh_pending, unchanged.state);
 }
 
+test "installed local credential status completes under the exclusive mutation lock" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try testPath(&tmp, "auth", &path_buffer);
+    var record = try testRecord("installed-account", 0);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+    try install(path, &record, null);
+    var private = try tmp.dir.openDir(io, "private", .{});
+    defer private.close(io);
+    var before_buffer: [4096]u8 = undefined;
+    defer std.crypto.secureZero(u8, &before_buffer);
+    const before = try private.readFile(io, "auth", &before_buffer);
+    const Worker = struct {
+        path: []const u8,
+        done: std.atomic.Value(bool) = .init(false),
+        configured: ?LocalStatus = null,
+        expired: ?LocalStatus = null,
+        failure: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.configured = localStatus(self.path, 1233) catch |err| result: {
+                self.failure = err;
+                break :result null;
+            };
+            self.expired = localStatus(self.path, 1234) catch |err| result: {
+                self.failure = err;
+                break :result null;
+            };
+            self.done.store(true, .release);
+        }
+    };
+    const lock = try private.openFile(io, ".auth.lock", .{ .mode = .read_write, .lock = .exclusive });
+    var worker: Worker = .{ .path = path };
+    const thread = std.Thread.spawn(.{}, Worker.run, .{&worker}) catch |err| {
+        lock.close(io);
+        return err;
+    };
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    while (!worker.done.load(.acquire) and start.durationTo(std.Io.Clock.Timestamp.now(io, .awake)).raw.nanoseconds < 2 * std.time.ns_per_s)
+        std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+    // Record before releasing, then join even on the negative path: a shared
+    // lock regression fails at this boundary rather than hanging the runner.
+    const completed_while_locked = worker.done.load(.acquire);
+    lock.close(io);
+    thread.join();
+    try std.testing.expect(completed_while_locked);
+    try std.testing.expectEqual(@as(?anyerror, null), worker.failure);
+    try std.testing.expectEqual(@as(?LocalStatus, .configured), worker.configured);
+    try std.testing.expectEqual(@as(?LocalStatus, .refresh_required), worker.expired);
+    var after_buffer: [4096]u8 = undefined;
+    defer std.crypto.secureZero(u8, &after_buffer);
+    try std.testing.expectEqualStrings(before, try private.readFile(io, "auth", &after_buffer));
+}
+
 test "successive login, generation compare, pending restart, and privacy" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
