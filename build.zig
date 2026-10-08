@@ -179,6 +179,21 @@ pub fn build(b: *std.Build) void {
     activity_integration.addArtifactArg(release_safe);
     activity_integration.addArtifactArg(activity_client);
     b.step("activity-integration", "Run complete Session activity reads and typed Client consumption").dependOn(&activity_integration.step);
+    const session_input_client = b.addExecutable(.{
+        .name = "rui-session-input-client-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/session_input_client.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    session_input_client.root_module.addImport("rui_client", read_client);
+    configureTerminalEditor(b, session_input_client);
+    const session_input = b.addSystemCommand(&.{"python3"});
+    session_input.addFileArg(b.path("tests/integration/session_input_integration.py"));
+    session_input.addArtifactArg(release_safe);
+    session_input.addArtifactArg(session_input_client);
+    b.step("session-input-integration", "Run draft custody and real Client capture/send/recovery cases").dependOn(&session_input.step);
     const integration = b.addSystemCommand(&.{"sh"});
     integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     integration.addArtifactArg(release_safe);
@@ -382,6 +397,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addArtifactArg(session_list_client);
     fast_integrations.addArtifactArg(proposal_client);
     fast_integrations.addArtifactArg(activity_client);
+    fast_integrations.addArtifactArg(session_input_client);
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.step.dependOn(&release.step);
     fast_integrations.step.dependOn(&run_evaluator_host.step);
@@ -400,6 +416,7 @@ pub fn build(b: *std.Build) void {
     process_integrations.addArtifactArg(session_list_client);
     process_integrations.addArtifactArg(proposal_client);
     process_integrations.addArtifactArg(activity_client);
+    process_integrations.addArtifactArg(session_input_client);
     const full_evaluator = b.addSystemCommand(&.{"python3"});
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     full_evaluator.addArtifactArg(evaluator);

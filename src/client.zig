@@ -2,6 +2,8 @@ const std = @import("std");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 
+pub const SessionInput = @import("SessionInput.zig");
+
 /// Pin before spawning a borrower; reset or destroy only after return/join.
 /// Stop is local transport intent, never cancellation of admitted Host work.
 pub const Cancellation = struct {
