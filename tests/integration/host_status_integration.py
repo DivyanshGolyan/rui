@@ -203,6 +203,7 @@ def protected_saturation(root):
         busy = raw_info(socket_path(store), store)
         assert busy.startswith(b"HTTP/1.1 503") and b"discovery_capacity_exhausted" in busy, busy
         assert time.monotonic() - busy_started < 2, "discovery busy reply exceeded bound"
+        assert status(store) == "owned_unavailable", "discovery saturation is not wire incompatibility"
         assert time.monotonic() - began < 5, "fixture consumed ordinary borrowers' acceptance budget"
         ack = raw_info(socket_path(store), store, identity,
                        kind="host_stop", route="control/host-stop")
@@ -236,6 +237,7 @@ def protected_saturation(root):
         assert status(store) == "unavailable"
         with (store / "host.lock").open("rb") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        print("protected discovery passed: ten ordinary + one discovery, competing busy, exact stop, listener closure, held lease, correlated release")
     finally:
         for stream in held:
             stream.close()
@@ -255,8 +257,9 @@ def hostile_discovery(root):
                             ("configure", {"key": "hostile", "session": "hostile/session", "configuration": {
                                 "workspace": {"state": "omitted"}, "provider": {"state": "omitted"},
                                 "model": {"state": "omitted"}, "instructions": {"state": "value", "value": "x" * 128}}})):
-            response = raw_info(socket_path(store), store, kind=kind, extra=extra)
-            assert b"RouteKindMismatch" in response and b"InjectedContentAcquireFailure" not in response, response
+            for route in ("host-info", "control/host-stop"):
+                response = raw_info(socket_path(store), store, route=route, kind=kind, extra=extra)
+                assert b"RouteKindMismatch" in response and b"InjectedContentAcquireFailure" not in response, response
             assert list((store / "scratch").iterdir()) == [], "hostile discovery created scratch"
             observed = raw_info(socket_path(store), store, kind="observe_command", route="observe-command", extra={"key": "hostile"})
             assert b'"status":"absent"' in observed, observed
@@ -268,6 +271,7 @@ def hostile_discovery(root):
         assert b'"type":"host_info"' in raw_info(socket_path(store), store)
         if baseline is not None:
             wait_for_descriptors(host.pid, baseline)
+        print("hostile discovery passed: oversized before body, message/configure before scratch, no saved command, healthy reuse")
     finally:
         stop_process(host)
         diagnostics.close()
@@ -307,6 +311,7 @@ def discovery_body_deadline(root):
             assert closed and 9 <= elapsed < 11.5, ("body deadline not acceptance-derived 10s", elapsed, bytes(response), diagnostics.tail())
         assert status(store).startswith("ready ")
         assert list((store / "scratch").iterdir()) == []
+        print(f"discovery absolute deadline passed: header + trickling body closed in {elapsed:.3f}s, scratch=0")
     finally:
         stop_process(host)
         diagnostics.close()
