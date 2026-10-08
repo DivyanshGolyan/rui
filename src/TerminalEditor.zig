@@ -4,6 +4,7 @@ const termios = @cImport(@cInclude("termios.h"));
 
 extern fn utf8proc_grapheme_break_stateful(c_int, c_int, *c_int) c_int;
 extern fn utf8proc_category(c_int) c_int;
+extern fn utf8proc_charwidth(c_int) c_int;
 
 buffer: []u8,
 length: usize = 0,
@@ -23,6 +24,393 @@ plain_ascii: bool = true,
 
 pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow };
 const paste_end = "\x1b[201~";
+
+/// Parser-owned classification; adapters must not inspect escape/paste scratch.
+pub const Pending = enum { none, escape, incomplete };
+
+pub fn pending(self: *const Editor) Pending {
+    if (self.paste or self.partial_length != 0 or self.escape == .csi or self.escape == .ss3) return .incomplete;
+    return if (self.escape == .esc) .escape else .none;
+}
+
+/// Call only after the adapter's input inactivity deadline expires. Bare ESC
+/// is discarded; all other incomplete input fails without accepting a prefix.
+pub fn expire(self: *Editor) !void {
+    switch (self.pending()) {
+        .none => {},
+        .escape => self.escape = .none,
+        .incomplete => return error.IncompleteTerminalInput,
+    }
+}
+
+/// One serialized stdin/stdout owner in final caller storage. No draft, history,
+/// allocator, worker or borrowed view survives a method return. The input owner
+/// feeds byte events and decides submit/Ctrl-C/Ctrl-D; ticks service Client jobs.
+pub const Terminal = struct {
+    original: std.posix.termios,
+    active: bool = false,
+    size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 },
+    anchored: bool = false,
+    permanent_partial: bool = false,
+    pending_since: i96 = 0,
+    flags: [2]c_int = undefined,
+    painted: usize = 0,
+    caret_row: usize = 0,
+    frame_size: ?std.posix.winsize = null,
+    /// Attach only after constructing the caller in final storage. UI thread
+    /// only; callback may service input/owner work, but must never render.
+    /// All write slices must remain immutable until that synchronous call ends.
+    pump: ?struct { context: *anyopaque, service: *const fn (*anyopaque, std.Io, i32) anyerror!void } = null,
+
+    fn service(self: *Terminal, io: std.Io, wait: i32) !void {
+        if (self.pump) |pump| return pump.service(pump.context, io, wait);
+        try std.Io.sleep(io, .fromMilliseconds(wait), .awake);
+    }
+
+    fn write(self: *Terminal, io: std.Io, bytes: []const u8) !void {
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            try self.checkGeometry();
+            const n = std.c.write(1, bytes[offset..].ptr, bytes.len - offset);
+            if (n < 0) switch (std.posix.errno(n)) {
+                .INTR => continue,
+                .AGAIN => {
+                    try self.service(io, 10);
+                    continue;
+                },
+                else => return error.TerminalCleanupFailed,
+            };
+            if (n == 0) return error.TerminalCleanupFailed;
+            offset += @intCast(n);
+            try self.checkGeometry();
+        }
+    }
+
+    fn checkGeometry(self: *Terminal) !void {
+        try self.observeGeometry(windowSize());
+    }
+
+    fn observeGeometry(self: *Terminal, current: std.posix.winsize) !void {
+        if (self.frame_size) |expected| {
+            if (current.row != expected.row or current.col != expected.col) {
+                self.anchored = false;
+                return error.UncertainTerminalCursor;
+            }
+        }
+    }
+
+    pub const Input = union(enum) {
+        byte: u8,
+        tick,
+        retry, // Ctrl-R, only outside parser custody
+        approve, // Ctrl-G, only outside parser custody; not authorization
+        timeout, // caller must invoke Editor.expire before reading again
+        physical_eof, // invocation failure, never successful detach
+    };
+
+    /// Successful begin must be followed by finish. On begin failure after raw
+    /// entry, cleanup is performed here instead.
+    pub fn begin(io: std.Io) !Terminal {
+        const original = try std.posix.tcgetattr(0);
+        var mode = original;
+        mode.lflag.ICANON = false;
+        mode.lflag.ECHO = false;
+        mode.lflag.ISIG = false;
+        mode.lflag.IEXTEN = false;
+        mode.iflag.IXON = false;
+        mode.cc[@intFromEnum(std.posix.V.MIN)] = 1;
+        mode.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+        const flags = [2]c_int{ std.c.fcntl(0, std.c.F.GETFL), std.c.fcntl(1, std.c.F.GETFL) };
+        if (flags[0] < 0 or flags[1] < 0) return error.TerminalCleanupFailed;
+        const nonblock: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+        if (std.c.fcntl(0, std.c.F.SETFL, flags[0] | nonblock) < 0) return error.TerminalCleanupFailed;
+        errdefer _ = std.c.fcntl(0, std.c.F.SETFL, flags[0]);
+        if (std.c.fcntl(1, std.c.F.SETFL, flags[1] | nonblock) < 0) return error.TerminalCleanupFailed;
+        errdefer _ = std.c.fcntl(1, std.c.F.SETFL, flags[1]);
+        try std.posix.tcsetattr(0, .FLUSH, mode);
+        var self: Terminal = .{ .original = original, .active = true, .flags = flags };
+        self.write(io, "\x1b[?2004h") catch |err| {
+            try self.finish(io);
+            return err;
+        };
+        return self;
+    }
+
+    /// Independently disable/drain stdout and restore exact stdin with FLUSH.
+    /// Restore failure wins. No successful completion or further accepted
+    /// effect may follow an unconfirmed cleanup.
+    pub fn finish(self: *Terminal, io: std.Io) !void {
+        std.debug.assert(self.active);
+        const disabled: anyerror!void = blk: {
+            self.write(io, "\x1b[?2004l") catch |err| break :blk err;
+            self.drain(io) catch |err| break :blk err;
+        };
+        if (!self.active) return disabled;
+        try self.restore();
+        disabled catch return error.TerminalCleanupFailed;
+    }
+
+    /// Exact proposal/prompt bytes have been written. Drain stdout while the
+    /// invocation services input, then flush old typeahead before fresh choice.
+    /// This is authorization handoff, not persistent cancellation policy.
+    pub fn prepareChoice(self: *Terminal, io: std.Io, parser: *Editor) !void {
+        if (windowSize().col < 16) return error.UncertainTerminalCursor;
+        try self.drain(io);
+        while (parser.pending() == .incomplete) try self.service(io, 10);
+        if (termios.tcflush(0, termios.TCIFLUSH) != 0) return error.TerminalFlushFailed;
+        if (std.c.getenv("RUI_TEST_ACTION_READY_FD")) |text| {
+            const fd = try std.fmt.parseInt(std.posix.fd_t, std.mem.span(text), 10);
+            const ready: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+            try ready.writeStreamingAll(io, "x");
+        }
+    }
+
+    fn restore(self: *Terminal) !void {
+        // End output custody before independently restoring both descriptors.
+        const restored = std.posix.tcsetattr(0, .FLUSH, self.original);
+        self.active = false;
+        var failed = false;
+        for (self.flags, 0..) |flags, fd| {
+            if (std.c.fcntl(@intCast(fd), std.c.F.SETFL, flags) < 0) failed = true;
+        }
+        restored catch return error.TerminalRestoreFailed;
+        if (failed) return error.TerminalCleanupFailed;
+    }
+
+    /// Poll at most 25ms; ticks never renew the 80ms ESC / 2s incomplete input
+    /// inactivity deadline. Positive bytes renew it, matching readLine semantics.
+    pub fn next(self: *Terminal, io: std.Io, kind: Pending) !Input {
+        std.debug.assert(self.active);
+        const now = std.Io.Clock.awake.now(io).nanoseconds;
+        if (self.pending_since == 0) self.pending_since = now;
+        var wait: i32 = 25;
+        if (kind != .none) {
+            const budget: i96 = if (kind == .escape) 80_000_000 else 2_000_000_000;
+            const remaining = self.pending_since + budget - now;
+            if (remaining <= 0) return .timeout;
+            wait = @intCast(@min(25, @divTrunc(remaining + 999_999, 1_000_000)));
+        }
+        var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
+        if (try std.posix.poll(&fds, wait) == 0) return .tick;
+        var byte: [1]u8 = undefined;
+        const count = std.posix.read(0, &byte) catch |err| switch (err) {
+            error.WouldBlock => return .tick,
+            else => return err,
+        };
+        if (count == 0) return .physical_eof;
+        self.pending_since = std.Io.Clock.awake.now(io).nanoseconds;
+        return classify(byte[0], kind);
+    }
+
+    fn classify(byte: u8, kind: Pending) Input {
+        if (kind == .none) switch (byte) {
+            18 => return .retry,
+            7 => return .approve,
+            else => {},
+        };
+        return .{ .byte = byte };
+    }
+
+    /// Reanchor after geometry changes without erasing uncertain old rows.
+    /// No history replay, alternate screen or scroll-region authority.
+    fn clear(self: *Terminal, io: std.Io) !void {
+        const current = windowSize();
+        self.frame_size = current;
+        defer self.frame_size = null;
+        errdefer self.anchored = false;
+        if (self.anchored) {
+            if (current.row == self.size.row and current.col == self.size.col) {
+                var control: [32]u8 = undefined;
+                if (self.caret_row != 0) try self.write(io, try std.fmt.bufPrint(&control, "\x1b[{d}A", .{self.caret_row}));
+                try self.write(io, "\r");
+                for (0..self.painted) |row| {
+                    try self.write(io, "\x1b[2K");
+                    if (row + 1 < self.painted) try self.write(io, "\r\n");
+                }
+                if (self.painted > 1) try self.write(io, try std.fmt.bufPrint(&control, "\x1b[{d}A", .{self.painted - 1}));
+                try self.write(io, "\r");
+            } else {
+                for (0..@max(current.row, 1)) |_| try self.write(io, "\r\n");
+                try self.write(io, "[Rui: terminal resized; draft retained]\r\n");
+            }
+        }
+        self.anchored = false;
+        self.size = current;
+    }
+
+    /// Permanent bytes are already terminal-safe presentation, synchronously
+    /// borrowed. Caller streams complete history once, never through redraw.
+    /// Chunk boundaries do not add newlines or duplicate content. Redraw ends a
+    /// final partial line before installing its footer; don't redraw mid-stream.
+    pub fn writePermanent(self: *Terminal, io: std.Io, bytes: []const u8) !void {
+        std.debug.assert(self.active);
+        try self.clear(io);
+        try self.write(io, bytes);
+        if (bytes.len != 0) self.permanent_partial = bytes[bytes.len - 1] != '\n';
+    }
+
+    /// At most six physical rows, including status; logical bytes stay intact.
+    pub fn redraw(self: *Terminal, io: std.Io, bytes: []const u8, cursor: usize, status: []const u8) !void {
+        std.debug.assert(self.active and cursor <= bytes.len);
+        // Output may pump Input and mutate its banks. Stage every borrowed
+        // display byte before the first write, including clear's resize notice.
+        const geometry = windowSize();
+        if (geometry.row < 2 or geometry.col < 8) return error.UncertainTerminalCursor;
+        // Reserve the widest prefix and one non-wrapping terminal column.
+        const view = try viewport(bytes, cursor, geometry.col - 6, @min(5, geometry.row - 1));
+        var status_copy: [4096]u8 = undefined;
+        var status_length = @min(status.len, @min(geometry.col - 3, status_copy.len));
+        while (status_length < status.len and status_length != 0 and status[status_length] & 0xc0 == 0x80)
+            status_length -= 1;
+        @memcpy(status_copy[0..status_length], status[0..status_length]);
+        for (status_copy[0..status_length]) |byte| if (byte < 32 or byte > 126) return error.UncertainTerminalCursor;
+        try self.clear(io);
+        self.frame_size = geometry;
+        defer self.frame_size = null;
+        errdefer self.anchored = false;
+        try self.checkGeometry();
+        if (self.permanent_partial) {
+            try self.write(io, "\r\n");
+            self.permanent_partial = false;
+        }
+        try self.write(io, "\r");
+        try self.write(io, status_copy[0..status_length]);
+        if (view.first != 0 or view.hidden_after) try self.write(io, " ~");
+        for (0..view.rows) |row| {
+            try self.write(io, "\r\n");
+            try self.write(io, if (row == 0) "rui> " else "> ");
+            try self.write(io, view.data[row][0..view.lengths[row]]);
+        }
+        var control: [32]u8 = undefined;
+        const up = view.rows - 1 - view.caret.row;
+        if (up != 0) try self.write(io, try std.fmt.bufPrint(&control, "\x1b[{d}A", .{up}));
+        try self.write(io, try std.fmt.bufPrint(&control, "\r\x1b[{d}C", .{view.caret.col + @as(usize, if (view.caret.row == 0) 5 else 2)}));
+        self.painted = view.rows + 1;
+        self.caret_row = view.caret.row + 1;
+        self.size = geometry;
+        self.anchored = true; // cursor remains at the actual draft caret
+    }
+
+    const Position = struct { row: usize = 0, col: usize = 0 };
+    const Viewport = struct {
+        data: [5][4096]u8 = undefined,
+        lengths: [5]usize = @splat(0),
+        rows: usize,
+        first: usize,
+        caret: Position,
+        hidden_after: bool,
+    };
+
+    // Two forward scans: geometry first, then immutable bounded presentation.
+    // No index or logical payload cache. An unrenderably large cluster fails.
+    fn viewport(bytes: []const u8, cursor: usize, columns: usize, limit: usize) !Viewport {
+        var caret: Position = .{};
+        var result: Viewport = undefined;
+        for (0..2) |pass| {
+            var pos: Position = .{};
+            var offset: usize = 0;
+            var prior: ?c_int = null;
+            var state: c_int = 0;
+            while (offset < bytes.len) {
+                const start = offset;
+                var width: usize = 0;
+                var regional: usize = 0;
+                while (offset < bytes.len) {
+                    const n = std.unicode.utf8ByteSequenceLength(bytes[offset]) catch return error.UncertainTerminalCursor;
+                    const scalar: c_int = @intCast(std.unicode.utf8Decode(bytes[offset..][0..n]) catch return error.UncertainTerminalCursor);
+                    if (prior) |p| {
+                        var next_state = state;
+                        if (utf8proc_grapheme_break_stateful(p, scalar, &next_state) != 0 and offset != start) break;
+                        state = next_state;
+                    }
+                    prior = scalar;
+                    offset += n;
+                    width = @max(width, @as(usize, @intCast(@max(0, utf8proc_charwidth(scalar)))));
+                    if (scalar == 0xfe0f or scalar == 0x20e3) width = @max(width, 2);
+                    if (scalar >= 0x1f1e6 and scalar <= 0x1f1ff) regional += 1;
+                    if (regional == 2) width = @max(width, 2);
+                }
+                const special = bytes[start];
+                if (special == '\t') width = @min(8 - pos.col % 8, columns);
+                if (width > columns) return error.UncertainTerminalCursor;
+                if (special != '\n' and pos.col + width > columns) pos = .{ .row = pos.row + 1 };
+                if (start == cursor) caret = pos;
+                if (pass == 1 and special != '\n' and pos.row >= result.first and pos.row < result.first + result.rows) {
+                    const row = pos.row - result.first;
+                    const n = if (special == '\t') width else offset - start;
+                    const used = result.lengths[row];
+                    if (used + n > result.data[row].len) return error.UncertainTerminalCursor;
+                    if (special == '\t') @memset(result.data[row][used..][0..n], ' ') else @memcpy(result.data[row][used..][0..n], bytes[start..offset]);
+                    result.lengths[row] += n;
+                }
+                if (special == '\n') pos = .{ .row = pos.row + 1 } else pos.col += width;
+                if (offset == cursor) caret = pos;
+            }
+            if (cursor == 0) caret = .{};
+            if (pass == 0) {
+                const first = if (caret.row >= limit) caret.row - limit + 1 else 0;
+                const rows = @min(limit, pos.row - first + 1);
+                result = .{ .rows = rows, .first = first, .caret = .{ .row = caret.row - first, .col = caret.col }, .hidden_after = pos.row >= first + rows };
+            }
+        }
+        return result;
+    }
+
+    const Drain = struct {
+        stopped: std.atomic.Value(bool) = .init(false),
+        done: std.atomic.Value(bool) = .init(false),
+        result: anyerror!void = undefined,
+        fn interrupted(_: std.posix.SIG) callconv(.c) void {}
+        fn run(self: *Drain) void {
+            self.result = self.wait();
+            self.done.store(true, .release);
+        }
+        fn wait(self: *Drain) !void {
+            var set = std.posix.sigemptyset();
+            std.posix.sigaddset(&set, .USR1);
+            var original: std.posix.sigset_t = undefined;
+            if (std.c.pthread_sigmask(@intCast(std.posix.SIG.UNBLOCK), &set, &original) != 0) return error.TerminalCleanupFailed;
+            defer _ = std.c.pthread_sigmask(@intCast(std.posix.SIG.SETMASK), &original, &set);
+            while (true) {
+                if (self.stopped.load(.acquire)) return error.InteractiveInterrupted;
+                const rc = termios.tcdrain(1);
+                if (self.stopped.load(.acquire)) return error.InteractiveInterrupted;
+                if (rc == 0) return;
+                if (std.posix.errno(rc) != .INTR) return error.TerminalCleanupFailed;
+            }
+        }
+    };
+
+    // Private joinable native drain borrower; it never reads input or writes.
+    fn drain(self: *Terminal, io: std.Io) !void {
+        var saved_action: std.posix.Sigaction = undefined;
+        std.posix.sigaction(.USR1, null, &saved_action);
+        if (saved_action.handler.handler != std.posix.SIG.DFL and saved_action.handler.handler != std.posix.SIG.IGN) return error.TerminalDrainSignalInUse;
+        const action: std.posix.Sigaction = .{ .handler = .{ .handler = Drain.interrupted }, .mask = std.posix.sigemptyset(), .flags = 0 };
+        std.posix.sigaction(.USR1, &action, null);
+        defer std.posix.sigaction(.USR1, &saved_action, null);
+        var borrower: Drain = .{};
+        const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 + (std.options.signal_stack_size orelse 0) }, Drain.run, .{&borrower});
+        var failure: ?anyerror = null;
+        while (!borrower.done.load(.acquire)) {
+            if (failure == null) self.service(io, 10) catch |err| {
+                failure = err;
+                borrower.stopped.store(true, .release);
+                // Do not leave raw mode hostage to native drain interruption.
+                self.restore() catch |cleanup| {
+                    failure = cleanup;
+                };
+            };
+            if (failure != null) {
+                _ = std.c.pthread_kill(thread.getHandle(), .USR1);
+                std.Io.sleep(std.Io.Threaded.global_single_threaded.io(), .fromMilliseconds(10), .awake) catch unreachable;
+            }
+        }
+        thread.join();
+        if (failure) |err| return err;
+        try borrower.result;
+    }
+};
 
 /// Returns a slice borrowed from buffer until its caller next reuses it.
 /// No draft, terminal mode or buffered input survives a prompt.
@@ -786,4 +1174,83 @@ test "word movement skips separators and stops at word edges" {
     try std.testing.expectEqualStrings(" two/三", storage[editor.cursor..editor.length]);
     try std.testing.expectEqual(Event.redraw, editor.moveWord(true));
     try std.testing.expectEqualStrings("/三", storage[editor.cursor..editor.length]);
+}
+
+test "persistent terminal pending expiry preserves draft and delegates controls" {
+    std.testing.refAllDecls(Terminal);
+    var storage: [80]u8 = undefined;
+    var editor: Editor = .{ .buffer = &storage };
+    for ("draft\x1b") |byte| _ = editor.feed(byte);
+    try std.testing.expectEqual(Pending.escape, editor.pending());
+    try editor.expire();
+    try std.testing.expectEqual(Pending.none, editor.pending());
+    try std.testing.expectEqualStrings("draft", storage[0..editor.length]);
+    for ("\x1b[") |byte| _ = editor.feed(byte);
+    try std.testing.expectEqual(Pending.incomplete, editor.pending());
+    try std.testing.expectError(error.IncompleteTerminalInput, editor.expire());
+    editor = .{ .buffer = &storage };
+    _ = editor.feed(0xc3);
+    try std.testing.expectError(error.IncompleteTerminalInput, editor.expire());
+    editor = .{ .buffer = &storage };
+    for ("\x1b[200~") |byte| _ = editor.feed(byte);
+    try std.testing.expectEqual(Pending.incomplete, editor.pending());
+    try std.testing.expectError(error.IncompleteTerminalInput, editor.expire());
+    try std.testing.expectEqual(.retry, std.meta.activeTag(Terminal.classify(18, .none)));
+    try std.testing.expectEqual(.approve, std.meta.activeTag(Terminal.classify(7, .none)));
+    for ([_]u8{ 7, 18, 3, 4 }) |byte| {
+        try std.testing.expectEqual(byte, Terminal.classify(byte, .incomplete).byte);
+    }
+    try std.testing.expectEqual(@as(u8, 3), Terminal.classify(3, .none).byte);
+    try std.testing.expectEqual(@as(u8, 4), Terminal.classify(4, .none).byte);
+}
+
+test "production viewport owns multiline Unicode tab and clipped caret presentation" {
+    var bytes = "prior\nA\t中e\u{301}🧑‍🌾tail\nnext".*;
+    const cursor = "prior\nA\t中e\u{301}".len;
+    const view = try Terminal.viewport(&bytes, cursor, 20, 1);
+    try std.testing.expectEqualStrings("A       中e\u{301}🧑‍🌾tail", view.data[0][0..view.lengths[0]]);
+    try std.testing.expectEqual(Terminal.Position{ .row = 0, .col = 11 }, view.caret);
+    try std.testing.expect(view.first != 0 and view.hidden_after);
+    @memset(&bytes, 'x'); // Input bank reuse cannot alter any displayed bytes.
+    try std.testing.expectEqualStrings("A       中e\u{301}🧑‍🌾tail", view.data[0][0..view.lengths[0]]);
+    try std.testing.expect(@sizeOf(Terminal) <= 256);
+}
+
+test "partial footer geometry loss retires relative cursor authority" {
+    const size: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
+    var terminal: Terminal = .{ .original = undefined, .size = size, .frame_size = size, .anchored = true, .painted = 6, .caret_row = 4 };
+    try terminal.observeGeometry(size);
+    var resized = size;
+    resized.row = 3;
+    try std.testing.expectError(error.UncertainTerminalCursor, terminal.observeGeometry(resized));
+    try std.testing.expect(!terminal.anchored);
+    terminal.anchored = true;
+    resized = size;
+    resized.col = 20;
+    try std.testing.expectError(error.UncertainTerminalCursor, terminal.observeGeometry(resized));
+    try std.testing.expect(!terminal.anchored);
+    const view = try Terminal.viewport("retained draft", 14, resized.col - 6, @min(5, resized.row - 1));
+    try std.testing.expect(view.rows <= 5);
+    try std.testing.expect(view.caret.col + 5 < resized.col);
+}
+
+test "persistent viewport wraps cells and clips physical rows without losing logical bytes" {
+    const bytes = "a\n界é\n👩‍💻\nz";
+    const view = try Terminal.viewport(bytes, bytes.len, 8, 2);
+    try std.testing.expectEqual(@as(usize, 2), view.first);
+    try std.testing.expectEqual(@as(usize, 2), view.rows);
+    try std.testing.expectEqual(Terminal.Position{ .row = 1, .col = 1 }, view.caret);
+    try std.testing.expectEqualStrings("👩‍💻", view.data[0][0..view.lengths[0]]);
+    const wrap = try Terminal.viewport("xxxxxxx🇺🇸Z", 7 + "🇺🇸".len, 8, 5);
+    try std.testing.expectEqual(Terminal.Position{ .row = 1, .col = 2 }, wrap.caret);
+    const tab = try Terminal.viewport("x\tZ", 2, 10, 5);
+    try std.testing.expectEqual(@as(usize, 8), tab.caret.col);
+    try std.testing.expectEqualStrings("x       Z", tab.data[0][0..tab.lengths[0]]);
+    const clipped = try Terminal.viewport(bytes, 1, 8, 2);
+    try std.testing.expect(clipped.hidden_after);
+    var mutable = "A中é".*;
+    const owned = try Terminal.viewport(&mutable, mutable.len, 8, 5);
+    @memset(&mutable, 'x');
+    try std.testing.expectEqualStrings("A中é", owned.data[0][0..owned.lengths[0]]);
+    try std.testing.expectEqual(@as(usize, 4), owned.caret.col);
 }
