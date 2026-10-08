@@ -80,8 +80,16 @@ def main():
             baseline = resources(host.pid)
             head, body = exchange(sock, store, "/v1/read-result", "read_result", key="reply-message")
             assert head.startswith(b"HTTP/1.1 200 ") and body == expected
+            head, body = exchange(sock, store, "/v1/conversation-page", "conversation_page",
+                                  session="direct/reply", end="0", before_position="0", before_ordinal="0")
+            assert head.startswith(b"HTTP/1.1 200 "), head
+            item = json.loads(body)["items"][0]
+            assert item["kind"] == "assistant", item
             for index in range(10):
-                if index % 2:
+                if index in (0, 2):
+                    peer, length = hold_reply(sock, store, "/v1/conversation-content", "conversation_content",
+                                              session="direct/reply", position=item["position"], ordinal="0", start="0", stream=True)
+                elif index % 2:
                     peer, length = hold_reply(sock, store, "/v1/inspect-session", "inspect_session",
                                               session="direct/reply", profile="full")
                 else:
@@ -94,7 +102,7 @@ def main():
             # ordinary writers remain held; it cannot revoke the saved answer.
             assert control.stop_session(state, store, "reply-stop", "direct/reply")["answer"]["status"] == "accepted"
             # Disconnect releases one exchange, not the committed result.
-            held.pop()[0].close()
+            held.pop(0)[0].close()  # Whole-stream Conversation reader.
 
             def reclaimed():
                 head, body = exchange(sock, store, "/v1/read-result", "read_result", key="reply-message")

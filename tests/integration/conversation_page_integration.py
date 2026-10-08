@@ -109,6 +109,10 @@ def main():
             start = next_offset
         assert b"".join(chunks) == payload.encode() and len(chunks) == 3
         head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", "direct/page",
+            position=item["position"], ordinal="0", start="0", stream=True)
+        assert head.startswith(b"HTTP/1.1 200 ") and data == payload.encode(), (head, len(data))
+        assert b"Content-Length: 10005\r\n" in head and b"X-Rui-Next-Offset: 10005\r\n" in head, head
+        head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", "direct/page",
             position=item["position"], ordinal="0", start=str(len(payload.encode())))
         assert head.startswith(b"HTTP/1.1 200 ") and data == b"", (head, data)
         assert b"X-Rui-Next-Offset: 10005\r\n" in head, head
@@ -254,6 +258,122 @@ def projected_ranges():
         shutil.rmtree(state)
 
 
+def whole_stream_shape(length):
+    # Escaping changes source length, not public byte framing. Pad only with
+    # ASCII so each shape is valid UTF-8 and has the independently chosen size.
+    unit = "\x00\n\\\"é中🙂/"
+    text = "" if length == 0 else "x" + unit * ((length - 1) // len(unit.encode()))
+    text += "z" * (length - len(text.encode()))
+    expected = text.encode()
+    assert len(expected) == length
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            body = successful_sse(1, text)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            self.close_connection = True
+
+        def log_message(self, _format, *_args):
+            pass
+
+    with tempfile.TemporaryDirectory(prefix="rui-whole-stream-") as root:
+        state = pathlib.Path(root)
+        store = state / "store"
+        store.mkdir(mode=0o700)
+        endpoint = TestHTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=endpoint.serve_forever)
+        worker.start()
+        process = None
+        try:
+            provider = f"http://127.0.0.1:{endpoint.server_port}/responses"
+            process, fields = start_host(store, provider)
+            configure(state, store, "stream-config", "direct/stream")
+            message(state, store, "stream-message", "direct/stream", "" if length == 0 else "input")
+
+            def completed_page():
+                head, body = request(fields["socket"], store, "/v1/conversation-page", "conversation_page", "direct/stream",
+                    end="0", before_position="0", before_ordinal="0")
+                assert head.startswith(b"HTTP/1.1 200 "), (head, body)
+                items = json.loads(body)["items"]
+                return items[0] if items and items[0]["kind"] == ("assistant" if length else "user") else None
+
+            item = wait_for(completed_page, "stream public identity")
+            identity = dict(position=item["position"], ordinal="0", start="0", stream=True)
+            head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", "direct/stream", **identity)
+            assert head.startswith(b"HTTP/1.1 200 ") and body == expected, (head, len(body), length)
+            for name in ("Content-Length", "X-Rui-Content-Bytes", "X-Rui-Next-Offset"):
+                assert f"{name}: {length}\r\n".encode() in head + b"\r\n", head
+            # Public identity/provenance/range checks remain the same in stream
+            # mode. Invalid caller requests must not fence healthy content.
+            for changes, status in (({"start": "1"}, 400), ({"ordinal": "1"}, 409), ({"position": str(2**64 - 1)}, 400)):
+                head, _ = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", "direct/stream", **(identity | changes))
+                assert head.startswith(f"HTTP/1.1 {status} ".encode()), head
+            wait_for(lambda: inspect_execution(store, "direct/stream")["custody_occupied"] == "0", "stream producer cleanup")
+            stop_process(process)
+            process = None
+            # Alter only a stopped Store. Digest and hidden-tail faults are
+            # separate fresh-Host witnesses, so one fence cannot mask another.
+            with sqlite3.connect(store / "rui.sqlite3") as database:
+                if length:
+                    answer, source, start, payload = database.execute(
+                        "SELECT p.answer_content_id,p.source_content_id,p.encoded_start,c.payload FROM answer_text_projection p "
+                        "JOIN content c ON c.content_id=p.source_content_id WHERE p.part_ordinal=0"
+                    ).fetchone()
+                    assert payload[start:start + 1] == b"x"
+                    database.execute("UPDATE content SET payload=? WHERE content_id=?", (payload[:start] + b"y" + payload[start + 1:], source))
+                else:
+                    # Empty assistant output has no public entry. The admitted
+                    # empty User entry exercises public projected-empty EOF.
+                    answer = database.execute("SELECT content_id FROM conversation_entry WHERE entry_kind=1").fetchone()[0]
+                    digest = database.execute("SELECT digest FROM content WHERE content_id=?", (answer,)).fetchone()[0]
+                    database.execute("UPDATE content SET payload=NULL,digest=? WHERE content_id=?", (b"\xff" * 32, answer))
+            for fault in ("digest", "tail"):
+                process, fields = start_host(store, provider)
+                head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", "direct/stream", **identity)
+                if length <= 4096:
+                    assert head.startswith(b"HTTP/1.1 500 "), (fault, length, head, len(body))
+                    assert json.loads(body)["code"] == "canonical_store_failure", body
+                else:
+                    assert head.startswith(b"HTTP/1.1 200 "), head
+                    assert f"Content-Length: {length}\r\n".encode() in head, head
+                    # No byte of the failed final window may escape, even at
+                    # an exact window multiple. Earlier bytes are not authenticated.
+                    sent = ((length - 1) // 4096) * 4096
+                    prefix = (b"y" + expected[1:]) if fault == "digest" else expected
+                    assert body == prefix[:sent] and len(body) < length, (fault, length, len(body))
+                    assert b"HTTP/1.1" not in body and b"canonical_store_failure" not in body
+                assert process.wait(timeout=5) == 1, "canonical corruption did not shut down Host"
+                stop_process(process)
+                process = None
+                if fault == "digest":
+                    with sqlite3.connect(store / "rui.sqlite3") as database:
+                        if length:
+                            database.execute("UPDATE content SET payload=? WHERE content_id=?", (payload, source))
+                            database.execute("INSERT INTO answer_text_projection VALUES(?,?,?,?,?,?)", (answer, 4, source, start, 0, 1))
+                        else:
+                            database.execute("UPDATE content SET digest=? WHERE content_id=?", (digest, answer))
+                            database.execute("INSERT INTO answer_text_projection VALUES(?,?,?,?,?,?)", (answer, 4, answer, 0, 0, 1))
+            print(f"whole stream {length} bytes: exact escape-heavy framing, independent digest/tail no-false-success witnesses passed")
+        finally:
+            if process is not None:
+                stop_process(process)
+            endpoint.shutdown()
+            endpoint.server_close()
+            worker.join(timeout=5)
+            assert not worker.is_alive()
+
+
 if __name__ == "__main__":
     main()
     projected_ranges()
+    for size in (0, 1, 4095, 4096, 8192, 8193, 131073):
+        whole_stream_shape(size)

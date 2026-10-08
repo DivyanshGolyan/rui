@@ -1212,6 +1212,7 @@ pub const ContentReader = struct {
     pub fn close(self: *ContentReader) void {
         std.debug.assert(self.active);
         self.active = false;
+        if (@import("builtin").is_test) _ = self.store.testing_content_work.closes.fetchAdd(1, .monotonic);
     }
 };
 
@@ -1369,6 +1370,8 @@ pub const Store = struct {
     selector: protocol.Bounded(protocol.max_store_bytes),
     mutex: std.Io.Mutex = .init,
     fenced: std.atomic.Value(bool) = .init(false),
+    // Source-level proof only: no counters/storage in the production Store.
+    testing_content_work: if (@import("builtin").is_test) struct { decoded: std.atomic.Value(u64) = .init(0), closes: std.atomic.Value(u64) = .init(0) } else void = if (@import("builtin").is_test) .{} else {},
 
     pub fn open(io: std.Io, database_path: []const u8, selector: []const u8) !Store {
         return openWithOptions(io, database_path, selector, .{});
@@ -5470,6 +5473,7 @@ pub const Store = struct {
                     }
                     var source = ProjectedByteSource{ .store = self, .cursor = cursor };
                     cursor.pending_end = try decodeOutputScalar(&source, &cursor.pending);
+                    if (@import("builtin").is_test) _ = self.testing_content_work.decoded.fetchAdd(cursor.pending_end, .monotonic);
                     cursor.pending_start = 0;
                     cursor.part_decoded += cursor.pending_end;
                 }
@@ -11393,7 +11397,7 @@ test "public tool-result cursor crosses a completed group boundary" {
     try std.testing.expectEqualStrings("Unknown tool: unknown.", result[0..size]);
 }
 
-fn testingPublicProjection(
+pub fn testingPublicProjection(
     storage: *Store,
     tmp: *std.testing.TmpDir,
     parts: []const struct { encoded: []const u8, decoded: []const u8 },
@@ -11401,7 +11405,7 @@ fn testingPublicProjection(
     try configureTestSession(storage, "projection-config", "direct/projection");
     try submitTestMessage(storage, tmp, "projection-input", "projection-key", "direct/projection", "input");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var source_buffer: [16 * 1024]u8 = undefined;
+    var source_buffer: [64 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&source_buffer);
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
@@ -11449,6 +11453,39 @@ fn testingPublicProjection(
     const page = try storage.publicConversationPage(.{ .session = session });
     try std.testing.expect(page.items[0].kind == .assistant);
     return .{ .session = session, .position = page.items[0].position };
+}
+
+test "public projected content sequential work excludes repeated prefixes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const expected = "a" ** 32768;
+    const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = expected, .decoded = expected }});
+    storage.testing_content_work = .{};
+    var window: [protocol.content_window_bytes]u8 = undefined;
+    var reader = try storage.openPublicConversationContent(request);
+    var offset: u64 = 0;
+    while (offset < expected.len) : (offset += window.len) {
+        try std.testing.expectEqual(window.len, try reader.readRange(offset, &window));
+        try std.testing.expectEqualStrings(expected[@intCast(offset)..][0..window.len], &window);
+    }
+    reader.close();
+    try std.testing.expectEqual(@as(u64, 32768), storage.testing_content_work.decoded.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
+    // Actual old endpoint work: eight fresh readers, not a timing estimate.
+    storage.testing_content_work = .{};
+    offset = 0;
+    while (offset < expected.len) : (offset += window.len) {
+        var ranged = try storage.openPublicConversationContent(request);
+        defer ranged.close();
+        try std.testing.expectEqual(window.len, try ranged.readRange(offset, &window));
+        try std.testing.expectEqualStrings(expected[@intCast(offset)..][0..window.len], &window);
+    }
+    try std.testing.expectEqual(@as(u64, 147456), storage.testing_content_work.decoded.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 8), storage.testing_content_work.closes.load(.monotonic));
+    try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
 }
 
 test "public projected content equal-length repoint fences at complete-stream EOF" {

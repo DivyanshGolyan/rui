@@ -3242,27 +3242,52 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, trace_
             try response.append("}");
             deliverResponse(host.io, fd, 200, response.slice());
         },
-        .conversation_content => |command| {
-            var reader = host.store.openPublicConversationContent(command) catch |err| switch (err) {
-                error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(host.io, fd, 409, "conversation_unavailable", @errorName(err)),
-                else => {
-                    fenceDispatch(host, "conversation content", err);
-                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
-                },
-            };
-            defer reader.close();
-            // Store owns public positioning/decoding; no transaction or BLOB
-            // handle survives this read into socket delivery.
-            var buffer: [protocol.content_window_bytes]u8 = undefined;
-            const count = reader.readRange(command.start, &buffer) catch |err| {
-                fenceDispatch(host, "conversation content", err);
-                return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
-            };
-            var header_buffer: [320]u8 = undefined;
-            const content_header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ count, reader.reference.length, command.start + count });
-            writeAll(host.io, fd, content_header) catch return;
-            writeAll(host.io, fd, buffer[0..count]) catch {};
+        .conversation_content => |command| try deliverConversationContent(host, fd, command),
+    }
+}
+
+fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
+    var reader = host.store.openPublicConversationContent(command) catch |err| switch (err) {
+        error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(host.io, fd, 409, "conversation_unavailable", @errorName(err)),
+        else => {
+            fenceDispatch(host, "conversation content", err);
+            return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
         },
+    };
+    defer reader.close();
+    // One reader, fixed window, no Store lock/BLOB over socket delivery.
+    const delivered = if (command.stream) reader.reference.length else @min(reader.reference.length - command.start, protocol.content_window_bytes);
+    const end = command.start + delivered;
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    const first: usize = @intCast(@min(delivered, buffer.len));
+    const count = reader.readRange(command.start, buffer[0..@max(first, 1)]) catch |err| {
+        fenceDispatch(host, "conversation content", err);
+        return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+    };
+    if (count != first) {
+        fenceDispatch(host, "conversation content", error.ShortCanonicalRead);
+        return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+    }
+    // Even empty/one-window projections validate EOF before successful headers.
+    var header_buffer: [320]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ delivered, reader.reference.length, end });
+    writeAll(host.io, fd, header) catch return;
+    writeAll(host.io, fd, buffer[0..first]) catch return;
+    var offset = command.start + first;
+    while (offset < end) {
+        const wanted: usize = @intCast(@min(end - offset, buffer.len));
+        const next = reader.readRange(offset, buffer[0..wanted]) catch |err| {
+            // After headers: close an incomplete advertised body, never append
+            // another response or send bytes from the failed final window.
+            fenceDispatch(host, "conversation content", err);
+            return;
+        };
+        if (next != wanted) {
+            fenceDispatch(host, "conversation content", error.ShortCanonicalRead);
+            return;
+        }
+        writeAll(host.io, fd, buffer[0..next]) catch return;
+        offset += next;
     }
 }
 
@@ -3981,6 +4006,51 @@ fn writeAll(io: std.Io, fd: std.posix.fd_t, bytes: []const u8) !void {
         offset += @intCast(count);
         end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s;
     }
+}
+
+test "Conversation stream native delivery decodes once and closes on failed handoff" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite", .{root});
+    var storage = try store_module.Store.open(std.testing.io, path, root);
+    defer storage.close() catch unreachable;
+    const expected = "x" ** 8189 ++ "é中🙂\n\\\"/" ** 257 ++ "tail";
+    var command = try store_module.testingPublicProjection(&storage, &tmp, &.{
+        .{ .encoded = "x" ** 8189, .decoded = "x" ** 8189 },
+        .{ .encoded = "\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/" ** 257 ++ "tail", .decoded = "é中🙂\n\\\"/" ** 257 ++ "tail" },
+    });
+    command.stream = true;
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .faults = .{} };
+    var sockets: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &sockets));
+    defer _ = std.c.close(sockets[0]);
+    defer _ = std.c.close(sockets[1]);
+    storage.testing_content_work = .{};
+    try deliverConversationContent(&host, sockets[0], command);
+    try std.testing.expectEqual(@as(u64, expected.len), storage.testing_content_work.decoded.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
+    try std.testing.expect(!storage.isFenced());
+    _ = std.c.shutdown(sockets[0], std.c.SHUT.WR);
+    var received: [expected.len + 320]u8 = undefined;
+    var used: usize = 0;
+    while (true) {
+        const count = std.c.read(sockets[1], received[used..].ptr, received.len - used);
+        try std.testing.expect(count >= 0);
+        if (count == 0) break;
+        used += @intCast(count);
+    }
+    const body_start = (std.mem.indexOf(u8, received[0..used], "\r\n\r\n") orelse return error.MissingHeaders) + 4;
+    try std.testing.expectEqualStrings(expected, received[body_start..used]);
+    // Failed delivery is not canonical corruption; the one reader still closes
+    // without traversing the rest of the content or keeping caller storage.
+    storage.testing_content_work = .{};
+    try deliverConversationContent(&host, -1, command);
+    try std.testing.expectEqual(@as(u64, protocol.content_window_bytes), storage.testing_content_work.decoded.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
+    try std.testing.expect(!storage.isFenced());
 }
 
 test "reply delivery establishes nonblocking only when sending" {
