@@ -3007,7 +3007,8 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
         return respondStatic(host.io, fd, 400, "invocation_error", "control_request_too_large");
     }
     const request_number = nextRequestNumber(host) catch {
-        return respondStatic(host.io, fd, 500, "invocation_error", "request_identity_exhausted");
+        sendStaticUntil(host.io, fd, 500, "invocation_error", "request_identity_exhausted", if (route == .host_info) header_deadline else null) catch {};
+        return;
     };
     if (host.faults.test_phase_trace) {
         trace_request_number.* = request_number;
@@ -4240,6 +4241,41 @@ test "reply delivery establishes nonblocking only when sending" {
     try std.testing.expectEqualSlices(u8, "a\xc3\xa9\x00z", &actual);
     try std.testing.expectEqual(nonblocking, std.c.fcntl(sockets[0], std.c.F.GETFL) & nonblocking);
     try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(sockets[1], std.c.F.GETFL) & nonblocking);
+}
+
+test "discovery identity exhaustion cannot start a new error delivery budget" {
+    const Clock = struct {
+        var fd: std.posix.fd_t = undefined;
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            var descriptors = [_]std.c.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+            const available = std.c.poll(&descriptors, descriptors.len, 0);
+            std.debug.assert(available >= 0);
+            // Reading the last header byte consumes the original budget.
+            return .fromNanoseconds(if (available > 0) 0 else 10 * std.time.ns_per_s);
+        }
+    };
+    var sockets: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+    defer _ = std.c.close(sockets[0]);
+    defer _ = std.c.close(sockets[1]);
+    const header = "POST /v1/host-info HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 0\r\n\r\n";
+    try writeAll(std.testing.io, sockets[1], header);
+    Clock.fd = sockets[0];
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Clock.now;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{} };
+    host.request_counter.store(std.math.maxInt(u64), .release);
+    var place = try host.reserveClient();
+    defer host.clientFinished(place, null);
+    var trace_request_number: ?u64 = null;
+    try handleConnection(&host, sockets[0], 0, &place, &trace_request_number);
+    try std.testing.expectEqual(Admission.Place.discovery, place);
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(sockets[1], std.c.F.SETFL, nonblocking));
+    var response: [512]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, -1), std.c.read(sockets[1], &response, response.len));
+    try std.testing.expectEqual(std.posix.E.AGAIN, std.posix.errno(@as(isize, -1)));
 }
 
 test "discovery reply delivery shares its absolute budget across header and partial body writes" {

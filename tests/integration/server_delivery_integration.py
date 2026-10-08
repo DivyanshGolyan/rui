@@ -4,11 +4,13 @@
 Run directly with a ReleaseSafe Rui binary; no Client/schema/test-hook changes.
 """
 
+import fcntl
 import hashlib
 import json
 import os
 import pathlib
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -16,8 +18,7 @@ import time
 
 import control_integration as control
 import dispatch_integration as model
-from host_process import stop_process
-from host_process import canonical_fixture_root
+from host_process import canonical_fixture_root, stop_process
 
 
 def exchange(sock, store, route, kind, **fields):
@@ -119,18 +120,20 @@ def main():
             # No reader rescue: ten unread peers remain open for the real
             # production inactivity interval. Shutdown must drain them itself.
             started = time.monotonic()
-            host_head, host_body = exchange(sock, store, "/v1/host-info", "host_info")
-            assert host_head.startswith(b"HTTP/1.1 200 "), host_head
-            identity = json.loads(host_body)["instance"]
-            stop_body = json.dumps({"version": "1", "kind": "host_stop", "store": str(store)}).encode()
-            with socket.socket(socket.AF_UNIX) as stop:
-                stop.settimeout(5)
-                stop.connect(sock)
-                stop.sendall(f"POST /v1/control/host-stop HTTP/1.1\r\nContent-Type: application/json\r\n"
-                             f"X-Rui-Wire-Version: 1\r\nX-Rui-Host-Instance: {identity}\r\n"
-                             f"Content-Length: {len(stop_body)}\r\n\r\n".encode() + stop_body)
-                head, body = control.read_http_response(stop)
-                assert b" 200 " in head and json.loads(body)["status"] == "acknowledged", (head, body)
+            stopped = subprocess.run([control.RUI, "host", "stop", "--store", store],
+                                     capture_output=True, text=True, timeout=5)
+            assert stopped.returncode == 0, stopped
+            identity = json.loads(discovery_body)["instance"]
+            assert f"Host instance: {identity} (retry with --instance {identity})" in stopped.stdout, stopped
+            assert "Stop acknowledged; completion and lease release are not confirmed" in stopped.stdout, stopped
+            control.wait_for(lambda: not pathlib.Path(sock).exists(), "listener closure with ten readers held")
+            with (store / "host.lock").open("rb") as lease:
+                try:
+                    fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                else:
+                    raise AssertionError("lease released before unread borrowers drained")
             assert host.poll() is None, "acknowledgement is not completed drain"
             assert host.wait(timeout=75) == 1
             assert b"EffectAwareShutdown" in host.stderr.read(), "not the normal Host drain"
