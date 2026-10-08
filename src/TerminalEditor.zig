@@ -43,6 +43,22 @@ pub fn expire(self: *Editor) !void {
     }
 }
 
+/// Fatal guidance after terminal custody has unwound. One optional native
+/// write, without retries or drain: flow-stopped stderr must not delay exit.
+pub fn writeDiagnostic(vectors: []const std.posix.iovec_const) void {
+    if (std.c.isatty(2) != 1) return;
+    const flags = std.c.fcntl(2, std.c.F.GETFL, @as(c_int, 0));
+    if (flags < 0) return;
+    const nonblocking: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    const changed = flags & nonblocking == 0;
+    if (changed and std.c.fcntl(2, std.c.F.SETFL, flags | nonblocking) < 0) return;
+    _ = std.c.writev(2, vectors.ptr, @intCast(vectors.len));
+    // stderr can share its open-file description with a parent or another
+    // terminal descriptor. An unconfirmed restore remains a fatal exit; never
+    // reopen blocking reporting to explain a failed best-effort diagnostic.
+    if (changed) _ = std.c.fcntl(2, std.c.F.SETFL, flags);
+}
+
 /// One serialized stdin/stdout owner in final caller storage. No draft, history,
 /// allocator, worker or borrowed view survives a method return. The input owner
 /// feeds byte events and decides submit/Ctrl-C/Ctrl-D; ticks service Client jobs.

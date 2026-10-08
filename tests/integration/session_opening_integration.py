@@ -145,6 +145,39 @@ def completed(store, request):
                   "original saved result")
 
 
+def fatal_stderr(home, store):
+    """A restored caller must exit even when its separate stderr TTY is stopped."""
+    for stopped in (False, True):
+        master, slave = pty.openpty()
+        error_master, error_slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+        original = termios.tcgetattr(slave)
+        output_flags = fcntl.fcntl(slave, fcntl.F_GETFL)
+        error_flags = fcntl.fcntl(error_slave, fcntl.F_GETFL)
+        if stopped:
+            termios.tcflow(error_slave, termios.TCOOFF)
+        process = None
+        try:
+            process = subprocess.Popen(
+                [str(host.RUI), "--store", str(store), "--resume", "missing/fatal-session"],
+                env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=error_slave)
+            assert process.wait(timeout=5) == 1, "missing Session must return fatal exit, not detach or signal death"
+            assert termios.tcgetattr(slave) == original, "fatal caller left raw mode"
+            assert fcntl.fcntl(slave, fcntl.F_GETFL) == output_flags, "stdout flags changed"
+            assert fcntl.fcntl(error_slave, fcntl.F_GETFL) == error_flags, "stderr flags changed"
+            if not stopped:
+                assert select.select([error_master], [], [], 1)[0], "missing fatal diagnostic"
+                assert b"SessionNotConfigured" in os.read(error_master, 4096)
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            if stopped:
+                termios.tcflow(error_slave, termios.TCOON)
+            for fd in (master, slave, error_master, error_slave):
+                os.close(fd)
+
+
 def idle_catchup(state, home, store, endpoint):
     """Idle opening must keep following another caller, not select idle once."""
     release = threading.Event()
@@ -393,6 +426,7 @@ def main():
         owner = host.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         for session in ("idle", "equal", "approval", "local", "wait"):
             configure(home, store, workspace, "opening/" + session)
+        fatal_stderr(home, store)
         local_commands(home, store, workspace, endpoint)
         idle_catchup(state, home, store, endpoint)
         with endpoint.lock:
@@ -405,7 +439,7 @@ def main():
                 answer("APPROVAL-ANSWER"), answer("PRESERVED-ANSWER")])
         approval(state, home, store, workspace, endpoint)
         wait_attention(state, home, store, workspace, endpoint)
-        print("session opening: 5 focused real Host/provider/PTY cases passed")
+        print("session opening: 6 focused real Host/provider/PTY cases passed")
     finally:
         if owner is not None:
             host.stop_host(owner)

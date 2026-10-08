@@ -28,7 +28,22 @@ test "detached launcher reports exec failure before claiming Host readiness" {
     try std.testing.expectEqual(@as(c_int, 2), rui_launch_detached(argv[0].?, &argv, argv.len));
 }
 
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) !u8 {
+    dispatch(init) catch |err| {
+        if (std.c.isatty(2) != 1) return err;
+        const name = @errorName(err);
+        const vectors = [_]std.posix.iovec_const{
+            .{ .base = "error: ", .len = "error: ".len },
+            .{ .base = name.ptr, .len = name.len },
+            .{ .base = "\n", .len = 1 },
+        };
+        TerminalEditor.writeDiagnostic(&vectors);
+        return 1;
+    };
+    return 0;
+}
+
+fn dispatch(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const args = try init.minimal.args.toSlice(allocator);
     if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return newSession(init, args[1..]);
