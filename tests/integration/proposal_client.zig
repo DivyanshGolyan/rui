@@ -27,6 +27,19 @@ pub fn main(init: std.process.Init) !void {
         try out.interface.flush();
     } else if (std.mem.eql(u8, args[1], "field")) {
         const field = std.meta.stringToEnum(client.ProposalField, args[5]) orelse return error.InvalidArguments;
-        if (try requests.readProposalField(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), field, std.Io.File.stdout()) != null) return error.ProposalUnavailable;
+        const position = try std.fmt.parseInt(u64, args[4], 10);
+        var cursor: client.ProposalCursor = .{};
+        while (true) {
+            const page = switch (try requests.proposalPage(args[2], args[3], cursor)) {
+                .page => |page| page,
+                .failure => return error.ProposalUnavailable,
+            };
+            for (page.items[0..page.count]) |item| if (item.position == position) {
+                const reference = item.fields[@intFromEnum(field)];
+                if (try requests.readProposalField(args[2], args[3], position, field, .{ .bytes = reference.length, .digest = reference.digest }, std.Io.File.stdout()) != null) return error.ProposalUnavailable;
+                return;
+            };
+            cursor = page.continuation() orelse return error.ProposalUnavailable;
+        }
     } else return error.InvalidArguments;
 }

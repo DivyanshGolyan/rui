@@ -406,6 +406,9 @@ pub const ReadActivityContent = struct { store: Bounded(max_store_bytes) = .{}, 
 pub const ActivityFacts = struct {
     end: u64,
     direction: @FieldType(ActivityPage, "direction") = .forward,
+    pending_total: u64 = 0,
+    pending: [4]ActivityItem = undefined,
+    pending_count: usize = 0,
     items: [16]ActivityItem = undefined,
     count: usize = 0,
     more: bool = false,
@@ -416,7 +419,12 @@ pub const ActivityFacts = struct {
             if (index != 0) try out.writeByte(',');
             try item.writeJson(out);
         }
-        try out.print("],\"more\":{}}}", .{self.more});
+        try out.print("],\"more\":{},\"pending_total\":\"{d}\",\"pending\":[", .{ self.more, self.pending_total });
+        for (self.pending[0..self.pending_count], 0..) |*item, index| {
+            if (index != 0) try out.writeByte(',');
+            try item.writeJson(out);
+        }
+        try out.writeAll("]}");
     }
 };
 
@@ -1404,7 +1412,7 @@ pub const max_client_request_bytes = @max(
 // maximum (two shorter cursor keys or one position and a closed field).
 pub const max_proposal_page_response_bytes = 160 + proposal_page_items * (240 + 4 * 144);
 // Worst row: four complete field references, identities, or escaped key/code.
-pub const max_activity_page_response_bytes = 256 + 16 * (400 + @max(4 * 144, 6 * max_key_bytes));
+pub const max_activity_page_response_bytes = 320 + 20 * (400 + @max(4 * 144, 6 * max_key_bytes));
 
 const max_session_stop_rejection_code_bytes = "invalid_session_reference".len;
 const max_model_interruption_rejection_code_bytes = "invalid_session_reference".len;

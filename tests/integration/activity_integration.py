@@ -65,13 +65,26 @@ def idle_resources(pid, path):
     return host_resources(pid)
 
 
-def mock_reply(path, store, mode, body, advertised=None, ok=False):
+def mock_reply(path, store, mode, body, advertised=None, ok=False,
+               first_page=None, header_digest=None, expected_error=None, expected_output=None):
     path = pathlib.Path(path)
     path.unlink(missing_ok=True)
     with socket.socket(socket.AF_UNIX) as listener:
         listener.bind(str(path))
         listener.listen(1)
         def serve():
+            if first_page is not None:
+                with listener.accept()[0] as peer:
+                    data = b""
+                    while b"\r\n\r\n" not in data: data += peer.recv(4096)
+                    head, received = data.split(b"\r\n\r\n", 1)
+                    length = int(next(line.split(b": ")[1] for line in head.split(b"\r\n") if line.startswith(b"Content-Length:")))
+                    while len(received) < length: received += peer.recv(4096)
+                    assert json.loads(received)["kind"] == "activity_page"
+                    encoded = json.dumps(first_page).encode()
+                    peer.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
+                        f"Content-Length: {len(encoded)}\r\n".encode() +
+                        b"X-Rui-Wire-Version: 1\r\nConnection: close\r\n\r\n" + encoded)
             with listener.accept()[0] as peer:
                 data = b""
                 while b"\r\n\r\n" not in data: data += peer.recv(4096)
@@ -80,13 +93,18 @@ def mock_reply(path, store, mode, body, advertised=None, ok=False):
                 while len(received) < length: received += peer.recv(4096)
                 size = len(body) if advertised is None else advertised
                 headers = b"" if mode == "page" else f"X-Rui-Content-Bytes: {size}\r\nX-Rui-Next-Offset: {size}\r\n".encode()
+                if header_digest is not None: headers += f"X-Rui-Scoped-Content-Sha256: {header_digest.hex()}\r\n".encode()
                 content_type = b"application/json" if mode == "page" else b"application/octet-stream"
                 peer.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: " + content_type + f"\r\nContent-Length: {size}\r\n".encode() +
                     headers + b"X-Rui-Wire-Version: 1\r\nConnection: close\r\n\r\n" + body)
         worker = threading.Thread(target=serve)
         worker.start()
         args = ("null", 0, "null", "forward") if mode == "page" else (1, 0)
-        result = caller(store, mode, *args, ok=ok)
+        reply = subprocess.run([str(CALLER), mode, str(store), SESSION, *map(str, args)], capture_output=True, timeout=10)
+        assert (reply.returncode == 0) == ok, (mode, reply.returncode, reply.stderr)
+        result = reply.stdout
+        if expected_error is not None: assert expected_error.encode() in reply.stderr, reply.stderr
+        if expected_output is not None: assert result == expected_output, result
         worker.join(timeout=5)
         assert not worker.is_alive()
     path.unlink()
@@ -213,7 +231,9 @@ def main():
                     stop_process(process)
                     process = None
             saved.close()
-            valid = {"version": "1", "type": "activity_page", "end": str(2**63-1), "direction": "forward", "more": False,
+            valid = {"version": "1", "type": "activity_page", "end": str(2**63-1), "direction": "forward", "more": False, "pending_total": "16",
+                "pending": [{"position": str(i+1), "ordinal": "0", "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
+                    "turn": None, "state": "queued", "content": {"bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(4)],
                 "items": [{"position": str(i+1), "ordinal": "0", "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
                     "turn": None, "state": "queued", "content": {"bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
             mock_reply(fields["socket"], store, "page", json.dumps(valid).encode(), ok=True)
@@ -233,7 +253,19 @@ def main():
             encoded = json.dumps(valid).encode()
             mock_reply(fields["socket"], store, "page", encoded[:-1], len(encoded))
             mock_reply(fields["socket"], store, "page", encoded.replace(b'"version": "1"', b'"version":"1","version":"1"'))
-            assert mock_reply(fields["socket"], store, "content", b"abc", 9) == b"abc"
+            scoped = copy.deepcopy(valid)
+            scoped["items"] = [scoped["items"][0]]
+            for complete, body, size, header_digest, error, output in (
+                (b"abcdefghi", b"abc", 9, digest(b"abcdefghi"), "TruncatedResponse", b"abc"),
+                (b"abcdefghi", b"abcdefghi", 9, digest(b"wrong"), "ContentBindingMismatch", b""),
+                (b"abcdefghi", b"abc", 3, digest(b"abcdefghi"), "ContentBindingMismatch", b""),
+                (b"abcdefghi", b"abcdefgXy", 9, digest(b"abcdefghi"), "ContentBindingMismatch", b""),
+                (b"", b"", 0, digest(b"wrong"), "ContentBindingMismatch", b""),
+                (b"x", b"", 0, digest(b"x"), "ContentBindingMismatch", b""),
+            ):
+                scoped["items"][0]["value"]["admission"]["content"] = {"bytes": str(len(complete)), "sha256": digest(complete).hex()}
+                mock_reply(fields["socket"], store, "content", body, size,
+                    first_page=scoped, header_digest=header_digest, expected_error=error, expected_output=output)
             print("activity typed native: seven kinds/complete content/proposals/fixed-end/reverse/ties/catch-up/restart/provenance/malformed/truncation passed")
         finally:
             if process is not None: stop_process(process)

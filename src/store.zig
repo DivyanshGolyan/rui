@@ -2714,6 +2714,40 @@ pub const Store = struct {
             };
         }
         var page: protocol.ActivityFacts = .{ .end = end, .direction = request.direction };
+        // Application and stop consumption are monotone admission prefixes.
+        // Derive their boundary at this end, never from today's turn binding.
+        const bounds = try prepare(self.database, "SELECT max(coalesce((SELECT max(source_admission_id) FROM conversation_entry WHERE session_ref=?1 AND session_position<=?2),0)," ++
+            "coalesce((SELECT max(admission_cutoff) FROM session_stop WHERE session_ref=?1 AND position<=?2),0))");
+        defer _ = c.sqlite3_finalize(bounds);
+        try bindText(bounds, 1, request.session.slice());
+        try bindU64(bounds, 2, end);
+        if (c.sqlite3_step(bounds) != c.SQLITE_ROW) return error.ActivityReadFailed;
+        const consumed = c.sqlite3_column_int64(bounds, 0);
+        if (consumed < 0) return error.CorruptStore;
+        const pending_sql = " FROM message_admission WHERE session_ref=?1 AND admission_id>?3 AND admission_position<=?2";
+        const total = try prepare(self.database, "SELECT count(*)" ++ pending_sql);
+        defer _ = c.sqlite3_finalize(total);
+        try bindText(total, 1, request.session.slice());
+        try bindU64(total, 2, end);
+        try bindI64(total, 3, consumed);
+        if (c.sqlite3_step(total) != c.SQLITE_ROW or c.sqlite3_column_int64(total, 0) < 0) return error.ActivityReadFailed;
+        page.pending_total = @intCast(c.sqlite3_column_int64(total, 0));
+        const preview = try prepare(self.database, "SELECT admission_id,admission_position" ++ pending_sql ++ " ORDER BY admission_id LIMIT 4");
+        defer _ = c.sqlite3_finalize(preview);
+        try bindText(preview, 1, request.session.slice());
+        try bindU64(preview, 2, end);
+        try bindI64(preview, 3, consumed);
+        while (true) {
+            const step = c.sqlite3_step(preview);
+            if (step == c.SQLITE_DONE) break;
+            if (step != c.SQLITE_ROW) return error.ActivityReadFailed;
+            const admission = try readNullablePositiveI64(preview, 0) orelse return error.CorruptStore;
+            const position = try readNullablePositiveI64(preview, 1) orelse return error.CorruptStore;
+            const owned = try self.activityMessageLocked(request.session.slice(), end, @intCast(admission));
+            if (owned.message.state != .queued) return error.CorruptStore;
+            page.pending[page.pending_count] = .{ .position = @intCast(position), .ordinal = 0, .value = .{ .admission = owned.message } };
+            page.pending_count += 1;
+        }
         const statement = try prepare(self.database, activity_sql ++ "SELECT position,ordinal FROM activity WHERE position<=?2 AND " ++
             "(?3=0 OR (?5=0 AND (position>?3 OR (?4 IS NOT NULL AND position=?3 AND ordinal>?4))) OR " ++
             "(?5=1 AND (position<?3 OR (?4 IS NOT NULL AND position=?3 AND ordinal<?4)))) " ++
@@ -13236,19 +13270,39 @@ test "activity fixed admission prefix survives later application and stop" {
     const empty = try storage.activityPage(request);
     try submitTestMessage(&storage, &tmp, "activity-a", "a", "direct/activity", "same");
     try submitTestMessage(&storage, &tmp, "activity-b", "b", "direct/activity", "same");
+    try submitTestMessage(&storage, &tmp, "activity-c", "c", "direct/activity", "same");
+    try submitTestMessage(&storage, &tmp, "activity-d", "d", "direct/activity", "same");
+    try submitTestMessage(&storage, &tmp, "activity-e", "e", "direct/activity", "same");
+    try submitTestMessage(&storage, &tmp, "activity-f", "f", "direct/activity", "same");
     const queued = try storage.activityPage(request);
-    try std.testing.expectEqual(@as(usize, 2), queued.count);
+    try std.testing.expectEqual(@as(usize, 6), queued.count);
+    try std.testing.expectEqual(@as(u64, 6), queued.pending_total);
+    try std.testing.expectEqual(@as(usize, 4), queued.pending_count);
+    for (queued.pending[0..4], queued.items[0..4]) |pending, item| {
+        try std.testing.expectEqualDeep(item, pending);
+    }
     try std.testing.expect(queued.items[0].value.admission.admission != queued.items[1].value.admission.admission);
     try std.testing.expect(queued.items[0].value.admission.turn == null);
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     _ = try admitted.permit.consume();
+    try std.testing.expectEqual(@as(u64, 0), (try storage.activityPage(request)).pending_total);
+    try submitTestMessage(&storage, &tmp, "activity-g", "g", "direct/activity", "same");
+    const before_stop = try storage.activityPage(request);
+    try std.testing.expectEqual(@as(u64, 1), before_stop.pending_total);
     var stop = try completeSessionStop("activity-stop", "direct/activity");
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
     try expectActivityOutcome(&storage, "direct/activity", admitted.permit.binding, "cancelled");
+    try std.testing.expectEqual(@as(u64, 0), (try storage.activityPage(request)).pending_total);
+    request.end = before_stop.end;
+    try std.testing.expectEqualDeep(before_stop.pending[0], (try storage.activityPage(request)).pending[0]);
     request.end = queued.end;
     const frozen = try storage.activityPage(request);
-    try std.testing.expectEqual(@as(usize, 2), frozen.count);
+    try std.testing.expectEqual(@as(usize, 6), frozen.count);
+    try std.testing.expectEqual(@as(u64, 6), frozen.pending_total);
+    try std.testing.expectEqualDeep(queued.pending[0..4], frozen.pending[0..4]);
     try std.testing.expect(frozen.items[0].value.admission.state == .queued and frozen.items[0].value.admission.turn == null);
     request.end = empty.end;
     try std.testing.expectEqual(@as(usize, 0), (try storage.activityPage(request)).count);
+    try std.testing.expectEqual(@as(u64, 0), (try storage.activityPage(request)).pending_total);
+    try std.testing.expectEqual(@as(usize, 0), (try storage.activityPage(request)).pending_count);
 }

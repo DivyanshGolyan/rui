@@ -3312,7 +3312,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
                 },
             };
             defer reader.close();
-            try deliverPublicContent(host, fd, &reader, 0, true);
+            try deliverPublicContent(host, fd, &reader, 0, true, true);
         },
         .activity_page => |command| {
             const page = host.store.activityPage(command) catch |err| switch (err) {
@@ -3336,7 +3336,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
                 },
             };
             defer reader.close();
-            try deliverPublicContent(host, fd, &reader, 0, true);
+            try deliverPublicContent(host, fd, &reader, 0, true, true);
         },
     }
 }
@@ -3350,10 +3350,10 @@ fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol
         },
     };
     defer reader.close();
-    return deliverPublicContent(host, fd, &reader, command.start, command.stream);
+    return deliverPublicContent(host, fd, &reader, command.start, command.stream, false);
 }
 
-fn deliverPublicContent(host: *Host, fd: std.posix.fd_t, reader: *store_module.ContentReader, start: u64, stream: bool) !void {
+fn deliverPublicContent(host: *Host, fd: std.posix.fd_t, reader: *store_module.ContentReader, start: u64, stream: bool, scoped: bool) !void {
     // One reader, fixed window, no Store lock/BLOB over socket delivery.
     const delivered = if (stream) reader.reference.length else @min(reader.reference.length - start, protocol.content_window_bytes);
     const end = start + delivered;
@@ -3368,8 +3368,10 @@ fn deliverPublicContent(host: *Host, fd: std.posix.fd_t, reader: *store_module.C
         return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
     }
     // Even empty/one-window projections validate EOF before successful headers.
-    var header_buffer: [320]u8 = undefined;
-    const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ delivered, reader.reference.length, end });
+    var digest_buffer: [96]u8 = undefined;
+    const digest_header = if (scoped) try std.fmt.bufPrint(&digest_buffer, "X-Rui-Scoped-Content-Sha256: {s}\r\n", .{std.fmt.bytesToHex(reader.reference.digest, .lower)}) else "";
+    var header_buffer: [416]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n{s}Connection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ delivered, reader.reference.length, end, digest_header });
     writeAll(host.io, fd, header) catch return;
     writeAll(host.io, fd, buffer[0..first]) catch return;
     var offset = start + first;
