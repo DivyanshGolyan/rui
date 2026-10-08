@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Public-CLI evidence for detached Host launch and convergence."""
 
+import errno
 import json
 import fcntl
 import os
@@ -14,6 +15,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 
 from host_process import start_ready_process, stop_process
@@ -22,6 +24,7 @@ import codex_integration as codex_fixture
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
 COMMAND_TIMEOUT = 16
+PTY_OUTPUT_LIMIT = 1024 * 1024
 
 
 LAUNCH_PROBE = r"""
@@ -233,8 +236,31 @@ def lower_descriptor_limit():
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
 
 
+def wait_for_terminal_exit(caller, master, output, deadline):
+    """Sole reader retains output through PTY EOF and reap, without renewed time."""
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(caller.args, 5)
+        if not select.select([master], [], [], min(remaining, 0.05))[0]:
+            continue
+        try:
+            chunk = os.read(master, 65536)
+        except OSError as error:
+            # Linux PTYs report EOF as EIO; Darwin returns an empty read.
+            if error.errno != errno.EIO:
+                raise
+            chunk = b""
+        if not chunk:
+            return caller.wait(timeout=max(0, deadline - time.monotonic()))
+        assert len(output) + len(chunk) < PTY_OUTPUT_LIMIT, "unexpected unbounded terminal output"
+        output.extend(chunk)
+
+
 def main():
     assert len(sys.argv) == 2, "usage: host_launch_integration.py /absolute/path/to/rui"
+    from host_launch_exit_test import check_exit_reader
+    check_exit_reader(wait_for_terminal_exit)
     with tempfile.TemporaryDirectory(prefix="rui-host-launch-") as root_text:
         root = pathlib.Path(root_text)
         home = root / "home"
@@ -379,32 +405,50 @@ def main():
         codex_fixture.credentials(bare_credential)
         bare_env = {**os.environ, "HOME": str(bare_home)}
         master, slave = pty.openpty()
-        caller = subprocess.Popen([RUI], cwd=root, env=bare_env,
-            stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
+        caller = None
         try:
-            output = b""
+            original_terminal = termios.tcgetattr(master)
+            caller = subprocess.Popen([RUI], cwd=root, env=bare_env,
+                stdin=slave, stdout=slave, stderr=slave)
+            os.close(slave)
+            slave = None
+            output = bytearray()
             until = time.monotonic() + COMMAND_TIMEOUT
             while b"rui> " not in output:
                 remaining = until - time.monotonic()
                 assert remaining > 0 and select.select([master], [], [], remaining)[0], output
-                output += os.read(master, 65536)
+                chunk = os.read(master, 65536)
+                assert len(output) + len(chunk) < PTY_OUTPUT_LIMIT, "unexpected unbounded terminal output"
+                output.extend(chunk)
             assert b"Host ready (active capacity 8)" in output, output
             assert b"Provider: codex" in output and b"Permission: ask" in output, output
             assert b"request: " in output and b"Session: rui/" in output, output
             assert len(wait_for_processes(bare_store, 1)) == 1
-            os.write(master, b"/exit\n")
-            assert caller.wait(timeout=5) == 0
+            # Transfer this thread's reader from prompt to exit without
+            # withholding output credit or discarding any transcript bytes.
+            os.set_blocking(master, False)
+            deadline = time.monotonic() + 5
+            assert os.write(master, b"/exit\n") == 6, "incomplete /exit submission"
+            assert wait_for_terminal_exit(caller, master, output, deadline) == 0, output
+            assert termios.tcgetattr(master) == original_terminal, output
             assert instance(status(bare_store, bare_env), 8)
             stopped = subprocess.run([RUI, "host", "stop", "--store", bare_store],
                 env=bare_env, capture_output=True, text=True, timeout=5)
             assert stopped.returncode == 0 and "Stop acknowledged" in stopped.stdout, stopped
         finally:
-            if caller.poll() is None:
-                caller.kill()
-                caller.wait(timeout=5)
-            os.close(master)
-            forced_crash_cleanup(bare_store)
+            try:
+                if caller is not None and caller.poll() is None:
+                    caller.kill()
+                    caller.wait(timeout=5)
+            finally:
+                try:
+                    os.close(master)
+                finally:
+                    try:
+                        if slave is not None:
+                            os.close(slave)
+                    finally:
+                        forced_crash_cleanup(bare_store)
 
         # A detached Host that cannot satisfy its inherited descriptor budget
         # exits; the CLI bounds uncertainty and points at owner diagnostics.
