@@ -21,7 +21,7 @@ paste_prefix_length: usize = 0,
 rejected: ?Event = null,
 plain_ascii: bool = true,
 
-const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow };
+pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow };
 const paste_end = "\x1b[201~";
 
 /// Returns a slice borrowed from buffer until its caller next reuses it.
@@ -218,9 +218,16 @@ fn visibleRow(editor: *const Editor, prompt_size: usize, size: std.posix.winsize
     return row;
 }
 
+/// Empty visible text is not replaceable while keyboard/paste input or a sticky
+/// rejection still has custody. Completed escape scratch is not pending input.
+pub fn pristine(self: *const Editor) bool {
+    return self.length == 0 and self.partial_length == 0 and self.escape == .none and
+        !self.paste and self.paste_prefix_length == 0 and self.rejected == null;
+}
+
 // This transition is also the production byte-ingress path. Its result is
 // observable through the accepted line; no escape parser reads past a prompt.
-fn feed(self: *Editor, byte: u8) Event {
+pub fn feed(self: *Editor, byte: u8) Event {
     if (self.paste) return self.pasted(byte);
     if (self.escape != .none and (byte == 3 or byte == 4 or byte == '\r' or byte == '\n')) {
         self.escape = .none;
