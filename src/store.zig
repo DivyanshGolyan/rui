@@ -10,9 +10,24 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 18;
+pub const schema_version: u32 = 19;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
+const public_tool_groups_sql = "WITH groups AS (SELECT op.operation_id,max(coalesce(call.acceptance_position,action.acceptance_position)) AS position " ++
+    "FROM model_operation op JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
+    "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+    "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' GROUP BY op.operation_id " ++
+    "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
+    "AND count(coalesce(call.acceptance_position,action.acceptance_position))=count(*) " ++
+    "AND count(coalesce(call.rejection_content_id,action.resolution_content_id))=count(*)), ";
+const activity_sql = public_tool_groups_sql ++
+    "entries AS (SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission WHERE session_ref=?1 " ++
+    "UNION ALL SELECT session_position,0,CASE entry_kind WHEN 1 THEN 2 ELSE 3 END,source_admission_id FROM conversation_entry WHERE session_ref=?1 AND entry_kind IN (1,3) " ++
+    "UNION ALL SELECT session_position,0,4,NULL FROM model_output_item WHERE session_ref=?1 AND item_kind=3), " ++
+    "completions AS (SELECT groups.position AS position,call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM groups JOIN model_tool_call call ON call.operation_id=groups.operation_id " ++
+    "UNION ALL SELECT outcome_position,0,6,turn_id FROM turn WHERE session_ref=?1 AND outcome_code IS NOT NULL " ++
+    "UNION ALL SELECT position,0,7,NULL FROM session_stop WHERE session_ref=?1), " ++
+    "activity AS (SELECT * FROM entries UNION ALL SELECT * FROM completions) ";
 const complete_tool_results_sql =
     "current.resolution_code='tool_calls' AND EXISTS(" ++
     " SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3" ++
@@ -315,6 +330,8 @@ pub const ProposalPage = struct {
     count: usize = 0,
     more: bool = false,
 };
+
+pub const ActivityPage = protocol.ActivityFacts;
 
 pub const MessageObservation = struct {
     content: ContentReference,
@@ -1892,15 +1909,17 @@ pub const Store = struct {
             .{ .accepted = true },
         );
         {
+            const position = try self.claimSessionPosition(command.session.slice());
             const insert = try prepare(
                 self.database,
-                "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff) VALUES(?1,?2,?3,?4)",
+                "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position) VALUES(?1,?2,?3,?4,?5)",
             );
             defer _ = c.sqlite3_finalize(insert);
             try bindText(insert, 1, command.key.slice());
             try bindText(insert, 2, command.session.slice());
             try bindNullableU64(insert, 3, selected_turn_id);
             try bindI64(insert, 4, cutoff_value);
+            try bindU64(insert, 5, position);
             try expectDone(insert);
         }
         var interrupted_operation_id: ?u64 = null;
@@ -2105,6 +2124,7 @@ pub const Store = struct {
             try bindU64(settle_turn, 2, command.operation_id);
             try expectDone(settle_turn);
             if (c.sqlite3_changes(self.database) != 1) return error.InterruptionTargetChanged;
+            try self.recordTurnOutcomePosition(command.turn_id);
         }
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
@@ -2558,13 +2578,7 @@ pub const Store = struct {
         // Tool outcomes enter public Conversation only when the entire group
         // settles. Position is then its last acceptance; call ordinal is the
         // stable tie breaker. Private model items/instructions never enter it.
-        const statement = try prepare(self.database, "WITH groups AS (SELECT op.operation_id,max(coalesce(call.acceptance_position,action.acceptance_position)) AS position " ++
-            "FROM model_operation op JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
-            "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-            "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' GROUP BY op.operation_id " ++
-            "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
-            "AND min(coalesce(call.acceptance_position,action.acceptance_position)) IS NOT NULL " ++
-            "AND count(coalesce(call.rejection_content_id,action.resolution_content_id))=count(*)), " ++
+        const statement = try prepare(self.database, public_tool_groups_sql ++
             "public AS (SELECT e.session_position AS position,0 AS ordinal,e.entry_kind AS kind,e.content_id " ++
             "FROM conversation_entry e WHERE e.session_ref=?1 AND e.entry_kind IN (1,3) AND e.session_position<=?2 " ++
             "UNION ALL SELECT groups.position,call.call_ordinal+1,4,coalesce(call.rejection_content_id,action.resolution_content_id) " ++
@@ -2670,6 +2684,178 @@ pub const Store = struct {
         const content_id = c.sqlite3_column_int64(statement, 0);
         if (content_id <= 0) return error.CorruptStore;
         return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id) };
+    }
+
+    pub fn activityPage(self: *Store, request: protocol.ActivityPage) !ActivityPage {
+        try request.validate();
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        return self.activityPageLocked(request) catch |err| switch (err) {
+            error.SessionNotFound, error.InvalidCursor => err,
+            else => self.fenceReadFailure(err),
+        };
+    }
+
+    fn activityPageLocked(self: *Store, request: protocol.ActivityPage) !ActivityPage {
+        const session = (try self.readSession(request.session.slice())) orelse return error.SessionNotFound;
+        const end = request.end orelse session.next_position - 1;
+        if (end >= session.next_position or request.position > end) return error.InvalidCursor;
+        try self.validateActivitySequence(request.session.slice());
+        if (request.ordinal) |ordinal| {
+            _ = self.activityItemLocked(request.session.slice(), end, request.position, ordinal) catch |err| switch (err) {
+                error.ContentNotFound => return error.InvalidCursor,
+                else => return err,
+            };
+        }
+        var page: ActivityPage = .{ .end = end, .direction = request.direction };
+        const statement = try prepare(self.database, activity_sql ++ "SELECT position,ordinal FROM activity WHERE position<=?2 AND " ++
+            "(?3=0 OR (?5=0 AND (position>?3 OR (?4 IS NOT NULL AND position=?3 AND ordinal>?4))) OR " ++
+            "(?5=1 AND (position<?3 OR (?4 IS NOT NULL AND position=?3 AND ordinal<?4)))) " ++
+            "ORDER BY CASE WHEN ?5=0 THEN position END,CASE WHEN ?5=0 THEN ordinal END," ++
+            "CASE WHEN ?5=1 THEN position END DESC,CASE WHEN ?5=1 THEN ordinal END DESC LIMIT 17");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, request.session.slice());
+        try bindU64(statement, 2, end);
+        try bindU64(statement, 3, request.position);
+        try bindNullableU64(statement, 4, request.ordinal);
+        try bindU64(statement, 5, @intFromEnum(request.direction));
+        while (true) {
+            const result = c.sqlite3_step(statement);
+            if (result == c.SQLITE_DONE) break;
+            if (result != c.SQLITE_ROW) return error.ActivityReadFailed;
+            if (page.count == page.items.len) {
+                page.more = true;
+                break;
+            }
+            const position = try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore;
+            const ordinal = c.sqlite3_column_int64(statement, 1);
+            if (ordinal < 0) return error.CorruptStore;
+            page.items[page.count] = (try self.activityItemLocked(request.session.slice(), end, @intCast(position), @intCast(ordinal))).item;
+            page.count += 1;
+        }
+        return page;
+    }
+
+    fn validateActivitySequence(self: *Store, session: []const u8) !void {
+        // Nullable columns permit corruption detection; no writer may omit one.
+        const guard = try prepare(self.database, "SELECT 1 FROM message_admission WHERE session_ref=?1 AND admission_position IS NULL " ++
+            "UNION ALL SELECT 1 FROM session_stop WHERE session_ref=?1 AND position IS NULL " ++
+            "UNION ALL SELECT 1 FROM turn WHERE session_ref=?1 AND ((outcome_code IS NULL)!=(outcome_position IS NULL)) LIMIT 1");
+        defer _ = c.sqlite3_finalize(guard);
+        try bindText(guard, 1, session);
+        if (c.sqlite3_step(guard) != c.SQLITE_DONE) return error.CorruptStore;
+    }
+
+    fn activityMessageLocked(self: *Store, session: []const u8, end: u64, admission: u64) !protocol.ActivityItem.Message {
+        const statement = try prepare(self.database, "SELECT m.command_key,m.turn_id,m.content_id," ++
+            "EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=m.session_ref AND e.source_admission_id=m.admission_id AND e.session_position<=?2)," ++
+            "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=m.session_ref AND s.admission_cutoff>=m.admission_id AND s.position<=?2)," ++
+            "c.kind=2 AND c.accepted=1 AND c.target=m.session_ref AND c.primary_content_id=m.content_id " ++
+            "AND (m.turn_id IS NULL OR (t.session_ref=m.session_ref AND EXISTS(SELECT 1 FROM conversation_entry e " ++
+            "WHERE e.source_admission_id=m.admission_id AND e.session_ref=m.session_ref AND e.turn_id=m.turn_id AND e.content_id=m.content_id))) FROM message_admission m " ++
+            "LEFT JOIN core_command c ON c.command_key=m.command_key LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
+            "WHERE m.session_ref=?1 AND m.admission_id=?3");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session);
+        try bindU64(statement, 2, end);
+        try bindU64(statement, 3, admission);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW or c.sqlite3_column_int(statement, 5) != 1) return error.CorruptStore;
+        const applied = c.sqlite3_column_int(statement, 3) == 1;
+        const content_id = try readNullablePositiveI64(statement, 2) orelse return error.CorruptStore;
+        const metadata = try self.readPublicContentMetadata(content_id);
+        var message: protocol.ActivityItem.Message = .{ .admission = admission, .key = .{}, .turn = null, .state = if (applied) .applied else if (c.sqlite3_column_int(statement, 4) == 1) .excluded else .queued, .content = .{ .length = metadata.length, .digest = metadata.digest } };
+        try readText(statement, 0, &message.key);
+        if (applied) message.turn = @intCast(try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore);
+        return message;
+    }
+
+    const ActivityIdentity = struct { item: protocol.ActivityItem, content_id: ?i64 = null };
+
+    fn activityItemLocked(self: *Store, session: []const u8, end: u64, position: u64, ordinal: u64) !ActivityIdentity {
+        const statement = try prepare(self.database, activity_sql ++ "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session);
+        try bindU64(statement, 2, end);
+        try bindU64(statement, 3, position);
+        try bindU64(statement, 4, ordinal);
+        const step = c.sqlite3_step(statement);
+        if (step == c.SQLITE_DONE) return error.ContentNotFound;
+        if (step != c.SQLITE_ROW) return error.ActivityReadFailed;
+        var result: ActivityIdentity = .{ .item = .{ .position = position, .ordinal = ordinal, .value = undefined } };
+        switch (c.sqlite3_column_int(statement, 0)) {
+            1, 2 => |kind| {
+                const admission = try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
+                const message = try self.activityMessageLocked(session, end, @intCast(admission));
+                if (kind == 2 and message.state != .applied) return error.CorruptStore;
+                result.item.value = if (kind == 1) .{ .admission = message } else .{ .user = message };
+                const select = try prepare(self.database, "SELECT content_id FROM message_admission WHERE session_ref=?1 AND admission_id=?2");
+                defer _ = c.sqlite3_finalize(select);
+                try bindText(select, 1, session);
+                try bindI64(select, 2, admission);
+                if (c.sqlite3_step(select) != c.SQLITE_ROW) return error.CorruptStore;
+                result.content_id = try readNullablePositiveI64(select, 0) orelse return error.CorruptStore;
+                if (kind == 2 and (try self.publicConversationContentLocked(session, position, ordinal)).id != result.content_id.?) return error.CorruptStore;
+            },
+            3, 5 => |kind| {
+                const content = try self.publicConversationContentLocked(session, position, ordinal);
+                result.item.value = if (kind == 3) .{ .assistant = .{ .length = content.metadata.length, .digest = content.metadata.digest } } else .{ .tool_result = .{ .length = content.metadata.length, .digest = content.metadata.digest } };
+                result.content_id = content.id;
+            },
+            4 => result.item.value = .{ .call = (try self.proposalLocked(session, position)).metadata },
+            6 => {
+                const select = try prepare(self.database, "SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.session_ref=t.session_ref AND o.turn_id=t.turn_id " ++
+                    "AND o.resolution_code IS NOT NULL AND ((t.outcome_code='completed' AND t.outcome_content_id=o.resolution_content_id) OR " ++
+                    "(t.outcome_code!='completed' AND t.outcome_content_id IS NULL)) FROM turn t LEFT JOIN model_operation o ON o.operation_id=t.operation_id WHERE t.session_ref=?1 AND t.outcome_position=?2");
+                defer _ = c.sqlite3_finalize(select);
+                try bindText(select, 1, session);
+                try bindU64(select, 2, position);
+                if (c.sqlite3_step(select) != c.SQLITE_ROW or c.sqlite3_column_int(select, 4) != 1) return error.CorruptStore;
+                var outcome: protocol.ActivityItem.Outcome = .{ .turn = @intCast(try readNullablePositiveI64(select, 0) orelse return error.CorruptStore), .operation = @intCast(try readNullablePositiveI64(select, 1) orelse return error.CorruptStore), .code = .{}, .content = null };
+                try readText(select, 2, &outcome.code);
+                result.content_id = try readNullablePositiveI64(select, 3);
+                if (result.content_id) |id| {
+                    const content = try self.readPublicContentMetadata(id);
+                    outcome.content = .{ .length = content.length, .digest = content.digest };
+                }
+                result.item.value = .{ .outcome = outcome };
+            },
+            7 => {
+                const select = try prepare(self.database, "SELECT s.command_key,s.selected_turn_id,s.admission_cutoff,t.outcome_position," ++
+                    "c.kind=3 AND c.accepted=1 AND c.target=s.session_ref AND (s.selected_turn_id IS NULL OR t.session_ref=s.session_ref) " ++
+                    "FROM session_stop s LEFT JOIN core_command c ON c.command_key=s.command_key LEFT JOIN turn t ON t.turn_id=s.selected_turn_id WHERE s.session_ref=?1 AND s.position=?2");
+                defer _ = c.sqlite3_finalize(select);
+                try bindText(select, 1, session);
+                try bindU64(select, 2, position);
+                if (c.sqlite3_step(select) != c.SQLITE_ROW or c.sqlite3_column_int(select, 4) != 1 or c.sqlite3_column_int64(select, 2) < 0) return error.CorruptStore;
+                const turn = try readNullablePositiveI64(select, 1);
+                const outcome_position = try readNullablePositiveI64(select, 3);
+                var stop: protocol.ActivityItem.Stop = .{ .key = .{}, .turn = if (turn) |id| @intCast(id) else null, .cutoff = @intCast(c.sqlite3_column_int64(select, 2)), .completion = if (turn == null or (outcome_position != null and outcome_position.? <= end)) .completed else .pending };
+                try readText(select, 0, &stop.key);
+                result.item.value = .{ .stop = stop };
+            },
+            else => return error.CorruptStore,
+        }
+        if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.CorruptStore;
+        return result;
+    }
+
+    pub fn openActivityContent(self: *Store, request: protocol.ReadActivityContent) !ContentReader {
+        if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.validateActivitySequence(request.session.slice()) catch |err| return self.fenceReadFailure(err);
+        const identity = self.activityItemLocked(request.session.slice(), std.math.maxInt(i64), request.position, request.ordinal) catch |err| switch (err) {
+            error.ContentNotFound => return err,
+            else => return self.fenceReadFailure(err),
+        };
+        const id = identity.content_id orelse return error.ContentNotFound;
+        const content = self.readPublicContentMetadata(id) catch |err| return self.fenceReadFailure(err);
+        const raw = self.contentIsRaw(id, content.length) catch |err| return self.fenceReadFailure(err);
+        return .{ .store = self, .content_id = id, .reference = .{ .length = content.length, .digest = content.digest }, .representation = if (raw) .raw else .{ .projection = .{} } };
     }
 
     pub fn proposalPage(self: *Store, request: protocol.ProposalPage) !ProposalPage {
@@ -4220,6 +4406,7 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(update);
         try bindU64(update, 1, turn_id);
         try expectDone(update);
+        if (c.sqlite3_changes(self.database) == 1) try self.recordTurnOutcomePosition(turn_id);
     }
 
     fn admitNextModelAttemptLocked(self: *Store, faults: Faults) !?AttemptAdmission {
@@ -4883,6 +5070,7 @@ pub const Store = struct {
                 try bindU64(settle_turn, 3, binding.operation_id);
                 try expectDone(settle_turn);
                 if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
+                try self.recordTurnOutcomePosition(binding.turn_id);
             },
             .retryable => |policy| switch (try decideModelRetry(binding.attempt_ordinal, policy, try readUnixMilliseconds(self.database))) {
                 .schedule_at_ms => |due_at_ms| {
@@ -4922,6 +5110,7 @@ pub const Store = struct {
                     try bindU64(settle_turn, 2, binding.operation_id);
                     try expectDone(settle_turn);
                     if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
+                    try self.recordTurnOutcomePosition(binding.turn_id);
                 },
             },
         }
@@ -5008,6 +5197,7 @@ pub const Store = struct {
             try expectDone(update_turn);
             if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
         }
+        try self.recordTurnOutcomePosition(@intCast(binding.turn_id));
         try exec(self.database, "COMMIT");
         return true;
     }
@@ -5295,6 +5485,7 @@ pub const Store = struct {
             try expectDone(update);
             if (c.sqlite3_changes(self.database) != 1) return error.SessionUpdateFailed;
         }
+        if (output.call_count == 0 and pending == 0) try self.recordTurnOutcomePosition(binding.turn_id);
         if (faults.output_commit) return error.InjectedOutputCommitFailure;
         try exec(self.database, "COMMIT");
     }
@@ -5993,14 +6184,44 @@ pub const Store = struct {
             }
             break :blk @intCast(prior + 1);
         } else return error.MessageAdmissionReadFailed;
-        const statement = try prepare(self.database, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id) VALUES(?1,?2,?3,?4)");
+        const position = try self.claimSessionPosition(session_ref);
+        const statement = try prepare(self.database, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position) VALUES(?1,?2,?3,?4,?5)");
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, admission_id);
         try bindText(statement, 2, session_ref);
         try bindText(statement, 3, command_key);
         try bindI64(statement, 4, content_id);
+        try bindU64(statement, 5, position);
         try expectDone(statement);
         return admission_id;
+    }
+
+    // Called only inside the owning write transaction; no separate frontier.
+    fn claimSessionPosition(self: *Store, session: []const u8) !u64 {
+        const statement = try prepare(self.database, "UPDATE session SET next_position=next_position+1 " ++
+            "WHERE session_ref=?1 AND next_position<9223372036854775807 RETURNING next_position-1");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.SessionPositionExhausted;
+        const position = try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore;
+        try expectDone(statement);
+        return @intCast(position);
+    }
+
+    fn recordTurnOutcomePosition(self: *Store, turn_id: u64) !void {
+        const select = try prepare(self.database, "SELECT session_ref FROM turn WHERE turn_id=?1 AND outcome_code IS NOT NULL AND outcome_position IS NULL");
+        defer _ = c.sqlite3_finalize(select);
+        try bindU64(select, 1, turn_id);
+        if (c.sqlite3_step(select) != c.SQLITE_ROW) return error.CorruptStore;
+        var session: protocol.Bounded(128) = .{};
+        try readText(select, 0, &session);
+        const position = try self.claimSessionPosition(session.slice());
+        const update = try prepare(self.database, "UPDATE turn SET outcome_position=?2 WHERE turn_id=?1 AND outcome_position IS NULL");
+        defer _ = c.sqlite3_finalize(update);
+        try bindU64(update, 1, turn_id);
+        try bindU64(update, 2, position);
+        try expectDone(update);
+        if (c.sqlite3_changes(self.database) != 1) return error.CorruptStore;
     }
 
     fn importEmptyContent(self: *Store) !i64 {
@@ -6289,6 +6510,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ session_ref TEXT NOT NULL REFERENCES session(session_ref),
         \\ command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key) DEFERRABLE INITIALLY DEFERRED,
         \\ content_id INTEGER NOT NULL REFERENCES content(content_id),
+        \\ admission_position INTEGER CHECK(admission_position>0),
         \\ turn_id INTEGER REFERENCES turn(turn_id) DEFERRABLE INITIALLY DEFERRED
         \\) STRICT;
         \\CREATE TABLE turn(
@@ -6298,13 +6520,15 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ input_cutoff INTEGER NOT NULL CHECK(input_cutoff>=first_admission_id),
         \\ operation_id INTEGER NOT NULL,
         \\ outcome_code TEXT CHECK(outcome_code IS NULL OR length(CAST(outcome_code AS BLOB)) BETWEEN 1 AND 96),
-        \\ outcome_content_id INTEGER REFERENCES content(content_id)
+        \\ outcome_content_id INTEGER REFERENCES content(content_id),
+        \\ outcome_position INTEGER CHECK(outcome_position>0)
         \\) STRICT;
         \\CREATE UNIQUE INDEX turn_one_active_per_session ON turn(session_ref) WHERE outcome_code IS NULL;
         \\CREATE TABLE session_stop(
         \\ command_key TEXT PRIMARY KEY REFERENCES core_command(command_key),
         \\ session_ref TEXT NOT NULL REFERENCES session(session_ref),
         \\ selected_turn_id INTEGER REFERENCES turn(turn_id),
+        \\ position INTEGER CHECK(position>0),
         \\ admission_cutoff INTEGER NOT NULL CHECK(admission_cutoff>=0)
         \\) STRICT, WITHOUT ROWID;
         \\CREATE TABLE model_interruption_command(
@@ -6919,6 +7143,18 @@ fn completeModelInterruption(
     command.turn_id = binding.turn_id;
     command.operation_id = binding.operation_id;
     return command;
+}
+
+fn expectActivityOutcome(storage: *Store, session: []const u8, binding: AttemptBinding, code: []const u8) !void {
+    var request: protocol.ActivityPage = .{ .direction = .backward };
+    try request.session.set(session);
+    const page = try storage.activityPage(request);
+    try std.testing.expect(page.count != 0 and page.items[0].value == .outcome);
+    const outcome = page.items[0].value.outcome;
+    try std.testing.expectEqual(binding.turn_id, outcome.turn);
+    try std.testing.expectEqual(binding.operation_id, outcome.operation);
+    try std.testing.expectEqualStrings(code, outcome.code.slice());
+    try std.testing.expectEqual(page.end, page.items[0].position);
 }
 
 fn configureTestSession(
@@ -9457,6 +9693,7 @@ test "model interruption removes a scheduled retry from admission" {
     );
     try std.testing.expect(storage.interruptModel(&interrupt, .{}) == .accepted);
     try std.testing.expect((try admitRetryForTesting(&storage)) == null);
+    try expectActivityOutcome(&storage, "direct/retry-interrupt", admitted.permit.binding, "cancelled");
 }
 
 test "accepted stop remains discoverable without a control hint" {
@@ -11170,8 +11407,8 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     const first = try storage.publicConversationPage(request);
     try std.testing.expectEqual(@as(usize, 16), first.count);
     try std.testing.expect(first.more);
-    try std.testing.expectEqual(@as(u64, 20), first.items[0].position);
-    try std.testing.expectEqual(@as(u64, 5), first.items[15].position);
+    try std.testing.expectEqual(@as(u64, 40), first.items[0].position);
+    try std.testing.expectEqual(@as(u64, 25), first.items[15].position);
     for (first.items[0..first.count]) |item| try std.testing.expect(item.kind == .user);
     try std.testing.expectEqual(@as(u64, 5), first.items[0].content.length);
     try std.testing.expectError(error.InvalidCursor, storage.publicConversationPage(.{
@@ -11181,7 +11418,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
         .before_ordinal = 1,
     }));
     try std.testing.expect(!storage.isFenced());
-    var unicode_reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = 20 });
+    var unicode_reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = 40 });
     var lead: [1]u8 = undefined;
     var rest: [4]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), try unicode_reader.read(0, &lead));
@@ -11211,8 +11448,8 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     const older = try storage.publicConversationPage(request);
     try std.testing.expectEqual(@as(usize, 4), older.count);
     try std.testing.expect(!older.more);
-    try std.testing.expectEqual(@as(u64, 4), older.items[0].position);
-    try std.testing.expectEqual(@as(u64, 1), older.items[3].position);
+    try std.testing.expectEqual(@as(u64, 24), older.items[0].position);
+    try std.testing.expectEqual(@as(u64, 21), older.items[3].position);
     try std.testing.expectEqual(@as(u64, 1024 * 1024), older.items[3].content.length);
     const fresh = try storage.publicConversationPage(.{ .session = request.session });
     try std.testing.expectEqual(@as(usize, 16), fresh.count);
@@ -11224,10 +11461,10 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     try std.testing.expectEqual(@as(usize, 2), try reader.read(read.start, &tail));
     try std.testing.expectEqualStrings("xx", &tail);
     reader.close();
-    read.position = 21; // the applied instruction is not public content
+    read.position = 41; // the applied instruction is not public content
     try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(read));
     try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{ .session = .{}, .position = 1 }));
-    try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(.{ .session = request.session, .position = 1, .start = 1024 * 1024 + 1 }));
+    try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(.{ .session = request.session, .position = 21, .start = 1024 * 1024 + 1 }));
     try std.testing.expectError(error.InvalidCursor, storage.publicConversationPage(.{ .session = request.session, .end = first.end + 100, .before_position = 1 }));
     try std.testing.expect(!storage.isFenced());
 }
@@ -11914,7 +12151,7 @@ test "one committed selection freezes its settings and input prefix" {
 
     // Failed admission publishes neither projection nor instruction inclusion.
     try std.testing.expectEqual(@as(i64, 0), try pragmaInt(storage.database, "SELECT count(*) FROM conversation_entry"));
-    try std.testing.expectEqual(@as(i64, 1), try pragmaInt(storage.database, "SELECT next_position FROM session"));
+    try std.testing.expectEqual(@as(i64, 3), try pragmaInt(storage.database, "SELECT next_position FROM session"));
 
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
@@ -11984,6 +12221,7 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expect(!first_reader.usable());
 
     try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
+    try expectActivityOutcome(&storage, "direct/dispatch", binding, "provider_http_422");
     const failed = (try storage.observeCommand("dispatch-1")).message.?.queue.?;
     const failure = switch (failed.state) {
         .failed => |value| value,
@@ -12270,6 +12508,7 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
             else => return error.ExpectedFailedObservation,
         };
         try std.testing.expectEqualStrings("retry_exhausted", failure.code.slice());
+        try expectActivityOutcome(&storage, "direct/failure", replacement_binding, "retry_exhausted");
     }
 }
 
@@ -12362,6 +12601,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
         else => return error.ExpectedFailedObservation,
     };
     try std.testing.expectEqualStrings("retry_exhausted", failure.code.slice());
+    try expectActivityOutcome(&storage, "direct/retry", fourth, "retry_exhausted");
     try std.testing.expect((try admitRetryForTesting(&storage)) == null);
     const statement = try prepare(
         storage.database,
@@ -12913,6 +13153,11 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     try std.testing.expectEqual(@as(usize, 5150), comparisons);
 
     try exec(storage.database, "DELETE FROM model_operation");
+    for (6000..6102) |value| {
+        var buffer: [32]u8 = undefined;
+        const session = try std.fmt.bufPrint(&buffer, "exhausted-{d}", .{value});
+        try configureTestSession(&storage, session, session);
+    }
     try exec(
         storage.database,
         "WITH RECURSIVE sequence(value) AS (VALUES(6000) UNION ALL SELECT value+1 FROM sequence WHERE value<6101) " ++
@@ -12978,4 +13223,32 @@ test "proposal callable cursor domain preserves healthy Store" {
     try std.testing.expectEqual(@as(usize, 0), page.count);
     try std.testing.expect(!page.more and !storage.isFenced());
     try std.testing.expectError(error.ContentNotFound, storage.openProposalField(.{ .position = std.math.maxInt(u64) }));
+}
+
+test "activity fixed admission prefix survives later application and stop" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "activity-config", "direct/activity");
+    var request: protocol.ActivityPage = .{};
+    try request.session.set("direct/activity");
+    const empty = try storage.activityPage(request);
+    try submitTestMessage(&storage, &tmp, "activity-a", "a", "direct/activity", "same");
+    try submitTestMessage(&storage, &tmp, "activity-b", "b", "direct/activity", "same");
+    const queued = try storage.activityPage(request);
+    try std.testing.expectEqual(@as(usize, 2), queued.count);
+    try std.testing.expect(queued.items[0].value.admission.admission != queued.items[1].value.admission.admission);
+    try std.testing.expect(queued.items[0].value.admission.turn == null);
+    var admitted = (try storage.admitNextModelAttempt(.{})).?;
+    _ = try admitted.permit.consume();
+    var stop = try completeSessionStop("activity-stop", "direct/activity");
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    try expectActivityOutcome(&storage, "direct/activity", admitted.permit.binding, "cancelled");
+    request.end = queued.end;
+    const frozen = try storage.activityPage(request);
+    try std.testing.expectEqual(@as(usize, 2), frozen.count);
+    try std.testing.expect(frozen.items[0].value.admission.state == .queued and frozen.items[0].value.admission.turn == null);
+    request.end = empty.end;
+    try std.testing.expectEqual(@as(usize, 0), (try storage.activityPage(request)).count);
 }
