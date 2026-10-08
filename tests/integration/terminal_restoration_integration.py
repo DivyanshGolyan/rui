@@ -126,7 +126,7 @@ def main(selected=None):
             "-fPIC", str(source), "-o", str(library)], check=True)
         cases = ("queued", "exit", "interrupt", "incomplete", "disable", "restore", "both",
             "disable-incomplete", "restore-incomplete", "both-incomplete", "output",
-            "drain", "drain-both", "drain-incomplete", "drain-eintr", "drain-held")
+            "drain", "drain-both", "drain-incomplete", "drain-both-incomplete", "drain-eintr", "drain-held")
         assert selected is None or selected in cases, selected
         for case in cases if selected is None else (selected,):
             master, slave = pty.openpty()
@@ -138,7 +138,7 @@ def main(selected=None):
             records = home / ".config/rui/requests"
             before = set(records.glob("*.json"))
             env = {**os.environ, "HOME": str(home)}
-            fault = case if separate else case.split("-", 1)[0]
+            fault = "drain-both" if case == "drain-both-incomplete" else case if separate else case.split("-", 1)[0]
             injected = separate or fault in ("disable", "restore", "both", "output")
             if injected:
                 env.update({"DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
@@ -242,6 +242,8 @@ def main(selected=None):
                         "drain-incomplete": "TerminalCleanupFailed"}.get(fault)
                     if expected:
                         assert expected in errors, errors
+                        if case.endswith("-incomplete"):
+                            assert "IncompleteTerminalInput" not in errors, errors
                     assert set(records.glob("*.json")) == before, "failed/empty prompt captured a request"
                     assert not received.is_set() and not proxy.exchanges, "failed cleanup sent to Host"
                     if injected:
