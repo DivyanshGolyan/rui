@@ -145,7 +145,9 @@ def main():
                 idle = host_resources(process.pid)
             print(f"proposal retained idle after repeated small/large reads={idle} (Linux RSS bytes/FDs)")
             message(state, store, "second", SESSION, "later group")
-            wait_for(lambda: page(store)["end"] > first["end"], "later accepted proposals")
+            later = wait_for(lambda: (p if len((p := page(store, page(store)["end"], items[-1]["position"]))["items"]) == 16 else None), "later accepted proposals")
+            assert [i["call_ordinal"] for i in later["items"]] == list(range(16))
+            assert all(i["position"] > first["end"] for i in later["items"]), "later group predates fixed end"
             assert page(store, first["end"]) == first, "fixed end admitted later calls"
             assert page(store, empty["end"])["items"] == [], "empty fixed end reopened"
             assert page(store, first["end"], last["items"][-1]["position"])["items"] == []
