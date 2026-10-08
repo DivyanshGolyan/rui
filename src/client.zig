@@ -362,7 +362,10 @@ pub const ActivityPage = struct {
                     if (outcome.code.slice().len == 0 or (outcome.code.eql("completed") != (outcome.content != null))) return error.InvalidActivityPage;
                     fact.value = .{ .outcome = .{ .turn = try id(outcome.turn, false), .operation = try id(outcome.operation, false), .code = outcome.code.value, .content = if (outcome.content) |reference| try content(reference) else null } };
                 },
-                .stop => |stop| fact.value = .{ .stop = .{ .key = stop.key.value, .turn = if (stop.turn) |turn| try id(turn, false) else null, .cutoff = try id(stop.cutoff, true), .completion = stop.completion.value } },
+                .stop => |stop| {
+                    if (stop.turn == null and stop.completion.value == .pending) return error.InvalidActivityPage;
+                    fact.value = .{ .stop = .{ .key = stop.key.value, .turn = if (stop.turn) |turn| try id(turn, false) else null, .cutoff = try id(stop.cutoff, true), .completion = stop.completion.value } };
+                },
             }
             position = fact.position;
             ordinal = fact.ordinal;
