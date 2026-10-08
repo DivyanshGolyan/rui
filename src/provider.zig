@@ -313,7 +313,12 @@ pub const CaptureWriter = struct {
         } else if (!failed) {
             if (self.test_gate_path) |path| if (capture.length >= self.test_gate_min_written_bytes) {
                 self.test_gate_path = null;
-                std.debug.print("{{\"rui_test_phase\":\"capture_write_gate_entered\",\"written_bytes\":{d}}}\n", .{capture.length});
+                // Emit a complete small pipe record, not debug.print fragments
+                // that can interleave with the Host's independent trace writer.
+                var notice_buffer: [96]u8 = undefined;
+                const notice = std.fmt.bufPrint(&notice_buffer, "{{\"rui_test_phase\":\"capture_write_gate_entered\",\"written_bytes\":{d}}}\n", .{capture.length}) catch unreachable;
+                // Diagnostics are best effort and must not fail the capture.
+                std.Io.File.stderr().writeStreamingAll(self.io, notice) catch {};
                 if (std.Io.Dir.cwd().openFile(self.io, path, .{})) |gate| {
                     defer gate.close(self.io);
                     var release: [1]u8 = undefined;
