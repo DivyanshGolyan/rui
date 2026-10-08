@@ -11,6 +11,7 @@ import sys
 import tempfile
 import termios
 import threading
+import time
 
 import canonical_failure_integration as canonical
 import dispatch_integration as fixture
@@ -36,7 +37,14 @@ static void record(const char *text) {
 }
 
 static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
+#ifdef __APPLE__
+    /* dyld exempts references from the tuple-owning image, not dlsym. */
+    ssize_t (*real_writev)(int, const struct iovec *, int) = writev;
+#else
     ssize_t (*real_writev)(int, const struct iovec *, int) = dlsym(RTLD_NEXT, "writev");
+    if (real_writev == writev) _exit(93);
+#endif
+    if (!real_writev || real_writev == probe_writev) _exit(93);
     const char *fault = getenv("RUI_TERMINAL_FAULT");
     static int stopped = 0;
     if (fd == 1 && count == 1 && iov[0].iov_len == 8 &&
@@ -57,7 +65,13 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
 }
 
 static int probe_tcdrain(int fd) {
+#ifdef __APPLE__
+    int (*real_tcdrain)(int) = tcdrain;
+#else
     int (*real_tcdrain)(int) = dlsym(RTLD_NEXT, "tcdrain");
+    if (real_tcdrain == tcdrain) _exit(94);
+#endif
+    if (!real_tcdrain || real_tcdrain == probe_tcdrain) _exit(94);
     if (fd == 1 && disabled) {
         record("drain\n");
         const char *fault = getenv("RUI_TERMINAL_FAULT");
@@ -81,7 +95,13 @@ static int probe_tcdrain(int fd) {
 }
 
 static int probe_tcsetattr(int fd, int action, const struct termios *attrs) {
+#ifdef __APPLE__
+    int (*real_tcsetattr)(int, int, const struct termios *) = tcsetattr;
+#else
     int (*real_tcsetattr)(int, int, const struct termios *) = dlsym(RTLD_NEXT, "tcsetattr");
+    if (real_tcsetattr == tcsetattr) _exit(95);
+#endif
+    if (!real_tcsetattr || real_tcsetattr == probe_tcsetattr) _exit(95);
     if (fd == 0 && (attrs->c_lflag & ICANON)) {
         record(action == TCSAFLUSH ? "restore-flush\n" : "restore-other\n");
         const char *fault = getenv("RUI_TERMINAL_FAULT");
@@ -109,6 +129,67 @@ int tcsetattr(int fd, int action, const struct termios *attrs) { return probe_tc
 """
 
 
+FORWARD_DRIVER = r"""
+#include <sys/uio.h>
+#include <termios.h>
+#include <unistd.h>
+
+int main(void) {
+    struct termios before, changed, after;
+    if (tcgetattr(0, &before)) return 1;
+    changed = before;
+    changed.c_lflag ^= ECHO;
+    if (tcsetattr(0, TCSAFLUSH, &changed) || tcgetattr(0, &after) ||
+        after.c_lflag != changed.c_lflag) return 2;
+    if (tcsetattr(0, TCSAFLUSH, &before) || tcgetattr(0, &after) ||
+        after.c_lflag != before.c_lflag) return 3;
+    char disable[] = "\033[?2004l";
+    struct iovec vector = { disable, sizeof(disable) - 1 };
+    if (writev(1, &vector, 1) != sizeof(disable) - 1 || tcdrain(1)) return 4;
+    return 0;
+}
+"""
+
+
+def check_forwarding(state, library):
+    source, executable, log = state / "forward.c", state / "forward", state / "forward.log"
+    source.write_text(FORWARD_DRIVER)
+    subprocess.run(["cc", str(source), "-o", str(executable)], check=True)
+    master, slave = pty.openpty()
+    original = termios.tcgetattr(slave)
+    caller = None
+    try:
+        env = {**os.environ,
+            "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+            "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "forwarding"}
+        caller = subprocess.Popen([str(executable)], stdin=slave, stdout=slave,
+            stderr=subprocess.PIPE, env=env)
+        output = bytearray()
+        deadline = time.monotonic() + 5
+        while caller.poll() is None or select.select([master], [], [], 0)[0]:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, "fixture forwarder did not finish"
+            if select.select([master], [], [], min(remaining, 0.05))[0]:
+                output.extend(os.read(master, 65536))
+                assert len(output) <= 8, output
+        result = caller.wait(timeout=5)
+        assert result == 0, (result, caller.stderr.read())
+        assert output == b"\x1b[?2004l", output
+        assert log.read_text().splitlines() == ["restore-flush", "restore-flush", "disable", "drain"]
+        assert termios.tcgetattr(slave) == original, "fixture forwarder did not restore attributes"
+        print("terminal fixture forwarding: writev/tcdrain/tcsetattr passed", flush=True)
+    finally:
+        if caller is not None:
+            if caller.poll() is None:
+                caller.kill()
+                caller.wait(timeout=5)
+            caller.stderr.close()
+        termios.tcflush(slave, termios.TCOFLUSH)
+        termios.tcsetattr(slave, termios.TCSAFLUSH, original)
+        os.close(master)
+        os.close(slave)
+
+
 def main(selected=None):
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-terminal-restoration.")).resolve()
     home = state / "home"
@@ -117,13 +198,17 @@ def main(selected=None):
     host = None
     completed = False
     try:
-        host = fixture.start_host(store, None)
-        human.run(home, "configure", "--store", store, "--session", "terminal/restoration",
-            "--workspace", state, "--provider", "codex", "--model", "model-a")
         source, library = state / "probe.c", state / "probe.so"
         source.write_text(PROBE)
         subprocess.run(["cc", "-dynamiclib" if sys.platform == "darwin" else "-shared",
             "-fPIC", str(source), "-o", str(library)], check=True)
+        check_forwarding(state, library)
+        if selected == "forwarding":
+            completed = True
+            return
+        host = fixture.start_host(store, None)
+        human.run(home, "configure", "--store", store, "--session", "terminal/restoration",
+            "--workspace", state, "--provider", "codex", "--model", "model-a")
         cases = ("queued", "exit", "interrupt", "incomplete", "disable", "restore", "both",
             "disable-incomplete", "restore-incomplete", "both-incomplete", "output",
             "drain", "drain-both", "drain-incomplete", "drain-both-incomplete", "drain-eintr", "drain-held")
