@@ -197,16 +197,17 @@ def main():
             assert history(store, stopped_end)[1] == stopped, "restart changed fixed activity"
             stop_process(process)
             process = None
-            for corrupt in ("UPDATE message_admission SET admission_position=NULL WHERE command_key='first'",
-                    "UPDATE core_command SET target='direct/foreign' WHERE command_key='first'",
-                    "DELETE FROM conversation_entry WHERE source_admission_id=(SELECT admission_id FROM message_admission WHERE command_key='first')",
-                    "UPDATE turn SET outcome_position=NULL WHERE outcome_code IS NOT NULL"):
+            for corrupt, position, ordinal in (("UPDATE message_admission SET admission_position=NULL WHERE command_key='first'", pending[0]["position"], 0),
+                    ("UPDATE core_command SET target='direct/foreign' WHERE command_key='first'", pending[0]["position"], 0),
+                    ("DELETE FROM conversation_entry WHERE source_admission_id=(SELECT admission_id FROM message_admission WHERE command_key='first')", pending[0]["position"], 0),
+                    ("UPDATE turn SET outcome_position=NULL WHERE outcome_code IS NOT NULL", pending[0]["position"], 0),
+                    ("UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call)", results[0]["position"], results[0]["ordinal"])):
                 for mode in ("page", "content"):
                     with sqlite3.connect(store / "rui.sqlite3") as db:
                         saved.backup(db)
                         db.execute(corrupt)
                     process, fields = start_host(store, provider)
-                    args = ("null", 0, "null", "forward") if mode == "page" else (pending[0]["position"], 0)
+                    args = ("null", int(position)-1, "null", "forward") if mode == "page" else (position, ordinal)
                     caller(store, mode, *args, ok=False)
                     assert process.wait(timeout=5) == 1, "damaged activity silently disappeared"
                     stop_process(process)
