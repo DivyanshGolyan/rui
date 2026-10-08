@@ -331,8 +331,6 @@ pub const ProposalPage = struct {
     more: bool = false,
 };
 
-pub const ActivityPage = protocol.ActivityFacts;
-
 pub const MessageObservation = struct {
     content: ContentReference,
     queue: ?AcceptedMessageQueue = null,
@@ -2660,7 +2658,13 @@ pub const Store = struct {
                 "LEFT JOIN content c ON c.content_id=e.content_id " ++
                 "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)"
         else
-            "SELECT coalesce(call.rejection_content_id,action.resolution_content_id) FROM model_operation op " ++
+            "SELECT coalesce(call.rejection_content_id,action.resolution_content_id),NOT EXISTS(SELECT 1 FROM model_tool_call linked " ++
+                "LEFT JOIN model_output_item item ON item.operation_id=linked.operation_id AND item.item_ordinal=linked.item_ordinal LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
+                "LEFT JOIN content source ON source.content_id=item.content_id LEFT JOIN content id ON id.content_id=linked.item_id_content_id LEFT JOIN content rejection ON rejection.content_id=linked.rejection_content_id " ++
+                "LEFT JOIN action_operation a ON a.parent_operation_id=linked.operation_id AND a.call_ordinal=linked.call_ordinal " ++
+                "WHERE linked.operation_id=op.operation_id AND CASE WHEN item.item_kind=3 AND item.session_ref=op.session_ref AND t.session_ref=op.session_ref " ++
+                "AND item.attempt_ordinal=op.attempt_ordinal AND source.private=1 AND id.private=0 AND id.digest=item.item_id_digest AND " ++
+                "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref)) THEN 0 ELSE 1 END=1) FROM model_operation op " ++
                 "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
                 "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
                 "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' AND call.call_ordinal+1=?3 " ++
@@ -2680,13 +2684,13 @@ pub const Store = struct {
             c.SQLITE_DONE => return error.ContentNotFound,
             else => return if (ordinal == 0) error.ConversationReadFailed else error.PublicContentReadFailed,
         }
-        if (ordinal == 0 and c.sqlite3_column_int(statement, 1) != 1) return error.CorruptStore;
+        if (c.sqlite3_column_int(statement, 1) != 1) return error.CorruptStore;
         const content_id = c.sqlite3_column_int64(statement, 0);
         if (content_id <= 0) return error.CorruptStore;
         return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id) };
     }
 
-    pub fn activityPage(self: *Store, request: protocol.ActivityPage) !ActivityPage {
+    pub fn activityPage(self: *Store, request: protocol.ActivityPage) !protocol.ActivityFacts {
         try request.validate();
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
@@ -2698,7 +2702,7 @@ pub const Store = struct {
         };
     }
 
-    fn activityPageLocked(self: *Store, request: protocol.ActivityPage) !ActivityPage {
+    fn activityPageLocked(self: *Store, request: protocol.ActivityPage) !protocol.ActivityFacts {
         const session = (try self.readSession(request.session.slice())) orelse return error.SessionNotFound;
         const end = request.end orelse session.next_position - 1;
         if (end >= session.next_position or request.position > end) return error.InvalidCursor;
@@ -2709,7 +2713,7 @@ pub const Store = struct {
                 else => return err,
             };
         }
-        var page: ActivityPage = .{ .end = end, .direction = request.direction };
+        var page: protocol.ActivityFacts = .{ .end = end, .direction = request.direction };
         const statement = try prepare(self.database, activity_sql ++ "SELECT position,ordinal FROM activity WHERE position<=?2 AND " ++
             "(?3=0 OR (?5=0 AND (position>?3 OR (?4 IS NOT NULL AND position=?3 AND ordinal>?4))) OR " ++
             "(?5=1 AND (position<?3 OR (?4 IS NOT NULL AND position=?3 AND ordinal<?4)))) " ++
@@ -2748,7 +2752,7 @@ pub const Store = struct {
         if (c.sqlite3_step(guard) != c.SQLITE_DONE) return error.CorruptStore;
     }
 
-    fn activityMessageLocked(self: *Store, session: []const u8, end: u64, admission: u64) !protocol.ActivityItem.Message {
+    fn activityMessageLocked(self: *Store, session: []const u8, end: u64, admission: u64) !struct { message: protocol.ActivityItem.Message, content_id: i64 } {
         const statement = try prepare(self.database, "SELECT m.command_key,m.turn_id,m.content_id," ++
             "EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=m.session_ref AND e.source_admission_id=m.admission_id AND e.session_position<=?2)," ++
             "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=m.session_ref AND s.admission_cutoff>=m.admission_id AND s.position<=?2)," ++
@@ -2768,7 +2772,7 @@ pub const Store = struct {
         var message: protocol.ActivityItem.Message = .{ .admission = admission, .key = .{}, .turn = null, .state = if (applied) .applied else if (c.sqlite3_column_int(statement, 4) == 1) .excluded else .queued, .content = .{ .length = metadata.length, .digest = metadata.digest } };
         try readText(statement, 0, &message.key);
         if (applied) message.turn = @intCast(try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore);
-        return message;
+        return .{ .message = message, .content_id = content_id };
     }
 
     const ActivityIdentity = struct { item: protocol.ActivityItem, content_id: ?i64 = null };
@@ -2787,15 +2791,11 @@ pub const Store = struct {
         switch (c.sqlite3_column_int(statement, 0)) {
             1, 2 => |kind| {
                 const admission = try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
-                const message = try self.activityMessageLocked(session, end, @intCast(admission));
+                const owned = try self.activityMessageLocked(session, end, @intCast(admission));
+                const message = owned.message;
                 if (kind == 2 and message.state != .applied) return error.CorruptStore;
                 result.item.value = if (kind == 1) .{ .admission = message } else .{ .user = message };
-                const select = try prepare(self.database, "SELECT content_id FROM message_admission WHERE session_ref=?1 AND admission_id=?2");
-                defer _ = c.sqlite3_finalize(select);
-                try bindText(select, 1, session);
-                try bindI64(select, 2, admission);
-                if (c.sqlite3_step(select) != c.SQLITE_ROW) return error.CorruptStore;
-                result.content_id = try readNullablePositiveI64(select, 0) orelse return error.CorruptStore;
+                result.content_id = owned.content_id;
                 if (kind == 2 and (try self.publicConversationContentLocked(session, position, ordinal)).id != result.content_id.?) return error.CorruptStore;
             },
             3, 5 => |kind| {
