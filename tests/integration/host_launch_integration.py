@@ -369,6 +369,9 @@ def main():
         # recoverable Session without any separate serve terminal.
         bare_home = root / "bare-home"
         bare_home.mkdir(mode=0o700)
+        # macOS's temporary root may have symlink ancestors. Supply canonical
+        # fixture HOME without relaxing the credential owner's no-symlink rule.
+        bare_home = bare_home.resolve(strict=True)
         bare_store = bare_home / ".local/share/rui/store"
         bare_credential_dir = bare_home / ".config/rui"
         bare_credential_dir.mkdir(parents=True, mode=0o700)
