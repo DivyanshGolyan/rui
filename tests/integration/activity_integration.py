@@ -201,6 +201,10 @@ def main():
                 "items": [{"position": str(i+1), "ordinal": "0", "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
                     "turn": None, "state": "queued", "content": {"bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
             mock_reply(fields["socket"], store, "page", json.dumps(valid).encode(), ok=True)
+            for turn, completion, ok in ((None, "completed", True), ("1", "pending", True), (None, "pending", False)):
+                wire = copy.deepcopy(valid)
+                wire["items"] = [{"position": "1", "ordinal": "0", "value": {"stop": {"key": "stop", "turn": turn, "cutoff": "0", "completion": completion}}}]
+                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
             for fault in ("order", "union", "digest", "binding", "integer", "field"):
                 wire = copy.deepcopy(valid)
                 if fault == "order": wire["items"][1]["position"] = "1"
