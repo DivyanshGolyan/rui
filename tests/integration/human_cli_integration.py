@@ -85,6 +85,62 @@ def terminal_step(master, command, marker="rui> "):
     return read_terminal(master, marker)
 
 
+def store_selection_cases(state, workspace, valid_store):
+    for case in ("saved-initial", "saved-after", "explicit-override", "explicit-create", "home-create"):
+        home = state / case
+        home.mkdir(mode=0o700)
+        destination = home / ".local/share/rui/store" if case == "home-create" else home / "store"
+        saved = case.startswith("saved") or case == "explicit-override"
+        if saved:
+            destination.mkdir(mode=0o700)
+            run(home, "setup", "--store", destination, "--provider", "codex", "--model", "gpt-6-luna")
+            if case != "saved-after":
+                destination.rmdir()
+                assert run(home, "host", "status", success=False) == ""
+        if not case.startswith("saved"):
+            (home / ".config/rui").mkdir(mode=0o700, parents=True, exist_ok=True)
+            codex_fixture.credentials(home / ".config/rui/codex.json")
+        explicit = valid_store if case == "explicit-override" else destination
+        if case == "explicit-override":
+            assert "Host: ready" in run(home, "host", "status", "--store", explicit)
+        args = ["--store", str(explicit)] if case.startswith("explicit") else []
+        master, slave = pty.openpty()
+        ready_read, ready_write = os.pipe()
+        caller = subprocess.Popen([str(fixture.RUI), *args], cwd=workspace,
+            env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
+            pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        os.close(slave)
+        os.close(ready_write)
+        try:
+            if case == "saved-after":
+                assert "No locally ready provider" in provider_prompt(master, ready_read)
+                destination.rmdir()
+                assert run(home, "host", "status", success=False) == ""
+                os.write(master, b"d\n")
+            if not case.startswith("saved"):
+                assert "Session: rui/" in read_terminal(master, "rui> ")
+                terminal_step(master, "/exit", "Detached.")
+            _, errors = caller.communicate(timeout=5)
+            if case.startswith("saved"):
+                assert caller.returncode != 0 and b"FileNotFound" in errors, (case, errors)
+                assert not destination.exists() and not (home / ".config/rui/requests").exists()
+            else:
+                assert caller.returncode == 0, (case, errors)
+                record, = (home / ".config/rui/requests").glob("*.json")
+                binding = json.loads(record.read_bytes())
+                assert binding["store"] == str(explicit.resolve()) and binding["require_model"] is True
+            print("Store provenance:", case, "passed", flush=True)
+        finally:
+            if caller.poll() is None:
+                caller.kill()
+                caller.wait(timeout=5)
+            os.close(ready_read)
+            os.close(master)
+            if case in ("explicit-create", "home-create") and destination.exists():
+                run(home, "host", "stop", "--store", destination)
+                fixture.wait_for(lambda: "Host: unavailable" in run(home, "host", "status", "--store", destination), "created Host stopped")
+
+
 def action_ready(descriptor):
     assert select.select([descriptor], [], [], 15)[0], "Action input flush did not finish"
     assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
@@ -288,6 +344,7 @@ def main():
     completed = False
     try:
         host = fixture.start_host(store, url)
+        store_selection_cases(state, workspace, store)
         saved_capture_cases(state, store, workspace)
         preferences_home = state / "preferences-home"
         preferences_home.mkdir()
@@ -714,6 +771,8 @@ def main():
             try:
                 welcome = read_terminal(master, "rui> ")
                 assert ("Bash runs without approval" in welcome) == warning, welcome
+                status = terminal_step(master, "/status")
+                assert ("Bash runs without approval" in status) == warning, status
                 terminal_step(master, "/exit", "Detached.")
                 assert caller.wait(timeout=5) == 0
             finally:

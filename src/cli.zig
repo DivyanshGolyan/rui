@@ -222,6 +222,7 @@ fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![
         return err;
     };
     if (defaults.store.len != 0) {
+        _ = try platform.resolveClientPaths(init.io, defaults.store.slice());
         @memcpy(buffer[0..defaults.store.len], defaults.store.slice());
         return buffer[0..defaults.store.len];
     }
@@ -767,7 +768,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     };
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var selected_store = store orelse (if (defaults.store.len != 0) defaults.store.slice() else try preferences.defaultStore(home, &fallback));
-    try preflightNewSession(init.io, selected_store);
+    try preflightNewSession(init.io, selected_store, store == null and defaults.store.len != 0);
     var credential_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const credential = try credentialPath(init, &credential_buffer, false);
     const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
@@ -789,7 +790,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
         if (store == null or explicit_provider == null or explicit_model == null)
             defaults = try preferences.load(home);
         selected_store = store orelse (if (defaults.store.len != 0) defaults.store.slice() else try preferences.defaultStore(home, &fallback));
-        try preflightNewSession(init.io, selected_store);
+        try preflightNewSession(init.io, selected_store, store == null and defaults.store.len != 0);
         const after_choice: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
         const updated = codex_auth.localStatus(credential, after_choice) catch |err| {
             std.debug.print("rui: credential still unreadable ({s}); inspect rui setup. No Session created.\n", .{@errorName(err)});
@@ -850,8 +851,10 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     try enterSession(init, &.{ "--store", saved.store.slice(), "--session", saved.session.slice() });
 }
 
-fn preflightNewSession(io: std.Io, destination: []const u8) !void {
-    try platform.validateStoreDestination(io, destination);
+fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
+    if (saved) {
+        _ = try platform.resolveClientPaths(io, destination);
+    } else try platform.validateStoreDestination(io, destination);
     switch (client.hostStatus(io, destination)) {
         .ready => |ready| if (!ready.capabilities.model) return error.HostModelUnavailable,
         .unavailable => {},
@@ -1180,6 +1183,8 @@ fn showSessionStatus(init: std.process.Init, store: []const u8, session_ref: []c
     try writeSafeField(init.io, "Store: ", store);
     try writeSafeField(init.io, "Workspace (Bash cwd): ", work.settings.workspace.slice());
     try writeSafeField(init.io, "Permission: ", @tagName(work.settings.permission_mode.value));
+    if (work.settings.tools.bash and work.settings.permission_mode.value == .bypass)
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Bash runs without approval.\n");
     try writeSafeField(init.io, "Work: ", @tagName(work.work.status.value));
     if (work.selected_message) |selected|
         try writeSafeField(init.io, "Current message: ", selected.slice());
