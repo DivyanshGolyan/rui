@@ -147,6 +147,49 @@ def completed(store, request):
                   "original saved result")
 
 
+def assistant_rendering(state, home, store, endpoint):
+    """Opening, staged history and keyed answers render only assistant markup."""
+    raw = "# RENDER-HEADING\n**RENDER-STRONG** é\n\x1b[31mRAW-CONTROL"
+    user = "# USER-MARKUP **USER-STRONG**"
+    # More than one opening page leaves real older Conversation rows for
+    # /history; otherwise a renderer test merely exercises an empty notice.
+    for index in range(9):
+        with endpoint.lock:
+            endpoint.responses.append(host.sse_answer("render-response-" + str(index),
+                "render-private-" + str(index), "render-item-" + str(index), raw)[0])
+        request = key()
+        host.message(state, store, request, "opening/render", user + str(index))
+        completed(store, request)
+    terminal = Terminal(home, store, "opening/render")
+    try:
+        terminal.until("rui> ", 0)
+        opening = bytes(terminal.transcript)
+        assert b"\x1b[1mRENDER-HEADING" in opening, opening
+        start = len(terminal.transcript)
+        terminal.send("/history\n")
+        terminal.until("RENDER-STRONG", start)
+        terminal.command("/status")
+        history = bytes(terminal.transcript[start:])
+        start = len(terminal.transcript)
+        terminal.send("/result " + request + "\n")
+        terminal.until("RENDER-STRONG", start)
+        terminal.command("/status")
+        answer = bytes(terminal.transcript[start:])
+        for rendered in (opening, history, answer):
+            assert b"\x1b[1mRENDER-HEADING" in rendered, rendered
+            assert b"\x1b[1mRENDER-STRONG" in rendered, rendered
+            assert b"# RENDER-HEADING" not in rendered, rendered
+            assert b"**RENDER-STRONG**" not in rendered, rendered
+            assert b"\\x1b[31mRAW-CONTROL" in rendered, rendered
+            assert b"\x1b[31mRAW-CONTROL" not in rendered, rendered
+        assert user.encode() in opening and user.encode() in history
+        assert host.read_result(store, request) == raw.encode(), "presentation rewrote raw result"
+        terminal.command("/exit", "Detached.")
+        terminal.finish()
+    finally:
+        terminal.close()
+
+
 def fatal_stderr(home, store):
     """A restored caller must exit even when its separate stderr TTY is stopped."""
     for stopped in (False, True):
@@ -670,8 +713,9 @@ def main():
     owner = None
     try:
         owner = host.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        for session in ("idle", "equal", "approval", "local", "wait", "switch-source", "switch-target", "rejection", "fatal-original", "recover"):
+        for session in ("idle", "equal", "approval", "local", "wait", "switch-source", "switch-target", "rejection", "fatal-original", "recover", "render"):
             configure(home, store, workspace, "opening/" + session)
+        assistant_rendering(state, home, store, endpoint)
         fatal_stderr(home, store)
         local_commands(home, store, workspace, endpoint)
         idle_catchup(state, home, store, endpoint)
@@ -689,7 +733,7 @@ def main():
                 answer("APPROVAL-ANSWER"), answer("PRESERVED-ANSWER")])
         approval(state, home, store, workspace, endpoint)
         wait_attention(state, home, store, workspace, endpoint)
-        print("session opening: 10 focused real Host/provider/PTY cases passed")
+        print("session opening: 11 focused real Host/provider/PTY cases passed")
     finally:
         if owner is not None:
             host.stop_host(owner)

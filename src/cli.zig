@@ -1643,9 +1643,11 @@ fn frontendResult(owner: *SessionFrontend, saved: *const client.MessageAddress) 
 }
 
 fn streamFrontendResult(caller: client.Requests, store: []const u8, key: []const u8, reply: *client.ReplyBuffer, task: *@import("ClientTask.zig")) !client.ResultReadReply {
-    var escaped: SessionView.Escaped(@TypeOf(task)) = .{ .sink = task, .text = .{ .mode = .multiline } };
-    const answer = try caller.readResultStream(store, key, &escaped, reply);
-    try escaped.finish();
+    var rendered: SessionView.Answer(@TypeOf(task)) = undefined;
+    rendered.init(task);
+    const answer = try caller.readResultStream(store, key, &rendered, reply);
+    if (answer == .failure) return answer;
+    try rendered.finish();
     return answer;
 }
 

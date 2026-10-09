@@ -5,6 +5,7 @@ const std = @import("std");
 const client = @import("client.zig");
 const protocol = @import("protocol.zig");
 const TerminalText = @import("TerminalText.zig");
+const AnswerRenderer = @import("AnswerRenderer.zig");
 
 pub const Stage = struct { current: client.Current, page: client.ActivityPage };
 
@@ -72,6 +73,59 @@ pub fn text(sink: anytype, bytes: []const u8) !void {
     try escaped.finish();
 }
 
+/// One assistant renderer and output window per active value. Initialize in
+/// final storage, then do not move: the renderer borrows the embedded Writer.
+/// Writer's narrow error set must not erase the rendezvous's Cancelled/error.
+pub fn Answer(comptime Sink: type) type {
+    return struct {
+        sink: Sink,
+        storage: [4096]u8 = undefined,
+        writer: std.Io.Writer,
+        renderer: AnswerRenderer,
+        failure: ?anyerror = null,
+
+        pub fn init(self: *@This(), sink: Sink) void {
+            self.* = .{ .sink = sink, .writer = undefined, .renderer = undefined };
+            self.writer = .{ .vtable = &.{ .drain = drain }, .buffer = &self.storage };
+            self.renderer = .{ .out = &self.writer };
+        }
+
+        pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
+            if (self.failure) |err| return err;
+            self.renderer.feed(bytes) catch |err| return self.failure orelse err;
+            self.writer.flush() catch |err| return self.failure orelse err;
+        }
+
+        pub fn finish(self: *@This()) anyerror!void {
+            if (self.failure) |err| return err;
+            self.renderer.finish() catch |err| return self.failure orelse err;
+            self.writer.flush() catch |err| return self.failure orelse err;
+        }
+
+        fn forward(self: *@This(), bytes: []const u8) std.Io.Writer.Error!void {
+            if (bytes.len == 0) return;
+            self.sink.feed(bytes) catch |err| {
+                self.failure = err;
+                return error.WriteFailed;
+            };
+        }
+
+        fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const self: *@This() = @fieldParentPtr("writer", writer);
+            try self.forward(writer.buffered());
+            writer.end = 0;
+            var consumed: usize = 0;
+            for (data[0 .. data.len - 1]) |bytes| {
+                try self.forward(bytes);
+                consumed += bytes.len;
+            }
+            const last = data[data.len - 1];
+            for (0..splat) |_| try self.forward(last);
+            return consumed + last.len * splat;
+        }
+    };
+}
+
 fn print(sink: anytype, comptime format: []const u8, args: anytype) !void {
     var storage: [256]u8 = undefined;
     try sink.feed(try std.fmt.bufPrint(&storage, format, args));
@@ -96,9 +150,16 @@ pub fn header(staged: *const Stage, sink: anytype) !void {
 }
 
 fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, sink: anytype) !void {
-    var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .multiline } };
-    if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &escaped)) |failure| return failure.err();
-    try escaped.finish();
+    if (item.value == .assistant) {
+        var answer: Answer(@TypeOf(sink)) = undefined;
+        answer.init(sink);
+        if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &answer)) |failure| return failure.err();
+        try answer.finish();
+    } else {
+        var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .multiline } };
+        if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &escaped)) |failure| return failure.err();
+        try escaped.finish();
+    }
     try sink.feed("\n");
 }
 
@@ -173,6 +234,42 @@ fn rowIndex(page: *const client.ActivityPage, index: usize) usize {
 
 pub fn bypassWarning(bash: bool, bypass: bool) bool {
     return bash and bypass;
+}
+
+test "SessionView Answer preserves split text, final flush and exact sink failures" {
+    const Sink = struct {
+        storage: [64]u8 = undefined,
+        len: usize = 0,
+        failure: ?anyerror = null,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            if (self.failure) |err| return err;
+            @memcpy(self.storage[self.len..][0..bytes.len], bytes);
+            self.len += bytes.len;
+        }
+    };
+    var sink: Sink = .{};
+    var answer: Answer(*Sink) = undefined;
+    answer.init(&sink);
+    try answer.feed("# Heading\n**bo");
+    try answer.feed("ld** \xc3");
+    try answer.feed("\xa9");
+    try answer.finish();
+    try std.testing.expectEqualStrings("\x1b[1mHeading\x1b[0m\n\x1b[1mbold\x1b[0m é", sink.storage[0..sink.len]);
+    for ([_]anyerror{ error.Cancelled, error.BrokenPipe }) |failure| {
+        for ([_]bool{ false, true }) |at_finish| {
+            sink = .{ .failure = failure };
+            answer.init(&sink);
+            if (at_finish) {
+                try answer.feed("short");
+                try std.testing.expectError(failure, answer.finish());
+            } else try std.testing.expectError(failure, answer.feed("visible\n"));
+            // A failed stream is terminal: no retry of its buffered prefix.
+            sink.failure = null;
+            try std.testing.expectError(failure, answer.feed("replacement"));
+            try std.testing.expectError(failure, answer.finish());
+            try std.testing.expectEqual(@as(usize, 0), sink.len);
+        }
+    }
 }
 
 test "SessionView warning requires Bash and bypass independently" {

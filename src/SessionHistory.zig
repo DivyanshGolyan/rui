@@ -2,6 +2,7 @@ const std = @import("std");
 pub const client = @import("client.zig");
 const protocol = @import("protocol.zig");
 const TerminalText = @import("TerminalText.zig");
+const View = @import("SessionView.zig");
 
 pub const item_bytes = 8192;
 pub const max_scratch_bytes = item_bytes * protocol.public_conversation_page_items;
@@ -35,20 +36,16 @@ pub const Prepared = struct {
             try sink.feed(try std.fmt.bufPrint(&output, "\n{s} (Conversation position {d}, ordinal {d}):\n", .{ label, item.position, item.ordinal }));
             if (self.offsets[index]) |start| {
                 var offset: u64 = 0;
-                var text: TerminalText = .{ .mode = .multiline };
+                var answer: View.Answer(@TypeOf(sink)) = undefined;
+                answer.init(sink);
+                var escaped: View.Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .multiline } };
                 while (offset < item.content.bytes) {
                     const wanted: usize = @intCast(@min(item.content.bytes - offset, window.len));
                     if (try scratch.readPositionalAll(io, window[0..wanted], start + offset) != wanted) return error.TruncatedHistoryScratch;
-                    for (window[0..wanted]) |byte| {
-                        var writer = std.Io.Writer.fixed(&output);
-                        try text.feed(&writer, &.{byte});
-                        if (writer.end != 0) try sink.feed(writer.buffered());
-                    }
+                    if (item.kind == .assistant) try answer.feed(window[0..wanted]) else try escaped.feed(window[0..wanted]);
                     offset += wanted;
                 }
-                var writer = std.Io.Writer.fixed(&output);
-                try text.finish(&writer);
-                if (writer.end != 0) try sink.feed(writer.buffered());
+                if (item.kind == .assistant) try answer.finish() else try escaped.finish();
                 try sink.feed("\n");
             } else {
                 try sink.feed(try std.fmt.bufPrint(&output, "[omitted: {d} raw bytes; export Conversation session ", .{item.content.bytes}));
