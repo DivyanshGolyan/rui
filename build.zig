@@ -143,6 +143,18 @@ pub fn build(b: *std.Build) void {
     cancellation_integration.addFileArg(b.path("tests/integration/persistent_cancellation_integration.py"));
     cancellation_integration.addArtifactArg(release_safe);
     b.step("persistent-cancellation-integration", "Restore persistent configuration before held output and borrower joins").dependOn(&cancellation_integration.step);
+    // libc interposition here is a Linux owner-boundary control, not a native
+    // Darwin drain/restore qualification or a substitute for its campaign.
+    if (target.result.os.tag == .linux) {
+        const drain_probe = addRui(b, target, .ReleaseSafe, "rui-native-drain-test", "src/native_drain_test.zig", pinned_transport);
+        drain_probe.root_module.addCSourceFile(.{ .file = b.path("tests/integration/native_drain_probe.c"), .flags = &.{"-std=gnu11"} });
+        drain_probe.root_module.linkSystemLibrary("dl", .{});
+        const drain_control = b.addSystemCommand(&.{"python3"});
+        drain_control.addFileArg(b.path("tests/integration/native_drain_integration.py"));
+        drain_control.addArtifactArg(drain_probe);
+        b.step("native-drain-integration", "Retain joined drain errors and restoration precedence").dependOn(&drain_control.step);
+        cancellation_integration.step.dependOn(&drain_control.step);
+    }
     const session_list_client = b.addExecutable(.{
         .name = "rui-session-list-client-test",
         .root_module = b.createModule(.{

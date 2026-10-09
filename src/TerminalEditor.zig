@@ -68,6 +68,7 @@ pub fn writeDiagnostic(vectors: []const std.posix.iovec_const) void {
 pub const Terminal = struct {
     original: std.posix.termios,
     active: bool = false,
+    finish_result: anyerror!void = {},
     size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 },
     anchored: bool = false,
     permanent_partial: bool = false,
@@ -159,9 +160,12 @@ pub const Terminal = struct {
     /// Paste disable is best effort on our still-nonblocking stdout; release
     /// custody and restore configuration before any borrower cancellation/join.
     pub fn finish(self: *Terminal) !void {
-        std.debug.assert(self.active);
+        if (!self.active) return self.finish_result;
         _ = std.c.write(1, "\x1b[?2004l", 8);
-        try self.restore();
+        // The terminal, not whichever caller first releases it, owns the
+        // restoration result. Later cleanup observes it without repeating I/O.
+        self.finish_result = self.restore();
+        return self.finish_result;
     }
 
     /// Exact proposal/prompt bytes have been written. Drain stdout while the
@@ -390,9 +394,9 @@ pub const Terminal = struct {
             while (true) {
                 if (self.stopped.load(.acquire)) return error.InteractiveInterrupted;
                 const rc = termios.tcdrain(1);
+                if (rc != 0 and std.posix.errno(rc) != .INTR) return error.TerminalCleanupFailed;
                 if (self.stopped.load(.acquire)) return error.InteractiveInterrupted;
                 if (rc == 0) return;
-                if (std.posix.errno(rc) != .INTR) return error.TerminalCleanupFailed;
             }
         }
     };
@@ -423,6 +427,11 @@ pub const Terminal = struct {
             }
         }
         thread.join();
+        try self.finish_result;
+        // UI service can report canonical failure, not just cancellation.
+        // Otherwise a completed native failure must not become Detached.
+        if (failure) |err| if (err == error.CanonicalStoreFailure) return err;
+        borrower.result catch |err| if (err != error.InteractiveInterrupted) return err;
         if (failure) |err| return err;
         try borrower.result;
     }
