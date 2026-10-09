@@ -54,6 +54,7 @@ fn dispatch(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, command, "login")) return login(init, args[2..], false, codex_auth.login);
     if (std.mem.eql(u8, command, "host")) return host(init, args[2..]);
+    if (std.mem.eql(u8, command, "export-conversation")) return exportConversation(init, args[2..]);
     if (std.mem.eql(u8, command, "setup")) try setup(init, args[2..]) else if (std.mem.eql(u8, command, "sessions")) try sessions(init, args[2..]) else if (std.mem.eql(u8, command, "session")) try enterSession(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, args[2..], false) else return usage();
     try postCommandHold(init);
 }
@@ -2141,6 +2142,29 @@ fn readResult(init: std.process.Init, args: []const []const u8) !void {
     }
 }
 
+/// Complete raw observation, not terminal presentation or an atomic file save.
+/// A failed delivery can leave a prefix on stdout; the exit status remains red.
+fn exportConversation(init: std.process.Init, args: []const []const u8) !void {
+    var store: ?[]const u8 = null;
+    var session: ?[]const u8 = null;
+    var session_buffer: [protocol.max_session_bytes]u8 = undefined;
+    var position: ?u64 = null;
+    var ordinal: ?u64 = null;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--session-hex") or std.mem.eql(u8, arg, "--session")) {
+            if (session != null) return error.InvalidArguments;
+            const value = try takeValue(args, &index);
+            session = if (std.mem.eql(u8, arg, "--session-hex")) try std.fmt.hexToBytes(&session_buffer, value) else value;
+        } else if (std.mem.eql(u8, arg, "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--position")) position = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else if (std.mem.eql(u8, arg, "--ordinal")) ordinal = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else return error.UnknownArgument;
+    }
+    var selection: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const caller: client.Requests = .{ .io = init.io };
+    if (try caller.readConversationContent(try selectedStore(init, store, &selection), session orelse return usage(), position orelse return usage(), ordinal orelse return usage(), null, std.Io.File.stdout())) |failure|
+        return failure.err();
+}
+
 fn readActionArguments(init: std.process.Init, args: []const []const u8) !void {
     return readActionContent(init, args, .arguments);
 }
@@ -2906,6 +2930,9 @@ fn usage() error{InvalidArguments} {
         \\  rui retry --store PATH --record FILE --kind configure|message|session-stop|model-interruption|permission-decision
         \\  rui observe-command --store PATH --key KEY
         \\  rui read-result --store PATH --key KEY
+        \\  rui export-conversation --store PATH --session REF --position ID --ordinal ID > NEW_FILE
+        \\    --session-hex HEX encodes an exact reference that Bash argv cannot represent; replaces --session.
+        \\    Complete raw bytes only; failed delivery may leave an incomplete file. Choose a new destination.
         \\  rui read-action-call-id --store PATH --session REF --action ID
         \\  rui read-action-arguments --store PATH --session REF --action ID
         \\  rui inspect-session --store PATH --session REF [--profile current|full]

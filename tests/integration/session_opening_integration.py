@@ -24,6 +24,7 @@ import uuid
 import dispatch_integration as host
 from canonical_failure_integration import ReplyProxy
 from conversation_page_integration import request as public_read
+from control_integration import raw_request
 from host_process import canonical_fixture_root
 from human_cli_integration import action_ready, admit, run
 
@@ -140,6 +141,7 @@ def configure(home, store, workspace, session):
                    "--workspace", workspace, "--provider", "codex", "--model",
                    "model-a", "--tools", "bash", "--permission-mode", "ask")
     assert result["admission"]["answer"]["status"] == "accepted", result
+    return result
 
 
 def completed(store, request):
@@ -188,6 +190,134 @@ def assistant_rendering(state, home, store, endpoint):
         terminal.finish()
     finally:
         terminal.close()
+
+
+def historical_export(state, home, store, workspace, endpoint, owner):
+    """Large live values stay complete; both historical paths give usable exports."""
+    session = "opening/omission' $(touch injected) é\\A\n\x1bF"
+    configuration = configure(home, store, workspace, session)
+    user = "OMIT-USER-BEGIN" + "u" * (8193 - 15)
+    answer = "OMIT-ANSWER-BEGIN" + "a" * (8229 - 33) + "OMIT-ANSWER-END!"
+    assert len(user.encode()) == 8193 and len(answer.encode()) == 8229
+    terminal = Terminal(home, store, session)
+    try:
+        terminal.until("rui> ", 0)
+        with endpoint.lock:
+            endpoint.responses.append(host.sse_answer("omission-response", "omission-private",
+                                                     "omission-item", answer)[0])
+        request = key()
+        original_message = request
+        start = len(terminal.transcript)
+        host.message(state, store, request, session, user)
+        completed(store, request)
+        terminal.until("OMIT-ANSWER-END!", start)
+        terminal.command("/status")
+        live = bytes(terminal.transcript[start:])
+        assert user.encode() in live and answer.encode() in live, "live content was omitted/shortened"
+        terminal.command("/exit", "Detached.")
+        terminal.finish()
+    finally:
+        terminal.close()
+
+    def exports(rendered):
+        commands = [line for line in rendered.decode().splitlines()
+                    if line.startswith("rui export-conversation ")]
+        assert len(commands) == 2, rendered
+        assert b"omitted: 8193 raw bytes" in rendered and b"omitted: 8229 raw bytes" in rendered
+        assert b"OMIT-USER-BEGIN" not in rendered and b"OMIT-ANSWER-BEGIN" not in rendered
+        actual = []
+        for index, command in enumerate(commands):
+            assert command.endswith(" > NEW_FILE"), command
+            destination = state / ("export-" + str(index))
+            invocation = command[:-len("NEW_FILE")] + str(destination)
+            result = subprocess.run(["bash", "-c", invocation], cwd=workspace,
+                env={**os.environ, "HOME": str(home),
+                     "PATH": str(host.RUI.parent) + os.pathsep + os.environ["PATH"]},
+                capture_output=True, timeout=15)
+            assert result.returncode == 0 and result.stdout == b"", result.stderr
+            actual.append(destination.read_bytes())
+            if index == 0:
+                for failure in ("framing", "truncated", "tail"):
+                    def rewrite(response):
+                        head, body = response.split(b"\r\n\r\n", 1)
+                        if failure == "framing":
+                            head = head.replace(b"X-Rui-Content-Bytes: " + str(len(body)).encode(),
+                                                b"X-Rui-Content-Bytes: " + str(len(body) + 1).encode())
+                        elif failure == "truncated":
+                            body = body[:-1]
+                        else:
+                            body += b"!"
+                        return head + b"\r\n\r\n" + body
+                    proxy = ReplyProxy(owner, "/v1/conversation-content", rewrite)
+                    try:
+                        failed = subprocess.run(["bash", "-c", command[:-len(" > NEW_FILE")]],
+                            env={**os.environ, "HOME": str(home),
+                                 "PATH": str(host.RUI.parent) + os.pathsep + os.environ["PATH"]},
+                            capture_output=True, timeout=15)
+                        assert failed.returncode != 0, (failure, failed)
+                        assert failed.stdout == (b"" if failure == "framing" else actual[-1][:8192])
+                        expected = b"TruncatedResponse" if failure == "truncated" else b"InvalidResponse"
+                        assert expected in failed.stderr, (failure, failed.stderr)
+                    finally:
+                        proxy.close()
+        assert sorted(actual) == sorted([user.encode(), answer.encode()]), "export identity/bytes changed"
+        assert not (workspace / "injected").exists(), "export quoting executed another command"
+
+    terminal = Terminal(home, store, session)
+    try:
+        terminal.until("rui> ", 0)
+        opening = bytes(terminal.transcript)
+        terminal.command("/exit", "Detached.")
+        terminal.finish()
+    finally:
+        terminal.close()
+    # ReplyProxy replaces the listener. Run its standalone export faults only
+    # after the interactive poller has exited and restored its terminal.
+    exports(opening)
+    # Push the large pair out of opening so /history owns their omission.
+    for index in range(9):
+        with endpoint.lock:
+            endpoint.responses.append(host.sse_answer("small-response-" + str(index),
+                "small-private-" + str(index), "small-item-" + str(index), "SMALL-ANSWER")[0])
+        request = key()
+        host.message(state, store, request, session, "SMALL-USER")
+        completed(store, request)
+    terminal = Terminal(home, store, session)
+    try:
+        terminal.until("rui> ", 0)
+        start = len(terminal.transcript)
+        terminal.send("/history\n")
+        terminal.until("NEW_FILE", start)
+        terminal.command("/status")
+        history = bytes(terminal.transcript[start:])
+        terminal.command("/exit", "Detached.")
+        terminal.finish()
+    finally:
+        terminal.close()
+    exports(history)
+    # NUL is admitted by the real protocol but cannot travel through argv.
+    # Copy captured request values, never alter the original recovery records.
+    nul_session = "opening/nul\x00exact"
+    configured = json.loads((home / ".config/rui/requests" / (configuration["request"] + ".json")).read_bytes())
+    configured.update(key=key(), session=nul_session)
+    socket_path = owner.rui_ready_fields["socket"]
+    head, body = raw_request(socket_path, "/v1/configure", json.dumps(configured, separators=(",", ":")).encode())
+    assert head.startswith(b"HTTP/1.1 200 ") and json.loads(body)["answer"]["status"] == "accepted", body
+    saved = json.loads((state / (original_message + ".json")).read_bytes())
+    saved.update(key=key(), session=nul_session)
+    with endpoint.lock:
+        endpoint.responses.append(host.sse_answer("nul-response", "nul-private", "nul-item", "NUL-ANSWER")[0])
+    head, body = raw_request(socket_path, "/v1/message", json.dumps(saved, separators=(",", ":")).encode())
+    assert head.startswith(b"HTTP/1.1 200 ") and json.loads(body)["answer"]["status"] == "accepted", body
+    completed(store, saved["key"])
+    head, body = public_read(socket_path, store, "/v1/conversation-page", "conversation_page", nul_session,
+                            end="0", before_position="0", before_ordinal="0")
+    assert head.startswith(b"HTTP/1.1 200 "), body
+    item = next(item for item in json.loads(body)["items"] if item["kind"] == "user")
+    exported = subprocess.run([str(host.RUI), "export-conversation", "--store", str(store),
+        "--session-hex", nul_session.encode().hex(), "--position", item["position"], "--ordinal", item["ordinal"]],
+        env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=15)
+    assert exported.returncode == 0 and exported.stdout == user.encode(), exported.stderr
 
 
 def fatal_stderr(home, store):
@@ -312,7 +442,8 @@ def equal_admissions(state, home, store, endpoint):
 
 def late_switch_failure(state, home, store, endpoint, owner):
     """A committed switch cannot roll back or prompt after incomplete content."""
-    payload = "SWITCH-CONTENT-BEGIN-" + "x" * 12288 + "-SWITCH-CONTENT-END"
+    # A historical value below the omission limit still spans two windows.
+    payload = "SWITCH-CONTENT-BEGIN-" + "x" * 6144 + "-SWITCH-CONTENT-END"
     with endpoint.lock:
         endpoint.responses.append(host.sse_answer("switch-answer", "switch-private",
                                                   "switch-item", "SWITCH-ANSWER")[0])
@@ -331,7 +462,7 @@ def late_switch_failure(state, home, store, endpoint, owner):
                 fields = dict(line.split(b": ", 1) for line in head.split(b"\r\n")[1:])
                 assert int(fields[b"Content-Length"]) == len(payload.encode()) == len(body)
                 if truncate:
-                    cut.append(body[:8192])
+                    cut.append(body[:4096])
                     return head + b"\r\n\r\n" + cut[-1]
             return response
         proxy = ReplyProxy(owner, "/v1/activity-content", rewrite)
@@ -346,7 +477,7 @@ def late_switch_failure(state, home, store, endpoint, owner):
             if truncate:
                 terminal.finish(nonzero=True)
                 output = bytes(terminal.transcript[start:])
-                assert cut == [payload.encode()[:8192]], "failed stream was retried/prepassed"
+                assert cut == [payload.encode()[:4096]], "failed stream was retried/prepassed"
                 assert cut[0] in output, "failure occurred before the streamed prefix was presented"
                 assert b"TruncatedResponse" in output, output
                 assert b"SWITCH-CONTENT-END" not in output, "missing suffix was fabricated"
@@ -716,6 +847,7 @@ def main():
         for session in ("idle", "equal", "approval", "local", "wait", "switch-source", "switch-target", "rejection", "fatal-original", "recover", "render"):
             configure(home, store, workspace, "opening/" + session)
         assistant_rendering(state, home, store, endpoint)
+        historical_export(state, home, store, workspace, endpoint, owner)
         fatal_stderr(home, store)
         local_commands(home, store, workspace, endpoint)
         idle_catchup(state, home, store, endpoint)
@@ -733,7 +865,7 @@ def main():
                 answer("APPROVAL-ANSWER"), answer("PRESERVED-ANSWER")])
         approval(state, home, store, workspace, endpoint)
         wait_attention(state, home, store, workspace, endpoint)
-        print("session opening: 11 focused real Host/provider/PTY cases passed")
+        print("session opening: 12 focused real Host/provider/PTY cases passed")
     finally:
         if owner is not None:
             host.stop_host(owner)

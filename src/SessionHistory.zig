@@ -1,10 +1,10 @@
 const std = @import("std");
 pub const client = @import("client.zig");
 const protocol = @import("protocol.zig");
-const TerminalText = @import("TerminalText.zig");
+const platform = @import("platform.zig");
 const View = @import("SessionView.zig");
 
-pub const item_bytes = 8192;
+pub const item_bytes = View.historical_item_bytes;
 pub const max_scratch_bytes = item_bytes * protocol.public_conversation_page_items;
 
 /// Owns metadata, never the scratch descriptor. Scratch is borrowed and must
@@ -12,6 +12,7 @@ pub const max_scratch_bytes = item_bytes * protocol.public_conversation_page_ite
 /// or display occurs during prepare; caller commits only after success.
 pub const Prepared = struct {
     page: client.ConversationPage,
+    store: protocol.Bounded(protocol.max_store_bytes),
     session: protocol.Bounded(protocol.max_session_bytes),
     offsets: [protocol.public_conversation_page_items]?u64 = @splat(null),
     bytes: u64 = 0,
@@ -48,17 +49,7 @@ pub const Prepared = struct {
                 if (item.kind == .assistant) try answer.finish() else try escaped.finish();
                 try sink.feed("\n");
             } else {
-                try sink.feed(try std.fmt.bufPrint(&output, "[omitted: {d} raw bytes; export Conversation session ", .{item.content.bytes}));
-                var text: TerminalText = .{ .mode = .line };
-                for (self.session.slice()) |byte| {
-                    var writer = std.Io.Writer.fixed(&output);
-                    try text.feed(&writer, &.{byte});
-                    if (writer.end != 0) try sink.feed(writer.buffered());
-                }
-                var writer = std.Io.Writer.fixed(&output);
-                try text.finish(&writer);
-                if (writer.end != 0) try sink.feed(writer.buffered());
-                try sink.feed(try std.fmt.bufPrint(&output, " position {d} ordinal {d}]\n", .{ item.position, item.ordinal }));
+                try View.omission(sink, self.store.slice(), self.session.slice(), item.position, item.ordinal, item.content.bytes);
             }
         }
     }
@@ -68,11 +59,12 @@ pub const Prepared = struct {
 /// At most 16*8192 staged bytes, one caller-owned scratch descriptor, no heap.
 /// Failure exposes neither prepared metadata nor new cursor; retry old cursor.
 pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8, cursor: client.ConversationCursor, scratch: std.Io.File) !Prepared {
-    const page = switch (try requests.conversationPage(store, session, cursor)) {
+    const paths = try platform.resolveClientPaths(requests.io, store);
+    const page = switch (try requests.conversationPage(paths.store.slice(), session, cursor)) {
         .page => |value| value,
         .failure => |failure| return failure.err(),
     };
-    var prepared: Prepared = .{ .page = page, .session = .{} };
+    var prepared: Prepared = .{ .page = page, .store = paths.store, .session = .{} };
     try prepared.session.set(session);
     const Staging = struct {
         io: std.Io,
@@ -90,7 +82,7 @@ pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8
         if (item.content.bytes > item_bytes) continue;
         prepared.offsets[index] = prepared.bytes;
         var staging: Staging = .{ .io = requests.io, .file = scratch, .offset = prepared.bytes, .remaining = item.content.bytes };
-        if (try requests.readConversationContent(store, session, item.position, item.ordinal, item.content, &staging)) |failure| return failure.err();
+        if (try requests.readConversationContent(prepared.store.slice(), session, item.position, item.ordinal, item.content, &staging)) |failure| return failure.err();
         if (staging.remaining != 0) return error.TruncatedHistoryContent;
         prepared.bytes = staging.offset;
     }
