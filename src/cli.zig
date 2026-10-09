@@ -1419,11 +1419,10 @@ fn persistentCommand(owner: *SessionFrontend, args: []const []const u8) !void {
         const saved = try client.MessageAddress.init(store, session_ref, args[1]);
         try frontendResult(owner, &saved);
     } else if (std.mem.eql(u8, name, "/recover") and args.len == 2) {
-        var accepted: ?client.CapturedIdentity = null;
-        defer if (accepted) |original| {
-            if (owner.ticket == null) owner.original = .{ .identity = original, .outcome = .accepted };
-        };
-        try owner.stream(runFrontendRecover, .{ init, args[1], &accepted });
+        var recovered: ?client.MutationReply = null;
+        const outcome = owner.stream(runFrontendRecover, .{ init, args[1], &recovered });
+        if (recovered) |reply| try owner.settleRecovered(reply);
+        try outcome;
     } else if (std.mem.eql(u8, name, "/setup")) {
         try owner.stream(runFrontendSetup, .{ init, args[1..] });
     } else if (std.mem.eql(u8, name, "/login") and args.len == 1) {
@@ -1532,23 +1531,23 @@ fn runFrontendConfigure(caller: client.Requests, init: std.process.Init, args: [
     };
 }
 
-fn runFrontendRecover(caller: client.Requests, init: std.process.Init, handle: []const u8, accepted: *?client.CapturedIdentity, task: *ClientTask) !void {
+fn runFrontendRecover(caller: client.Requests, init: std.process.Init, handle: []const u8, recovered: *?client.MutationReply, task: *ClientTask) !void {
     const output: Output = .{ .io = init.io, .task = task };
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory = try requestDirectory(init, &directory_buffer);
-    recoverFrontendRecord(caller, directory, handle, accepted, output) catch |err| {
+    recoverFrontendRecord(caller, directory, handle, recovered, output) catch |err| {
         if (err == error.CanonicalStoreFailure or err == error.Cancelled) return err;
         try output.field("Original key: ", handle);
         try output.field("Rui: Recovery not confirmed: ", @errorName(err));
     };
 }
 
-fn recoverFrontendRecord(caller: client.Requests, directory: []const u8, handle: []const u8, accepted: *?client.CapturedIdentity, output: Output) !void {
+fn recoverFrontendRecord(caller: client.Requests, directory: []const u8, handle: []const u8, recovered: *?client.MutationReply, output: Output) !void {
     var captured = try client.openCaptured(caller.io, directory, handle);
     defer captured.close(caller.io);
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try caller.sendCaptured(&captured, null, &reply_buffer);
-    if (reply.isAccepted()) accepted.* = captured.saved;
+    recovered.* = reply;
     try frontendMutation(output, reply);
 }
 

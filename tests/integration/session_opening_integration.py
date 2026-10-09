@@ -23,6 +23,7 @@ import uuid
 
 import dispatch_integration as host
 from canonical_failure_integration import ReplyProxy
+from conversation_page_integration import request as public_read
 from host_process import canonical_fixture_root
 from human_cli_integration import action_ready, admit, run
 
@@ -437,6 +438,79 @@ def current_recovery_diagnostic(home, store, endpoint, owner):
         proxy.close()
 
 
+def matching_recovery(home, store, endpoint, owner):
+    """Only recovery of the matching original may release its input bank."""
+    unrelated = admit(home, "configure", "--store", store,
+                      "--session", "opening/recover", "--permission-mode", "ask")["request"]
+    held, release = threading.Event(), threading.Event()
+    with endpoint.lock:
+        for label in ("RECOVERY-ORIGINAL-ANSWER", "RECOVERY-NEXT-ANSWER"):
+            endpoint.responses.append(host.sse_answer(label, label + "-private",
+                                                      label + "-item", label)[0])
+        before = len(endpoint.requests)
+    def lose_first_reply(response):
+        if len(proxy.exchanges) == 1:
+            head, _ = response.split(b"\r\n\r\n", 1)
+            return head + b"\r\n\r\n"
+        if len(proxy.exchanges) == 2:
+            held.set()
+            assert release.wait(15), "matching recovery reply was never released"
+        return response
+    proxy = ReplyProxy(owner, "/v1/message", lose_first_reply)
+    terminal = None
+    try:
+        terminal = Terminal(home, store, "opening/recover")
+        terminal.until("rui> ", 0)
+        start = len(terminal.transcript)
+        terminal.send("RECOVER-EXACT-ORIGINAL-é🙂\n")
+        terminal.until("Admission unconfirmed.", start)
+        original = json.loads(proxy.exchanges[0][0])
+        saved = host.command("observe-command", "--store", store, "--key", original["key"])
+        assert saved["observation"]["status"] == "accepted", saved
+        terminal.command("/recover " + unrelated)
+        start = len(terminal.transcript)
+        terminal.send("MUST-REMAIN-BUSY\n")
+        terminal.until("Submission busy; draft retained.", start)
+        assert len(proxy.exchanges) == 1, "unrelated recovery released the original bank"
+        terminal.send("\x15")  # Explicitly discard this blocked test composition.
+        terminal.send("/recover " + original["key"] + "\n")
+        host.wait_for(held.is_set, "matching original recovery response held")
+        start = len(terminal.transcript)
+        terminal.send("NEXT-é🙂\x1b[D")
+        terminal.until("NEXT-é🙂", start)
+        assert proxy.exchanges[1][0] == proxy.exchanges[0][0], "recovery replaced original intent"
+        start = len(terminal.transcript)
+        release.set()
+        terminal.until("Original request accepted.", start)
+        while not re.search(rb"\rRui: (?:idle|completed|in_flight)\r\r\nrui> NEXT-", terminal.transcript[start:]):
+            assert terminal.read(), "matching recovery never settled the caller"
+        terminal.send("RECOVERED\n")
+        terminal.until("RECOVERY-NEXT-ANSWER", start)
+        assert len(proxy.exchanges) == 3, "recovered original was sent again or next input remained busy"
+        next_request = json.loads(proxy.exchanges[2][0])
+        assert next_request["key"] != original["key"], "next Message reused the original identity"
+        assert next_request["text"] == {"state": "value", "value": "NEXT-éRECOVERED🙂"}, next_request
+        socket = owner.rui_ready_fields["socket"]
+        head, body = public_read(socket, store, "/v1/conversation-page", "conversation_page",
+                                 "opening/recover", end="0", before_position="0", before_ordinal="0")
+        assert head.startswith(b"HTTP/1.1 200 "), (head, body)
+        page = json.loads(body)
+        assert page["direction"] == "newest_first" and not page["more"], page
+        newest_user = next(row for row in page["items"] if row["kind"] == "user")
+        head, body = public_read(socket, store, "/v1/conversation-content", "conversation_content",
+                                 "opening/recover", position=newest_user["position"],
+                                 ordinal=newest_user["ordinal"], start="0", stream=True)
+        assert head.startswith(b"HTTP/1.1 200 ") and body == "NEXT-éRECOVERED🙂".encode(), (head, body)
+        assert len(endpoint.requests) == before + 2, "recovery duplicated provider work"
+        terminal.command("/exit", "Detached.")
+        terminal.finish()
+    finally:
+        release.set()
+        if terminal is not None:
+            terminal.close()
+        proxy.close()
+
+
 def approval(state, home, store, workspace, endpoint):
     """Attention cannot steal draft focus; only fresh exact Action approves."""
     terminal = Terminal(home, store, "opening/approval")
@@ -596,7 +670,7 @@ def main():
     owner = None
     try:
         owner = host.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        for session in ("idle", "equal", "approval", "local", "wait", "switch-source", "switch-target", "rejection", "fatal-original"):
+        for session in ("idle", "equal", "approval", "local", "wait", "switch-source", "switch-target", "rejection", "fatal-original", "recover"):
             configure(home, store, workspace, "opening/" + session)
         fatal_stderr(home, store)
         local_commands(home, store, workspace, endpoint)
@@ -608,13 +682,14 @@ def main():
         late_switch_failure(state, home, store, endpoint, owner)
         rejected_input(home, store, endpoint, owner)
         current_recovery_diagnostic(home, store, endpoint, owner)
+        matching_recovery(home, store, endpoint, owner)
         with endpoint.lock:
             endpoint.responses.extend([
                 host.sse_tool_calls("opening-proposal", [("bash", "opening-call", arguments)]),
                 answer("APPROVAL-ANSWER"), answer("PRESERVED-ANSWER")])
         approval(state, home, store, workspace, endpoint)
         wait_attention(state, home, store, workspace, endpoint)
-        print("session opening: 9 focused real Host/provider/PTY cases passed")
+        print("session opening: 10 focused real Host/provider/PTY cases passed")
     finally:
         if owner is not None:
             host.stop_host(owner)
