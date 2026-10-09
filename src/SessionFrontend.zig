@@ -122,22 +122,21 @@ fn drive(self: *Self, store: []const u8, session: []const u8) !void {
 }
 
 fn acceptedDiagnostic(self: *Self, original: *const client.CapturedIdentity) !void {
-    const stderr = std.Io.File.stderr();
-    try stderr.writeStreamingAll(self.init.io, "Rui: Original Admission accepted; do not replace intent.\n");
+    _ = self;
+    // At most twelve escaped bytes per identity byte, plus fixed labels. This
+    // is transient final-report storage, not retained output or a retry queue.
+    var storage: [12 * (protocol.max_store_bytes + protocol.max_session_bytes + protocol.max_key_bytes) + 256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try writer.writeAll("Rui: Original Admission accepted; do not replace intent.\n");
     inline for (.{ "Store: ", "Session: ", "Key: " }, .{ original.store.slice(), original.session.slice(), original.key.slice() }) |label, value| {
-        try stderr.writeStreamingAll(self.init.io, label);
+        try writer.writeAll(label);
         var text: TerminalText = .{ .mode = .line };
-        var storage: [256]u8 = undefined;
-        for (value) |byte| {
-            var writer = std.Io.Writer.fixed(&storage);
-            try text.feed(&writer, &.{byte});
-            try stderr.writeStreamingAll(self.init.io, writer.buffered());
-        }
-        var writer = std.Io.Writer.fixed(&storage);
+        try text.feed(&writer, value);
         try text.finish(&writer);
-        try stderr.writeStreamingAll(self.init.io, writer.buffered());
-        try stderr.writeStreamingAll(self.init.io, "\n");
+        try writer.writeAll("\n");
     }
+    const vectors = [_]std.posix.iovec_const{.{ .base = storage[0..writer.end].ptr, .len = writer.end }};
+    Editor.writeDiagnostic(&vectors);
 }
 
 fn read(raw: *anyopaque, task: *Task) !void {
