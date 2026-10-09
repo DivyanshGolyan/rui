@@ -14,6 +14,7 @@ if [ "${3:-}" = parallel ]; then
     session_input_client=$9
     history_client=${10}
     legacy_terminal=${11}
+    native_drain=${12:-}
     output=$(mktemp -d "${TMPDIR:-/tmp}/rui-check.XXXXXX")
     trap 'rm -rf "$output"' EXIT
     pids=
@@ -77,6 +78,9 @@ if [ "${3:-}" = parallel ]; then
     run_isolated_case history python3 "$directory/history_integration.py" "$release_safe" "$history_client"
     run_isolated_case session-opening python3 "$directory/session_opening_integration.py" "$release_safe"
     run_isolated_case terminal-restoration python3 "$directory/terminal_restoration_integration.py" "$legacy_terminal"
+    if [ -n "$native_drain" ]; then
+        run_isolated_case native-drain python3 "$directory/native_drain_integration.py" "$native_drain"
+    fi
     run_isolated_case persistent-cancellation python3 "$directory/persistent_cancellation_integration.py" "$release_safe"
     run_isolated_case admission-debug sh "$directory/admission_integration.sh" "$debug" artifact-smoke
     if [ "$failed" -eq 0 ]; then
@@ -92,9 +96,13 @@ activity_client=$6
 session_input_client=$7
 history_client=$8
 legacy_terminal=$9
+native_drain=${10:-}
 python3 "$directory/history_integration.py" "$release_safe" "$history_client"
 python3 "$directory/session_opening_integration.py" "$release_safe"
 python3 "$directory/terminal_restoration_integration.py" "$legacy_terminal"
+if [ -n "$native_drain" ]; then
+    python3 "$directory/native_drain_integration.py" "$native_drain"
+fi
 python3 "$directory/persistent_cancellation_integration.py" "$release_safe"
 sh "$directory/admission_integration.sh" "$release_safe"
 python3 "$directory/dispatch_integration.py" "$release_safe"
