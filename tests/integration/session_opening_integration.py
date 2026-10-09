@@ -386,6 +386,57 @@ def rejected_input(home, store, endpoint, owner):
             proxy.close()
 
 
+def current_recovery_diagnostic(home, store, endpoint, owner):
+    """A newer uncertain Message, not a stale acceptance, owns fatal guidance."""
+    with endpoint.lock:
+        for label in ("ACCEPTED-A", "UNCERTAIN-B"):
+            endpoint.responses.append(host.sse_answer(label, label + "-private",
+                                                      label + "-item", label)[0])
+    def lose_second_reply(response):
+        if len(proxy.exchanges) == 2:
+            # The real Host already committed B. Preserve its framing but lose
+            # the body, so the caller cannot know that admission outcome.
+            head, _ = response.split(b"\r\n\r\n", 1)
+            return head + b"\r\n\r\n"
+        return response
+    proxy = ReplyProxy(owner, "/v1/message", lose_second_reply)
+    terminal = None
+    try:
+        terminal = Terminal(home, store, "opening/fatal-original")
+        terminal.until("rui> ", 0)
+        start = len(terminal.transcript)
+        terminal.send("ACCEPTED-ORIGINAL-A\n")
+        terminal.until("ACCEPTED-A", start)
+        terminal.command("/status")
+        start = len(terminal.transcript)
+        terminal.send("UNCERTAIN-ORIGINAL-B\n")
+        terminal.until("Admission unconfirmed.", start)
+        assert len(proxy.exchanges) == 2, "uncertain original was retried"
+        first, second = [json.loads(body) for body, _ in proxy.exchanges]
+        assert first["text"] == {"state": "value", "value": "ACCEPTED-ORIGINAL-A"}, first
+        assert second["text"] == {"state": "value", "value": "UNCERTAIN-ORIGINAL-B"}, second
+        saved = host.command("observe-command", "--store", store, "--key", second["key"])
+        assert saved["key"] == second["key"] and saved["observation"]["status"] == "accepted", saved
+        assert saved["observation"]["kind"] == "message", saved
+        assert saved["observation"]["target"] == "opening/fatal-original", saved
+        start = len(terminal.transcript)
+        terminal.send("\x1b[")
+        terminal.finish(nonzero=True)
+        output = bytes(terminal.transcript[start:]).decode(errors="replace")
+        assert "IncompleteTerminalInput" in output, output
+        assert "Original Admission unconfirmed" in output, "fatal guidance overstated admission certainty"
+        for label, value in (("Store", str(store)), ("Session", "opening/fatal-original"),
+                             ("Key", second["key"])):
+            assert f"{label}: {value}" in output, (label, output)
+        assert first["key"] not in output, "fatal guidance used a stale accepted identity"
+        assert "Original Admission accepted" not in output, output
+        assert len(proxy.exchanges) == 2, "fatal cleanup resent work"
+    finally:
+        if terminal is not None:
+            terminal.close()
+        proxy.close()
+
+
 def approval(state, home, store, workspace, endpoint):
     """Attention cannot steal draft focus; only fresh exact Action approves."""
     terminal = Terminal(home, store, "opening/approval")
@@ -545,7 +596,7 @@ def main():
     owner = None
     try:
         owner = host.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        for session in ("idle", "equal", "approval", "local", "wait", "switch-source", "switch-target", "rejection"):
+        for session in ("idle", "equal", "approval", "local", "wait", "switch-source", "switch-target", "rejection", "fatal-original"):
             configure(home, store, workspace, "opening/" + session)
         fatal_stderr(home, store)
         local_commands(home, store, workspace, endpoint)
@@ -556,13 +607,14 @@ def main():
         equal_admissions(state, home, store, endpoint)
         late_switch_failure(state, home, store, endpoint, owner)
         rejected_input(home, store, endpoint, owner)
+        current_recovery_diagnostic(home, store, endpoint, owner)
         with endpoint.lock:
             endpoint.responses.extend([
                 host.sse_tool_calls("opening-proposal", [("bash", "opening-call", arguments)]),
                 answer("APPROVAL-ANSWER"), answer("PRESERVED-ANSWER")])
         approval(state, home, store, workspace, endpoint)
         wait_attention(state, home, store, workspace, endpoint)
-        print("session opening: 8 focused real Host/provider/PTY cases passed")
+        print("session opening: 9 focused real Host/provider/PTY cases passed")
     finally:
         if owner is not None:
             host.stop_host(owner)
