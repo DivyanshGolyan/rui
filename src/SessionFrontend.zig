@@ -94,7 +94,10 @@ pub fn run(init: std.process.Init, store: []const u8, session: ?[]const u8, dire
     const admission_result = self.settleAdmission(true);
     if (self.reads.take() != null) self.reads.acknowledge();
     if (self.captured) |*captured| captured.close(init.io);
-    const output_failed = (if (outcome) |_| false else |_| true) or (if (restored) |_| false else |_| true);
+    const output_failed = (if (outcome) |_| false else |_| true) or (if (restored) |_| false else |_| true) or
+        (if (read_result) |_| false else |err| err != error.Cancelled) or
+        (if (admission_result) |_| false else |err| err != error.Cancelled) or
+        self.fatal != null or self.mask_failure != null;
     if (output_failed) if (self.original) |original| {
         // Best-effort explanation cannot replace the retained fatal outcome.
         self.originalDiagnostic(&original.identity, original.outcome) catch {};
@@ -290,7 +293,11 @@ fn settleAdmission(self: *Self, force: bool) !void {
     if (self.capturing) return;
     if (self.admission.thread != null) {
         if (!force and !self.admission.completed()) return;
-        try self.applyAdmission(self.admission.join());
+        const joined = self.admission.join();
+        try self.applyAdmission(joined);
+        // Interactive transport failure remains recoverable, but a terminal
+        // unwind must retain the actual joined failure, not a successful detach.
+        if (!self.terminal.active) try joined;
     }
 }
 
@@ -988,6 +995,39 @@ test "SessionFrontend settlement is semantic even without output and canonical i
     try std.testing.expectError(error.CanonicalStoreFailure, self.applyAdmission(error.CanonicalStoreFailure));
     try std.testing.expectEqual(error.CanonicalStoreFailure, self.fatal.?);
     try std.testing.expectEqualStrings("original", self.input.retained().?.bytes);
+
+    const Worker = struct {
+        fn fail(_: *anyopaque, _: *Task) !void {
+            return error.ConnectionLost;
+        }
+    };
+    self.init.io = std.testing.io;
+    self.admission = .{};
+    self.capturing = false;
+    self.captured = .{
+        .file = undefined, // Failure settlement borrows identity, never reads/closes it.
+        .length = 0,
+        .saved = .{},
+        .target = .{ .message = .{ .bytes = 8, .digest = protocol.contentDigest("original") } },
+    };
+    try self.captured.?.saved.store.set("store/original");
+    try self.captured.?.saved.session.set("session/original");
+    try self.captured.?.saved.key.set("key/original");
+    try self.captured.?.saved.kind.set("message");
+    self.fatal = null;
+    self.terminal.active = true;
+    try self.admission.start(std.testing.io, &self, Worker.fail);
+    try self.settleAdmission(true); // Ordinary interactive failure stays recoverable.
+    self.terminal.active = false;
+    try self.admission.start(std.testing.io, &self, Worker.fail);
+    try std.testing.expectError(error.ConnectionLost, self.settleAdmission(true));
+    try std.testing.expect(self.admission.thread == null);
+    try std.testing.expectEqual(Input.State.unconfirmed, self.input.submissionState().?);
+    try std.testing.expectEqualStrings("original", self.input.retained().?.bytes);
+    try std.testing.expectEqual(Input.Outcome.unconfirmed, self.original.?.outcome);
+    try std.testing.expectEqualStrings("store/original", self.original.?.identity.store.slice());
+    try std.testing.expectEqualStrings("session/original", self.original.?.identity.session.slice());
+    try std.testing.expectEqualStrings("key/original", self.original.?.identity.key.slice());
 }
 
 test "SessionFrontend original recovery checks destination key bytes and scoped digest" {
