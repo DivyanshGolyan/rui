@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Fresh-Host Bash recovery cuts prove durable facts never restore a permit."""
 
+import fcntl
 import json
 import os
 import pathlib
 import pty
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 
 import bash_integration as bash
@@ -118,13 +121,14 @@ def prove_effect_without_result_becomes_indeterminate(state):
         home = state / "effect-before-result-home"
         home.mkdir()
         master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
         entered = subprocess.Popen([str(RUI), "session", "--store", str(store), "--session", session],
             env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         try:
             human.read_terminal(master, "rui> ")
-            status = human.terminal_step(master, "/status")
-            assert "Indeterminate Action: 1" in status, status
+            status = human.terminal_step(master, "/status", "The command may have run; Rui did not replay it.")
+            assert "Indeterminate Action (may have run): 1" in status, status
             assert "The command may have run; Rui did not replay it." in status, status
             human.terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0

@@ -12,6 +12,7 @@ import resource
 import select
 import shlex
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -375,15 +376,22 @@ def main():
         clean_env = {key: value for key, value in env.items()
             if key not in ("MallocMaxMagazines", "MallocSpaceEfficient", "RUI_HOST_MALLOC_DEFAULTS")}
         disconnected_store = root / "disconnected-stdout"
-        disconnected = subprocess.Popen([RUI, "serve", "--store", disconnected_store],
+        # Reach the readiness write even under the orb's finite FD limit;
+        # production default-capacity admission has its own dedicated gate.
+        disconnected = subprocess.Popen([RUI, "serve", "--store", disconnected_store, "--active-capacity", "8"],
             env=clean_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             disconnected.stdout.close()
-            assert disconnected.wait(timeout=COMMAND_TIMEOUT) != 0
+            assert disconnected.wait(timeout=COMMAND_TIMEOUT) == 1
+            errors = disconnected.stderr.read(4096).decode()
+            assert "HostReadinessOutputUnavailable" in errors, errors
             records = [json.loads(line) for file in (disconnected_store / "diagnostics").glob("host-*.jsonl")
                 for line in file.read_text().splitlines()]
             assert any(record.get("phase") == "failed" for record in records), records
             assert not any(record.get("phase") == "ready" for record in records), records
+            replacement = run_start(disconnected_store, env)
+            assert replacement.returncode == 0, replacement.stderr
+            assert instance(status(disconnected_store, env), 8)
         finally:
             if disconnected.poll() is None:
                 disconnected.kill()
@@ -405,6 +413,7 @@ def main():
         codex_fixture.credentials(bare_credential)
         bare_env = {**os.environ, "HOME": str(bare_home)}
         master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
         caller = None
         try:
             original_terminal = termios.tcgetattr(master)
@@ -420,9 +429,24 @@ def main():
                 chunk = os.read(master, 65536)
                 assert len(output) + len(chunk) < PTY_OUTPUT_LIMIT, "unexpected unbounded terminal output"
                 output.extend(chunk)
-            assert b"Host ready (active capacity 8)" in output, output
-            assert b"Provider: codex" in output and b"Permission: ask" in output, output
-            assert b"request: " in output and b"Session: rui/" in output, output
+            assert b"Host ready" not in output, "auto-start polluted quiet opening"
+            assert b"Provider/model: codex/gpt-6-luna" in output and b"Permission Mode: bypass" in output, output
+            assert b"Bash bypasses approval" in output, output
+            assert b"request: " in output and b"Rui Session: rui/" in output, output
+            captures = list((bare_home / ".config/rui/requests").glob("*.json"))
+            assert len(captures) == 1, captures
+            captured = json.loads(captures[0].read_text())
+            assert captured["key"] == captures[0].stem
+            assert captured["session"] == "rui/" + captured["key"]
+            assert captured["store"] == str(bare_store.resolve())
+            configuration = captured["configuration"]
+            assert configuration["workspace"] == {"state": "value", "value": str(root.resolve())}
+            assert configuration["provider"] == {"state": "value", "value": "codex"}
+            assert configuration["model"] == {"state": "value", "value": "gpt-6-luna"}
+            assert configuration["tools"] == {"state": "value", "value": ["bash"]}
+            assert configuration["permission_mode"] == {"state": "value", "value": "bypass"}
+            assert captured["require_model"] is True
+            assert ("Rui Session: " + captured["session"]).encode() in output
             assert len(wait_for_processes(bare_store, 1)) == 1
             # Transfer this thread's reader from prompt to exit without
             # withholding output credit or discarding any transcript bytes.
