@@ -54,7 +54,6 @@ deferred_retry: bool = false,
 deferred_approval: bool = false,
 pending_notice: ?[]const u8 = null,
 fatal: ?anyerror = null,
-restore_failure: ?anyerror = null,
 mask_failure: ?anyerror = null,
 borrower: bool = false,
 capturing: bool = false,
@@ -632,14 +631,7 @@ fn validateOriginal(record: *const client.CapturedRecord, store: []const u8, ses
 }
 
 fn restoreTerminal(self: *Self) !void {
-    if (self.restore_failure) |err| return err;
-    if (!self.terminal.active) return;
-    self.terminal.finish() catch |err| {
-        // finish releases active custody even on failed restoration. Retain
-        // its higher-precedence failure across later no-op restore attempts.
-        self.restore_failure = err;
-        return err;
-    };
+    try self.terminal.finish();
 }
 
 fn cancelCommand(self: *Self) void {
@@ -1127,10 +1119,10 @@ test "SessionFrontend cancellation claims scoped command gate before detaching" 
 test "SessionFrontend released terminal retains restoration failure ahead of worker failure" {
     var self: Self = undefined;
     self.terminal.active = false;
-    self.restore_failure = error.TerminalRestoreFailed;
+    self.terminal.finish_result = error.TerminalRestoreFailed;
     self.fatal = error.CanonicalStoreFailure;
     try std.testing.expectError(error.TerminalRestoreFailed, self.restoreTerminal());
-    self.restore_failure = error.TerminalCleanupFailed;
+    self.terminal.finish_result = error.TerminalCleanupFailed;
     try std.testing.expectError(error.TerminalCleanupFailed, self.restoreTerminal());
 }
 
@@ -1150,7 +1142,7 @@ test "SessionFrontend borrower cleanup retains actual failure but not cancellati
     self.init.io = std.testing.io;
     self.reads = .{};
     self.terminal.active = false;
-    self.restore_failure = null;
+    self.terminal.finish_result = {};
     self.fatal = error.TestInputFailure;
     self.command_cancel = null;
     try std.testing.expectError(error.TestInputFailure, self.call(Worker.request, .{}));
@@ -1213,7 +1205,7 @@ test "SessionFrontend failed parent mask restore joins launched borrower and ret
         self.init.io = std.testing.io;
         self.reads = .{};
         self.terminal.active = false;
-        self.restore_failure = terminal_error;
+        self.terminal.finish_result = if (terminal_error) |err| err else {};
         self.mask_failure = null;
         self.command_cancel = null;
         self.detached = false;
