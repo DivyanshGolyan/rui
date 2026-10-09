@@ -2607,10 +2607,9 @@ pub const Store = struct {
                 (kind == 4) != (ordinal > 0)) return error.CorruptStore;
             // Do not filter damaged rows out of SQL: validate ordinary
             // producers and the exposed content before publishing metadata.
-            const metadata = if (ordinal == 0)
-                (try self.publicConversationContentLocked(request.session.slice(), @intCast(position), 0)).metadata
-            else
-                try self.readPublicContentMetadata(content_id);
+            const resolved = try self.publicConversationContentLocked(request.session.slice(), @intCast(position), @intCast(ordinal));
+            if (resolved.id != content_id) return error.CorruptStore;
+            const metadata = resolved.metadata;
             page.items[page.count] = .{ .position = @intCast(position), .ordinal = @intCast(ordinal), .kind = switch (kind) {
                 1 => .user,
                 3 => .assistant,
@@ -11590,7 +11589,7 @@ test "public foreign Turn page fences" {
     try testingOrdinaryPublicCorruption(.page, true);
 }
 
-fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { private, missing }) !void {
+fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { private, missing, sibling_ordinal, sibling_item_id }) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
@@ -11598,14 +11597,18 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
     try configureTestSession(&storage, "tool-config", "direct/corrupt-tool");
     try submitTestMessage(&storage, &tmp, "tool-input", "tool-key", "direct/corrupt-tool", "run tool");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+    const calls = [_]TestingCall{
+        .{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        .{ .item_id = "sibling", .name = "unknown", .encoded_call_id = "sibling-call", .decoded_call_id = "sibling-call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    };
     try settleCallsForTesting(&storage, &tmp, binding, "tool-output", &calls);
     var request = protocol.ConversationPage{};
     try request.session.set("direct/corrupt-tool");
     const valid = try storage.publicConversationPage(request);
-    try std.testing.expectEqual(@as(usize, 2), valid.count);
-    const item = valid.items[0];
-    try std.testing.expect(item.kind == .tool_result and item.ordinal == 1);
+    try std.testing.expectEqual(@as(usize, 3), valid.count);
+    const sibling_damage = damage == .sibling_ordinal or damage == .sibling_item_id;
+    const item = valid.items[if (sibling_damage) 0 else 1];
+    try std.testing.expect(item.kind == .tool_result and item.ordinal == (if (sibling_damage) @as(u64, 2) else 1));
     {
         var reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal });
         defer reader.close();
@@ -11613,9 +11616,11 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
         const count = try reader.read(0, &bytes);
         try std.testing.expectEqualStrings("Unknown tool: unknown.", bytes[0..count]);
     }
-    // Damage the exposed result after real settlement, not its legitimate
-    // private provider backing. Keep the complete group's identity visible.
+    // Keep counts, acceptance positions and results intact for sibling damage:
+    // reading the healthy highest ordinal must validate the entire group.
     switch (damage) {
+        .sibling_ordinal => try exec(storage.database, "UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE call_ordinal=0"),
+        .sibling_item_id => try exec(storage.database, "UPDATE model_tool_call SET item_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0"),
         .private => try exec(storage.database, "UPDATE content SET private=1 WHERE content_id=(SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=0)"),
         .missing => {
             try exec(storage.database, "PRAGMA foreign_keys=OFF");
@@ -11624,7 +11629,7 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
         },
     }
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
-    request.end = valid.end;
+    request.end = item.position;
     if (route == .cursor) {
         request.before_position = item.position;
         request.before_ordinal = item.ordinal;
@@ -11659,6 +11664,13 @@ test "public completed tool group with missing exposed content fences" {
     try testingToolPublicCorruption(.page, .missing);
     try testingToolPublicCorruption(.content, .missing);
     try testingToolPublicCorruption(.cursor, .missing);
+}
+
+test "public completed tool group with corrupt sibling provenance fences" {
+    for ([_]TestingPublicReadRoute{ .page, .cursor, .content }) |route| {
+        try testingToolPublicCorruption(route, .sibling_ordinal);
+        try testingToolPublicCorruption(route, .sibling_item_id);
+    }
 }
 
 test "private-only model output never becomes public conversation" {

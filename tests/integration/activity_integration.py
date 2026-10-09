@@ -13,7 +13,7 @@ import tempfile
 import threading
 
 from control_integration import command, configure, inspect_execution, message, observe, start_host, stop_session, successful_sse, wait_for
-from conversation_page_integration import host_resources
+from conversation_page_integration import host_resources, request
 from dispatch_integration import sse_tool_calls
 from host_process import TestHTTPServer, stop_process
 from proposal_integration import digest
@@ -210,6 +210,32 @@ def main():
                     args = ("null", int(position)-1, "null", "forward") if mode == "page" else (position, ordinal)
                     caller(store, mode, *args, ok=False)
                     assert process.wait(timeout=5) == 1, "damaged activity silently disappeared"
+                    stop_process(process)
+                    process = None
+            # First read after each independent restore/restart is Conversation,
+            # never proposal/activity traversal that could rescue validation.
+            # Corrupt only the first call; target the healthy highest sibling.
+            sibling = results[-1]
+            for corrupt in (
+                    "UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0",
+                    "UPDATE model_tool_call SET item_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=1) WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0"):
+                for mode in ("page", "cursor", "content"):
+                    with sqlite3.connect(store / "rui.sqlite3") as db:
+                        saved.backup(db)
+                        assert db.execute(corrupt).rowcount == 1
+                    process, fields = start_host(store, provider)
+                    if mode == "content":
+                        route, wire_kind = "/v1/conversation-content", "conversation_content"
+                        identity = {"position": sibling["position"], "ordinal": sibling["ordinal"], "start": "0"}
+                    else:
+                        route, wire_kind = "/v1/conversation-page", "conversation_page"
+                        identity = {"end": sibling["position"], "before_position": "0", "before_ordinal": "0"}
+                        if mode == "cursor":
+                            identity.update(before_position=sibling["position"], before_ordinal=sibling["ordinal"])
+                    head, body = request(fields["socket"], store, route, wire_kind, SESSION, **identity)
+                    assert head.startswith(b"HTTP/1.1 500 "), (mode, head, body)
+                    assert json.loads(body)["code"] == "canonical_store_failure", (mode, body)
+                    assert process.wait(timeout=5) == 1, "damaged Conversation did not shut down Host"
                     stop_process(process)
                     process = None
             saved.close()
