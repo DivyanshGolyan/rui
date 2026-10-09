@@ -163,10 +163,10 @@ def cases(state, home, store, workspace, owner):
                 settled = rb"\rRui: (?!submitting|unconfirmed|rejected|capture failed)[^\r\n]*\r\r\nrui> NEXT-" + "éKEPT🙂".encode() + rb"\r\x1b\["
                 while not re.search(settled, terminal.transcript[start:]):
                     assert terminal.read(), terminal.transcript
-                terminal.send("\n")
+                terminal.send("Q\n")  # Cursor must still precede the emoji AFTER release.
                 host.wait_for(lambda: len(set(records.glob("*.json")) - before) == 2, "next draft captured after exact join")
                 next_record = (set(records.glob("*.json")) - before - {record}).pop()
-                assert json.loads(next_record.read_bytes())["text"] == {"state": "value", "value": "NEXT-éKEPT🙂"}
+                assert json.loads(next_record.read_bytes())["text"] == {"state": "value", "value": "NEXT-éKEPTQ🙂"}
                 terminal.send("\x03")
                 terminal.finish()
                 assert record.read_bytes() == original

@@ -773,11 +773,16 @@ fn borrow(self: *Self, comptime function: anytype, args: anytype, comptime strea
         self.cancelCommand();
         self.restoreTerminal() catch {}; // Failure retained by restore owner.
         self.reads.cancel();
-        self.reads.join() catch {};
+        self.reads.join() catch |err| {
+            if (err != error.Cancelled and ((self.fatal orelse error.Cancelled) != error.CanonicalStoreFailure or err == error.CanonicalStoreFailure)) self.fatal = err;
+        };
         if (self.reads.take() != null) self.reads.acknowledge();
         // The task wrapper stores the semantic result separately. Cleanup
-        // must preserve canonical failure even after an earlier UI error.
-        if (context.result) |_| {} else |err| if (err == error.CanonicalStoreFailure) {
+        // must retain actual failure after an earlier UI error, while local
+        // cancellation alone never erases a failure or becomes one itself.
+        if (context.result) |_| {} else |err| if (err != error.Cancelled and
+            ((self.fatal orelse error.Cancelled) != error.CanonicalStoreFailure or err == error.CanonicalStoreFailure))
+        {
             self.fatal = err;
         }
     };
@@ -1089,10 +1094,16 @@ test "SessionFrontend released terminal retains restoration failure ahead of wor
     try std.testing.expectError(error.TerminalCleanupFailed, self.restoreTerminal());
 }
 
-test "SessionFrontend borrower cleanup retains canonical failure after input fails" {
+test "SessionFrontend borrower cleanup retains actual failure but not cancellation after input fails" {
     const Worker = struct {
         fn request(_: client.Requests) !void {
             return error.CanonicalStoreFailure;
+        }
+        fn failed(_: client.Requests) !void {
+            return error.TestReadFailure;
+        }
+        fn cancelled(_: client.Requests) !void {
+            return error.Cancelled;
         }
     };
     var self: Self = undefined;
@@ -1105,6 +1116,14 @@ test "SessionFrontend borrower cleanup retains canonical failure after input fai
     try std.testing.expectError(error.TestInputFailure, self.call(Worker.request, .{}));
     try std.testing.expect(self.reads.thread == null);
     try std.testing.expectEqual(error.CanonicalStoreFailure, self.fatal.?);
+    self.fatal = error.TestInputFailure;
+    try std.testing.expectError(error.TestInputFailure, self.call(Worker.failed, .{}));
+    try std.testing.expect(self.reads.thread == null);
+    try std.testing.expectEqual(error.TestReadFailure, self.fatal.?);
+    self.fatal = error.TestInputFailure;
+    try std.testing.expectError(error.TestInputFailure, self.call(Worker.cancelled, .{}));
+    try std.testing.expect(self.reads.thread == null);
+    try std.testing.expectEqual(error.TestInputFailure, self.fatal.?);
 }
 
 test "SessionFrontend worker inherits blocked SIGINT and parent mask is restored" {
