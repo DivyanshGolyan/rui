@@ -280,6 +280,39 @@ fn settleAdmission(self: *Self, force: bool) !void {
     }
 }
 
+/// The recovery worker returns owned decoded facts before fallible display.
+/// Only the exact outstanding Message may settle this caller's input custody.
+pub fn settleRecovered(self: *Self, reply: client.MutationReply) !void {
+    if (self.ticket == null) {
+        if (reply.isAccepted()) self.original = .{ .identity = reply.context, .outcome = .accepted };
+        return;
+    }
+    if (!reply.context.kind.eql("message") or !reply.context.store.eql(self.capture_store.slice()) or
+        !reply.context.session.eql(self.capture_session.slice()) or !reply.context.key.eql(&self.capture_key)) return;
+    const retained = self.input.retained().?.bytes;
+    const bytes = if (std.mem.startsWith(u8, retained, "//")) retained[1..] else retained;
+    switch (reply.target) {
+        .message => |message| {
+            if (message.bytes != bytes.len or !std.mem.eql(u8, &message.digest, &protocol.contentDigest(bytes))) return;
+        },
+        else => return,
+    }
+    // A concurrent original send still borrows its pinned capture. Join and
+    // apply that actual outcome before recovery can release/reopen the owner.
+    self.admission.cancel();
+    const joined = self.settleAdmission(true);
+    if (self.ticket == null or self.input.submissionState() == .rejected) {
+        try joined;
+        return;
+    }
+    if (self.input.submissionState() == .capture_failed)
+        self.captured = try self.input.recover(self.ticket.?, self);
+    try validateOriginal(&self.captured.?, self.capture_store.slice(), self.capture_session.slice(), &self.capture_key, bytes);
+    self.reply = reply;
+    try self.applyAdmission({});
+    try joined;
+}
+
 fn applyAdmission(self: *Self, result: anyerror!void) !void {
     if (result) |_| {
         const accepted = self.reply.isAccepted();
