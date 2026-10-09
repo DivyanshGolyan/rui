@@ -257,6 +257,26 @@ pub fn build(b: *std.Build) void {
     );
     credential_integration_step.dependOn(&credential_integration.step);
 
+    const preference_policy_actor = b.addExecutable(.{
+        .name = "rui-preference-policy-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/preference_policy.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    preference_policy_actor.root_module.link_libc = true;
+    preference_policy_actor.root_module.addImport("preferences", b.createModule(.{
+        .root_source_file = b.path("src/preferences.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    }));
+    const preference_policy_integration = b.addSystemCommand(&.{"python3"});
+    preference_policy_integration.addFileArg(b.path("tests/integration/preference_policy_integration.py"));
+    preference_policy_integration.addArtifactArg(preference_policy_actor);
+    const preference_policy_step = b.step("preference-policy-integration", "Run native preference publication and privacy cases");
+    preference_policy_step.dependOn(&preference_policy_integration.step);
+
     const codex_h2_integration = b.addSystemCommand(&.{"python3"});
     codex_h2_integration.addFileArg(b.path("tests/integration/codex_h2_integration.py"));
     codex_h2_integration.addArtifactArg(release_safe);
@@ -349,6 +369,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addArtifactArg(tests);
     fast_integrations.addArtifactArg(host_status_actor);
     fast_integrations.addArtifactArg(session_list_client);
+    fast_integrations.addArtifactArg(preference_policy_actor);
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.step.dependOn(&release.step);
     fast_integrations.step.dependOn(&run_evaluator_host.step);
@@ -365,6 +386,7 @@ pub fn build(b: *std.Build) void {
     process_integrations.addArtifactArg(debug);
     process_integrations.addArtifactArg(host_status_actor);
     process_integrations.addArtifactArg(session_list_client);
+    process_integrations.addArtifactArg(preference_policy_actor);
     const full_evaluator = b.addSystemCommand(&.{"python3"});
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     full_evaluator.addArtifactArg(evaluator);

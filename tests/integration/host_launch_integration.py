@@ -374,12 +374,29 @@ def main():
         # startup must fail the handshake rather than claim ready.
         clean_env = {key: value for key, value in env.items()
             if key not in ("MallocMaxMagazines", "MallocSpaceEfficient", "RUI_HOST_MALLOC_DEFAULTS")}
+        # The production default remains 1000. Its descriptor admission runs
+        # before the lease/diagnostic writer, so rejection creates no Store.
+        rejected_store = root / "default-capacity-rejected"
+        rejected = subprocess.run([RUI, "serve", "--store", rejected_store],
+            env=clean_env, preexec_fn=lower_descriptor_limit,
+            capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+        assert rejected.returncode != 0, rejected
+        assert "DescriptorCapacityInsufficient" in rejected.stderr, rejected.stderr
+        fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", rejected.stderr)}
+        assert fields["active_capacity"] == 1000 and fields["soft_limit"] == 64, fields
+        assert fields["required"] > fields["soft_limit"], fields
+        assert not rejected.stdout and not rejected_store.exists(), rejected
+
+        # Capacity 8 is the existing desktop profile. Admit this child so the
+        # disconnected pipe exercises readiness output, not pre-lease refusal.
         disconnected_store = root / "disconnected-stdout"
-        disconnected = subprocess.Popen([RUI, "serve", "--store", disconnected_store],
+        disconnected = subprocess.Popen([RUI, "serve", "--store", disconnected_store, "--active-capacity", "8"],
             env=clean_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             disconnected.stdout.close()
             assert disconnected.wait(timeout=COMMAND_TIMEOUT) != 0
+            stderr = disconnected.stderr.read().decode()
+            assert "HostReadinessOutputUnavailable" in stderr, stderr
             records = [json.loads(line) for file in (disconnected_store / "diagnostics").glob("host-*.jsonl")
                 for line in file.read_text().splitlines()]
             assert any(record.get("phase") == "failed" for record in records), records
