@@ -16,10 +16,10 @@ pub fn main(init: std.process.Init) !void {
     defer scratch.close(init.io);
     const requests: client.Requests = .{ .io = init.io };
     const prepared = History.prepare(requests, args[2], args[3], cursor, scratch) catch |err| {
-        // Production caller's old cursor is a value, not a preparer's loan.
-        try std.testing.expectEqual(cursor, (client.ConversationCursor{ .end = try std.fmt.parseInt(u64, args[4], 10), .before_position = try std.fmt.parseInt(u64, args[5], 10), .before_ordinal = try std.fmt.parseInt(u64, args[6], 10) }));
+        // This driver checks preparation only. The real Frontend/PTY owns the
+        // fault/retry cursor oracle; reconstructing argv cannot prove it.
         var buffer: [160]u8 = undefined;
-        try std.Io.File.stderr().writeStreamingAll(init.io, try std.fmt.bufPrint(&buffer, "preserved {d}/{d}/{d}: {s}\n", .{ cursor.end, cursor.before_position, cursor.before_ordinal, @errorName(err) }));
+        try std.Io.File.stderr().writeStreamingAll(init.io, try std.fmt.bufPrint(&buffer, "prepare failed at {d}/{d}/{d}: {s}\n", .{ cursor.end, cursor.before_position, cursor.before_ordinal, @errorName(err) }));
         return err;
     };
     const Sink = struct {

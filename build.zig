@@ -194,6 +194,29 @@ pub fn build(b: *std.Build) void {
     session_input.addArtifactArg(release_safe);
     session_input.addArtifactArg(session_input_client);
     b.step("session-input-integration", "Run draft custody and real Client capture/send/recovery cases").dependOn(&session_input.step);
+    const history_client = b.addExecutable(.{
+        .name = "rui-history-client-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/history_client.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    history_client.root_module.link_libc = true;
+    history_client.root_module.addImport("SessionHistory", b.createModule(.{
+        .root_source_file = b.path("src/SessionHistory.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    }));
+    const history_integration = b.addSystemCommand(&.{"python3"});
+    history_integration.addFileArg(b.path("tests/integration/history_integration.py"));
+    history_integration.addArtifactArg(release_safe);
+    history_integration.addArtifactArg(history_client);
+    b.step("history-integration", "Run staged Conversation history and integrity/failure cases").dependOn(&history_integration.step);
+    const opening_integration = b.addSystemCommand(&.{"python3"});
+    opening_integration.addFileArg(b.path("tests/integration/session_opening_integration.py"));
+    opening_integration.addArtifactArg(release_safe);
+    b.step("session-opening-integration", "Run real Host/provider/PTY opening and caller recovery cases").dependOn(&opening_integration.step);
     const integration = b.addSystemCommand(&.{"sh"});
     integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     integration.addArtifactArg(release_safe);
@@ -398,6 +421,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addArtifactArg(proposal_client);
     fast_integrations.addArtifactArg(activity_client);
     fast_integrations.addArtifactArg(session_input_client);
+    fast_integrations.addArtifactArg(history_client);
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.step.dependOn(&release.step);
     fast_integrations.step.dependOn(&run_evaluator_host.step);
@@ -417,6 +441,7 @@ pub fn build(b: *std.Build) void {
     process_integrations.addArtifactArg(proposal_client);
     process_integrations.addArtifactArg(activity_client);
     process_integrations.addArtifactArg(session_input_client);
+    process_integrations.addArtifactArg(history_client);
     const full_evaluator = b.addSystemCommand(&.{"python3"});
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     full_evaluator.addArtifactArg(evaluator);
