@@ -86,5 +86,20 @@ pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8
         if (staging.remaining != 0) return error.TruncatedHistoryContent;
         prepared.bytes = staging.offset;
     }
+    // Received-byte integrity does not establish staged-byte integrity. Verify
+    // the complete page before exposing Prepared or allowing cursor commit.
+    var window: [protocol.content_window_bytes]u8 = undefined;
+    for (page.items[0..page.count], prepared.offsets[0..page.count]) |item, staged| {
+        const start = staged orelse continue;
+        var hash = protocol.contentHasher();
+        var offset: u64 = 0;
+        while (offset < item.content.bytes) {
+            const wanted: usize = @intCast(@min(item.content.bytes - offset, window.len));
+            if (try scratch.readPositionalAll(requests.io, window[0..wanted], start + offset) != wanted) return error.TruncatedHistoryScratch;
+            hash.update(window[0..wanted]);
+            offset += wanted;
+        }
+        if (!std.mem.eql(u8, &hash.finalResult(), &item.content.digest)) return error.ContentBindingMismatch;
+    }
     return prepared;
 }
