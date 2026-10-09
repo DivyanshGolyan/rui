@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Canonical invocation failure at real producers and current caller boundaries."""
 import json
+import fcntl
 import os
 import pathlib
 import pty
 import select
 import shutil
+import struct
 import socket
 import socketserver
 import sqlite3
@@ -17,7 +19,7 @@ import threading
 import time
 
 import dispatch_integration as fixture
-from host_process import canonical_fixture_root
+from host_process import canonical_fixture_root, assert_persistent_terminal_restored
 
 ERROR = {"version": "1", "type": "invocation_error", "code": "canonical_store_failure"}
 ERROR_BYTES = json.dumps(ERROR, separators=(",", ":")).encode()
@@ -416,6 +418,7 @@ def interactive_cases(state, binding=False, null_code=False):
             if binding and route == "/v1/observe-command":
                 continue  # Streaming observation belongs to the subsequent unit.
             master, slave = pty.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
             original_terminal = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
             args = (["--resume", "--store", str(store), "--", "original/session"] if line is not None
@@ -476,7 +479,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     assert "You: " not in output, output
                 if not binding or line is None:
                     assert "rui> " not in output and "Detached." not in output, output
-                assert termios.tcgetattr(slave) == original_terminal, "fatal invocation did not restore the terminal"
+                assert_persistent_terminal_restored(slave, original_terminal)
                 request, reply = proxy.exchanges[0]
                 decoded = json.loads(reply.split(b"\r\n\r\n", 1)[1])
                 assert decoded["observation" if route == "/v1/observe-command" else "answer"]["status"] == "accepted"

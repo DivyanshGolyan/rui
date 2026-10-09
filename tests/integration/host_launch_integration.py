@@ -19,7 +19,7 @@ import tempfile
 import termios
 import time
 
-from host_process import start_ready_process, stop_process
+from host_process import start_ready_process, stop_process, assert_persistent_terminal_restored
 import codex_integration as codex_fixture
 
 
@@ -454,7 +454,7 @@ def main():
             deadline = time.monotonic() + 5
             assert os.write(master, b"/exit\n") == 6, "incomplete /exit submission"
             assert wait_for_terminal_exit(caller, master, output, deadline) == 0, output
-            assert termios.tcgetattr(master) == original_terminal, output
+            assert_persistent_terminal_restored(master, original_terminal)
             assert instance(status(bare_store, bare_env), 8)
             stopped = subprocess.run([RUI, "host", "stop", "--store", bare_store],
                 env=bare_env, capture_output=True, text=True, timeout=5)

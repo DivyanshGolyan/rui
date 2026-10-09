@@ -261,8 +261,8 @@ def main(selected=None):
             caller = None
             proxy = None
             try:
-                caller = subprocess.Popen([str(fixture.RUI), "--resume", "--store", str(store),
-                    "--", "terminal/restoration"], env=env,
+                caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+                    "--session", "terminal/restoration"], env=env,
                     stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
                 human.read_terminal(output_master, "rui> ")
                 # A terminal consumes output while Rui drains it. Withholding

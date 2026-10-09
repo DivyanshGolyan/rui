@@ -58,7 +58,6 @@ restore_failure: ?anyerror = null,
 mask_failure: ?anyerror = null,
 borrower: bool = false,
 capturing: bool = false,
-restoring: bool = false,
 ticket: ?Input.Ticket = null,
 capture_bytes: []const u8 = &.{},
 capture_target: client.CaptureTarget = undefined,
@@ -106,10 +105,12 @@ pub fn run(init: std.process.Init, store: []const u8, session: ?[]const u8, dire
     admission_result catch |err| if (err == error.CanonicalStoreFailure) return err;
     read_result catch |err| if (err == error.CanonicalStoreFailure) return err;
     outcome catch |err| if (err == error.CanonicalStoreFailure) return err;
-    try outcome;
+    outcome catch |err| if (err != error.InteractiveInterrupted) return err;
     read_result catch |err| if (err != error.Cancelled) return err;
     admission_result catch |err| if (err != error.Cancelled) return err;
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Detached. Host work continues.\n");
+    const detached_notice = "Rui: Detached. Host work continues.\n";
+    const vectors = [_]std.posix.iovec_const{.{ .base = detached_notice, .len = detached_notice.len }};
+    try Editor.writeAvailable(1, &vectors);
 }
 
 fn drive(self: *Self, store: []const u8, session: ?[]const u8) !void {
@@ -518,8 +519,11 @@ fn waitCapture(self: *Self) !client.CapturedRecord {
             self.detached = true;
             const restored = self.restoreTerminal();
             self.admission.cancel();
-            self.joinCapture() catch {}; // Original input/restore failure wins.
+            const joined = self.joinCapture();
             try restored;
+            // UI interruption cannot turn an actual capture failure into a
+            // successful detach. Cancellation alone leaves captured intent.
+            joined catch |failure| if (failure != error.Cancelled) return failure;
             return err;
         };
     }
@@ -623,9 +627,7 @@ fn validateOriginal(record: *const client.CapturedRecord, store: []const u8, ses
 fn restoreTerminal(self: *Self) !void {
     if (self.restore_failure) |err| return err;
     if (!self.terminal.active) return;
-    self.restoring = true;
-    defer self.restoring = false;
-    self.terminal.finish(self.init.io) catch |err| {
+    self.terminal.finish() catch |err| {
         // finish releases active custody even on failed restoration. Retain
         // its higher-precedence failure across later no-op restore attempts.
         self.restore_failure = err;
@@ -640,12 +642,12 @@ fn cancelCommand(self: *Self) void {
 fn pump(raw: *anyopaque, io: std.Io, wait: i32) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.detached) {
-        if (!self.restoring) try self.settleAdmission(false);
+        try self.settleAdmission(false);
         try std.Io.sleep(io, .fromMilliseconds(wait), .awake);
         return;
     }
     try self.step();
-    if (!self.restoring) try self.settleAdmission(false);
+    try self.settleAdmission(false);
     if (self.detached) return error.InteractiveInterrupted;
 }
 
