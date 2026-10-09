@@ -446,6 +446,7 @@ def interactive_cases(state, binding=False, null_code=False):
                 else ["--store", str(store), "--provider", "codex", "--model", "gpt-6-luna"])
             proxy = None
             caller = None
+            output = ""
             try:
                 if line is None:
                     proxy = ReplyProxy(host, route, rewrite)
@@ -455,22 +456,50 @@ def interactive_cases(state, binding=False, null_code=False):
                     stderr=slave if route == "/v1/activity-page" else subprocess.PIPE)
                 if line is not None:
                     human.read_terminal(master, "rui> ")
-                    proxy = ReplyProxy(host, route,
-                        (lambda response: canonical_response) if route == "/v1/activity-page" else rewrite)
-                    os.write(master, (line + "\n").encode())
+                    if route == "/v1/activity-page":
+                        armed, healthy = threading.Event(), threading.Event()
+                        def observation_reply(response):
+                            if armed.is_set():
+                                return canonical_response
+                            healthy.set()
+                            return response
+                        proxy = ReplyProxy(host, route, observation_reply)
+                        deadline = time.monotonic() + 15
+                        fixture.wait_for(healthy.is_set, "healthy activity poll before Message",
+                            timeout=deadline - time.monotonic())
+                        # A healthy backend reply alone is not caller settlement.
+                        # First observe a completed healthy-read redraw; then a
+                        # distinct next draft in a locally settled Admission frame.
+                        # Rejection restores the original or keeps a rejected
+                        # bank, so neither can satisfy the second exact draft.
+                        for draft, payload in (("BEFORE-ADMISSION", "BEFORE-ADMISSION"),
+                                ("AFTER-ADMISSION", "\x15" + line + "\nAFTER-ADMISSION")):
+                            start = len(output)
+                            os.write(master, payload.encode())
+                            settled = re.compile(r"\rRui: (?!opening|command running|submitting|"
+                                r"unconfirmed|rejected|capture failed)[^\r\n]*\r*\n"
+                                r"rui> " + re.escape(draft) + r"\r\x1b\[[0-9]+C")
+                            while not settled.search(output[start:]):
+                                remaining = deadline - time.monotonic()
+                                assert remaining > 0, ("no settled draft", draft, output)
+                                assert select.select([master], [], [], remaining)[0], (draft, output)
+                                output += os.read(master, 65536).decode(errors="replace")
+                                assert len(output) < 1024 * 1024, "unbounded acceptance output"
+                        armed.set()
+                    else:
+                        proxy = ReplyProxy(host, route, rewrite)
+                        os.write(master, (line + "\n").encode())
                     if route == "/v1/control/permission-decision":
                         human.read_terminal(master, "Ctrl-G 1 actionable")
                         os.write(master, b"\x07")
                         human.read_terminal(master, "Allow once, deny, or later?")
                         human.action_ready(ready_read)
                         os.write(master, b"d\n")
-                if route == "/v1/activity-page" or (route == "/v1/control/permission-decision" and not binding):
-                    output = ""
-                elif route == "/v1/message" and not binding:
+                if route == "/v1/message" and not binding:
                     # Message admission is asynchronous; its fatal diagnosis
                     # is on stderr, not the command mutation's stdout notice.
                     output = human.read_terminal(master, "Rui: submitting; draft retained")
-                else:
+                elif route != "/v1/activity-page" and not (route == "/v1/control/permission-decision" and not binding):
                     output = human.read_terminal(master, reason if binding else "CanonicalStoreFailure")
                 if binding:
                     assert "other/session" not in output and '"answer"' not in output, output
@@ -549,6 +578,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     messages = [(body, reply) for path, body, reply in proxy.host_exchanges if path == "/v1/message"]
                     assert len(messages) == 1, "accepted Message was resubmitted"
                     request, reply = messages[0]
+                    assert json.loads(request)["text"] == {"state": "value", "value": line}, request
                     assert json.loads(proxy.exchanges[0][0])["kind"] == "activity_page"
                 else:
                     request, reply = proxy.exchanges[0]
