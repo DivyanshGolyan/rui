@@ -33,6 +33,15 @@ pub fn composition(self: *const Input) View {
     return .{ .bytes = editor.buffer[0..editor.length], .cursor = editor.cursor };
 }
 
+/// Parser custody belongs to the active logical composition, not its layout.
+pub fn pending(self: *const Input) Editor.Pending {
+    return self.editors[self.active].pending();
+}
+
+pub fn expire(self: *Input) !void {
+    try self.editors[self.active].expire();
+}
+
 pub fn submissionState(self: *const Input) ?State {
     return if (self.submitted) |submitted| submitted.state else null;
 }
@@ -54,6 +63,11 @@ pub fn discardRejected(self: *Input, ticket: Ticket) !void {
 }
 
 pub fn feed(self: *Input, byte: u8) Event {
+    return self.feedForSelection(byte, true);
+}
+
+/// Selection may fence submission, never parser ingress or command custody.
+pub fn feedForSelection(self: *Input, byte: u8, selected: bool) Event {
     const event = self.editors[self.active].feed(byte);
     if (event != .submit) return .{ .editor = event };
     const bytes = self.composition().bytes;
@@ -65,7 +79,7 @@ pub fn feed(self: *Input, byte: u8) Event {
         self.clearComposition();
         return .command;
     }
-    if (self.submitted != null) return .busy;
+    if (!selected or self.submitted != null) return .busy;
     self.serial += 1;
     self.submitted = .{ .bank = self.active, .state = .ready };
     self.active ^= 1;
