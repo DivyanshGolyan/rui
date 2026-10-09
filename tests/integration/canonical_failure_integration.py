@@ -418,7 +418,7 @@ def interactive_cases(state, binding=False, null_code=False):
             master, slave = pty.openpty()
             original_terminal = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
-            args = (["session", "--store", str(store), "--session", "original/session"] if line is not None
+            args = (["--resume", "--store", str(store), "--", "original/session"] if line is not None
                 else ["--store", str(store), "--provider", "codex", "--model", "gpt-6-luna"])
             proxy = None
             caller = None

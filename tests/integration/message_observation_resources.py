@@ -24,8 +24,8 @@ def retained(state, binary, label, repetition, failed_key):
     home = state / f"{label}-{repetition}"
     home.mkdir()
     master, slave = pty.openpty()
-    process = subprocess.Popen([str(binary), "session", "--store", str(state / "store"),
-        "--session", "resources/message"], env={**os.environ, "HOME": str(home)},
+    process = subprocess.Popen([str(binary), "--resume", "--store", str(state / "store"),
+        "--", "resources/message"], env={**os.environ, "HOME": str(home)},
         stdin=slave, stdout=slave, stderr=slave)
     os.close(slave)
     try:

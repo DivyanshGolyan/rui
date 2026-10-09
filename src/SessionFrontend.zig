@@ -16,6 +16,7 @@ pub const Commands = struct {
     parse: *const fn ([]u8, [][]const u8) anyerror!usize,
     // Called only after terminal/read handoff. Draft ownership stays here.
     run: *const fn (*Self, []const []const u8) anyerror!void,
+    pick: *const fn (*Self) anyerror!?protocol.Bounded(protocol.max_session_bytes),
 };
 
 init: std.process.Init,
@@ -71,7 +72,7 @@ original: ?struct { identity: client.CapturedIdentity, outcome: Input.Outcome } 
 reply: client.MutationReply = undefined,
 reply_buffer: client.ReplyBuffer = .{},
 
-pub fn run(init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, scratch: std.Io.File, commands: Commands) !void {
+pub fn run(init: std.process.Init, store: []const u8, session: ?[]const u8, directory: []const u8, scratch: std.Io.File, commands: Commands) !void {
     var self: Self = .{
         .init = init,
         .store = .{},
@@ -111,14 +112,26 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
     try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Detached. Host work continues.\n");
 }
 
-fn drive(self: *Self, store: []const u8, session: []const u8) !void {
+fn drive(self: *Self, store: []const u8, session: ?[]const u8) !void {
     try self.store.set(store);
-    try self.target.set(session);
-    try self.startTask(&self.reads, self, read);
+    if (session) |reference| {
+        try self.stageTarget(reference);
+    } else if (try self.commands.pick(self)) |reference| {
+        try self.stageTarget(reference.slice());
+    } else {
+        self.detached = true;
+    }
     while (!self.detached) {
         try self.service();
         try self.step();
     }
+}
+
+fn stageTarget(self: *Self, reference: []const u8) !void {
+    std.debug.assert(self.reads.thread == null);
+    try self.target.set(reference);
+    self.read_kind = .stage;
+    try self.startTask(&self.reads, self, read);
 }
 
 fn originalDiagnostic(self: *Self, original: *const client.CapturedIdentity, outcome: Input.Outcome) !void {
@@ -809,14 +822,21 @@ pub fn command(self: *Self, bytes: []u8) !void {
         }
         return;
     }
-    if (std.mem.eql(u8, args[0], "/resume") and count == 2) {
+    if (std.mem.eql(u8, args[0], "/resume") and (count == 1 or count == 2)) {
         if (self.reads.thread != null) {
             try self.notice("Read in progress; old Session and draft retained.");
             return;
         }
-        try self.target.set(args[1]);
-        self.read_kind = .stage;
-        try self.startTask(&self.reads, self, read);
+        if (count == 2) {
+            try self.stageTarget(args[1]);
+        } else {
+            const picked = self.commands.pick(self) catch |err| {
+                if (err != error.ResumeListingUnavailable) return err;
+                try self.notice("Resume selection unavailable; old Session and draft retained.");
+                return;
+            };
+            if (picked) |reference| try self.stageTarget(reference.slice());
+        }
         return;
     }
     if (std.mem.eql(u8, args[0], "/history") and count == 1) {
@@ -893,8 +913,11 @@ test "SessionFrontend command stays in Input bank while a read owns the stream" 
         fn run(_: *Self, _: []const []const u8) !void {
             return error.UnexpectedHandoff;
         }
+        fn pick(_: *Self) !?protocol.Bounded(protocol.max_session_bytes) {
+            return error.UnexpectedHandoff;
+        }
     };
-    self.commands = .{ .parse = CommandsFixture.parse, .run = CommandsFixture.run };
+    self.commands = .{ .parse = CommandsFixture.parse, .run = CommandsFixture.run, .pick = CommandsFixture.pick };
     for ("/exit") |byte| _ = self.feed(byte);
     try std.testing.expectEqual(.command, std.meta.activeTag(self.feed('\r')));
     self.command_pending = true;

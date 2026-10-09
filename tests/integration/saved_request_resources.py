@@ -72,8 +72,8 @@ def retained(state, binary, label):
     for number in range(100):
         (records / f"01234567-89ab-4cde-8012-{number:012x}.json").write_text("invalid but enumerable")
     master, slave = pty.openpty()
-    process = subprocess.Popen([str(binary), "session", "--store", str(state / "live-store"),
-        "--session", "resources/original"], env={**os.environ, "HOME": str(home)},
+    process = subprocess.Popen([str(binary), "--resume", "--store", str(state / "live-store"),
+        "--", "resources/original"], env={**os.environ, "HOME": str(home)},
         stdin=slave, stdout=slave, stderr=slave)
     os.close(slave)
     try:

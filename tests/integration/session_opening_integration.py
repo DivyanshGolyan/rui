@@ -31,7 +31,7 @@ from human_cli_integration import action_ready, admit, run
 
 class Terminal:
     """One reader, one absolute case budget, bounded transcript through reap."""
-    def __init__(self, home, store, session, seconds=20):
+    def __init__(self, home, store, session, seconds=20, arguments=None, cwd=None):
         self.deadline = time.monotonic() + seconds
         self.transcript = bytearray()
         self.master, self.slave = pty.openpty()
@@ -43,11 +43,11 @@ class Terminal:
         self.ready, writer = os.pipe()
         try:
             self.process = subprocess.Popen(
-                [str(host.RUI), "--store", str(store), "--resume", session],
+                [str(host.RUI), *(arguments if arguments is not None else ["--store", str(store), "--resume", session])],
                 env={**os.environ, "HOME": str(home),
                      "RUI_TEST_ACTION_READY_FD": str(writer)},
                 pass_fds=(writer,), stdin=self.slave, stdout=self.slave,
-                stderr=self.slave)
+                stderr=self.slave, cwd=cwd)
         except BaseException:
             os.close(self.ready)
             os.close(self.master)
@@ -147,6 +147,95 @@ def configure(home, store, workspace, session):
 def completed(store, request):
     host.wait_for(lambda: host.completed_observation(store, request),
                   "original saved result")
+
+
+def resume_selection(state, home, store, endpoint):
+    workspace = state / "picker-workspace"
+    workspace.mkdir()
+    references = ["--saved session"] + ["picker/" + str(index) for index in range(1, 8)] + ['picker/"quoted space"']
+    displayed_last = 'picker/\\"quoted space\\"'
+    for reference in references:
+        configure(home, store, workspace, reference)
+    records = set((home / ".config/rui/requests").iterdir())
+    with endpoint.lock:
+        provider_reads = len(endpoint.requests)
+    terminal = Terminal(home, store, None, arguments=["--resume", "--store", str(store)], cwd=workspace)
+    try:
+        terminal.until("Resume: choose", 0)
+        action_ready(terminal.ready)
+        first = bytes(terminal.transcript)
+        assert re.findall(rb"\[[1-8]\] Session: ([^\r\n]+)", first) == [ref.encode() for ref in references[:8]], first
+        start = len(terminal.transcript)
+        terminal.send("n\n")
+        terminal.until("Resume: choose", start)
+        action_ready(terminal.ready)
+        assert re.findall(rb"\[[1-8]\] Session: ([^\r\n]+)", terminal.transcript[start:]) == [displayed_last.encode()]
+        start = len(terminal.transcript)
+        terminal.send("a\n")
+        terminal.until("Resume: choose", start)
+        action_ready(terminal.ready)
+        assert b"all Workspaces" in terminal.transcript[start:] and b"[1] Session: opening/idle" in terminal.transcript[start:]
+        terminal.send("d\n")
+        terminal.until("Detached.", start)
+        terminal.finish()
+        assert b"Rui Session:" not in terminal.transcript, "deferred picker committed a selection"
+    finally:
+        terminal.close()
+    terminal = Terminal(home, store, references[0], arguments=["--resume", "--store", str(store), "--", references[0]], cwd=workspace)
+    try:
+        terminal.until("rui> ", 0)
+        assert ("Rui Session: " + references[0]).encode() in terminal.transcript
+        start = len(terminal.transcript)
+        terminal.send('/resume "picker/\\\"quoted space\\\""\n')
+        terminal.until("Rui Session: " + displayed_last, start)
+        terminal.command("/status")
+        start = len(terminal.transcript)
+        terminal.send("/resume\n")
+        terminal.until("Resume: choose", start)
+        action_ready(terminal.ready)
+        terminal.send("d\n")
+        terminal.until("Rui: idle", start)
+        status = terminal.command("/status")
+        assert "Session: " + displayed_last in status, status
+        start = len(terminal.transcript)
+        terminal.send("/resume\n")
+        terminal.until("Resume: choose", start)
+        action_ready(terminal.ready)
+        terminal.send("1\n")
+        terminal.until("Rui Session: " + references[0], start)
+        terminal.command("/status")
+        terminal.command("/exit", "Detached.")
+        terminal.finish()
+    finally:
+        terminal.close()
+    assert set((home / ".config/rui/requests").iterdir()) == records, "resume captured fresh intent"
+    with endpoint.lock:
+        assert len(endpoint.requests) == provider_reads, "resume dispatched provider work"
+    legacy = subprocess.run([str(host.RUI), "session", "--store", str(store), "--session", references[0]],
+                            capture_output=True, timeout=5)
+    assert legacy.returncode != 0 and b"rui --resume" in legacy.stderr and b"Rui Session:" not in legacy.stdout
+    stopped_store = state / "resume-stopped-store"
+    prior = host.start_host(stopped_store, None)
+    try:
+        configure(home, stopped_store, workspace, "saved/stopped-host")
+    finally:
+        host.stop_host(prior)
+    terminal = Terminal(home, stopped_store, "saved/stopped-host", cwd=workspace)
+    try:
+        terminal.until("rui> ", 0)
+        assert b"Rui Session: saved/stopped-host" in terminal.transcript
+        assert b"Diagnostics:" not in terminal.transcript and b"Host ready" not in terminal.transcript, "resume launch was not silent"
+        status = run(home, "host", "status", "--store", stopped_store)
+        assert "Host: ready" in status and "Active capacity: 8" in status and "Managed authentication: enabled" in status, status
+        terminal.command("/exit", "Detached.")
+        terminal.finish()
+    finally:
+        terminal.close()
+        status = run(home, "host", "status", "--store", stopped_store)
+        if "Host: ready" in status:
+            instance = re.search(r"Instance: ([0-9a-f]+)", status)[1]
+            run(home, "host", "stop", "--store", stopped_store, "--instance", instance)
+            host.wait_for(lambda: "Host: unavailable" in run(home, "host", "status", "--store", stopped_store), "replacement discovery unavailable")
 
 
 def assistant_rendering(state, home, store, endpoint):
@@ -643,11 +732,14 @@ def matching_recovery(home, store, endpoint, owner):
             endpoint.responses.append(host.sse_answer(label, label + "-private",
                                                       label + "-item", label)[0])
         before = len(endpoint.requests)
+    def messages():
+        return [exchange for exchange in proxy.exchanges
+                if json.loads(exchange[0])["kind"] == "message"]
     def lose_first_reply(response):
-        if len(proxy.exchanges) == 1:
+        if len(messages()) == 1:
             head, _ = response.split(b"\r\n\r\n", 1)
             return head + b"\r\n\r\n"
-        if len(proxy.exchanges) == 2:
+        if len(messages()) == 2:
             held.set()
             assert release.wait(15), "matching recovery reply was never released"
         return response
@@ -663,17 +755,29 @@ def matching_recovery(home, store, endpoint, owner):
         saved = host.command("observe-command", "--store", store, "--key", original["key"])
         assert saved["observation"]["status"] == "accepted", saved
         terminal.command("/recover " + unrelated)
+        record = home / ".config/rui/requests" / (original["key"] + ".json")
+        original_record = record.read_bytes()
+        # Forward and drain a real complete Host list, then truncate delivery.
+        # No socket replacement or fixture-owned Session listing is involved.
+        proxy.route = "/v1/list-sessions"
+        proxy.rewrite = lambda response: response[:-1]
+        terminal.command("/resume")
+        assert len(proxy.exchanges) == 2 and json.loads(proxy.exchanges[1][0])["kind"] == "list_sessions"
+        proxy.route, proxy.rewrite = "/v1/message", lose_first_reply
+        status = terminal.command("/status")
+        assert "Session: opening/recover" in status, "failed listing switched Session"
+        assert record.read_bytes() == original_record, "failed listing replaced original capture"
         start = len(terminal.transcript)
         terminal.send("MUST-REMAIN-BUSY\n")
         terminal.until("Submission busy; draft retained.", start)
-        assert len(proxy.exchanges) == 1, "unrelated recovery released the original bank"
+        assert len(messages()) == 1, "unrelated recovery or failed listing released the original bank"
         terminal.send("\x15")  # Explicitly discard this blocked test composition.
         terminal.send("/recover " + original["key"] + "\n")
         host.wait_for(held.is_set, "matching original recovery response held")
         start = len(terminal.transcript)
         terminal.send("NEXT-é🙂\x1b[D")
         terminal.until("NEXT-é🙂", start)
-        assert proxy.exchanges[1][0] == proxy.exchanges[0][0], "recovery replaced original intent"
+        assert messages()[1][0] == messages()[0][0], "recovery replaced original intent"
         start = len(terminal.transcript)
         release.set()
         terminal.until("Original request accepted.", start)
@@ -681,8 +785,8 @@ def matching_recovery(home, store, endpoint, owner):
             assert terminal.read(), "matching recovery never settled the caller"
         terminal.send("RECOVERED\n")
         terminal.until("RECOVERY-NEXT-ANSWER", start)
-        assert len(proxy.exchanges) == 3, "recovered original was sent again or next input remained busy"
-        next_request = json.loads(proxy.exchanges[2][0])
+        assert len(messages()) == 3, "recovered original was sent again or next input remained busy"
+        next_request = json.loads(messages()[2][0])
         assert next_request["key"] != original["key"], "next Message reused the original identity"
         assert next_request["text"] == {"state": "value", "value": "NEXT-éRECOVERED🙂"}, next_request
         socket = owner.rui_ready_fields["socket"]
@@ -875,6 +979,7 @@ def main():
         owner = host.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         for session in ("idle", "equal", "approval", "local", "wait", "switch-source", "switch-target", "rejection", "fatal-original", "recover", "render"):
             configure(home, store, workspace, "opening/" + session)
+        resume_selection(state, home, store, endpoint)
         assistant_rendering(state, home, store, endpoint)
         historical_export(state, home, store, workspace, endpoint, owner)
         fatal_stderr(home, store)
@@ -894,7 +999,7 @@ def main():
                 answer("APPROVAL-ANSWER"), answer("PRESERVED-ANSWER")])
         approval(state, home, store, workspace, endpoint)
         wait_attention(state, home, store, workspace, endpoint)
-        print("session opening: 12 focused real Host/provider/PTY cases passed")
+        print("session opening: 13 focused real Host/provider/PTY cases passed")
     finally:
         if owner is not None:
             host.stop_host(owner)
