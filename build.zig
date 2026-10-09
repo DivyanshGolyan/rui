@@ -143,11 +143,27 @@ pub fn build(b: *std.Build) void {
         }),
     });
     session_list_client.root_module.link_libc = true;
-    session_list_client.root_module.addImport("rui_client", b.createModule(.{
+    const client_module = b.createModule(.{
         .root_source_file = b.path("src/client.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
-    }));
+    });
+    session_list_client.root_module.addImport("rui_client", client_module);
+    const session_input_client = b.addExecutable(.{
+        .name = "rui-session-input-client-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/session_input_client.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    session_input_client.root_module.addImport("rui_client", client_module);
+    configureTerminalEditor(b, session_input_client);
+    const session_input = b.addSystemCommand(&.{"python3"});
+    session_input.addFileArg(b.path("tests/integration/session_input_integration.py"));
+    session_input.addArtifactArg(release_safe);
+    session_input.addArtifactArg(session_input_client);
+    b.step("session-input-integration", "Run draft custody and real Client capture/send/recovery cases").dependOn(&session_input.step);
     const integration = b.addSystemCommand(&.{"sh"});
     integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     integration.addArtifactArg(release_safe);
@@ -349,6 +365,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addArtifactArg(tests);
     fast_integrations.addArtifactArg(host_status_actor);
     fast_integrations.addArtifactArg(session_list_client);
+    fast_integrations.addArtifactArg(session_input_client);
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.step.dependOn(&release.step);
     fast_integrations.step.dependOn(&run_evaluator_host.step);
@@ -365,6 +382,7 @@ pub fn build(b: *std.Build) void {
     process_integrations.addArtifactArg(debug);
     process_integrations.addArtifactArg(host_status_actor);
     process_integrations.addArtifactArg(session_list_client);
+    process_integrations.addArtifactArg(session_input_client);
     const full_evaluator = b.addSystemCommand(&.{"python3"});
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     full_evaluator.addArtifactArg(evaluator);
