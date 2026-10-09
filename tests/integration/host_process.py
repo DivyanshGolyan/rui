@@ -1,11 +1,14 @@
 """Bounded startup and cleanup for Host processes used by integration evidence."""
 
 import http.server
+import fcntl
 import json
 import os
 import pathlib
 import selectors
 import subprocess
+import sys
+import termios
 import threading
 import time
 
@@ -17,6 +20,23 @@ STDERR_TAIL_LIMIT = 16 * 1024
 def canonical_fixture_root(path):
     """Resolve a newly created private root before deriving fixture identities."""
     return pathlib.Path(path).resolve(strict=True)
+
+
+def assert_persistent_terminal_restored(descriptor, original, original_flags=None):
+    """Configuration equality for persistent NOW cancellation, not #423.
+
+    Darwin can set kernel-owned PENDIN on canonical re-entry. Compare every
+    other attribute without modifying the terminal or relaxing legacy FLUSH.
+    """
+    actual, expected = termios.tcgetattr(descriptor), list(original)
+    if sys.platform == "darwin":
+        actual[3] &= ~termios.PENDIN
+        expected[3] &= ~termios.PENDIN
+    assert actual == expected, ("persistent terminal configuration not restored", actual, expected)
+    if original_flags is not None:
+        # FWASWRITTEN is Darwin kernel history, not a user-controlled flag.
+        ignored = 0x10000 if sys.platform == "darwin" else 0
+        assert not (fcntl.fcntl(descriptor, fcntl.F_GETFL) ^ original_flags) & ~ignored, "persistent descriptor flags not restored"
 
 
 class TestHTTPServer(http.server.ThreadingHTTPServer):

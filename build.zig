@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const pinned_transport = addPinnedTransport(b, target);
 
-    const rui = addRui(b, target, optimize, "rui", pinned_transport);
+    const rui = addRui(b, target, optimize, "rui", "src/cli.zig", pinned_transport);
     b.installArtifact(rui);
     b.installFile("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md");
 
@@ -133,7 +133,16 @@ pub fn build(b: *std.Build) void {
     logic_test_step.dependOn(&run_renderer_allocation.step);
     test_step.dependOn(&run_renderer_allocation.step);
 
-    const release_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
+    const release_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", "src/cli.zig", pinned_transport);
+    const legacy_terminal = addRui(b, target, .ReleaseSafe, "rui-legacy-terminal-test", "src/legacy_terminal_test.zig", pinned_transport);
+    const legacy_integration = b.addSystemCommand(&.{"python3"});
+    legacy_integration.addFileArg(b.path("tests/integration/terminal_restoration_integration.py"));
+    legacy_integration.addArtifactArg(legacy_terminal);
+    b.step("terminal-restoration-integration", "Run unchanged single-prompt drain/FLUSH and error precedence controls").dependOn(&legacy_integration.step);
+    const cancellation_integration = b.addSystemCommand(&.{"python3"});
+    cancellation_integration.addFileArg(b.path("tests/integration/persistent_cancellation_integration.py"));
+    cancellation_integration.addArtifactArg(release_safe);
+    b.step("persistent-cancellation-integration", "Restore persistent configuration before held output and borrower joins").dependOn(&cancellation_integration.step);
     const session_list_client = b.addExecutable(.{
         .name = "rui-session-list-client-test",
         .root_module = b.createModule(.{
@@ -387,7 +396,7 @@ pub fn build(b: *std.Build) void {
     const host_stop_step = b.step("host-stop-integration", "Run native exact-instance Host shutdown and custody drain");
     host_stop_step.dependOn(&host_stop_integration.step);
 
-    const debug = addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
+    const debug = addRui(b, target, .Debug, "rui-debug-check", "src/cli.zig", pinned_transport);
     const debug_integration = b.addSystemCommand(&.{"sh"});
     debug_integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     debug_integration.addArtifactArg(debug);
@@ -409,7 +418,7 @@ pub fn build(b: *std.Build) void {
         b.pathFromRoot("build.zig"),
         b.pathFromRoot("src"),
     });
-    const release = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
+    const release = addRui(b, target, .ReleaseSmall, "rui-release-small-check", "src/cli.zig", pinned_transport);
     const fast_integrations = b.addSystemCommand(&.{"sh"});
     fast_integrations.addFileArg(b.path("tests/integration/check.sh"));
     fast_integrations.addArtifactArg(release_safe);
@@ -422,6 +431,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addArtifactArg(activity_client);
     fast_integrations.addArtifactArg(session_input_client);
     fast_integrations.addArtifactArg(history_client);
+    fast_integrations.addArtifactArg(legacy_terminal);
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.step.dependOn(&release.step);
     fast_integrations.step.dependOn(&run_evaluator_host.step);
@@ -442,6 +452,7 @@ pub fn build(b: *std.Build) void {
     process_integrations.addArtifactArg(activity_client);
     process_integrations.addArtifactArg(session_input_client);
     process_integrations.addArtifactArg(history_client);
+    process_integrations.addArtifactArg(legacy_terminal);
     const full_evaluator = b.addSystemCommand(&.{"python3"});
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     full_evaluator.addArtifactArg(evaluator);
@@ -511,6 +522,7 @@ pub fn build(b: *std.Build) void {
                 @tagName(resolved.result.cpu.arch),
                 @tagName(resolved.result.os.tag),
             }),
+            "src/cli.zig",
             cross_transport,
         );
         const child = addEvaluator(
@@ -729,12 +741,13 @@ fn addRui(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     name: []const u8,
+    root: []const u8,
     pinned_transport: PinnedTransport,
 ) *std.Build.Step.Compile {
     const executable = b.addExecutable(.{
         .name = name,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/cli.zig"),
+            .root_source_file = b.path(root),
             .target = target,
             .optimize = optimize,
         }),

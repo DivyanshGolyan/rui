@@ -58,7 +58,6 @@ restore_failure: ?anyerror = null,
 mask_failure: ?anyerror = null,
 borrower: bool = false,
 capturing: bool = false,
-restoring: bool = false,
 ticket: ?Input.Ticket = null,
 capture_bytes: []const u8 = &.{},
 capture_target: client.CaptureTarget = undefined,
@@ -95,7 +94,10 @@ pub fn run(init: std.process.Init, store: []const u8, session: ?[]const u8, dire
     const admission_result = self.settleAdmission(true);
     if (self.reads.take() != null) self.reads.acknowledge();
     if (self.captured) |*captured| captured.close(init.io);
-    const output_failed = (if (outcome) |_| false else |_| true) or (if (restored) |_| false else |_| true);
+    const output_failed = (if (outcome) |_| false else |_| true) or (if (restored) |_| false else |_| true) or
+        (if (read_result) |_| false else |err| err != error.Cancelled) or
+        (if (admission_result) |_| false else |err| err != error.Cancelled) or
+        self.fatal != null or self.mask_failure != null;
     if (output_failed) if (self.original) |original| {
         // Best-effort explanation cannot replace the retained fatal outcome.
         self.originalDiagnostic(&original.identity, original.outcome) catch {};
@@ -106,10 +108,12 @@ pub fn run(init: std.process.Init, store: []const u8, session: ?[]const u8, dire
     admission_result catch |err| if (err == error.CanonicalStoreFailure) return err;
     read_result catch |err| if (err == error.CanonicalStoreFailure) return err;
     outcome catch |err| if (err == error.CanonicalStoreFailure) return err;
-    try outcome;
+    outcome catch |err| if (err != error.InteractiveInterrupted) return err;
     read_result catch |err| if (err != error.Cancelled) return err;
     admission_result catch |err| if (err != error.Cancelled) return err;
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Detached. Host work continues.\n");
+    const detached_notice = "Rui: Detached. Host work continues.\n";
+    const vectors = [_]std.posix.iovec_const{.{ .base = detached_notice, .len = detached_notice.len }};
+    try Editor.writeAvailable(1, &vectors);
 }
 
 fn drive(self: *Self, store: []const u8, session: ?[]const u8) !void {
@@ -289,7 +293,11 @@ fn settleAdmission(self: *Self, force: bool) !void {
     if (self.capturing) return;
     if (self.admission.thread != null) {
         if (!force and !self.admission.completed()) return;
-        try self.applyAdmission(self.admission.join());
+        const joined = self.admission.join();
+        try self.applyAdmission(joined);
+        // Interactive transport failure remains recoverable, but a terminal
+        // unwind must retain the actual joined failure, not a successful detach.
+        if (!self.terminal.active) try joined;
     }
 }
 
@@ -518,8 +526,11 @@ fn waitCapture(self: *Self) !client.CapturedRecord {
             self.detached = true;
             const restored = self.restoreTerminal();
             self.admission.cancel();
-            self.joinCapture() catch {}; // Original input/restore failure wins.
+            const joined = self.joinCapture();
             try restored;
+            // UI interruption cannot turn an actual capture failure into a
+            // successful detach. Cancellation alone leaves captured intent.
+            joined catch |failure| if (failure != error.Cancelled) return failure;
             return err;
         };
     }
@@ -623,9 +634,7 @@ fn validateOriginal(record: *const client.CapturedRecord, store: []const u8, ses
 fn restoreTerminal(self: *Self) !void {
     if (self.restore_failure) |err| return err;
     if (!self.terminal.active) return;
-    self.restoring = true;
-    defer self.restoring = false;
-    self.terminal.finish(self.init.io) catch |err| {
+    self.terminal.finish() catch |err| {
         // finish releases active custody even on failed restoration. Retain
         // its higher-precedence failure across later no-op restore attempts.
         self.restore_failure = err;
@@ -640,12 +649,12 @@ fn cancelCommand(self: *Self) void {
 fn pump(raw: *anyopaque, io: std.Io, wait: i32) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.detached) {
-        if (!self.restoring) try self.settleAdmission(false);
+        try self.settleAdmission(false);
         try std.Io.sleep(io, .fromMilliseconds(wait), .awake);
         return;
     }
     try self.step();
-    if (!self.restoring) try self.settleAdmission(false);
+    try self.settleAdmission(false);
     if (self.detached) return error.InteractiveInterrupted;
 }
 
@@ -771,11 +780,16 @@ fn borrow(self: *Self, comptime function: anytype, args: anytype, comptime strea
         self.cancelCommand();
         self.restoreTerminal() catch {}; // Failure retained by restore owner.
         self.reads.cancel();
-        self.reads.join() catch {};
+        self.reads.join() catch |err| {
+            if (err != error.Cancelled and ((self.fatal orelse error.Cancelled) != error.CanonicalStoreFailure or err == error.CanonicalStoreFailure)) self.fatal = err;
+        };
         if (self.reads.take() != null) self.reads.acknowledge();
         // The task wrapper stores the semantic result separately. Cleanup
-        // must preserve canonical failure even after an earlier UI error.
-        if (context.result) |_| {} else |err| if (err == error.CanonicalStoreFailure) {
+        // must retain actual failure after an earlier UI error, while local
+        // cancellation alone never erases a failure or becomes one itself.
+        if (context.result) |_| {} else |err| if (err != error.Cancelled and
+            ((self.fatal orelse error.Cancelled) != error.CanonicalStoreFailure or err == error.CanonicalStoreFailure))
+        {
             self.fatal = err;
         }
     };
@@ -981,6 +995,39 @@ test "SessionFrontend settlement is semantic even without output and canonical i
     try std.testing.expectError(error.CanonicalStoreFailure, self.applyAdmission(error.CanonicalStoreFailure));
     try std.testing.expectEqual(error.CanonicalStoreFailure, self.fatal.?);
     try std.testing.expectEqualStrings("original", self.input.retained().?.bytes);
+
+    const Worker = struct {
+        fn fail(_: *anyopaque, _: *Task) !void {
+            return error.ConnectionLost;
+        }
+    };
+    self.init.io = std.testing.io;
+    self.admission = .{};
+    self.capturing = false;
+    self.captured = .{
+        .file = undefined, // Failure settlement borrows identity, never reads/closes it.
+        .length = 0,
+        .saved = .{},
+        .target = .{ .message = .{ .bytes = 8, .digest = protocol.contentDigest("original") } },
+    };
+    try self.captured.?.saved.store.set("store/original");
+    try self.captured.?.saved.session.set("session/original");
+    try self.captured.?.saved.key.set("key/original");
+    try self.captured.?.saved.kind.set("message");
+    self.fatal = null;
+    self.terminal.active = true;
+    try self.admission.start(std.testing.io, &self, Worker.fail);
+    try self.settleAdmission(true); // Ordinary interactive failure stays recoverable.
+    self.terminal.active = false;
+    try self.admission.start(std.testing.io, &self, Worker.fail);
+    try std.testing.expectError(error.ConnectionLost, self.settleAdmission(true));
+    try std.testing.expect(self.admission.thread == null);
+    try std.testing.expectEqual(Input.State.unconfirmed, self.input.submissionState().?);
+    try std.testing.expectEqualStrings("original", self.input.retained().?.bytes);
+    try std.testing.expectEqual(Input.Outcome.unconfirmed, self.original.?.outcome);
+    try std.testing.expectEqualStrings("store/original", self.original.?.identity.store.slice());
+    try std.testing.expectEqualStrings("session/original", self.original.?.identity.session.slice());
+    try std.testing.expectEqualStrings("key/original", self.original.?.identity.key.slice());
 }
 
 test "SessionFrontend original recovery checks destination key bytes and scoped digest" {
@@ -1087,10 +1134,16 @@ test "SessionFrontend released terminal retains restoration failure ahead of wor
     try std.testing.expectError(error.TerminalCleanupFailed, self.restoreTerminal());
 }
 
-test "SessionFrontend borrower cleanup retains canonical failure after input fails" {
+test "SessionFrontend borrower cleanup retains actual failure but not cancellation after input fails" {
     const Worker = struct {
         fn request(_: client.Requests) !void {
             return error.CanonicalStoreFailure;
+        }
+        fn failed(_: client.Requests) !void {
+            return error.TestReadFailure;
+        }
+        fn cancelled(_: client.Requests) !void {
+            return error.Cancelled;
         }
     };
     var self: Self = undefined;
@@ -1103,6 +1156,14 @@ test "SessionFrontend borrower cleanup retains canonical failure after input fai
     try std.testing.expectError(error.TestInputFailure, self.call(Worker.request, .{}));
     try std.testing.expect(self.reads.thread == null);
     try std.testing.expectEqual(error.CanonicalStoreFailure, self.fatal.?);
+    self.fatal = error.TestInputFailure;
+    try std.testing.expectError(error.TestInputFailure, self.call(Worker.failed, .{}));
+    try std.testing.expect(self.reads.thread == null);
+    try std.testing.expectEqual(error.TestReadFailure, self.fatal.?);
+    self.fatal = error.TestInputFailure;
+    try std.testing.expectError(error.TestInputFailure, self.call(Worker.cancelled, .{}));
+    try std.testing.expect(self.reads.thread == null);
+    try std.testing.expectEqual(error.TestInputFailure, self.fatal.?);
 }
 
 test "SessionFrontend worker inherits blocked SIGINT and parent mask is restored" {

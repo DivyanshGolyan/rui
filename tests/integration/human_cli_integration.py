@@ -18,7 +18,7 @@ import termios
 import threading
 import time
 
-from host_process import canonical_fixture_root
+from host_process import canonical_fixture_root, assert_persistent_terminal_restored
 import dispatch_integration as fixture
 import codex_integration as codex_fixture
 
@@ -243,8 +243,6 @@ int fsync(int fd) {
 
 def main():
     import canonical_failure_integration
-    import terminal_restoration_integration
-    terminal_restoration_integration.main()
     canonical_failure_integration.main()
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-human-cli."))
     home = state / "home"
@@ -752,7 +750,7 @@ def main():
                 output += tail.decode(errors="replace")
                 assert len(output.encode()) < 1024 * 1024
             assert "New Session intent" not in output and "request: " not in output and "rui> " not in output, output
-            assert termios.tcgetattr(master) == original_mode
+            assert_persistent_terminal_restored(master, original_mode)
             assert (blocked_config / "requests").read_text() == "not a directory"
             assert run(preferences_home, "sessions", "--store", store, "--all", "--json") == sessions_before
         finally:

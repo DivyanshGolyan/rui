@@ -43,20 +43,23 @@ pub fn expire(self: *Editor) !void {
     }
 }
 
-/// Fatal guidance after terminal custody has unwound. One optional native
-/// write, without retries or drain: flow-stopped stderr must not delay exit.
-pub fn writeDiagnostic(vectors: []const std.posix.iovec_const) void {
-    if (std.c.isatty(2) != 1) return;
-    const flags = std.c.fcntl(2, std.c.F.GETFL, @as(c_int, 0));
-    if (flags < 0) return;
+/// Optional terminal reporting after custody has unwound. One nonblocking
+/// write, without retries/drain; restoring shared descriptor flags is required.
+pub fn writeAvailable(fd: c_int, vectors: []const std.posix.iovec_const) !void {
+    if (std.c.isatty(fd) != 1) return;
+    const flags = std.c.fcntl(fd, std.c.F.GETFL, @as(c_int, 0));
+    if (flags < 0) return error.TerminalCleanupFailed;
     const nonblocking: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
     const changed = flags & nonblocking == 0;
-    if (changed and std.c.fcntl(2, std.c.F.SETFL, flags | nonblocking) < 0) return;
-    _ = std.c.writev(2, vectors.ptr, @intCast(vectors.len));
-    // stderr can share its open-file description with a parent or another
-    // terminal descriptor. An unconfirmed restore remains a fatal exit; never
-    // reopen blocking reporting to explain a failed best-effort diagnostic.
-    if (changed) _ = std.c.fcntl(2, std.c.F.SETFL, flags);
+    if (changed and std.c.fcntl(fd, std.c.F.SETFL, flags | nonblocking) < 0) return error.TerminalCleanupFailed;
+    _ = std.c.writev(fd, vectors.ptr, @intCast(vectors.len));
+    if (changed and std.c.fcntl(fd, std.c.F.SETFL, flags) < 0) return error.TerminalCleanupFailed;
+}
+
+/// Fatal guidance cannot replace the retained fatal result or reopen blocking
+/// reporting to explain an unconfirmed descriptor restoration.
+pub fn writeDiagnostic(vectors: []const std.posix.iovec_const) void {
+    writeAvailable(2, vectors) catch {};
 }
 
 /// One serialized stdin/stdout owner in final caller storage. No draft, history,
@@ -146,24 +149,19 @@ pub const Terminal = struct {
         try std.posix.tcsetattr(0, .FLUSH, mode);
         var self: Terminal = .{ .original = original, .active = true, .flags = flags };
         self.write(io, "\x1b[?2004h") catch |err| {
-            try self.finish(io);
+            try self.finish();
             return err;
         };
         return self;
     }
 
-    /// Independently disable/drain stdout and restore exact stdin with FLUSH.
-    /// Restore failure wins. No successful completion or further accepted
-    /// effect may follow an unconfirmed cleanup.
-    pub fn finish(self: *Terminal, io: std.Io) !void {
+    /// Persistent cancellation never borrows output credit or pumps workers.
+    /// Paste disable is best effort on our still-nonblocking stdout; release
+    /// custody and restore configuration before any borrower cancellation/join.
+    pub fn finish(self: *Terminal) !void {
         std.debug.assert(self.active);
-        const disabled: anyerror!void = blk: {
-            self.write(io, "\x1b[?2004l") catch |err| break :blk err;
-            self.drain(io) catch |err| break :blk err;
-        };
-        if (!self.active) return disabled;
+        _ = std.c.write(1, "\x1b[?2004l", 8);
         try self.restore();
-        disabled catch return error.TerminalCleanupFailed;
     }
 
     /// Exact proposal/prompt bytes have been written. Drain stdout while the
@@ -183,8 +181,10 @@ pub const Terminal = struct {
 
     fn restore(self: *Terminal) !void {
         // End output custody before independently restoring both descriptors.
-        const restored = std.posix.tcsetattr(0, .FLUSH, self.original);
+        // NOW restores configuration, not identical kernel history: Darwin
+        // may retain PENDIN and FWASWRITTEN. Single-prompt readLine stays FLUSH.
         self.active = false;
+        const restored = std.posix.tcsetattr(0, .NOW, self.original);
         var failed = false;
         for (self.flags, 0..) |flags, fd| {
             if (std.c.fcntl(@intCast(fd), std.c.F.SETFL, flags) < 0) failed = true;
@@ -411,11 +411,11 @@ pub const Terminal = struct {
         while (!borrower.done.load(.acquire)) {
             if (failure == null) self.service(io, 10) catch |err| {
                 failure = err;
-                borrower.stopped.store(true, .release);
                 // Do not leave raw mode hostage to native drain interruption.
-                self.restore() catch |cleanup| {
+                if (self.active) self.finish() catch |cleanup| {
                     failure = cleanup;
                 };
+                borrower.stopped.store(true, .release);
             };
             if (failure != null) {
                 _ = std.c.pthread_kill(thread.getHandle(), .USR1);

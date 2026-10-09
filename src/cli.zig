@@ -1752,9 +1752,9 @@ fn streamFrontendResult(caller: client.Requests, store: []const u8, key: []const
     return answer;
 }
 
-// Retained privately until persistent consumers and their failure gates replace
-// every old caller. It is not another public entry or recovery authority.
-fn enterSessionLegacy(init: std.process.Init, args: []const []const u8) !void {
+// Retained for the build-only single-prompt fixture. Production dispatch never
+// calls this; it is not another public entry or recovery authority.
+pub fn enterSessionLegacy(init: std.process.Init, args: []const []const u8) !void {
     var store: ?[]const u8 = null;
     var session_ref: ?[]const u8 = null;
     var index: usize = 0;

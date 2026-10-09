@@ -25,13 +25,13 @@ import dispatch_integration as host
 from canonical_failure_integration import ReplyProxy
 from conversation_page_integration import request as public_read
 from control_integration import raw_request
-from host_process import canonical_fixture_root
+from host_process import canonical_fixture_root, assert_persistent_terminal_restored
 from human_cli_integration import action_ready, admit, run
 
 
 class Terminal:
     """One reader, one absolute case budget, bounded transcript through reap."""
-    def __init__(self, home, store, session, seconds=20, arguments=None, cwd=None):
+    def __init__(self, home, store, session, seconds=20, arguments=None, cwd=None, environment=None, stderr=None):
         self.deadline = time.monotonic() + seconds
         self.transcript = bytearray()
         self.master, self.slave = pty.openpty()
@@ -40,14 +40,15 @@ class Terminal:
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ,
                     struct.pack("HHHH", 24, 100, 0, 0))
         self.original = termios.tcgetattr(self.slave)
+        self.original_flags = fcntl.fcntl(self.slave, fcntl.F_GETFL)
         self.ready, writer = os.pipe()
         try:
             self.process = subprocess.Popen(
                 [str(host.RUI), *(arguments if arguments is not None else ["--store", str(store), "--resume", session])],
                 env={**os.environ, "HOME": str(home),
-                     "RUI_TEST_ACTION_READY_FD": str(writer)},
+                     "RUI_TEST_ACTION_READY_FD": str(writer), **(environment or {})},
                 pass_fds=(writer,), stdin=self.slave, stdout=self.slave,
-                stderr=self.slave, cwd=cwd)
+                stderr=self.slave if stderr is None else stderr, cwd=cwd)
         except BaseException:
             os.close(self.ready)
             os.close(self.master)
@@ -112,7 +113,7 @@ class Terminal:
             readable = select.select([self.master], [], [], min(.05, self.remaining()))[0]
             if readable:
                 self.read()
-        assert termios.tcgetattr(self.slave) == self.original, "terminal not restored"
+        assert_persistent_terminal_restored(self.slave, self.original, self.original_flags)
         os.close(self.slave)
         self.slave = None
         while self.read():
@@ -130,6 +131,8 @@ class Terminal:
                 os.close(self.slave)
             os.close(self.master)
             os.close(self.ready)
+            if self.process.stderr is not None:
+                self.process.stderr.close()
 
 
 def key():
@@ -437,6 +440,7 @@ def fatal_stderr(home, store):
         error_master, error_slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
         original = termios.tcgetattr(slave)
+        original_error = termios.tcgetattr(error_slave)
         output_flags = fcntl.fcntl(slave, fcntl.F_GETFL)
         error_flags = fcntl.fcntl(error_slave, fcntl.F_GETFL)
         if stopped:
@@ -447,9 +451,8 @@ def fatal_stderr(home, store):
                 [str(host.RUI), "--store", str(store), "--resume", "missing/fatal-session"],
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=error_slave)
             assert process.wait(timeout=5) == 1, "missing Session must return fatal exit, not detach or signal death"
-            assert termios.tcgetattr(slave) == original, "fatal caller left raw mode"
-            assert fcntl.fcntl(slave, fcntl.F_GETFL) == output_flags, "stdout flags changed"
-            assert fcntl.fcntl(error_slave, fcntl.F_GETFL) == error_flags, "stderr flags changed"
+            assert_persistent_terminal_restored(slave, original, output_flags)
+            assert_persistent_terminal_restored(error_slave, original_error, error_flags)
             if not stopped:
                 assert select.select([error_master], [], [], 1)[0], "missing fatal diagnostic"
                 assert b"SessionNotConfigured" in os.read(error_master, 4096)
