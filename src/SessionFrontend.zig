@@ -54,6 +54,7 @@ deferred_approval: bool = false,
 pending_notice: ?[]const u8 = null,
 fatal: ?anyerror = null,
 restore_failure: ?anyerror = null,
+mask_failure: ?anyerror = null,
 borrower: bool = false,
 capturing: bool = false,
 restoring: bool = false,
@@ -99,6 +100,7 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
         self.acceptedDiagnostic(&original) catch {};
     };
     try restored;
+    if (self.mask_failure) |err| return err;
     if (self.fatal) |err| return err;
     admission_result catch |err| if (err == error.CanonicalStoreFailure) return err;
     read_result catch |err| if (err == error.CanonicalStoreFailure) return err;
@@ -495,12 +497,29 @@ fn send(raw: *anyopaque, task: *Task) !void {
 }
 
 fn startTask(self: *Self, task: *Task, context: *anyopaque, function: Task.Run) !void {
+    return self.startTaskUsing(task, context, function, std.c.sigprocmask);
+}
+
+fn startTaskUsing(self: *Self, task: *Task, context: *anyopaque, function: Task.Run, comptime mask: anytype) !void {
     var blocked = std.posix.sigemptyset();
     std.posix.sigaddset(&blocked, .INT);
     var previous: std.posix.sigset_t = undefined;
-    std.posix.sigprocmask(std.posix.SIG.BLOCK, &blocked, &previous);
-    defer std.posix.sigprocmask(std.posix.SIG.SETMASK, &previous, null);
-    try task.start(self.init.io, context, function);
+    if (mask(@as(c_int, @intCast(std.posix.SIG.BLOCK)), &blocked, &previous) != 0) return error.SignalMaskBlockFailed;
+    const started = task.start(self.init.io, context, function);
+    if (mask(@as(c_int, @intCast(std.posix.SIG.SETMASK)), &previous, null) != 0) {
+        self.mask_failure = error.SignalMaskRestoreFailed;
+        self.cancelCommand();
+        self.detached = true;
+        // The caller's stack context still lives here. Never return a failed
+        // launch with an already-started borrower left outside its join guard.
+        const restored = self.restoreTerminal();
+        task.cancel();
+        task.join() catch {}; // Terminal/mask failure outranks worker result.
+        if (task.take() != null) task.acknowledge();
+        try restored;
+        return error.SignalMaskRestoreFailed;
+    }
+    try started;
 }
 
 pub fn recover(self: *Self, bytes: []const u8) !client.CapturedRecord {
@@ -560,9 +579,24 @@ fn pump(raw: *anyopaque, io: std.Io, wait: i32) !void {
 }
 
 fn startSend(self: *Self) !void {
-    self.startTask(&self.admission, self, send) catch {
-        try self.sendNotStarted();
+    self.startTask(&self.admission, self, send) catch |err| {
+        try self.sendLaunchFailed(err);
     };
+}
+
+fn sendLaunchFailed(self: *Self, err: anyerror) !void {
+    if (self.mask_failure != null) if (self.admission.result()) |result| {
+        // Failed parent restoration may follow a completed exchange. The
+        // launch owner already joined; apply that original outcome only once.
+        try self.applyAdmission(switch (result) {
+            .succeeded => {},
+            .cancelled => error.Cancelled,
+            .failed => |failure| failure,
+        });
+        return err;
+    };
+    try self.sendNotStarted();
+    if (self.mask_failure != null) return err;
 }
 
 fn sendNotStarted(self: *Self) !void {
@@ -984,4 +1018,112 @@ test "SessionFrontend borrower cleanup retains canonical failure after input fai
     try std.testing.expectError(error.TestInputFailure, self.call(Worker.request, .{}));
     try std.testing.expect(self.reads.thread == null);
     try std.testing.expectEqual(error.CanonicalStoreFailure, self.fatal.?);
+}
+
+test "SessionFrontend worker inherits blocked SIGINT and parent mask is restored" {
+    const Worker = struct {
+        blocked: bool = false,
+        fn run(raw: *anyopaque, _: *Task) !void {
+            const worker: *@This() = @ptrCast(@alignCast(raw));
+            var current = std.posix.sigemptyset();
+            if (std.c.sigprocmask(@intCast(std.posix.SIG.SETMASK), null, &current) != 0) return error.TestMaskReadFailed;
+            worker.blocked = std.posix.sigismember(&current, .INT);
+        }
+    };
+    var before = std.posix.sigemptyset();
+    try std.testing.expectEqual(0, std.c.sigprocmask(@intCast(std.posix.SIG.SETMASK), null, &before));
+    var self: Self = undefined;
+    self.init.io = std.testing.io;
+    self.reads = .{};
+    var worker: Worker = .{};
+    try self.startTask(&self.reads, &worker, Worker.run);
+    try self.reads.join();
+    try std.testing.expect(worker.blocked);
+    var after = std.posix.sigemptyset();
+    try std.testing.expectEqual(0, std.c.sigprocmask(@intCast(std.posix.SIG.SETMASK), null, &after));
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&after));
+}
+
+test "SessionFrontend failed parent mask restore joins launched borrower and retains precedence" {
+    const Worker = struct {
+        finished: bool = false,
+        fn run(raw: *anyopaque, task: *Task) !void {
+            const worker: *@This() = @ptrCast(@alignCast(raw));
+            defer worker.finished = true;
+            try task.feed("borrowed");
+        }
+    };
+    const Mask = struct {
+        fn failRestore(how: c_int, _: ?*const std.posix.sigset_t, previous: ?*std.posix.sigset_t) c_int {
+            if (previous) |old| old.* = std.posix.sigemptyset();
+            return if (how == std.posix.SIG.SETMASK) -1 else 0;
+        }
+        fn failBlock(_: c_int, _: ?*const std.posix.sigset_t, _: ?*std.posix.sigset_t) c_int {
+            return -1;
+        }
+    };
+    for ([_]?anyerror{ null, error.TerminalRestoreFailed }) |terminal_error| {
+        var self: Self = undefined;
+        self.init.io = std.testing.io;
+        self.reads = .{};
+        self.terminal.active = false;
+        self.restore_failure = terminal_error;
+        self.mask_failure = null;
+        self.command_cancel = null;
+        self.detached = false;
+        var worker: Worker = .{};
+        defer {
+            self.reads.cancel();
+            self.reads.join() catch {};
+            if (self.reads.take() != null) self.reads.acknowledge();
+        }
+        try std.testing.expectError(terminal_error orelse error.SignalMaskRestoreFailed, self.startTaskUsing(&self.reads, &worker, Worker.run, Mask.failRestore));
+        try std.testing.expect(worker.finished and self.detached);
+        try std.testing.expect(self.reads.thread == null and self.reads.take() == null);
+        try std.testing.expectEqual(error.SignalMaskRestoreFailed, self.mask_failure.?);
+        self.mask_failure = null;
+        worker.finished = false;
+        try std.testing.expectError(error.SignalMaskBlockFailed, self.startTaskUsing(&self.reads, &worker, Worker.run, Mask.failBlock));
+        try std.testing.expect(!worker.finished and self.reads.thread == null);
+        try std.testing.expect(self.mask_failure == null);
+    }
+}
+
+test "SessionFrontend mask failure settles already joined accepted or uncertain Admission" {
+    for ([_]Task.Result{ .succeeded, .cancelled, .{ .failed = error.ConnectionLost } }) |result| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var self: Self = undefined;
+        self.init.io = std.testing.io;
+        self.input.init();
+        self.selected = true;
+        self.read_kind = .render;
+        self.admission = .{ .terminal = result };
+        self.mask_failure = error.SignalMaskRestoreFailed;
+        self.accepted_original = null;
+        self.fatal = null;
+        self.deferred_retry = false;
+        for ("original") |byte| _ = self.feed(byte);
+        self.ticket = self.feed('\r').message;
+        const Capture = struct {
+            pub fn capture(_: @This(), _: []const u8) !void {}
+        };
+        try self.input.capture(self.ticket.?, Capture{});
+        self.captured = .{ .file = try tmp.dir.createFile(std.testing.io, "capture", .{}), .length = 0, .saved = .{}, .target = undefined };
+        defer if (self.captured) |*captured| captured.close(std.testing.io);
+        try self.captured.?.saved.store.set("original-store");
+        try self.captured.?.saved.session.set("original-session");
+        try self.captured.?.saved.key.set("original-key");
+        self.reply = .{ .status = 200, .target = undefined, .answer = .{ .result = .{ .accepted = .{ .message = .{ .admission = 7 } } }, .replayed = false } };
+        try std.testing.expectError(error.SignalMaskRestoreFailed, self.sendLaunchFailed(error.SignalMaskRestoreFailed));
+        if (result == .succeeded) {
+            try std.testing.expect(self.accepted_original != null);
+            try std.testing.expectEqualStrings("original-key", self.accepted_original.?.key.slice());
+            try std.testing.expect(self.ticket == null and self.captured == null);
+        } else {
+            try std.testing.expectEqual(Input.State.unconfirmed, self.input.submissionState().?);
+            try std.testing.expectEqualStrings("original", self.input.retained().?.bytes);
+            try std.testing.expect(self.accepted_original == null);
+        }
+    }
 }
