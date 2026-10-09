@@ -22,6 +22,7 @@ import time
 import uuid
 
 import dispatch_integration as host
+from canonical_failure_integration import ReplyProxy
 from host_process import canonical_fixture_root
 from human_cli_integration import action_ready, admit, run
 
@@ -265,6 +266,66 @@ def equal_admissions(state, home, store, endpoint):
         assert b"EQUAL-ANSWER" in host.read_result(store, request)
 
 
+def late_switch_failure(state, home, store, endpoint, owner):
+    """A committed switch cannot roll back or prompt after incomplete content."""
+    payload = "SWITCH-CONTENT-BEGIN-" + "x" * 12288 + "-SWITCH-CONTENT-END"
+    with endpoint.lock:
+        endpoint.responses.append(host.sse_answer("switch-answer", "switch-private",
+                                                  "switch-item", "SWITCH-ANSWER")[0])
+    request = key()
+    host.message(state, store, request, "opening/switch-target", payload)
+    completed(store, request)
+    before = len(endpoint.requests)
+    # Both cases use real metadata and real content. Only the failing case
+    # drops a late suffix; all framing/binding headers remain byte-identical.
+    for truncate in (False, True):
+        cut = []
+        def rewrite(response):
+            head, body = response.split(b"\r\n\r\n", 1)
+            if body.startswith(b"SWITCH-CONTENT-BEGIN-"):
+                assert head.startswith(b"HTTP/1.1 200 "), head
+                fields = dict(line.split(b": ", 1) for line in head.split(b"\r\n")[1:])
+                assert int(fields[b"Content-Length"]) == len(payload.encode()) == len(body)
+                if truncate:
+                    cut.append(body[:8192])
+                    return head + b"\r\n\r\n" + cut[-1]
+            return response
+        proxy = ReplyProxy(owner, "/v1/activity-content", rewrite)
+        terminal = None
+        try:
+            terminal = Terminal(home, store, "opening/switch-source")
+            terminal.until("rui> ", 0)
+            start = len(terminal.transcript)
+            terminal.send("/resume opening/switch-target\n")
+            terminal.until("Session: opening/switch-target", start)
+            terminal.until("SWITCH-CONTENT-BEGIN-", start)
+            if truncate:
+                terminal.finish(nonzero=True)
+                output = bytes(terminal.transcript[start:])
+                assert cut == [payload.encode()[:8192]], "failed stream was retried/prepassed"
+                assert cut[0] in output, "failure occurred before the streamed prefix was presented"
+                assert b"TruncatedResponse" in output, output
+                assert b"SWITCH-CONTENT-END" not in output, "missing suffix was fabricated"
+                assert b"old Session and draft retained" not in output, "committed switch rolled back"
+                assert b"Session: opening/switch-source" not in output, "old selection was reentered"
+                prefix_end = output.index(cut[0]) + len(cut[0])
+                assert b"rui> " not in output[prefix_end:], "incomplete replay resumed prompting"
+                assert b"Detached." not in output, "fatal replay was reported as normal detach"
+            else:
+                terminal.until("SWITCH-CONTENT-END", start)
+                terminal.until("rui> \r\x1b[5C", start)
+                assert not cut
+                status = terminal.command("/status")
+                assert "Session: opening/switch-target" in status, status
+                terminal.command("/exit", "Detached.")
+                terminal.finish()
+            assert len(endpoint.requests) == before, "replay resubmitted saved work"
+        finally:
+            if terminal is not None:
+                terminal.close()
+            proxy.close()  # Join all borrowers before returning the real socket.
+
+
 def approval(state, home, store, workspace, endpoint):
     """Attention cannot steal draft focus; only fresh exact Action approves."""
     terminal = Terminal(home, store, "opening/approval")
@@ -424,7 +485,7 @@ def main():
     owner = None
     try:
         owner = host.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        for session in ("idle", "equal", "approval", "local", "wait"):
+        for session in ("idle", "equal", "approval", "local", "wait", "switch-source", "switch-target"):
             configure(home, store, workspace, "opening/" + session)
         fatal_stderr(home, store)
         local_commands(home, store, workspace, endpoint)
@@ -433,13 +494,14 @@ def main():
             endpoint.responses.extend([answer("EQUAL-ANSWER-A"), answer("EQUAL-ANSWER-B"),
                                        answer("OLD-SELECTION-ANSWER")])
         equal_admissions(state, home, store, endpoint)
+        late_switch_failure(state, home, store, endpoint, owner)
         with endpoint.lock:
             endpoint.responses.extend([
                 host.sse_tool_calls("opening-proposal", [("bash", "opening-call", arguments)]),
                 answer("APPROVAL-ANSWER"), answer("PRESERVED-ANSWER")])
         approval(state, home, store, workspace, endpoint)
         wait_attention(state, home, store, workspace, endpoint)
-        print("session opening: 6 focused real Host/provider/PTY cases passed")
+        print("session opening: 7 focused real Host/provider/PTY cases passed")
     finally:
         if owner is not None:
             host.stop_host(owner)
