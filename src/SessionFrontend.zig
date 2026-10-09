@@ -348,7 +348,15 @@ fn serviceCommand(self: *Self) !void {
 fn feed(self: *Self, byte: u8) Input.Event {
     // Do not seal an Admission against an absent or not-yet-selected target.
     // Parser-owned paste/escape/scalar bytes still belong to Input unchanged.
-    return self.input.feedForSelection(byte, self.selected and !(self.read_kind == .stage and self.reads.thread != null));
+    const event = self.input.feedForSelection(byte, self.selected and !(self.read_kind == .stage and self.reads.thread != null));
+    if (event == .editor and (event.editor == .invalid or event.editor == .overflow)) {
+        // Enter completed the rejected attempt. Reset only active composition,
+        // never the separately sealed Admission or its outstanding capture loan.
+        self.input.clearComposition();
+        self.dirty = true;
+        self.pending_notice = "Whole input rejected; nothing sent.";
+    }
+    return event;
 }
 
 fn step(self: *Self) !void {
@@ -380,8 +388,7 @@ fn step(self: *Self) !void {
                     self.cancelCommand();
                     self.detached = true;
                 },
-                .invalid, .overflow => self.pending_notice = "Whole input rejected; nothing sent.",
-                .none => {},
+                .none, .invalid, .overflow => {},
                 .submit => unreachable,
             },
         },

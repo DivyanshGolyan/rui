@@ -326,6 +326,66 @@ def late_switch_failure(state, home, store, endpoint, owner):
             proxy.close()  # Join all borrowers before returning the real socket.
 
 
+def rejected_input(home, store, endpoint, owner):
+    """Completed malformed attempts cannot poison editing or a sealed Message."""
+    held, release = threading.Event(), threading.Event()
+    def hold_reply(response):
+        held.set()
+        assert release.wait(15), "original admission reply was never released"
+        return response
+    terminal = Terminal(home, store, "opening/rejection")
+    proxy = None
+    try:
+        terminal.until("rui> ", 0)
+        before = len(endpoint.requests)
+        os.write(terminal.master, b"DISCARD\xffsuffix\n")
+        terminal.until("Whole input rejected; nothing sent.", 0)
+        terminal.command("/status")
+        assert len(endpoint.requests) == before, "malformed attempt submitted work"
+        with endpoint.lock:
+            for label in ("RECOVERED-ANSWER", "SEALED-ANSWER", "NEXT-ANSWER"):
+                endpoint.responses.append(host.sse_answer(label, label + "-private",
+                                                          label + "-item", label)[0])
+        start = len(terminal.transcript)
+        terminal.send("é中🙂\x1b[DRECOVERED\n")
+        terminal.until("RECOVERED-ANSWER", start)
+        terminal.command("/status")
+        first = json.loads(endpoint.requests[before])
+        assert first["input"][-1]["content"][0]["text"] == "é中RECOVERED🙂", first
+        # The Host accepted the original, but Input still owns its sealed bank
+        # until this real admission response returns. This is not a capture-
+        # loan hold or a synthetic Host rejection.
+        proxy = ReplyProxy(owner, "/v1/message", hold_reply)
+        terminal.send("ORIGINAL-SEALED-é🙂\n")
+        host.wait_for(held.is_set, "real original admission response held")
+        start = len(terminal.transcript)
+        os.write(terminal.master, b"REJECT-NEXT\xfftail\n")
+        terminal.until("Whole input rejected; nothing sent.", start)
+        terminal.send("NEXT-é🙂\x1b[DKEPT")
+        terminal.until("NEXT-éKEPT🙂", start)
+        assert len(proxy.exchanges) == 1, "malformed next composition sent another request"
+        settled = len(terminal.transcript)
+        release.set()
+        # A footer without the submitting label establishes caller settlement,
+        # not merely Host completion, without replacing the composing draft.
+        terminal.until("\rRui: completed", settled)
+        terminal.until("SEALED-ANSWER", start)
+        second = json.loads(endpoint.requests[before + 1])
+        assert second["input"][-1]["content"][0]["text"] == "ORIGINAL-SEALED-é🙂", second
+        terminal.send("\n")
+        terminal.until("NEXT-ANSWER", start)
+        third = json.loads(endpoint.requests[before + 2])
+        assert third["input"][-1]["content"][0]["text"] == "NEXT-éKEPT🙂", third
+        assert len(endpoint.requests) == before + 3, "rejected attempt leaked or duplicated work"
+        terminal.command("/exit", "Detached.")
+        terminal.finish()
+    finally:
+        release.set()
+        terminal.close()
+        if proxy is not None:
+            proxy.close()
+
+
 def approval(state, home, store, workspace, endpoint):
     """Attention cannot steal draft focus; only fresh exact Action approves."""
     terminal = Terminal(home, store, "opening/approval")
@@ -485,7 +545,7 @@ def main():
     owner = None
     try:
         owner = host.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        for session in ("idle", "equal", "approval", "local", "wait", "switch-source", "switch-target"):
+        for session in ("idle", "equal", "approval", "local", "wait", "switch-source", "switch-target", "rejection"):
             configure(home, store, workspace, "opening/" + session)
         fatal_stderr(home, store)
         local_commands(home, store, workspace, endpoint)
@@ -495,13 +555,14 @@ def main():
                                        answer("OLD-SELECTION-ANSWER")])
         equal_admissions(state, home, store, endpoint)
         late_switch_failure(state, home, store, endpoint, owner)
+        rejected_input(home, store, endpoint, owner)
         with endpoint.lock:
             endpoint.responses.extend([
                 host.sse_tool_calls("opening-proposal", [("bash", "opening-call", arguments)]),
                 answer("APPROVAL-ANSWER"), answer("PRESERVED-ANSWER")])
         approval(state, home, store, workspace, endpoint)
         wait_attention(state, home, store, workspace, endpoint)
-        print("session opening: 7 focused real Host/provider/PTY cases passed")
+        print("session opening: 8 focused real Host/provider/PTY cases passed")
     finally:
         if owner is not None:
             host.stop_host(owner)
