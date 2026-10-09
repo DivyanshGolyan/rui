@@ -30,9 +30,41 @@ pub fn main(init: std.process.Init) !void {
         try out.interface.writeByte('}');
         try out.interface.flush();
     } else if (args.len == 6 and std.mem.eql(u8, args[1], "content")) {
-        if (try requests.readActivityContent(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), try std.fmt.parseInt(u64, args[5], 10), std.Io.File.stdout()) != null) return error.ActivityUnavailable;
+        const position = try std.fmt.parseInt(u64, args[4], 10);
+        const ordinal = try std.fmt.parseInt(u64, args[5], 10);
+        var cursor: client.ActivityCursor = .{};
+        while (true) {
+            const page = switch (try requests.activityPage(args[2], args[3], cursor)) {
+                .page => |page| page,
+                .failure => return error.ActivityUnavailable,
+            };
+            for (page.facts.items[0..page.facts.count]) |item| if (item.position == position and item.ordinal == ordinal) {
+                const reference = switch (item.value) {
+                    .admission, .user => |message| message.content,
+                    .assistant, .tool_result => |content| content,
+                    .outcome => |outcome| outcome.content orelse return error.ActivityUnavailable,
+                    else => return error.ActivityUnavailable,
+                };
+                if (try requests.readActivityContent(args[2], args[3], position, ordinal, .{ .bytes = reference.length, .digest = reference.digest }, std.Io.File.stdout()) != null) return error.ActivityUnavailable;
+                return;
+            };
+            cursor = page.continuation() orelse return error.ActivityUnavailable;
+        }
     } else if (args.len == 6 and std.mem.eql(u8, args[1], "field")) {
         const field = std.meta.stringToEnum(client.ProposalField, args[5]) orelse return error.InvalidArguments;
-        if (try requests.readProposalField(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), field, std.Io.File.stdout()) != null) return error.ActivityUnavailable;
+        const position = try std.fmt.parseInt(u64, args[4], 10);
+        var cursor: client.ActivityCursor = .{};
+        while (true) {
+            const page = switch (try requests.activityPage(args[2], args[3], cursor)) {
+                .page => |page| page,
+                .failure => return error.ActivityUnavailable,
+            };
+            for (page.facts.items[0..page.facts.count]) |item| if (item.position == position and item.value == .call) {
+                const reference = item.value.call.fields[@intFromEnum(field)];
+                if (try requests.readProposalField(args[2], args[3], position, field, .{ .bytes = reference.length, .digest = reference.digest }, std.Io.File.stdout()) != null) return error.ActivityUnavailable;
+                return;
+            };
+            cursor = page.continuation() orelse return error.ActivityUnavailable;
+        }
     } else return error.InvalidArguments;
 }

@@ -44,7 +44,8 @@ def digest(data):
     return hashlib.sha256(len(domain).to_bytes(8, "big") + domain + data).digest()
 
 
-def mock_reply(socket_path, store, mode, body, advertised=None, extra_headers=b""):
+def mock_reply(socket_path, store, mode, body, advertised=None, extra_headers=b"",
+               first_page=None, expected_error=None, expected_output=None):
     # Replace only the stopped fixture Host's endpoint, not its saved work.
     path = pathlib.Path(socket_path)
     path.unlink(missing_ok=True)
@@ -52,6 +53,18 @@ def mock_reply(socket_path, store, mode, body, advertised=None, extra_headers=b"
         listener.bind(str(path))
         listener.listen(1)
         def serve():
+            if first_page is not None:
+                with listener.accept()[0] as peer:
+                    data = b""
+                    while b"\r\n\r\n" not in data: data += peer.recv(4096)
+                    head, received = data.split(b"\r\n\r\n", 1)
+                    length = int(next(line.split(b": ")[1] for line in head.split(b"\r\n") if line.startswith(b"Content-Length:")))
+                    while len(received) < length: received += peer.recv(4096)
+                    assert json.loads(received)["kind"] == "proposal_page"
+                    encoded = json.dumps(first_page).encode()
+                    peer.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
+                        f"Content-Length: {len(encoded)}\r\n".encode() +
+                        b"X-Rui-Wire-Version: 1\r\nConnection: close\r\n\r\n" + encoded)
             with listener.accept()[0] as peer:
                 data = b""
                 while b"\r\n\r\n" not in data:
@@ -66,7 +79,12 @@ def mock_reply(socket_path, store, mode, body, advertised=None, extra_headers=b"
                     extra_headers + b"X-Rui-Wire-Version: 1\r\nConnection: close\r\n\r\n" + body)
         worker = threading.Thread(target=serve)
         worker.start()
-        result = caller(store, mode, "null" if mode == "page" else 1, 0 if mode == "page" else "arguments", ok=False)
+        reply = subprocess.run([str(CALLER), mode, str(store), SESSION,
+            "null" if mode == "page" else "1", "0" if mode == "page" else "arguments"], capture_output=True, timeout=10)
+        assert reply.returncode != 0, (mode, reply.stderr)
+        result = reply.stdout
+        if expected_error is not None: assert expected_error.encode() in reply.stderr, reply.stderr
+        if expected_output is not None: assert result == expected_output, result
         worker.join(timeout=5)
         assert not worker.is_alive()
     path.unlink()
@@ -251,8 +269,23 @@ def main():
             encoded = json.dumps(valid).encode()
             mock_reply(fields["socket"], store, "page", encoded[:-1], len(encoded))
             mock_reply(fields["socket"], store, "page", encoded.replace(b'"version": "1"', b'"version":"1","version":"1"'))
-            assert mock_reply(fields["socket"], store, "field", b"abc", 9,
-                b"X-Rui-Content-Bytes: 9\r\nX-Rui-Next-Offset: 9\r\n") == b"abc"
+            scoped = copy.deepcopy(valid)
+            scoped["items"] = [scoped["items"][0]]
+            scoped["items"][0]["position"] = "1"
+            scoped["more"] = False
+            for complete, body, size, header_digest, error, output in (
+                (b"abcdefghi", b"abc", 9, digest(b"abcdefghi"), "TruncatedResponse", b"abc"),
+                (b"abcdefghi", b"abcdefghi", 9, digest(b"wrong"), "ContentBindingMismatch", b""),
+                (b"abcdefghi", b"abc", 3, digest(b"abcdefghi"), "ContentBindingMismatch", b""),
+                (b"abcdefghi", b"abcdefgXy", 9, digest(b"abcdefghi"), "ContentBindingMismatch", b""),
+                (b"", b"", 0, digest(b"wrong"), "ContentBindingMismatch", b""),
+                (b"x", b"", 0, digest(b"x"), "ContentBindingMismatch", b""),
+            ):
+                scoped["items"][0]["fields"]["arguments"] = {"bytes": str(len(complete)), "sha256": digest(complete).hex()}
+                headers = (f"X-Rui-Content-Bytes: {size}\r\nX-Rui-Next-Offset: {size}\r\n"
+                    f"X-Rui-Scoped-Content-Sha256: {header_digest.hex()}\r\n").encode()
+                mock_reply(fields["socket"], store, "field", body, size, headers,
+                    first_page=scoped, expected_error=error, expected_output=output)
             print("proposal native caller: historical rejection/complete fields/frozen traversal/restart/authority/corruption/malformed/truncation passed")
         finally:
             if process is not None: stop_process(process)
