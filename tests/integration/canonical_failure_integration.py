@@ -5,6 +5,7 @@ import fcntl
 import os
 import pathlib
 import pty
+import re
 import select
 import shutil
 import struct
@@ -141,6 +142,7 @@ class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         self.route = route
         self.rewrite = rewrite
         self.exchanges = []
+        self.host_exchanges = []
         super().__init__(str(self.path), Exchange)
         os.chmod(self.path, 0o600)
         self.thread = threading.Thread(target=self.serve_forever)
@@ -181,6 +183,7 @@ class Exchange(socketserver.BaseRequestHandler):
                     break
                 response += part
         route = head.split(b" ")[1].decode()
+        self.server.host_exchanges.append((route, body, response))
         if route == self.server.route:
             self.server.exchanges.append((body, response))
             if self.server.rewrite is not None:
@@ -398,8 +401,26 @@ def interactive_cases(state, binding=False, null_code=False):
     reason = "InvalidResponse" if null_code else "RequestBindingMismatch"
     rewrite = (lambda response: wrong_target(response, null_code=null_code)) if binding else None
     home = state / ("null-interactive" if null_code else "binding-interactive" if binding else "interactive")
-    home.mkdir()
+    home.mkdir(mode=0o700)
     store = home / "store"
+    canonical_response = None
+    if not binding:
+        # Retain a real Host's canonical diagnosis, rather than manufacturing
+        # canonical authority in the proxy used at the activity-read seam.
+        fault_host = fixture.start_host(home / "fault-store", None, "--fault", "before-commit")
+        fault_proxy = ReplyProxy(fault_host, "/v1/configure", lambda response: response)
+        try:
+            failed = invoke(home, "configure", "--store", home / "fault-store",
+                "--session", "fault-source", "--workspace", state,
+                "--provider", "codex", "--model", "model-a",
+                "--record", home / "fault-source.json", "--key", "fault-source")
+            expect_fatal(failed)
+            canonical_response = fault_proxy.exchanges[0][1]
+            assert canonical_response.startswith(b"HTTP/1.1 500 "), canonical_response
+            assert json.loads(canonical_response.split(b"\r\n\r\n", 1)[1]) == ERROR
+        finally:
+            fault_proxy.close()
+            fixture.stop_host(fault_host)
     endpoint = fixture.SuccessEndpoint([fixture.sse_tool_calls("canonical-tool", [("bash", "canonical-call",
         '{"cmd":"true","timeout_ms":null}')]),
         fixture.sse_answer("canonical-answer", "canonical-reason", "canonical-message", "denied tool saved")[0],
@@ -414,8 +435,8 @@ def interactive_cases(state, binding=False, null_code=False):
         codex.credentials(home / ".config/rui/codex.json")
         for route, line in (("/v1/configure", "/configure --permission-mode ask"),
                 ("/v1/message", "original terminal bytes"), ("/v1/control/permission-decision", "/wait"),
-                ("/v1/configure", None), ("/v1/observe-command", "confirmed terminal bytes")):
-            if binding and route == "/v1/observe-command":
+                ("/v1/configure", None), ("/v1/activity-page", "confirmed terminal bytes")):
+            if binding and route == "/v1/activity-page":
                 continue  # Streaming observation belongs to the subsequent unit.
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
@@ -430,26 +451,43 @@ def interactive_cases(state, binding=False, null_code=False):
                     proxy = ReplyProxy(host, route, rewrite)
                 caller = subprocess.Popen([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
-                    pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                    pass_fds=(ready_write,), stdin=slave, stdout=slave,
+                    stderr=slave if route == "/v1/activity-page" else subprocess.PIPE)
                 if line is not None:
                     human.read_terminal(master, "rui> ")
-                    proxy = ReplyProxy(host, route, rewrite)
+                    proxy = ReplyProxy(host, route,
+                        (lambda response: canonical_response) if route == "/v1/activity-page" else rewrite)
                     os.write(master, (line + "\n").encode())
                     if route == "/v1/control/permission-decision":
+                        human.read_terminal(master, "Ctrl-G 1 actionable")
+                        os.write(master, b"\x07")
                         human.read_terminal(master, "Allow once, deny, or later?")
                         human.action_ready(ready_read)
                         os.write(master, b"d\n")
-                if route == "/v1/observe-command":
+                if route == "/v1/activity-page" or (route == "/v1/control/permission-decision" and not binding):
                     output = ""
+                elif route == "/v1/message" and not binding:
+                    # Message admission is asynchronous; its fatal diagnosis
+                    # is on stderr, not the command mutation's stdout notice.
+                    output = human.read_terminal(master, "Rui: submitting; draft retained")
                 else:
-                    output = human.read_terminal(master, reason if binding else "canonical_store_failure")
+                    output = human.read_terminal(master, reason if binding else "CanonicalStoreFailure")
                 if binding:
                     assert "other/session" not in output and '"answer"' not in output, output
                 if binding and line is not None:
                     # Keep the existing recoverable invocation-error workflow;
                     # only canonical Store failure requires fatal detachment.
-                    if "rui> " not in output:
-                        output += human.read_terminal(master, "rui> ")
+                    # Command-running redraws also contain rui>; they are not
+                    # a ready prompt, and submitting /exit there is busy input.
+                    ready = re.compile(r"\rRui: (?!command running|opening|submitting)[^\r\n]*\r*\n"
+                        r"rui> \r\x1b\[5C")
+                    deadline = time.monotonic() + 15
+                    while not ready.search(output.split(reason, 1)[1]):
+                        remaining = deadline - time.monotonic()
+                        assert remaining > 0, ("no recovered ready prompt", output)
+                        if select.select([master], [], [], remaining)[0]:
+                            output += os.read(master, 65536).decode(errors="replace")
+                            assert len(output) < 1024 * 1024, "unbounded prompt output"
                     os.write(master, b"/exit\n")
                 # Supply output credit during the original exit budget for
                 # fatal cleanup and recoverable explicit detachment alike.
@@ -467,32 +505,71 @@ def interactive_cases(state, binding=False, null_code=False):
                     assert caller.returncode == 0, "explicit detachment failed"
                 else:
                     assert caller.returncode != 0, "fatal mutation resumed the Session prompt"
-                errors = caller.stderr.read().decode()
-                assert (reason if binding else "CanonicalStoreFailure") in errors, errors
-                if route == "/v1/observe-command":
-                    assert "Message accepted" in errors and "do not resubmit it" in errors and "admission may be uncertain" not in errors, errors
+                # Final original-request guidance is intentionally a bounded
+                # best-effort TTY write. This case gives it ordinary terminal
+                # output credit and captures one stdout/stderr byte order.
+                errors = caller.stderr.read().decode() if caller.stderr is not None else ""
+                if binding and line is not None:
+                    assert reason in output, output  # Recoverable editor notice.
+                elif route != "/v1/activity-page":
+                    assert (reason if binding else "CanonicalStoreFailure") in errors, errors
                 # Drain before checking that there is no later prompt/success.
                 while select.select([master], [], [], 0.05)[0]:
                     output += os.read(master, 65536).decode(errors="replace")
                 assert "admitted:" not in output and "Configured." not in output, output
-                if route != "/v1/observe-command":
+                if route != "/v1/activity-page":
                     assert "You: " not in output, output
                 if not binding or line is None:
-                    assert "rui> " not in output and "Detached." not in output, output
+                    # Earlier input echo is not a later prompt. Output also
+                    # repaints the empty editor while the command still owns
+                    # it; exclude only that explicit command-running frame.
+                    if route == "/v1/activity-page":
+                        # Acceptance can release composition before a later
+                        # read fails. Only the fatal owner's joined diagnosis
+                        # forbids another prompt; do not hide earlier frames.
+                        guidance = "Rui: Original Admission accepted; do not replace intent."
+                        assert guidance in output and "CanonicalStoreFailure" in output, output
+                        later = output.split(guidance, 1)[1]
+                    elif route == "/v1/message":
+                        later = "Rui: submitting; draft retained" + output.split(
+                            "Rui: submitting; draft retained", 1)[1]
+                        later = re.sub(r"Rui: submitting; draft retained[^\r\n]*\r*\n"
+                            r"rui> \r\x1b\[5C", "", later)
+                    elif route == "/v1/control/permission-decision":
+                        later = "\rRui: command running" + output.split("\rRui: command running", 1)[1]
+                    else:
+                        later = output.split(reason if binding else "CanonicalStoreFailure", 1)[1]
+                    if route != "/v1/activity-page":
+                        later = re.sub(r"\rRui: command running[^\r\n]*\r*\n"
+                            r"rui> \r\x1b\[5C", "", later)
                 assert_persistent_terminal_restored(slave, original_terminal)
-                request, reply = proxy.exchanges[0]
+                if route == "/v1/activity-page":
+                    assert proxy.exchanges, "no activity read reached the owning seam"
+                    assert not any(path == "/v1/observe-command" for path, _, _ in proxy.host_exchanges)
+                    messages = [(body, reply) for path, body, reply in proxy.host_exchanges if path == "/v1/message"]
+                    assert len(messages) == 1, "accepted Message was resubmitted"
+                    request, reply = messages[0]
+                    assert json.loads(proxy.exchanges[0][0])["kind"] == "activity_page"
+                else:
+                    request, reply = proxy.exchanges[0]
                 decoded = json.loads(reply.split(b"\r\n\r\n", 1)[1])
-                assert decoded["observation" if route == "/v1/observe-command" else "answer"]["status"] == "accepted"
+                assert decoded["answer"]["status"] == "accepted"
                 key = json.loads(request)["key"]
                 record = home / ".config/rui/requests" / f"{key}.json"
                 assert json.loads(record.read_bytes())["key"] == key
+                assert record.read_bytes() == request, "transmission changed the captured inputs"
+                if not binding or line is None:
+                    assert "rui> " not in later and "Detached." not in output, output
+                if route == "/v1/activity-page":
+                    assert f"Store: {store}" in later and "Session: original/session" in later, later
+                    assert f"Key: {key}" in later and "admission may be uncertain" not in later, later
             finally:
                 if proxy is not None:
                     proxy.close()
                 if caller is not None and caller.poll() is None:
                     caller.kill()
                     caller.wait(timeout=5)
-                if caller is not None:
+                if caller is not None and caller.stderr is not None:
                     caller.stderr.close()
                 os.close(master)
                 os.close(slave)

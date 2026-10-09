@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import pty
+import select
 import signal
 import struct
 import subprocess
@@ -13,6 +14,7 @@ import sys
 import tempfile
 import termios
 import threading
+import time
 
 import bash_integration as bash
 import dispatch_integration as fixture
@@ -127,9 +129,25 @@ def prove_effect_without_result_becomes_indeterminate(state):
         os.close(slave)
         try:
             human.read_terminal(master, "rui> ")
-            status = human.terminal_step(master, "/status", "The command may have run; Rui did not replay it.")
+            status_deadline = time.monotonic() + 15
+            os.write(master, b"/status\n")
+            status = human.read_terminal(master, "The command may have run; Rui did not replay it.",
+                timeout=status_deadline - time.monotonic())
             assert "Indeterminate Action (may have run): 1" in status, status
             assert "The command may have run; Rui did not replay it." in status, status
+            # Attention text and even a prompt can be rendered while /status
+            # still borrows the command bank. Wait for its settled footer,
+            # not a command-running redraw, before submitting another command.
+            settled = "Rui: in_flight; indeterminate 1\nrui> "
+            after_attention = status.split("The command may have run; Rui did not replay it.", 1)[1]
+            while settled not in after_attention.replace("\r", ""):
+                remaining = status_deadline - time.monotonic()
+                assert remaining > 0, ("settled /status footer", status, after_attention)
+                assert select.select([master], [], [], remaining)[0], ("settled /status footer", status, after_attention)
+                chunk = os.read(master, 65536)
+                assert chunk, ("terminal closed before settled /status footer", status, after_attention)
+                after_attention += chunk.decode(errors="replace")
+                assert len(after_attention) < 1024 * 1024, "unexpected unbounded terminal output"
             human.terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
