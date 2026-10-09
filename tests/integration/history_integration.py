@@ -66,7 +66,7 @@ def exchange(peer):
     return json.loads(body)
 
 
-def mock(store, metadata, responses, cursor=(40, 0, 0), failure=None):
+def mock(store, metadata, responses, cursor=(40, 0, 0), failure=None, staged_bytes=None):
     path = socket_path(store)
     path.parent.mkdir(mode=0o700, exist_ok=True)
     path.unlink(missing_ok=True)
@@ -82,12 +82,21 @@ def mock(store, metadata, responses, cursor=(40, 0, 0), failure=None):
                     assert request["kind"] == "conversation_page"
                     assert [request[k] for k in ("end", "before_position", "before_ordinal")] == list(map(str, cursor))
                     peer.sendall(wire(json.dumps(metadata).encode()))
-                for identity, response in responses:
+                for index, (identity, response) in enumerate(responses):
                     with listener.accept()[0] as peer:
                         request = exchange(peer)
                         assert request["kind"] == "conversation_content"
                         assert (int(request["position"]), int(request["ordinal"])) == identity
                         assert request["stream"] is True and request["start"] == "0"
+                        if index == 1 and staged_bytes is not None:
+                            # The second request proves the first staging write
+                            # completed. Fault scratch before prepare returns;
+                            # leave both complete network bodies unchanged.
+                            scratch = store.parent / "history-scratch"
+                            original = scratch.read_bytes()
+                            assert len(original) == int(metadata["items"][0]["content"]["bytes"])
+                            assert digest(original) == metadata["items"][0]["content"]["sha256"]
+                            scratch.write_bytes(staged_bytes)
                         peer.sendall(response)
             except BaseException as err:
                 errors.append(err)
@@ -100,6 +109,7 @@ def mock(store, metadata, responses, cursor=(40, 0, 0), failure=None):
     if failure:
         assert result.returncode != 0 and result.stdout == b"", (failure, result)
         assert f"prepare failed at {'/'.join(map(str, cursor))}: {failure}".encode() in result.stderr, result.stderr
+        assert b"next " not in result.stderr, result.stderr
     else:
         assert result.returncode == 0, result.stderr
     return result
@@ -112,6 +122,20 @@ def negatives(store):
     result = mock(store, metadata, good)
     assert result.stdout.index(older) < result.stdout.index(b"newer\\x1b\\u202e")
     assert b"Conversation position 20, ordinal 0" in result.stdout
+    # Hash all completed staged ranges, not just received bytes or the last
+    # fetched item. The first item spans the verification window boundary.
+    staged = b"newer staged " + b"q" * 4096
+    staged_page = page([row(30, staged), row(20, older)])
+    staged_wire = [((30, 0), wire(staged, True)), ((20, 0), wire(older, True))]
+    expected = mock(store, staged_page, staged_wire).stdout
+    assert staged in expected and expected.index(older) < expected.index(staged)
+    for altered in (b"!" + staged[1:], staged[:-1] + b"!"):
+        mock(store, staged_page, staged_wire, staged_bytes=altered, failure="ContentBindingMismatch")
+    # An empty second body cannot extend a truncated first range with a hole.
+    mock(store, page([row(30, staged), row(20, b"")]),
+         [staged_wire[0], ((20, 0), wire(b"", True))],
+         staged_bytes=b"", failure="TruncatedHistoryScratch")
+    assert mock(store, staged_page, staged_wire).stdout == expected  # unchanged-cursor retry
     # Second-item failure proves no first-item display escapes preparation.
     mock(store, metadata, [good[0], ((20, 0), wire(b"X" * len(older), True))], failure="ContentBindingMismatch")
     assert (store.parent / "history-scratch").read_bytes() == newer
@@ -149,7 +173,7 @@ def negatives(store):
     assert b"next 40/40/1" in result.stderr
     full["before_ordinal"] = "2"
     mock(store, full, [], failure="InvalidConversationPage")
-    print("History native fault witnesses: metadata, framing, hash, empty, tail, late failure, 8192/8193, retry, continuation")
+    print("History native fault witnesses: metadata, framing, wire/staged hash, scratch truncation, empty, tail, late failure, 8192/8193, retry, continuation")
 
 
 def real_host(state, store):
