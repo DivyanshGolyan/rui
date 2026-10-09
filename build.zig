@@ -145,8 +145,10 @@ pub fn build(b: *std.Build) void {
     b.step("persistent-cancellation-integration", "Restore persistent configuration before held output and borrower joins").dependOn(&cancellation_integration.step);
     // libc interposition here is a Linux owner-boundary control, not a native
     // Darwin drain/restore qualification or a substitute for its campaign.
+    var native_drain: ?*std.Build.Step.Compile = null;
     if (target.result.os.tag == .linux) {
         const drain_probe = addRui(b, target, .ReleaseSafe, "rui-native-drain-test", "src/native_drain_test.zig", pinned_transport);
+        native_drain = drain_probe;
         drain_probe.root_module.addCSourceFile(.{ .file = b.path("tests/integration/native_drain_probe.c"), .flags = &.{"-std=gnu11"} });
         drain_probe.root_module.linkSystemLibrary("dl", .{});
         const drain_control = b.addSystemCommand(&.{"python3"});
@@ -444,6 +446,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addArtifactArg(session_input_client);
     fast_integrations.addArtifactArg(history_client);
     fast_integrations.addArtifactArg(legacy_terminal);
+    if (native_drain) |probe| fast_integrations.addArtifactArg(probe);
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.step.dependOn(&release.step);
     fast_integrations.step.dependOn(&run_evaluator_host.step);
@@ -465,6 +468,7 @@ pub fn build(b: *std.Build) void {
     process_integrations.addArtifactArg(session_input_client);
     process_integrations.addArtifactArg(history_client);
     process_integrations.addArtifactArg(legacy_terminal);
+    if (native_drain) |probe| process_integrations.addArtifactArg(probe);
     const full_evaluator = b.addSystemCommand(&.{"python3"});
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     full_evaluator.addArtifactArg(evaluator);
