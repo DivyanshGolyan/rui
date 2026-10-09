@@ -130,7 +130,9 @@ pub const Requests = struct {
 
     /// Conversation has no scoped-digest header. Its snapshot reference binds
     /// framing before delivery and the domain-separated body hash at EOF.
-    pub fn readConversationContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: CommandObservation.ContentReference, sink: anytype) !?ReadFailure {
+    /// Null is an explicit raw export without prior snapshot authentication;
+    /// it still validates complete framing and physical EOF before final feed.
+    pub fn readConversationContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?CommandObservation.ContentReference, sink: anytype) !?ReadFailure {
         try self.check();
         try validateIdentityInputs("", session);
         if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
@@ -236,7 +238,7 @@ pub const Requests = struct {
     }
 };
 
-fn readConversationContentResponse(requests: Requests, fd: std.posix.fd_t, expected: CommandObservation.ContentReference, sink: anytype) !?ReadFailure {
+fn readConversationContentResponse(requests: Requests, fd: std.posix.fd_t, expected: ?CommandObservation.ContentReference, sink: anytype) !?ReadFailure {
     const head = try readResponseHeadUntil(requests, fd, 60_000, null);
     if (head.status != 200) {
         if (head.kind != .command_json) return error.InvalidResponse;
@@ -244,9 +246,12 @@ fn readConversationContentResponse(requests: Requests, fd: std.posix.fd_t, expec
         return try decodeReadFailure(try readCommandBodyUntil(requests, fd, head, &reply, null), false);
     }
     if (head.kind != .content_bytes) return error.InvalidResponse;
-    if (head.content_length != expected.bytes or head.total != expected.bytes or head.next != expected.bytes) return error.ContentBindingMismatch;
+    if (expected) |reference| {
+        if (head.content_length != reference.bytes or head.total != reference.bytes or head.next != reference.bytes) return error.ContentBindingMismatch;
+    } else if (head.total != head.content_length or head.next != head.content_length) return error.InvalidResponse;
     var hash = protocol.contentHasher();
-    var remaining = expected.bytes;
+    const digest = if (expected) |reference| reference.digest else null;
+    var remaining = head.content_length;
     var window: [protocol.content_window_bytes]u8 = undefined;
     while (remaining != 0) {
         const wanted: usize = @intCast(@min(remaining, window.len));
@@ -256,17 +261,17 @@ fn readConversationContentResponse(requests: Requests, fd: std.posix.fd_t, expec
             if (count == 0) return error.TruncatedResponse;
             filled += count;
         }
-        hash.update(window[0..wanted]);
+        if (expected != null) hash.update(window[0..wanted]);
         remaining -= wanted;
-        if (remaining == 0) try completeConversationEOF(requests, fd, hash.finalResult(), expected.digest);
+        if (remaining == 0) try completeConversationEOF(requests, fd, hash.finalResult(), digest);
         if (@TypeOf(sink) == std.Io.File) try sink.writeStreamingAll(requests.io, window[0..wanted]) else try sink.feed(window[0..wanted]);
     }
-    if (expected.bytes == 0) try completeConversationEOF(requests, fd, hash.finalResult(), expected.digest);
+    if (head.content_length == 0) try completeConversationEOF(requests, fd, hash.finalResult(), digest);
     return null;
 }
 
-fn completeConversationEOF(requests: Requests, fd: std.posix.fd_t, actual: [32]u8, expected: [32]u8) !void {
-    if (!std.mem.eql(u8, &actual, &expected)) return error.ContentBindingMismatch;
+fn completeConversationEOF(requests: Requests, fd: std.posix.fd_t, actual: [32]u8, expected: ?[32]u8) !void {
+    if (expected) |digest| if (!std.mem.eql(u8, &actual, &digest)) return error.ContentBindingMismatch;
     var tail: [1]u8 = undefined;
     if (try readRequest(requests, fd, &tail, std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s) != 0) return error.InvalidResponse;
 }

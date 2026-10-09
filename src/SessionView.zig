@@ -8,6 +8,7 @@ const TerminalText = @import("TerminalText.zig");
 const AnswerRenderer = @import("AnswerRenderer.zig");
 
 pub const Stage = struct { current: client.Current, page: client.ActivityPage };
+pub const historical_item_bytes = 8192;
 
 pub fn inspectCurrent(requests: client.Requests, store: []const u8, session: []const u8, file: std.Io.File) !client.Current {
     // Positional capture makes reused scratch independent of its stream cursor.
@@ -131,6 +132,39 @@ fn print(sink: anytype, comptime format: []const u8, args: anytype) !void {
     try sink.feed(try std.fmt.bufPrint(&storage, format, args));
 }
 
+/// Bash argv quoting, not terminal-display escaping. Every byte round trips;
+/// control/non-ASCII bytes remain printable and cannot acquire shell authority.
+fn bashArgument(sink: anytype, value: []const u8) !void {
+    if (std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidExportIdentity;
+    try sink.feed("$'");
+    var escaped: [4]u8 = undefined;
+    for (value) |byte| {
+        if (byte == '\'' or byte == '\\') {
+            try sink.feed(&.{ '\\', byte });
+        } else if (byte >= 0x20 and byte <= 0x7e) {
+            try sink.feed(&.{byte});
+        } else try sink.feed(try std.fmt.bufPrint(&escaped, "\\x{x:0>2}", .{byte}));
+    }
+    try sink.feed("'");
+}
+
+pub fn omission(sink: anytype, store: []const u8, session: []const u8, position: u64, ordinal: u64, bytes: u64) !void {
+    try print(sink, "[omitted: {d} raw bytes; Conversation position {d}, ordinal {d}]\n", .{ bytes, position, ordinal });
+    try sink.feed("rui export-conversation --store ");
+    try bashArgument(sink, store);
+    if (std.mem.indexOfScalar(u8, session, 0) != null) {
+        // Public references can contain NUL; Bash argv cannot. Hex is only
+        // a caller encoding, never a different Session or a normalization.
+        try sink.feed(" --session-hex ");
+        var encoded: [2]u8 = undefined;
+        for (session) |byte| try sink.feed(try std.fmt.bufPrint(&encoded, "{x:0>2}", .{byte}));
+    } else {
+        try sink.feed(" --session ");
+        try bashArgument(sink, session);
+    }
+    try print(sink, " --position {d} --ordinal {d} > NEW_FILE\n", .{ position, ordinal });
+}
+
 pub fn header(staged: *const Stage, sink: anytype) !void {
     const current = &staged.current;
     try sink.feed("Rui Session: ");
@@ -149,7 +183,9 @@ pub fn header(staged: *const Stage, sink: anytype) !void {
     if (facts.pending_total != 0) try print(sink, "Rui: {d} pending at opening snapshot.\n", .{facts.pending_total});
 }
 
-fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, sink: anytype) !void {
+fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, historical: bool, sink: anytype) !void {
+    if (historical and reference.length > historical_item_bytes)
+        return omission(sink, store, session, item.position, item.ordinal, reference.length);
     if (item.value == .assistant) {
         var answer: Answer(@TypeOf(sink)) = undefined;
         answer.init(sink);
@@ -189,15 +225,15 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             },
             .user => |message| {
                 try sink.feed("\nYou:\n");
-                try content(requests, store, session, item, message.content, sink);
+                try content(requests, store, session, item, message.content, page.facts.direction == .backward, sink);
             },
             .assistant => |reference| {
                 try sink.feed("\n--- Assistant ---\n");
-                try content(requests, store, session, item, reference, sink);
+                try content(requests, store, session, item, reference, page.facts.direction == .backward, sink);
             },
             .tool_result => |reference| {
                 try sink.feed("\nTool Result:\n");
-                try content(requests, store, session, item, reference, sink);
+                try content(requests, store, session, item, reference, page.facts.direction == .backward, sink);
             },
             .call => |call| {
                 try sink.feed("\nRui: Proposal; inspection is NOT authorization.\n");
@@ -234,6 +270,20 @@ fn rowIndex(page: *const client.ActivityPage, index: usize) usize {
 
 pub fn bypassWarning(bash: bool, bypass: bool) bool {
     return bash and bypass;
+}
+
+test "SessionView omission keeps NUL Session identity executable via hex" {
+    const Sink = struct {
+        out: *std.Io.Writer,
+        pub fn feed(self: @This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
+    };
+    var storage: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try omission(Sink{ .out = &writer }, "/store", "a\x00é", 17, 3, 8193);
+    try std.testing.expectEqualStrings("[omitted: 8193 raw bytes; Conversation position 17, ordinal 3]\n" ++
+        "rui export-conversation --store $'/store' --session-hex 6100c3a9 --position 17 --ordinal 3 > NEW_FILE\n", writer.buffered());
 }
 
 test "SessionView Answer preserves split text, final flush and exact sink failures" {

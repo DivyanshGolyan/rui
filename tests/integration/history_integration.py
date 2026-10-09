@@ -132,7 +132,9 @@ def negatives(store):
     rendered = mock(store, page([row(30, large)]), [((30, 0), wire(large, True))])
     assert large in rendered.stdout
     omitted = mock(store, page([row(30, b"q" * 8193)]), [])
-    assert b"omitted: 8193 raw bytes; export Conversation session history/exact position 30 ordinal 0" in omitted.stdout
+    assert b"omitted: 8193 raw bytes; Conversation position 30, ordinal 0" in omitted.stdout
+    assert (f"rui export-conversation --store $'{store.resolve()}' --session $'history/exact'"
+            " --position 30 --ordinal 0 > NEW_FILE").encode() in omitted.stdout
     for change in ("fixed_end", "order", "ordinal", "digest", "direction", "kind"):
         bad = copy.deepcopy(metadata)
         if change == "fixed_end": bad["end"] = "41"
