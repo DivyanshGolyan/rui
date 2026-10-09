@@ -1421,7 +1421,7 @@ fn persistentCommand(owner: *SessionFrontend, args: []const []const u8) !void {
     } else if (std.mem.eql(u8, name, "/recover") and args.len == 2) {
         var accepted: ?client.CapturedIdentity = null;
         defer if (accepted) |original| {
-            owner.accepted_original = original;
+            if (owner.ticket == null) owner.original = .{ .identity = original, .outcome = .accepted };
         };
         try owner.stream(runFrontendRecover, .{ init, args[1], &accepted });
     } else if (std.mem.eql(u8, name, "/setup")) {
@@ -1451,7 +1451,7 @@ fn persistentCommand(owner: *SessionFrontend, args: []const []const u8) !void {
         @memcpy(flags[4..][0 .. args.len - 1], args[1..]);
         var accepted: ?client.CapturedIdentity = null;
         defer if (accepted) |original| {
-            owner.accepted_original = original;
+            if (owner.ticket == null) owner.original = .{ .identity = original, .outcome = .accepted };
         };
         try owner.stream(runFrontendConfigure, .{ init, flags[0 .. args.len + 3], &accepted });
     } else if (std.mem.eql(u8, name, "/approve") and args.len == 1) {

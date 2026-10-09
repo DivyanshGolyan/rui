@@ -67,7 +67,7 @@ capture_key: [36]u8 = undefined,
 capture_reserved: bool = false,
 capture_path: [std.Io.Dir.max_path_bytes]u8 = undefined,
 captured: ?client.CapturedRecord = null,
-accepted_original: ?client.CapturedIdentity = null,
+original: ?struct { identity: client.CapturedIdentity, outcome: Input.Outcome } = null,
 reply: client.MutationReply = undefined,
 reply_buffer: client.ReplyBuffer = .{},
 
@@ -95,9 +95,9 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
     if (self.reads.take() != null) self.reads.acknowledge();
     if (self.captured) |*captured| captured.close(init.io);
     const output_failed = (if (outcome) |_| false else |_| true) or (if (restored) |_| false else |_| true);
-    if (output_failed) if (self.accepted_original) |original| {
+    if (output_failed) if (self.original) |original| {
         // Best-effort explanation cannot replace the retained fatal outcome.
-        self.acceptedDiagnostic(&original) catch {};
+        self.originalDiagnostic(&original.identity, original.outcome) catch {};
     };
     try restored;
     if (self.mask_failure) |err| return err;
@@ -121,13 +121,18 @@ fn drive(self: *Self, store: []const u8, session: []const u8) !void {
     }
 }
 
-fn acceptedDiagnostic(self: *Self, original: *const client.CapturedIdentity) !void {
+fn originalDiagnostic(self: *Self, original: *const client.CapturedIdentity, outcome: Input.Outcome) !void {
     _ = self;
     // At most twelve escaped bytes per identity byte, plus fixed labels. This
     // is transient final-report storage, not retained output or a retry queue.
     var storage: [12 * (protocol.max_store_bytes + protocol.max_session_bytes + protocol.max_key_bytes) + 256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&storage);
-    try writer.writeAll("Rui: Original Admission accepted; do not replace intent.\n");
+    try writer.writeAll(switch (outcome) {
+        .accepted => "Rui: Original Admission accepted; do not replace intent.\n",
+        .rejected => "Rui: Original Admission rejected; inspect the same saved request.\n",
+        .not_sent => "Rui: Original Admission not sent; recover the same saved request.\n",
+        .unconfirmed => "Rui: Original Admission unconfirmed; recover the same saved request, never replacement intent.\n",
+    });
     inline for (.{ "Store: ", "Session: ", "Key: " }, .{ original.store.slice(), original.session.slice(), original.key.slice() }) |label, value| {
         try writer.writeAll(label);
         var text: TerminalText = .{ .mode = .line };
@@ -278,8 +283,9 @@ fn settleAdmission(self: *Self, force: bool) !void {
 fn applyAdmission(self: *Self, result: anyerror!void) !void {
     if (result) |_| {
         const accepted = self.reply.isAccepted();
-        if (accepted) self.accepted_original = self.captured.?.saved;
-        try self.input.resolve(self.ticket.?, if (accepted) .accepted else if (self.reply.answer) |_| .rejected else |_| .unconfirmed);
+        const outcome: Input.Outcome = if (accepted) .accepted else if (self.reply.answer) |_| .rejected else |_| .unconfirmed;
+        self.original = .{ .identity = self.captured.?.saved, .outcome = outcome };
+        try self.input.resolve(self.ticket.?, outcome);
         self.releaseSettledCapture();
         if (!accepted) {
             self.pending_notice = if (self.ticket == null)
@@ -293,6 +299,7 @@ fn applyAdmission(self: *Self, result: anyerror!void) !void {
         }
     } else |err| {
         try self.input.resolve(self.ticket.?, .unconfirmed);
+        if (self.captured) |captured| self.original = .{ .identity = captured.saved, .outcome = .unconfirmed };
         self.pending_notice = "Admission unconfirmed. Ctrl-R retries the original capture; editing remains available.";
         if (err == error.CanonicalStoreFailure) {
             self.fatal = err;
@@ -447,6 +454,16 @@ pub fn capture(self: *Self, bytes: []const u8) !client.CapturedRecord {
     return self.waitCapture();
 }
 
+fn joinCapture(self: *Self) !void {
+    const joined = self.admission.join();
+    // A completed capture still owns recovery identity when UI/mask cleanup
+    // fails. Actual capture failure leaves the preceding original fact intact.
+    if (self.admission.result()) |result| if (result == .succeeded) {
+        self.original = .{ .identity = self.captured.?.saved, .outcome = .not_sent };
+    };
+    try joined;
+}
+
 fn waitCapture(self: *Self) !client.CapturedRecord {
     while (!self.admission.completed()) {
         self.captureStep() catch |err| {
@@ -455,12 +472,12 @@ fn waitCapture(self: *Self) !client.CapturedRecord {
             self.detached = true;
             const restored = self.restoreTerminal();
             self.admission.cancel();
-            self.admission.join() catch {}; // Original input/restore failure wins.
+            self.joinCapture() catch {}; // Original input/restore failure wins.
             try restored;
             return err;
         };
     }
-    try self.admission.join();
+    try self.joinCapture();
     const captured = self.captured.?;
     self.captured = null;
     return captured;
@@ -520,7 +537,9 @@ fn startTaskUsing(self: *Self, task: *Task, context: *anyopaque, function: Task.
         // launch with an already-started borrower left outside its join guard.
         const restored = self.restoreTerminal();
         task.cancel();
-        task.join() catch {}; // Terminal/mask failure outranks worker result.
+        if (task == &self.admission and self.capturing) {
+            self.joinCapture() catch {}; // Terminal/mask failure outranks worker result.
+        } else task.join() catch {}; // Other borrowers retain their ordinary outcome.
         if (task.take() != null) task.acknowledge();
         try restored;
         return error.SignalMaskRestoreFailed;
@@ -607,6 +626,10 @@ fn sendLaunchFailed(self: *Self, err: anyerror) !void {
 
 fn sendNotStarted(self: *Self) !void {
     try self.input.resolve(self.ticket.?, .not_sent);
+    if (self.captured) |captured| self.original = .{
+        .identity = captured.saved,
+        .outcome = if (self.input.submissionState() == .unconfirmed) .unconfirmed else .not_sent,
+    };
     self.pending_notice = "Send worker unavailable; Ctrl-R retries the original capture.";
     self.dirty = true;
 }
@@ -1106,7 +1129,7 @@ test "SessionFrontend mask failure settles already joined accepted or uncertain 
         self.read_kind = .render;
         self.admission = .{ .terminal = result };
         self.mask_failure = error.SignalMaskRestoreFailed;
-        self.accepted_original = null;
+        self.original = null;
         self.fatal = null;
         self.deferred_retry = false;
         for ("original") |byte| _ = self.feed(byte);
@@ -1122,14 +1145,15 @@ test "SessionFrontend mask failure settles already joined accepted or uncertain 
         try self.captured.?.saved.key.set("original-key");
         self.reply = .{ .status = 200, .target = undefined, .answer = .{ .result = .{ .accepted = .{ .message = .{ .admission = 7 } } }, .replayed = false } };
         try std.testing.expectError(error.SignalMaskRestoreFailed, self.sendLaunchFailed(error.SignalMaskRestoreFailed));
+        try std.testing.expect(self.original != null);
+        try std.testing.expectEqualStrings("original-key", self.original.?.identity.key.slice());
         if (result == .succeeded) {
-            try std.testing.expect(self.accepted_original != null);
-            try std.testing.expectEqualStrings("original-key", self.accepted_original.?.key.slice());
+            try std.testing.expectEqual(Input.Outcome.accepted, self.original.?.outcome);
             try std.testing.expect(self.ticket == null and self.captured == null);
         } else {
             try std.testing.expectEqual(Input.State.unconfirmed, self.input.submissionState().?);
             try std.testing.expectEqualStrings("original", self.input.retained().?.bytes);
-            try std.testing.expect(self.accepted_original == null);
+            try std.testing.expectEqual(Input.Outcome.unconfirmed, self.original.?.outcome);
         }
     }
 }
