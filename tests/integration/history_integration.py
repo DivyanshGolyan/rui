@@ -99,7 +99,7 @@ def mock(store, metadata, responses, cursor=(40, 0, 0), failure=None):
     path.unlink()
     if failure:
         assert result.returncode != 0 and result.stdout == b"", (failure, result)
-        assert f"preserved {'/'.join(map(str, cursor))}: {failure}".encode() in result.stderr, result.stderr
+        assert f"prepare failed at {'/'.join(map(str, cursor))}: {failure}".encode() in result.stderr, result.stderr
     else:
         assert result.returncode == 0, result.stderr
     return result

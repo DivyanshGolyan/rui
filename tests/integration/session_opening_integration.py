@@ -232,7 +232,7 @@ def historical_export(state, home, store, workspace, endpoint, owner):
             invocation = command[:-len("NEW_FILE")] + str(destination)
             result = subprocess.run(["bash", "-c", invocation], cwd=workspace,
                 env={**os.environ, "HOME": str(home),
-                     "PATH": str(host.RUI.parent) + os.pathsep + os.environ["PATH"]},
+                     "PATH": str(state / "bin") + os.pathsep + os.environ["PATH"]},
                 capture_output=True, timeout=15)
             assert result.returncode == 0 and result.stdout == b"", result.stderr
             actual.append(destination.read_bytes())
@@ -252,7 +252,7 @@ def historical_export(state, home, store, workspace, endpoint, owner):
                     try:
                         failed = subprocess.run(["bash", "-c", command[:-len(" > NEW_FILE")]],
                             env={**os.environ, "HOME": str(home),
-                                 "PATH": str(host.RUI.parent) + os.pathsep + os.environ["PATH"]},
+                                 "PATH": str(state / "bin") + os.pathsep + os.environ["PATH"]},
                             capture_output=True, timeout=15)
                         assert failed.returncode != 0, (failure, failed)
                         assert failed.stdout == (b"" if failure == "framing" else actual[-1][:8192])
@@ -278,22 +278,43 @@ def historical_export(state, home, store, workspace, endpoint, owner):
     for index in range(9):
         with endpoint.lock:
             endpoint.responses.append(host.sse_answer("small-response-" + str(index),
-                "small-private-" + str(index), "small-item-" + str(index), "SMALL-ANSWER")[0])
+                "small-private-" + str(index), "small-item-" + str(index), "SMALL-ANSWER-" + str(index))[0])
         request = key()
-        host.message(state, store, request, session, "SMALL-USER")
+        host.message(state, store, request, session, "SMALL-USER-" + str(index))
         completed(store, request)
-    terminal = Terminal(home, store, session)
+    reads = 0
+    def second_item_fault(response):
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            return response[:-1]
+        return response
+    proxy = ReplyProxy(owner, "/v1/conversation-content", second_item_fault)
+    terminal = None
     try:
+        terminal = Terminal(home, store, session)
         terminal.until("rui> ", 0)
+        recent = bytes(terminal.transcript)
         start = len(terminal.transcript)
         terminal.send("/history\n")
-        terminal.until("NEW_FILE", start)
+        terminal.until("History unavailable; old cursor retained.", start)
+        failed = bytes(terminal.transcript[start:])
+        assert not any(value in failed for value in (b"Conversation position", b"SMALL-ANSWER", b"SMALL-USER")), "partial page displayed"
+        start = len(terminal.transcript)
+        terminal.send("/history\n")
+        while not any(value in terminal.transcript[start:] for value in (b"NEW_FILE", b"No older Conversation rows")):
+            assert terminal.read()
         terminal.command("/status")
         history = bytes(terminal.transcript[start:])
+        expected = [f"SMALL-{role}-{index}".encode() for index in range(9) for role in ("USER", "ANSWER")]
+        actual = re.findall(rb"SMALL-(?:USER|ANSWER)-[0-9]+", history + recent)
+        assert actual == expected, ("history retry skipped, duplicated or reordered a value", actual, expected)
         terminal.command("/exit", "Detached.")
         terminal.finish()
     finally:
-        terminal.close()
+        if terminal is not None:
+            terminal.close()
+        proxy.close()
     exports(history)
     # NUL is admitted by the real protocol but cannot travel through argv.
     # Copy captured request values, never alter the original recovery records.
@@ -796,6 +817,10 @@ def local_commands(home, store, workspace, endpoint):
                 terminal.until("éKEPTZ", start)
                 fcntl.flock(lock, fcntl.LOCK_UN)
             terminal.until("Model: not selected", start)
+            # A field is not command completion. Wait until the worker's last
+            # report has joined and the owner releases the command loan.
+            terminal.until("Host: unavailable", start)
+            terminal.until("Rui: idle\r\r\nrui> éKEPTZ", start)
             terminal.send("\x1b[F" + "\x7f" * 6)
         terminal.command("/exit", "Detached.")
         terminal.finish()
@@ -833,6 +858,10 @@ def wait_attention(state, home, store, workspace, endpoint):
 
 def main():
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-opening."))
+    # Build gates name their artifact rui-release-safe-check. Exercise the
+    # printed public command with that exact executable, not a PATH install.
+    (state / "bin").mkdir()
+    (state / "bin/rui").symlink_to(host.RUI)
     home, workspace, store = state / "home", state / "workspace", state / "store"
     home.mkdir()
     workspace.mkdir()

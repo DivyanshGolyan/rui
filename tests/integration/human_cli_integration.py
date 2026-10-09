@@ -702,11 +702,12 @@ def main():
                 handle = next(line.split("request: ", 1)[1].strip() for line in welcome.splitlines()
                     if line.startswith("request: "))
                 reference = f"rui/{handle}"
-                assert f"Session: {reference}" in welcome and "Permission: ask" in welcome, welcome
+                assert f"Session: {reference}" in welcome and "Permission Mode: bypass" in welcome, welcome
+                assert "Bash bypasses approval" in welcome, welcome
                 assert f"Workspace (Bash cwd): {workspace.resolve()}" in welcome, welcome
                 assert "Model: gpt-6-luna" in welcome and "Provider: codex" in welcome, welcome
                 current = fixture.command("inspect-session", "--store", store, "--session", reference)
-                assert current["session"]["permission_mode"] == "ask", current
+                assert current["session"]["permission_mode"] == "bypass" and current["session"]["tools"] == ["bash"], current
                 assert current["session"]["workspace"] == str(workspace.resolve()), current
                 assert json.loads(run(preferences_home, "recover", handle, "--json"))["answer"]["replayed"] is True
                 created.append(reference)
@@ -782,7 +783,7 @@ def main():
             recovered_again = json.loads(run(preferences_home, "recover", handle, "--json"))
             assert recovered_again["answer"]["replayed"], recovered_again
             assert fixture.command("inspect-session", "--store", store,
-                "--session", f"rui/{handle}")["session"]["permission_mode"] == "ask"
+                "--session", f"rui/{handle}")["session"]["permission_mode"] == "bypass"
         finally:
             if interrupted.poll() is None:
                 interrupted.kill()
