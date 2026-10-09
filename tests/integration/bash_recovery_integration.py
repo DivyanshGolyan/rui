@@ -122,7 +122,7 @@ def prove_effect_without_result_becomes_indeterminate(state):
         home.mkdir()
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
-        entered = subprocess.Popen([str(RUI), "session", "--store", str(store), "--session", session],
+        entered = subprocess.Popen([str(RUI), "--resume", "--store", str(store), "--", session],
             env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         try:

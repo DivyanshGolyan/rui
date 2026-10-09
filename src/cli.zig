@@ -55,7 +55,7 @@ fn dispatch(init: std.process.Init) !void {
     if (std.mem.eql(u8, command, "login")) return login(init, args[2..], false, codex_auth.login);
     if (std.mem.eql(u8, command, "host")) return host(init, args[2..]);
     if (std.mem.eql(u8, command, "export-conversation")) return exportConversation(init, args[2..]);
-    if (std.mem.eql(u8, command, "setup")) try setup(init, args[2..]) else if (std.mem.eql(u8, command, "sessions")) try sessions(init, args[2..]) else if (std.mem.eql(u8, command, "session")) try enterSession(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, args[2..], false) else return usage();
+    if (std.mem.eql(u8, command, "setup")) try setup(init, args[2..]) else if (std.mem.eql(u8, command, "sessions")) try sessions(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, args[2..], false) else return usage();
     try postCommandHold(init);
 }
 
@@ -819,13 +819,31 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     var explicit_provider: ?[]const u8 = null;
     var explicit_model: ?[]const u8 = null;
     var resume_ref: ?[]const u8 = null;
+    var resuming = false;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
-        if (std.mem.eql(u8, args[index], "--store") and store == null) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--provider") and explicit_provider == null) explicit_provider = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--model") and explicit_model == null) explicit_model = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--resume") and resume_ref == null) resume_ref = try takeValue(args, &index) else return usage();
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--store") and store == null) {
+            store = try takeValue(args, &index);
+        } else if (std.mem.eql(u8, arg, "--provider") and explicit_provider == null) {
+            explicit_provider = try takeValue(args, &index);
+        } else if (std.mem.eql(u8, arg, "--model") and explicit_model == null) {
+            explicit_model = try takeValue(args, &index);
+        } else if (std.mem.eql(u8, arg, "--resume") and !resuming) {
+            resuming = true;
+        } else if (resuming and std.mem.eql(u8, arg, "--") and resume_ref == null) {
+            if (index + 1 < args.len) {
+                if (index + 2 != args.len) return usage();
+                resume_ref = args[index + 1];
+            }
+            break;
+        } else if (resuming and resume_ref == null and !std.mem.startsWith(u8, arg, "--")) {
+            resume_ref = arg;
+        } else return usage();
     }
-    if (resume_ref) |reference| {
+    if (resuming) {
         if (explicit_provider != null or explicit_model != null) return usage();
-        return enterSession(init, if (store) |destination| &.{ "--store", destination, "--session", reference } else &.{ "--session", reference });
+        return enterSession(init, store, resume_ref);
     }
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
         std.debug.print("rui needs terminal input and output to create a Session; use explicit one-shot commands for scripts. No Host or Session changed.\n", .{});
@@ -926,7 +944,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
         try writeMutationReply(init.io, reply, null, true);
         return error.SessionConfigurationRejected;
     }
-    try enterSession(init, &.{ "--store", saved.store.slice(), "--session", saved.session.slice() });
+    try enterSession(init, saved.store.slice(), saved.session.slice());
 }
 
 fn preflightNewSession(io: std.Io, destination: []const u8) !void {
@@ -1146,7 +1164,7 @@ fn configureUsing(init: std.process.Init, args: []const []const u8, interactive:
     if (human and !json and !interactive) {
         var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "configuration: {s} in {s}\n", .{ saved.session.slice(), saved.store.slice() }));
-        if (reply.isAccepted()) try std.Io.File.stdout().writeStreamingAll(io, "next: rui session (same Store and Session)\n");
+        if (reply.isAccepted()) try std.Io.File.stdout().writeStreamingAll(io, "next: rui --resume (same Store and Session)\n");
     }
 }
 
@@ -1192,7 +1210,7 @@ fn message(init: std.process.Init, args: []const []const u8) !void {
     if (human and !json) {
         var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "message: {s} in {s}\n", .{ input.session, input.store }));
-        if (reply.isAccepted()) try std.Io.File.stdout().writeStreamingAll(io, "next: rui session (same Store and Session)\n");
+        if (reply.isAccepted()) try std.Io.File.stdout().writeStreamingAll(io, "next: rui --resume (same Store and Session)\n");
     }
 }
 
@@ -1350,20 +1368,102 @@ fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []cons
     return null;
 }
 
-fn enterSession(init: std.process.Init, args: []const []const u8) !void {
-    var store: ?[]const u8 = null;
-    var session_ref: ?[]const u8 = null;
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session")) session_ref = try takeValue(args, &index) else return error.UnknownArgument;
-    }
+fn enterSession(init: std.process.Init, store: ?[]const u8, session_ref: ?[]const u8) !void {
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) return error.InteractiveTerminalRequired;
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, store, &fallback));
+    const selected = try selectedStore(init, store, &fallback);
+    try startHost(init, selected, true);
+    const paths = try platform.resolveClientPaths(init.io, selected);
     var directory: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const scratch = try renderScratch(init);
     defer scratch.close(init.io);
-    try SessionFrontend.run(init, paths.store.slice(), session_ref orelse return error.SessionRequired, try requestDirectory(init, &directory), scratch, .{ .parse = interactiveTokens, .run = persistentCommand });
+    try SessionFrontend.run(init, paths.store.slice(), session_ref, try requestDirectory(init, &directory), scratch, .{ .parse = interactiveTokens, .run = persistentCommand, .pick = pickSession });
+}
+
+fn pickSession(owner: *SessionFrontend) !?protocol.Bounded(protocol.max_session_bytes) {
+    var directory = try std.Io.Dir.cwd().openDir(owner.init.io, ".", .{});
+    defer directory.close(owner.init.io);
+    var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+    const length = try directory.realPath(owner.init.io, &workspace);
+    const Picker = struct {
+        scope: ?[]const u8,
+        cursor: client.SessionListCursor = .{},
+        page: client.SessionListPage = undefined,
+        fn read(client_requests: client.Requests, store: []const u8, scope: ?[]const u8, cursor: client.SessionListCursor, scratch: std.Io.File) !client.SessionListPage {
+            scratch.setLength(client_requests.io, 0) catch return error.ResumeListingUnavailable;
+            const Capture = struct {
+                io: std.Io,
+                file: std.Io.File,
+                offset: u64 = 0,
+                pub fn feed(self: *@This(), bytes: []const u8) !void {
+                    try self.file.writePositionalAll(self.io, bytes, self.offset);
+                    self.offset += bytes.len;
+                }
+            };
+            var capture: Capture = .{ .io = client_requests.io, .file = scratch };
+            var buffer: client.ReplyBuffer = .{};
+            const reply = client_requests.listSessions(store, scope, cursor, &capture, &buffer) catch |err| {
+                if (err == error.CanonicalStoreFailure) return err;
+                return error.ResumeListingUnavailable;
+            };
+            const decoded = client.SessionListReply.decode(client_requests.io, scratch, scope, cursor, reply) catch return error.ResumeListingUnavailable;
+            return switch (decoded) {
+                .page => |page| page,
+                .failure => |failure| return if (failure.err() == error.CanonicalStoreFailure) error.CanonicalStoreFailure else error.ResumeListingUnavailable,
+            };
+        }
+        fn prepare(frontend: *SessionFrontend, self: *@This()) !bool {
+            // Only worker read failures become recoverable listing failures;
+            // terminal/choice failures from call must remain fatal unchanged.
+            self.page = try frontend.call(read, .{ frontend.store.slice(), self.scope, self.cursor, frontend.scratch });
+            const Sink = struct {
+                owner: *SessionFrontend,
+                pub fn feed(s: @This(), bytes: []const u8) !void {
+                    try s.owner.write(bytes);
+                }
+            };
+            const sink: Sink = .{ .owner = frontend };
+            try frontend.write(if (self.scope == null) "Rui: Resume — all Workspaces.\n" else "Rui: Resume — current Workspace.\n");
+            var prefix: [64]u8 = undefined;
+            for (self.page.rows[0..self.page.count], 1..) |*row, number| {
+                try frontend.write(try std.fmt.bufPrint(&prefix, "[{d}] Session: ", .{number}));
+                try SessionView.text(sink, row.reference.slice());
+                try frontend.write("\n    Workspace: ");
+                try SessionView.text(sink, row.workspace.slice());
+                try frontend.write("\n    Provider/model: ");
+                try frontend.write(@tagName(row.provider));
+                try frontend.write("/");
+                try SessionView.text(sink, row.model.slice());
+                try frontend.write(try std.fmt.bufPrint(&prefix, "\n    Permission: {s}\n", .{@tagName(row.permission_mode)}));
+                if (SessionView.bypassWarning(row.tools.bash, row.permission_mode == .bypass))
+                    try frontend.write("    Rui: WARNING — Bash bypasses approval.\n");
+            }
+            if (self.page.count == 0) try frontend.write("Rui: No configured Sessions in this scope.\n");
+            try frontend.write("Resume: choose 1–8, n next page, a all Workspaces, d defer.\n");
+            return true;
+        }
+    };
+    // Retained page: 36,128 bytes on Linux x86-64. The joined worker result
+    // adds one page while the prior page survives; decode also has fixed
+    // page/reply values, a 4-KiB input window and 12-KiB parser storage.
+    // Value copies may be elided: these are storage estimates, not stack or
+    // physical peaks. Decoder loans end on return, worker storage after join,
+    // and the picker page/filter/choice here on selection or deferral. One
+    // active picker per Frontend, with no dormant-Session population multiplier.
+    var picker: Picker = .{ .scope = workspace[0..length] };
+    var input: [16]u8 = undefined;
+    while (try owner.choose(&input, Picker.prepare, .{&picker})) |choice| {
+        if (std.mem.eql(u8, choice, "d")) return null;
+        if (std.mem.eql(u8, choice, "a")) {
+            picker.scope = null;
+            picker.cursor = .{};
+        } else if (std.mem.eql(u8, choice, "n") and picker.page.next != null) {
+            picker.cursor = picker.page.next.?;
+        } else if (choice.len == 1 and choice[0] >= '1' and choice[0] <= '8' and choice[0] - '1' < picker.page.count) {
+            return picker.page.rows[choice[0] - '1'].reference;
+        } else try owner.write("Rui: No selection; choose a listed row, next page, all Workspaces or defer.\n");
+    }
+    return null;
 }
 
 fn persistentCommand(owner: *SessionFrontend, args: []const []const u8) !void {
@@ -1372,7 +1472,7 @@ fn persistentCommand(owner: *SessionFrontend, args: []const []const u8) !void {
     const session_ref = owner.session.slice();
     const name = args[0];
     if (std.mem.eql(u8, name, "/help") and args.len == 1) {
-        try owner.write("Rui: /help /status /wait /requests /result KEY /setup [settings] /login /configure [settings] /resume REF /recover [KEY] /discard /approve /history /exit\nCtrl-R recovers original captured intent, never a new Message. Ctrl-G deliberately inspects a pending Action; attention never takes your draft. /discard abandons only a definite rejection. /resume stages metadata before switching. /exit detaches without cancelling Host work. Prefix // to send a leading slash.\n");
+        try owner.write("Rui: /help /status /wait /requests /result KEY /setup [settings] /login /configure [settings] /resume [REF] /recover [KEY] /discard /approve /history /exit\nCtrl-R recovers original captured intent, never a new Message. Ctrl-G deliberately inspects a pending Action; attention never takes your draft. /discard abandons only a definite rejection. /resume offers bounded selection/deferral without REF, then stages metadata before switching. /exit detaches without cancelling Host work. Prefix // to send a leading slash.\n");
     } else if (std.mem.eql(u8, name, "/status") and args.len == 1) {
         const current = try owner.call(SessionView.inspectCurrent, .{ store, session_ref, owner.scratch });
         try frontendField(owner, "Session: ", current.settings.reference.slice());
@@ -2903,7 +3003,8 @@ fn usage() error{InvalidArguments} {
         \\  rui serve [--store PATH] [--active-capacity N] [--codex | --provider-endpoint URL] [--provider-ca-file PATH] [--fault NAME]
         \\  rui configure [--store PATH] --session REF [settings] [--json]
         \\    First configuration requires --workspace PATH --provider codex --model MODEL.
-        \\  rui session [--store PATH] --session REF
+        \\  rui --resume [--store PATH] [--] [REF]
+        \\    Resume exact REF or choose a bounded page; -- permits option-looking references.
         \\    All new commands use --store, then saved Store, then HOME/.local/share/rui/store.
         \\    Type /help for in-Session commands (including /setup).
         \\  One-shot commands (never prompt or change meaning on redirection):
