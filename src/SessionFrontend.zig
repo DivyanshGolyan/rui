@@ -341,13 +341,19 @@ fn applyAdmission(self: *Self, result: anyerror!void) !void {
         try self.input.resolve(self.ticket.?, outcome);
         self.releaseSettledCapture();
         if (!accepted) {
-            self.pending_notice = if (self.ticket == null)
-                "Submission rejected; original draft and cursor restored."
-            else
-                "Submission not accepted; recover the original request, never replacement intent.";
-            if (self.reply.answer) |_| {} else |err| if (err == error.CanonicalStoreFailure) {
-                self.fatal = err;
-                return err;
+            if (self.reply.answer) |_| {
+                self.pending_notice = if (self.ticket == null)
+                    "Submission rejected; original draft and cursor restored."
+                else
+                    "Submission not accepted; recover the original request, never replacement intent.";
+            } else |err| {
+                // The owned decoder diagnosis is not a rejection or proof of
+                // noncommit. Keep uncertainty and original recovery custody.
+                self.pending_notice = @errorName(err);
+                if (err == error.CanonicalStoreFailure) {
+                    self.fatal = err;
+                    return err;
+                }
             }
         }
     } else |err| {
