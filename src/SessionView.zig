@@ -171,7 +171,7 @@ fn rowIndex(page: *const client.ActivityPage, index: usize) usize {
     return if (page.facts.direction == .backward) page.facts.count - 1 - index else index;
 }
 
-fn bypassWarning(bash: bool, bypass: bool) bool {
+pub fn bypassWarning(bash: bool, bypass: bool) bool {
     return bash and bypass;
 }
 

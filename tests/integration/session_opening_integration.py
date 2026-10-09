@@ -312,6 +312,23 @@ def local_commands(home, store, workspace, endpoint):
         status = terminal.command("/status")
         assert "Permission: bypass" in status, "recovery reapplied old configuration"
         assert len(endpoint.requests) == before, "local command started model work"
+        for tools, mode, warning in (("none", "bypass", False), ("edit", "bypass", False),
+                                     ("bash,edit", "bypass", True), ("bash", "ask", False),
+                                     ("bash", "bypass", True)):
+            terminal.command(f'/configure --tools "{tools}" --permission-mode {mode}')
+            status = terminal.command("/status")
+            assert ("Bash bypasses approval" in status) == warning, (tools, mode, status)
+            listing = run(home, "sessions", "--store", store, "--all")
+            selected = listing.split("Session: opening/local\n", 1)[1].split("Session: ", 1)[0]
+            assert ("Bash runs without approval" in selected) == warning, (tools, mode, selected)
+            entered = Terminal(home, store, "opening/local")
+            try:
+                opening = entered.until("rui> ", 0)
+                assert ("Bash bypasses approval" in opening) == warning, (tools, mode, opening)
+                entered.command("/exit", "Detached.")
+                entered.finish()
+            finally:
+                entered.close()
         if os.path.exists("/proc/self/task"):
             with open(home / ".config/rui/.preferences.lock", "rb") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)

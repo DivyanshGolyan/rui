@@ -1245,7 +1245,7 @@ fn showSessionStatus(init: std.process.Init, store: []const u8, session_ref: []c
         try writeSafeField(init.io, "Model: ", work.settings.model.slice());
         try std.Io.File.stdout().writeStreamingAll(init.io, "Permission: ");
         try writeSafeText(init.io, @tagName(work.settings.permission_mode.value));
-        try std.Io.File.stdout().writeStreamingAll(init.io, if (work.settings.permission_mode.value == .bypass) " (Bash runs without approval)\nRui: Bash commands can run without asking you.\n" else "\n");
+        try std.Io.File.stdout().writeStreamingAll(init.io, if (SessionView.bypassWarning(work.settings.tools.bash, work.settings.permission_mode.value == .bypass)) " (Bash runs without approval)\nRui: Bash commands can run without asking you.\n" else "\n");
         if (work.selected_message != null) try writeSafeField(init.io, "Work: ", @tagName(work.work.status.value));
         if (work.actionable_count != 0) try showActionable(init.io, &report, false);
         return;
@@ -1365,6 +1365,8 @@ fn persistentCommand(owner: *SessionFrontend, args: []const []const u8) !void {
         try frontendField(owner, "Provider: ", @tagName(current.settings.provider.value));
         try frontendField(owner, "Model: ", current.settings.model.slice());
         try frontendField(owner, "Permission: ", @tagName(current.settings.permission_mode.value));
+        if (SessionView.bypassWarning(current.settings.tools.bash, current.settings.permission_mode.value == .bypass))
+            try owner.write("Rui: WARNING — Bash bypasses approval.\n");
         try frontendField(owner, "Work: ", @tagName(current.work.status.value));
         if (current.selected_message) |selected| try frontendField(owner, "Current message: ", selected.slice());
         if (current.pending_messages != 0) {
@@ -2402,7 +2404,7 @@ fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8
             try writeSafeField(init.io, "  Model: ", row.model.slice());
             try std.Io.File.stdout().writeStreamingAll(init.io, if (row.tools.bash and row.tools.edit) "  Tools: Bash, Edit\n" else if (row.tools.bash) "  Tools: Bash\n" else if (row.tools.edit) "  Tools: Edit\n" else "  Tools: none\n");
             try writeSafeField(init.io, "  Permission: ", @tagName(row.permission_mode));
-            if (row.permission_mode == .bypass) try std.Io.File.stdout().writeStreamingAll(init.io, "  Rui: Bash runs without approval.\n");
+            if (SessionView.bypassWarning(row.tools.bash, row.permission_mode == .bypass)) try std.Io.File.stdout().writeStreamingAll(init.io, "  Rui: Bash runs without approval.\n");
         }
     }
     return .{ .count = page.count, .next = page.next };
