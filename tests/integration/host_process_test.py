@@ -85,8 +85,33 @@ def main():
         assert process.poll() is None
     finally:
         stop_process(process)
+    prove_private_environment()
     prove_coalesced_phase_records()
     prove_gate_broadcast()
+
+
+def prove_private_environment():
+    with tempfile.TemporaryDirectory(prefix="rui-host-environment-") as directory:
+        inherited = "RUI_TEST_PARENT_ENV"
+        previous = os.environ.get(inherited)
+        os.environ[inherited] = "parent-only"
+        try:
+            process, fields = start_ready_process(
+                child("import os; print('ready home=' + os.environ['HOME'].encode().hex() "
+                      "+ ' inherited=' + os.environ.get('RUI_TEST_PARENT_ENV', 'absent')); time.sleep(10)"),
+                env={"HOME": directory},
+                timeout=1,
+            )
+            try:
+                assert fields == {"home": directory.encode().hex(), "inherited": "absent"}, fields
+                assert os.environ[inherited] == "parent-only"
+            finally:
+                stop_process(process)
+        finally:
+            if previous is None:
+                del os.environ[inherited]
+            else:
+                os.environ[inherited] = previous
 
 
 def prove_gate_broadcast():
