@@ -2250,16 +2250,21 @@ fn showResult(init: std.process.Init, saved: *const client.MessageAddress, prese
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
     var renderer: AnswerRenderer = .{ .out = &output.interface };
-    const answer = try client.readResultStream(init.io, saved.store.slice(), saved.key.slice(), &renderer, &read_buffer);
-    switch (answer) {
-        .answer => {
+    const answer = blk: {
+        // Abandon retained text and pending writer bytes on failure. A renderer
+        // transition may be buffered, so tracked style cannot prove terminal state.
+        // Reset alone, before diagnostics; failed cleanup retains the original error.
+        errdefer _ = std.c.write(1, "\x1b[0m", 4);
+        const answer = try client.readResultStream(init.io, saved.store.slice(), saved.key.slice(), &renderer, &read_buffer);
+        if (answer == .answer) {
             try renderer.finish();
             try output.flush();
-        },
-        .failure => |failure| {
-            try writeReadFailure(init.io, failure, saved.key.slice());
-            return failure.err();
-        },
+        } else _ = std.c.write(1, "\x1b[0m", 4);
+        break :blk answer;
+    };
+    if (answer == .failure) {
+        try writeReadFailure(init.io, answer.failure, saved.key.slice());
+        return answer.failure.err();
     }
     try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
 }

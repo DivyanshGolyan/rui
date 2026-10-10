@@ -47,6 +47,9 @@ pub fn begin() !Self {
 pub fn finish(self: *Self) !void {
     if (!self.active) return self.result;
     self.active = false;
+    // The UI owns emitted style, even if a renderer's next window was cancelled.
+    // Attempt controls independently; neither may hold restoration on output credit.
+    const reset = std.c.write(1, "\x1b[0m", 4) == 4;
     const disabled = std.c.write(1, "\x1b[?2004l", 8) == 8;
     // Input discard is independent of output credit. TCSAFLUSH can drain the
     // same terminal's output and keep it raw while an output peer is absent.
@@ -56,7 +59,7 @@ pub fn finish(self: *Self) !void {
     for (self.flags, 0..) |flags, fd| {
         if (std.c.fcntl(@intCast(fd), std.c.F.SETFL, flags) < 0) flags_ok = false;
     }
-    self.result = if (restored) |_| if (flags_ok and disabled and flushed) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
+    self.result = if (restored) |_| if (flags_ok and reset and disabled and flushed) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
     return self.result;
 }
 

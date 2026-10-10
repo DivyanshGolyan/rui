@@ -120,7 +120,7 @@ def persistent_opening_case():
     home = state / "home"
     home.mkdir(mode=0o700)
     store = state / "store'$(false)"
-    large_answer = "# Saved heading\n**saved bold** é\n" + "x" * 8192 + "\nOPENING-COMPLETE"
+    large_answer = "# Saved heading\n**saved bold** é\n# " + "x" * 8192 + "\nOPENING-COMPLETE"
     history_release = threading.Event()
     opening_release = threading.Event()
     endpoint = fixture.SuccessEndpoint([
@@ -183,6 +183,8 @@ def persistent_opening_case():
         tail, errors = terminal_exit(caller, master)
         assert caller.returncode != 0 and b"TruncatedResponse" in errors, errors
         assert "OPENING-COMPLETE" not in prefix and b"OPENING-COMPLETE" not in tail, "truncated opening exposed unverified completion"
+        styled = prefix.encode() + tail
+        assert styled.rfind(b"\x1b[0m") > styled.rfind(b"\x1b[1m"), "failed opening left renderer styling active"
         actual = termios.tcgetattr(slave)
         if sys.platform == "darwin":
             mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
@@ -195,6 +197,26 @@ def persistent_opening_case():
         os.close(master)
         os.close(slave)
         master = slave = None
+        for buffered_reset in (False, True):
+            def truncate_result(response):
+                if not buffered_reset:
+                    return response[:-1]
+                # The renderer has returned to normal style, but its reset and
+                # incomplete span remain buffered after a visible bold prefix.
+                body = b"# " + b"x" * 5000 + b"\n*UNVERIFIED"
+                return (b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n"
+                    b"X-Rui-Wire-Version: 1\r\nContent-Length: " + str(len(body) + 1).encode()
+                    + b"\r\nConnection: close\r\n\r\n" + body)
+
+            proxy = canonical.ReplyProxy(host, "/v1/read-result", truncate_result)
+            failed_result = subprocess.run([str(fixture.RUI), "result", message["request"]],
+                env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=5)
+            assert failed_result.returncode != 0 and b"TruncatedResponse" in failed_result.stderr, failed_result
+            assert failed_result.stdout.rfind(b"\x1b[0m") > failed_result.stdout.rfind(b"\x1b[1m"), "failed keyed result left renderer styling active"
+            assert b"OPENING-COMPLETE" not in failed_result.stdout and b"UNVERIFIED" not in failed_result.stdout, "failed keyed result flushed unverified text"
+            assert len(endpoint.requests) == 1 and len(proxy.exchanges) == 1, "failed keyed result restarted work"
+            proxy.close()
+            proxy = None
         for i in range(1, 10):
             message = admit(home, "message", "--store", store, "--session", "persistent/opening", f"saved user {i:02d}")
             fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "history saved answer")
@@ -215,9 +237,22 @@ def persistent_opening_case():
             caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
                 "--session", "persistent/opening"], env={**os.environ, "HOME": str(home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-            assert opening_held.wait(10), "opening did not reach its metadata gate"
+            # Own startup output while awaiting the real public metadata gate.
+            # Preserve the iteration and caller diagnostics if setup fails.
+            startup, startup_errors = bytearray(), bytearray()
+            errors_fd = caller.stderr.fileno()
+            deadline = time.monotonic() + 10
+            while not opening_held.is_set():
+                assert caller.poll() is None and time.monotonic() < deadline, (
+                    "opening did not reach its metadata gate", handoff, caller.poll(),
+                    bytes(startup), bytes(startup_errors), proxy.exchanges)
+                for fd in select.select([master, errors_fd], [], [], min(0.1, max(0, deadline - time.monotonic())))[0]:
+                    data = os.read(fd, 65536)
+                    (startup if fd == master else startup_errors).extend(data)
+                    assert len(startup) + len(startup_errors) < 1024 * 1024, "unexpected unbounded startup output"
+            assert not startup_errors, (handoff, startup_errors)
             os.write(master, b"/history\n" + handoff)
-            output = b""
+            output = bytes(startup)
             deadline = time.monotonic() + 15
             while b"No older Conversation rows" not in output and b"History page complete" not in output:
                 remaining = deadline - time.monotonic()
