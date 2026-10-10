@@ -99,6 +99,10 @@ pub const Kind = enum {
     list_sessions,
     conversation_page,
     conversation_content,
+    proposal_page,
+    proposal_field,
+    activity_page,
+    activity_content,
 };
 
 pub const ConfigureCommand = struct {
@@ -291,6 +295,131 @@ pub const ConversationContent = struct {
     stream: bool = false,
 };
 
+pub const ProposalField = enum { item_id, name, call_id, arguments };
+pub const ProposalRejection = enum { unknown_tool, invalid_arguments, tool_unavailable };
+pub const proposal_page_items = 16;
+pub const ProposalMetadata = struct {
+    position: u64,
+    operation: u64,
+    turn: u64,
+    call_ordinal: u64,
+    action: ?u64,
+    rejection: ?ProposalRejection,
+    fields: [4]struct { length: u64, digest: [32]u8 }, // ProposalField order.
+};
+pub const ProposalPage = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    end: ?u64 = null, // Null captures; zero freezes an empty traversal.
+    after: u64 = 0,
+
+    pub fn validate(self: ProposalPage) !void {
+        if (self.after > std.math.maxInt(i64)) return error.InvalidCursor;
+        if (self.end) |end| {
+            if (end > std.math.maxInt(i64) or self.after > end) return error.InvalidCursor;
+        } else if (self.after != 0) return error.InvalidCursor;
+    }
+};
+pub const ReadProposalField = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    position: u64 = 0,
+    field: ProposalField = .item_id,
+};
+
+pub const ActivityPage = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    end: ?u64 = null,
+    position: u64 = 0,
+    // Null is a sequence boundary; a value identifies an actual public row.
+    ordinal: ?u64 = null,
+    direction: enum { forward, backward } = .forward,
+
+    pub fn validate(self: ActivityPage) !void {
+        if (self.position > std.math.maxInt(i64) or (self.ordinal != null and
+            (self.position == 0 or self.ordinal.? > std.math.maxInt(i64)))) return error.InvalidCursor;
+        if (self.end) |end| if (end > std.math.maxInt(i64) or self.position > end) return error.InvalidCursor;
+    }
+};
+pub const ActivityItem = struct {
+    position: u64,
+    ordinal: u64 = 0,
+    value: union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: Content, outcome: Outcome, stop: Stop },
+    pub const Content = struct {
+        length: u64,
+        digest: [32]u8,
+        pub fn writeJson(self: Content, out: *std.Io.Writer) !void {
+            try out.print("{{\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ self.length, std.fmt.bytesToHex(self.digest, .lower) });
+        }
+    };
+    pub const Message = struct { admission: u64, key: Bounded(max_key_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: Content };
+    pub const Call = ProposalMetadata;
+    pub const Outcome = struct { turn: u64, operation: u64, code: Bounded(96), content: ?Content };
+    pub const Stop = struct { key: Bounded(max_key_bytes), turn: ?u64, cutoff: u64, completion: enum { pending, completed } };
+
+    pub fn writeJson(self: *const ActivityItem, out: *std.Io.Writer) !void {
+        try out.print("{{\"position\":\"{d}\",\"ordinal\":\"{d}\",\"value\":{{\"{s}\":", .{ self.position, self.ordinal, @tagName(self.value) });
+        switch (self.value) {
+            .admission, .user => |message| {
+                try out.print("{{\"admission\":\"{d}\",\"key\":", .{message.admission});
+                try std.json.Stringify.value(message.key.slice(), .{}, out);
+                try out.writeAll(",\"turn\":");
+                if (message.turn) |turn| try out.print("\"{d}\"", .{turn}) else try out.writeAll("null");
+                try out.print(",\"state\":\"{s}\",\"content\":", .{@tagName(message.state)});
+                try message.content.writeJson(out);
+                try out.writeByte('}');
+            },
+            .assistant, .tool_result => |content| try content.writeJson(out),
+            .call => |call| {
+                try out.print("{{\"operation\":\"{d}\",\"turn\":\"{d}\",\"call_ordinal\":\"{d}\",\"action\":", .{ call.operation, call.turn, call.call_ordinal });
+                if (call.action) |action| try out.print("\"{d}\"", .{action}) else try out.writeAll("null");
+                try out.writeAll(",\"rejection\":");
+                if (call.rejection) |code| try std.json.Stringify.value(@tagName(code), .{}, out) else try out.writeAll("null");
+                try out.writeAll(",\"fields\":[");
+                for (call.fields, 0..) |field, index| {
+                    if (index != 0) try out.writeByte(',');
+                    try (Content{ .length = field.length, .digest = field.digest }).writeJson(out);
+                }
+                try out.writeAll("]}");
+            },
+            .outcome => |outcome| {
+                try out.print("{{\"turn\":\"{d}\",\"operation\":\"{d}\",\"code\":", .{ outcome.turn, outcome.operation });
+                try std.json.Stringify.value(outcome.code.slice(), .{}, out);
+                try out.writeAll(",\"content\":");
+                if (outcome.content) |content| try content.writeJson(out) else try out.writeAll("null");
+                try out.writeByte('}');
+            },
+            .stop => |stop| {
+                try out.writeAll("{\"key\":");
+                try std.json.Stringify.value(stop.key.slice(), .{}, out);
+                try out.writeAll(",\"turn\":");
+                if (stop.turn) |turn| try out.print("\"{d}\"", .{turn}) else try out.writeAll("null");
+                try out.print(",\"cutoff\":\"{d}\",\"completion\":\"{s}\"}}", .{ stop.cutoff, @tagName(stop.completion) });
+            },
+        }
+        try out.writeAll("}}");
+    }
+};
+pub const ReadActivityContent = struct { store: Bounded(max_store_bytes) = .{}, session: Bounded(max_session_bytes) = .{}, position: u64 = 0, ordinal: u64 = 0 };
+
+pub const ActivityFacts = struct {
+    end: u64,
+    direction: @FieldType(ActivityPage, "direction") = .forward,
+    items: [16]ActivityItem = undefined,
+    count: usize = 0,
+    more: bool = false,
+
+    pub fn writeJson(self: *const ActivityFacts, out: *std.Io.Writer) !void {
+        try out.print("{{\"version\":\"1\",\"type\":\"activity_page\",\"end\":\"{d}\",\"direction\":\"{s}\",\"items\":[", .{ self.end, @tagName(self.direction) });
+        for (self.items[0..self.count], 0..) |*item, index| {
+            if (index != 0) try out.writeByte(',');
+            try item.writeJson(out);
+        }
+        try out.print("],\"more\":{}}}", .{self.more});
+    }
+};
+
 pub const Request = union(Kind) {
     host_info: struct { store: Bounded(max_store_bytes) = .{} },
     host_stop: struct { store: Bounded(max_store_bytes) = .{} },
@@ -307,12 +436,16 @@ pub const Request = union(Kind) {
     list_sessions: ListSessions,
     conversation_page: ConversationPage,
     conversation_content: ConversationContent,
+    proposal_page: ProposalPage,
+    proposal_field: ReadProposalField,
+    activity_page: ActivityPage,
+    activity_content: ReadActivityContent,
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content => {},
+            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .proposal_page, .proposal_field, .activity_page, .activity_content => {},
         }
     }
 
@@ -470,6 +603,14 @@ const Parser = struct {
             .conversation_page
         else if (kind_text.eql("conversation_content"))
             .conversation_content
+        else if (kind_text.eql("proposal_page"))
+            .proposal_page
+        else if (kind_text.eql("proposal_field"))
+            .proposal_field
+        else if (kind_text.eql("activity_page"))
+            .activity_page
+        else if (kind_text.eql("activity_content"))
+            .activity_content
         else
             return error.UnknownCommand;
 
@@ -494,6 +635,10 @@ const Parser = struct {
             .list_sessions => .{ .list_sessions = try self.parseListSessions(store) },
             .conversation_page => .{ .conversation_page = try self.parseConversationPage(store) },
             .conversation_content => .{ .conversation_content = try self.parseConversationContent(store) },
+            .proposal_page => .{ .proposal_page = try self.parseProposalPage(store) },
+            .proposal_field => .{ .proposal_field = try self.parseProposalField(store) },
+            .activity_page => .{ .activity_page = try self.parseActivityPage(store) },
+            .activity_content => .{ .activity_content = try self.parseActivityContent(store) },
         };
         errdefer request.removeTemporaryContent(self.options.io) catch {
             self.options.cleanup_failed.* = true;
@@ -744,6 +889,82 @@ const Parser = struct {
         }
         if (request.position == 0 or request.position > std.math.maxInt(i64) or
             request.ordinal > std.math.maxInt(i64) or (request.stream and request.start != 0)) return error.InvalidCursor;
+        return request;
+    }
+
+    fn parseProposalPage(self: *Parser, store: Bounded(max_store_bytes)) !ProposalPage {
+        var request = ProposalPage{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("end");
+        if (try self.consumeIf('n')) {
+            for ("ull") |byte| try self.expectByte(byte);
+        } else request.end = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("after");
+        request.after = try self.readCanonicalU64();
+        try request.validate();
+        return request;
+    }
+
+    fn parseActivityPage(self: *Parser, store: Bounded(max_store_bytes)) !ActivityPage {
+        var request: ActivityPage = .{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("end");
+        if (try self.consumeIf('n')) {
+            for ("ull") |byte| try self.expectByte(byte);
+        } else request.end = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("position");
+        request.position = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("ordinal");
+        if (try self.consumeIf('n')) {
+            for ("ull") |byte| try self.expectByte(byte);
+        } else request.ordinal = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("direction");
+        var direction: Bounded(8) = .{};
+        try self.readSmallString(&direction);
+        request.direction = std.meta.stringToEnum(@FieldType(ActivityPage, "direction"), direction.slice()) orelse return error.InvalidCursor;
+        try request.validate();
+        return request;
+    }
+
+    fn parseActivityContent(self: *Parser, store: Bounded(max_store_bytes)) !ReadActivityContent {
+        var request: ReadActivityContent = .{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("position");
+        request.position = try self.readCanonicalU64();
+        try self.expectByte(',');
+        try self.expectKey("ordinal");
+        request.ordinal = try self.readCanonicalU64();
+        if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
+        return request;
+    }
+
+    fn parseProposalField(self: *Parser, store: Bounded(max_store_bytes)) !ReadProposalField {
+        var request = ReadProposalField{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("session");
+        try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("position");
+        request.position = try self.readCanonicalU64();
+        if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.InvalidCursor;
+        try self.expectByte(',');
+        try self.expectKey("field");
+        var field: Bounded(16) = .{};
+        try self.readSmallString(&field);
+        request.field = std.meta.stringToEnum(ProposalField, field.slice()) orelse return error.InvalidField;
         return request;
     }
 
@@ -1148,6 +1369,12 @@ pub const max_client_request_bytes = @max(
         @max(@max(max_read_action_arguments_request_bytes, max_read_action_call_id_request_bytes), @max(max_conversation_page_request_bytes, max_conversation_content_request_bytes)),
     ),
 );
+
+// Both proposal requests are smaller than the existing Conversation page
+// maximum (two shorter cursor keys or one position and a closed field).
+pub const max_proposal_page_response_bytes = 160 + proposal_page_items * (240 + 4 * 144);
+// Worst row: four complete field references, identities, or escaped key/code.
+pub const max_activity_page_response_bytes = 256 + 16 * (400 + @max(4 * 144, 6 * max_key_bytes));
 
 const max_session_stop_rejection_code_bytes = "invalid_session_reference".len;
 const max_model_interruption_rejection_code_bytes = "invalid_session_reference".len;
