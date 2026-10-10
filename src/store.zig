@@ -2661,9 +2661,10 @@ pub const Store = struct {
                 "LEFT JOIN model_output_item item ON item.operation_id=linked.operation_id AND item.item_ordinal=linked.item_ordinal LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
                 "LEFT JOIN content source ON source.content_id=item.content_id LEFT JOIN content id ON id.content_id=linked.item_id_content_id LEFT JOIN content rejection ON rejection.content_id=linked.rejection_content_id " ++
                 "LEFT JOIN action_operation a ON a.parent_operation_id=linked.operation_id AND a.call_ordinal=linked.call_ordinal " ++
+                "LEFT JOIN content result ON result.content_id=a.resolution_content_id " ++
                 "WHERE linked.operation_id=op.operation_id AND CASE WHEN item.item_kind=3 AND item.session_ref=op.session_ref AND t.session_ref=op.session_ref " ++
                 "AND item.attempt_ordinal=op.attempt_ordinal AND source.private=1 AND id.private=0 AND id.digest=item.item_id_digest AND " ++
-                "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref)) THEN 0 ELSE 1 END=1) FROM model_operation op " ++
+                "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref AND result.private=0)) THEN 0 ELSE 1 END=1) FROM model_operation op " ++
                 "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
                 "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
                 "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' AND call.call_ordinal+1=?3 " ++

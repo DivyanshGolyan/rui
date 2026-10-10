@@ -218,7 +218,9 @@ def main():
             sibling = results[-1]
             for corrupt in (
                     "UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0",
-                    "UPDATE model_tool_call SET item_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=1) WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0"):
+                    "UPDATE model_tool_call SET item_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=1) WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0",
+                    "UPDATE content SET private=1 WHERE content_id=(SELECT resolution_content_id FROM action_operation WHERE parent_operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0)",
+                    "DELETE FROM content WHERE content_id=(SELECT resolution_content_id FROM action_operation WHERE parent_operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0)"):
                 for mode in ("page", "cursor", "content"):
                     with sqlite3.connect(store / "rui.sqlite3") as db:
                         saved.backup(db)
@@ -233,8 +235,8 @@ def main():
                         if mode == "cursor":
                             identity.update(before_position=sibling["position"], before_ordinal=sibling["ordinal"])
                     head, body = request(fields["socket"], store, route, wire_kind, SESSION, **identity)
-                    assert head.startswith(b"HTTP/1.1 500 "), (mode, head, body)
-                    assert json.loads(body)["code"] == "canonical_store_failure", (mode, body)
+                    assert head.startswith(b"HTTP/1.1 500 "), (corrupt, mode, head, body)
+                    assert json.loads(body)["code"] == "canonical_store_failure", (corrupt, mode, body)
                     assert process.wait(timeout=5) == 1, "damaged Conversation did not shut down Host"
                     stop_process(process)
                     process = None
