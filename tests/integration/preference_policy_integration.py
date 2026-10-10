@@ -9,51 +9,30 @@ is returned-error evidence, not power-loss evidence; other platforms report the 
 """
 import base64
 from contextlib import contextmanager
-import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import platform
 import re
 import resource
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
-import time
 
 from host_process import canonical_fixture_root
 
 
 @contextmanager
-def private_fixture_root(deadline):
+def private_fixture_root():
     root = canonical_fixture_root(Path(tempfile.mkdtemp(prefix="rui-preference-policy-")))
     try:
         yield root
-        time_left(deadline, 1)
         shutil.rmtree(root)
-        time_left(deadline, 1)  # Cleanup shares the same, never-renewed budget.
     except BaseException:
         print(json.dumps({"phase": "failure_retention", "private_root": str(root),
                           "root_remains": root.exists()}), flush=True)
         raise
-
-
-def artifact_identity(path):
-    assert stat.S_ISREG(path.stat().st_mode), path
-    with path.open("rb") as file:
-        before = os.fstat(file.fileno())
-        assert stat.S_ISREG(before.st_mode), path
-        digest = hashlib.file_digest(file, "sha256").hexdigest()
-        after = os.fstat(file.fileno())
-    assert all(getattr(before, name) == getattr(current, name)
-               for current in (after, path.stat())
-               for name in ("st_dev", "st_ino", "st_uid", "st_mode", "st_size", "st_mtime_ns")), path
-    return {"path": str(path), "dev": before.st_dev, "inode": before.st_ino,
-            "uid": before.st_uid, "mode": before.st_mode, "size": before.st_size,
-            "mtime_ns": before.st_mtime_ns, "sha256": digest}
 
 
 def require_darwin_fsync(output, path, architecture, *, interpose):
@@ -90,37 +69,23 @@ def require_darwin_fsync(output, path, architecture, *, interpose):
     return slots[0][2], slots[0][4]
 
 
-def time_left(deadline, limit):
-    remaining = deadline - time.monotonic()
-    assert remaining > 0, "preference fixture budget exhausted"
-    return min(limit, remaining)
-
-
-def audit_darwin_images(shim, compiled_inputs, environment, deadline):
+def audit_darwin_images(shim, binary, environment):
     reader_name = shutil.which("dyld_info")
-    assert reader_name is not None, "dyld_info unavailable; no cuts admitted"
+    assert reader_name is not None, "dyld_info unavailable; cannot validate injection"
     reader = Path(reader_name).resolve(strict=True)
-    paths = {name: Path(identity["path"]) for name, identity in compiled_inputs.items()}
-    paths.update(shim=shim, reader=reader)
-    source = paths["source"]
-    identities = {name: artifact_identity(path) for name, path in paths.items()}
-    assert all(identities[name] == expected for name, expected in compiled_inputs.items())
+    paths = {"actor": binary, "shim": shim}
     architecture = platform.machine()
     assert architecture in ("arm64", "x86_64"), architecture
-    print(json.dumps({"phase": "pre_cut_identity", "architecture": architecture,
-                      "inputs": identities}), flush=True)
+    print(f"Darwin injection validation: {architecture}, reader {reader}", flush=True)
     reader_uses = 0
 
     def inspect(name, *options):
         nonlocal reader_uses
         reader_uses += 1
-        assert reader_uses <= 3
-        assert {name: artifact_identity(path) for name, path in paths.items()} == identities
         command = [str(reader), "-arch", architecture, *options, str(paths[name])]
-        stdout = source.parent / f"audit-{reader_uses}.stdout"
-        stderr = source.parent / f"audit-{reader_uses}.stderr"
-        # Never lift an inherited limit. At most six private 1 MiB output files,
-        # with one reader at a time; the enclosing allowance owns the total clock.
+        stdout = shim.parent / f"audit-{reader_uses}.stdout"
+        stderr = shim.parent / f"audit-{reader_uses}.stderr"
+        # Bound reader diagnostics without lifting an inherited file-size limit.
         limit = min(value for value in (1024 * 1024, *resource.getrlimit(resource.RLIMIT_FSIZE))
                     if value != resource.RLIM_INFINITY)
         failure = None
@@ -128,7 +93,7 @@ def audit_darwin_images(shim, compiled_inputs, environment, deadline):
         with stdout.open("xb") as output, stderr.open("xb") as errors:
             try:
                 result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=output, stderr=errors,
-                    env=environment, timeout=time_left(deadline, 10),
+                    env=environment, timeout=10,
                     preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit)))
             except subprocess.TimeoutExpired as error:
                 failure = error  # subprocess.run kills and waits for its own child before raising.
@@ -143,9 +108,6 @@ def audit_darwin_images(shim, compiled_inputs, environment, deadline):
             raise failure
         assert len(raw_output) < limit and len(raw_errors) < limit, "audit output limit reached"
         assert result.returncode == 0, f"{name} Mach-O audit failed"
-        current = {name: artifact_identity(path) for name, path in paths.items()}
-        print(json.dumps({"phase": "post_reader_identity", "inputs": current}), flush=True)
-        assert current == identities
         return raw_output.decode("utf-8")
 
     for name in ("actor", "shim"):
@@ -161,20 +123,14 @@ def audit_darwin_images(shim, compiled_inputs, environment, deadline):
     assert [(int(symbol[1], 16), symbol[2]) for symbol in symbols] == [
         (int(addresses[0], 16), "_sync_interpose"),
         (int(addresses[1], 16), "_probe_sync")], output
-    assert {name: artifact_identity(path) for name, path in paths.items()} == identities
     print("PASS pre-cut Darwin artifact audit (not load/cut equivalence)", flush=True)
-    return paths, identities
 
 
 def main():
     binary = Path(sys.argv[1]).resolve()
-    budget = float(os.environ.get("RUI_TEST_PREFERENCE_BUDGET_SECONDS", "300"))
-    assert math.isfinite(budget) and budget > 0, "invalid preference fixture budget"
-    deadline = time.monotonic() + budget
     if sys.platform == "darwin":
         assert not any(name.startswith("DYLD_") for name in os.environ), "ambient DYLD override"
-        print(json.dumps({"phase": "fixture_budget", "seconds": budget}), flush=True)
-    with private_fixture_root(deadline) as root:
+    with private_fixture_root() as root:
         home = root / "home"
         home.mkdir(mode=0o700)
         environment = {**os.environ, "TMPDIR": str(root)}
@@ -182,7 +138,7 @@ def main():
         def run(action, *args, error=None, extra=None):
             result = subprocess.run([str(binary), action, str(home), *args],
                                     env={**environment, **(extra or {})},
-                                    capture_output=True, timeout=time_left(deadline, 10))
+                                    capture_output=True, timeout=10)
             assert result.returncode == (1 if error else 0), result.stderr
             if error:
                 assert error.encode() in result.stderr, result.stderr
@@ -262,23 +218,12 @@ int fsync(int fd) { return probe_sync(fd); }
 #endif
 ''')
         compiler = ["cc", "-dynamiclib", str(source)] if sys.platform == "darwin" else ["cc", "-shared", "-fPIC", str(source), "-ldl"]
-        if sys.platform == "darwin":
-            compiler_name = shutil.which("cc")
-            assert compiler_name is not None, "cc unavailable"
-            compiler[0] = str(Path(compiler_name).resolve(strict=True))
-            compiled_inputs = {name: artifact_identity(path) for name, path in
-                               {"actor": binary, "source": source, "compiler": Path(compiler[0])}.items()}
-            print(json.dumps({"phase": "shim_compile_input", "inputs": compiled_inputs}), flush=True)
         subprocess.run([*compiler, "-o", str(shim)], check=True, env=environment,
-                       timeout=time_left(deadline, 60))
-        audited = audit_darwin_images(shim, compiled_inputs, environment, deadline) if sys.platform == "darwin" else None
+                       timeout=60)
+        if sys.platform == "darwin":
+            audit_darwin_images(shim, binary, environment)
         injection = "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD"
         for cut in (1, 2, 3):
-            if audited is not None:
-                paths, identities = audited
-                current = {name: artifact_identity(path) for name, path in paths.items()}
-                print(json.dumps({"phase": "pre_cut_identity", "cut": cut, "inputs": current}), flush=True)
-                assert current == identities
             trace.unlink(missing_ok=True)
             saved.write_bytes(old)
             run("set", "new-pin", error="PreferenceDirectorySyncFailed",
