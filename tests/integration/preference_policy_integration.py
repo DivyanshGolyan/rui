@@ -67,7 +67,7 @@ def require_darwin_fsync(output, path, architecture, *, interpose):
     entries = [line.split() for line in groups[0].splitlines()]
     assert entries == [["+0x0000", "rebase", "_probe_sync"],
                        ["+0x0008", "bind", "libSystem/_fsync"]], output
-    return slots[0][2], slots[0][4]
+    return slots[0][2], slots[0][4], slots[0][0]
 
 
 def audit_darwin_images(shim, binary, environment):
@@ -80,10 +80,10 @@ def audit_darwin_images(shim, binary, environment):
     print(f"Darwin injection validation: {architecture}, reader {reader}", flush=True)
     reader_uses = 0
 
-    def inspect(name, *options):
+    def inspect(name, tool, *options):
         nonlocal reader_uses
         reader_uses += 1
-        command = [str(reader), "-arch", architecture, *options, str(paths[name])]
+        command = [str(tool), "-arch", architecture, *options, str(paths[name])]
         stdout = shim.parent / f"audit-{reader_uses}.stdout"
         stderr = shim.parent / f"audit-{reader_uses}.stderr"
         # Bound reader diagnostics without lifting an inherited file-size limit.
@@ -112,18 +112,27 @@ def audit_darwin_images(shim, binary, environment):
         return raw_output.decode("utf-8")
 
     for name in ("actor", "shim"):
-        output = inspect(name, "-imports", "-fixups", "-symbolic_fixups")
+        output = inspect(name, reader, "-imports", "-fixups", "-symbolic_fixups")
         addresses = require_darwin_fsync(output, paths[name], architecture, interpose=name == "shim")
-    # Symbolic fixup groups omit their base address. Resolve the raw tuple base
-    # and replacement target through the same reader to correlate exact addresses.
-    output = inspect("shim", "-lookup_va", ",".join(addresses))
-    assert output.splitlines()[0] == f"{shim} [{architecture}]:", output
-    symbols = [re.fullmatch(r"  (0x[0-9A-Fa-f]+) (\S+)", line)
-               for line in output.splitlines()[1:] if line.strip()]
-    assert all(symbol is not None for symbol in symbols), output
-    assert [(int(symbol[1], 16), symbol[2]) for symbol in symbols] == [
-        (int(addresses[0], 16), "_sync_interpose"),
-        (int(addresses[1], 16), "_probe_sync")], output
+    # Symbolic fixups omit their base. Match exact local symbols and sections to
+    # the raw tuple, rejecting duplicate names and aliases at either address.
+    symbol_reader = shutil.which("nm")
+    assert symbol_reader is not None, "nm unavailable; cannot validate injection"
+    output = inspect("shim", Path(symbol_reader).resolve(strict=True), "-nm")
+    expected = [(int(addresses[0], 16), f"{addresses[2]},__interpose", "non-external", "_sync_interpose"),
+                (int(addresses[1], 16), "__TEXT,__text", "non-external", "_probe_sync")]
+    symbols = []
+    for line in output.splitlines():
+        imported = re.fullmatch(r" +\(undefined\) external (\S+) \(from [^)]+\)", line)
+        if imported:
+            assert imported[1] not in ("_sync_interpose", "_probe_sync"), output
+            continue
+        symbol = re.fullmatch(r"([0-9A-Fa-f]+) \((__\w+,__\w+)\) (non-external|external) (\S+)", line)
+        assert symbol is not None, output
+        address = int(symbol[1], 16)
+        if address in (expected[0][0], expected[1][0]) or symbol[4] in ("_sync_interpose", "_probe_sync"):
+            symbols.append((address, symbol[2], symbol[3], symbol[4]))
+    assert sorted(symbols) == sorted(expected), output
     print("PASS pre-cut Darwin artifact audit (not load/cut equivalence)", flush=True)
 
 
