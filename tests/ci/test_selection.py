@@ -114,11 +114,24 @@ class SelectionTest(unittest.TestCase):
 
     def test_standalone_helper_routes_add_without_losing_existing_consumers(self):
         for path, owner in (("host_process.py", "check"),
-                            ("control_integration.py", "control-integration"),
+                            ("control_integration.py", "check"),
                             ("canonical_failure_integration.py", "canonical-failure-integration")):
             result = select([f"tests/integration/{path}"], "review", AVAILABLE)
             for family in ("targets", "native_targets"):
                 self.assertIn(owner, result[family])
+
+    def test_shared_fixture_helpers_keep_composed_and_separate_consumers(self):
+        for name in ("control_integration.py", "dispatch_integration.py", "host_process.py"):
+            path = f"tests/integration/{name}"
+            standalone = {"codex-h2-integration", "transport-h2-integration", "server-delivery-integration"}
+            if name != "control_integration.py":
+                standalone.add("current-facts-integration")
+            for composed, paths in (("check", [path]), ("check-full", [path, "build.zig"])):
+                with self.subTest(name=name, composed=composed):
+                    result = select(paths, "review", AVAILABLE)
+                    for family in ("targets", "native_targets"):
+                        self.assertTrue({composed, *standalone} <= set(result[family]))
+                        self.assertNotIn("control-integration", result[family])
 
     def test_canonical_failure_is_covered_by_the_composed_human_cli_gate(self):
         path = "tests/integration/canonical_failure_integration.py"
