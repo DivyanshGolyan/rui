@@ -108,6 +108,33 @@ def terminal_exit(caller, master, timeout=5):
                 pending.remove(fd)
 
 
+def terminal_gate(caller, master, reached, context):
+    """Own startup output until the public metadata gate, not a silent wait."""
+    errors_fd = caller.stderr.fileno()
+    streams = {master: bytearray(), errors_fd: bytearray()}
+    pending = set(streams)
+    deadline = time.monotonic() + 10
+    while not reached.is_set():
+        remaining = max(0, deadline - time.monotonic())
+        for fd in select.select(list(pending), [], [], min(0.1, remaining))[0]:
+            try:
+                data = os.read(fd, 65536)
+            except OSError as error:
+                if fd != master or error.errno != errno.EIO:
+                    raise
+                data = b""
+            if data:
+                streams[fd].extend(data)
+                assert sum(map(len, streams.values())) < 1024 * 1024, "unexpected unbounded startup output"
+            else:
+                pending.remove(fd)
+        assert reached.is_set() or (caller.poll() is None and time.monotonic() < deadline), (
+            "terminal metadata gate not reached", context, caller.poll(),
+            bytes(streams[master]), bytes(streams[errors_fd]))
+    assert not streams[errors_fd], (context, bytes(streams[errors_fd]))
+    return bytes(streams[master])
+
+
 def terminal_step(master, command, marker="rui> "):
     os.write(master, (command + "\n").encode())
     return read_terminal(master, marker)
@@ -237,22 +264,9 @@ def persistent_opening_case():
             caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
                 "--session", "persistent/opening"], env={**os.environ, "HOME": str(home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-            # Own startup output while awaiting the real public metadata gate.
-            # Preserve the iteration and caller diagnostics if setup fails.
-            startup, startup_errors = bytearray(), bytearray()
-            errors_fd = caller.stderr.fileno()
-            deadline = time.monotonic() + 10
-            while not opening_held.is_set():
-                assert caller.poll() is None and time.monotonic() < deadline, (
-                    "opening did not reach its metadata gate", handoff, caller.poll(),
-                    bytes(startup), bytes(startup_errors), proxy.exchanges)
-                for fd in select.select([master, errors_fd], [], [], min(0.1, max(0, deadline - time.monotonic())))[0]:
-                    data = os.read(fd, 65536)
-                    (startup if fd == master else startup_errors).extend(data)
-                    assert len(startup) + len(startup_errors) < 1024 * 1024, "unexpected unbounded startup output"
-            assert not startup_errors, (handoff, startup_errors)
+            startup = terminal_gate(caller, master, opening_held, ("queued opening", handoff, proxy.exchanges))
             os.write(master, b"/history\n" + handoff)
-            output = bytes(startup)
+            output = startup
             deadline = time.monotonic() + 15
             while b"No older Conversation rows" not in output and b"History page complete" not in output:
                 remaining = deadline - time.monotonic()
@@ -399,10 +413,10 @@ def persistent_pending_case():
         caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
             "--session", "persistent/pending"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-        assert captured.wait(10), "opening did not capture its page"
+        startup = terminal_gate(caller, master, captured, ("pending opening", proxy.exchanges, endpoint.requests))
         admit(home, "message", "--store", store, "--session", "persistent/pending", "late queued beyond snapshot")
         opening_release.set()
-        output = read_terminal(master, "rui> ")
+        output = startup.decode(errors="replace").replace("\r\n", "\n") + read_terminal(master, "rui> ")
         assert "24 pending at opening snapshot" in output, ("opening counted only its newest page or fresh Current", output)
         previews = [line for line in output.splitlines() if "Rui: queued preview: " in line]
         assert len(previews) == 4, previews
