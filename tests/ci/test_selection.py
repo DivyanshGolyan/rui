@@ -120,6 +120,18 @@ class SelectionTest(unittest.TestCase):
             for family in ("targets", "native_targets"):
                 self.assertIn(owner, result[family])
 
+    def test_canonical_failure_is_covered_by_the_composed_human_cli_gate(self):
+        path = "tests/integration/canonical_failure_integration.py"
+        alone = select([path], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertIn("canonical-failure-integration", alone[family])
+            self.assertNotIn("check", alone[family])
+        for composed in ("src/server.zig", "build.zig"):
+            combined = select([path, composed], "review", AVAILABLE)
+            for family in ("targets", "native_targets"):
+                self.assertNotIn("canonical-failure-integration", combined[family])
+                self.assertIn("current-facts-integration", combined[family])
+
     def test_ci_policy_does_not_make_build_qualification_universal(self):
         for path in (".github/workflows/check.yml",
                      "tests/ci/select_tests.py", "tests/ci/run_selected.py"):

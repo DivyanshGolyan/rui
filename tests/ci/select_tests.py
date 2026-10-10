@@ -64,7 +64,7 @@ RULES = (
     (("tests/integration/canonical_failure_integration.py", "tests/integration/dispatch_integration.py",
       "tests/integration/host_process.py", "build.zig"),
      ("canonical-failure-integration",), ("canonical-failure-integration",), "Canonical failure caller oracle"),
-    (("tests/integration/host_process.py", "tests/integration/canonical_failure_integration.py"),
+    (("tests/integration/host_process.py",),
      ("check",), ("check",), "Shared fixture helpers retain existing composed consumers"),
     (("tests/integration/control_integration.py",),
      ("control-integration",), ("control-integration",), "Control helper remains an executable fixture"),
@@ -92,6 +92,7 @@ CHECK_COVERS = {
     "host-status-integration", "host-launch-integration", "host-stop-integration",
     "descriptor-capacity-integration", "workflow-check", "evaluator-host-integration",
     "proposal-integration", "activity-integration", "preference-policy-integration",
+    "canonical-failure-integration",  # human_cli_integration.main executes all cases.
 }
 
 
