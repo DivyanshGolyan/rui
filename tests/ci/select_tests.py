@@ -22,6 +22,9 @@ RULES = (
      ("proposal-integration",), ("proposal-integration",), "Historical proposal fixture and typed Client"),
     (("tests/integration/activity_*",),
      ("activity-integration",), ("activity-integration",), "Session activity fixture and typed Client"),
+    (("tests/integration/preference_policy*",),
+     ("preference-policy-integration",), ("preference-policy-integration",),
+     "Preference publication fixture and native actor"),
     (("src/server.zig", "tests/integration/admission_integration.sh"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
      "Admission/capture owner: complete Debug recovery matrix, not artifact smoke"),
@@ -62,7 +65,7 @@ CHECK_COVERS = {
     "bash-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
     "descriptor-capacity-integration", "workflow-check", "evaluator-host-integration",
-    "proposal-integration", "activity-integration",
+    "proposal-integration", "activity-integration", "preference-policy-integration",
 }
 
 
@@ -113,10 +116,6 @@ def select(paths, phase, available):
         if "evaluator_string" in path:
             targets.add("evaluator-string-sanitizer")
             native_targets.add("evaluator-string-sanitizer")
-        if (path in {"src/preferences.zig", "src/provider_selection.zig", "src/cli.zig"}
-                and "preference-policy-integration" in available):
-            targets.add("preference-policy-integration")
-            native_targets.add("preference-policy-integration")
     for checks in (targets, native_targets):
         if "check-full" in checks:
             checks.discard("check")

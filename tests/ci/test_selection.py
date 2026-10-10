@@ -54,9 +54,18 @@ class SelectionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "absent"):
             select(["src/bash.zig"], "review", AVAILABLE - {"bash-recovery-integration"})
 
-    def test_preference_target_is_used_when_owner_wires_it(self):
-        result = select(["src/preferences.zig"], "review", AVAILABLE | {"preference-policy-integration"})
-        self.assertEqual(result["targets"], ["admission-debug-integration", "check", "preference-policy-integration"])
+    def test_preference_owner_and_fixture_use_canonical_membership(self):
+        result = select(["src/preferences.zig"], "review", AVAILABLE)
+        self.assertEqual(result["targets"], ["admission-debug-integration", "check"])
+        self.assertEqual(result["native_targets"], ["admission-debug-integration", "check"])
+        for path in ("tests/integration/preference_policy_integration.py",
+                     "tests/integration/preference_policy.zig"):
+            result = select([path], "review", AVAILABLE)
+            self.assertEqual(result["targets"], ["preference-policy-integration"])
+            self.assertEqual(result["native_targets"], ["preference-policy-integration"])
+            combined = select([path, "src/protocol.zig"], "review", AVAILABLE)
+            self.assertEqual(combined["targets"], ["check"])
+            self.assertEqual(combined["native_targets"], ["check"])
 
     def test_existing_fixture_target_and_new_fixture_fallback(self):
         result = select(["tests/integration/host_stop_integration.py"], "review", AVAILABLE)
