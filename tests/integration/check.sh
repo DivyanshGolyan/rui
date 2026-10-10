@@ -10,6 +10,8 @@ if [ "${3:-}" = parallel ]; then
     test_binary=$4
     host_status_actor=$5
     session_list_client=$6
+    proposal_client=$7
+    activity_client=$8
     output=$(mktemp -d "${TMPDIR:-/tmp}/rui-check.XXXXXX")
     trap 'rm -rf "$output"' EXIT
     pids=
@@ -34,6 +36,8 @@ if [ "${3:-}" = parallel ]; then
     run_case control python3 "$directory/control_integration.py" "$release_safe"
     run_case session-list python3 "$directory/session_list_integration.py" "$release_safe" "$session_list_client"
     run_case conversation-page python3 "$directory/conversation_page_integration.py" "$release_safe"
+    run_case proposal python3 "$directory/proposal_integration.py" "$release_safe" "$proposal_client"
+    run_case activity python3 "$directory/activity_integration.py" "$release_safe" "$activity_client"
     run_case descriptor-capacity python3 "$directory/descriptor_capacity_integration.py" "$release_safe"
     run_case host-status python3 "$directory/host_status_integration.py" "$release_safe" "$host_status_actor"
     run_case host-stop python3 "$directory/host_stop_integration.py" "$release_safe" "$host_status_actor"
@@ -78,6 +82,8 @@ fi
 
 host_status_actor=$3
 session_list_client=$4
+proposal_client=$5
+activity_client=$6
 sh "$directory/admission_integration.sh" "$release_safe"
 python3 "$directory/dispatch_integration.py" "$release_safe"
 python3 "$directory/bash_owner_integration.py" "$release_safe"
@@ -89,6 +95,8 @@ python3 "$directory/codex_integration.py" "$release_safe"
 python3 "$directory/control_integration.py" "$release_safe"
 python3 "$directory/session_list_integration.py" "$release_safe" "$session_list_client"
 python3 "$directory/conversation_page_integration.py" "$release_safe"
+python3 "$directory/proposal_integration.py" "$release_safe" "$proposal_client"
+python3 "$directory/activity_integration.py" "$release_safe" "$activity_client"
 python3 "$directory/descriptor_capacity_integration.py" "$release_safe"
 python3 "$directory/host_status_integration.py" "$release_safe" "$host_status_actor"
 python3 "$directory/host_launch_integration.py" "$release_safe"

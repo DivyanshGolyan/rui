@@ -69,6 +69,17 @@ class SelectionTest(unittest.TestCase):
             self.assertEqual(result["targets"], ["transport-h2-integration"])
             self.assertEqual(result["native_targets"], ["transport-h2-integration"])
 
+    def test_public_read_fixture_and_client_select_owner_once(self):
+        for owner in ("proposal", "activity"):
+            for suffix in ("_integration.py", "_client.zig"):
+                path = f"tests/integration/{owner}{suffix}"
+                result = select([path], "review", AVAILABLE)
+                self.assertEqual(result["targets"], [f"{owner}-integration"])
+                self.assertEqual(result["native_targets"], [f"{owner}-integration"])
+                combined = select([path, "src/protocol.zig"], "review", AVAILABLE)
+                self.assertEqual(combined["targets"], ["check"])
+                self.assertEqual(combined["native_targets"], ["check"])
+
     def test_admission_owners_keep_complete_debug_matrix(self):
         for path in ("src/server.zig", "tests/integration/admission_integration.sh"):
             result = select([path, "src/store.zig"], "review", AVAILABLE)

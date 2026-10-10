@@ -18,6 +18,10 @@ RULES = (
      "CLI selection and otherwise unnamed native terminal/caller checks"),
     (("src/store.zig",), ("check",), ("test",),
      "Store SQL owners: composed Linux caller checks and native SQLite tests"),
+    (("tests/integration/proposal_*",),
+     ("proposal-integration",), ("proposal-integration",), "Historical proposal fixture and typed Client"),
+    (("tests/integration/activity_*",),
+     ("activity-integration",), ("activity-integration",), "Session activity fixture and typed Client"),
     (("src/server.zig", "tests/integration/admission_integration.sh"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
      "Admission/capture owner: complete Debug recovery matrix, not artifact smoke"),
@@ -58,6 +62,7 @@ CHECK_COVERS = {
     "bash-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
     "descriptor-capacity-integration", "workflow-check", "evaluator-host-integration",
+    "proposal-integration", "activity-integration",
 }
 
 

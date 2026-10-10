@@ -3321,6 +3321,8 @@ def main():
             "attempt-before-commit",
         )
         processes.append(recovery_host)
+        for index in range(1, 101):
+            configure(state, recovery_store, f"recovery-history-{index}", f"recovery-{index}", "model-a")
         stop_host(recovery_host)
         processes.remove(recovery_host)
         database = sqlite3.connect(recovery_store / "rui.sqlite3")
