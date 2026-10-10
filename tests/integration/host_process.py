@@ -147,12 +147,13 @@ def _start_error(reason, process, stdout, stderr_tail):
     )
 
 
-def start_ready_process(args, *, timeout=10, required_fields=None):
+def start_ready_process(args, *, timeout=10, required_fields=None, env=None):
     """Start a Host and transfer ownership only after one valid ready line."""
     process = subprocess.Popen(
         list(map(str, args)),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=env,
     )
     stdout = bytearray()
     stderr_tail = bytearray()

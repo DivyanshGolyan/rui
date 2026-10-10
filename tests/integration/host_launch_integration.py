@@ -374,12 +374,29 @@ def main():
         # startup must fail the handshake rather than claim ready.
         clean_env = {key: value for key, value in env.items()
             if key not in ("MallocMaxMagazines", "MallocSpaceEfficient", "RUI_HOST_MALLOC_DEFAULTS")}
+        # The production default remains 1000. Its descriptor admission runs
+        # before the lease/diagnostic writer, so rejection creates no Store.
+        rejected_store = root / "default-capacity-rejected"
+        rejected = subprocess.run([RUI, "serve", "--store", rejected_store],
+            env=clean_env, preexec_fn=lower_descriptor_limit,
+            capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+        assert rejected.returncode != 0, rejected
+        assert "DescriptorCapacityInsufficient" in rejected.stderr, rejected.stderr
+        fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", rejected.stderr)}
+        assert fields["active_capacity"] == 1000 and fields["soft_limit"] == 64, fields
+        assert fields["required"] > fields["soft_limit"], fields
+        assert not rejected.stdout and not rejected_store.exists(), rejected
+
+        # Capacity 8 is the existing desktop profile. Admit this child so the
+        # disconnected pipe exercises readiness output, not pre-lease refusal.
         disconnected_store = root / "disconnected-stdout"
-        disconnected = subprocess.Popen([RUI, "serve", "--store", disconnected_store],
+        disconnected = subprocess.Popen([RUI, "serve", "--store", disconnected_store, "--active-capacity", "8"],
             env=clean_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             disconnected.stdout.close()
             assert disconnected.wait(timeout=COMMAND_TIMEOUT) != 0
+            stderr = disconnected.stderr.read().decode()
+            assert "HostReadinessOutputUnavailable" in stderr, stderr
             records = [json.loads(line) for file in (disconnected_store / "diagnostics").glob("host-*.jsonl")
                 for line in file.read_text().splitlines()]
             assert any(record.get("phase") == "failed" for record in records), records
@@ -420,9 +437,28 @@ def main():
                 chunk = os.read(master, 65536)
                 assert len(output) + len(chunk) < PTY_OUTPUT_LIMIT, "unexpected unbounded terminal output"
                 output.extend(chunk)
-            assert b"Host ready (active capacity 8)" in output, output
-            assert b"Provider: codex" in output and b"Permission: ask" in output, output
-            assert b"request: " in output and b"Session: rui/" in output, output
+            # Automatic success is quiet; readiness is established separately
+            # through protected status and the accepted Session below.
+            assert b"Provider: codex" in output and b"Model: gpt-6-luna" in output, output
+            assert b"Permission: bypass\r\n" in output, output
+            assert b"Bash runs without approval" not in output, output
+            assert b"Bash commands can run without asking you" not in output, output
+            captures = list((bare_home / ".config/rui/requests").glob("*.json"))
+            assert len(captures) == 1, captures
+            captured = json.loads(captures[0].read_text())
+            key = captures[0].stem
+            reference = "rui/" + key
+            assert captured["key"] == key and captured["kind"] == "configure", captured
+            assert captured["session"] == reference and captured["store"] == str(bare_store.resolve()), captured
+            configuration = captured["configuration"]
+            assert configuration["workspace"] == {"state": "value", "value": str(root.resolve())}, captured
+            assert configuration["provider"] == {"state": "value", "value": "codex"}, captured
+            assert configuration["model"] == {"state": "value", "value": "gpt-6-luna"}, captured
+            assert configuration["tools"] == {"state": "value", "value": ["bash"]}, captured
+            assert configuration["permission_mode"] == {"state": "value", "value": "bypass"}, captured
+            assert captured["require_model"] is True, captured
+            assert ("request: " + key).encode() in output and ("Session: " + reference).encode() in output, output
+            assert ("Workspace (Bash cwd): " + str(root.resolve())).encode() in output, output
             assert len(wait_for_processes(bare_store, 1)) == 1
             # Transfer this thread's reader from prompt to exit without
             # withholding output credit or discarding any transcript bytes.
@@ -431,7 +467,21 @@ def main():
             assert os.write(master, b"/exit\n") == 6, "incomplete /exit submission"
             assert wait_for_terminal_exit(caller, master, output, deadline) == 0, output
             assert termios.tcgetattr(master) == original_terminal, output
+            assert b"Host ready" not in output and b"Attached to the ready Host" not in output and b"Diagnostics:" not in output, output
             assert instance(status(bare_store, bare_env), 8)
+            inspected = subprocess.run([RUI, "inspect-session", "--store", bare_store, "--session", reference],
+                env=bare_env, capture_output=True, text=True, timeout=5)
+            assert inspected.returncode == 0, inspected.stderr
+            current = json.loads(inspected.stdout)["session"]
+            assert {name: current[name] for name in ("reference", "workspace", "provider", "model", "tools", "permission_mode")} == {
+                "reference": reference, "workspace": str(root.resolve()), "provider": "codex",
+                "model": "gpt-6-luna", "tools": ["bash"], "permission_mode": "bypass",
+            }, current
+            recovered = subprocess.run([RUI, "recover", key, "--json"],
+                env=bare_env, capture_output=True, text=True, timeout=5)
+            assert recovered.returncode == 0, recovered.stderr
+            answer = json.loads(recovered.stdout)["answer"]
+            assert answer["status"] == "accepted" and answer["replayed"] is True, answer
             stopped = subprocess.run([RUI, "host", "stop", "--store", bare_store],
                 env=bare_env, capture_output=True, text=True, timeout=5)
             assert stopped.returncode == 0 and "Stop acknowledged" in stopped.stdout, stopped

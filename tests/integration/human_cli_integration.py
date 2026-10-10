@@ -40,6 +40,33 @@ def admit(home, *args):
     return admission
 
 
+def preference_edits(home, store):
+    """Exact saved intent, independent of prospective recommendation output."""
+    run(home, "setup", "--store", store, "--provider", "codex", "--model", "gpt-6-luna")
+    saved = home / ".config/rui/preferences"
+    pinned = f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
+    cleared = f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=\n"
+    assert saved.read_text() == pinned
+    run(home, "setup", "--store", store)
+    assert saved.read_text() == pinned, "omitted model lost its selection"
+    assert "Model: not selected" in run(home, "setup", "--clear-model")
+    assert saved.read_text() == cleared, "clear persisted a recommendation or retained the model"
+    run(home, "setup")
+    assert saved.read_text() == cleared, "inspection persisted a recommendation"
+    for flags in (("--clear-model", "--model", "gpt-6-luna"),
+                  ("--model", "gpt-6-luna", "--clear-model"), ("--model", "")):
+        run(home, "setup", *flags, success=False)
+        assert saved.read_text() == cleared, "rejected edit changed preferences"
+    saved.write_text(pinned.replace("provider=codex", "provider=retired").replace("gpt-6-luna", "old-model"))
+    run(home, "setup", "--clear-model")
+    assert saved.read_text() == cleared.replace("provider=codex", "provider=retired")
+    assert "saved provider is unsupported; no fallback" in run(home, "setup")
+    run(home, "setup", "--provider", "codex", "--clear-model")
+    assert saved.read_text() == cleared
+    run(home, "setup", "--model", "gpt-6-luna")
+    assert saved.read_text() == pinned
+
+
 def read_terminal(master, marker, timeout=15):
     output = b""
     deadline = time.monotonic() + timeout
@@ -56,6 +83,69 @@ def read_terminal(master, marker, timeout=15):
 def terminal_step(master, command, marker="rui> "):
     os.write(master, (command + "\n").encode())
     return read_terminal(master, marker)
+
+
+def store_selection_cases(state, workspace, valid_store):
+    for case in ("saved-initial", "saved-after", "explicit-override", "explicit-create", "home-create"):
+        home = state / case
+        home.mkdir(mode=0o700)
+        destination = home / ".local/share/rui/store" if case == "home-create" else home / "store"
+        saved = case.startswith("saved") or case == "explicit-override"
+        if saved:
+            destination.mkdir(mode=0o700)
+            run(home, "setup", "--store", destination, "--provider", "codex", "--model", "gpt-6-luna")
+            if case != "saved-after":
+                destination.rmdir()
+                assert run(home, "host", "status", success=False) == ""
+        if not case.startswith("saved"):
+            (home / ".config/rui").mkdir(mode=0o700, parents=True, exist_ok=True)
+            codex_fixture.credentials(home / ".config/rui/codex.json")
+        explicit = valid_store if case == "explicit-override" else destination
+        if case == "explicit-override":
+            assert "Host: ready" in run(home, "host", "status", "--store", explicit)
+        args = ["--store", str(explicit)] if case.startswith("explicit") else []
+        master, slave = pty.openpty()
+        ready_read, ready_write = os.pipe()
+        caller = subprocess.Popen([str(fixture.RUI), *args], cwd=workspace,
+            env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
+            pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        os.close(slave)
+        os.close(ready_write)
+        try:
+            settlement_timeout = 5
+            if case == "saved-after":
+                assert "No locally ready provider" in provider_prompt(master, ready_read)
+                destination.rmdir()
+                assert run(home, "host", "status", success=False) == ""
+                response_deadline = time.monotonic() + settlement_timeout
+                os.write(master, b"d\n")
+                # Darwin prompt cleanup can wait for this PTY consumer. Drain
+                # the actual deferral response within the original exit budget.
+                read_terminal(master, "Rui: Login deferred.", timeout=response_deadline - time.monotonic())
+                settlement_timeout = response_deadline - time.monotonic()
+                assert settlement_timeout > 0, "saved-Store deferral did not settle within 5 seconds"
+            if not case.startswith("saved"):
+                assert "Session: rui/" in read_terminal(master, "rui> ")
+                terminal_step(master, "/exit", "Detached.")
+            _, errors = caller.communicate(timeout=settlement_timeout)
+            if case.startswith("saved"):
+                assert caller.returncode != 0 and b"FileNotFound" in errors, (case, errors)
+                assert not destination.exists() and not (home / ".config/rui/requests").exists()
+            else:
+                assert caller.returncode == 0, (case, errors)
+                record, = (home / ".config/rui/requests").glob("*.json")
+                binding = json.loads(record.read_bytes())
+                assert binding["store"] == str(explicit.resolve()) and binding["require_model"] is True
+            print("Store provenance:", case, "passed", flush=True)
+        finally:
+            if caller.poll() is None:
+                caller.kill()
+                caller.wait(timeout=5)
+            os.close(ready_read)
+            os.close(master)
+            if case in ("explicit-create", "home-create") and destination.exists():
+                run(home, "host", "stop", "--store", destination)
+                fixture.wait_for(lambda: "Host: unavailable" in run(home, "host", "status", "--store", destination), "created Host stopped")
 
 
 def action_ready(descriptor):
@@ -261,6 +351,7 @@ def main():
     completed = False
     try:
         host = fixture.start_host(store, url)
+        store_selection_cases(state, workspace, store)
         saved_capture_cases(state, store, workspace)
         preferences_home = state / "preferences-home"
         preferences_home.mkdir()
@@ -270,11 +361,13 @@ def main():
         assert "choose a supported provider" in fresh_setup and "Host: unavailable" in fresh_setup
         assert not (preferences_home / ".config").exists(), "inspection created private state"
         # The shorter preferences path fits while the unsaved Store fallback
-        # does not. A provider-only update must fail before publication.
+        # does not. Independent provider publication still succeeds.
         max_path = os.pathconf(preferences_home, "PC_PATH_MAX")
         long_home = str(preferences_home) + "/." * ((max_path - 16 - len(str(preferences_home))) // 2)
-        assert run(long_home, "setup", "--provider", "codex", success=False) == ""
-        assert not (preferences_home / ".config/rui/preferences").exists()
+        oversized_setup = run(long_home, "setup", "--provider", "codex")
+        assert "Saved defaults" in oversized_setup and "Store unavailable" in oversized_setup
+        assert "no alternate Store selected" in oversized_setup and "Host: unavailable" in oversized_setup
+        assert (preferences_home / ".config/rui/preferences").read_text().endswith("provider=codex\nmodel=\n")
         invalid_home = os.fsencode(state) + b"/home-\xff"
         try:
             os.mkdir(invalid_home, mode=0o700)
@@ -303,6 +396,7 @@ def main():
             "--provider", "codex", "--model", "gpt-6-luna")
         saved = preferences_home / ".config/rui/preferences"
         assert saved.read_text() == f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
+        preference_edits(preferences_home, store)
         original_preferences = saved.read_text()
         saved.write_text(original_preferences.replace("model=gpt-6-luna", "model=family=variant"))
         assert saved.read_text().endswith("provider=codex\nmodel=family=variant\n")
@@ -335,7 +429,13 @@ def main():
         retired_store.mkdir(mode=0o700)
         assert "Saved defaults" in run(preferences_home, "setup", "--store", retired_store)
         retired_store.rmdir()
-        assert run(preferences_home, "setup", success=False) == ""
+        unavailable_setup = run(preferences_home, "setup")
+        assert str(retired_store) in unavailable_setup and "Store unavailable" in unavailable_setup
+        assert "no alternate Store selected" in unavailable_setup and "Host: unavailable" in unavailable_setup
+        assert "Saved defaults" in run(preferences_home, "setup", "--clear-model")
+        assert saved.read_text().endswith("provider=codex\nmodel=\n")
+        assert f"store={retired_store}\n" in saved.read_text()
+        assert "Saved defaults" in run(preferences_home, "setup", "--model", "gpt-6-luna")
         assert "Saved defaults" in run(preferences_home, "setup", "--store", store)
         assert f"store={store.resolve()}\n" in saved.read_text()
         credential = saved.parent / "codex.json"
@@ -367,7 +467,9 @@ def main():
         assert "credential: error" in run(preferences_home, "setup")
         credential.unlink()
         assert run(preferences_home, "setup", "--provider", "other", success=False) == ""
-        assert run(preferences_home, "setup", "--model", "other-model", success=False) == ""
+        assert "Saved defaults" in run(preferences_home, "setup", "--model", "other-model")
+        assert saved.read_text().endswith("model=other-model\n")
+        assert "Saved defaults" in run(preferences_home, "setup", "--model", "gpt-6-luna")
         assert saved.read_text().endswith("model=gpt-6-luna\n")
         assert run(preferences_home, "setup", "--store", state / "missing", success=False) == ""
         assert saved.read_text().endswith("model=gpt-6-luna\n")
@@ -398,11 +500,11 @@ def main():
         assert "Saved defaults" in run(preferences_home, "setup", "--store", store)
         assert saved.read_text().endswith("provider=retired\nmodel=old-model\n")
         assert "Saved defaults" in run(preferences_home, "setup", "--provider", "codex")
-        assert saved.read_text().endswith("provider=codex\nmodel=gpt-6-luna\n")
+        assert saved.read_text().endswith("provider=codex\nmodel=\n")
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
         assert "Saved defaults" in run(preferences_home, "setup", "--provider", "codex", "--model", "gpt-6-luna")
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=old-model\n")
-        assert "saved model is unsupported; no fallback" in run(preferences_home, "setup")
+        assert "Next Session: codex / old-model" in run(preferences_home, "setup")
         assert "Saved defaults" in run(preferences_home, "setup", "--model", "gpt-6-luna")
         saved.rename(saved.parent / "preferences.backup")
         sole = run(preferences_home, "setup")
@@ -573,8 +675,8 @@ def main():
                 explicit.wait(timeout=5)
             os.close(ready_read)
             os.close(master)
-        # The credential arrives while the prompt is open, then expires
-        # before the choice. Readiness must use the post-choice clock.
+        # A valid opaque credential arrives while the prompt is open, then
+        # becomes renewal-due before the choice. It remains usable for creation.
         (explicit_config / "codex.json").unlink()
         master, slave = pty.openpty()
         ready_read, ready_write = os.pipe()
@@ -597,9 +699,15 @@ def main():
             credential_file = explicit_config / "codex.json"
             codex_fixture.credentials(credential_file)
             credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", f"expires_at={expiry}"))
+            assert "credential: error" in run(preferences_home, "setup", environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)}), "JWT/record expiry mismatch was accepted"
+            codex_fixture.credentials(credential_file, access="synthetic-opaque-access")
+            credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", "expires_at=0").replace("refreshed_at=1750000000", f"refreshed_at={expiry - 8 * 24 * 60 * 60}"))
             while time.time() < expiry:
                 time.sleep(0.01)
-            assert "No new Session created" in terminal_step(master, "d", "No new Session created")
+            assert "usable locally; renewal due at dispatch" in run(preferences_home, "setup", environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)})
+            welcome = terminal_step(master, "d", "rui> ")
+            assert "Session: rui/" in welcome and "Permission: bypass" in welcome, welcome
+            assert "Detached." in terminal_step(master, "/exit", "Detached.")
             assert expiring.wait(timeout=5) == 0
             assert malformed.read_text() == "version=9\n"
         finally:
@@ -635,9 +743,11 @@ def main():
                     assert "Saved defaults" in run(changing_home, "setup", "--store", after)
                     codex_fixture.credentials(changing_home / ".config/rui/codex.json")
                     welcome = terminal_step(master, "d")
-                    assert f"Diagnostics: {after.resolve()}/diagnostics" in welcome, welcome
+                    assert "Diagnostics:" not in welcome, welcome
                     handle = next(line.split("request: ", 1)[1].strip() for line in welcome.splitlines()
                         if line.startswith("request: "))
+                    selected = json.loads((changing_home / ".config/rui/requests" / f"{handle}.json").read_bytes())
+                    assert selected["store"] == str(after.resolve()), selected
                     current = fixture.command("inspect-session", "--store", after,
                         "--session", f"rui/{handle}")
                     assert current["session"]["model"] == "gpt-6-luna", current
@@ -652,6 +762,33 @@ def main():
         finally:
             fixture.stop_host(other_host)
         codex_fixture.credentials(credential)
+        for tools, mode, warning in (("none", "bypass", False), ("edit", "bypass", False),
+                                     ("bash,edit", "bypass", True), ("bash", "ask", False)):
+            warning_ref = f"warnings/{tools}/{mode}"
+            admit(preferences_home, "configure", "--store", store, "--session", warning_ref,
+                  "--workspace", workspace, "--provider", "codex", "--model", "model-a",
+                  "--tools", tools, "--permission-mode", mode)
+            listing = run(preferences_home, "sessions", "--store", store, "--all")
+            selected = listing.split(f"Session: {warning_ref}\n", 1)[1].split("Session: ", 1)[0]
+            assert ("Bash runs without approval" in selected) == warning, selected
+            master, slave = pty.openpty()
+            caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store), "--session", warning_ref],
+                env={**os.environ, "HOME": str(preferences_home)}, stdin=slave, stdout=slave, stderr=slave)
+            os.close(slave)
+            try:
+                welcome = read_terminal(master, "rui> ")
+                assert f"Permission: {mode}\n" in welcome, welcome
+                assert "Bash runs without approval" not in welcome, welcome
+                assert "Bash commands can run without asking you" not in welcome, welcome
+                status = terminal_step(master, "/status")
+                assert ("Bash runs without approval" in status) == warning, status
+                terminal_step(master, "/exit", "Detached.")
+                assert caller.wait(timeout=5) == 0
+            finally:
+                if caller.poll() is None:
+                    caller.kill()
+                    caller.wait(timeout=5)
+                os.close(master)
         created = []
         for _ in range(2):
             master, slave = pty.openpty()
@@ -661,14 +798,21 @@ def main():
             os.close(slave)
             try:
                 welcome = read_terminal(master, "rui> ")
+                assert "Attached to the ready Host" not in welcome and "Diagnostics:" not in welcome, welcome
                 handle = next(line.split("request: ", 1)[1].strip() for line in welcome.splitlines()
                     if line.startswith("request: "))
                 reference = f"rui/{handle}"
-                assert f"Session: {reference}" in welcome and "Permission: ask" in welcome, welcome
+                saved = json.loads((preferences_home / ".config/rui/requests" / f"{handle}.json").read_bytes())
+                assert saved["require_model"] is True and saved["store"] == str(store.resolve())
+                assert saved["session"] == reference and saved["configuration"]["workspace"] == {"state": "value", "value": str(workspace.resolve())}
+                assert saved["configuration"]["tools"] == {"state": "value", "value": ["bash"]} and saved["configuration"]["permission_mode"] == {"state": "value", "value": "bypass"}
+                assert f"Session: {reference}" in welcome and "Permission: bypass" in welcome, welcome
+                assert "Bash runs without approval" not in welcome, welcome
+                assert "Bash commands can run without asking you" not in welcome, welcome
                 assert f"Workspace (Bash cwd): {workspace.resolve()}" in welcome, welcome
                 assert "Model: gpt-6-luna" in welcome and "Provider: codex" in welcome, welcome
                 current = fixture.command("inspect-session", "--store", store, "--session", reference)
-                assert current["session"]["permission_mode"] == "ask", current
+                assert current["session"]["permission_mode"] == "bypass", current
                 assert current["session"]["workspace"] == str(workspace.resolve()), current
                 assert json.loads(run(preferences_home, "recover", handle, "--json"))["answer"]["replayed"] is True
                 created.append(reference)
@@ -744,7 +888,7 @@ def main():
             recovered_again = json.loads(run(preferences_home, "recover", handle, "--json"))
             assert recovered_again["answer"]["replayed"], recovered_again
             assert fixture.command("inspect-session", "--store", store,
-                "--session", f"rui/{handle}")["session"]["permission_mode"] == "ask"
+                "--session", f"rui/{handle}")["session"]["permission_mode"] == "bypass"
         finally:
             if interrupted.poll() is None:
                 interrupted.kill()
@@ -891,7 +1035,20 @@ def main():
             assert "Permission: ask" in terminal_step(master, "/status")
             assert not credential.exists()
             assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model gpt-6-luna")
-            assert "active Session unchanged" in terminal_step(master, "/setup --model other-model")
+            assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model other-model")
+            interactive_saved = preferences_home / ".config/rui/preferences"
+            assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --clear-model")
+            assert interactive_saved.read_text().endswith("provider=codex\nmodel=\n")
+            cleared_preferences = interactive_saved.read_bytes()
+            for command, error in (("/setup --clear-model --model gpt-6-luna", "ConflictingPreferenceModelEdit"),
+                                   ("/setup --model gpt-6-luna --clear-model", "ConflictingPreferenceModelEdit"),
+                                   ('/setup --model ""', "InvalidPreferenceModel")):
+                assert error in terminal_step(master, command)
+                assert interactive_saved.read_bytes() == cleared_preferences
+            assert "Permission: ask" in terminal_step(master, "/status")
+            active = fixture.command("inspect-session", "--store", store, "--session", session)["session"]
+            assert active["model"] == "model-a" and active["permission_mode"] == "ask", active
+            assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model gpt-6-luna")
             spaced_store = state / "spaced store"
             spaced_store.mkdir(mode=0o700)
             assert "Saved defaults for future Sessions" in terminal_step(master, f'/setup --store "{spaced_store}"')
@@ -1412,8 +1569,9 @@ def main():
         os.close(slave)
         try:
             greeting = read_terminal(master, "rui> ")
-            assert "Permission: bypass (Bash runs without approval)" in greeting, greeting
-            assert "Rui: Bash commands can run without asking you." in greeting, greeting
+            assert "Permission: bypass\n" in greeting, greeting
+            assert "Bash runs without approval" not in greeting, greeting
+            assert "Bash commands can run without asking you" not in greeting, greeting
             assert "Provider: codex" in greeting and "Model: model-a" in greeting, greeting
             fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
             before = len(endpoint.requests)

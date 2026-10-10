@@ -1,0 +1,48 @@
+name: Daily changed-main macOS
+on:
+  schedule:
+    - cron: '23 6 * * *'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: daily-macos
+  cancel-in-progress: true
+jobs:
+  changed:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.main.outputs.changed }}
+    steps:
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        id: main
+        with:
+          script: |
+            const {data} = await github.rest.actions.listWorkflowRuns({
+              ...context.repo, workflow_id: 'daily-macos.yml', status: 'completed',
+              branch: 'main', event: 'schedule', per_page: 1
+            });
+            const previous = data.workflow_runs[0];
+            const changed = !previous || previous.head_sha !== context.sha;
+            core.setOutput('changed', String(changed));
+            await core.summary.addRaw(`Scheduled main SHA: ${context.sha}. ` +
+              (changed ? 'Run native ordinary suite.' :
+                `Unchanged since prior ${previous.conclusion} attempt; no retry or new test evidence.`)).write();
+  macos:
+    needs: changed
+    if: ${{ needs.changed.outputs.changed == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: ./.github/actions/setup
+      - name: Ordinary suite on the actual scheduled main SHA
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          echo "Tested main SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m). No coverage claim for intermediate merges." | tee -a "$GITHUB_STEP_SUMMARY"
+          zig build check --summary all

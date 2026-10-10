@@ -91,11 +91,14 @@ pub fn build(b: *std.Build) void {
     configureTerminalEditor(b, tests);
     configureTransport(b, tests, target, pinned_transport);
     const run_tests = b.addRunArtifact(tests);
+    // Reuse compiled artifacts, never a prior test outcome (even with a fixed seed).
+    run_tests.has_side_effects = true;
     run_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
 
     const test_step = b.step("test", "Run unit, Store, and protocol tests");
     test_step.dependOn(&run_tests.step);
     const run_full_tests = b.addRunArtifact(tests);
+    run_full_tests.has_side_effects = true;
     run_full_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "1");
     const full_test_step = b.step("test-full", "Run native tests including the real 60-second client deadline witness");
     full_test_step.dependOn(&run_full_tests.step);
@@ -110,6 +113,7 @@ pub fn build(b: *std.Build) void {
     });
     configureTerminalEditor(b, logic_tests);
     const run_logic_tests = b.addRunArtifact(logic_tests);
+    run_logic_tests.has_side_effects = true;
     const logic_test_step = b.step(
         "test-logic",
         "Run the shared execution turn and portable owner tests without Host, Bash, or transport fixtures",
@@ -143,11 +147,42 @@ pub fn build(b: *std.Build) void {
         }),
     });
     session_list_client.root_module.link_libc = true;
-    session_list_client.root_module.addImport("rui_client", b.createModule(.{
+    const read_client = b.createModule(.{
         .root_source_file = b.path("src/client.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
-    }));
+    });
+    session_list_client.root_module.addImport("rui_client", read_client);
+    const proposal_client = b.addExecutable(.{
+        .name = "rui-proposal-client-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/proposal_client.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    proposal_client.root_module.link_libc = true;
+    proposal_client.root_module.addImport("rui_client", read_client);
+    const proposal_integration = b.addSystemCommand(&.{"python3"});
+    proposal_integration.addFileArg(b.path("tests/integration/proposal_integration.py"));
+    proposal_integration.addArtifactArg(release_safe);
+    proposal_integration.addArtifactArg(proposal_client);
+    b.step("proposal-integration", "Run historical proposal discovery and complete typed Client reads").dependOn(&proposal_integration.step);
+    const activity_client = b.addExecutable(.{
+        .name = "rui-activity-client-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/activity_client.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    activity_client.root_module.link_libc = true;
+    activity_client.root_module.addImport("rui_client", read_client);
+    const activity_integration = b.addSystemCommand(&.{"python3"});
+    activity_integration.addFileArg(b.path("tests/integration/activity_integration.py"));
+    activity_integration.addArtifactArg(release_safe);
+    activity_integration.addArtifactArg(activity_client);
+    b.step("activity-integration", "Run complete Session activity reads and typed Client consumption").dependOn(&activity_integration.step);
     const integration = b.addSystemCommand(&.{"sh"});
     integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     integration.addArtifactArg(release_safe);
@@ -165,6 +200,26 @@ pub fn build(b: *std.Build) void {
         "Run the targeted model dispatch, output, retry, and recovery shortcut",
     );
     dispatch_integration_step.dependOn(&dispatch_integration.step);
+
+    const login_signal_integration = b.addSystemCommand(&.{"python3"});
+    login_signal_integration.addFileArg(b.path("tests/integration/login_signal_integration.py"));
+    login_signal_integration.addArtifactArg(release_safe);
+    b.step("login-signal-integration", "Run the Linux-only one-shot login signal loader witness").dependOn(&login_signal_integration.step);
+
+    const current_facts_integration = b.addSystemCommand(&.{"python3"});
+    current_facts_integration.addFileArg(b.path("tests/integration/current_facts_integration.py"));
+    current_facts_integration.addArtifactArg(release_safe);
+    b.step("current-facts-integration", "Run the real Current producer/consumer observation oracle").dependOn(&current_facts_integration.step);
+
+    const canonical_failure_integration = b.addSystemCommand(&.{"python3"});
+    canonical_failure_integration.addFileArg(b.path("tests/integration/canonical_failure_integration.py"));
+    canonical_failure_integration.addArtifactArg(release_safe);
+    b.step("canonical-failure-integration", "Run canonical invocation failure at real producer and caller boundaries").dependOn(&canonical_failure_integration.step);
+
+    const server_delivery_integration = b.addSystemCommand(&.{"python3"});
+    server_delivery_integration.addFileArg(b.path("tests/integration/server_delivery_integration.py"));
+    server_delivery_integration.addArtifactArg(release_safe);
+    b.step("server-delivery-integration", "Run real reply inactivity, connection headroom and Host drain separately from load").dependOn(&server_delivery_integration.step);
 
     const h2_integration = b.addSystemCommand(&.{"python3"});
     h2_integration.addFileArg(b.path("tests/integration/transport_h2_integration.py"));
@@ -256,6 +311,26 @@ pub fn build(b: *std.Build) void {
         "Run native cross-process credential lock and refresh-generation transitions",
     );
     credential_integration_step.dependOn(&credential_integration.step);
+
+    const preference_policy_actor = b.addExecutable(.{
+        .name = "rui-preference-policy-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/preference_policy.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    preference_policy_actor.root_module.link_libc = true;
+    preference_policy_actor.root_module.addImport("preferences", b.createModule(.{
+        .root_source_file = b.path("src/preferences.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    }));
+    const preference_policy_integration = b.addSystemCommand(&.{"python3"});
+    preference_policy_integration.addFileArg(b.path("tests/integration/preference_policy_integration.py"));
+    preference_policy_integration.addArtifactArg(preference_policy_actor);
+    const preference_policy_step = b.step("preference-policy-integration", "Run native preference publication and privacy cases");
+    preference_policy_step.dependOn(&preference_policy_integration.step);
 
     const codex_h2_integration = b.addSystemCommand(&.{"python3"});
     codex_h2_integration.addFileArg(b.path("tests/integration/codex_h2_integration.py"));
@@ -349,6 +424,9 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addArtifactArg(tests);
     fast_integrations.addArtifactArg(host_status_actor);
     fast_integrations.addArtifactArg(session_list_client);
+    fast_integrations.addArtifactArg(proposal_client);
+    fast_integrations.addArtifactArg(activity_client);
+    fast_integrations.addArtifactArg(preference_policy_actor);
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.step.dependOn(&release.step);
     fast_integrations.step.dependOn(&run_evaluator_host.step);
@@ -359,12 +437,17 @@ pub fn build(b: *std.Build) void {
         "check-full",
         "Run routine native tests, sanitizer and process integrations serially (long witnesses are separate)",
     );
+    const check_part = b.option(enum { all, execution, callers }, "check-part", "Isolated full-check part (default all)") orelse .all;
     const process_integrations = b.addSystemCommand(&.{"sh"});
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
     process_integrations.addArtifactArg(release_safe);
     process_integrations.addArtifactArg(debug);
     process_integrations.addArtifactArg(host_status_actor);
     process_integrations.addArtifactArg(session_list_client);
+    process_integrations.addArtifactArg(proposal_client);
+    process_integrations.addArtifactArg(activity_client);
+    process_integrations.addArtifactArg(preference_policy_actor);
+    process_integrations.addArg(@tagName(check_part));
     const full_evaluator = b.addSystemCommand(&.{"python3"});
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     full_evaluator.addArtifactArg(evaluator);
@@ -377,12 +460,14 @@ pub fn build(b: *std.Build) void {
     full_evaluator_host.addArtifactArg(evaluator);
     full_evaluator_host.step.dependOn(&full_evaluator.step);
     process_integrations.step.dependOn(&format.step);
-    process_integrations.step.dependOn(&full_evaluator_host.step);
+    // The execution part owns native tests and evaluator/sanitizer work. The
+    // callers part runs on another machine, isolated from that child-process load.
+    if (check_part != .callers) process_integrations.step.dependOn(&full_evaluator_host.step);
     process_integrations.step.dependOn(&release.step);
     full_check_step.dependOn(&process_integrations.step);
 
     const measurement_tests = b.addSystemCommand(&.{
-        "go", "test", "-mod=readonly", "./...",
+        "go", "test", "-count=1", "-mod=readonly", "./...",
     });
     measurement_tests.setCwd(b.path("tests/qualification"));
     measurement_tests.setEnvironmentVariable("GOTOOLCHAIN", "local");
@@ -393,7 +478,7 @@ pub fn build(b: *std.Build) void {
     measurement_test_step.dependOn(&measurement_tests.step);
 
     const queue_audit_test = b.addSystemCommand(&.{
-        "go", "test", "-mod=readonly", "-run", "^TestExecutionAuditQueryRejectsHiddenEntities$", "./model-queue", "-args", "-sqlite",
+        "go", "test", "-count=1", "-mod=readonly", "-run", "^TestExecutionAuditQueryRejectsHiddenEntities$", "./model-queue", "-args", "-sqlite",
     });
     queue_audit_test.setCwd(b.path("tests/qualification"));
     queue_audit_test.setEnvironmentVariable("GOTOOLCHAIN", "local");
@@ -402,15 +487,15 @@ pub fn build(b: *std.Build) void {
 
     const linux_cross_step = b.step(
         "cross-check-linux",
-        "Compile the supported Linux x86-64/ARM64 targets",
+        "Compile Linux x86-64 and experimental Linux ARM64",
     );
     const macos_cross_step = b.step(
         "cross-check-macos",
-        "Compile the supported macOS x86-64/ARM64 targets (requires Xcode/Command Line Tools)",
+        "Compile Apple Silicon macOS and experimental Intel macOS (requires Xcode/Command Line Tools)",
     );
     const cross_step = b.step(
         "cross-check",
-        "Compile the supported Linux/macOS x86-64/ARM64 targets",
+        "Compile supported native and experimental Linux/macOS architectures (not runtime qualification)",
     );
     cross_step.dependOn(linux_cross_step);
     cross_step.dependOn(macos_cross_step);

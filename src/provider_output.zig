@@ -354,7 +354,7 @@ fn readString(io: std.Io, file: std.Io.File, value: Range, destination: *protoco
 }
 
 fn stringDigest(io: std.Io, file: std.Io.File, value: Range) ![32]u8 {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var hash = protocol.contentHasher();
     var decoded = Decoded{ .hash = &hash };
     var source = try FileSource.init(io, file, value);
     const parsed = try parseString(&source, &decoded);
@@ -958,6 +958,17 @@ fn testingReasoningSse(reasoning: []const u8, terminal_reasoning: []const u8) ![
             "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"response\",\"status\":\"completed\",\"output\":[{s},{s}]}}}}\n\n",
         .{ reasoning, answer, terminal_reasoning, answer },
     );
+}
+
+test "provider proposal identity uses decoded content domain" {
+    const sse = "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"p-é\\n\"}}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"p-\\u00e9\\n\",\"name\":\"bash\",\"call_id\":\"c1\",\"arguments\":\"{}\"}}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const accepted = try validateTestingSse(&tmp, sse, 4096);
+    try std.testing.expectEqual(@as(u64, 1), accepted.output.call_count);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest("p-é\n"), &accepted.first_item.id_digest);
 }
 
 test "provider reasoning strings preserve raw items across evidence and file window boundaries" {

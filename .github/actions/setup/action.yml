@@ -1,0 +1,113 @@
+name: Prepare native Rui checks
+description: Pinned Zig and existing build caches on standard supported runners
+inputs:
+  targets:
+    description: Selected existing build targets
+    default: '[]'
+  check-part:
+    description: Full-check partition, keeping concurrent cache writers separate
+    default: all
+runs:
+  using: composite
+  steps:
+    - name: Select fixture dependencies
+      id: requirements
+      shell: bash
+      env:
+        TARGETS: ${{ inputs.targets }}
+      run: |
+        python3 - <<'PY'
+        import json, os, sys
+        sys.path.insert(0, 'tests/ci')
+        from select_tests import setup_requirements
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            for name, required in setup_requirements(json.loads(os.environ['TARGETS'])).items():
+                print(f'{name}={str(required).lower()}', file=output)
+        PY
+    - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      if: ${{ steps.requirements.outputs.go == 'true' }}
+      with:
+        go-version: '1.27.1'
+        cache: false
+    - name: Identify the actual native build tools
+      id: tools
+      shell: bash
+      run: |
+        set -euo pipefail
+        identity="$RUNNER_TEMP/rui-native-tools.txt"
+        {
+          uname -sm
+          cc --version
+          make --version
+          perl -v
+          if [ "$(uname -s)" = Darwin ]; then
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-path
+            xcrun --sdk macosx --show-sdk-version
+            xcrun --sdk macosx --show-sdk-build-version
+          else
+            cat /etc/os-release
+            ldd --version
+            ld --version
+          fi
+        } > "$identity"
+        cat "$identity"
+        echo "identity=$(shasum -a 256 "$identity" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: ${{ runner.temp }}/rui-zig
+        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.16.0
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      id: build-cache
+      with:
+        # build.zig marks every Zig test run side-effectful: no acceptance
+        # manifests are written/read. Output-producing build steps stay cached.
+        path: |
+          ~/.cache/zig
+          .zig-cache
+        key: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.16.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-${{ inputs.check-part }}
+        restore-keys: |
+          rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.16.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-
+          rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.16.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-
+    - name: Install pinned compiler
+      shell: bash
+      run: |
+        set -euo pipefail
+        case "$(uname -s)/$(uname -m)" in
+          Linux/x86_64)
+            archive=zig-x86_64-linux-0.16.0
+            checksum=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+            ;;
+          Darwin/arm64)
+            archive=zig-aarch64-macos-0.16.0
+            checksum=b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
+            ;;
+          *) echo "Unsupported actual native architecture" >&2; exit 1 ;;
+        esac
+        if [ ! -x "$RUNNER_TEMP/rui-zig/zig" ]; then
+          curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
+            --retry 1 --retry-delay 1 --retry-max-time 95 \
+            "https://pkg.hexops.org/zig/$archive.tar.xz" -o "$RUNNER_TEMP/zig.tar.xz"
+          echo "$checksum  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/rui-zig"
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" --strip-components=1 -C "$RUNNER_TEMP/rui-zig"
+        fi
+        test "$("$RUNNER_TEMP/rui-zig/zig" version)" = 0.16.0
+        echo "$RUNNER_TEMP/rui-zig" >> "$GITHUB_PATH"
+        echo "ZIG_GLOBAL_CACHE_DIR=$HOME/.cache/zig" >> "$GITHUB_ENV"
+    - name: Install the selected H2 fixture dependency
+      if: ${{ steps.requirements.outputs.h2 == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m venv "$RUNNER_TEMP/rui-python"
+        "$RUNNER_TEMP/rui-python/bin/pip" --disable-pip-version-check install --retries 1 'h2==4.3.0'
+        echo "$RUNNER_TEMP/rui-python/bin" >> "$GITHUB_PATH"
+    - name: Fetch the existing pinned dependency graph
+      if: ${{ steps.build-cache.outputs.cache-hit != 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$HOME/.cache/zig/tmp"
+        test "$(zig fetch --global-cache-dir "$HOME/.cache/zig" https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz)" = N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM
+        zig build --global-cache-dir "$HOME/.cache/zig" --fetch=all
