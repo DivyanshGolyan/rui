@@ -93,6 +93,7 @@ def persistent_input_cases():
     home.mkdir(mode=0o700)
     store = state / "store"
     first_release = threading.Event()
+    next_received, next_admission_release = threading.Event(), threading.Event()
     endpoint = fixture.SuccessEndpoint([
         (fixture.sse_answer("persistent-a", "persistent-ar", "persistent-am", "first exact answer")[0], first_release),
         fixture.sse_answer("persistent-b", "persistent-br", "persistent-bm", "second exact answer")[0],
@@ -117,14 +118,18 @@ def persistent_input_cases():
         def lost_once(response):
             received.set()
             assert admission_release.wait(15), "Admission gate was not released"
-            return b"" if len(proxy.exchanges) == 1 else response
+            if len(proxy.exchanges) == 3:
+                next_received.set()
+                assert next_admission_release.wait(15), "next Admission gate was not released"
+            return b"" if len(proxy.exchanges) in (1, 4) else response
 
         caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
             "--session", "persistent/input"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "rui> ")
         proxy = canonical.ReplyProxy(host, "/v1/message", lost_once)
-        os.write(master, "original éZ\n".encode())
+        # An idle recovery key cannot authorize retry of a future submission.
+        os.write(master, "\x12original éZ\n".encode())
         assert received.wait(10), "original Message did not reach Host"
         os.write(master, "next café!\x1b[D\x1b[DX".encode())
         composed = read_terminal(master, "rui> next cafXé!")
@@ -141,21 +146,32 @@ def persistent_input_cases():
         assert json.loads(saved)["text"]["value"] == "original éZ"
         first_release.set()
         read_terminal(master, "first exact answer")
+        assert len(proxy.exchanges) == 1, "idle Ctrl-R retried unrelated uncertain intent"
         os.write(master, b"\x12")
         read_terminal(master, "completed")
         assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == saved, "Ctrl-R changed original capture"
         assert len(endpoint.requests) == 1, "recovery repeated provider work"
         # Cursor still sits before é; insert at that exact logical position.
         os.write(master, b"Y\n")
+        assert next_received.wait(10), "next Message did not reach Host"
+        # A retry requested during this Admission belongs only to its ticket.
+        os.write(master, b"\x12pending scope")
+        read_terminal(master, "rui> pending scope")
+        next_admission_release.set()
         read_terminal(master, "second exact answer")
         assert json.loads(proxy.exchanges[-1][0])["text"]["value"] == "next cafXYé!"
         assert len(endpoint.requests) == 2
-        os.write(master, b"bad\xc3(\n")
+        os.write(master, b"\x15bad\xc3(\n")
         read_terminal(master, "InvalidTerminalInput")
         os.write(master, b"valid after rejection\n")
-        read_terminal(master, "valid after malformed")
+        uncertain = read_terminal(master, "Admission unconfirmed")
+        if "valid after malformed" not in uncertain:
+            read_terminal(master, "valid after malformed")
         assert json.loads(proxy.exchanges[-1][0])["text"]["value"] == "valid after rejection"
-        assert len(proxy.exchanges) == 4, "malformed input reached capture/transmission"
+        assert len(proxy.exchanges) == 4, "accepted ticket's Ctrl-R retried a later submission"
+        os.write(master, b"\x12")
+        read_terminal(master, "completed")
+        assert len(proxy.exchanges) == 5 and proxy.exchanges[4][0] == proxy.exchanges[3][0], "fresh Ctrl-R did not recover the current original"
         # Actual prepublication access failure, followed by repair. Recovery
         # must capture the original under its reserved key, not wedge forever.
         before_failure = set(records.glob("*.json"))
@@ -166,7 +182,7 @@ def persistent_input_cases():
         failed += read_terminal(master, "rui> next cafXé!")
         reserved = failed.split("Original reserved request: ", 1)[1].splitlines()[0]
         assert set(records.glob("*.json")) == before_failure
-        assert len(proxy.exchanges) == 4, "capture failure transmitted input"
+        assert len(proxy.exchanges) == 5, "capture failure transmitted input"
         records.chmod(0o700)
         os.write(master, b"\x12")
         read_terminal(master, "capture retry answer")
@@ -176,7 +192,7 @@ def persistent_input_cases():
         os.write(master, b"Y\n")
         read_terminal(master, "next after capture retry")
         assert json.loads(proxy.exchanges[-1][0])["text"]["value"] == "next cafXYé!"
-        assert len(endpoint.requests) == 5 and len(proxy.exchanges) == 6
+        assert len(endpoint.requests) == 5 and len(proxy.exchanges) == 7
         # A command selects a handoff, not another input/submission window.
         before_command = set(records.glob("*.json"))
         os.write(master, b"/configure --permission-mode ask\nUNREAD suffix\n")
@@ -185,7 +201,7 @@ def persistent_input_cases():
         assert len(added) == 1 and "configuration" in added[0], "command suffix became captured Message intent"
         assert fixture.command("inspect-session", "--store", store,
             "--session", "persistent/input")["session"]["permission_mode"] == "ask"
-        assert len(endpoint.requests) == 5 and len(proxy.exchanges) == 6, "command suffix reached Host"
+        assert len(endpoint.requests) == 5 and len(proxy.exchanges) == 7, "command suffix reached Host"
         os.write(master, b"\x03")
         read_terminal(master, "Detached.")
         _, errors = caller.communicate(timeout=5)
@@ -201,6 +217,7 @@ def persistent_input_cases():
         print("persistent public Session: exact original replay, joined acceptance, next Unicode cursor, malformed→valid, prepublication repair, restoration passed", flush=True)
     finally:
         first_release.set()
+        next_admission_release.set()
         records = home / ".config/rui/requests"
         if records.exists():
             records.chmod(0o700)

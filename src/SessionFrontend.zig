@@ -35,7 +35,7 @@ opening: bool = true,
 poll_at: i96 = 0,
 dirty: bool = true,
 detached: bool = false,
-retry: bool = false,
+retry: ?Input.Ticket = null,
 inspect_action: bool = false,
 notice: ?[]const u8 = null,
 previous_signals: [2]std.posix.Sigaction = undefined,
@@ -90,6 +90,10 @@ fn pendingHandoff(self: *Self) bool {
     return self.input.command_length != null or self.inspect_action;
 }
 
+fn requestRetry(self: *Self) void {
+    self.retry = if (self.ticket != null and self.input.submitted.?.state != .rejected) self.ticket else null;
+}
+
 fn driveActive(self: *Self) !void {
     while (!self.detached) {
         if (interrupted.load(.acquire)) return error.InteractiveInterrupted;
@@ -106,10 +110,13 @@ fn driveActive(self: *Self) !void {
             self.reader.acknowledge();
         }
         if (self.reader.thread != null and self.reader.completed()) try self.settleReader();
-        if (self.ticket != null and self.admission.thread == null and self.retry) {
-            self.retry = false;
-            if (self.input.submitted.?.state != .rejected) try self.admission.start(self.init.io, self, resend);
-        }
+        if (self.admission.thread == null) if (self.retry) |requested| {
+            self.retry = null;
+            if (self.ticket) |ticket| {
+                if (std.meta.eql(requested, ticket) and self.input.submitted.?.state != .rejected)
+                    try self.admission.start(self.init.io, self, resend);
+            }
+        };
         if (self.reader.thread == null and std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at)
             try self.reader.start(self.init.io, self, scan);
         if (self.notice) |notice| {
@@ -164,7 +171,7 @@ fn step(self: *Self, wait: i32) !bool {
     }) orelse return false;
     if (self.input.pending() == .none) switch (byte) {
         18 => {
-            self.retry = true;
+            self.requestRetry();
             return true;
         },
         7 => {
@@ -305,7 +312,7 @@ fn handoff(self: *Self) !void {
                     } else self.notice = "Cannot discard an unresolved submission; Ctrl-R recovers the original.";
                 }
             } else if (std.mem.startsWith(u8, text, "/recover ") and self.ticket != null) {
-                if (std.mem.eql(u8, text[9..], &self.capture_key)) self.retry = true else self.notice = "Recovery key does not match this original submission; nothing sent.";
+                if (std.mem.eql(u8, text[9..], &self.capture_key)) self.requestRetry() else self.notice = "Recovery key does not match this original submission; nothing sent.";
             } else if (std.mem.eql(u8, text, "/wait") or std.mem.eql(u8, text, "/login")) {
                 self.notice = "Staged persistent mode has no nested approval/login prompt. Ctrl-G inspects; use explicit one-shot commands for decisions/login.";
             } else if (std.mem.eql(u8, text, "/help")) {
