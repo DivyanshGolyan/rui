@@ -54,8 +54,9 @@ def require_darwin_fsync(output, path, architecture, *, interpose):
     if not interpose:
         return
     slots = [line.split() for line in fixups.splitlines()
-             if line.split()[:2] == ["__DATA", "__interpose"]]
+             if line.split()[1:2] == ["__interpose"]]
     assert len(slots) == 2 and all(len(slot) == 5 for slot in slots), output
+    assert slots[0][0] == slots[1][0] and slots[0][0] in ("__DATA", "__DATA_CONST"), output
     assert slots[0][3] == "rebase" and int(slots[0][4], 16) > 0, output
     assert slots[1][3:] == ["bind", "libSystem/_fsync"], output
     assert int(slots[1][2], 16) == int(slots[0][2], 16) + 8, output
