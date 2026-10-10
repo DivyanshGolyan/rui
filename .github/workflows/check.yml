@@ -97,34 +97,58 @@ jobs:
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - run: actionlint -shellcheck= .github/workflows/check.yml .github/workflows/daily-macos.yml
         if: ${{ steps.cadence.outputs.run == 'true' }}
-  linux:
+  linux_suites:
+    name: linux suites (${{ matrix.part }})
     needs: plan
     if: ${{ needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      # The serial full gate is the measured critical path on both platforms.
+      # Keep ordinary selections single-worker and full-gate parts isolated.
+      fail-fast: false
+      matrix:
+        part: ${{ contains(fromJSON(needs.plan.outputs.targets || '[]'), 'check-full') && fromJSON('["execution", "callers"]') || fromJSON('["all"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup
         with:
-          targets: ${{ needs.plan.outputs.targets }}
+          targets: ${{ matrix.part == 'execution' && '["check-full"]' || needs.plan.outputs.targets }}
+          check-part: ${{ matrix.part }}
       - name: Run selected targets without acceptance-result caching
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
+          CHECK_PART: ${{ matrix.part }}
         run: |
           set -euo pipefail
+          test "$(uname -m)" = x86_64
           echo "Tested SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           zig fmt --check --ast-check build.zig src
-          python3 -B tests/ci/run_selected.py "$TARGETS"
+          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART"
       - name: Prove warm compilation does not cache test acceptance
-        if: ${{ needs.plan.outputs.cache_execution == 'true' }}
+        if: ${{ needs.plan.outputs.cache_execution == 'true' && matrix.part != 'execution' }}
         run: python3 -B tests/ci/cache_execution.py
       - name: Existing Linux measurement-tool checks, not resource qualification
-        if: ${{ needs.plan.outputs.linux_memory == 'true' }}
+        if: ${{ needs.plan.outputs.linux_memory == 'true' && matrix.part != 'execution' }}
         run: |
           set -euo pipefail
           python3 -B -m unittest discover -s tests/qualification/linux-memory -v
           cc -shared -fPIC -pthread -Wall -Wextra -Werror tests/qualification/linux-memory/malloc_probe.c -o "$RUNNER_TEMP/rui-malloc-probe.so"
           rm "$RUNNER_TEMP/rui-malloc-probe.so"
+  linux:
+    # Preserve the existing required status for the entire selected Linux gate.
+    needs: [plan, linux_suites]
+    if: ${{ always() && ((needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]') || needs.plan.result == 'failure') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every selected Linux part
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          NATIVE_RESULT: ${{ needs.linux_suites.result }}
+        run: |
+          test "$PLAN_RESULT" = success
+          test "$NATIVE_RESULT" = success
   macos_suites:
     name: macos suites (${{ matrix.part }})
     needs: plan
