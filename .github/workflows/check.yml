@@ -62,13 +62,16 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           PHASE: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && 'review' || 'development' }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          if [ "$BASE" = 0000000000000000000000000000000000000000 ]; then
-            BASE=$(git merge-base HEAD origin/main)
+          fallback=()
+          if [ "$EVENT_NAME" = push ]; then
+            fallback=(--fallback-base origin/main)
           fi
-          python3 tests/ci/select_tests.py --base "$BASE" --phase "$PHASE" > selection.json
+          python3 tests/ci/select_tests.py --base "$BASE" --phase "$PHASE" "${fallback[@]}" > selection.json
           cat selection.json
+          BASE=$(python3 -c 'import json; print(json.load(open("selection.json"))["base"])')
           git diff --check "$BASE" HEAD
           python3 - <<'PY'
           import json, os

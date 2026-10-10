@@ -11,7 +11,7 @@ import subprocess
 # Paths sharing an owner select its maintained boundary checks. Unknown code
 # selects check rather than silently declaring that no tests apply.
 RULES = (
-    (("src/execution_turn.zig", "src/request_encoding.zig", "src/AnswerRenderer.zig"),
+    (("src/logic_tests.zig", "src/execution_turn.zig", "src/request_encoding.zig", "src/AnswerRenderer.zig"),
      ("test-logic",), (), "Portable owner transitions and encoding"),
     (("src/cli.zig", "src/client.zig", "src/Terminal*", "src/preferences.zig", "src/provider_selection.zig"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
@@ -53,14 +53,33 @@ RULES = (
      ("test", "host-launch-integration"), ("test", "host-launch-integration"), "Native Host launch and startup failures"),
     (("src/descriptor*", "tests/integration/descriptor*"),
      ("test", "descriptor-capacity-integration"), ("test", "descriptor-capacity-integration"), "Native descriptor capacity"),
-    (("build.zig", "build.zig.zon", "src/build_*", "src/*.patch", ".agents/setup"),
+    (("tests/integration/check.sh",), ("check", "check-full"), ("check", "check-full"),
+     "Shared driver: both parallel and full-check execution modes"),
+    (("tests/integration/login_signal_integration.py", "build.zig"), ("login-signal-integration",), (),
+     "Linux-only native login signal loader witness"),
+    (("tests/integration/current_facts_integration.py", "build.zig"),
+     ("current-facts-integration",), ("current-facts-integration",), "Current producer/consumer oracle"),
+    (("tests/integration/server_delivery_integration.py", "build.zig"),
+     ("server-delivery-integration",), ("server-delivery-integration",), "Real reply inactivity and Host drain"),
+    (("tests/integration/dispatch_integration.py", "tests/integration/host_process.py",
+      "tests/integration/canonical_failure_integration.py"),
+     ("current-facts-integration",), ("current-facts-integration",), "Current oracle's imported fixture owners"),
+    (("tests/integration/dispatch_integration.py", "tests/integration/host_process.py",
+      "tests/integration/control_integration.py"),
+     ("server-delivery-integration",), ("server-delivery-integration",), "Delivery oracle's imported fixture owners"),
+    (("build.zig", "build.zig.zon", "src/build_*", "src/*.patch", ".agents/setup",
+      ".github/actions/setup/action.yml"),
      ("check-full", "admission-debug-integration", "test-full", "evaluator-churn"),
      ("check-full", "admission-debug-integration", "test-full", "evaluator-churn"),
      "Build, dependency or bootstrap inputs"),
+    (("build.zig", "build.zig.zon", "src/build_transport.sh", "src/curl*.patch", ".agents/setup",
+      ".github/actions/setup/action.yml"),
+     ("transport-h2-integration", "codex-h2-integration"),
+     ("transport-h2-integration", "codex-h2-integration"), "Transport build and managed TLS/H2 bootstrap"),
 )
 
 CHECK_COVERS = {
-    "test", "test-logic", "admission-integration", "dispatch-integration",
+    "test", "admission-integration", "dispatch-integration",
     "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
     "bash-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
@@ -84,7 +103,7 @@ def execution_batches(targets, check_part="all"):
     if check_part not in {"all", "callers"}:
         raise ValueError(f"Unknown full-check part: {check_part}")
     isolated = {"check", "check-full", "admission-debug-integration", "test-full",
-                "evaluator-churn", "host-launch-integration"}
+                "evaluator-churn", "host-launch-integration", "server-delivery-integration"}
     evaluator = [target for target in targets
                  if target in {"workflow-check", "evaluator-host-integration"}]
     shared = [target for target in targets if target not in isolated and target not in evaluator]
@@ -101,7 +120,7 @@ def select(paths, phase, available):
         if path.endswith(".md") or path.startswith(("docs/", "research/")):
             reasons.add("Documentation: references and diff whitespace, no runtime change")
             continue
-        if path.startswith((".github/", "tests/ci/")):
+        if path.startswith((".github/", "tests/ci/")) and path != ".github/actions/setup/action.yml":
             reasons.add("CI policy: selector and workflow checks")
             targets.add("test-logic")
             native_targets.add("test-logic")
@@ -141,7 +160,7 @@ def select(paths, phase, available):
             targets.add("evaluator-string-sanitizer")
             native_targets.add("evaluator-string-sanitizer")
     for checks in (targets, native_targets):
-        if "check-full" in checks:
+        if "check-full" in checks and "tests/integration/check.sh" not in paths:
             checks.discard("check")
         if checks & {"check", "check-full"}:
             checks -= CHECK_COVERS
@@ -160,24 +179,38 @@ def select(paths, phase, available):
             "reasons": sorted(reasons), "acceptance_reused": False}
 
 
-def changed_paths(base, head):
+def changed_paths(base, head, fallback_base=None):
     def commit(ref):
         return subprocess.check_output(
-            ["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"], text=True).strip()
+            ["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"],
+            text=True, stderr=subprocess.PIPE).strip()
+    head_commit = commit(head)
+    try:
+        base_commit = commit(base)
+    except subprocess.CalledProcessError:
+        if fallback_base is None:
+            raise
+        # An orphaned push predecessor may not be present after fetch-depth: 0.
+        # Review base failures remain errors; only pushes opt into this fallback.
+        base_commit = subprocess.check_output(
+            ["git", "merge-base", head_commit, commit(fallback_base)], text=True).strip()
     # No rename inference: both deleted and added owners select their checks.
     raw = subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z",
-                                   commit(base), commit(head)])
-    return [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p]
+                                   base_commit, head_commit])
+    return [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p], base_commit
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True)
     parser.add_argument("--head", default="HEAD")
+    parser.add_argument("--fallback-base", help="Push-only fallback ancestor when the before commit is unavailable")
     parser.add_argument("--phase", choices=("development", "review"), default="review")
     args = parser.parse_args()
     available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path("build.zig").read_text()))
-    result = select(changed_paths(args.base, args.head), args.phase, available)
+    paths, base = changed_paths(args.base, args.head, args.fallback_base)
+    result = select(paths, args.phase, available)
+    result["base"] = base
     result["head"] = subprocess.check_output(["git", "rev-parse", args.head], text=True).strip()
     print(json.dumps(result, indent=2))
 

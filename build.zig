@@ -201,6 +201,21 @@ pub fn build(b: *std.Build) void {
     );
     dispatch_integration_step.dependOn(&dispatch_integration.step);
 
+    const login_signal_integration = b.addSystemCommand(&.{"python3"});
+    login_signal_integration.addFileArg(b.path("tests/integration/login_signal_integration.py"));
+    login_signal_integration.addArtifactArg(release_safe);
+    b.step("login-signal-integration", "Run the Linux-only one-shot login signal loader witness").dependOn(&login_signal_integration.step);
+
+    const current_facts_integration = b.addSystemCommand(&.{"python3"});
+    current_facts_integration.addFileArg(b.path("tests/integration/current_facts_integration.py"));
+    current_facts_integration.addArtifactArg(release_safe);
+    b.step("current-facts-integration", "Run the real Current producer/consumer observation oracle").dependOn(&current_facts_integration.step);
+
+    const server_delivery_integration = b.addSystemCommand(&.{"python3"});
+    server_delivery_integration.addFileArg(b.path("tests/integration/server_delivery_integration.py"));
+    server_delivery_integration.addArtifactArg(release_safe);
+    b.step("server-delivery-integration", "Run real reply inactivity, connection headroom and Host drain separately from load").dependOn(&server_delivery_integration.step);
+
     const h2_integration = b.addSystemCommand(&.{"python3"});
     h2_integration.addFileArg(b.path("tests/integration/transport_h2_integration.py"));
     h2_integration.addArtifactArg(release_safe);
@@ -467,15 +482,15 @@ pub fn build(b: *std.Build) void {
 
     const linux_cross_step = b.step(
         "cross-check-linux",
-        "Compile the supported Linux x86-64/ARM64 targets",
+        "Compile Linux x86-64 and experimental Linux ARM64",
     );
     const macos_cross_step = b.step(
         "cross-check-macos",
-        "Compile the supported macOS x86-64/ARM64 targets (requires Xcode/Command Line Tools)",
+        "Compile Apple Silicon macOS and experimental Intel macOS (requires Xcode/Command Line Tools)",
     );
     const cross_step = b.step(
         "cross-check",
-        "Compile the supported Linux/macOS x86-64/ARM64 targets",
+        "Compile supported native and experimental Linux/macOS architectures (not runtime qualification)",
     );
     cross_step.dependOn(linux_cross_step);
     cross_step.dependOn(macos_cross_step);

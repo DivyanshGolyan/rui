@@ -628,10 +628,15 @@ def read_action(store, session, action, field):
     return completed.stdout
 
 
-def wait_for(predicate, description, timeout=8, interval=0.025):
-    deadline = time.monotonic() + timeout
+def wait_for(predicate, description, timeout=8, interval=0.025, *, deadline=None):
+    if deadline is None:
+        deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = predicate()
+        # An inspection can block past its caller's budget. A clean observation
+        # after the deadline is not evidence of timely physical reclamation.
+        if time.monotonic() >= deadline:
+            break
         if value:
             return value
         time.sleep(interval)
@@ -4227,7 +4232,7 @@ def main():
             .get("code")
             and value,
             "exact-capacity result",
-            timeout=max(0, exact_deadline - time.monotonic()),
+            deadline=exact_deadline,
         )
         # The request itself fits exactly and reaches HTTP. Its held charge
         # intentionally leaves no shared scratch for the fixture response.
@@ -4243,7 +4248,7 @@ def main():
                 and value["scratch_used_bytes"] == "0" else None
             ),
             "exact-capacity physical cleanup",
-            timeout=max(0, exact_deadline - time.monotonic()),
+            deadline=exact_deadline,
         )
         assert resources["scratch_used_bytes"] == "0", resources
         stop_host(host)

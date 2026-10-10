@@ -160,5 +160,24 @@ class ShapedWorkTests(unittest.TestCase):
         self.assertEqual(rows[1]["host_physical_peaks_by_round"], [123456])
 
 
+class ObservationDeadlineTests(unittest.TestCase):
+    def test_blocking_predicate_cannot_publish_a_late_clean_observation(self):
+        for completed_at in (7.999, 8.0, 15.0):
+            with self.subTest(completed_at=completed_at):
+                clock = [0.0]
+
+                def inspect():
+                    clock[0] = completed_at
+                    return {"custody_occupied": "0", "scratch_used_bytes": "0"}
+
+                with patch.object(transport.dispatch.time, "monotonic", side_effect=lambda: clock[0]):
+                    if completed_at < 8:
+                        self.assertEqual(transport.dispatch.wait_for(inspect, "physical cleanup"),
+                                         {"custody_occupied": "0", "scratch_used_bytes": "0"})
+                    else:
+                        with self.assertRaisesRegex(AssertionError, "physical cleanup"):
+                            transport.dispatch.wait_for(inspect, "physical cleanup")
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]])

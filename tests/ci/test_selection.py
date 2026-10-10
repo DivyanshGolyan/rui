@@ -1,3 +1,4 @@
+import json
 import re
 import os
 from pathlib import Path
@@ -22,6 +23,19 @@ class SelectionTest(unittest.TestCase):
         result = select(["src/request_encoding.zig"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["test-logic"])
         self.assertFalse(result["native_required"])
+
+    def test_logic_root_selects_its_executable_root(self):
+        result = select(["src/logic_tests.zig"], "review", AVAILABLE)
+        self.assertEqual(result["targets"], ["test-logic"])
+
+    def test_composed_gates_do_not_cover_the_separate_logic_root(self):
+        for logic in ("src/logic_tests.zig", "src/AnswerRenderer.zig",
+                      "src/request_encoding.zig", "src/execution_turn.zig"):
+            for composed in ("src/server.zig", "src/store.zig", "build.zig"):
+                with self.subTest(logic=logic, composed=composed):
+                    result = select([logic, composed], "review", AVAILABLE)
+                    self.assertIn("test-logic", result["targets"])
+                    self.assertTrue(set(result["targets"]) & {"check", "check-full"})
 
     def test_docs_are_not_runtime_acceptance(self):
         self.assertEqual(select(["VERIFICATION.md"], "review", AVAILABLE)["targets"], [])
@@ -50,11 +64,56 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(result["native_targets"], ["codex-credential-integration", "codex-h2-integration", "codex-integration", "test"])
 
     def test_build_changes_keep_long_and_debug_checks(self):
-        self.assertEqual(select(["build.zig"], "review", AVAILABLE)["targets"],
-                         ["admission-debug-integration", "check-full", "evaluator-churn", "test-full"])
+        result = select(["build.zig"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertTrue({"admission-debug-integration", "check-full", "evaluator-churn",
+                             "test-full", "current-facts-integration", "server-delivery-integration"}
+                            <= set(result[family]))
+        self.assertIn("login-signal-integration", result["targets"])
+        self.assertNotIn("login-signal-integration", result["native_targets"])
+
+    def test_transport_inputs_keep_both_native_h2_owners(self):
+        for path in ("src/build_transport.sh", "src/curl-post-retry.patch", "build.zig.zon"):
+            result = select([path], "review", AVAILABLE)
+            for family in ("targets", "native_targets"):
+                self.assertIn("transport-h2-integration", result[family])
+                self.assertIn("codex-h2-integration", result[family])
+
+    def test_bootstrap_action_is_not_cheap_ci_policy(self):
+        result = select([".github/actions/setup/action.yml"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertTrue({"check-full", "admission-debug-integration", "test-full",
+                             "evaluator-churn", "transport-h2-integration",
+                             "codex-h2-integration"} <= set(result[family]))
+
+    def test_shared_driver_keeps_parallel_and_full_modes(self):
+        for paths in (["tests/integration/check.sh"],
+                      ["tests/integration/check.sh", "build.zig"],
+                      ["tests/integration/check.sh", "src/server.zig"]):
+            result = select(paths, "review", AVAILABLE)
+            for family in ("targets", "native_targets"):
+                self.assertTrue({"check", "check-full"} <= set(result[family]))
+
+    def test_standalone_oracles_have_executable_platform_routes(self):
+        for owner in ("login-signal", "current-facts", "server-delivery"):
+            path = f"tests/integration/{owner.replace('-', '_')}_integration.py"
+            result = select([path], "review", AVAILABLE)
+            self.assertEqual(result["targets"], [f"{owner}-integration"])
+            self.assertEqual(result["native_targets"],
+                             [] if owner == "login-signal" else [f"{owner}-integration"])
+            combined = select([path, "build.zig"], "review", AVAILABLE)
+            self.assertIn(f"{owner}-integration", combined["targets"])
+
+    def test_standalone_imported_helpers_keep_their_real_oracles(self):
+        result = select(["tests/integration/dispatch_integration.py"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertTrue({"current-facts-integration", "server-delivery-integration"}
+                            <= set(result[family]))
+        self.assertEqual(execution_batches(["current-facts-integration", "server-delivery-integration"]),
+                         [["current-facts-integration"], ["server-delivery-integration"]])
 
     def test_ci_policy_does_not_make_build_qualification_universal(self):
-        for path in (".github/actions/setup/action.yml", ".github/workflows/check.yml",
+        for path in (".github/workflows/check.yml",
                      "tests/ci/select_tests.py", "tests/ci/run_selected.py"):
             result = select([path], "review", AVAILABLE)
             self.assertEqual(result["targets"], ["test-logic"])
@@ -153,6 +212,35 @@ class SelectionTest(unittest.TestCase):
         ])
         with self.assertRaises(ValueError):
             execution_batches(["test-logic"], "execution")
+
+    def test_unreachable_push_base_falls_back_without_hiding_review_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def git(*args):
+                return subprocess.check_output(
+                    ["git", "-c", "user.name=Selector test", "-c", "user.email=test@example.invalid",
+                     *args], cwd=directory, text=True, stderr=subprocess.DEVNULL).strip()
+            git("init", "-b", "main")
+            root = Path(directory)
+            (root / "build.zig").write_text(Path("build.zig").read_text())
+            git("add", "build.zig")
+            git("commit", "-m", "base")
+            git("checkout", "-b", "candidate")
+            (root / "src").mkdir()
+            (root / "src/request_encoding.zig").write_text("// changed owner\n")
+            git("add", ".")
+            git("commit", "-m", "candidate")
+            command = ["python3", str(Path("tests/ci/select_tests.py").resolve()),
+                       "--base", "1" * 40, "--phase", "development"]
+            missing = subprocess.run(command, cwd=directory, capture_output=True, text=True)
+            self.assertNotEqual(missing.returncode, 0)
+            for base in ("1" * 40, "0" * 40):
+                command[command.index("--base") + 1] = base
+                fallback = subprocess.run(command + ["--fallback-base", "main"],
+                                          cwd=directory, capture_output=True, text=True)
+                self.assertEqual(fallback.returncode, 0, fallback.stderr)
+                selected = json.loads(fallback.stdout)
+                self.assertEqual(selected["targets"], ["test-logic"])
+                self.assertEqual(selected["base"], git("rev-parse", "main"))
 
 
 class FullCheckPartitionTest(unittest.TestCase):
