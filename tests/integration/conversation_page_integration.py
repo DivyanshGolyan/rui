@@ -44,12 +44,16 @@ def host_resources(pid):
 
 def idle_resources(pid, path):
     # Response completion is not connection cleanup; wait for owned peer FDs.
-    peers = {f"socket:[{r[6]}]" for line in pathlib.Path("/proc/net/unix").read_text().splitlines()[1:]
-        if len(r := line.split()) == 8 and r[7] == path and int(r[3], 16) == 0}
+    directory = pathlib.Path(f"/proc/{pid}/fd")
     try:
-        if any(os.readlink(fd) in peers for fd in pathlib.Path(f"/proc/{pid}/fd").iterdir()): return None
+        descriptors = {fd.name: os.readlink(fd) for fd in directory.iterdir()}
+        peers = {f"socket:[{r[6]}]" for line in pathlib.Path("/proc/net/unix").read_text().splitlines()[1:]
+            if len(r := line.split()) == 8 and r[7] == path and int(r[3], 16) == 0}
+        if any(target in peers for target in descriptors.values()): return None
+        if descriptors != {fd.name: os.readlink(fd) for fd in directory.iterdir()}: return None
     except FileNotFoundError: return None  # An observed descriptor just closed.
-    return host_resources(pid)
+    # Count the validated identities, not a later, unrelated FD enumeration.
+    return host_resources(pid)[0], len(descriptors)
 
 
 def main():
