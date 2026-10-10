@@ -177,6 +177,15 @@ def persistent_input_cases():
         read_terminal(master, "next after capture retry")
         assert json.loads(proxy.exchanges[-1][0])["text"]["value"] == "next cafXYé!"
         assert len(endpoint.requests) == 5 and len(proxy.exchanges) == 6
+        # A command selects a handoff, not another input/submission window.
+        before_command = set(records.glob("*.json"))
+        os.write(master, b"/configure --permission-mode ask\nUNREAD suffix\n")
+        read_terminal(master, "Configured.")
+        added = [json.loads(path.read_text()) for path in set(records.glob("*.json")) - before_command]
+        assert len(added) == 1 and "configuration" in added[0], "command suffix became captured Message intent"
+        assert fixture.command("inspect-session", "--store", store,
+            "--session", "persistent/input")["session"]["permission_mode"] == "ask"
+        assert len(endpoint.requests) == 5 and len(proxy.exchanges) == 6, "command suffix reached Host"
         os.write(master, b"\x03")
         read_terminal(master, "Detached.")
         _, errors = caller.communicate(timeout=5)
@@ -266,9 +275,12 @@ def persistent_permission_case():
         proxy.rewrite = hold_first_observation
         proxy.route = "/v1/inspect-session"
         assert observation_held.wait(10), "periodic Current read did not reach Host"
-        os.write(master, b"\x07")
+        records = home / ".config/rui/requests"
+        before_inspection = set(records.glob("*.json"))
+        os.write(master, b"\x07UNREAD suffix\n")
         inspected = read_terminal(master, "Inspection only; no decision sent", timeout=5)
         assert not observation_release.is_set(), "inspection depended on silent observation release"
+        assert set(records.glob("*.json")) == before_inspection, "inspection suffix became captured Message intent"
         if "rui> next cafXé!" not in inspected.split("Inspection only", 1)[1]:
             inspected += read_terminal(master, "rui> next cafXé!")
         assert "Inspection only; no decision sent" in inspected and "Allow once" not in inspected, inspected

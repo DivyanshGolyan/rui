@@ -246,7 +246,8 @@ def persistent_cases(state, library, home, store, host):
     """Real synchronous capture custody and actual nonblocking output credit."""
     records = home / ".config/rui/requests"
     records.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for case in ("sync-exit", "sync-handoff", "admission-interrupt", "backpressure", "backpressure-command", "disable", "restore", "both"):
+    for case in ("sync-exit", "sync-handoff", "sync-command-int", "sync-command-term",
+                 "admission-interrupt", "backpressure", "backpressure-command", "disable", "restore", "both"):
         master, slave = pty.openpty()
         output_master, output_slave = pty.openpty()
         original = termios.tcgetattr(slave)
@@ -277,10 +278,14 @@ def persistent_cases(state, library, home, store, host):
                     os.write(master, "next café!\x1b[D\x1b[DX".encode())
                     human.read_terminal(output_master, "rui> next cafXé!")
                     os.write(master, b"\x07")
+                elif case.startswith("sync-command-"):
+                    os.write(master, b"/configure --permission-mode ask\n")
                 else:
                     os.write(master, b"/exit\nSTALE")
                 fixture.wait_for(lambda: termios.tcgetattr(slave)[3] & termios.ICANON, "restoration before synchronous capture join")
                 assert caller.poll() is None, "synchronous capture was reported reaped before its gate released"
+                if case.startswith("sync-command-"):
+                    caller.send_signal(signal.SIGINT if case.endswith("-int") else signal.SIGTERM)
                 release.touch()
                 if case == "sync-handoff":
                     resumed = human.read_terminal(output_master, "Admission unconfirmed")
@@ -292,7 +297,7 @@ def persistent_cases(state, library, home, store, host):
                     os.write(master, b"Y\n")
                     human.read_terminal(output_master, "You: next cafXYé!")
                     os.write(master, b"\x03")
-                else:
+                elif not case.startswith("sync-command-"):
                     # The finished prompt's suffix must not reach the next owner.
                     os.write(master, b"\n")
                     assert select.select([slave], [], [], 5)[0]
@@ -325,6 +330,11 @@ def persistent_cases(state, library, home, store, host):
             errors = caller.stderr.read().decode()
             if expected:
                 assert ("TerminalRestoreFailed" if case in ("restore", "both") else "TerminalCleanupFailed") in errors, errors
+            if case.startswith("sync-command-"):
+                assert set(records.glob("*.json")) - before == {record}, "interrupt during join captured a pending configuration"
+                assert record.read_bytes() == saved, "interrupt replaced original capture"
+                assert fixture.command("inspect-session", "--store", store,
+                    "--session", "terminal/restoration")["session"]["permission_mode"] == "bypass", "interrupt during join executed pending configuration"
             if case not in ("restore", "both"):
                 actual = termios.tcgetattr(slave)
                 if sys.platform == "darwin":

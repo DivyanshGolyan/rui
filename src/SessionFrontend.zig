@@ -86,10 +86,14 @@ fn drive(self: *Self) !void {
     }
 }
 
+fn pendingHandoff(self: *Self) bool {
+    return self.input.command_length != null or self.inspect_action;
+}
+
 fn driveActive(self: *Self) !void {
     while (!self.detached) {
         if (interrupted.load(.acquire)) return error.InteractiveInterrupted;
-        if (self.input.command_length != null or self.inspect_action) return error.CommandHandoff;
+        if (self.pendingHandoff()) return error.CommandHandoff;
         if (self.admission.thread != null and self.admission.completed()) {
             self.settleAdmission() catch |err| {
                 if (err == error.CanonicalStoreFailure) return err;
@@ -125,6 +129,7 @@ fn driveActive(self: *Self) !void {
             if (self.detached) break;
         }
         if (self.detached) break;
+        if (self.pendingHandoff()) return error.CommandHandoff;
         if (self.dirty and self.reader.thread == null and !self.opening) {
             const view = self.input.composition();
             const status = if (self.ticket != null) switch (self.input.submitted.?.state) {
@@ -144,10 +149,12 @@ fn pump(raw: *anyopaque) !void {
     _ = try self.step(16);
     if (self.detached or interrupted.load(.acquire)) return error.InteractiveInterrupted;
     // Unwind the terminal write and its window loan before handing off.
-    if (self.input.command_length != null or self.inspect_action) return error.CommandHandoff;
+    if (self.pendingHandoff()) return error.CommandHandoff;
 }
 
 fn step(self: *Self, wait: i32) !bool {
+    // The selected handoff owns the next transition, including queued bytes.
+    if (self.pendingHandoff()) return false;
     const byte = (self.terminal.next(self.init.io, self.input.pending(), wait) catch |err| switch (err) {
         error.InputDeadline => {
             try self.input.expire();
@@ -276,6 +283,7 @@ fn handoff(self: *Self) !void {
         else |_|
             "Activity observation interrupted; displayed prefix may be incomplete. Admission unconfirmed; Ctrl-R retries the original capture. Next draft retained.";
     };
+    if (interrupted.load(.acquire)) return error.InteractiveInterrupted;
     try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
     {
         self.signals(false);
