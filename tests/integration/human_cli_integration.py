@@ -112,15 +112,22 @@ def store_selection_cases(state, workspace, valid_store):
         os.close(slave)
         os.close(ready_write)
         try:
+            settlement_timeout = 5
             if case == "saved-after":
                 assert "No locally ready provider" in provider_prompt(master, ready_read)
                 destination.rmdir()
                 assert run(home, "host", "status", success=False) == ""
+                response_deadline = time.monotonic() + settlement_timeout
                 os.write(master, b"d\n")
+                # Darwin prompt cleanup can wait for this PTY consumer. Drain
+                # the actual deferral response within the original exit budget.
+                read_terminal(master, "Rui: Login deferred.", timeout=response_deadline - time.monotonic())
+                settlement_timeout = response_deadline - time.monotonic()
+                assert settlement_timeout > 0, "saved-Store deferral did not settle within 5 seconds"
             if not case.startswith("saved"):
                 assert "Session: rui/" in read_terminal(master, "rui> ")
                 terminal_step(master, "/exit", "Detached.")
-            _, errors = caller.communicate(timeout=5)
+            _, errors = caller.communicate(timeout=settlement_timeout)
             if case.startswith("saved"):
                 assert caller.returncode != 0 and b"FileNotFound" in errors, (case, errors)
                 assert not destination.exists() and not (home / ".config/rui/requests").exists()
