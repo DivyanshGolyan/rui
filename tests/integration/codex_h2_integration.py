@@ -17,6 +17,25 @@ import transport_h2_integration as h2_fixture
 from host_process import HostDiagnostics, start_ready_process
 
 
+def assert_managed_descriptor_rejection(rejected, limit):
+    assert rejected.returncode != 0 and "descriptor capacity insufficient" in rejected.stderr, rejected.stderr
+    assert not rejected.stdout.startswith("ready "), rejected.stdout
+    fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", rejected.stderr)}
+    # As in descriptor_capacity_integration, macOS libmalloc can open one
+    # inherited socket. Validate every Host-owned population independently.
+    inherited = fields["inherited"]
+    assert inherited in ({3, 4} if sys.platform == "darwin" else {3}), fields
+    fixed_host = 11 if sys.platform == "darwin" else 9
+    authentication = 10 if sys.platform == "darwin" else 8
+    required = inherited + fixed_host + 42 + 10 + authentication + 1
+    expected = dict(active_capacity=1, required=required, soft_limit=limit,
+                    inherited=inherited, fixed_host=fixed_host, clients=42,
+                    execution=10, authentication=authentication, self_wake=1)
+    assert fields == expected, (fields, expected)
+    print(f"managed descriptor rejection passed: {expected}", flush=True)
+    return required
+
+
 def run():
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-codex-h2.")).resolve()
     private = root / "private"
@@ -40,10 +59,9 @@ def run():
     complete = False
     store = root / "store"
     try:
-        # Inherited stdio (3), fixed Host (9/11), clients (42), one execution
-        # place (10), auth worker (8/10), and self-wake (1). Keep the fixture's
-        # descriptor limit on the Host child, not its TLS peer or callers.
-        required = {"linux": 73, "darwin": 77}[sys.platform]
+        # Probe below the minimum inherited population, then test the exact
+        # adjacent boundary observed before any Host-owned descriptors open.
+        minimum_required = {"linux": 73, "darwin": 77}[sys.platform]
         serve = [fixture.RUI, "serve", "--store", store, "--active-capacity", "1",
                  "--test-codex-fixture-endpoint", f"https://localhost:{endpoint.server_address[1]}/responses",
                  "--provider-ca-file", root / "cert.pem", "--test-phase-trace"]
@@ -51,10 +69,13 @@ def run():
             return ["sh", "-c", 'ulimit -n "$1"; shift; exec "$@"',
                     "rui-managed-descriptors", str(limit), *serve]
 
-        rejected = subprocess.run(limited(required - 1), capture_output=True, text=True, timeout=15)
-        assert rejected.returncode != 0 and "descriptor capacity insufficient" in rejected.stderr, rejected.stderr
-        assert f"required={required}" in rejected.stderr and "authentication=" in rejected.stderr
+        rejected = subprocess.run(limited(minimum_required - 1), capture_output=True, text=True, timeout=15)
+        required = assert_managed_descriptor_rejection(rejected, minimum_required - 1)
         assert not store.exists(), "managed capacity rejection created Store files"
+        if required != minimum_required:
+            rejected = subprocess.run(limited(required - 1), capture_output=True, text=True, timeout=15)
+            assert assert_managed_descriptor_rejection(rejected, required - 1) == required, rejected.stderr
+            assert not store.exists(), "managed capacity rejection created Store files"
         host, _ = start_ready_process(
             limited(required),
             required_fields={"execution": "enabled", "curl": "8.22.0",
