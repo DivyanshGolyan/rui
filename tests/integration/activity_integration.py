@@ -13,7 +13,7 @@ import tempfile
 import threading
 
 from control_integration import command, configure, inspect_execution, message, observe, start_host, stop_session, successful_sse, wait_for
-from conversation_page_integration import host_resources, request
+from conversation_page_integration import host_resources, idle_resources, request
 from dispatch_integration import sse_tool_calls
 from host_process import TestHTTPServer, canonical_fixture_root, stop_process
 from proposal_integration import digest
@@ -53,16 +53,6 @@ def history(store, end="null", position=0, direction="forward"):
 
 def kind(row):
     return next(iter(row["value"]))
-
-
-def idle_resources(pid, path):
-    # Response completion is not connection cleanup; wait for owned peer FDs.
-    peers = {f"socket:[{r[6]}]" for line in pathlib.Path("/proc/net/unix").read_text().splitlines()[1:]
-        if len(r := line.split()) == 8 and r[7] == path and int(r[3], 16) == 0}
-    try:
-        if any(os.readlink(fd) in peers for fd in pathlib.Path(f"/proc/{pid}/fd").iterdir()): return None
-    except FileNotFoundError: return None  # An observed descriptor just closed.
-    return host_resources(pid)
 
 
 def mock_reply(path, store, mode, body, advertised=None, ok=False):
