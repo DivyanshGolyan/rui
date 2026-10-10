@@ -79,7 +79,17 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
 
 fn drive(self: *Self) !void {
     while (!self.detached) {
+        self.driveActive() catch |err| {
+            if (err != error.CommandHandoff) return err;
+            try self.handoff();
+        };
+    }
+}
+
+fn driveActive(self: *Self) !void {
+    while (!self.detached) {
         if (interrupted.load(.acquire)) return error.InteractiveInterrupted;
+        if (self.input.command_length != null or self.inspect_action) return error.CommandHandoff;
         if (self.admission.thread != null and self.admission.completed()) {
             self.settleAdmission() catch |err| {
                 if (err == error.CanonicalStoreFailure) return err;
@@ -91,18 +101,7 @@ fn drive(self: *Self) !void {
             try self.terminal.permanent(bytes);
             self.reader.acknowledge();
         }
-        if (self.reader.thread != null and self.reader.completed()) {
-            try self.reader.join();
-            self.current = self.observed;
-            self.cursor = self.next_cursor;
-            self.opening = false;
-            self.poll_at = std.Io.Clock.awake.now(self.init.io).nanoseconds + 250_000_000;
-            self.dirty = true;
-        }
-        if (self.reader.thread == null and (self.input.command_length != null or self.inspect_action)) {
-            try self.handoff();
-            continue;
-        }
+        if (self.reader.thread != null and self.reader.completed()) try self.settleReader();
         if (self.ticket != null and self.admission.thread == null and self.retry) {
             self.retry = false;
             if (self.input.submitted.?.state != .rejected) try self.admission.start(self.init.io, self, resend);
@@ -144,6 +143,8 @@ fn pump(raw: *anyopaque) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     _ = try self.step(16);
     if (self.detached or interrupted.load(.acquire)) return error.InteractiveInterrupted;
+    // Unwind the terminal write and its window loan before handing off.
+    if (self.input.command_length != null or self.inspect_action) return error.CommandHandoff;
 }
 
 fn step(self: *Self, wait: i32) !bool {
@@ -245,16 +246,37 @@ fn settleAdmission(self: *Self) !void {
     }
 }
 
+fn settleReader(self: *Self) !void {
+    if (self.reader.thread == null) return;
+    try self.reader.join();
+    self.current = self.observed;
+    self.cursor = self.next_cursor;
+    self.opening = false;
+    self.poll_at = std.Io.Clock.awake.now(self.init.io).nanoseconds + 250_000_000;
+    self.dirty = true;
+}
+
 fn handoff(self: *Self) !void {
-    try self.terminal.permanent("\n");
     const restored = self.terminal.finish();
+    self.reader.cancel();
     self.admission.cancel();
+    const read_result = self.settleReader();
     const joined = self.settleAdmission();
+    if (self.reader.take() != null) self.reader.acknowledge();
     try restored;
-    joined catch |err| {
-        if (err == error.CanonicalStoreFailure) return err;
-        self.notice = "Admission unconfirmed; Ctrl-R retries the original capture. Next draft retained.";
+    read_result catch |err| if (err == error.CanonicalStoreFailure) return err;
+    joined catch |err| if (err == error.CanonicalStoreFailure) return err;
+    read_result catch |err| {
+        if (err != error.Cancelled) return err;
+        self.notice = "Activity observation interrupted; displayed prefix may be incomplete. Host work unchanged.";
     };
+    joined catch {
+        self.notice = if (read_result) |_|
+            "Admission unconfirmed; Ctrl-R retries the original capture. Next draft retained."
+        else |_|
+            "Activity observation interrupted; displayed prefix may be incomplete. Admission unconfirmed; Ctrl-R retries the original capture. Next draft retained.";
+    };
+    try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
     {
         self.signals(false);
         defer self.signals(true);

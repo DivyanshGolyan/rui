@@ -232,6 +232,7 @@ def persistent_permission_case():
     thread.start()
     host = caller = proxy = None
     master = slave = None
+    observation_release = threading.Event()
     completed = False
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
@@ -252,12 +253,29 @@ def persistent_permission_case():
             read_terminal(master, "no nested approval/login prompt")
         os.write(master, "next café!\x1b[D\x1b[DX".encode())
         read_terminal(master, "rui> next cafXé!")
+        # The real periodic Current reply has no first byte yet. Inspection
+        # must cancel that observation, not wait for an unrelated read to end.
+        observation_held = threading.Event()
+
+        def hold_first_observation(response):
+            if not observation_held.is_set():
+                observation_held.set()
+                assert observation_release.wait(15), "observation gate was not released"
+            return response
+
+        proxy.rewrite = hold_first_observation
+        proxy.route = "/v1/inspect-session"
+        assert observation_held.wait(10), "periodic Current read did not reach Host"
         os.write(master, b"\x07")
-        inspected = read_terminal(master, "Inspection only; no decision sent")
+        inspected = read_terminal(master, "Inspection only; no decision sent", timeout=5)
+        assert not observation_release.is_set(), "inspection depended on silent observation release"
         if "rui> next cafXé!" not in inspected.split("Inspection only", 1)[1]:
             inspected += read_terminal(master, "rui> next cafXé!")
         assert "Inspection only; no decision sent" in inspected and "Allow once" not in inspected, inspected
         action = inspected.split("Action ", 1)[1].splitlines()[0]
+        observation_release.set()
+        proxy.route = "/v1/message"
+        proxy.rewrite = lambda response: response
         current = fixture.command("inspect-session", "--store", store, "--session", "persistent/permission")
         assert [row["action"] for row in current["actionable_permissions"]] == [action]
         assert json.loads(inspected.split("Bash arguments: ", 1)[1].splitlines()[0]) == arguments
@@ -285,6 +303,7 @@ def persistent_permission_case():
         completed = True
         print("persistent permission: draft/cursor retained, exact fresh inspection, paste grants nothing, one-shot denial, external TERM cleanup passed", flush=True)
     finally:
+        observation_release.set()
         if caller is not None and caller.poll() is None:
             caller.kill()
             caller.wait(timeout=5)

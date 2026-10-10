@@ -246,7 +246,7 @@ def persistent_cases(state, library, home, store, host):
     """Real synchronous capture custody and actual nonblocking output credit."""
     records = home / ".config/rui/requests"
     records.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for case in ("sync-exit", "sync-handoff", "admission-interrupt", "backpressure", "disable", "restore", "both"):
+    for case in ("sync-exit", "sync-handoff", "admission-interrupt", "backpressure", "backpressure-command", "disable", "restore", "both"):
         master, slave = pty.openpty()
         output_master, output_slave = pty.openpty()
         original = termios.tcgetattr(slave)
@@ -257,7 +257,7 @@ def persistent_cases(state, library, home, store, host):
         try:
             environment = {**os.environ, "HOME": str(home),
                 "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
-                "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": case}
+                "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "backpressure" if case.startswith("backpressure") else case}
             if case.startswith("sync-"):
                 environment["RUI_CAPTURE_SYNC_RELEASE"] = str(release)
                 if case == "sync-handoff":
@@ -312,15 +312,15 @@ def persistent_cases(state, library, home, store, host):
                 os.write(master, b"held real Admission\n")
                 assert received.wait(10)
                 caller.send_signal(signal.SIGINT)
-            elif case == "backpressure":
+            elif case.startswith("backpressure"):
                 # An external caller admits large exact content after opening;
                 # the frontend's actual activity reader fills stdout's PTY.
                 human.run(home, "message", "--store", store, "--session", "terminal/restoration", "z" * 50000)
                 fixture.wait_for(lambda: log.exists() and "output-blocked" in log.read_text(), "actual terminal EAGAIN")
-                os.write(master, b"\x03")
+                os.write(master, b"\x07" if case == "backpressure-command" else b"\x03")
             else:
                 os.write(master, b"\x03")
-            expected = 1 if case in ("backpressure", "disable", "restore", "both") else 0
+            expected = 1 if case in ("backpressure", "backpressure-command", "disable", "restore", "both") else 0
             assert caller.wait(timeout=5) == expected, caller.stderr.read()
             errors = caller.stderr.read().decode()
             if expected:
