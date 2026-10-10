@@ -4,6 +4,7 @@ set -eu
 directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 release_safe=$1
 debug=$2
+printf 'Actual native platform: %s %s\n' "$(uname -s)" "$(uname -m)"
 
 if [ "${3:-}" = parallel ]; then
     test_binary=$4
@@ -44,6 +45,7 @@ if [ "${3:-}" = parallel ]; then
         shift
         if wait "$pid"; then
             printf '%s passed\n' "$name"
+            cat "$output/$name.log"
         else
             printf '%s failed:\n' "$name" >&2
             cat "$output/$name.log" >&2
@@ -57,6 +59,7 @@ if [ "${3:-}" = parallel ]; then
         shift
         if "$@" >"$output/$name.log" 2>&1; then
             printf '%s passed\n' "$name"
+            cat "$output/$name.log"
         else
             printf '%s failed:\n' "$name" >&2
             cat "$output/$name.log" >&2

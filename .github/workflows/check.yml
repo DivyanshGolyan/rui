@@ -1,0 +1,101 @@
+name: Selected checks
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.select.outputs.targets }}
+      native_targets: ${{ steps.select.outputs.native_targets }}
+      native: ${{ steps.select.outputs.native }}
+      linux_memory: ${{ steps.select.outputs.linux_memory }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Select existing targets
+        id: select
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          PHASE: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && 'review' || 'development' }}
+        run: |
+          set -euo pipefail
+          if [ "$BASE" = 0000000000000000000000000000000000000000 ]; then
+            BASE=$(git merge-base HEAD origin/main)
+          fi
+          python3 tests/ci/select_tests.py --base "$BASE" --phase "$PHASE" > selection.json
+          cat selection.json
+          git diff --check "$BASE" HEAD
+          python3 - <<'PY'
+          import json, os
+          p = json.load(open('selection.json'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              print('targets=' + json.dumps(p['targets']), file=f)
+              print('native_targets=' + json.dumps(p['native_targets']), file=f)
+              print('native=' + str(p['native_required']).lower(), file=f)
+              print('linux_memory=' + str(p['linux_memory_checks']).lower(), file=f)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              print('Selection (not acceptance):\n```json\n' + json.dumps(p, indent=2) + '\n```', file=f)
+          PY
+      - run: python3 -B -m unittest discover -s tests/ci -v
+      - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -shellcheck= .github/workflows/check.yml .github/workflows/daily-macos.yml
+  linux:
+    needs: plan
+    if: ${{ needs.plan.outputs.targets != '[]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup
+        with:
+          targets: ${{ needs.plan.outputs.targets }}
+      - name: Run selected targets without acceptance-result caching
+        env:
+          TARGETS: ${{ needs.plan.outputs.targets }}
+        run: |
+          set -euo pipefail
+          echo "Tested SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
+          zig fmt --check --ast-check build.zig src
+          for target in $(python3 -c 'import json,os; print(" ".join(json.loads(os.environ["TARGETS"])))'); do
+            zig build "$target" --summary all
+          done
+      - name: Existing Linux measurement-tool checks, not resource qualification
+        if: ${{ needs.plan.outputs.linux_memory == 'true' }}
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s tests/qualification/linux-memory -v
+          cc -shared -fPIC -pthread -Wall -Wextra -Werror tests/qualification/linux-memory/malloc_probe.c -o "$RUNNER_TEMP/rui-malloc-probe.so"
+          rm "$RUNNER_TEMP/rui-malloc-probe.so"
+  macos:
+    needs: plan
+    if: ${{ needs.plan.outputs.native == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup
+        with:
+          targets: ${{ needs.plan.outputs.native_targets }}
+      - name: Run required native targets
+        env:
+          TARGETS: ${{ needs.plan.outputs.native_targets }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          echo "Tested SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
+          for target in $(python3 -c 'import json,os; print(" ".join(json.loads(os.environ["TARGETS"])))'); do
+            zig build "$target" --summary all
+          done

@@ -1,0 +1,59 @@
+name: Prepare native Rui checks
+description: Pinned Zig and existing build caches on standard supported runners
+inputs:
+  targets:
+    description: Selected existing build targets
+    default: '[]'
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      if: ${{ contains(fromJSON(inputs.targets), 'measurement-check') }}
+      with:
+        go-version: '1.27.1'
+        cache: false
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        # Local run/test manifests are deliberately not restored. Re-run tests.
+        path: |
+          ~/.cache/zig
+          ${{ runner.temp }}/rui-zig
+        key: rui-${{ runner.os }}-${{ runner.arch }}-0.16.0-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ github.sha }}
+        restore-keys: |
+          rui-${{ runner.os }}-${{ runner.arch }}-0.16.0-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-
+    - name: Install pinned compiler and fixture dependency
+      shell: bash
+      run: |
+        set -euo pipefail
+        case "$(uname -s)/$(uname -m)" in
+          Linux/x86_64)
+            archive=zig-x86_64-linux-0.16.0
+            checksum=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+            ;;
+          Darwin/arm64)
+            archive=zig-aarch64-macos-0.16.0
+            checksum=b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
+            ;;
+          *) echo "Unsupported actual native architecture" >&2; exit 1 ;;
+        esac
+        if [ ! -x "$RUNNER_TEMP/rui-zig/zig" ]; then
+          curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
+            --retry 1 --retry-delay 1 --retry-max-time 95 \
+            "https://pkg.hexops.org/zig/$archive.tar.xz" -o "$RUNNER_TEMP/zig.tar.xz"
+          echo "$checksum  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/rui-zig"
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" --strip-components=1 -C "$RUNNER_TEMP/rui-zig"
+        fi
+        test "$("$RUNNER_TEMP/rui-zig/zig" version)" = 0.16.0
+        echo "$RUNNER_TEMP/rui-zig" >> "$GITHUB_PATH"
+        echo "ZIG_GLOBAL_CACHE_DIR=$HOME/.cache/zig" >> "$GITHUB_ENV"
+        python3 -m venv "$RUNNER_TEMP/rui-python"
+        "$RUNNER_TEMP/rui-python/bin/pip" --disable-pip-version-check install --retries 1 'h2==4.3.0'
+        echo "$RUNNER_TEMP/rui-python/bin" >> "$GITHUB_PATH"
+    - name: Fetch the existing pinned dependency graph
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$HOME/.cache/zig/tmp"
+        test "$(zig fetch --global-cache-dir "$HOME/.cache/zig" https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz)" = N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM
+        zig build --global-cache-dir "$HOME/.cache/zig" --fetch=all
