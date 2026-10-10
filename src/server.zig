@@ -2888,6 +2888,10 @@ const Route = enum {
     list_sessions,
     conversation_page,
     conversation_content,
+    proposal_page,
+    proposal_field,
+    activity_page,
+    activity_content,
     unsupported_control,
 
     fn isControl(self: Route) bool {
@@ -2988,6 +2992,10 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, trace_
         .list_sessions => header.route == .list_sessions,
         .conversation_page => header.route == .conversation_page,
         .conversation_content => header.route == .conversation_content,
+        .proposal_page => header.route == .proposal_page,
+        .proposal_field => header.route == .proposal_field,
+        .activity_page => header.route == .activity_page,
+        .activity_content => header.route == .activity_content,
     };
     if (!route_matches) {
         return respondStatic(host.io, fd, 400, "invocation_error", "route_kind_mismatch");
@@ -3243,6 +3251,68 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, trace_
             deliverResponse(host.io, fd, 200, response.slice());
         },
         .conversation_content => |command| try deliverConversationContent(host, fd, command),
+        .proposal_page => |command| {
+            const page = host.store.proposalPage(command) catch |err| switch (err) {
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, "proposal_unavailable", @errorName(err)),
+                else => {
+                    fenceDispatch(host, "proposal page", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                },
+            };
+            var response: protocol.FixedJsonBuffer(protocol.max_proposal_page_response_bytes) = .{};
+            try response.appendFmt("{{\"version\":\"1\",\"type\":\"proposal_page\",\"end\":\"{d}\",\"items\":[", .{page.end});
+            for (page.items[0..page.count], 0..) |item, index| {
+                if (index != 0) try response.append(",");
+                try response.appendFmt("{{\"position\":\"{d}\",\"operation\":\"{d}\",\"turn\":\"{d}\",\"call_ordinal\":\"{d}\",\"action\":", .{ item.position, item.operation, item.turn, item.call_ordinal });
+                if (item.action) |action| try response.appendFmt("\"{d}\"", .{action}) else try response.append("null");
+                try response.append(",\"rejection\":");
+                if (item.rejection) |code| try response.appendJsonString(@tagName(code)) else try response.append("null");
+                try response.append(",\"fields\":{");
+                inline for (std.meta.tags(protocol.ProposalField), 0..) |field, field_index| {
+                    if (field_index != 0) try response.append(",");
+                    const reference = item.fields[field_index];
+                    try response.appendFmt("\"{s}\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ @tagName(field), reference.length, std.fmt.bytesToHex(reference.digest, .lower) });
+                }
+                try response.append("}}");
+            }
+            try response.appendFmt("],\"more\":{s}}}", .{if (page.more) "true" else "false"});
+            deliverResponse(host.io, fd, 200, response.slice());
+        },
+        .proposal_field => |command| {
+            var reader = host.store.openProposalField(command) catch |err| switch (err) {
+                error.ContentNotFound => return respondStatic(host.io, fd, 409, "proposal_unavailable", @errorName(err)),
+                else => {
+                    fenceDispatch(host, "proposal field", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                },
+            };
+            defer reader.close();
+            try deliverPublicContent(host, fd, &reader, 0, true);
+        },
+        .activity_page => |command| {
+            const page = host.store.activityPage(command) catch |err| switch (err) {
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, "activity_unavailable", @errorName(err)),
+                else => {
+                    fenceDispatch(host, "activity page", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                },
+            };
+            var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+            var out = std.Io.Writer.fixed(&buffer);
+            try page.writeJson(&out);
+            deliverResponse(host.io, fd, 200, out.buffered());
+        },
+        .activity_content => |command| {
+            var reader = host.store.openActivityContent(command) catch |err| switch (err) {
+                error.ContentNotFound => return respondStatic(host.io, fd, 409, "activity_unavailable", @errorName(err)),
+                else => {
+                    fenceDispatch(host, "activity content", err);
+                    return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                },
+            };
+            defer reader.close();
+            try deliverPublicContent(host, fd, &reader, 0, true);
+        },
     }
 }
 
@@ -3255,17 +3325,21 @@ fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol
         },
     };
     defer reader.close();
+    return deliverPublicContent(host, fd, &reader, command.start, command.stream);
+}
+
+fn deliverPublicContent(host: *Host, fd: std.posix.fd_t, reader: *store_module.ContentReader, start: u64, stream: bool) !void {
     // One reader, fixed window, no Store lock/BLOB over socket delivery.
-    const delivered = if (command.stream) reader.reference.length else @min(reader.reference.length - command.start, protocol.content_window_bytes);
-    const end = command.start + delivered;
+    const delivered = if (stream) reader.reference.length else @min(reader.reference.length - start, protocol.content_window_bytes);
+    const end = start + delivered;
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     const first: usize = @intCast(@min(delivered, buffer.len));
-    const count = reader.readRange(command.start, buffer[0..@max(first, 1)]) catch |err| {
-        fenceDispatch(host, "conversation content", err);
+    const count = reader.readRange(start, buffer[0..@max(first, 1)]) catch |err| {
+        fenceDispatch(host, "public content", err);
         return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
     };
     if (count != first) {
-        fenceDispatch(host, "conversation content", error.ShortCanonicalRead);
+        fenceDispatch(host, "public content", error.ShortCanonicalRead);
         return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
     }
     // Even empty/one-window projections validate EOF before successful headers.
@@ -3273,17 +3347,17 @@ fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol
     const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ delivered, reader.reference.length, end });
     writeAll(host.io, fd, header) catch return;
     writeAll(host.io, fd, buffer[0..first]) catch return;
-    var offset = command.start + first;
+    var offset = start + first;
     while (offset < end) {
         const wanted: usize = @intCast(@min(end - offset, buffer.len));
         const next = reader.readRange(offset, buffer[0..wanted]) catch |err| {
             // After headers: close an incomplete advertised body, never append
             // another response or send bytes from the failed final window.
-            fenceDispatch(host, "conversation content", err);
+            fenceDispatch(host, "public content", err);
             return;
         };
         if (next != wanted) {
-            fenceDispatch(host, "conversation content", error.ShortCanonicalRead);
+            fenceDispatch(host, "public content", error.ShortCanonicalRead);
             return;
         }
         writeAll(host.io, fd, buffer[0..next]) catch return;
@@ -3378,6 +3452,14 @@ const HeaderReader = struct {
             .conversation_page
         else if (std.mem.eql(u8, path, "/v1/conversation-content"))
             .conversation_content
+        else if (std.mem.eql(u8, path, "/v1/proposal-page"))
+            .proposal_page
+        else if (std.mem.eql(u8, path, "/v1/proposal-field"))
+            .proposal_field
+        else if (std.mem.eql(u8, path, "/v1/activity-page"))
+            .activity_page
+        else if (std.mem.eql(u8, path, "/v1/activity-content"))
+            .activity_content
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
             .unsupported_control
         else

@@ -143,11 +143,42 @@ pub fn build(b: *std.Build) void {
         }),
     });
     session_list_client.root_module.link_libc = true;
-    session_list_client.root_module.addImport("rui_client", b.createModule(.{
+    const read_client = b.createModule(.{
         .root_source_file = b.path("src/client.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
-    }));
+    });
+    session_list_client.root_module.addImport("rui_client", read_client);
+    const proposal_client = b.addExecutable(.{
+        .name = "rui-proposal-client-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/proposal_client.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    proposal_client.root_module.link_libc = true;
+    proposal_client.root_module.addImport("rui_client", read_client);
+    const proposal_integration = b.addSystemCommand(&.{"python3"});
+    proposal_integration.addFileArg(b.path("tests/integration/proposal_integration.py"));
+    proposal_integration.addArtifactArg(release_safe);
+    proposal_integration.addArtifactArg(proposal_client);
+    b.step("proposal-integration", "Run historical proposal discovery and complete typed Client reads").dependOn(&proposal_integration.step);
+    const activity_client = b.addExecutable(.{
+        .name = "rui-activity-client-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/activity_client.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    activity_client.root_module.link_libc = true;
+    activity_client.root_module.addImport("rui_client", read_client);
+    const activity_integration = b.addSystemCommand(&.{"python3"});
+    activity_integration.addFileArg(b.path("tests/integration/activity_integration.py"));
+    activity_integration.addArtifactArg(release_safe);
+    activity_integration.addArtifactArg(activity_client);
+    b.step("activity-integration", "Run complete Session activity reads and typed Client consumption").dependOn(&activity_integration.step);
     const integration = b.addSystemCommand(&.{"sh"});
     integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
     integration.addArtifactArg(release_safe);
@@ -369,6 +400,8 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addArtifactArg(tests);
     fast_integrations.addArtifactArg(host_status_actor);
     fast_integrations.addArtifactArg(session_list_client);
+    fast_integrations.addArtifactArg(proposal_client);
+    fast_integrations.addArtifactArg(activity_client);
     fast_integrations.addArtifactArg(preference_policy_actor);
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.step.dependOn(&release.step);
@@ -386,6 +419,8 @@ pub fn build(b: *std.Build) void {
     process_integrations.addArtifactArg(debug);
     process_integrations.addArtifactArg(host_status_actor);
     process_integrations.addArtifactArg(session_list_client);
+    process_integrations.addArtifactArg(proposal_client);
+    process_integrations.addArtifactArg(activity_client);
     process_integrations.addArtifactArg(preference_policy_actor);
     const full_evaluator = b.addSystemCommand(&.{"python3"});
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
