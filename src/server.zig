@@ -113,6 +113,56 @@ const TestTransition = enum {
     action_result_committed,
 };
 
+// Host serializes these value transitions with the drain mutex. A place
+// remains owned through socket close, including failed classification.
+const Admission = struct {
+    const Place = enum { classification, ordinary, control, discovery };
+    total: usize = 0,
+    headroom: usize = 0,
+    ordinary: usize = 0,
+    discovery: usize = 0,
+
+    fn reserve(self: *Admission) !Place {
+        if (self.total == max_clients) return error.ConnectionCapacityExhausted;
+        if (self.headroom == control_headroom) return error.ClassificationCapacityExhausted;
+        self.total += 1;
+        self.headroom += 1;
+        return .classification;
+    }
+
+    fn classify(self: *Admission, place: *Place, route: Route) !void {
+        std.debug.assert(place.* == .classification);
+        if (route == .host_info) {
+            if (self.discovery == 1) return error.DiscoveryCapacityExhausted;
+            self.discovery += 1;
+            place.* = .discovery;
+        } else if (route.isControl()) {
+            place.* = .control;
+        } else {
+            if (self.ordinary == max_ordinary_clients) return error.OrdinaryCapacityExhausted;
+            self.ordinary += 1;
+            self.headroom -= 1;
+            place.* = .ordinary;
+        }
+    }
+
+    fn release(self: *Admission, place: Place) void {
+        std.debug.assert(self.total > 0);
+        self.total -= 1;
+        if (place == .ordinary) {
+            std.debug.assert(self.ordinary > 0);
+            self.ordinary -= 1;
+        } else {
+            std.debug.assert(self.headroom > 0);
+            self.headroom -= 1;
+            if (place == .discovery) {
+                std.debug.assert(self.discovery == 1);
+                self.discovery = 0;
+            }
+        }
+    }
+};
+
 const Host = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -135,9 +185,7 @@ const Host = struct {
     controls_changed: std.atomic.Value(bool) = .init(false),
     control_hint_suppressed: std.atomic.Value(bool) = .init(false),
     request_counter: std.atomic.Value(u64) = .init(0),
-    active_clients: std.atomic.Value(usize) = .init(0),
-    classification_clients: std.atomic.Value(usize) = .init(0),
-    ordinary_clients: std.atomic.Value(usize) = .init(0),
+    admission: Admission = .{},
     scratch_used: std.atomic.Value(u64) = .init(0),
     launch_mutex: std.Io.Mutex = .init,
     trace_mutex: std.Io.Mutex = .init,
@@ -164,13 +212,26 @@ const Host = struct {
         try launch(context);
     }
 
-    fn clientFinished(self: *Host, trace_request_number: ?u64) void {
+    fn reserveClient(self: *Host) !Admission.Place {
         self.drain_mutex.lockUncancelable(self.io);
-        const prior = self.active_clients.fetchSub(1, .acq_rel);
-        std.debug.assert(prior > 0);
+        defer self.drain_mutex.unlock(self.io);
+        return self.admission.reserve();
+    }
+
+    fn classifyClient(self: *Host, place: *Admission.Place, route: Route) !void {
+        self.drain_mutex.lockUncancelable(self.io);
+        defer self.drain_mutex.unlock(self.io);
+        try self.admission.classify(place, route);
+    }
+
+    fn clientFinished(self: *Host, place: Admission.Place, trace_request_number: ?u64) void {
+        self.drain_mutex.lockUncancelable(self.io);
+        self.admission.release(place);
         // Test-only census witness before final drain unlock, not thread exit.
         if (trace_request_number) |request_number|
-            traceRequest(self, "connection_resources_released", request_number, self.scratch_used.load(.acquire));
+            traceRequest(self, "connection_resources_released", request_number, self.scratch_used.load(.acquire))
+        else
+            traceSubject(self, "connection_place_released", "place", @tagName(place));
         self.drain_condition.broadcast(self.io);
         self.drain_mutex.unlock(self.io);
     }
@@ -178,7 +239,7 @@ const Host = struct {
     fn drain(self: *Host) void {
         self.drain_mutex.lockUncancelable(self.io);
         defer self.drain_mutex.unlock(self.io);
-        while (self.active_clients.load(.acquire) != 0) {
+        while (self.admission.total != 0) {
             self.drain_condition.waitUncancelable(self.io, &self.drain_mutex);
         }
     }
@@ -188,6 +249,7 @@ const Connection = struct {
     host: *Host,
     stream: std.Io.net.Stream,
     accepted_at_ns: u64,
+    place: Admission.Place,
 };
 
 extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
@@ -371,6 +433,7 @@ pub fn serve(
                 return err,
             else => return err,
         };
+        const accepted_at_ns = nowNs(&host);
         if (host.effect_shutdown.load(.acquire)) {
             stream.close(io);
             return error.EffectAwareShutdown;
@@ -387,37 +450,26 @@ pub fn serve(
                 return err;
             };
         }
-        const previous = host.active_clients.fetchAdd(1, .acq_rel);
-        if (previous >= max_clients) {
-            host.clientFinished(null);
-            sendStatic(io, stream.socket.handle, 503, "busy", "connection_capacity_exhausted") catch {};
+        const place = host.reserveClient() catch |err| {
+            sendStaticUntil(io, stream.socket.handle, 503, "busy", admissionCode(err), @as(i128, accepted_at_ns) + 10 * std.time.ns_per_s) catch {};
             stream.close(io);
             continue;
-        }
-        const previous_classification = host.classification_clients.fetchAdd(1, .acq_rel);
-        if (previous_classification >= control_headroom) {
-            _ = host.classification_clients.fetchSub(1, .acq_rel);
-            host.clientFinished(null);
-            sendStatic(io, stream.socket.handle, 503, "busy", "classification_capacity_exhausted") catch {};
-            stream.close(io);
-            continue;
-        }
+        };
         const connection = allocator.create(Connection) catch {
-            _ = host.classification_clients.fetchSub(1, .acq_rel);
-            host.clientFinished(null);
             stream.close(io);
+            host.clientFinished(place, null);
             continue;
         };
         connection.* = .{
             .host = &host,
             .stream = stream,
-            .accepted_at_ns = nowNs(&host),
+            .accepted_at_ns = accepted_at_ns,
+            .place = place,
         };
         const thread = std.Thread.spawn(.{ .stack_size = connection_stack_bytes }, connectionMain, .{connection}) catch {
             allocator.destroy(connection);
-            _ = host.classification_clients.fetchSub(1, .acq_rel);
-            host.clientFinished(null);
             stream.close(io);
+            host.clientFinished(place, null);
             continue;
         };
         thread.detach();
@@ -2862,13 +2914,28 @@ fn connectionMain(connection: *Connection) void {
     var trace_request_number: ?u64 = null;
     defer {
         stream.close(host.io);
+        const place = connection.place;
         host.allocator.destroy(connection);
         // This is the last Host access: drain may release the stack owner as
         // soon as the active population reaches zero.
-        host.clientFinished(trace_request_number);
+        host.clientFinished(place, trace_request_number);
     }
-    handleConnection(host, stream.socket.handle, accepted_at_ns, &trace_request_number) catch |err| {
-        sendStatic(host.io, stream.socket.handle, 400, "invocation_error", @errorName(err)) catch {};
+    handleConnection(host, stream.socket.handle, accepted_at_ns, &connection.place, &trace_request_number) catch |err| {
+        const deadline: ?i128 = if (connection.place == .discovery or connection.place == .classification)
+            @as(i128, accepted_at_ns) + 10 * std.time.ns_per_s
+        else
+            null;
+        sendStaticUntil(host.io, stream.socket.handle, 400, "invocation_error", @errorName(err), deadline) catch {};
+    };
+}
+
+fn admissionCode(err: anyerror) []const u8 {
+    return switch (err) {
+        error.ConnectionCapacityExhausted => "connection_capacity_exhausted",
+        error.ClassificationCapacityExhausted => "classification_capacity_exhausted",
+        error.DiscoveryCapacityExhausted => "discovery_capacity_exhausted",
+        error.OrdinaryCapacityExhausted => "ordinary_capacity_exhausted",
+        else => unreachable,
     };
 }
 
@@ -2897,6 +2964,15 @@ const Route = enum {
     fn isControl(self: Route) bool {
         return self == .host_stop or self == .session_stop or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
     }
+
+    fn kind(self: Route) protocol.Kind {
+        return switch (self) {
+            .observe => .observe_command,
+            .inspect => .inspect_session,
+            .unsupported_control => unreachable,
+            inline else => |route| @field(protocol.Kind, @tagName(route)),
+        };
+    }
 };
 const DropMode = enum { none, before_admission, during_admission, after_commit };
 
@@ -2907,28 +2983,15 @@ const Header = struct {
     instance: ?protocol.InstanceId = null,
 };
 
-fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, trace_request_number: *?u64) !void {
-    var classification_held = true;
-    defer if (classification_held) {
-        _ = host.classification_clients.fetchSub(1, .acq_rel);
-    };
-    var ordinary_held = false;
-    defer if (ordinary_held) {
-        _ = host.ordinary_clients.fetchSub(1, .acq_rel);
-    };
-    var header_reader = HeaderReader.init(host.io, fd);
+fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place: *Admission.Place, trace_request_number: *?u64) !void {
+    const header_deadline = @as(i128, accepted_at_ns) + 10 * std.time.ns_per_s;
+    var header_reader = HeaderReader.init(host.io, fd, header_deadline);
     const route = try header_reader.readRoute();
-    const ordinary = !route.isControl();
-    if (ordinary) {
-        const previous = host.ordinary_clients.fetchAdd(1, .acq_rel);
-        if (previous >= max_ordinary_clients) {
-            _ = host.ordinary_clients.fetchSub(1, .acq_rel);
-            return respondStatic(host.io, fd, 503, "busy", "ordinary_capacity_exhausted");
-        }
-        ordinary_held = true;
-        const prior = host.classification_clients.fetchSub(1, .acq_rel);
-        std.debug.assert(prior > 0);
-        classification_held = false;
+    host.classifyClient(place, route) catch |err| {
+        sendStaticUntil(host.io, fd, 503, "busy", admissionCode(err), header_deadline) catch {};
+        return;
+    };
+    if (place.* == .ordinary) {
         traceSubject(host, "ordinary_classification_released", "route", @tagName(route));
     }
     const header = try header_reader.finish(route);
@@ -2946,7 +3009,8 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, trace_
         return respondStatic(host.io, fd, 400, "invocation_error", "control_request_too_large");
     }
     const request_number = nextRequestNumber(host) catch {
-        return respondStatic(host.io, fd, 500, "invocation_error", "request_identity_exhausted");
+        sendStaticUntil(host.io, fd, 500, "invocation_error", "request_identity_exhausted", if (route == .host_info) header_deadline else null) catch {};
+        return;
     };
     if (host.faults.test_phase_trace) {
         trace_request_number.* = request_number;
@@ -2954,6 +3018,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, trace_
             inline else => |selected_route| traceRequest(host, "connection_request_" ++ @tagName(selected_route), request_number, null),
         }
     }
+    if (route == .host_info) return handleHostInfo(host, fd, header, header_deadline);
     var cleanup_failed = false;
     var request = protocol.parseRequest(.{
         .io = host.io,
@@ -2966,6 +3031,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, trace_
         .fault_content_seal = host.faults.content_seal,
         .cleanup_failed = &cleanup_failed,
         .scratch_budget = host.retention.sharedBudget(),
+        .expected_kind = route.kind(),
     }) catch |err| {
         if (cleanup_failed) std.debug.print("rui: retained ingress file and charge after cleanup failure\n", .{});
         return respondStatic(host.io, fd, if (err == error.ScratchCapacityExhausted) @as(u16, 507) else 400, "invocation_error", @errorName(err));
@@ -2975,30 +3041,6 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, trace_
     };
     if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
         return respondStatic(host.io, fd, 409, "invocation_error", "wrong_store_identity");
-    }
-    const route_matches = switch (request) {
-        .host_info => header.route == .host_info,
-        .host_stop => header.route == .host_stop,
-        .configure => header.route == .configure,
-        .message => header.route == .message,
-        .session_stop => header.route == .session_stop,
-        .model_interruption => header.route == .model_interruption,
-        .permission_decision => header.route == .permission_decision,
-        .observe_command => header.route == .observe,
-        .read_result => header.route == .read_result,
-        .read_action_call_id => header.route == .read_action_call_id,
-        .read_action_arguments => header.route == .read_action_arguments,
-        .inspect_session => header.route == .inspect,
-        .list_sessions => header.route == .list_sessions,
-        .conversation_page => header.route == .conversation_page,
-        .conversation_content => header.route == .conversation_content,
-        .proposal_page => header.route == .proposal_page,
-        .proposal_field => header.route == .proposal_field,
-        .activity_page => header.route == .activity_page,
-        .activity_content => header.route == .activity_content,
-    };
-    if (!route_matches) {
-        return respondStatic(host.io, fd, 400, "invocation_error", "route_kind_mismatch");
     }
     if (header.instance) |instance| {
         if (!std.mem.eql(u8, &instance, &host.instance)) {
@@ -3014,22 +3056,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, trace_
     }
 
     switch (request) {
-        .host_info => {
-            if (!host.launchAllowed()) {
-                return respondStatic(host.io, fd, 503, "host_unavailable", "dispatch_fenced");
-            }
-            var response: protocol.ResponseBuffer = .{};
-            try response.append("{\"version\":\"1\",\"type\":\"host_info\",\"store\":");
-            try response.appendJsonString(host.lease.paths.store.slice());
-            try response.append(",\"instance\":\"");
-            try response.append(&std.fmt.bytesToHex(host.instance, .lower));
-            try response.appendFmt("\",\"active_capacity\":\"{d}\",\"capabilities\":{{\"bash\":true,\"model\":{s},\"managed_authentication\":{s}}}}}", .{
-                host.custody.records.len,
-                if (host.provider_endpoint != null) "true" else "false",
-                if (host.provider_endpoint != null and host.authentication != null) "true" else "false",
-            });
-            deliverResponse(host.io, fd, 200, response.slice());
-        },
+        .host_info => unreachable, // Discovery owns its bounded exchange.
         .host_stop => {
             host.launch_mutex.lockUncancelable(host.io);
             const first = !host.effect_shutdown.swap(true, .acq_rel);
@@ -3395,15 +3422,58 @@ fn nextRequestNumber(host: *Host) !u64 {
     }
 }
 
+fn handleHostInfo(host: *Host, fd: std.posix.fd_t, header: Header, deadline: i128) !void {
+    if (header.content_length > protocol.max_host_info_request_bytes) return error.DiscoveryRequestTooLarge;
+    var cleanup_failed = false;
+    const request = try protocol.parseRequest(.{
+        .io = host.io,
+        .fd = fd,
+        .content_length = header.content_length,
+        .scratch_path = "", // Kind validation rejects before any content capture.
+        .request_number = 0,
+        .cleanup_failed = &cleanup_failed,
+        .expected_kind = .host_info,
+        .deadline = deadline,
+    });
+    if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
+        sendStaticUntil(host.io, fd, 409, "invocation_error", "wrong_store_identity", deadline) catch {};
+        return;
+    }
+    if (header.instance) |instance| {
+        if (!std.mem.eql(u8, &instance, &host.instance)) {
+            sendStaticUntil(host.io, fd, 409, "invocation_error", "host_instance_changed", deadline) catch {};
+            return;
+        }
+    }
+    if (header.drop == .before_admission) return;
+    if (!host.launchAllowed()) {
+        sendStaticUntil(host.io, fd, 503, "host_unavailable", "dispatch_fenced", deadline) catch {};
+        return;
+    }
+    var response: protocol.ResponseBuffer = .{};
+    try response.append("{\"version\":\"1\",\"type\":\"host_info\",\"store\":");
+    try response.appendJsonString(host.lease.paths.store.slice());
+    try response.append(",\"instance\":\"");
+    try response.append(&std.fmt.bytesToHex(host.instance, .lower));
+    try response.appendFmt("\",\"active_capacity\":\"{d}\",\"capabilities\":{{\"bash\":true,\"model\":{s},\"managed_authentication\":{s}}}}}", .{
+        host.custody.records.len,
+        if (host.provider_endpoint != null) "true" else "false",
+        if (host.provider_endpoint != null and host.authentication != null) "true" else "false",
+    });
+    std.debug.assert(response.len <= protocol.max_host_info_response_bytes);
+    // Never append an error to a partially delivered response.
+    writeHttpUntil(host.io, fd, 200, response.slice(), deadline) catch {};
+}
+
 const HeaderReader = struct {
     io: std.Io,
     fd: std.posix.fd_t,
     buffer: [protocol.max_header_bytes]u8 = undefined,
     used: usize = 0,
-    started: std.Io.Clock.Timestamp,
+    deadline: i128,
 
-    fn init(io: std.Io, fd: std.posix.fd_t) HeaderReader {
-        return .{ .io = io, .fd = fd, .started = .now(io, .awake) };
+    fn init(io: std.Io, fd: std.posix.fd_t, deadline: i128) HeaderReader {
+        return .{ .io = io, .fd = fd, .deadline = deadline };
     }
 
     fn readRoute(self: *HeaderReader) !Route {
@@ -3518,19 +3588,9 @@ const HeaderReader = struct {
     }
 
     fn readByte(self: *HeaderReader) !void {
-        const now = std.Io.Clock.Timestamp.now(self.io, .awake);
-        const elapsed = self.started.durationTo(now).raw.nanoseconds;
-        if (elapsed >= 10 * std.time.ns_per_s) return error.HeaderDeadlineExceeded;
-        const remaining_ms: i32 = @intCast(@max(
-            1,
-            @divFloor(10 * std.time.ns_per_s - elapsed, std.time.ns_per_ms),
-        ));
-        var poll_fd = [_]std.posix.pollfd{.{
-            .fd = self.fd,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        }};
-        if (try std.posix.poll(&poll_fd, remaining_ms) == 0) return error.HeaderDeadlineExceeded;
+        protocol.pollExchange(self.io, self.fd, std.posix.POLL.IN, self.deadline) catch |err| {
+            return if (err == error.ExchangeDeadlineExceeded) error.HeaderDeadlineExceeded else err;
+        };
         const count = try std.posix.read(self.fd, self.buffer[self.used .. self.used + 1]);
         if (count == 0) return error.IncompleteHeader;
         self.used += count;
@@ -3980,9 +4040,13 @@ fn appendHex(response: *protocol.ResponseBuffer, bytes: *const [32]u8) !void {
 }
 
 fn sendStatic(io: std.Io, fd: std.posix.fd_t, status: u16, kind: []const u8, code: []const u8) !void {
+    return sendStaticUntil(io, fd, status, kind, code, null);
+}
+
+fn sendStaticUntil(io: std.Io, fd: std.posix.fd_t, status: u16, kind: []const u8, code: []const u8, deadline: ?i128) !void {
     var response: protocol.ResponseBuffer = .{};
     try renderStatic(&response, kind, code);
-    try writeHttp(io, fd, status, response.slice());
+    try writeHttpUntil(io, fd, status, response.slice(), deadline);
 }
 
 fn renderStatic(response: *protocol.ResponseBuffer, kind: []const u8, code: []const u8) !void {
@@ -4034,6 +4098,10 @@ fn deliverReport(io: std.Io, fd: std.posix.fd_t, report: *store_module.SessionRe
 }
 
 fn writeHttp(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8) !void {
+    return writeHttpUntil(io, fd, status, body, null);
+}
+
+fn writeHttpUntil(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8, deadline: ?i128) !void {
     const reason = switch (status) {
         200 => "OK",
         400 => "Bad Request",
@@ -4046,11 +4114,15 @@ fn writeHttp(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8) !voi
     };
     var header_buffer: [256]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ status, reason, body.len });
-    try writeAll(io, fd, header);
-    try writeAll(io, fd, body);
+    try writeAllUntil(io, fd, header, deadline);
+    try writeAllUntil(io, fd, body, deadline);
 }
 
 fn writeAll(io: std.Io, fd: std.posix.fd_t, bytes: []const u8) !void {
+    return writeAllUntil(io, fd, bytes, null);
+}
+
+fn writeAllUntil(io: std.Io, fd: std.posix.fd_t, bytes: []const u8, deadline: ?i128) !void {
     // Reply delivery is terminal for this connection. Change mode here, not
     // at accept: request ingress retains its existing blocking policy.
     const flags = std.c.fcntl(fd, std.c.F.GETFL);
@@ -4060,11 +4132,11 @@ fn writeAll(io: std.Io, fd: std.posix.fd_t, bytes: []const u8) !void {
     // Each available window starts its own inactivity budget. Store/report
     // production between windows is not socket inactivity; only positive
     // writes renew this budget, never readiness, AGAIN or INTR.
-    var end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s;
+    var end = deadline orelse (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s);
     var offset: usize = 0;
     while (offset < bytes.len) {
         const remaining = end - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-        if (remaining <= 0) return error.TransferInactive;
+        if (remaining <= 0) return if (deadline != null) error.ExchangeDeadlineExceeded else error.TransferInactive;
         const milliseconds: c_int = @intCast(@divTrunc(remaining + std.time.ns_per_ms - 1, std.time.ns_per_ms));
         var poll_fd = [_]std.c.pollfd{.{
             .fd = fd,
@@ -4078,7 +4150,7 @@ fn writeAll(io: std.Io, fd: std.posix.fd_t, bytes: []const u8) !void {
             .INTR => continue,
             else => return error.PollFailed,
         }
-        if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= end) return error.TransferInactive;
+        if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= end) return if (deadline != null) error.ExchangeDeadlineExceeded else error.TransferInactive;
         const count = std.c.write(fd, bytes[offset..].ptr, bytes.len - offset);
         if (count < 0) switch (std.posix.errno(count)) {
             .AGAIN, .INTR => continue,
@@ -4086,7 +4158,7 @@ fn writeAll(io: std.Io, fd: std.posix.fd_t, bytes: []const u8) !void {
         };
         if (count == 0) return error.ConnectionClosed;
         offset += @intCast(count);
-        end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s;
+        if (deadline == null) end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s;
     }
 }
 
@@ -4171,6 +4243,89 @@ test "reply delivery establishes nonblocking only when sending" {
     try std.testing.expectEqualSlices(u8, "a\xc3\xa9\x00z", &actual);
     try std.testing.expectEqual(nonblocking, std.c.fcntl(sockets[0], std.c.F.GETFL) & nonblocking);
     try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(sockets[1], std.c.F.GETFL) & nonblocking);
+}
+
+test "discovery identity exhaustion cannot start a new error delivery budget" {
+    const Clock = struct {
+        var fd: std.posix.fd_t = undefined;
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            var descriptors = [_]std.c.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+            const available = std.c.poll(&descriptors, descriptors.len, 0);
+            std.debug.assert(available >= 0);
+            // Reading the last header byte consumes the original budget.
+            return .fromNanoseconds(if (available > 0) 0 else 10 * std.time.ns_per_s);
+        }
+    };
+    var sockets: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+    defer _ = std.c.close(sockets[0]);
+    defer _ = std.c.close(sockets[1]);
+    const header = "POST /v1/host-info HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 0\r\n\r\n";
+    try writeAll(std.testing.io, sockets[1], header);
+    Clock.fd = sockets[0];
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Clock.now;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{} };
+    host.request_counter.store(std.math.maxInt(u64), .release);
+    var place = try host.reserveClient();
+    defer host.clientFinished(place, null);
+    var trace_request_number: ?u64 = null;
+    try handleConnection(&host, sockets[0], 0, &place, &trace_request_number);
+    try std.testing.expectEqual(Admission.Place.discovery, place);
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(sockets[1], std.c.F.SETFL, nonblocking));
+    var response: [512]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, -1), std.c.read(sockets[1], &response, response.len));
+    try std.testing.expectEqual(std.posix.E.AGAIN, std.posix.errno(@as(isize, -1)));
+}
+
+test "discovery reply delivery shares its absolute budget across header and partial body writes" {
+    const Peer = struct {
+        fd: std.posix.fd_t,
+        actual: [65536 + 256]u8 = undefined,
+        used: usize = 0,
+        writes: usize = 0,
+        at: i96 = 0,
+
+        fn now(context: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const before = self.used;
+            while (self.used < self.actual.len) {
+                const count = std.c.read(self.fd, self.actual[self.used..].ptr, self.actual.len - self.used);
+                if (count < 0) {
+                    std.debug.assert(std.posix.errno(count) == .AGAIN);
+                    break;
+                }
+                std.debug.assert(count > 0);
+                self.used += @intCast(count);
+            }
+            if (self.used != before) {
+                self.writes += 1;
+                self.at += 3 * std.time.ns_per_s;
+            }
+            return .fromNanoseconds(self.at);
+        }
+    };
+    var sockets: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+    defer _ = std.c.close(sockets[0]);
+    defer _ = std.c.close(sockets[1]);
+    const capacity: c_int = 1024;
+    try std.posix.setsockopt(sockets[0], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&capacity));
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(sockets[1], std.c.F.SETFL, nonblocking));
+    var peer: Peer = .{ .fd = sockets[1] };
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Peer.now;
+    const io: std.Io = .{ .userdata = &peer, .vtable = &vtable };
+    var body: [65536]u8 = undefined;
+    for (&body, 0..) |*byte, index| byte.* = @intCast((index * 19 + 37) % 251);
+    try std.testing.expectError(error.ExchangeDeadlineExceeded, writeHttpUntil(io, sockets[0], 200, &body, 10 * std.time.ns_per_s));
+    const boundary = std.mem.indexOf(u8, peer.actual[0..peer.used], "\r\n\r\n").? + 4;
+    try std.testing.expect(peer.writes >= 4 and peer.at >= 10 * std.time.ns_per_s);
+    try std.testing.expect(peer.used > boundary and peer.used - boundary < body.len);
+    try std.testing.expectEqualSlices(u8, body[0 .. peer.used - boundary], peer.actual[boundary..peer.used]);
 }
 
 test "reply delivery renews on short writes and excludes production between windows" {
@@ -4328,6 +4483,65 @@ test "connection populations preserve two control places" {
     try std.testing.expectEqual(max_clients, max_ordinary_clients + control_headroom);
     try std.testing.expectEqual(@as(usize, 12 * 1024 * 1024), maximum_connection_stack_reservation_bytes);
     try std.testing.expectEqual(@as(usize, 10 * 64 * 1024), maximum_result_delivery_buffers_bytes);
+}
+
+test "connection admission exhausts reachable reservation classification and release transitions" {
+    for (0..11) |ordinary| for (0..3) |controls| for (0..2) |discovery| for (0..3) |classification| {
+        const headroom = controls + discovery + classification;
+        if (headroom > 2) continue;
+        const original = Admission{ .total = ordinary + headroom, .ordinary = ordinary, .headroom = headroom, .discovery = discovery };
+        var admission = original;
+        if (original.total == 12) {
+            try std.testing.expectError(error.ConnectionCapacityExhausted, admission.reserve());
+            try std.testing.expectEqualDeep(original, admission);
+        } else if (headroom == 2) {
+            try std.testing.expectError(error.ClassificationCapacityExhausted, admission.reserve());
+            try std.testing.expectEqualDeep(original, admission);
+        } else {
+            inline for (std.meta.tags(Route)) |route| {
+                admission = original;
+                var place = try admission.reserve();
+                try std.testing.expectEqual(Admission.Place.classification, place);
+                if (route == .host_info and discovery == 1) {
+                    try std.testing.expectError(error.DiscoveryCapacityExhausted, admission.classify(&place, route));
+                    try std.testing.expectEqual(Admission.Place.classification, place);
+                } else if (route != .host_info and !route.isControl() and ordinary == 10) {
+                    try std.testing.expectError(error.OrdinaryCapacityExhausted, admission.classify(&place, route));
+                    try std.testing.expectEqual(Admission.Place.classification, place);
+                } else {
+                    try admission.classify(&place, route);
+                    const expected: Admission.Place = if (route == .host_info) .discovery else if (route.isControl()) .control else .ordinary;
+                    try std.testing.expectEqual(expected, place);
+                    try std.testing.expectEqual(original.total + 1, admission.total);
+                    try std.testing.expectEqual(ordinary + @intFromBool(expected == .ordinary), admission.ordinary);
+                    try std.testing.expectEqual(headroom + @intFromBool(expected != .ordinary), admission.headroom);
+                    try std.testing.expectEqual(discovery + @intFromBool(expected == .discovery), admission.discovery);
+                }
+                admission.release(place);
+                try std.testing.expectEqualDeep(original, admission);
+            }
+            // Allocation/spawn failure returns the original unclassified place.
+            admission = original;
+            admission.release(try admission.reserve());
+            try std.testing.expectEqualDeep(original, admission);
+        }
+        inline for (std.meta.tags(Admission.Place)) |place| {
+            const population = switch (place) {
+                .ordinary => ordinary,
+                .control => controls,
+                .discovery => discovery,
+                .classification => classification,
+            };
+            if (population > 0) {
+                admission = original;
+                admission.release(place);
+                try std.testing.expectEqual(original.total - 1, admission.total);
+                try std.testing.expectEqual(ordinary - @intFromBool(place == .ordinary), admission.ordinary);
+                try std.testing.expectEqual(headroom - @intFromBool(place != .ordinary), admission.headroom);
+                try std.testing.expectEqual(discovery - @intFromBool(place == .discovery), admission.discovery);
+            }
+        }
+    };
 }
 
 test "model retry and inactivity defaults match the owning resource contract" {
@@ -5317,7 +5531,72 @@ test "control response variants fit exact worst-case JSON bounds" {
 fn finishTestClient(host: *Host, release: *std.atomic.Value(bool), completed: *std.atomic.Value(bool)) void {
     while (!release.load(.acquire)) std.atomic.spinLoopHint();
     completed.store(true, .release);
-    host.clientFinished(null);
+    host.clientFinished(.classification, null);
+}
+
+test "rejected discovery joins connection cleanup and restores control headroom" {
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{} };
+    var ordinary_places: [10]Admission.Place = undefined;
+    var ordinary_count: usize = 0;
+    defer for (ordinary_places[0..ordinary_count]) |place| host.clientFinished(place, null);
+    for (&ordinary_places) |*place| {
+        place.* = try host.reserveClient();
+        ordinary_count += 1;
+        try host.classifyClient(place, .observe);
+    }
+    var discovery = try host.reserveClient();
+    defer host.clientFinished(discovery, null);
+    try host.classifyClient(&discovery, .host_info);
+    var sockets: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+    var server_owned = true;
+    defer if (server_owned) {
+        _ = std.c.close(sockets[0]);
+    };
+    defer _ = std.c.close(sockets[1]);
+    const place = try host.reserveClient();
+    const connection = host.allocator.create(Connection) catch |err| {
+        host.clientFinished(place, null);
+        return err;
+    };
+    connection.* = .{ .host = &host, .stream = .{ .socket = .{ .handle = sockets[0], .address = undefined } }, .accepted_at_ns = nowNs(&host), .place = place };
+    const thread = std.Thread.spawn(.{ .stack_size = connection_stack_bytes }, connectionMain, .{connection}) catch |err| {
+        host.allocator.destroy(connection);
+        host.clientFinished(place, null);
+        return err;
+    };
+    server_owned = false;
+    var joined = false;
+    defer {
+        if (!joined) thread.join();
+        // Reclaim the descriptor even when the no-close negative control fails.
+        if (std.c.fcntl(sockets[0], std.c.F.GETFL) >= 0) _ = std.c.close(sockets[0]);
+    }
+    try writeAll(std.testing.io, sockets[1], "POST /v1/host-info HTTP/1.1\r\n");
+    const body = "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}";
+    var expected_buffer: [512]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buffer, "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n{s}", .{ body.len, body });
+    var reply: [512]u8 = undefined;
+    var received: usize = 0;
+    const deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 5 * std.time.ns_per_s;
+    while (received < expected.len) {
+        try protocol.pollExchange(std.testing.io, sockets[1], std.posix.POLL.IN, deadline);
+        const count = try std.posix.read(sockets[1], reply[received..expected.len]);
+        try std.testing.expect(count > 0);
+        received += count;
+    }
+    try std.testing.expectEqualStrings(expected, reply[0..received]);
+    // A complete response does not prove release. Join the actual handler.
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(sockets[0], std.c.F.GETFL));
+    try std.testing.expectEqual(std.posix.E.BADF, std.posix.errno(@as(c_int, -1)));
+    try std.testing.expectEqualDeep(Admission{ .total = 11, .ordinary = 10, .headroom = 1, .discovery = 1 }, host.admission);
+    var control = try host.reserveClient();
+    defer host.clientFinished(control, null);
+    try host.classifyClient(&control, .host_stop);
+    try std.testing.expectEqual(Admission.Place.control, control);
+    std.debug.print("admission storage: Host={d} Connection={d} Admission={d} header={d} stacks={d} delivery={d}\n", .{ @sizeOf(Host), @sizeOf(Connection), @sizeOf(Admission), protocol.max_header_bytes, maximum_connection_stack_reservation_bytes, maximum_result_delivery_buffers_bytes });
 }
 
 test "shutdown drain retains stack-owned Host until active clients finish" {
@@ -5328,7 +5607,7 @@ test "shutdown drain retains stack-owned Host until active clients finish" {
         .store = undefined,
         .faults = .{},
     };
-    host.active_clients.store(1, .release);
+    _ = try host.reserveClient();
     var release: std.atomic.Value(bool) = .init(false);
     var completed: std.atomic.Value(bool) = .init(false);
     const thread = try std.Thread.spawn(.{}, finishTestClient, .{ &host, &release, &completed });

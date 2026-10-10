@@ -13,7 +13,7 @@ import tempfile
 import threading
 
 from control_integration import RUI, command, configure, inspect_execution, message, observe, start_host, successful_sse, wait_for
-from conversation_page_integration import host_resources, request
+from conversation_page_integration import host_resources, idle_resources, request
 from dispatch_integration import sse_tool_calls
 from host_process import TestHTTPServer, stop_process
 
@@ -111,6 +111,12 @@ def main():
             empty = page(store)
             assert empty["items"] == [] and not empty["more"]
             baseline = host_resources(process.pid)
+            if baseline is not None:
+                with socket.socket(socket.AF_UNIX) as held:
+                    held.connect(fields["socket"])
+                    wait_for(lambda: idle_resources(process.pid, fields["socket"]) is None,
+                             "held proposal peer excluded from idle census")
+                baseline = wait_for(lambda: idle_resources(process.pid, fields["socket"]), "idle proposal baseline")
             message(state, store, "first", SESSION, "first group")
             first = wait_for(lambda: (p if len((p := page(store))["items"]) == 16 else None), "proposal page")
             assert first["more"] and [i["call_ordinal"] for i in first["items"]] == list(range(16))
