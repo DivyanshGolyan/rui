@@ -58,6 +58,8 @@ def artifact_identity(path):
 
 def require_darwin_fsync(output, path, architecture, *, interpose):
     assert output.splitlines()[0] == f"{path} [{architecture}]:", output
+    envelopes = re.findall(r"(?m)^.*\[[^\]\n]+\]:[^\n]*$", output)
+    assert envelopes == [f"{path} [{architecture}]:"], output
 
     def section(name):
         matches = re.findall(rf"(?ms)^    -{name}:\n(.*?)(?=^    -[a-z_]+:|\Z)", output)
@@ -78,7 +80,8 @@ def require_darwin_fsync(output, path, architecture, *, interpose):
     assert slots[0][3] == "rebase" and int(slots[0][4], 16) > 0, output
     assert slots[1][3:] == ["bind", "libSystem/_fsync"], output
     assert int(slots[1][2], 16) == int(slots[0][2], 16) + 8, output
-    assert len(re.findall(r"(?m)^_sync_interpose:$", symbolic)) == 1, output
+    headers = re.findall(r"(?m)^[ \t]*_sync_interpose\b[^\n]*$", symbolic)
+    assert headers == ["_sync_interpose:"], output
     groups = re.findall(r"(?ms)^_sync_interpose:\n(.*?)(?=^\S|\Z)", symbolic)
     assert len(groups) == 1, output
     entries = [line.split() for line in groups[0].splitlines()]
