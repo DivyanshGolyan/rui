@@ -258,7 +258,11 @@ def main():
             mock_reply(fields["socket"], store, "page", encoded[:-1], len(encoded))
             mock_reply(fields["socket"], store, "page", encoded.replace(b'"version": "1"', b'"version":"1","version":"1"'))
             assert mock_reply(fields["socket"], store, "field", b"abc", 9,
-                b"X-Rui-Content-Bytes: 9\r\nX-Rui-Next-Offset: 9\r\n") == b"abc"
+                b"X-Rui-Content-Bytes: 9\r\nX-Rui-Next-Offset: 9\r\n") == b""
+            # A complete earlier window may be visible on failure; the final
+            # incomplete window cannot be mistaken for verified completion.
+            assert mock_reply(fields["socket"], store, "field", b"p" * 4096 + b"abc", 4105,
+                b"X-Rui-Content-Bytes: 4105\r\nX-Rui-Next-Offset: 4105\r\n") == b"p" * 4096
             print("proposal native caller: historical rejection/complete fields/frozen traversal/restart/authority/corruption/malformed/truncation passed")
         finally:
             if process is not None: stop_process(process)

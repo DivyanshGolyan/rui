@@ -123,7 +123,7 @@ fn driveActive(self: *Self) !void {
             }
         };
         if (self.reader.thread == null) {
-            if (self.history_requested) {
+            if (self.history_requested and !self.opening) {
                 self.history_requested = false;
                 if (self.history_cursor != null) {
                     self.read_phase = .history_preparing;

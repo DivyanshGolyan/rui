@@ -80,6 +80,34 @@ def read_terminal(master, marker, timeout=15):
         .replace("\x1b[?2004h", "").replace("\x1b[?2004l", ""))
 
 
+def terminal_exit(caller, master, timeout=5):
+    """Own both output streams until exit, including a late rendering prefix."""
+    errors_fd = caller.stderr.fileno()
+    streams = {master: bytearray(), errors_fd: bytearray()}
+    pending = set(streams)
+    deadline = time.monotonic() + timeout
+    while True:
+        exited = caller.poll() is not None
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, ("terminal exit timeout", bytes(streams[master]), bytes(streams[errors_fd]))
+        ready = select.select(list(pending), [], [], 0 if exited else min(remaining, 0.1))[0]
+        if exited and not ready:
+            caller.stderr.close()
+            return bytes(streams[master]), bytes(streams[errors_fd])
+        for fd in ready:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError as error:
+                if fd != master or error.errno != errno.EIO:
+                    raise
+                chunk = b""
+            if chunk:
+                streams[fd].extend(chunk)
+                assert sum(map(len, streams.values())) < 1024 * 1024, "unexpected unbounded terminal output"
+            else:
+                pending.remove(fd)
+
+
 def terminal_step(master, command, marker="rui> "):
     os.write(master, (command + "\n").encode())
     return read_terminal(master, marker)
@@ -94,6 +122,7 @@ def persistent_opening_case():
     store = state / "store'$(false)"
     large_answer = "# Saved heading\n**saved bold** é\n" + "x" * 8192 + "\nOPENING-COMPLETE"
     history_release = threading.Event()
+    opening_release = threading.Event()
     endpoint = fixture.SuccessEndpoint([
         fixture.sse_answer("opening-a", "opening-ar", "opening-am", large_answer)[0],
         *[fixture.sse_answer(f"older-{i}", f"older-r-{i}", f"older-m-{i}", f"saved answer {i:02d}")[0] for i in range(1, 10)],
@@ -129,7 +158,7 @@ def persistent_opening_case():
         assert len(endpoint.requests) == 1, "opening restarted saved work"
         os.write(master, b"\x03")
         read_terminal(master, "Detached.")
-        _, errors = caller.communicate(timeout=5)
+        _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
         actual = termios.tcgetattr(slave)
         if sys.platform == "darwin":
@@ -150,9 +179,10 @@ def persistent_opening_case():
         caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
             "--session", "persistent/opening"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-        read_terminal(master, "Saved heading")
-        _, errors = caller.communicate(timeout=5)
+        prefix = read_terminal(master, "Saved heading")
+        tail, errors = terminal_exit(caller, master)
         assert caller.returncode != 0 and b"TruncatedResponse" in errors, errors
+        assert "OPENING-COMPLETE" not in prefix and b"OPENING-COMPLETE" not in tail, "truncated opening exposed unverified completion"
         actual = termios.tcgetattr(slave)
         if sys.platform == "darwin":
             mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
@@ -168,6 +198,44 @@ def persistent_opening_case():
         for i in range(1, 10):
             message = admit(home, "message", "--store", store, "--session", "persistent/opening", f"saved user {i:02d}")
             fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "history saved answer")
+        # A queued local traversal is not eligible until opening establishes its
+        # cursor. Both command and inspection cancellation must retain it.
+        for handoff in (b"/status\n", b"\x07"):
+            opening_release.clear()
+            opening_held = threading.Event()
+
+            def hold_first_opening(response):
+                if len(proxy.exchanges) == 1:
+                    opening_held.set()
+                    assert opening_release.wait(15), "cancelled opening gate was not released"
+                return response
+
+            proxy = canonical.ReplyProxy(host, "/v1/activity-page", hold_first_opening)
+            master, slave = pty.openpty()
+            caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
+                "--session", "persistent/opening"], env={**os.environ, "HOME": str(home)},
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            assert opening_held.wait(10), "opening did not reach its metadata gate"
+            os.write(master, b"/history\n" + handoff)
+            output = b""
+            deadline = time.monotonic() + 15
+            while b"No older Conversation rows" not in output and b"History page complete" not in output:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0 and select.select([master], [], [], remaining)[0], output
+                output += os.read(master, 65536)
+                assert len(output) < 1024 * 1024
+            assert b"No older Conversation rows" not in output, ("queued history consumed an unestablished opening cursor", handoff, output)
+            assert b"literal **user**" in output and b"saved user 01" in output, output
+            assert len(endpoint.requests) == 10, "opening/history handoff restarted work"
+            opening_release.set()
+            os.write(master, b"\x03")
+            _, errors = terminal_exit(caller, master)
+            assert caller.returncode == 0, errors
+            proxy.close()
+            proxy = None
+            os.close(master)
+            os.close(slave)
+            master = slave = None
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
         caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
@@ -215,8 +283,11 @@ def persistent_opening_case():
         command = shlex.split(export)
         assert command[0:3] == ["rui", "read-conversation", "--store-hex"] and bytes.fromhex(command[3]) == str(store).encode(), export
         assert all(32 <= ord(char) < 127 for char in export), "raw export printed terminal controls"
+        executables = state / "bin"
+        executables.mkdir()
+        (executables / "rui").symlink_to(fixture.RUI.resolve())
         exported = subprocess.run(export, shell=True, env={**os.environ, "HOME": str(home),
-            "PATH": str(fixture.RUI.parent) + os.pathsep + os.environ["PATH"]}, capture_output=True, timeout=10)
+            "PATH": str(executables) + os.pathsep + os.environ["PATH"]}, capture_output=True, timeout=10)
         assert exported.returncode == 0 and exported.stdout == large_answer.encode(), (export, exported.stderr, exported.stdout)
         for flags in (("--session-hex", "0"), ("--session-hex", "zz"),
                 ("--session-hex", "61" * 129), ("--store-hex", "61" * 493),
@@ -233,12 +304,13 @@ def persistent_opening_case():
         assert len(endpoint.requests) == 12, "history caused provider work"
         os.write(master, b"\x03")
         read_terminal(master, "Detached.")
-        _, errors = caller.communicate(timeout=5)
+        _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
         completed = True
         print("persistent opening/history: exact chronological frozen replay, assistant-only Markdown, whole-page failure/retry, no cursor loss/late append/repeated work passed", flush=True)
     finally:
         history_release.set()
+        opening_release.set()
         if caller is not None and caller.poll() is None:
             caller.kill()
             caller.wait(timeout=5)
@@ -304,7 +376,7 @@ def persistent_pending_case():
         assert len(endpoint.requests) == 1, "opening dispatched queued work"
         os.write(master, b"\x03")
         read_terminal(master, "Detached.")
-        _, errors = caller.communicate(timeout=5)
+        _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
         completed = True
         print("persistent pending: exact frozen 24 beyond newest 16, oldest four previews, late admission excluded passed", flush=True)

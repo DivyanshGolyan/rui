@@ -251,7 +251,8 @@ def main():
             encoded = json.dumps(valid).encode()
             mock_reply(fields["socket"], store, "page", encoded[:-1], len(encoded))
             mock_reply(fields["socket"], store, "page", encoded.replace(b'"version": "1"', b'"version":"1","version":"1"'))
-            assert mock_reply(fields["socket"], store, "content", b"abc", 9) == b"abc"
+            assert mock_reply(fields["socket"], store, "content", b"abc", 9) == b""
+            assert mock_reply(fields["socket"], store, "content", b"p" * 4096 + b"abc", 4105) == b"p" * 4096
             print("activity typed native: seven kinds/complete content/proposals/fixed-end/reverse/ties/catch-up/restart/provenance/malformed/truncation passed")
         finally:
             if process is not None: stop_process(process)
