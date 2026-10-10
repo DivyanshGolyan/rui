@@ -84,7 +84,18 @@ jobs:
           PY
       - run: python3 -B -m unittest discover -s tests/ci -v
         if: ${{ steps.cadence.outputs.run == 'true' }}
-      - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -shellcheck= .github/workflows/check.yml .github/workflows/daily-macos.yml
+      - name: Install the pinned workflow linter
+        if: ${{ steps.cadence.outputs.run == 'true' }}
+        run: |
+          set -euo pipefail
+          # The official release avoids rebuilding the Go CLI on every plan.
+          curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
+            -o "$RUNNER_TEMP/actionlint.tar.gz"
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - run: actionlint -shellcheck= .github/workflows/check.yml .github/workflows/daily-macos.yml
         if: ${{ steps.cadence.outputs.run == 'true' }}
   linux:
     needs: plan
