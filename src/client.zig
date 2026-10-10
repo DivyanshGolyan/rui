@@ -4771,9 +4771,15 @@ test "transport cancellation returns before silent peer release and retains pinn
     var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var captured = try captureConfigure(io, .{ .store = root, .session = .{ .named = "s" } }, .{ .explicit = .{ .record = try std.fmt.bufPrint(&record_buffer, "{s}/record", .{root}), .key = "original" } });
     defer captured.close(io);
-    const paths = try platform.resolveClientPaths(io, root);
+    var lease = try platform.StoreLease.acquire(io, root);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    const paths = lease.paths;
     var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-    defer listener.deinit(io);
+    defer {
+        listener.deinit(io);
+        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    }
     var token: Cancellation = .{};
     var worker: Worker = .{ .requests = .{ .io = io, .cancellation = &token }, .captured = &captured };
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
@@ -4918,9 +4924,15 @@ test "transport cancellation retains synchronous sink loans and respects deliver
         try tmp.dir.setPermissions(io, .fromMode(0o700));
         var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
-        const paths = try platform.resolveClientPaths(io, root);
+        var lease = try platform.StoreLease.acquire(io, root);
+        defer lease.release();
+        try lease.prepareForServing(false);
+        const paths = lease.paths;
         var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-        defer listener.deinit(io);
+        defer {
+            listener.deinit(io);
+            std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+        }
         var token: Cancellation = .{};
         var worker: Worker = .{ .requests = .{ .io = io, .cancellation = &token }, .root = root, .kind = kind, .sink = .{ .fail = kind == .result } };
         const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
