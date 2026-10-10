@@ -440,8 +440,9 @@ def main():
             # Automatic success is quiet; readiness is established separately
             # through protected status and the accepted Session below.
             assert b"Provider: codex" in output and b"Model: gpt-6-luna" in output, output
-            assert b"Permission: bypass (Bash runs without approval)" in output, output
-            assert b"Rui: Bash commands can run without asking you." in output, output
+            assert b"Permission: bypass\r\n" in output, output
+            assert b"Bash runs without approval" not in output, output
+            assert b"Bash commands can run without asking you" not in output, output
             captures = list((bare_home / ".config/rui/requests").glob("*.json"))
             assert len(captures) == 1, captures
             captured = json.loads(captures[0].read_text())

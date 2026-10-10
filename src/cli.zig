@@ -1172,9 +1172,7 @@ fn showSessionStatus(init: std.process.Init, store: []const u8, session_ref: []c
         try writeSafeField(init.io, "Workspace (Bash cwd): ", work.settings.workspace.slice());
         try writeSafeField(init.io, "Provider: ", @tagName(work.settings.provider.value));
         try writeSafeField(init.io, "Model: ", work.settings.model.slice());
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Permission: ");
-        try writeSafeText(init.io, @tagName(work.settings.permission_mode.value));
-        try std.Io.File.stdout().writeStreamingAll(init.io, if (work.settings.tools.bash and work.settings.permission_mode.value == .bypass) " (Bash runs without approval)\nRui: Bash commands can run without asking you.\n" else "\n");
+        try writeSafeField(init.io, "Permission: ", @tagName(work.settings.permission_mode.value));
         if (work.selected_message != null) try writeSafeField(init.io, "Work: ", @tagName(work.work.status.value));
         if (work.actionable_count != 0) try showActionable(init.io, &report, false);
         return;
