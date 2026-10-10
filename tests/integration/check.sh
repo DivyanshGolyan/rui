@@ -87,24 +87,43 @@ session_list_client=$4
 proposal_client=$5
 activity_client=$6
 preference_policy_actor=$7
-sh "$directory/admission_integration.sh" "$release_safe"
-python3 "$directory/dispatch_integration.py" "$release_safe"
-python3 "$directory/bash_owner_integration.py" "$release_safe"
-python3 "$directory/bash_integration.py" "$release_safe"
-python3 "$directory/human_cli_integration.py" "$release_safe"
-python3 "$directory/preference_policy_integration.py" "$preference_policy_actor"
-python3 "$directory/bash_lifecycle_integration.py" "$release_safe"
-python3 "$directory/bash_recovery_integration.py" "$release_safe"
-python3 "$directory/codex_integration.py" "$release_safe"
-python3 "$directory/control_integration.py" "$release_safe"
-python3 "$directory/session_list_integration.py" "$release_safe" "$session_list_client"
-python3 "$directory/conversation_page_integration.py" "$release_safe"
-python3 "$directory/proposal_integration.py" "$release_safe" "$proposal_client"
-python3 "$directory/activity_integration.py" "$release_safe" "$activity_client"
-python3 "$directory/descriptor_capacity_integration.py" "$release_safe"
-python3 "$directory/host_status_integration.py" "$release_safe" "$host_status_actor"
-python3 "$directory/host_launch_integration.py" "$release_safe"
-python3 "$directory/host_stop_integration.py" "$release_safe" "$host_status_actor"
-sh "$directory/admission_integration.sh" "$debug" artifact-smoke
-python3 "$directory/host_process_test.py"
-python3 "$directory/host_allocator_test.py" "$release_safe"
+part=${8:-all}
+case "$part" in
+    all|execution|callers) ;;
+    *) printf 'Unknown full-check part: %s\n' "$part" >&2; exit 2 ;;
+esac
+# Each part stays serial. CI may put the disjoint parts on separate machines;
+# the default all mode preserves the original complete serial gate and order.
+if [ "$part" != callers ]; then
+    sh "$directory/admission_integration.sh" "$release_safe"
+    python3 "$directory/dispatch_integration.py" "$release_safe"
+    python3 "$directory/bash_owner_integration.py" "$release_safe"
+    python3 "$directory/bash_integration.py" "$release_safe"
+fi
+if [ "$part" != execution ]; then
+    python3 "$directory/human_cli_integration.py" "$release_safe"
+    python3 "$directory/preference_policy_integration.py" "$preference_policy_actor"
+fi
+if [ "$part" != callers ]; then
+    python3 "$directory/bash_lifecycle_integration.py" "$release_safe"
+    python3 "$directory/bash_recovery_integration.py" "$release_safe"
+    python3 "$directory/codex_integration.py" "$release_safe"
+    python3 "$directory/control_integration.py" "$release_safe"
+fi
+if [ "$part" != execution ]; then
+    python3 "$directory/session_list_integration.py" "$release_safe" "$session_list_client"
+    python3 "$directory/conversation_page_integration.py" "$release_safe"
+    python3 "$directory/proposal_integration.py" "$release_safe" "$proposal_client"
+    python3 "$directory/activity_integration.py" "$release_safe" "$activity_client"
+fi
+if [ "$part" != callers ]; then
+    python3 "$directory/descriptor_capacity_integration.py" "$release_safe"
+fi
+if [ "$part" != execution ]; then
+    python3 "$directory/host_status_integration.py" "$release_safe" "$host_status_actor"
+    python3 "$directory/host_launch_integration.py" "$release_safe"
+    python3 "$directory/host_stop_integration.py" "$release_safe" "$host_status_actor"
+    sh "$directory/admission_integration.sh" "$debug" artifact-smoke
+    python3 "$directory/host_process_test.py"
+    python3 "$directory/host_allocator_test.py" "$release_safe"
+fi

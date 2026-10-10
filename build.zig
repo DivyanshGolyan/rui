@@ -417,6 +417,7 @@ pub fn build(b: *std.Build) void {
         "check-full",
         "Run routine native tests, sanitizer and process integrations serially (long witnesses are separate)",
     );
+    const check_part = b.option(enum { all, execution, callers }, "check-part", "Isolated full-check part (default all)") orelse .all;
     const process_integrations = b.addSystemCommand(&.{"sh"});
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
     process_integrations.addArtifactArg(release_safe);
@@ -426,6 +427,7 @@ pub fn build(b: *std.Build) void {
     process_integrations.addArtifactArg(proposal_client);
     process_integrations.addArtifactArg(activity_client);
     process_integrations.addArtifactArg(preference_policy_actor);
+    process_integrations.addArg(@tagName(check_part));
     const full_evaluator = b.addSystemCommand(&.{"python3"});
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     full_evaluator.addArtifactArg(evaluator);
@@ -438,7 +440,9 @@ pub fn build(b: *std.Build) void {
     full_evaluator_host.addArtifactArg(evaluator);
     full_evaluator_host.step.dependOn(&full_evaluator.step);
     process_integrations.step.dependOn(&format.step);
-    process_integrations.step.dependOn(&full_evaluator_host.step);
+    // The execution part owns native tests and evaluator/sanitizer work. The
+    // callers part runs on another machine, isolated from that child-process load.
+    if (check_part != .callers) process_integrations.step.dependOn(&full_evaluator_host.step);
     process_integrations.step.dependOn(&release.step);
     full_check_step.dependOn(&process_integrations.step);
 

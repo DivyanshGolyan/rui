@@ -4,6 +4,9 @@ inputs:
   targets:
     description: Selected existing build targets
     default: '[]'
+  check-part:
+    description: Full-check partition, keeping concurrent cache writers separate
+    default: all
 runs:
   using: composite
   steps:
@@ -62,8 +65,9 @@ runs:
         path: |
           ~/.cache/zig
           .zig-cache
-        key: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.16.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}
+        key: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.16.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-${{ inputs.check-part }}
         restore-keys: |
+          rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.16.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-
           rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.16.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-
     - name: Install pinned compiler
       shell: bash

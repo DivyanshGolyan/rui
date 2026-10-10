@@ -125,24 +125,48 @@ jobs:
           python3 -B -m unittest discover -s tests/qualification/linux-memory -v
           cc -shared -fPIC -pthread -Wall -Wextra -Werror tests/qualification/linux-memory/malloc_probe.c -o "$RUNNER_TEMP/rui-malloc-probe.so"
           rm "$RUNNER_TEMP/rui-malloc-probe.so"
-  macos:
+  macos_suites:
+    name: macos suites (${{ matrix.part }})
     needs: plan
     if: ${{ needs.plan.outputs.native == 'true' }}
     runs-on: macos-15
     timeout-minutes: 45
+    strategy:
+      # Only the measured serial full gate gets two isolated machines. Ordinary
+      # affected targets and the changed-main backstop keep their existing cadence.
+      fail-fast: false
+      matrix:
+        part: ${{ contains(fromJSON(needs.plan.outputs.native_targets || '[]'), 'check-full') && fromJSON('["execution", "callers"]') || fromJSON('["all"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup
         with:
-          targets: ${{ needs.plan.outputs.native_targets }}
+          targets: ${{ matrix.part == 'execution' && '["check-full"]' || needs.plan.outputs.native_targets }}
+          check-part: ${{ matrix.part }}
       - name: Run required native targets
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
+          CHECK_PART: ${{ matrix.part }}
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
           echo "Tested SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
-          python3 -B tests/ci/run_selected.py "$TARGETS"
+          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART"
       - name: Prove warm compilation does not cache test acceptance
-        if: ${{ needs.plan.outputs.cache_execution == 'true' }}
+        if: ${{ needs.plan.outputs.cache_execution == 'true' && matrix.part != 'execution' }}
         run: python3 -B tests/ci/cache_execution.py
+  macos:
+    # Keep the existing required status. A failed/cancelled matrix member must
+    # fail this aggregate, even when its sibling completes successfully.
+    needs: [plan, macos_suites]
+    if: ${{ always() && (needs.plan.outputs.native == 'true' || needs.plan.result == 'failure') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every selected Apple Silicon part
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          NATIVE_RESULT: ${{ needs.macos_suites.result }}
+        run: |
+          test "$PLAN_RESULT" = success
+          test "$NATIVE_RESULT" = success

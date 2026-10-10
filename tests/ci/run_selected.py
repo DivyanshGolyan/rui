@@ -11,8 +11,9 @@ from select_tests import execution_batches
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("targets", help="JSON array from the selector")
+    parser.add_argument("--check-part", choices=("all", "execution", "callers"), default="all")
     args = parser.parse_args()
-    for batch in execution_batches(json.loads(args.targets)):
+    for batch in execution_batches(json.loads(args.targets), args.check_part):
         print("Executing: " + " ".join(batch), flush=True)
         start = time.monotonic()
         result = subprocess.run(["zig", "build", *batch, "--summary", "all"])
