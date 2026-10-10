@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
@@ -22,11 +23,41 @@ jobs:
       native_targets: ${{ steps.select.outputs.native_targets }}
       native: ${{ steps.select.outputs.native }}
       linux_memory: ${{ steps.select.outputs.linux_memory }}
+      cache_execution: ${{ steps.select.outputs.cache_execution }}
     steps:
+      - name: Avoid duplicate development work for a ready PR
+        id: cadence
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            let run = true;
+            if (context.eventName === 'push') {
+              try {
+                const branch = context.ref.replace(/^refs\/heads\//, '');
+                const pulls = await github.paginate(github.rest.pulls.list, {
+                  ...context.repo, state: 'open', head: `${context.repo.owner}:${branch}`
+                });
+                const ready = pulls.find(p => !p.draft && p.head.sha === context.sha &&
+                  p.head.repo?.full_name === `${context.repo.owner}/${context.repo.repo}`);
+                if (ready) {
+                  const {data} = await github.rest.pulls.get({...context.repo, pull_number: ready.number});
+                  // Conflicted or unknown mergeability keeps development fallback.
+                  run = data.head.sha !== context.sha || data.mergeable !== true;
+                }
+              } catch {
+                core.warning('PR lookup unavailable; running development checks.');
+              }
+            }
+            core.setOutput('run', String(run));
+            if (!run) await core.summary.addRaw(
+              `Duplicate development work omitted for ready, mergeable head ${context.sha}. Fresh merge-ref review remains required.`
+            ).write();
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: ${{ steps.cadence.outputs.run == 'true' }}
         with:
           fetch-depth: 0
       - name: Select existing targets
+        if: ${{ steps.cadence.outputs.run == 'true' }}
         id: select
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -47,14 +78,17 @@ jobs:
               print('native_targets=' + json.dumps(p['native_targets']), file=f)
               print('native=' + str(p['native_required']).lower(), file=f)
               print('linux_memory=' + str(p['linux_memory_checks']).lower(), file=f)
+              print('cache_execution=' + str(p['cache_execution_checks']).lower(), file=f)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               print('Selection (not acceptance):\n```json\n' + json.dumps(p, indent=2) + '\n```', file=f)
           PY
       - run: python3 -B -m unittest discover -s tests/ci -v
+        if: ${{ steps.cadence.outputs.run == 'true' }}
       - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -shellcheck= .github/workflows/check.yml .github/workflows/daily-macos.yml
+        if: ${{ steps.cadence.outputs.run == 'true' }}
   linux:
     needs: plan
-    if: ${{ needs.plan.outputs.targets != '[]' }}
+    if: ${{ needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -69,9 +103,10 @@ jobs:
           set -euo pipefail
           echo "Tested SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           zig fmt --check --ast-check build.zig src
-          for target in $(python3 -c 'import json,os; print(" ".join(json.loads(os.environ["TARGETS"])))'); do
-            zig build "$target" --summary all
-          done
+          python3 -B tests/ci/run_selected.py "$TARGETS"
+      - name: Prove warm compilation does not cache test acceptance
+        if: ${{ needs.plan.outputs.cache_execution == 'true' }}
+        run: python3 -B tests/ci/cache_execution.py
       - name: Existing Linux measurement-tool checks, not resource qualification
         if: ${{ needs.plan.outputs.linux_memory == 'true' }}
         run: |
@@ -96,6 +131,7 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = arm64
           echo "Tested SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
-          for target in $(python3 -c 'import json,os; print(" ".join(json.loads(os.environ["TARGETS"])))'); do
-            zig build "$target" --summary all
-          done
+          python3 -B tests/ci/run_selected.py "$TARGETS"
+      - name: Prove warm compilation does not cache test acceptance
+        if: ${{ needs.plan.outputs.cache_execution == 'true' }}
+        run: python3 -B tests/ci/cache_execution.py

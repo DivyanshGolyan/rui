@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 import unittest
 
-from select_tests import select
+from select_tests import execution_batches, select, setup_requirements
 
 
 AVAILABLE = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path("build.zig").read_text()))
@@ -106,6 +106,32 @@ class SelectionTest(unittest.TestCase):
         self.assertTrue(result["manual_checks"])
         self.assertFalse(result["linux_memory_checks"])
         self.assertEqual(select(["tests/qualification/linux-memory/results.json"], "review", AVAILABLE)["targets"], [])
+
+    def test_setup_installs_only_selected_fixture_dependencies(self):
+        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "h2": False})
+        self.assertEqual(setup_requirements(["check-full"]), {"go": False, "h2": False})
+        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "h2": False})
+        for target in ("transport-h2-integration", "codex-h2-integration"):
+            self.assertEqual(setup_requirements([target, "measurement-check"]),
+                             {"go": True, "h2": True})
+
+    def test_batches_share_builds_but_isolate_timing_witnesses(self):
+        targets = ["test", "dispatch-integration", "transport-h2-integration",
+                   "test-full", "evaluator-churn", "admission-debug-integration",
+                   "host-launch-integration", "check-full", "workflow-check",
+                   "evaluator-host-integration"]
+        self.assertEqual(execution_batches(targets), [
+            ["workflow-check", "evaluator-host-integration"],
+            ["test", "dispatch-integration", "transport-h2-integration"],
+            ["test-full"], ["evaluator-churn"], ["admission-debug-integration"],
+            ["host-launch-integration"], ["check-full"],
+        ])
+        self.assertEqual(execution_batches([]), [])
+
+    def test_cache_proof_tracks_cache_policy_not_every_runtime_edit(self):
+        for path in ("build.zig", ".github/actions/setup/action.yml", "tests/ci/cache_execution.py"):
+            self.assertTrue(select([path], "review", AVAILABLE)["cache_execution_checks"])
+        self.assertFalse(select(["src/store.zig"], "review", AVAILABLE)["cache_execution_checks"])
 
 
 if __name__ == "__main__":

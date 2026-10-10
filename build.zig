@@ -91,11 +91,14 @@ pub fn build(b: *std.Build) void {
     configureTerminalEditor(b, tests);
     configureTransport(b, tests, target, pinned_transport);
     const run_tests = b.addRunArtifact(tests);
+    // Reuse compiled artifacts, never a prior test outcome (even with a fixed seed).
+    run_tests.has_side_effects = true;
     run_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
 
     const test_step = b.step("test", "Run unit, Store, and protocol tests");
     test_step.dependOn(&run_tests.step);
     const run_full_tests = b.addRunArtifact(tests);
+    run_full_tests.has_side_effects = true;
     run_full_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "1");
     const full_test_step = b.step("test-full", "Run native tests including the real 60-second client deadline witness");
     full_test_step.dependOn(&run_full_tests.step);
@@ -110,6 +113,7 @@ pub fn build(b: *std.Build) void {
     });
     configureTerminalEditor(b, logic_tests);
     const run_logic_tests = b.addRunArtifact(logic_tests);
+    run_logic_tests.has_side_effects = true;
     const logic_test_step = b.step(
         "test-logic",
         "Run the shared execution turn and portable owner tests without Host, Bash, or transport fixtures",
@@ -439,7 +443,7 @@ pub fn build(b: *std.Build) void {
     full_check_step.dependOn(&process_integrations.step);
 
     const measurement_tests = b.addSystemCommand(&.{
-        "go", "test", "-mod=readonly", "./...",
+        "go", "test", "-count=1", "-mod=readonly", "./...",
     });
     measurement_tests.setCwd(b.path("tests/qualification"));
     measurement_tests.setEnvironmentVariable("GOTOOLCHAIN", "local");
@@ -450,7 +454,7 @@ pub fn build(b: *std.Build) void {
     measurement_test_step.dependOn(&measurement_tests.step);
 
     const queue_audit_test = b.addSystemCommand(&.{
-        "go", "test", "-mod=readonly", "-run", "^TestExecutionAuditQueryRejectsHiddenEntities$", "./model-queue", "-args", "-sqlite",
+        "go", "test", "-count=1", "-mod=readonly", "-run", "^TestExecutionAuditQueryRejectsHiddenEntities$", "./model-queue", "-args", "-sqlite",
     });
     queue_audit_test.setCwd(b.path("tests/qualification"));
     queue_audit_test.setEnvironmentVariable("GOTOOLCHAIN", "local");

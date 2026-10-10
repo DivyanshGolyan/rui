@@ -69,6 +69,23 @@ CHECK_COVERS = {
 }
 
 
+def setup_requirements(targets):
+    return {"go": "measurement-check" in targets,
+            "h2": bool(set(targets) & {"transport-h2-integration", "codex-h2-integration"})}
+
+
+def execution_batches(targets):
+    # Share compilation and graph execution only among independent owner suites.
+    # Composed gates and latency-sensitive/long witnesses keep isolated execution.
+    isolated = {"check", "check-full", "admission-debug-integration", "test-full",
+                "evaluator-churn", "host-launch-integration"}
+    evaluator = [target for target in targets
+                 if target in {"workflow-check", "evaluator-host-integration"}]
+    shared = [target for target in targets if target not in isolated and target not in evaluator]
+    return (([evaluator] if evaluator else []) + ([shared] if shared else [])
+            + [[target] for target in targets if target in isolated])
+
+
 def select(paths, phase, available):
     targets, native_targets, reasons = set(), set(), set()
     manual_checks = set()
@@ -130,6 +147,8 @@ def select(paths, phase, available):
         raise ValueError(f"Selected targets absent from build.zig: {sorted(missing)}")
     return {"phase": phase, "targets": sorted(targets),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
+            "cache_execution_checks": any(path == "build.zig" or path.startswith(".github/")
+                                          or path == "tests/ci/cache_execution.py" for path in paths),
             "linux_memory_checks": linux_memory_checks, "manual_checks": sorted(manual_checks),
             "reasons": sorted(reasons), "acceptance_reused": False}
 
