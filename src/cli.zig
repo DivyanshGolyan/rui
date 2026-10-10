@@ -1,6 +1,7 @@
 const std = @import("std");
 const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalText = @import("TerminalText.zig");
+const SessionFrontend = @import("SessionFrontend.zig");
 const client = @import("client.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
@@ -1266,9 +1267,10 @@ fn sessionMessage(init: std.process.Init, store: []const u8, session_ref: []cons
 fn enterSession(init: std.process.Init, args: []const []const u8) !void {
     var store: ?[]const u8 = null;
     var session_ref: ?[]const u8 = null;
+    var persistent = false;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
-        if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session")) session_ref = try takeValue(args, &index) else return error.UnknownArgument;
+        if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session")) session_ref = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--persistent")) persistent = true else return error.UnknownArgument;
     }
     const reference = session_ref orelse return usage();
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
@@ -1289,9 +1291,16 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         return err;
     };
     try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Type a message or /help. /exit detaches without stopping work.\n");
+    if (persistent) {
+        var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const directory = try requestDirectory(init, &directory_buffer);
+        const scratch = try renderScratch(init);
+        defer scratch.close(init.io);
+        return SessionFrontend.run(init, destination, reference, directory, scratch, sessionCommand);
+    }
     var input_buffer: [64 * 1024]u8 = undefined;
     while (true) {
-        const line = (TerminalEditor.readLine(init.io, &input_buffer, "rui> ", true) catch |err| {
+        const text = (TerminalEditor.readLine(init.io, &input_buffer, "rui> ", true) catch |err| {
             if (err == error.InteractiveInterrupted) break;
             if (err == error.StreamTooLong) {
                 std.debug.print("rui: input too long; nothing sent. Use rui message --text FILE for longer input.\n", .{});
@@ -1302,111 +1311,20 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
             } else return err;
             continue;
         }) orelse break;
-        const text = line;
         if (text.len == 0) continue;
         if (std.mem.eql(u8, text, "/exit")) break;
-        if (std.mem.eql(u8, text, "/help")) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: /help  /status  /wait  /requests  /result KEY  /setup [--store PATH] [--provider codex] [--model gpt-6-luna | --clear-model]  /login  /configure [settings]  /exit\n/help shows these commands; /status inspects this Session; /wait follows selected work; /requests lists local recovery handles; /result KEY reads a saved answer. /setup reads local credential/Host status and saves defaults for future Sessions only; /login chooses Codex login or defers; /configure changes this Session; /exit detaches without stopping work.\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
-            continue;
-        }
-        if (std.mem.eql(u8, text, "/login")) {
-            guideProviderLogin(init) catch |err| {
-                if (err != error.InteractiveInterrupted) return err;
-                try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Login deferred. Inspect saved work with /status or /result.\n");
+        if (std.mem.startsWith(u8, text, "/") and !std.mem.startsWith(u8, text, "//")) {
+            sessionCommand(init, destination, reference, input_buffer[0..text.len]) catch |err| {
+                if (err == error.InteractiveInterrupted) break;
+                return err;
             };
             continue;
         }
-        const attention: ?Attention = if (std.mem.eql(u8, text, "/setup") or std.mem.startsWith(u8, text, "/setup ")) blk: {
-            var setup_args: [6][]const u8 = undefined;
-            const count = interactiveTokens(input_buffer["/setup".len..text.len], &setup_args) catch {
-                try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /setup [--store PATH] [--provider codex] [--model gpt-6-luna | --clear-model]; no changes saved.\n");
-                break :blk null;
-            };
-            setup(init, setup_args[0..count]) catch |err| std.debug.print("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
-            break :blk null;
-        } else if (std.mem.eql(u8, text, "/status")) blk: {
-            showSessionStatus(init, destination, reference, false) catch |err| {
-                if (err == error.CanonicalStoreFailure) return err;
-                std.debug.print("rui: status: {s}\n", .{@errorName(err)});
-            };
-            break :blk null;
-        } else if (std.mem.eql(u8, text, "/requests")) blk: {
-            sessionRequests(init, destination, reference) catch |err| std.debug.print("rui: requests: {s}\n", .{@errorName(err)});
-            break :blk null;
-        } else if (std.mem.eql(u8, text, "/wait"))
-            waitForSession(init, destination, reference, .interactive, false) catch |err| blk: {
-                if (err == error.CanonicalStoreFailure) return err;
-                std.debug.print("rui: wait: {s}\n", .{@errorName(err)});
-                break :blk null;
-            }
-        else if (std.mem.startsWith(u8, text, "/result ")) blk: {
-            const saved = client.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
-                std.debug.print("rui: result key: {s}\n", .{@errorName(err)});
-                break :blk null;
-            };
-            showResult(init, &saved, .interactive) catch |err| {
-                if (err == error.CanonicalStoreFailure) return err;
-                std.debug.print("rui: result: {s}\n", .{@errorName(err)});
-            };
-            break :blk null;
-        } else if (std.mem.eql(u8, text, "/configure") or std.mem.startsWith(u8, text, "/configure ")) blk: {
-            var config_args: [24][]const u8 = undefined;
-            config_args[0..4].* = .{ "--store", destination, "--session", reference };
-            var count: usize = 4;
-            var arguments: [20][]const u8 = undefined;
-            const argument_count = interactiveTokens(input_buffer["/configure".len..text.len], &arguments) catch {
-                try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Usage: /configure --model MODEL [--tools bash] [--permission-mode ask|bypass] (settings for this Session only)\n");
-                break :blk null;
-            };
-            var next: usize = 0;
-            var valid = true;
-            while (next < argument_count) {
-                const flag = arguments[next];
-                next += 1;
-                const takes_value = std.mem.eql(u8, flag, "--workspace") or std.mem.eql(u8, flag, "--provider") or
-                    std.mem.eql(u8, flag, "--model") or std.mem.eql(u8, flag, "--instructions") or
-                    std.mem.eql(u8, flag, "--tools") or std.mem.eql(u8, flag, "--permission-mode") or
-                    std.mem.eql(u8, flag, "--output-schema");
-                if (!takes_value and !std.mem.eql(u8, flag, "--text-output")) {
-                    valid = false;
-                    break;
-                }
-                const value = if (takes_value and next < argument_count) arguments[next] else null;
-                if (takes_value and value != null) next += 1;
-                if ((takes_value and value == null) or count + (if (takes_value) @as(usize, 2) else 1) > config_args.len) {
-                    valid = false;
-                    break;
-                }
-                config_args[count] = flag;
-                count += 1;
-                if (value) |setting| {
-                    if (std.mem.eql(u8, setting, "-") and
-                        (std.mem.eql(u8, flag, "--instructions") or std.mem.eql(u8, flag, "--output-schema")))
-                    {
-                        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Use a file for /configure content; terminal stdin belongs to this Session.\n");
-                        break :blk null;
-                    }
-                    config_args[count] = setting;
-                    count += 1;
-                }
-            }
-            if (valid and count > 4) {
-                configure(init, config_args[0..count], true) catch |err| {
-                    std.debug.print("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
-                    if (err == error.CanonicalStoreFailure) return err;
-                };
-            } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Usage: /configure --model MODEL [--tools bash] [--permission-mode ask|bypass] (settings for this Session only)\n");
-            break :blk null;
-        } else if (std.mem.startsWith(u8, text, "/") and !std.mem.startsWith(u8, text, "//")) blk: {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Unknown command. Type /help.\n");
-            break :blk null;
-        } else blk: {
-            const message_text = if (std.mem.startsWith(u8, text, "//")) text[1..] else text;
-            break :blk sessionMessage(init, destination, reference, message_text) catch |err| {
-                if (err == error.CanonicalStoreFailure) return err;
-                std.debug.print("rui: message: {s}; admission may be uncertain. Check /requests and recover the original handle before sending new work\n", .{@errorName(err)});
-                break :blk null;
-            };
+        const message_text = if (std.mem.startsWith(u8, text, "//")) text[1..] else text;
+        const attention = sessionMessage(init, destination, reference, message_text) catch |err| {
+            if (err == error.CanonicalStoreFailure) return err;
+            std.debug.print("rui: message: {s}; admission may be uncertain. Check /requests and recover the original handle before sending new work\n", .{@errorName(err)});
+            continue;
         };
         if (attention) |action| interactiveAction(init, destination, reference, action) catch |err| {
             if (err == error.InteractiveInterrupted) break;
@@ -1416,6 +1334,123 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         };
     }
     try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Detached. Host work continues.\n");
+}
+
+fn sessionCommand(init: std.process.Init, destination: []const u8, reference: []const u8, input_buffer: []u8) !void {
+    const text = input_buffer;
+    if (std.mem.eql(u8, text, "/inspect-action")) {
+        const report = try inspectWork(init, destination, reference);
+        defer report.file.close(init.io);
+        if (report.current.first_action) |action| {
+            var buffer: [20]u8 = undefined;
+            const id = try std.fmt.bufPrint(&buffer, "{d}", .{action});
+            try inspectAction(init, &.{ "--store", destination, "--session", reference, "--action", id }, true);
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Inspection only; no decision sent. Use rui allow-action or deny-action with this Store, Session and exact Action ID.\n");
+        } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No actionable permission in this Current snapshot; no decision sent.\n");
+        return;
+    }
+    if (std.mem.eql(u8, text, "/help")) {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: /help  /status  /wait  /requests  /result KEY  /setup [--store PATH] [--provider codex] [--model gpt-6-luna | --clear-model]  /login  /configure [settings]  /exit\n/help shows these commands; /status inspects this Session; /wait follows selected work; /requests lists local recovery handles; /result KEY reads a saved answer. /setup reads local credential/Host status and saves defaults for future Sessions only; /login chooses Codex login or defers; /configure changes this Session; /exit detaches without stopping work.\nMessages are submitted as written. To send a leading /, prefix it with //; use the one-shot --text FILE for longer input.\n");
+        return;
+    }
+    if (std.mem.eql(u8, text, "/login")) {
+        guideProviderLogin(init) catch |err| {
+            if (err != error.InteractiveInterrupted) return err;
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Login deferred. Inspect saved work with /status or /result.\n");
+        };
+        return;
+    }
+    const attention: ?Attention = if (std.mem.eql(u8, text, "/setup") or std.mem.startsWith(u8, text, "/setup ")) blk: {
+        var setup_args: [6][]const u8 = undefined;
+        const count = interactiveTokens(input_buffer["/setup".len..text.len], &setup_args) catch {
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /setup [--store PATH] [--provider codex] [--model gpt-6-luna | --clear-model]; no changes saved.\n");
+            break :blk null;
+        };
+        setup(init, setup_args[0..count]) catch |err| std.debug.print("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+        break :blk null;
+    } else if (std.mem.eql(u8, text, "/status")) blk: {
+        showSessionStatus(init, destination, reference, false) catch |err| {
+            if (err == error.CanonicalStoreFailure) return err;
+            std.debug.print("rui: status: {s}\n", .{@errorName(err)});
+        };
+        break :blk null;
+    } else if (std.mem.eql(u8, text, "/requests")) blk: {
+        sessionRequests(init, destination, reference) catch |err| std.debug.print("rui: requests: {s}\n", .{@errorName(err)});
+        break :blk null;
+    } else if (std.mem.eql(u8, text, "/wait"))
+        waitForSession(init, destination, reference, .interactive, false) catch |err| blk: {
+            if (err == error.CanonicalStoreFailure) return err;
+            std.debug.print("rui: wait: {s}\n", .{@errorName(err)});
+            break :blk null;
+        }
+    else if (std.mem.startsWith(u8, text, "/result ")) blk: {
+        const saved = client.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
+            std.debug.print("rui: result key: {s}\n", .{@errorName(err)});
+            break :blk null;
+        };
+        showResult(init, &saved, .interactive) catch |err| {
+            if (err == error.CanonicalStoreFailure) return err;
+            std.debug.print("rui: result: {s}\n", .{@errorName(err)});
+        };
+        break :blk null;
+    } else if (std.mem.eql(u8, text, "/configure") or std.mem.startsWith(u8, text, "/configure ")) blk: {
+        var config_args: [24][]const u8 = undefined;
+        config_args[0..4].* = .{ "--store", destination, "--session", reference };
+        var count: usize = 4;
+        var arguments: [20][]const u8 = undefined;
+        const argument_count = interactiveTokens(input_buffer["/configure".len..text.len], &arguments) catch {
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Usage: /configure --model MODEL [--tools bash] [--permission-mode ask|bypass] (settings for this Session only)\n");
+            break :blk null;
+        };
+        var next: usize = 0;
+        var valid = true;
+        while (next < argument_count) {
+            const flag = arguments[next];
+            next += 1;
+            const takes_value = std.mem.eql(u8, flag, "--workspace") or std.mem.eql(u8, flag, "--provider") or
+                std.mem.eql(u8, flag, "--model") or std.mem.eql(u8, flag, "--instructions") or
+                std.mem.eql(u8, flag, "--tools") or std.mem.eql(u8, flag, "--permission-mode") or
+                std.mem.eql(u8, flag, "--output-schema");
+            if (!takes_value and !std.mem.eql(u8, flag, "--text-output")) {
+                valid = false;
+                break;
+            }
+            const value = if (takes_value and next < argument_count) arguments[next] else null;
+            if (takes_value and value != null) next += 1;
+            if ((takes_value and value == null) or count + (if (takes_value) @as(usize, 2) else 1) > config_args.len) {
+                valid = false;
+                break;
+            }
+            config_args[count] = flag;
+            count += 1;
+            if (value) |setting| {
+                if (std.mem.eql(u8, setting, "-") and
+                    (std.mem.eql(u8, flag, "--instructions") or std.mem.eql(u8, flag, "--output-schema")))
+                {
+                    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Use a file for /configure content; terminal stdin belongs to this Session.\n");
+                    break :blk null;
+                }
+                config_args[count] = setting;
+                count += 1;
+            }
+        }
+        if (valid and count > 4) {
+            configure(init, config_args[0..count], true) catch |err| {
+                std.debug.print("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
+                if (err == error.CanonicalStoreFailure) return err;
+            };
+        } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Usage: /configure --model MODEL [--tools bash] [--permission-mode ask|bypass] (settings for this Session only)\n");
+        break :blk null;
+    } else blk: {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Unknown command. Type /help.\n");
+        break :blk null;
+    };
+    if (attention) |action| interactiveAction(init, destination, reference, action) catch |err| {
+        if (err == error.InteractiveInterrupted) return err;
+        if (err == error.TerminalRestoreFailed or err == error.TerminalCleanupFailed or err == error.TerminalFlushFailed or err == error.IncompleteTerminalInput) return err;
+        std.debug.print("rui: Action observation or decision failed: {s}; check /requests and /status\n", .{@errorName(err)});
+        if (err == error.CanonicalStoreFailure) return err;
+    };
 }
 
 fn interactiveAction(init: std.process.Init, store: []const u8, session_ref: []const u8, initial: Attention) !void {
@@ -2485,9 +2520,10 @@ fn usage() error{InvalidArguments} {
         \\  rui serve [--store PATH] [--active-capacity N] [--codex | --provider-endpoint URL] [--provider-ca-file PATH] [--fault NAME]
         \\  rui configure [--store PATH] --session REF [settings] [--json]
         \\    First configuration requires --workspace PATH --provider codex --model MODEL.
-        \\  rui session [--store PATH] --session REF
+        \\  rui session [--store PATH] --session REF [--persistent]
         \\    All new commands use --store, then saved Store, then HOME/.local/share/rui/store.
         \\    Type /help for in-Session commands (including /setup).
+        \\    --persistent stages continuous drafting and new activity; decisions/login stay one-shot.
         \\  One-shot commands (never prompt or change meaning on redirection):
         \\  rui message [--store PATH] --session REF TEXT|- [--json]
         \\    --text FILE|- also captures a file or stdin before sending.

@@ -85,6 +85,225 @@ def terminal_step(master, command, marker="rui> "):
     return read_terminal(master, marker)
 
 
+def persistent_input_cases():
+    """Real captured Admission, a next draft, original replay and input recovery."""
+    import canonical_failure_integration as canonical
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-input."))
+    home = state / "home"
+    home.mkdir(mode=0o700)
+    store = state / "store"
+    first_release = threading.Event()
+    endpoint = fixture.SuccessEndpoint([
+        (fixture.sse_answer("persistent-a", "persistent-ar", "persistent-am", "first exact answer")[0], first_release),
+        fixture.sse_answer("persistent-b", "persistent-br", "persistent-bm", "second exact answer")[0],
+        fixture.sse_answer("persistent-c", "persistent-cr", "persistent-cm", "valid after malformed")[0],
+        fixture.sse_answer("persistent-d", "persistent-dr", "persistent-dm", "capture retry answer")[0],
+        fixture.sse_answer("persistent-e", "persistent-er", "persistent-em", "next after capture retry")[0],
+    ])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = caller = proxy = None
+    master = slave = None
+    completed = False
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        run(home, "configure", "--store", store, "--session", "persistent/input",
+            "--workspace", state, "--provider", "codex", "--model", "model-a")
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        original = termios.tcgetattr(slave)
+        received, admission_release = threading.Event(), threading.Event()
+
+        def lost_once(response):
+            received.set()
+            assert admission_release.wait(15), "Admission gate was not released"
+            return b"" if len(proxy.exchanges) == 1 else response
+
+        caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
+            "--session", "persistent/input"], env={**os.environ, "HOME": str(home)},
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        read_terminal(master, "rui> ")
+        proxy = canonical.ReplyProxy(host, "/v1/message", lost_once)
+        os.write(master, "original éZ\n".encode())
+        assert received.wait(10), "original Message did not reach Host"
+        os.write(master, "next café!\x1b[D\x1b[DX".encode())
+        composed = read_terminal(master, "rui> next cafXé!")
+        assert "submitting" in composed, composed
+        records = home / ".config/rui/requests"
+        before = set(records.glob("*.json"))
+        os.write(master, b"\n")
+        assert "Submission unresolved" in read_terminal(master, "Submission unresolved")
+        assert set(records.glob("*.json")) == before, "busy Enter created replacement intent"
+        admission_release.set()
+        read_terminal(master, "Admission unconfirmed")
+        assert len(proxy.exchanges) == 1
+        saved = proxy.exchanges[0][0]
+        assert json.loads(saved)["text"]["value"] == "original éZ"
+        first_release.set()
+        read_terminal(master, "first exact answer")
+        os.write(master, b"\x12")
+        read_terminal(master, "completed")
+        assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == saved, "Ctrl-R changed original capture"
+        assert len(endpoint.requests) == 1, "recovery repeated provider work"
+        # Cursor still sits before é; insert at that exact logical position.
+        os.write(master, b"Y\n")
+        read_terminal(master, "second exact answer")
+        assert json.loads(proxy.exchanges[-1][0])["text"]["value"] == "next cafXYé!"
+        assert len(endpoint.requests) == 2
+        os.write(master, b"bad\xc3(\n")
+        read_terminal(master, "InvalidTerminalInput")
+        os.write(master, b"valid after rejection\n")
+        read_terminal(master, "valid after malformed")
+        assert json.loads(proxy.exchanges[-1][0])["text"]["value"] == "valid after rejection"
+        assert len(proxy.exchanges) == 4, "malformed input reached capture/transmission"
+        # Actual prepublication access failure, followed by repair. Recovery
+        # must capture the original under its reserved key, not wedge forever.
+        before_failure = set(records.glob("*.json"))
+        records.chmod(0o500)
+        os.write(master, b"original before capture failure\n")
+        failed = read_terminal(master, "Admission unconfirmed")
+        os.write(master, "next café!\x1b[D\x1b[DX".encode())
+        failed += read_terminal(master, "rui> next cafXé!")
+        reserved = failed.split("Original reserved request: ", 1)[1].splitlines()[0]
+        assert set(records.glob("*.json")) == before_failure
+        assert len(proxy.exchanges) == 4, "capture failure transmitted input"
+        records.chmod(0o700)
+        os.write(master, b"\x12")
+        read_terminal(master, "capture retry answer")
+        recovered = json.loads(proxy.exchanges[-1][0])
+        assert recovered["key"] == reserved and recovered["text"]["value"] == "original before capture failure", recovered
+        assert len(set(records.glob("*.json")) - before_failure) == 1
+        os.write(master, b"Y\n")
+        read_terminal(master, "next after capture retry")
+        assert json.loads(proxy.exchanges[-1][0])["text"]["value"] == "next cafXYé!"
+        assert len(endpoint.requests) == 5 and len(proxy.exchanges) == 6
+        os.write(master, b"\x03")
+        read_terminal(master, "Detached.")
+        _, errors = caller.communicate(timeout=5)
+        assert caller.returncode == 0, errors
+        actual = termios.tcgetattr(slave)
+        if sys.platform == "darwin":
+            # NOW restores user configuration, not kernel-owned history flags.
+            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+            actual[3] &= ~mask
+            original[3] &= ~mask
+        assert actual == original, "persistent terminal configuration was not restored"
+        completed = True
+        print("persistent public Session: exact original replay, joined acceptance, next Unicode cursor, malformed→valid, prepublication repair, restoration passed", flush=True)
+    finally:
+        first_release.set()
+        records = home / ".config/rui/requests"
+        if records.exists():
+            records.chmod(0o700)
+        if not completed and caller is not None and caller.poll() is not None:
+            print(f"persistent caller exited {caller.returncode}: {caller.stderr.read().decode(errors='replace')}", file=sys.stderr)
+        if caller is not None and caller.poll() is None:
+            caller.kill()
+            caller.wait(timeout=5)
+        if proxy is not None:
+            proxy.close()
+        if master is not None:
+            os.close(master)
+            os.close(slave)
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+        if completed:
+            shutil.rmtree(state)
+        else:
+            print(f"retained persistent input failure state: {state}", file=sys.stderr)
+
+
+def persistent_permission_case():
+    """Staged inspection cannot authorize; the canonical exact one-shot still can."""
+    import canonical_failure_integration as canonical
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-permission."))
+    home = state / "home"
+    home.mkdir(mode=0o700)
+    store = state / "store"
+    arguments = json.dumps({"cmd": "printf unsafe >> effect-count", "timeout_ms": None})
+    endpoint = fixture.SuccessEndpoint([
+        fixture.sse_tool_calls("persistent-call", [("bash", "persistent-call-id", arguments)]),
+        fixture.sse_answer("persistent-answer", "persistent-reason", "persistent-message", "after explicit denial")[0],
+    ])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = caller = proxy = None
+    master = slave = None
+    completed = False
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        run(home, "configure", "--store", store, "--session", "persistent/permission",
+            "--workspace", state, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        original = termios.tcgetattr(slave)
+        caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
+            "--session", "persistent/permission"], env={**os.environ, "HOME": str(home)},
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        assert "Permission: ask" in read_terminal(master, "rui> ")
+        proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: response)
+        os.write(master, b"requires permission\n")
+        read_terminal(master, "Rui: attention")
+        for command in ("/wait", "/login"):
+            os.write(master, (command + "\n").encode())
+            read_terminal(master, "no nested approval/login prompt")
+        os.write(master, "next café!\x1b[D\x1b[DX".encode())
+        read_terminal(master, "rui> next cafXé!")
+        os.write(master, b"\x07")
+        inspected = read_terminal(master, "Inspection only; no decision sent")
+        if "rui> next cafXé!" not in inspected.split("Inspection only", 1)[1]:
+            inspected += read_terminal(master, "rui> next cafXé!")
+        assert "Inspection only; no decision sent" in inspected and "Allow once" not in inspected, inspected
+        action = inspected.split("Action ", 1)[1].splitlines()[0]
+        current = fixture.command("inspect-session", "--store", store, "--session", "persistent/permission")
+        assert [row["action"] for row in current["actionable_permissions"]] == [action]
+        assert json.loads(inspected.split("Bash arguments: ", 1)[1].splitlines()[0]) == arguments
+        os.write(master, b"Y\n")
+        read_terminal(master, "You: next cafXYé!")
+        assert json.loads(proxy.exchanges[-1][0])["text"]["value"] == "next cafXYé!"
+        # Pasted 'a' remains Message input, never a permission decision.
+        os.write(master, b"\x1b[200~a\x1b[201~\n")
+        read_terminal(master, "You: a")
+        saved = [json.loads(path.read_text()) for path in (home / ".config/rui/requests").glob("*.json")]
+        assert not any(row["kind"] == "permission_decision" for row in saved)
+        assert not (state / "effect-count").exists(), "persistent input approved an unseen Action"
+        decision = admit(home, "deny-action", "--store", store, "--session", "persistent/permission", "--action", action)
+        assert decision["admission"]["answer"]["status"] == "accepted", decision
+        read_terminal(master, "after explicit denial")
+        assert not (state / "effect-count").exists()
+        caller.send_signal(signal.SIGTERM)
+        assert caller.wait(timeout=5) == 0, caller.stderr.read()
+        actual = termios.tcgetattr(slave)
+        if sys.platform == "darwin":
+            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+            actual[3] &= ~mask
+            original[3] &= ~mask
+        assert actual == original, "signal after inspection handoff did not restore terminal"
+        completed = True
+        print("persistent permission: draft/cursor retained, exact fresh inspection, paste grants nothing, one-shot denial, external TERM cleanup passed", flush=True)
+    finally:
+        if caller is not None and caller.poll() is None:
+            caller.kill()
+            caller.wait(timeout=5)
+        if proxy is not None:
+            proxy.close()
+        if master is not None:
+            os.close(master)
+            os.close(slave)
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+        if completed:
+            shutil.rmtree(state)
+        else:
+            print(f"retained persistent permission failure state: {state}", file=sys.stderr)
+
+
 def store_selection_cases(state, workspace, valid_store):
     for case in ("saved-initial", "saved-after", "explicit-override", "explicit-create", "home-create"):
         home = state / case
@@ -307,6 +526,8 @@ int fsync(int fd) {
 def main():
     import canonical_failure_integration
     import terminal_restoration_integration
+    persistent_input_cases()
+    persistent_permission_case()
     terminal_restoration_integration.main()
     canonical_failure_integration.main()
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-human-cli."))

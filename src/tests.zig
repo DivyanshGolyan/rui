@@ -25,4 +25,6 @@ test {
     _ = @import("client.zig");
     _ = @import("cli.zig");
     _ = @import("TerminalText.zig");
+    _ = @import("SessionInput.zig");
+    _ = @import("ClientTask.zig");
 }
