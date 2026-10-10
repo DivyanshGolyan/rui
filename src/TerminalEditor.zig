@@ -21,8 +21,23 @@ paste_prefix_length: usize = 0,
 rejected: ?Event = null,
 plain_ascii: bool = true,
 
-const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow };
+pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow };
 const paste_end = "\x1b[201~";
+
+pub const Pending = enum { none, escape, incomplete };
+
+pub fn pending(self: *const Editor) Pending {
+    if (self.paste or self.partial_length != 0 or self.escape == .csi or self.escape == .ss3) return .incomplete;
+    return if (self.escape == .esc) .escape else .none;
+}
+
+pub fn expire(self: *Editor) !void {
+    switch (self.pending()) {
+        .none => {},
+        .escape => self.escape = .none,
+        .incomplete => return error.IncompleteTerminalInput,
+    }
+}
 
 /// Returns a slice borrowed from buffer until its caller next reuses it.
 /// No draft, terminal mode or buffered input survives a prompt.
@@ -231,7 +246,7 @@ fn visibleRow(editor: *const Editor, prompt_size: usize, size: std.posix.winsize
 
 // This transition is also the production byte-ingress path. Its result is
 // observable through the accepted line; no escape parser reads past a prompt.
-fn feed(self: *Editor, byte: u8) Event {
+pub fn feed(self: *Editor, byte: u8) Event {
     if (self.paste) return self.pasted(byte);
     if (self.escape != .none and (byte == 3 or byte == 4 or byte == '\r' or byte == '\n')) {
         self.escape = .none;

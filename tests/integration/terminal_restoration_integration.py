@@ -6,6 +6,7 @@ import pathlib
 import pty
 import select
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,7 @@ PROBE = r"""
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/uio.h>
 #include <termios.h>
 #include <unistd.h>
@@ -63,6 +65,50 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
         }
     }
     return real_writev(fd, iov, count);
+}
+
+static ssize_t probe_write(int fd, const void *bytes, size_t count) {
+    if (fd == 1 && count == 8 && !memcmp(bytes, "\033[?2004l", 8)) {
+        struct iovec iov = { (void *)bytes, count };
+        return probe_writev(fd, &iov, 1);
+    }
+#ifdef __APPLE__
+    ssize_t (*real_write)(int, const void *, size_t) = write;
+#else
+    ssize_t (*real_write)(int, const void *, size_t) = dlsym(RTLD_NEXT, "write");
+    if (real_write == write) _exit(96);
+#endif
+    if (!real_write || real_write == probe_write) _exit(96);
+    ssize_t result = real_write(fd, bytes, count);
+    int saved_errno = errno;
+    static int blocked = 0;
+    if (fd == 1 && result < 0 && saved_errno == EAGAIN && !blocked &&
+        !strcmp(getenv("RUI_TERMINAL_FAULT"), "backpressure")) {
+        blocked = 1;
+        record("output-blocked\n");
+    }
+    errno = saved_errno;
+    return result;
+}
+
+static int probe_fsync(int fd) {
+#ifdef __APPLE__
+    int (*real_fsync)(int) = fsync;
+#else
+    int (*real_fsync)(int) = dlsym(RTLD_NEXT, "fsync");
+    if (real_fsync == fsync) _exit(97);
+#endif
+    if (!real_fsync || real_fsync == probe_fsync) _exit(97);
+    const char *gate = getenv("RUI_CAPTURE_SYNC_RELEASE");
+    struct stat value;
+    static int held = 0;
+    if (gate && !held && !fstat(fd, &value) && S_ISDIR(value.st_mode)) {
+        held = 1;
+        record("capture-sync-held\n");
+        while (access(gate, F_OK)) usleep(1000);
+        if (getenv("RUI_CAPTURE_SYNC_ERROR")) { errno = EIO; return -1; }
+    }
+    return real_fsync(fd);
 }
 
 static int probe_tcdrain(int fd) {
@@ -120,10 +166,14 @@ static int probe_tcsetattr(int fd, int action, const struct termios *attrs) {
     pair_##original __attribute__((section("__DATA,__interpose"))) = \
         { (const void *)&replacement, (const void *)&original };
 INTERPOSE(probe_writev, writev)
+INTERPOSE(probe_write, write)
+INTERPOSE(probe_fsync, fsync)
 INTERPOSE(probe_tcdrain, tcdrain)
 INTERPOSE(probe_tcsetattr, tcsetattr)
 #else
 ssize_t writev(int fd, const struct iovec *iov, int count) { return probe_writev(fd, iov, count); }
+ssize_t write(int fd, const void *bytes, size_t count) { return probe_write(fd, bytes, count); }
+int fsync(int fd) { return probe_fsync(fd); }
 int tcdrain(int fd) { return probe_tcdrain(fd); }
 int tcsetattr(int fd, int action, const struct termios *attrs) { return probe_tcsetattr(fd, action, attrs); }
 #endif
@@ -146,6 +196,7 @@ int main(void) {
         after.c_lflag != before.c_lflag) return 3;
     char disable[] = "\033[?2004l";
     struct iovec vector = { disable, sizeof(disable) - 1 };
+    if (write(1, disable, sizeof(disable) - 1) != sizeof(disable) - 1) return 5;
     if (writev(1, &vector, 1) != sizeof(disable) - 1 || tcdrain(1)) return 4;
     return 0;
 }
@@ -172,13 +223,13 @@ def check_forwarding(state, library):
             assert remaining > 0, "fixture forwarder did not finish"
             if select.select([master], [], [], min(remaining, 0.05))[0]:
                 output.extend(os.read(master, 65536))
-                assert len(output) <= 8, output
+                assert len(output) <= 16, output
         result = caller.wait(timeout=5)
         assert result == 0, (result, caller.stderr.read())
-        assert output == b"\x1b[?2004l", output
-        assert log.read_text().splitlines() == ["restore-flush", "restore-flush", "disable", "drain"]
+        assert output == b"\x1b[?2004l" * 2, output
+        assert log.read_text().splitlines() == ["restore-flush", "restore-flush", "disable", "disable", "drain"]
         assert termios.tcgetattr(slave) == original, "fixture forwarder did not restore attributes"
-        print("terminal fixture forwarding: writev/tcdrain/tcsetattr passed", flush=True)
+        print("terminal fixture forwarding: write/writev/tcdrain/tcsetattr passed", flush=True)
     finally:
         if caller is not None:
             if caller.poll() is None:
@@ -189,6 +240,115 @@ def check_forwarding(state, library):
         termios.tcsetattr(slave, termios.TCSAFLUSH, original)
         os.close(master)
         os.close(slave)
+
+
+def persistent_cases(state, library, home, store, host):
+    """Real synchronous capture custody and actual nonblocking output credit."""
+    records = home / ".config/rui/requests"
+    records.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for case in ("sync-exit", "sync-handoff", "admission-interrupt", "backpressure", "disable", "restore", "both"):
+        master, slave = pty.openpty()
+        output_master, output_slave = pty.openpty()
+        original = termios.tcgetattr(slave)
+        log, release = state / f"persistent-{case}.log", state / f"persistent-{case}.release"
+        caller = proxy = None
+        reply_release = threading.Event()
+        before = set(records.glob("*.json"))
+        try:
+            environment = {**os.environ, "HOME": str(home),
+                "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": case}
+            if case.startswith("sync-"):
+                environment["RUI_CAPTURE_SYNC_RELEASE"] = str(release)
+                if case == "sync-handoff":
+                    environment["RUI_CAPTURE_SYNC_ERROR"] = "1"
+            caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
+                "--session", "terminal/restoration"], env=environment,
+                stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
+            human.read_terminal(output_master, "rui> ")
+            if case.startswith("sync-"):
+                os.write(master, b"original synchronously captured\n")
+                fixture.wait_for(lambda: log.exists() and "capture-sync-held" in log.read_text(), "real capture directory sync")
+                record, = set(records.glob("*.json")) - before
+                saved = record.read_bytes()
+                key = json.loads(saved)["key"]
+                assert fixture.command("observe-command", "--store", store, "--key", key)["observation"]["status"] == "absent"
+                if case == "sync-handoff":
+                    os.write(master, "next café!\x1b[D\x1b[DX".encode())
+                    human.read_terminal(output_master, "rui> next cafXé!")
+                    os.write(master, b"\x07")
+                else:
+                    os.write(master, b"/exit\nSTALE")
+                fixture.wait_for(lambda: termios.tcgetattr(slave)[3] & termios.ICANON, "restoration before synchronous capture join")
+                assert caller.poll() is None, "synchronous capture was reported reaped before its gate released"
+                release.touch()
+                if case == "sync-handoff":
+                    resumed = human.read_terminal(output_master, "Admission unconfirmed")
+                    resumed += human.read_terminal(output_master, "rui> next cafXé!")
+                    assert "No actionable permission" in resumed, resumed
+                    os.write(master, b"\x12")
+                    human.read_terminal(output_master, "You: original synchronously captured")
+                    assert record.read_bytes() == saved, "postpublication recovery replaced original record"
+                    os.write(master, b"Y\n")
+                    human.read_terminal(output_master, "You: next cafXYé!")
+                    os.write(master, b"\x03")
+                else:
+                    # The finished prompt's suffix must not reach the next owner.
+                    os.write(master, b"\n")
+                    assert select.select([slave], [], [], 5)[0]
+                    assert os.read(slave, 4096) == b"\n", "persistent detach leaked queued typeahead"
+            elif case == "admission-interrupt":
+                received = threading.Event()
+                def hold(response):
+                    received.set()
+                    assert reply_release.wait(15)
+                    return b""  # Caller is already reaped; no delivery to its closed socket.
+                proxy = canonical.ReplyProxy(host, "/v1/message", hold)
+                os.write(master, b"held real Admission\n")
+                assert received.wait(10)
+                caller.send_signal(signal.SIGINT)
+            elif case == "backpressure":
+                # An external caller admits large exact content after opening;
+                # the frontend's actual activity reader fills stdout's PTY.
+                human.run(home, "message", "--store", store, "--session", "terminal/restoration", "z" * 50000)
+                fixture.wait_for(lambda: log.exists() and "output-blocked" in log.read_text(), "actual terminal EAGAIN")
+                os.write(master, b"\x03")
+            else:
+                os.write(master, b"\x03")
+            expected = 1 if case in ("backpressure", "disable", "restore", "both") else 0
+            assert caller.wait(timeout=5) == expected, caller.stderr.read()
+            errors = caller.stderr.read().decode()
+            if expected:
+                assert ("TerminalRestoreFailed" if case in ("restore", "both") else "TerminalCleanupFailed") in errors, errors
+            if case not in ("restore", "both"):
+                actual = termios.tcgetattr(slave)
+                if sys.platform == "darwin":
+                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                    actual[3] &= ~mask
+                    original[3] &= ~mask
+                assert actual == original, (case, actual, original)
+            if case == "admission-interrupt":
+                assert not reply_release.is_set(), "borrower cleanup needed the Host reply"
+            reply_release.set()
+            if proxy is not None:
+                proxy.close()
+                proxy = None
+            # Detachment never cancels or restarts the actual owning Host.
+            answer = human.admit(home, "message", "--store", store, "--session", "terminal/restoration", f"valid after {case}")
+            assert answer["admission"]["answer"]["status"] == "accepted", answer
+            print(f"persistent terminal: {case} passed", flush=True)
+        finally:
+            release.touch()
+            reply_release.set()
+            if caller is not None and caller.poll() is None:
+                caller.kill()
+                caller.wait(timeout=5)
+            if proxy is not None:
+                proxy.close()
+            termios.tcflush(output_slave, termios.TCOFLUSH)
+            termios.tcsetattr(slave, termios.TCSAFLUSH, original)
+            for fd in (master, slave, output_master, output_slave):
+                os.close(fd)
 
 
 def main(selected=None):
@@ -210,6 +370,11 @@ def main(selected=None):
         host = fixture.start_host(store, None)
         human.run(home, "configure", "--store", store, "--session", "terminal/restoration",
             "--workspace", state, "--provider", "codex", "--model", "model-a")
+        if selected is None or selected == "persistent":
+            persistent_cases(state, library, home, store, host)
+        if selected == "persistent":
+            completed = True
+            return
         cases = ("queued", "exit", "interrupt", "incomplete", "disable", "restore", "both",
             "disable-incomplete", "restore-incomplete", "both-incomplete", "output",
             "drain", "drain-both", "drain-incomplete", "drain-both-incomplete", "drain-eintr", "drain-held")

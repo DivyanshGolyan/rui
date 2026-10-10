@@ -2081,7 +2081,9 @@ pub const CaptureTarget = union(enum) {
     generated: []const u8, // Caller-selected private directory, not HOME policy.
     explicit: struct { record: []const u8, key: []const u8 },
 
-    fn resolve(self: CaptureTarget, io: std.Io, path: []u8, key: *[36]u8) !@FieldType(CaptureTarget, "explicit") {
+    /// Reserve identity before asynchronous capture; returned slices borrow
+    /// caller storage through capture return. This does not publish a record.
+    pub fn resolve(self: CaptureTarget, io: std.Io, path: []u8, key: *[36]u8) !@FieldType(CaptureTarget, "explicit") {
         return switch (self) {
             .explicit => |value| value,
             .generated => |directory| blk: {
