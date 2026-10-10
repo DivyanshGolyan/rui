@@ -96,32 +96,25 @@ pub fn loadInto(path: []const u8, destination: *Record) !void {
     try owner.syncDirectory();
 }
 
-pub const LocalStatus = enum { missing, configured, refresh_required };
-
 /// Opaque tokens have no encoded expiry; both local inspection and runtime
 /// refresh use the last successful exchange as their clock.
 pub fn opaqueRefreshDue(refreshed_at: i64, now_seconds: i64) bool {
     return now_seconds -| refreshed_at >= 8 * 24 * 60 * 60;
 }
 
-/// Inspect only the atomic credential snapshot. Do not create a lock, refresh,
-/// contact the provider or claim that a locally present token works remotely.
-pub fn localStatus(path: []const u8, now_seconds: i64) !LocalStatus {
+/// Read an atomic snapshot without creating a lock or refreshing. On success
+/// the caller owns destination and must wipe it after its final consumer.
+pub fn readSnapshotInto(path: []const u8, destination: *Record) !bool {
     var owner = Owner.open(path) catch |err| switch (err) {
-        error.FileNotFound => return .missing,
+        error.FileNotFound => return false,
         else => return err,
     };
     defer owner.close();
-    var record: Record = undefined;
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
-    owner.readRecordInto(&record) catch |err| switch (err) {
-        error.FileNotFound => return .missing,
+    owner.readRecordInto(destination) catch |err| switch (err) {
+        error.FileNotFound => return false,
         else => return err,
     };
-    if (record.state == .refresh_pending or
-        (if (record.expires_at != 0) record.expires_at <= now_seconds else opaqueRefreshDue(record.refreshed_at, now_seconds)))
-        return .refresh_required;
-    return .configured;
+    return true;
 }
 
 /// `expected_generation == null` is an explicit login. It may replace an
@@ -462,42 +455,17 @@ fn testPath(tmp: *std.testing.TmpDir, name: []const u8, buffer: []u8) ![]const u
     return std.fmt.bufPrint(buffer, "{s}/private/{s}", .{ root[0..len], name });
 }
 
-test "local credential status is observational at expiry and pending refresh" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try testPath(&tmp, "auth", &path_buffer);
-    try std.testing.expectEqual(LocalStatus.missing, try localStatus(path, 1233));
-    var private = try tmp.dir.openDir(io, "private", .{});
-    defer private.close(io);
-    try std.testing.expectError(error.FileNotFound, private.openFile(io, ".auth.lock", .{}));
-    var record = try testRecord("acct", 0);
-    try install(path, &record, null);
-    try std.testing.expectEqual(LocalStatus.configured, try localStatus(path, 1233));
-    try std.testing.expectEqual(LocalStatus.refresh_required, try localStatus(path, 1234));
-    record.expires_at = 0;
-    record.refreshed_at = 100;
-    try record.access_token.set("opaque-access");
-    try install(path, &record, null);
-    try std.testing.expectEqual(LocalStatus.configured, try localStatus(path, 100 + 8 * 24 * 60 * 60 - 1));
-    try std.testing.expectEqual(LocalStatus.refresh_required, try localStatus(path, 100 + 8 * 24 * 60 * 60));
-    try std.testing.expectError(error.InjectedRefreshFailure, exchangeRefresh(path, 2, {}, struct {
-        fn fail(_: void, _: *const Record) error{InjectedRefreshFailure}!Record {
-            return error.InjectedRefreshFailure;
-        }
-    }.fail));
-    try std.testing.expectEqual(LocalStatus.refresh_required, try localStatus(path, 1233));
-    const unchanged = try load(path);
-    try std.testing.expectEqual(State.refresh_pending, unchanged.state);
-}
-
 test "installed local credential status completes under the exclusive mutation lock" {
+    const auth = @import("codex_auth.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try testPath(&tmp, "auth", &path_buffer);
-    var record = try testRecord("installed-account", 0);
+    var record = try testRecord(auth.fixture_account_id, 0);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+    try record.id_token.set(auth.fixture_id_token);
+    try record.access_token.set(auth.fixture_access_token);
+    record.expires_at = 4_102_444_800;
     try install(path, &record, null);
     var private = try tmp.dir.openDir(io, "private", .{});
     defer private.close(io);
@@ -507,16 +475,16 @@ test "installed local credential status completes under the exclusive mutation l
     const Worker = struct {
         path: []const u8,
         done: std.atomic.Value(bool) = .init(false),
-        configured: ?LocalStatus = null,
-        expired: ?LocalStatus = null,
+        configured: ?auth.LocalStatus = null,
+        expired: ?auth.LocalStatus = null,
         failure: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            self.configured = localStatus(self.path, 1233) catch |err| result: {
+            self.configured = auth.localStatus(self.path, 4_102_444_799) catch |err| result: {
                 self.failure = err;
                 break :result null;
             };
-            self.expired = localStatus(self.path, 1234) catch |err| result: {
+            self.expired = auth.localStatus(self.path, 4_102_444_800) catch |err| result: {
                 self.failure = err;
                 break :result null;
             };
@@ -539,8 +507,8 @@ test "installed local credential status completes under the exclusive mutation l
     thread.join();
     try std.testing.expect(completed_while_locked);
     try std.testing.expectEqual(@as(?anyerror, null), worker.failure);
-    try std.testing.expectEqual(@as(?LocalStatus, .configured), worker.configured);
-    try std.testing.expectEqual(@as(?LocalStatus, .refresh_required), worker.expired);
+    try std.testing.expectEqual(@as(?auth.LocalStatus, .configured), worker.configured);
+    try std.testing.expectEqual(@as(?auth.LocalStatus, .renewal_due), worker.expired);
     var after_buffer: [4096]u8 = undefined;
     defer std.crypto.secureZero(u8, &after_buffer);
     try std.testing.expectEqualStrings(before, try private.readFile(io, "auth", &after_buffer));

@@ -5,6 +5,7 @@ const named_scratch = @import("named_scratch.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const provider = @import("provider.zig");
+const provider_selection = @import("provider_selection.zig");
 pub const Output = @import("provider_output.zig");
 const request_encoding = @import("request_encoding.zig");
 const store = @import("store.zig");
@@ -17,6 +18,19 @@ const PreparedRequest = provider.PreparedRequest;
 // and managed-route authentication. The Host owns only effect scheduling and
 // the provider transport owns only curl and sealed byte lifetimes.
 pub const provider_label = "codex";
+pub const recommended_model = "gpt-6-luna";
+
+/// Local identifier syntax, not a catalog, qualification or account entitlement.
+pub fn validModel(model: []const u8) bool {
+    if (model.len == 0 or model.len > protocol.max_model_bytes) return false;
+    for (model) |byte| if (byte < 0x21 or byte > 0x7e) return false;
+    return true;
+}
+
+pub fn capability(readiness: provider_selection.Readiness) provider_selection.Capability {
+    return .{ .name = provider_label, .recommended_model = recommended_model, .valid_model = validModel, .readiness = readiness };
+}
+
 pub const managed_endpoint = "https://chatgpt.com/backend-api/codex/responses";
 pub const observation_names: provider.ObservationNames = .{
     .request_id = "x-request-id",

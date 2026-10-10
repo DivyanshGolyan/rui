@@ -11,6 +11,7 @@ if [ "${3:-}" = parallel ]; then
     session_list_client=$6
     proposal_client=$7
     activity_client=$8
+    preference_policy_actor=$9
     output=$(mktemp -d "${TMPDIR:-/tmp}/rui-check.XXXXXX")
     trap 'rm -rf "$output"' EXIT
     pids=
@@ -29,6 +30,7 @@ if [ "${3:-}" = parallel ]; then
     run_case bash-owner python3 "$directory/bash_owner_integration.py" "$release_safe"
     run_case bash python3 "$directory/bash_integration.py" "$release_safe"
     run_case human-cli python3 "$directory/human_cli_integration.py" "$release_safe"
+    run_case preference-policy python3 "$directory/preference_policy_integration.py" "$preference_policy_actor"
     run_case bash-lifecycle python3 "$directory/bash_lifecycle_integration.py" "$release_safe"
     run_case bash-recovery python3 "$directory/bash_recovery_integration.py" "$release_safe"
     run_case codex python3 "$directory/codex_integration.py" "$release_safe"
@@ -81,11 +83,13 @@ host_status_actor=$3
 session_list_client=$4
 proposal_client=$5
 activity_client=$6
+preference_policy_actor=$7
 sh "$directory/admission_integration.sh" "$release_safe"
 python3 "$directory/dispatch_integration.py" "$release_safe"
 python3 "$directory/bash_owner_integration.py" "$release_safe"
 python3 "$directory/bash_integration.py" "$release_safe"
 python3 "$directory/human_cli_integration.py" "$release_safe"
+python3 "$directory/preference_policy_integration.py" "$preference_policy_actor"
 python3 "$directory/bash_lifecycle_integration.py" "$release_safe"
 python3 "$directory/bash_recovery_integration.py" "$release_safe"
 python3 "$directory/codex_integration.py" "$release_safe"
