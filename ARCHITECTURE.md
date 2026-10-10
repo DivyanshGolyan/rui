@@ -2,6 +2,12 @@
 
 This is the accepted V1 contract, not implementation evidence; it includes accepted behavior that is not yet implemented. For runnable behavior and current limitations, see [README Status](README.md#status). [VERIFICATION.md](VERIFICATION.md) owns required evidence.
 
+## Supported guarantees
+
+Rui supports Linux x86-64 and macOS Apple Silicon. Recovery covers a terminated Rui process followed by restart on supported local storage. OS crashes, power loss and storage-device failure are not guaranteed. Existing atomic publication, sync ordering, canonical-state validation and indeterminate-effect rules remain required; narrowing the recovery promise does not excuse a failing functional assertion.
+
+Authorized commands execute with the user's privileges. Permission checks authorize exact Actions, not a filesystem, network or credential sandbox. Rui enforces its own allocation, population and accounting limits exactly. External-process CPU, elapsed-time and termination safeguards are best effort under OS scheduling and I/O; they do not promise hard interruption, descendant containment or exact physical-memory limits. Cleanup retains ownership until release is observed.
+
 ## A piece of work from start to finish
 
 Suppose a caller wants an agent to investigate a failing test. The caller explicitly starts the Host, names a Session, configures its Workspace and sends a message. The model asks to run Bash. With the default permission mode, Rui authorizes the proposed action without asking a client. Once admitted for execution, Bash runs; Rui saves its result and asks the model for the final answer.
@@ -365,6 +371,8 @@ Sharing a Session shares its permission policy under ordinary configuration orde
 
 Later mode changes neither answer pending requests, revoke existing authorizations nor stop running actions. Model-request settings do not authorize later Actions. Recovery reuses saved permission facts, not current mode; rollback creates none. Authorization may wait for capacity without an Attempt. No Workspace isolation, global Action serialization or concurrent-writer coordination is promised.
 
+An authorized Bash command runs as the user and can access the user's files, network and credentials. The authorization protocol is not a sandbox. Evaluator capability restrictions below apply to that evaluator interface, not arbitrary authorized commands.
+
 ### Exact Edit
 
 #### Proposal and line coordinates
@@ -453,6 +461,8 @@ Delayed physical cleanup is an elapsed-time policy measured against the awake mo
 ### Commit boundaries and crash recovery
 
 Recovery uses committed facts only; it cannot establish an outcome or permission to execute from temporary artifacts, diagnostics or caller-supplied evidence. The committing owner alone publishes semantic consequences. Attempt admission transfers one-shot launch authority, not canonical-state ownership, to the reserved execution owner. Terminal delivery hands sealed evidence to core validation/import under the ownership and sealing rules above. A live owner can report a known failure before launch; after custody loss, recovery uses committed uncertainty even if launch never happened.
+
+These restart rules cover process crashes, not OS crashes or power loss. Retain transactional and file-publication ordering for consistent observed success and failure; no storage-hardware guarantee follows from a completed sync call.
 
 | Boundary | Commit meaning and retained owner | Next consumer / recovery |
 | --- | --- | --- |
@@ -680,6 +690,8 @@ Give the child an empty environment, three explicit stdio pipes and only selecte
 
 CPU protection covers native decoding, compilation, JS/job draining and encoding. Elapsed lifetime spans successful spawn through protocol completion and exit; queue wait, external work and parent preparation/publication have their own ownership. Derive cooperative checks and kernel backstop from policy/OS granularity. Deadline expiry begins termination; retain resources until pipes close and child is reaped. Unexplained signals are not specific resource diagnoses. Exhaustion cannot publish partial success.
 
+Engine allocation/accounting limits remain exact. OS CPU and lifetime backstops are best-effort runaway protection: scheduler delay or blocked I/O may exceed elapsed limits. A returning overrun is failure, not renewed allowance or successful enforcement; unresolved processes and readers retain cleanup ownership.
+
 Maintain small evaluator-only extensions at the pinned QuickJS revision for bounded UTF-8 string construction and the Workflow entry/import compiler policy. Apply the policy to a generated translation unit without modifying the dependency archive; compile-only validation inspects parser-owned facts, not unlinked module namespace bindings or a second source scanner. Disable dynamic compilation before author code runs. Keep engine-layout access behind its native interfaces and require compatibility checks on dependency or build-configuration upgrades. The research prototype is not production integration or platform qualification.
 
 Bound native allocations/stack separately from engine heap; reuse temporary storage only after references expire. The native stack bound is 1 MiB: Linux sets the child soft/hard `RLIMIT_STACK`; macOS creates the bounded Mach-O stack and guard at exec, and the worker verifies the main-thread stack size before reading source. Failure prevents evaluation. Darwin rejects limit changes for custom stacks, and successful limit readback alone does not establish protection after shrinking an ordinary stack. Source may need contiguous storage within budget. Workflow Output is a streamed strict-data value without a separate serialized-size cap. No independent source/result-byte, entry/request-count or microtask quotas merely to preserve fixed tables; use bounded allocation/transfer and CPU/lifetime checks. The worker rejects invalid types/prototypes/accessors/cycles and nonfinite numbers; its object-key enumeration emits unique keys. Retain exact-binding, arithmetic, recursion and diagnostic checks at their owning boundaries. No process pool, numeric descriptor-ceiling scan, exit-time whole-buffer wiping, fixed address-space quota or RSS polling killer is selected. Internal capacities must qualify promised workloads, not silently redefine them.
@@ -831,7 +843,7 @@ Ingress remains connection-owned through the receiving core/Runtime owner's impo
 
 ### Platform capabilities
 
-Target Linux/macOS on x86-64/ARM64 through capabilities, not distribution allowlists. Minimum OS/kernel/libc follows build/API requirements; incompatibility rejects. Run checks on the available Mac; elsewhere use source/API/dependency/cross-compilation evidence, labeling unexecuted assumptions. No Linux runtime fleet/matrix is required. Crash tests do not certify power loss; keep platform memory metrics and unavailable counters distinct.
+Support Linux x86-64 and macOS Apple Silicon through capabilities, not distribution allowlists. Minimum OS/kernel/libc follows build/API requirements; incompatibility rejects. Platform-sensitive changes require affected native checks on both supported systems before merge. Optional cross-compilation of Linux ARM64 and Intel macOS is experimental and does not extend support. Keep platform memory metrics and unavailable counters distinct.
 
 | Owner | Selected mechanism |
 | --- | --- |

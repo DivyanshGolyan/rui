@@ -628,10 +628,15 @@ def read_action(store, session, action, field):
     return completed.stdout
 
 
-def wait_for(predicate, description, timeout=8, interval=0.025):
-    deadline = time.monotonic() + timeout
+def wait_for(predicate, description, timeout=8, interval=0.025, *, deadline=None):
+    if deadline is None:
+        deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = predicate()
+        # An inspection can block past its caller's budget. A clean observation
+        # after the deadline is not evidence of timely physical reclamation.
+        if time.monotonic() >= deadline:
+            break
         if value:
             return value
         time.sleep(interval)
@@ -4219,6 +4224,7 @@ def main():
             "direct/framing-exact",
         )["execution"]
         assert int(resources["scratch_used_bytes"]) == actual_request_bytes, resources
+        exact_deadline = time.monotonic() + 8
         endpoint.release.set()
         exact_result = wait_for(
             lambda: (value := observe(framing_exact_store, "exact-0"))
@@ -4226,17 +4232,24 @@ def main():
             .get("code")
             and value,
             "exact-capacity result",
+            deadline=exact_deadline,
         )
         # The request itself fits exactly and reaches HTTP. Its held charge
         # intentionally leaves no shared scratch for the fixture response.
         assert exact_result["result"]["code"] == "response_scratch_exhausted", exact_result
-        resources = command(
-            "inspect-session",
-            "--store",
-            framing_exact_store,
-            "--session",
-            "direct/framing-exact",
-        )["execution"]
+        # A committed result is not physical release. Observe that owner boundary
+        # within the same original result deadline, including custody and charge.
+        resources = wait_for(
+            lambda: (
+                value if (value := command(
+                    "inspect-session", "--store", framing_exact_store,
+                    "--session", "direct/framing-exact",
+                )["execution"])["custody_occupied"] == "0"
+                and value["scratch_used_bytes"] == "0" else None
+            ),
+            "exact-capacity physical cleanup",
+            deadline=exact_deadline,
+        )
         assert resources["scratch_used_bytes"] == "0", resources
         stop_host(host)
         processes.remove(host)
