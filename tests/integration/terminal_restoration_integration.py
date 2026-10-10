@@ -297,6 +297,11 @@ def persistent_cases(state, library, home, store, host):
                     os.write(master, b"\n")
                     assert select.select([slave], [], [], 5)[0]
                     assert os.read(slave, 4096) == b"\n", "persistent detach leaked queued typeahead"
+                    # Canonical ECHO is restored on this separate input PTY.
+                    # Darwin's drain-based fixture cleanup waits for its peer;
+                    # consume the probe's echo, not only its accepted input.
+                    assert select.select([master], [], [], 5)[0]
+                    assert os.read(master, 4096) == b"\r\n", "canonical probe echo was not consumed"
             elif case == "admission-interrupt":
                 received = threading.Event()
                 def hold(response):
