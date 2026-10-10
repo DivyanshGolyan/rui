@@ -229,7 +229,9 @@ const Host = struct {
         self.admission.release(place);
         // Test-only census witness before final drain unlock, not thread exit.
         if (trace_request_number) |request_number|
-            traceRequest(self, "connection_resources_released", request_number, self.scratch_used.load(.acquire));
+            traceRequest(self, "connection_resources_released", request_number, self.scratch_used.load(.acquire))
+        else
+            traceSubject(self, "connection_place_released", "place", @tagName(place));
         self.drain_condition.broadcast(self.io);
         self.drain_mutex.unlock(self.io);
     }

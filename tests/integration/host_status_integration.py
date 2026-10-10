@@ -168,6 +168,13 @@ def correlated_phase(diagnostics, phase, began_ns, **fields):
     return record
 
 
+def discovery_released(diagnostics, began_ns):
+    started = correlated_phase(diagnostics, "connection_request_host_info", began_ns)
+    released = correlated_phase(diagnostics, "connection_resources_released", began_ns,
+                                subject_kind="request_number", subject=started["subject"])
+    assert int(released["sequence"]) > int(started["sequence"]), (started, released)
+
+
 def protected_saturation(root):
     store = root / "saturated"
     host, _ = start(store, 1, "--test-phase-trace")
@@ -175,10 +182,14 @@ def protected_saturation(root):
     held = []
     try:
         diagnostics.wait("lifecycle_boundary")
+        began_ns = time.monotonic_ns()
         initial = status(store)
         identity = initial.split()[1]
         assert initial.startswith("ready "), initial
+        discovery_released(diagnostics, began_ns)
+        began_ns = time.monotonic_ns()
         assert b'"type":"host_info"' in raw_info(socket_path(store), store)
+        discovery_released(diagnostics, began_ns)
         baseline = wait_for_descriptors(host.pid) if sys.platform == "linux" else None
         began = time.monotonic()
         for index in range(10):
@@ -193,17 +204,26 @@ def protected_saturation(root):
             assert record["process"] == str(host.pid) and record["clock"] == "awake_ns", record
             assert record["run"] == records[0]["run"], records
             assert index == 0 or int(record["sequence"]) > int(records[index - 1]["sequence"]), records
+        began_ns = time.monotonic_ns()
         observed = status(store)
         assert observed == initial, ("status lost ordinary headroom", observed)
+        discovery_released(diagnostics, began_ns)
         began_ns = time.monotonic_ns()
         held.append(held_request(store, "host-info"))
         pending = correlated_phase(diagnostics, "connection_request_host_info", began_ns)
         assert not diagnostics.matching("connection_resources_released", subject=pending["subject"])
         busy_started = time.monotonic()
+        began_ns = time.monotonic_ns()
         busy = raw_info(socket_path(store), store)
         assert busy.startswith(b"HTTP/1.1 503") and b"discovery_capacity_exhausted" in busy, busy
         assert time.monotonic() - busy_started < 2, "discovery busy reply exceeded bound"
+        busy_release = correlated_phase(diagnostics, "connection_place_released", began_ns,
+                                        subject_kind="place", subject="classification")
+        began_ns = time.monotonic_ns()
         assert status(store) == "owned_unavailable", "discovery saturation is not wire incompatibility"
+        status_release = correlated_phase(diagnostics, "connection_place_released", began_ns,
+                                          subject_kind="place", subject="classification")
+        print("discovery rejection cleanup:", json.dumps([busy_release, status_release]), flush=True)
         assert time.monotonic() - began < 5, "fixture consumed ordinary borrowers' acceptance budget"
         ack = raw_info(socket_path(store), store, identity,
                        kind="host_stop", route="control/host-stop")
