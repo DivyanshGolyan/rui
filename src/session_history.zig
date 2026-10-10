@@ -1,0 +1,233 @@
+//! Atomic bounded Conversation preparation, distinct from one-pass opening.
+const std = @import("std");
+const client = @import("client.zig");
+const protocol = @import("protocol.zig");
+const View = @import("session_view.zig");
+
+pub const item_bytes = 8192;
+pub const max_scratch_bytes = item_bytes * protocol.public_conversation_page_items;
+
+/// Owns metadata; borrows unchanged scratch from successful prepare to render.
+/// Preparation exposes no output or cursor; the caller commits after rendering.
+pub const Prepared = struct {
+    page: client.ConversationPage,
+    offsets: [protocol.public_conversation_page_items]u64 = undefined,
+
+    pub fn render(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype) !void {
+        var window: [protocol.content_window_bytes]u8 = undefined;
+        for (0..self.page.count) |reverse| {
+            const index = self.page.count - 1 - reverse;
+            const item = self.page.items[index];
+            if (item.content.bytes > item_bytes) {
+                var buffer: [192]u8 = undefined;
+                try sink.feed(try std.fmt.bufPrint(&buffer, "Rui: Historical item omitted: position {d}, ordinal {d}, {d} raw bytes.\nRaw export: rui read-conversation --store-hex ", .{ item.position, item.ordinal, item.content.bytes }));
+                try writeHex(sink, store);
+                try sink.feed(" --session-hex ");
+                try writeHex(sink, session);
+                try sink.feed(try std.fmt.bufPrint(&buffer, " --position {d} --ordinal {d}\n", .{ item.position, item.ordinal }));
+                continue;
+            }
+            try sink.feed(switch (item.kind) {
+                .user => "You: ",
+                .assistant => "Assistant: ",
+                .tool_result => "Tool Result:\n",
+            });
+            var answer: View.Answer(@TypeOf(sink)) = undefined;
+            answer.init(sink);
+            var escaped: View.Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .multiline } };
+            var offset: u64 = 0;
+            while (offset < item.content.bytes) {
+                const wanted: usize = @intCast(@min(item.content.bytes - offset, window.len));
+                if (try scratch.readPositionalAll(io, window[0..wanted], self.offsets[index] + offset) != wanted) return error.TruncatedHistoryScratch;
+                if (item.kind == .assistant) try answer.feed(window[0..wanted]) else try escaped.feed(window[0..wanted]);
+                offset += wanted;
+            }
+            if (item.kind == .assistant) try answer.finish() else try escaped.finish();
+            try sink.feed("\n");
+        }
+    }
+};
+
+pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8, cursor: client.ConversationCursor, scratch: std.Io.File) !Prepared {
+    const page = switch (try requests.conversationPage(store, session, cursor)) {
+        .page => |value| value,
+        .failure => |failure| return failure.err(),
+    };
+    var prepared: Prepared = .{ .page = page };
+    try scratch.setLength(requests.io, 0);
+    const Staging = struct {
+        io: std.Io,
+        file: std.Io.File,
+        offset: u64 = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.file.writePositionalAll(self.io, bytes, self.offset);
+            self.offset += bytes.len;
+        }
+    };
+    var staging: Staging = .{ .io = requests.io, .file = scratch };
+    for (page.items[0..page.count], 0..) |item, index| {
+        if (item.content.bytes > item_bytes) continue;
+        prepared.offsets[index] = staging.offset;
+        if (try requests.readConversationContent(store, session, item.position, item.ordinal, item.content, &staging)) |failure| return failure.err();
+    }
+    // Received-byte integrity does not prove that staging preserved those bytes.
+    var window: [protocol.content_window_bytes]u8 = undefined;
+    for (page.items[0..page.count], prepared.offsets[0..page.count]) |item, start| {
+        if (item.content.bytes > item_bytes) continue;
+        var hash = protocol.contentHasher();
+        var offset: u64 = 0;
+        while (offset < item.content.bytes) {
+            const wanted: usize = @intCast(@min(item.content.bytes - offset, window.len));
+            if (try scratch.readPositionalAll(requests.io, window[0..wanted], start + offset) != wanted) return error.TruncatedHistoryScratch;
+            hash.update(window[0..wanted]);
+            offset += wanted;
+        }
+        if (!std.mem.eql(u8, &hash.finalResult(), &item.content.digest)) return error.ContentBindingMismatch;
+    }
+    return prepared;
+}
+
+fn writeHex(sink: anytype, bytes: []const u8) !void {
+    var buffer: [256]u8 = undefined;
+    var used: usize = 0;
+    for (bytes) |byte| {
+        const encoded = std.fmt.bytesToHex([1]u8{byte}, .lower);
+        @memcpy(buffer[used..][0..2], &encoded);
+        used += 2;
+        if (used == buffer.len) {
+            try sink.feed(&buffer);
+            used = 0;
+        }
+    }
+    if (used != 0) try sink.feed(buffer[0..used]);
+}
+
+test "historical export preserves opaque identities without terminal or shell interpretation" {
+    const Sink = struct {
+        bytes: [2048]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    var prepared: Prepared = .{ .page = .{ .end = 2, .count = 1, .more = false } };
+    prepared.page.items[0] = .{ .position = 2, .ordinal = 0, .kind = .user, .content = .{ .bytes = 8193, .digest = @splat(0) } };
+    var sink: Sink = .{};
+    try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)", "team\x1b[2J\n\x00é\u{202e}", &sink);
+    // Independent UTF-8 byte-to-hex oracle, including NUL and directional text.
+    try std.testing.expectEqualStrings("Rui: Historical item omitted: position 2, ordinal 0, 8193 raw bytes.\nRaw export: rui read-conversation --store-hex 2f746d702f6127242866616c736529 --session-hex 7465616d1b5b324a0a00c3a9e280ae --position 2 --ordinal 0\n", sink.bytes[0..sink.length]);
+}
+
+test "history preparation binds wire and staged bytes before exposure" {
+    const Peer = struct {
+        var clients: [2]std.posix.fd_t = undefined;
+        var connected: usize = 0;
+        var mode: enum { intact, corrupt, missing, short_wire, wrong_domain, extra_wire } = .intact;
+        var failure: ?anyerror = null;
+        fn connect(_: ?*anyopaque, _: *const std.Io.net.UnixAddress) std.Io.net.UnixAddress.ConnectError!std.Io.net.Socket.Handle {
+            defer connected += 1;
+            return clients[connected];
+        }
+        fn stage(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) std.Io.File.WritePositionalError!usize {
+            if (mode == .missing) {
+                var count = header.len;
+                for (data[0 .. data.len - 1]) |bytes| count += bytes.len;
+                return count + data[data.len - 1].len * splat;
+            }
+            const count = try std.testing.io.vtable.fileWritePositional(userdata, file, header, data, splat, offset);
+            if (mode == .corrupt and offset == 0) _ = try std.testing.io.vtable.fileWritePositional(userdata, file, "", &.{"X"}, 1, 0);
+            return count;
+        }
+        fn serve(fds: [2]std.posix.fd_t) void {
+            exchange(fds) catch |err| {
+                failure = err;
+            };
+        }
+        fn exchange(fds: [2]std.posix.fd_t) !void {
+            // Independent Python hashlib oracle for domain-prefixed "first".
+            const metadata = "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"2\",\"items\":[{\"position\":\"2\",\"ordinal\":\"0\",\"kind\":\"user\",\"content\":{\"bytes\":\"5\",\"sha256\":\"2e37afae3fe85c8c30175c6f0a1b578b3cbe5f4482248f77cb55656781d2790b\",\"display\":\"omitted\"}}],\"more\":false}";
+            for (fds, [2][]const u8{ metadata, "first" }, [2][]const u8{ "application/json", "application/octet-stream" }, 0..) |fd, normal_body, content_type, index| {
+                const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+                defer file.close(std.testing.io);
+                var head: [512]u8 = undefined;
+                var used: usize = 0;
+                while (!std.mem.endsWith(u8, head[0..used], "\r\n\r\n")) {
+                    if (used == head.len or std.posix.system.read(fd, head[used..].ptr, 1) != 1) return error.TestRequestTruncated;
+                    used += 1;
+                }
+                const marker = "Content-Length: ";
+                const start = (std.mem.indexOf(u8, head[0..used], marker) orelse return error.TestRequestTruncated) + marker.len;
+                const end = start + (std.mem.indexOf(u8, head[start..used], "\r\n") orelse return error.TestRequestTruncated);
+                var remaining = try std.fmt.parseInt(usize, head[start..end], 10);
+                var buffer: [1024]u8 = undefined;
+                while (remaining != 0) {
+                    const count = std.posix.system.read(fd, &buffer, @min(buffer.len, remaining));
+                    if (count <= 0) return error.TestRequestTruncated;
+                    remaining -= @intCast(count);
+                }
+                var wrong_metadata = metadata.*;
+                if (mode == .wrong_domain) {
+                    const digest_start = (std.mem.indexOf(u8, &wrong_metadata, "2e37afae") orelse unreachable);
+                    @memcpy(wrong_metadata[digest_start..][0..64], "a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e");
+                }
+                const body = if (index == 0 and mode == .wrong_domain) &wrong_metadata else if (index == 1 and mode == .short_wire) "firs" else normal_body;
+                const response = try std.fmt.bufPrint(&buffer, "HTTP/1.1 200 OK\r\nX-Rui-Wire-Version: 1\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\n\r\n", .{ content_type, body.len, body.len, body.len });
+                @memcpy(buffer[response.len..][0..body.len], body);
+                var length = response.len + body.len;
+                if (index == 1 and mode == .extra_wire) {
+                    buffer[length] = '!';
+                    length += 1;
+                }
+                try file.writeStreamingAll(std.testing.io, buffer[0..length]);
+            }
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const scratch = try tmp.dir.createFile(io, "history", .{ .read = true });
+    defer scratch.close(io);
+    var vtable = io.vtable.*;
+    vtable.netConnectUnix = Peer.connect;
+    vtable.fileWritePositional = Peer.stage;
+    const requests: client.Requests = .{ .io = .{ .userdata = io.userdata, .vtable = &vtable } };
+    for ([_]@TypeOf(Peer.mode){ .intact, .corrupt, .missing, .short_wire, .wrong_domain, .extra_wire }) |mode| {
+        Peer.mode = mode;
+        Peer.connected = 0;
+        Peer.failure = null;
+        var servers: [2]std.posix.fd_t = undefined;
+        for (&Peer.clients, &servers) |*caller, *server| {
+            var sockets: [2]std.posix.fd_t = undefined;
+            if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
+            caller.* = sockets[0];
+            server.* = sockets[1];
+        }
+        const peer = try std.Thread.spawn(.{}, Peer.serve, .{servers});
+        const result = prepare(requests, root, "history/session", .{ .end = 2 }, scratch);
+        // Release any request never reached after an earlier protocol failure.
+        for (Peer.clients[Peer.connected..]) |fd| {
+            const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+            file.close(io);
+        }
+        peer.join();
+        if (Peer.failure) |err| {
+            _ = try result;
+            return err;
+        }
+        if (mode == .intact) {
+            try std.testing.expectEqual(@as(usize, 1), (try result).page.count);
+        } else {
+            const err = if (result) |_| return error.UnverifiedHistoryExposed else |err| err;
+            try std.testing.expectEqual(@as(anyerror, switch (mode) {
+                .corrupt, .short_wire, .wrong_domain => error.ContentBindingMismatch,
+                .missing => error.TruncatedHistoryScratch,
+                .extra_wire => error.InvalidResponse,
+                .intact => unreachable,
+            }), err);
+        }
+    }
+}

@@ -101,6 +101,47 @@ pub const Requests = struct {
         return readActionContent(self, store_path, session, action_id, "read_action_call_id", "/v1/read-action-call-id", destination, reply_buffer);
     }
 
+    pub fn conversationPage(self: Requests, store_path: []const u8, session: []const u8, cursor: ConversationCursor) !ConversationPageReply {
+        try self.check();
+        try validateIdentityInputs("", session);
+        try cursor.validate();
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try renderReadRequest(&body, "conversation_page", paths.store.slice(), "session", session, null, null);
+        body.len -= 1;
+        try body.appendFmt(",\"end\":\"{d}\",\"before_position\":\"{d}\",\"before_ordinal\":\"{d}\"}}", .{ cursor.end, cursor.before_position, cursor.before_ordinal });
+        const fd = try openRead(self, &paths, "/v1/conversation-page", body.slice());
+        defer self.io.vtable.netClose(self.io.userdata, &.{fd});
+        const Sink = struct {
+            buffer: protocol.FixedJsonBuffer(protocol.max_conversation_page_response_bytes) = .{},
+            pub fn feed(s: *@This(), bytes: []const u8) !void {
+                try s.buffer.append(bytes);
+            }
+        };
+        var sink: Sink = .{};
+        var reply: ReplyBuffer = .{};
+        return switch (try readReportResponse(self, fd, &sink, &reply)) {
+            .report => .{ .page = try ConversationPage.parse(sink.buffer.slice(), cursor) },
+            .command => |value| .{ .failure = try decodeReadFailure(value, false) },
+        };
+    }
+
+    /// Stream prefix bytes; bind length, digest and EOF before the final window.
+    /// Null selects raw export, still requiring framing and physical EOF.
+    pub fn readConversationContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?CommandObservation.ContentReference, sink: anytype) !?ReadFailure {
+        try self.check();
+        try validateIdentityInputs("", session);
+        if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try renderReadRequest(&body, "conversation_content", paths.store.slice(), "session", session, null, null);
+        body.len -= 1;
+        try body.appendFmt(",\"position\":\"{d}\",\"ordinal\":\"{d}\",\"start\":\"0\",\"stream\":true}}", .{ position, ordinal });
+        const fd = try openRead(self, &paths, "/v1/conversation-content", body.slice());
+        defer self.io.vtable.netClose(self.io.userdata, &.{fd});
+        return readPublicContentResponse(self, fd, expected, sink);
+    }
+
     /// Returns owned metadata only; no scratch, payload or traversal escapes.
     pub fn proposalPage(self: Requests, store_path: []const u8, session: []const u8, cursor: ProposalCursor) !ProposalPageReply {
         try self.check();
@@ -131,7 +172,7 @@ pub const Requests = struct {
 
     /// Complete bytes once, through the ordinary synchronous sink contract.
     /// Failure may follow delivered prefix bytes; it never returns success then.
-    pub fn readProposalField(self: Requests, store_path: []const u8, session: []const u8, position: u64, field: ProposalField, sink: anytype) !?ReadFailure {
+    pub fn readProposalField(self: Requests, store_path: []const u8, session: []const u8, position: u64, field: ProposalField, expected: ?CommandObservation.ContentReference, sink: anytype) !?ReadFailure {
         try self.check();
         try validateIdentityInputs("", session);
         if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidTarget;
@@ -142,7 +183,7 @@ pub const Requests = struct {
         try body.appendFmt(",\"position\":\"{d}\",\"field\":\"{s}\"}}", .{ position, @tagName(field) });
         const fd = try openRead(self, &paths, "/v1/proposal-field", body.slice());
         defer self.io.vtable.netClose(self.io.userdata, &.{fd});
-        return readPublicContentResponse(self, fd, sink);
+        return readPublicContentResponse(self, fd, expected, sink);
     }
 
     pub fn activityPage(self: Requests, store_path: []const u8, session: []const u8, cursor: ActivityCursor) !ActivityPageReply {
@@ -175,7 +216,7 @@ pub const Requests = struct {
     }
 
     /// Complete scoped bytes once; callers still use readProposalField for calls.
-    pub fn readActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, sink: anytype) !?ReadFailure {
+    pub fn readActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?CommandObservation.ContentReference, sink: anytype) !?ReadFailure {
         try self.check();
         try validateIdentityInputs("", session);
         if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
@@ -186,11 +227,11 @@ pub const Requests = struct {
         try body.appendFmt(",\"position\":\"{d}\",\"ordinal\":\"{d}\"}}", .{ position, ordinal });
         const fd = try openRead(self, &paths, "/v1/activity-content", body.slice());
         defer self.io.vtable.netClose(self.io.userdata, &.{fd});
-        return readPublicContentResponse(self, fd, sink);
+        return readPublicContentResponse(self, fd, expected, sink);
     }
 };
 
-fn readPublicContentResponse(requests: Requests, fd: std.posix.fd_t, sink: anytype) !?ReadFailure {
+fn readPublicContentResponse(requests: Requests, fd: std.posix.fd_t, expected: ?CommandObservation.ContentReference, sink: anytype) !?ReadFailure {
     const head = try readResponseHeadUntil(requests, fd, 60_000, null);
     if (head.status != 200) {
         if (head.kind != .command_json) return error.InvalidResponse;
@@ -198,9 +239,116 @@ fn readPublicContentResponse(requests: Requests, fd: std.posix.fd_t, sink: anyty
         return try decodeReadFailure(try readCommandBodyUntil(requests, fd, head, &reply_buffer, null), false);
     }
     if (head.kind != .content_bytes or head.total != head.content_length or head.next != head.content_length) return error.InvalidResponse;
-    try readResponseBody(requests, fd, head.content_length, sink);
+    if (expected) |reference| if (head.content_length != reference.bytes) return error.ContentBindingMismatch;
+    var hash = protocol.contentHasher();
+    var remaining = head.content_length;
+    var window: [protocol.content_window_bytes]u8 = undefined;
+    while (remaining != 0) {
+        const wanted: usize = @intCast(@min(remaining, window.len));
+        var filled: usize = 0;
+        while (filled != wanted) {
+            const count = try readRequest(requests, fd, window[filled..wanted], std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s);
+            if (count == 0) return error.TruncatedResponse;
+            filled += count;
+        }
+        hash.update(window[0..wanted]);
+        remaining -= wanted;
+        if (remaining == 0) try completeContentEOF(requests, fd, hash.finalResult(), expected);
+        if (@TypeOf(sink) == std.Io.File) try sink.writeStreamingAll(requests.io, window[0..wanted]) else try sink.feed(window[0..wanted]);
+    }
+    if (head.content_length == 0) try completeContentEOF(requests, fd, hash.finalResult(), expected);
     return null;
 }
+
+fn completeContentEOF(requests: Requests, fd: std.posix.fd_t, actual: [32]u8, expected: ?CommandObservation.ContentReference) !void {
+    if (expected) |reference| if (!std.mem.eql(u8, &actual, &reference.digest)) return error.ContentBindingMismatch;
+    var tail: [1]u8 = undefined;
+    if (try readRequest(requests, fd, &tail, std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s) != 0) return error.InvalidResponse;
+}
+
+pub const ConversationCursor = struct {
+    end: u64,
+    before_position: u64 = 0,
+    before_ordinal: u64 = 0,
+    pub fn validate(self: ConversationCursor) !void {
+        if (self.end > std.math.maxInt(i64) or self.before_position > self.end or self.before_ordinal > std.math.maxInt(i64) or
+            (self.before_position == 0 and self.before_ordinal != 0)) return error.InvalidCursor;
+    }
+};
+pub const ConversationPageReply = union(enum) { page: ConversationPage, failure: ReadFailure };
+pub const ConversationPage = struct {
+    pub const Item = struct {
+        position: u64,
+        ordinal: u64,
+        kind: enum { user, assistant, tool_result },
+        content: CommandObservation.ContentReference,
+    };
+    end: u64,
+    items: [protocol.public_conversation_page_items]Item = undefined,
+    count: usize = 0,
+    more: bool,
+    pub fn continuation(self: *const ConversationPage) ?ConversationCursor {
+        if (!self.more) return null;
+        const last = self.items[self.count - 1];
+        return .{ .end = self.end, .before_position = last.position, .before_ordinal = last.ordinal };
+    }
+    pub fn parse(bytes: []const u8, cursor: ConversationCursor) !ConversationPage {
+        try cursor.validate();
+        const Row = struct {
+            position: JsonString(20),
+            ordinal: JsonString(20),
+            kind: JsonEnum(@FieldType(Item, "kind")),
+            content: struct { bytes: JsonString(20), sha256: JsonString(64), display: JsonString(16) },
+        };
+        const Rows = struct {
+            values: [protocol.public_conversation_page_items]Row = undefined,
+            count: usize = 0,
+            pub fn jsonParse(a: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+                if (try source.next() != .array_begin) return error.UnexpectedToken;
+                var rows: @This() = .{};
+                while (try source.peekNextTokenType() != .array_end) {
+                    if (rows.count == rows.values.len) return error.LengthMismatch;
+                    rows.values[rows.count] = try std.json.innerParse(Row, a, source, options);
+                    rows.count += 1;
+                }
+                _ = try source.next();
+                return rows;
+            }
+        };
+        const Wire = struct {
+            version: JsonString(8),
+            type: JsonString(32),
+            direction: JsonString(16),
+            end: JsonString(20),
+            items: Rows,
+            more: bool,
+            before_position: ?JsonString(20) = null,
+            before_ordinal: ?JsonString(20) = null,
+        };
+        var storage: [2 * protocol.max_conversation_page_response_bytes]u8 = undefined;
+        var fixed = std.heap.FixedBufferAllocator.init(&storage);
+        const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{ .ignore_unknown_fields = true }) catch return error.InvalidConversationPage;
+        if (!wire.version.eql("1") or !wire.type.eql("conversation_page") or !wire.direction.eql("newest_first")) return error.InvalidConversationPage;
+        var page: ConversationPage = .{ .end = try mutationId(wire.end, true), .count = wire.items.count, .more = wire.more };
+        if (page.end > std.math.maxInt(i64) or (cursor.end != 0 and page.end != cursor.end) or (page.more and page.count != page.items.len)) return error.InvalidConversationPage;
+        var position = cursor.before_position;
+        var ordinal = cursor.before_ordinal;
+        for (wire.items.values[0..page.count], page.items[0..page.count]) |row, *item| {
+            item.* = .{ .position = try mutationId(row.position, false), .ordinal = try mutationId(row.ordinal, true), .kind = row.kind.value, .content = .{ .bytes = try mutationId(row.content.bytes, true), .digest = undefined } };
+            if (item.position > page.end or item.ordinal > std.math.maxInt(i64) or item.content.bytes > protocol.max_sqlite_content_bytes or
+                ((item.kind == .tool_result) != (item.ordinal != 0)) or !row.content.display.eql("omitted") or row.content.sha256.slice().len != 64 or
+                (position != 0 and (item.position > position or (item.position == position and item.ordinal >= ordinal)))) return error.InvalidConversationPage;
+            _ = std.fmt.hexToBytes(&item.content.digest, row.content.sha256.slice()) catch return error.InvalidConversationPage;
+            position = item.position;
+            ordinal = item.ordinal;
+        }
+        if (page.more) {
+            if (wire.before_position == null or wire.before_ordinal == null or
+                try mutationId(wire.before_position.?, false) != position or try mutationId(wire.before_ordinal.?, true) != ordinal) return error.InvalidConversationPage;
+        } else if (wire.before_position != null or wire.before_ordinal != null) return error.InvalidConversationPage;
+        return page;
+    }
+};
 
 pub const ProposalField = protocol.ProposalField;
 pub const ProposalCursor = struct { end: ?u64 = null, after: u64 = 0 };

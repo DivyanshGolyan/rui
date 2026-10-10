@@ -85,6 +85,251 @@ def terminal_step(master, command, marker="rui> "):
     return read_terminal(master, marker)
 
 
+def persistent_opening_case():
+    """Frozen replay uses real content once and assistant-only formatting."""
+    import canonical_failure_integration as canonical
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-opening."))
+    home = state / "home"
+    home.mkdir(mode=0o700)
+    store = state / "store'$(false)"
+    large_answer = "# Saved heading\n**saved bold** é\n" + "x" * 8192 + "\nOPENING-COMPLETE"
+    history_release = threading.Event()
+    endpoint = fixture.SuccessEndpoint([
+        fixture.sse_answer("opening-a", "opening-ar", "opening-am", large_answer)[0],
+        *[fixture.sse_answer(f"older-{i}", f"older-r-{i}", f"older-m-{i}", f"saved answer {i:02d}")[0] for i in range(1, 10)],
+        fixture.sse_answer("late", "late-r", "late-m", "late beyond captured end")[0],
+        fixture.sse_answer("independent", "independent-r", "independent-m", "independent history admission")[0],
+    ])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = caller = proxy = None
+    master = slave = None
+    completed = False
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        run(home, "configure", "--store", store, "--session", "persistent/opening",
+            "--workspace", state, "--provider", "codex", "--model", "model-a")
+        message = admit(home, "message", "--store", store, "--session", "persistent/opening", "literal **user** é")
+        fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "opening saved answer")
+        rendered = run(home, "result", message["request"])
+        assert "\x1b[1mSaved heading\x1b[0m" in rendered and "OPENING-COMPLETE" in rendered, "keyed result bypassed assistant renderer"
+        assert run(home, "read-result", "--store", store, "--key", message["request"]) == large_answer
+        assert json.loads(run(home, "result", message["request"], "--json"))["answer"] == large_answer
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+        original = termios.tcgetattr(slave)
+        caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
+            "--session", "persistent/opening"], env={**os.environ, "HOME": str(home)},
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        output = read_terminal(master, "rui> ")
+        assert output.count("literal **user** é") == 1, ("opening lost or duplicated User", output)
+        assert output.count("\x1b[1mSaved heading\x1b[0m") == 1, ("opening bypassed assistant renderer", output)
+        assert output.count("\x1b[1msaved bold\x1b[0m é") == 1, output
+        assert "OPENING-COMPLETE" in output, "opening applied the historical omission limit"
+        assert len(endpoint.requests) == 1, "opening restarted saved work"
+        os.write(master, b"\x03")
+        read_terminal(master, "Detached.")
+        _, errors = caller.communicate(timeout=5)
+        assert caller.returncode == 0, errors
+        actual = termios.tcgetattr(slave)
+        if sys.platform == "darwin":
+            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+            actual[3] &= ~mask
+            original[3] &= ~mask
+        assert actual == original, "opening terminal configuration was not restored"
+        os.close(master)
+        os.close(slave)
+        master = slave = None
+
+        # A late opening read error is fatal after a visible prefix, not a
+        # recoverable page preparation error or a reason to replay provider work.
+        proxy = canonical.ReplyProxy(host, "/v1/activity-content",
+            lambda response: response[:-1] if b"OPENING-COMPLETE" in response else response)
+        master, slave = pty.openpty()
+        original = termios.tcgetattr(slave)
+        caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
+            "--session", "persistent/opening"], env={**os.environ, "HOME": str(home)},
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        read_terminal(master, "Saved heading")
+        _, errors = caller.communicate(timeout=5)
+        assert caller.returncode != 0 and b"TruncatedResponse" in errors, errors
+        actual = termios.tcgetattr(slave)
+        if sys.platform == "darwin":
+            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+            actual[3] &= ~mask
+            original[3] &= ~mask
+        assert actual == original, "late opening error left terminal configuration changed"
+        assert len(endpoint.requests) == 1 and len(proxy.exchanges) == 2, "opening error retried or caused work"
+        proxy.close()
+        proxy = None
+        os.close(master)
+        os.close(slave)
+        master = slave = None
+        for i in range(1, 10):
+            message = admit(home, "message", "--store", store, "--session", "persistent/opening", f"saved user {i:02d}")
+            fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "history saved answer")
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+        caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
+            "--session", "persistent/opening"], env={**os.environ, "HOME": str(home)},
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        output = read_terminal(master, "rui> ")
+        assert "saved user 09" in output and "literal **user** é" not in output, output
+        assert output.index("saved user 08") < output.index("saved answer 08") < output.index("saved user 09"), output
+        message = admit(home, "message", "--store", store, "--session", "persistent/opening", "late input")
+        fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "late saved answer")
+        read_terminal(master, "late beyond captured end")
+
+        history_held = threading.Event()
+
+        def truncate_second(response):
+            if len(proxy.exchanges) == 2:
+                history_held.set()
+                assert history_release.wait(15), "history preparation gate was not released"
+                return response[:-1]
+            return response
+
+        proxy = canonical.ReplyProxy(host, "/v1/conversation-content", truncate_second)
+        os.write(master, b"/history\n")
+        assert history_held.wait(10), "history did not reach its held content read"
+        records = home / ".config/rui/requests"
+        before = set(records.glob("*.json"))
+        os.write(master, "during history é\nnext café!\x1b[D\x1b[DX".encode())
+        fixture.wait_for(lambda: len(set(records.glob("*.json")) - before) == 1, "independent history Admission capture")
+        record = (set(records.glob("*.json")) - before).pop()
+        fixture.wait_for(lambda: fixture.completed_observation(store, record.stem), "Admission while history preparation is held")
+        assert json.loads(record.read_text())["text"]["value"] == "during history é"
+        history_release.set()
+        failed = read_terminal(master, "History unavailable; older cursor and draft retained")
+        assert "saved answer" not in failed and "saved user" not in failed, "failed history exposed a staged prefix"
+        if "rui> next cafXé!" not in failed:
+            read_terminal(master, "rui> next cafXé!")
+        os.write(master, b"\x1b[CZ")
+        read_terminal(master, "rui> next cafXéZ!")
+        os.write(master, b"\x05\x15/history\n")
+        recovered = read_terminal(master, "History page complete")
+        assert recovered.count("literal **user** é") == 1 and "Historical item omitted" in recovered, recovered
+        assert "Saved heading" not in recovered and "OPENING-COMPLETE" not in recovered, "oversized historical content leaked"
+        assert recovered.index("literal **user** é") < recovered.index("Historical item omitted") < recovered.index("saved user 01"), recovered
+        export = next(line.removeprefix("Raw export: ") for line in recovered.splitlines() if line.startswith("Raw export: "))
+        command = shlex.split(export)
+        assert command[0:3] == ["rui", "read-conversation", "--store-hex"] and bytes.fromhex(command[3]) == str(store).encode(), export
+        assert all(32 <= ord(char) < 127 for char in export), "raw export printed terminal controls"
+        exported = subprocess.run(export, shell=True, env={**os.environ, "HOME": str(home),
+            "PATH": str(fixture.RUI.parent) + os.pathsep + os.environ["PATH"]}, capture_output=True, timeout=10)
+        assert exported.returncode == 0 and exported.stdout == large_answer.encode(), (export, exported.stderr, exported.stdout)
+        for flags in (("--session-hex", "0"), ("--session-hex", "zz"),
+                ("--session-hex", "61" * 129), ("--store-hex", "61" * 493),
+                ("--session", "persistent/opening", "--session-hex", "61"),
+                ("--store", store, "--store-hex", "61")):
+            rejected = subprocess.run([str(fixture.RUI), "read-conversation", *map(str, flags),
+                "--position", "1", "--ordinal", "0"], capture_output=True, timeout=10)
+            assert rejected.returncode != 0 and not rejected.stdout, (flags, rejected)
+            assert b"InvalidHexIdentity" in rejected.stderr or b"DuplicateArgument" in rejected.stderr, rejected.stderr
+        assert "late beyond captured end" not in recovered and "saved user 09" not in recovered, "history recaptured or replayed opening"
+        assert proxy.exchanges[0][0] == proxy.exchanges[2][0], "history failure advanced its actual cursor"
+        os.write(master, b"/history\n")
+        read_terminal(master, "No older Conversation rows")
+        assert len(endpoint.requests) == 12, "history caused provider work"
+        os.write(master, b"\x03")
+        read_terminal(master, "Detached.")
+        _, errors = caller.communicate(timeout=5)
+        assert caller.returncode == 0, errors
+        completed = True
+        print("persistent opening/history: exact chronological frozen replay, assistant-only Markdown, whole-page failure/retry, no cursor loss/late append/repeated work passed", flush=True)
+    finally:
+        history_release.set()
+        if caller is not None and caller.poll() is None:
+            caller.kill()
+            caller.wait(timeout=5)
+        if master is not None:
+            os.close(master)
+            os.close(slave)
+        if proxy is not None:
+            proxy.close()
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+        if completed:
+            shutil.rmtree(state)
+        else:
+            print(f"retained persistent opening failure state: {state}", file=sys.stderr)
+
+
+def persistent_pending_case():
+    """Opening counts the frozen queue beyond its newest Activity page."""
+    import canonical_failure_integration as canonical
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-pending."))
+    home = state / "home"
+    home.mkdir(mode=0o700)
+    store = state / "store"
+    release, captured, opening_release = threading.Event(), threading.Event(), threading.Event()
+    endpoint = fixture.SuccessEndpoint([(fixture.sse_answer("pending-a", "pending-r", "pending-m", "held answer")[0], release)])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = caller = proxy = None
+    master = slave = None
+    completed = False
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        run(home, "configure", "--store", store, "--session", "persistent/pending", "--workspace", state,
+            "--provider", "codex", "--model", "model-a")
+        admit(home, "message", "--store", store, "--session", "persistent/pending", "active original")
+        fixture.wait_for(lambda: len(endpoint.requests) == 1, "held first provider request")
+        for i in range(1, 25):
+            admit(home, "message", "--store", store, "--session", "persistent/pending", f"queued-{i:02d} é")
+
+        def hold_opening(response):
+            if len(proxy.exchanges) == 1:
+                captured.set()
+                assert opening_release.wait(15), "opening metadata gate was not released"
+            return response
+
+        proxy = canonical.ReplyProxy(host, "/v1/activity-page", hold_opening)
+        master, slave = pty.openpty()
+        caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
+            "--session", "persistent/pending"], env={**os.environ, "HOME": str(home)},
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        assert captured.wait(10), "opening did not capture its page"
+        admit(home, "message", "--store", store, "--session", "persistent/pending", "late queued beyond snapshot")
+        opening_release.set()
+        output = read_terminal(master, "rui> ")
+        assert "24 pending at opening snapshot" in output, ("opening counted only its newest page or fresh Current", output)
+        previews = [line for line in output.splitlines() if "Rui: queued preview: " in line]
+        assert len(previews) == 4, previews
+        for i, preview in enumerate(previews, 1):
+            assert preview.endswith(f"queued-{i:02d} é"), previews
+        assert len(endpoint.requests) == 1, "opening dispatched queued work"
+        os.write(master, b"\x03")
+        read_terminal(master, "Detached.")
+        _, errors = caller.communicate(timeout=5)
+        assert caller.returncode == 0, errors
+        completed = True
+        print("persistent pending: exact frozen 24 beyond newest 16, oldest four previews, late admission excluded passed", flush=True)
+    finally:
+        opening_release.set()
+        if caller is not None and caller.poll() is None:
+            caller.kill()
+            caller.wait(timeout=5)
+        if master is not None:
+            os.close(master)
+            os.close(slave)
+        if proxy is not None:
+            proxy.close()
+        if host is not None:
+            fixture.stop_host(host)
+        release.set()
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+        if completed:
+            shutil.rmtree(state)
+        else:
+            print(f"retained persistent pending failure state: {state}", file=sys.stderr)
+
+
 def persistent_input_cases():
     """Real captured Admission, a next draft, original replay and input recovery."""
     import canonical_failure_integration as canonical
@@ -574,6 +819,8 @@ int fsync(int fd) {
 def main():
     import canonical_failure_integration
     import terminal_restoration_integration
+    persistent_opening_case()
+    persistent_pending_case()
     persistent_input_cases()
     persistent_permission_case()
     terminal_restoration_integration.main()

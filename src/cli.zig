@@ -1,6 +1,7 @@
 const std = @import("std");
 const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalText = @import("TerminalText.zig");
+const AnswerRenderer = @import("AnswerRenderer.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const client = @import("client.zig");
 const codex_auth = @import("codex_auth.zig");
@@ -37,6 +38,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, command, "login")) return login(init, args[2..], false, codex_auth.login);
     if (std.mem.eql(u8, command, "host")) return host(init, args[2..]);
+    if (std.mem.eql(u8, command, "read-conversation")) return readConversation(init, args[2..]);
     if (std.mem.eql(u8, command, "setup")) try setup(init, args[2..]) else if (std.mem.eql(u8, command, "sessions")) try sessions(init, args[2..]) else if (std.mem.eql(u8, command, "session")) try enterSession(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, args[2..], false) else return usage();
     try postCommandHold(init);
 }
@@ -1753,6 +1755,43 @@ fn inspect(init: std.process.Init, args: []const []const u8) !void {
     }
 }
 
+fn readConversation(init: std.process.Init, args: []const []const u8) !void {
+    var store_path: ?[]const u8 = null;
+    var session: ?[]const u8 = null;
+    var store_hex: [protocol.max_store_bytes]u8 = undefined;
+    var session_hex: [protocol.max_session_bytes]u8 = undefined;
+    var position: ?u64 = null;
+    var ordinal: ?u64 = null;
+    var index: usize = 0;
+    while (index < args.len) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--store") or std.mem.eql(u8, arg, "--store-hex")) {
+            if (store_path != null) return error.DuplicateArgument;
+            const value = try takeValue(args, &index);
+            store_path = if (std.mem.eql(u8, arg, "--store-hex")) try decodeHexIdentity(value, &store_hex) else value;
+        } else if (std.mem.eql(u8, arg, "--session") or std.mem.eql(u8, arg, "--session-hex")) {
+            if (session != null) return error.DuplicateArgument;
+            const value = try takeValue(args, &index);
+            session = if (std.mem.eql(u8, arg, "--session-hex")) try decodeHexIdentity(value, &session_hex) else value;
+        } else if (std.mem.eql(u8, arg, "--position")) position = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else if (std.mem.eql(u8, arg, "--ordinal")) ordinal = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else return error.UnknownArgument;
+        index += 1;
+    }
+    const reference = session orelse return usage();
+    const target = position orelse return usage();
+    const item = ordinal orelse return usage();
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const requests_: client.Requests = .{ .io = init.io };
+    if (try requests_.readConversationContent(try selectedStore(init, store_path, &selected_buffer), reference, target, item, null, std.Io.File.stdout())) |failure| {
+        try writeReadFailure(init.io, failure, reference);
+        return failure.err();
+    }
+}
+
+fn decodeHexIdentity(encoded: []const u8, buffer: []u8) ![]const u8 {
+    if (encoded.len % 2 != 0 or encoded.len / 2 > buffer.len) return error.InvalidHexIdentity;
+    return std.fmt.hexToBytes(buffer[0 .. encoded.len / 2], encoded) catch error.InvalidHexIdentity;
+}
+
 fn readResult(init: std.process.Init, args: []const []const u8) !void {
     const io = init.io;
     var store_path: ?[]const u8 = null;
@@ -2208,9 +2247,15 @@ fn showResult(init: std.process.Init, saved: *const client.MessageAddress, prese
     }
     if (presentation == .interactive) try std.Io.File.stdout().writeStreamingAll(init.io, "Assistant: ");
     var read_buffer: client.ReplyBuffer = .{};
-    const answer = try client.readResult(init.io, saved.store.slice(), saved.key.slice(), std.Io.File.stdout(), &read_buffer);
+    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var output = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
+    var renderer: AnswerRenderer = .{ .out = &output.interface };
+    const answer = try client.readResultStream(init.io, saved.store.slice(), saved.key.slice(), &renderer, &read_buffer);
     switch (answer) {
-        .answer => {},
+        .answer => {
+            try renderer.finish();
+            try output.flush();
+        },
         .failure => |failure| {
             try writeReadFailure(init.io, failure, saved.key.slice());
             return failure.err();
@@ -2548,6 +2593,7 @@ fn usage() error{InvalidArguments} {
         \\  rui retry --store PATH --record FILE --kind configure|message|session-stop|model-interruption|permission-decision
         \\  rui observe-command --store PATH --key KEY
         \\  rui read-result --store PATH --key KEY
+        \\  rui read-conversation [--store PATH|--store-hex HEX] --session REF|--session-hex HEX --position POSITION --ordinal ORDINAL
         \\  rui read-action-call-id --store PATH --session REF --action ID
         \\  rui read-action-arguments --store PATH --session REF --action ID
         \\  rui inspect-session --store PATH --session REF [--profile current|full]

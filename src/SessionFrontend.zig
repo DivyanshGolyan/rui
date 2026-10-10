@@ -6,7 +6,8 @@ const protocol = @import("protocol.zig");
 const Input = @import("SessionInput.zig");
 const Task = @import("ClientTask.zig");
 const Terminal = @import("SessionTerminal.zig");
-const Text = @import("TerminalText.zig");
+const View = @import("session_view.zig");
+const History = @import("session_history.zig");
 const Self = @This();
 
 pub const Command = *const fn (std.process.Init, []const u8, []const u8, []u8) anyerror!void;
@@ -31,6 +32,10 @@ current: client.Current = undefined,
 observed: client.Current = undefined,
 cursor: client.ActivityCursor = .{},
 next_cursor: client.ActivityCursor = .{},
+history_cursor: ?client.ConversationCursor = null,
+next_history_cursor: ?client.ConversationCursor = null,
+history_requested: bool = false,
+read_phase: enum { activity, history_preparing, history_rendering } = .activity,
 opening: bool = true,
 poll_at: i96 = 0,
 dirty: bool = true,
@@ -117,8 +122,18 @@ fn driveActive(self: *Self) !void {
                     try self.admission.start(self.init.io, self, resend);
             }
         };
-        if (self.reader.thread == null and std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at)
-            try self.reader.start(self.init.io, self, scan);
+        if (self.reader.thread == null) {
+            if (self.history_requested) {
+                self.history_requested = false;
+                if (self.history_cursor != null) {
+                    self.read_phase = .history_preparing;
+                    try self.reader.start(self.init.io, self, history);
+                } else self.notice = "No older Conversation rows.";
+            } else if (std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at) {
+                self.read_phase = .activity;
+                try self.reader.start(self.init.io, self, scan);
+            }
+        }
         if (self.notice) |notice| {
             self.notice = null;
             try self.terminal.permanent("\nRui: ");
@@ -191,7 +206,12 @@ fn step(self: *Self, wait: i32) !bool {
             try self.admission.start(self.init.io, self, submit);
         },
         .command => {
-            if (std.mem.eql(u8, self.input.command_buffer[0..self.input.command_length.?], "/exit")) self.detached = true;
+            const text = self.input.command_buffer[0..self.input.command_length.?];
+            if (std.mem.eql(u8, text, "/exit")) self.detached = true else if (std.mem.eql(u8, text, "/history")) {
+                // Local read work never cancels the independent Admission owner.
+                self.input.command_length = null;
+                self.history_requested = true;
+            }
         },
         .busy => self.notice = "Submission unresolved; editing remains available. Recover the original request, not replacement intent.",
         .editor => |event| switch (event) {
@@ -262,10 +282,21 @@ fn settleAdmission(self: *Self) !void {
 
 fn settleReader(self: *Self) !void {
     if (self.reader.thread == null) return;
-    try self.reader.join();
-    self.current = self.observed;
-    self.cursor = self.next_cursor;
-    self.opening = false;
+    self.reader.join() catch |err| {
+        if (self.read_phase != .history_preparing or err == error.CanonicalStoreFailure or err == error.Cancelled) return err;
+        self.notice = "History unavailable; older cursor and draft retained.";
+        self.dirty = true;
+        return;
+    };
+    if (self.read_phase == .history_rendering) {
+        self.history_cursor = self.next_history_cursor;
+        self.notice = "History page complete.";
+    } else {
+        self.current = self.observed;
+        self.cursor = self.next_cursor;
+        if (self.opening) self.history_cursor = self.next_history_cursor;
+        self.opening = false;
+    }
     self.poll_at = std.Io.Clock.awake.now(self.init.io).nanoseconds + 250_000_000;
     self.dirty = true;
 }
@@ -316,7 +347,7 @@ fn handoff(self: *Self) !void {
             } else if (std.mem.eql(u8, text, "/wait") or std.mem.eql(u8, text, "/login")) {
                 self.notice = "Staged persistent mode has no nested approval/login prompt. Ctrl-G inspects; use explicit one-shot commands for decisions/login.";
             } else if (std.mem.eql(u8, text, "/help")) {
-                try std.Io.File.stdout().writeStreamingAll(self.init.io, "Rui: /status /requests /result KEY /setup /configure /recover KEY /discard /exit. Ctrl-R retries the original uncertain capture; Ctrl-G inspects the fresh exact Action without granting approval. Decisions and login use explicit one-shot commands. This staged mode renders new activity only; full opening/history is not implemented.\n");
+                try std.Io.File.stdout().writeStreamingAll(self.init.io, "Rui: /status /history /requests /result KEY /setup /configure /recover KEY /discard /exit. Opening replays the newest 16 Activity rows; /history reads older Conversation pages at that frozen end. Historical items over 8192 raw bytes are omitted with a raw export command. Ctrl-R retries the original uncertain capture; Ctrl-G inspects the fresh exact Action without granting approval. Decisions and login use explicit one-shot commands.\n");
             } else try self.command(self.init, self.store, self.session, text);
         }
     }
@@ -328,24 +359,7 @@ fn handoff(self: *Self) !void {
 fn scan(raw: *anyopaque, task: *Task) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const requests = task.requests();
-    try self.scratch.setLength(task.io, 0);
-    const Capture = struct {
-        io: std.Io,
-        file: std.Io.File,
-        offset: u64 = 0,
-        pub fn feed(s: *@This(), bytes: []const u8) !void {
-            try s.file.writePositionalAll(s.io, bytes, s.offset);
-            s.offset += bytes.len;
-        }
-    };
-    var capture: Capture = .{ .io = task.io, .file = self.scratch };
-    var response: client.ReplyBuffer = .{};
-    const report = try requests.inspectSession(self.store, self.session, .current, &capture, &response);
-    self.observed = switch (try client.CurrentReply.decode(task.io, self.scratch, self.session, report)) {
-        .current => |current| current,
-        .unconfigured => return error.SessionNotConfigured,
-        .failure => |failure| return failure.err(),
-    };
+    self.observed = try View.current(requests, self.store, self.session, self.scratch);
     var cursor = self.cursor;
     if (self.opening) cursor.direction = .backward;
     const page = switch (try requests.activityPage(self.store, self.session, cursor)) {
@@ -353,61 +367,31 @@ fn scan(raw: *anyopaque, task: *Task) !void {
         .failure => |failure| return failure.err(),
     };
     if (self.opening) {
+        self.next_history_cursor = if (page.facts.more) .{ .end = page.facts.end } else null;
+        if (page.facts.more) for (page.facts.items[0..page.facts.count]) |item| {
+            switch (item.value) {
+                .user, .assistant, .tool_result => self.next_history_cursor = .{ .end = page.facts.end, .before_position = item.position, .before_ordinal = item.ordinal },
+                else => {},
+            }
+        };
+        const pending = try View.pending(requests, self.store, self.session, page.facts.end);
+        try pending.render(requests, self.store, self.session, task);
+    }
+    try View.render(requests, self.store, self.session, &page, task);
+    if (self.opening) {
         self.next_cursor = .{ .position = page.facts.end };
         return;
-    }
-    for (page.facts.items[0..page.facts.count]) |item| {
-        switch (item.value) {
-            .admission => |message| try content(self, task, item, message.content, "You: ", .line),
-            .assistant => |reference| try content(self, task, item, reference, "Assistant: ", .multiline),
-            .user, .tool_result => {},
-            .call => |call| {
-                var storage: [160]u8 = undefined;
-                try task.feed(try std.fmt.bufPrint(&storage, "Rui: proposal {d} (inspection only); Ctrl-G for exact pending Action.\n", .{call.position}));
-            },
-            .outcome => |outcome| if (!outcome.code.eql("completed")) {
-                try task.feed("Rui: saved work outcome: ");
-                try task.feed(outcome.code.slice());
-                try task.feed("\n");
-            },
-            .stop => try task.feed("Rui: Session stop accepted.\n"),
-        }
     }
     self.next_cursor = page.continuation() orelse .{ .position = page.facts.end };
     if (page.facts.more) return;
     self.next_cursor.end = null;
 }
 
-fn content(self: *Self, task: *Task, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, label: []const u8, mode: Text.Mode) !void {
-    const Sink = struct {
-        task: *Task,
-        text: Text,
-        length: u64 = 0,
-        hash: std.crypto.hash.sha2.Sha256 = protocol.contentHasher(),
-        pub fn feed(s: *@This(), bytes: []const u8) !void {
-            s.length += bytes.len;
-            s.hash.update(bytes);
-            var storage: [256]u8 = undefined;
-            var out = std.Io.Writer.fixed(&storage);
-            for (bytes) |byte| {
-                if (storage.len - out.end < 16) {
-                    try s.task.feed(out.buffered());
-                    out.end = 0;
-                }
-                try s.text.feed(&out, &.{byte});
-            }
-            if (out.end != 0) try s.task.feed(out.buffered());
-        }
-    };
-    try task.feed(label);
-    var sink: Sink = .{ .task = task, .text = .{ .mode = mode } };
-    if (try task.requests().readActivityContent(self.store, self.session, item.position, item.ordinal, &sink)) |failure| return failure.err();
-    var digest: [32]u8 = undefined;
-    sink.hash.final(&digest);
-    if (sink.length != reference.length or !std.mem.eql(u8, &digest, &reference.digest)) return error.ContentBindingMismatch;
-    var storage: [16]u8 = undefined;
-    var out = std.Io.Writer.fixed(&storage);
-    try sink.text.finish(&out);
-    try task.feed(out.buffered());
-    try task.feed("\n");
+fn history(raw: *anyopaque, task: *Task) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const prepared = try History.prepare(task.requests(), self.store, self.session, self.history_cursor.?, self.scratch);
+    // Joined errors before this point retain the cursor without visible content.
+    self.read_phase = .history_rendering;
+    try prepared.render(task.io, self.scratch, self.store, self.session, task);
+    self.next_history_cursor = prepared.page.continuation();
 }
