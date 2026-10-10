@@ -15,7 +15,7 @@ import threading
 from control_integration import command, configure, inspect_execution, message, observe, start_host, stop_session, successful_sse, wait_for
 from conversation_page_integration import host_resources, request
 from dispatch_integration import sse_tool_calls
-from host_process import TestHTTPServer, stop_process
+from host_process import TestHTTPServer, canonical_fixture_root, stop_process
 from proposal_integration import digest
 
 CALLER = pathlib.Path(sys.argv[2]).resolve()
@@ -110,7 +110,7 @@ def main():
         def log_message(self, *_args): pass
 
     with tempfile.TemporaryDirectory(prefix="rui-activity-") as root:
-        state = pathlib.Path(root)
+        state = canonical_fixture_root(root)
         store = state / "store"
         store.mkdir(mode=0o700)
         endpoint = TestHTTPServer(("127.0.0.1", 0), Handler)
