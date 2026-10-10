@@ -4,8 +4,8 @@ Build the driver with:
 zig build-exe -O ReleaseSafe -lc --dep preferences \
   -Mroot=tests/integration/preference_policy.zig -Mpreferences=src/preferences.zig \
   -femit-bin=zig-out/bin/preference-policy
-Then run this file with that binary's path. Linux fsync interposition is not
-power-loss evidence; other platforms run privacy cases and report the skip.
+Then run this file with that binary's path. Linux/Darwin fsync interposition
+is returned-error evidence, not power-loss evidence; other platforms report the skip.
 """
 import os
 from pathlib import Path
@@ -62,12 +62,12 @@ def main():
             run("login", error=error)
             assert saved.read_bytes() == invalid
         saved.write_bytes(old)
-        if sys.platform != "linux":
-            print("PASS preference privacy; fsync injection UNAVAILABLE (Linux only)")
+        if sys.platform not in ("linux", "darwin"):
+            print("PASS preference privacy; fsync injection UNAVAILABLE (Linux/Darwin only)")
             return
 
         source = root / "sync.c"
-        shim = root / "sync.so"
+        shim = root / ("sync.dylib" if sys.platform == "darwin" else "sync.so")
         trace = root / "sync.trace"
         source.write_text(r'''
 #define _GNU_SOURCE
@@ -77,10 +77,15 @@ def main():
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
-int fsync(int fd) {
+static int probe_sync(int fd) {
     static unsigned directories;
     struct stat st;
+#ifdef __APPLE__
+    /* dyld exempts references in the tuple-owning image from replacement. */
+    int (*real_sync)(int) = fsync;
+#else
     int (*real_sync)(int) = dlsym(RTLD_NEXT, "fsync");
+#endif
     if (fstat(fd, &st) || !S_ISDIR(st.st_mode)) return real_sync(fd);
     directories++;
     int log = open(getenv("RUI_SYNC_TRACE"), O_WRONLY|O_CREAT|O_APPEND, 0600);
@@ -92,13 +97,22 @@ int fsync(int fd) {
     }
     return real_sync(fd);
 }
+#ifdef __APPLE__
+__attribute__((used)) static const struct { const void *replacement; const void *original; }
+    sync_interpose __attribute__((section("__DATA,__interpose"))) =
+        { (const void *)&probe_sync, (const void *)&fsync };
+#else
+int fsync(int fd) { return probe_sync(fd); }
+#endif
 ''')
-        subprocess.run(["cc", "-shared", "-fPIC", str(source), "-ldl", "-o", str(shim)], check=True)
+        compiler = ["cc", "-dynamiclib", str(source)] if sys.platform == "darwin" else ["cc", "-shared", "-fPIC", str(source), "-ldl"]
+        subprocess.run([*compiler, "-o", str(shim)], check=True)
+        injection = "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD"
         for cut in (1, 2, 3):
             trace.unlink(missing_ok=True)
             saved.write_bytes(old)
             run("set", "new-pin", error="PreferenceDirectorySyncFailed",
-                extra={"LD_PRELOAD": str(shim), "RUI_SYNC_TRACE": str(trace), "RUI_SYNC_CUT": str(cut)})
+                extra={injection: str(shim), "RUI_SYNC_TRACE": str(trace), "RUI_SYNC_CUT": str(cut)})
             assert trace.read_bytes() == b"123"[:cut], "fault missed real directory sync"
             expected = old if cut < 3 else b"version=1\nstore=\nprovider=codex\nmodel=new-pin\n"
             assert saved.read_bytes() == expected, "partial/incorrect publication"
