@@ -16,7 +16,7 @@ import time
 
 import control_integration as control
 import dispatch_integration as model
-from host_process import stop_process
+from host_process import canonical_fixture_root, stop_process
 
 
 def exchange(sock, store, route, kind, **fields):
@@ -59,7 +59,7 @@ def resources(pid):
 
 def main():
     with tempfile.TemporaryDirectory(prefix="rui-reply-") as root:
-        state = pathlib.Path(root)
+        state = canonical_fixture_root(root)
         store = state / "store"
         store.mkdir(mode=0o700)
         text = "é中\n" + "asymmetric-0123456789\n" * 12_000

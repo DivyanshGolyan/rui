@@ -112,6 +112,14 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(execution_batches(["current-facts-integration", "server-delivery-integration"]),
                          [["current-facts-integration"], ["server-delivery-integration"]])
 
+    def test_standalone_helper_routes_add_without_losing_existing_consumers(self):
+        for path, owner in (("host_process.py", "check"),
+                            ("control_integration.py", "control-integration"),
+                            ("canonical_failure_integration.py", "canonical-failure-integration")):
+            result = select([f"tests/integration/{path}"], "review", AVAILABLE)
+            for family in ("targets", "native_targets"):
+                self.assertIn(owner, result[family])
+
     def test_ci_policy_does_not_make_build_qualification_universal(self):
         for path in (".github/workflows/check.yml",
                      "tests/ci/select_tests.py", "tests/ci/run_selected.py"):
@@ -191,7 +199,8 @@ class SelectionTest(unittest.TestCase):
                    "evaluator-host-integration"]
         self.assertEqual(execution_batches(targets), [
             ["workflow-check", "evaluator-host-integration"],
-            ["test", "dispatch-integration", "transport-h2-integration"],
+            ["test", "dispatch-integration"],
+            ["transport-h2-integration"],
             ["test-full"], ["evaluator-churn"], ["admission-debug-integration"],
             ["host-launch-integration"], ["check-full"],
         ])

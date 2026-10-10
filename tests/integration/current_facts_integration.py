@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Real producer replies through the existing Current CLI consumer boundary."""
 import json
-import pathlib
 import re
 import tempfile
 
 import canonical_failure_integration as canonical
 import dispatch_integration as fixture
+from host_process import canonical_fixture_root
 
 
 with tempfile.TemporaryDirectory(prefix="rui-current-facts-") as temporary:
-    state = pathlib.Path(temporary)
+    state = canonical_fixture_root(temporary)
     store = state / "store"
     host = fixture.start_host(store, None)
     try:

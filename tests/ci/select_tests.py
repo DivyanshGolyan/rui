@@ -61,6 +61,13 @@ RULES = (
      ("current-facts-integration",), ("current-facts-integration",), "Current producer/consumer oracle"),
     (("tests/integration/server_delivery_integration.py", "build.zig"),
      ("server-delivery-integration",), ("server-delivery-integration",), "Real reply inactivity and Host drain"),
+    (("tests/integration/canonical_failure_integration.py", "tests/integration/dispatch_integration.py",
+      "tests/integration/host_process.py", "build.zig"),
+     ("canonical-failure-integration",), ("canonical-failure-integration",), "Canonical failure caller oracle"),
+    (("tests/integration/host_process.py", "tests/integration/canonical_failure_integration.py"),
+     ("check",), ("check",), "Shared fixture helpers retain existing composed consumers"),
+    (("tests/integration/control_integration.py",),
+     ("control-integration",), ("control-integration",), "Control helper remains an executable fixture"),
     (("tests/integration/dispatch_integration.py", "tests/integration/host_process.py",
       "tests/integration/canonical_failure_integration.py"),
      ("current-facts-integration",), ("current-facts-integration",), "Current oracle's imported fixture owners"),
@@ -103,7 +110,8 @@ def execution_batches(targets, check_part="all"):
     if check_part not in {"all", "callers"}:
         raise ValueError(f"Unknown full-check part: {check_part}")
     isolated = {"check", "check-full", "admission-debug-integration", "test-full",
-                "evaluator-churn", "host-launch-integration", "server-delivery-integration"}
+                "evaluator-churn", "host-launch-integration", "server-delivery-integration",
+                "transport-h2-integration", "codex-h2-integration"}
     evaluator = [target for target in targets
                  if target in {"workflow-check", "evaluator-host-integration"}]
     shared = [target for target in targets if target not in isolated and target not in evaluator]

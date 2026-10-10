@@ -211,6 +211,11 @@ pub fn build(b: *std.Build) void {
     current_facts_integration.addArtifactArg(release_safe);
     b.step("current-facts-integration", "Run the real Current producer/consumer observation oracle").dependOn(&current_facts_integration.step);
 
+    const canonical_failure_integration = b.addSystemCommand(&.{"python3"});
+    canonical_failure_integration.addFileArg(b.path("tests/integration/canonical_failure_integration.py"));
+    canonical_failure_integration.addArtifactArg(release_safe);
+    b.step("canonical-failure-integration", "Run canonical invocation failure at real producer and caller boundaries").dependOn(&canonical_failure_integration.step);
+
     const server_delivery_integration = b.addSystemCommand(&.{"python3"});
     server_delivery_integration.addFileArg(b.path("tests/integration/server_delivery_integration.py"));
     server_delivery_integration.addArtifactArg(release_safe);
