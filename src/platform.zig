@@ -708,7 +708,7 @@ test "startup cleanup refuses an owned name with the wrong type" {
 }
 
 test "startup cleanup refuses owned symlink and socket names" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = try @import("socket_fixture.zig").Directory.init();
     defer tmp.cleanup();
     const target = try tmp.dir.createFile(std.testing.io, "target", .{});
     target.close(std.testing.io);
@@ -725,11 +725,8 @@ test "startup cleanup refuses owned symlink and socket names" {
     );
     try tmp.dir.deleteFile(std.testing.io, "request-1-1.tmp");
 
-    var root_path_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const root_path = root_path_buffer[0..try tmp.dir.realPath(std.testing.io, &root_path_buffer)];
-    var socket_path_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const socket_path = try std.fmt.bufPrint(&socket_path_buffer, "{s}/response-1-1.tmp", .{root_path});
-    const address = try std.Io.net.UnixAddress.init(socket_path);
+    var socket_path_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const address = try tmp.address("response-1-1.tmp", &socket_path_buffer);
     var listener = try address.listen(std.testing.io, .{});
     defer listener.deinit(std.testing.io);
     try std.testing.expectError(
@@ -743,13 +740,11 @@ test "startup cleanup refuses owned symlink and socket names" {
 }
 
 test "startup reclaims only a stale Unix socket" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = try @import("socket_fixture.zig").Directory.init();
     defer tmp.cleanup();
-    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var socket_path_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const socket_path = try std.fmt.bufPrint(&socket_path_buffer, "{s}/stale.sock", .{root});
-    const address = try std.Io.net.UnixAddress.init(socket_path);
+    var socket_path_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const address = try tmp.address("stale.sock", &socket_path_buffer);
+    const socket_path = address.path;
     var listener = try address.listen(std.testing.io, .{});
     try reclaimStaleSocket(std.testing.io, socket_path);
     try std.testing.expectError(

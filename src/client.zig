@@ -5021,12 +5021,10 @@ test "transport cancellation quanta neither expire nor renew inactivity and obse
 test "transport cancellation saturated Unix backlog is not a connected writable socket" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    var tmp = try @import("socket_fixture.zig").Directory.init();
     defer tmp.cleanup();
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
-    var address_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const address = try std.Io.net.UnixAddress.init(try std.fmt.bufPrint(&address_buffer, "{s}/socket", .{root}));
+    var address_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const address = try tmp.address("socket", &address_buffer);
     var listener = try address.listen(io, .{ .kernel_backlog = 0 });
     defer listener.deinit(io);
     const queued = try address.connect(io);
