@@ -777,7 +777,9 @@ def main():
             os.close(slave)
             try:
                 welcome = read_terminal(master, "rui> ")
-                assert ("Bash runs without approval" in welcome) == warning, welcome
+                assert f"Permission: {mode}\n" in welcome, welcome
+                assert "Bash runs without approval" not in welcome, welcome
+                assert "Bash commands can run without asking you" not in welcome, welcome
                 status = terminal_step(master, "/status")
                 assert ("Bash runs without approval" in status) == warning, status
                 terminal_step(master, "/exit", "Detached.")
@@ -805,6 +807,8 @@ def main():
                 assert saved["session"] == reference and saved["configuration"]["workspace"] == {"state": "value", "value": str(workspace.resolve())}
                 assert saved["configuration"]["tools"] == {"state": "value", "value": ["bash"]} and saved["configuration"]["permission_mode"] == {"state": "value", "value": "bypass"}
                 assert f"Session: {reference}" in welcome and "Permission: bypass" in welcome, welcome
+                assert "Bash runs without approval" not in welcome, welcome
+                assert "Bash commands can run without asking you" not in welcome, welcome
                 assert f"Workspace (Bash cwd): {workspace.resolve()}" in welcome, welcome
                 assert "Model: gpt-6-luna" in welcome and "Provider: codex" in welcome, welcome
                 current = fixture.command("inspect-session", "--store", store, "--session", reference)
@@ -1565,8 +1569,9 @@ def main():
         os.close(slave)
         try:
             greeting = read_terminal(master, "rui> ")
-            assert "Permission: bypass (Bash runs without approval)" in greeting, greeting
-            assert "Rui: Bash commands can run without asking you." in greeting, greeting
+            assert "Permission: bypass\n" in greeting, greeting
+            assert "Bash runs without approval" not in greeting, greeting
+            assert "Bash commands can run without asking you" not in greeting, greeting
             assert "Provider: codex" in greeting and "Model: model-a" in greeting, greeting
             fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
             before = len(endpoint.requests)
