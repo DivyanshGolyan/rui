@@ -10,8 +10,10 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from host_process import (
     READINESS_LIMIT,
@@ -93,6 +95,7 @@ def main():
     prove_private_environment()
     prove_coalesced_phase_records()
     prove_observation_channel()
+    prove_observation_disposal()
     prove_short_optional_receipt()
     prove_gate_broadcast()
 
@@ -333,6 +336,163 @@ def prove_final_observation_state():
                 assert case == "normal", (plan, case, "terminal channel loss accepted")
                 observations.close()  # Idempotent readback after mapping custody ends.
     print("Host final observation helper: every plan rejects final loss, encoding loss, missing tail, interrupted publication and missing/foreign state with kill status; normal prefix accepted")
+
+
+def prove_observation_disposal():
+    import ctypes
+    from host_process import OBSERVATION_LIMITS, OBSERVATION_SEALED, _observation_atomics
+    native = _observation_atomics()
+    for plan in OBSERVATION_LIMITS:
+        for case in ("held-final", "late-loss", "missing-tail", "missing-endpoint"):
+            reader, writer = os.pipe()
+            process = SimpleNamespace(pid=os.getpid(), poll=lambda: None, stderr=io.BytesIO())
+            state = observation_state(process.pid, 4 if case == "missing-tail" else 2,
+                                      active=int(case == "held-final"))
+            observations = _Observations(process, reader, plan, state)
+            process.rui_observations = observations
+            diagnostics = HostDiagnostics(process)
+            os.write(writer, observation_frame(1))
+            diagnostics.wait("ordinary_classification_released", timeout=1)
+            address = ctypes.addressof(ctypes.c_char.from_buffer(state))
+            result = []
+            def dispose():
+                try:
+                    observations.dispose(time.monotonic() + .2)
+                except BaseException as error:
+                    result.append(error)
+                else:
+                    result.append(None)
+            if case == "late-loss":
+                # Synthetic post-seal loss stays sticky; the real native
+                # late-attempt/SIGKILL ordering is separately exercised in Zig.
+                state[24] = 3
+            worker = threading.Thread(target=dispose)
+            worker.start()
+            deadline = time.monotonic() + 1
+            while not native.observation_load(address + 32) & OBSERVATION_SEALED:
+                assert time.monotonic() < deadline, "fixture failed to seal native admission"
+                time.sleep(.001)
+            if case == "held-final":
+                assert worker.is_alive() and not result, "received final frame falsely proved retirement"
+                # Synthetic retirement shadow: only the count byte changes.
+                # The native regression holds the actual record call here.
+                state[32] = 0
+            worker.join(1)
+            assert not worker.is_alive(), "bounded disposal worker leaked"
+            if case in ("held-final", "missing-endpoint"):
+                assert result == [None], result
+                assert native.observation_load(address + 32) == OBSERVATION_SEALED
+                if case == "missing-endpoint":
+                    try:
+                        diagnostics.wait("cleanup_completed", operation="7", timeout=.02)
+                    except AssertionError as error:
+                        assert "timed out waiting" in str(error), error
+                    else:
+                        raise AssertionError("sealed zero-active channel invented a required endpoint")
+            else:
+                assert len(result) == 1 and isinstance(result[0], AssertionError), result
+                assert ("native loss" if case == "late-loss" else "disposal budget") in str(result[0]), result
+            os.close(writer)
+            process.poll = lambda: -9
+            try:
+                diagnostics.close()
+            except AssertionError as error:
+                assert case in ("late-loss", "missing-tail"), error
+            else:
+                assert case in ("held-final", "missing-endpoint")
+    # Actual pre-teardown helper copy survives deletion of its private root,
+    # without Store/HOME reads or a new retention service.
+    with tempfile.TemporaryDirectory() as destination:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "store").mkdir()
+            (root / "store/private").write_bytes(b"private Store bytes")
+            process = SimpleNamespace(pid=os.getpid(), poll=lambda: None,
+                                      args=["rui", "serve", "--store", root / "store"])
+            reader, writer = os.pipe()
+            observations = _Observations(process, reader, "status", observation_state(process.pid, 0))
+            snapshot = observations.snapshot()
+            os.close(writer)
+            process.poll = lambda: -9
+            observations.close()
+            with patch.dict(os.environ, RUI_FAILURE_ARTIFACTS=destination):
+                observations.preserve_failure(snapshot)
+        paths = list(pathlib.Path(destination).rglob("observation-failure-*.json"))
+        assert len(paths) == 1 and not list(pathlib.Path(destination).rglob("private"))
+        snapshot = json.loads(paths[0].read_bytes())
+        assert snapshot["returncode"] is None and not snapshot["atomic_census"]
+        assert snapshot["records"] == [] and snapshot["shared_state"] == [1, os.getpid(), 37, 0, 0]
+    print("Host disposal: every plan drains held final custody, seals admission, refuses late loss/missing tail and missing endpoint; pre-teardown retention survives root removal")
+    prove_retention_does_not_own_teardown()
+
+
+def prove_retention_does_not_own_teardown():
+    import host_process
+    import run_selected  # Loaded by the preceding real retention helper call.
+    # Sampling itself is optional, including failures before write_text/open.
+    with tempfile.TemporaryDirectory() as directory:
+        try:
+            raise AssertionError("original fixture failure")
+        except AssertionError as original:
+            assert not host_process.preserve_failure_metadata(pathlib.Path(directory) / "pty-failure.json",
+                lambda: os.read(-1, 1))
+            assert sys.exc_info()[1] is original, "metadata sampling replaced original failure"
+    for case in ("write-failure", "copy-failure", "late-loss"):
+        with tempfile.TemporaryDirectory() as destination, tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            reader, writer = os.pipe()
+            process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)",
+                "--store", str(root / "store")], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                pass_fds=(writer,))
+            os.close(writer)  # Only child custody now; kill must produce EOF.
+            state = observation_state(process.pid, 0)
+            observations = _Observations(process, reader, "status", state)
+            process.rui_observations = observations
+            copied = []
+            def copy(*args):
+                assert process.returncode == -9 and process.stdout.closed and process.stderr.closed
+                copied.append(True)
+                if case == "copy-failure":
+                    raise OSError("unavailable hosted destination")
+            original_kill = process.kill
+            def kill():
+                if case == "late-loss":
+                    state[24] = 1  # Synthetic native loss after successful seal.
+                original_kill()
+            original_open = pathlib.Path.open
+            def open_path(path, *args, **kwargs):
+                if case == "write-failure" and path.name.startswith("observation-failure-"):
+                    raise OSError("unavailable fixture destination")
+                return original_open(path, *args, **kwargs)
+            try:
+                with patch.dict(os.environ, RUI_FAILURE_ARTIFACTS=destination), \
+                        patch.object(run_selected, "retain_failure_logs", copy), \
+                        patch.object(pathlib.Path, "open", open_path), patch.object(process, "kill", kill):
+                    if case == "late-loss":
+                        try:
+                            stop_process(process, timeout=1)
+                        except AssertionError as error:
+                            assert "final native observation loss" in str(error), error
+                        else:
+                            raise AssertionError("post-seal loss became acceptance")
+                    else:
+                        try:
+                            raise AssertionError("original fixture failure")
+                        except AssertionError as original:
+                            stop_process(process, timeout=1)
+                            assert sys.exc_info()[1] is original, "optional retention replaced original failure"
+                assert process.returncode == -9 and process.stdout.closed and process.stderr.closed
+                assert not observations.thread.is_alive() and observations.final_state is not None
+                assert copied == ([] if case == "write-failure" else [True]), copied
+                if case == "late-loss":
+                    snapshot = json.loads(next(root.glob("observation-failure-*.json")).read_bytes())
+                    assert snapshot["stage"] == "pre_kill" and snapshot["shared_state"][3] == 0
+                    assert snapshot["post_reap_state"][3] == 1 and snapshot["final_error"] == "AssertionError"
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=1)
+    print("Host retention: sampling/write/copy refusal preserves original failure and actual SIGKILL/reap/closed custody; post-seal loss retains distinct pre/post states")
 
 
 if __name__ == "__main__":

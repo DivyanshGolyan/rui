@@ -19,7 +19,7 @@ import termios
 import threading
 import time
 
-from host_process import canonical_fixture_root
+from host_process import canonical_fixture_root, preserve_failure_metadata
 import dispatch_integration as fixture
 import codex_integration as codex_fixture
 
@@ -879,7 +879,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         if fragmented_paste:
             assert not select.select([ready_read], [], [], 1)[0], "unfinished chat paste opened consent scope"
             os.write(master, b"\x1b[201~\n")
-        action_ready(ready_read)
+        transcript += action_ready(ready_read, master)
         if "a: Allow once / d: Deny (Enter)" not in transcript:
             transcript += read_terminal(master, "a: Allow once / d: Deny (Enter)")
         assert "Capturing original" not in transcript and "Original reserved request" not in transcript, transcript
@@ -894,8 +894,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert not (state / "effect-count").exists(), "queued chat authorized an effect"
         for invalid in (b"Y\n", b"\x1b[200~a\x1b[201~\n"):
             os.write(master, invalid)
-            action_ready(ready_read)
             rejected = read_terminal(master, "a: Allow once / d: Deny (Enter)")
+            rejected += action_ready(ready_read, master)
             assert "Run Bash:" not in rejected, "invalid choice repeated command"
             assert set(records.glob("*.json")) == before_choice, "invalid choice captured authority"
             assert not (state / "effect-count").exists()
@@ -903,7 +903,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                                 ("/login", "Login uses rui login codex in your shell.")):
             os.write(master, (command + "\n").encode())
             restricted = read_terminal(master, notice)
-            action_ready(ready_read)
+            restricted += action_ready(ready_read, master)
             assert "Run Bash:" not in restricted, restricted
             assert set(records.glob("*.json")) == before_choice, "nested prompt created intent"
         current = fixture.command("inspect-session", "--store", store, "--session", reference)
@@ -929,14 +929,14 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             assert len(endpoint.requests) == 1
             os.write(master, b"\x01\x0b/discard\n")
             shown = read_terminal(master, second_command)
-            action_ready(ready_read)
+            shown += action_ready(ready_read, master)
             if "a: Allow once / d: Deny (Enter)" not in shown:
                 shown += read_terminal(master, "a: Allow once / d: Deny (Enter)")
             assert f"\n? Run Bash:\n  {second_command}\n" in shown, shown
             os.write(master, b"/details\n")
             details = read_terminal(master, "Details complete")
             assert "\n› requires permission" in details, details
-            action_ready(ready_read)
+            details += action_ready(ready_read, master)
             assert fixture.command("inspect-session", "--store", store, "--session", reference)["actionable_permissions"][0]["action"] == current["actionable_permissions"][1]["action"]
             os.write(master, b"/exit\n")
             assert caller.wait(timeout=5) == 0, caller.stderr.read()
@@ -1030,6 +1030,15 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         completed = True
         print(f"persistent permission: inline {decision}, lost={lost_reply}, fragmented={fragmented_paste}, quiet outcome, retained cursor, hidden-field validation and TERM cleanup passed", flush=True)
     finally:
+        if sys.exc_info()[0] is not None:
+            preserve_failure_metadata(state / "pty-failure.json", lambda: {
+                "case": "persistent_permission", "decision": decision,
+                "lost_reply": lost_reply, "fragmented_paste": fragmented_paste,
+                "error": sys.exc_info()[0].__name__,
+                "caller_returncode": caller.poll() if caller is not None else None,
+                "ready_pending": bool(select.select([ready_read], [], [], 0)[0]),
+                "terminal_pending": bool(select.select([master], [], [], 0)[0]) if master is not None else None,
+            })
         arguments_release.set()
         if caller is not None and caller.poll() is None:
             caller.kill()
@@ -1116,9 +1125,34 @@ def store_selection_cases(state, workspace, valid_store):
                 fixture.wait_for(lambda: "Host: unavailable" in run(home, "host", "status", "--store", destination), "created Host stopped")
 
 
-def action_ready(descriptor, timeout=15):
-    assert select.select([descriptor], [], [], timeout)[0], "Action input flush did not finish"
-    assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
+def action_ready(descriptor, master, timeout=15):
+    """Supply normal terminal credit until the actual fresh-input boundary.
+
+    Read exactly one notification, never a future choice's byte. Keep every
+    intervening output byte under the existing terminal transcript bound.
+    Deliberately withheld-credit controls must select the pipe directly.
+    """
+    deadline = time.monotonic() + timeout
+    output = bytearray()
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, ("Action input flush did not finish", bytes(output))
+        ready = select.select([descriptor, master], [], [], remaining)[0]
+        assert ready, ("Action input flush did not finish", bytes(output))
+        if master in ready:
+            output.extend(os.read(master, 65536))
+            assert len(output) < 1024 * 1024, "unexpected unbounded terminal output"
+        if descriptor in ready:
+            assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
+            # The notification follows the final write/flush. Collect its
+            # remaining queued bytes too, without waiting for another prompt.
+            while select.select([master], [], [], 0)[0]:
+                assert time.monotonic() < deadline, "Action transcript exceeded readiness deadline"
+                chunk = os.read(master, 65536)
+                assert chunk, "Action terminal closed at readiness"
+                output.extend(chunk)
+                assert len(output) < 1024 * 1024, "unexpected unbounded terminal output"
+            return re.sub(rb"\x1b\[(?:33|39|90|91|94)m", b"", output).decode(errors="replace").replace("\r\n", "\n")
 
 
 def provider_prompt(master, ready, command=None):
@@ -1129,9 +1163,7 @@ def provider_prompt(master, ready, command=None):
         os.write(master, (command + "\n").encode())
     deadline = time.monotonic() + 15
     output = read_terminal(master, "Provider: [c]", timeout=deadline - time.monotonic())
-    remaining = deadline - time.monotonic()
-    assert remaining > 0 and select.select([ready], [], [], remaining)[0], "provider input flush did not finish"
-    assert os.read(ready, 1) == b"x", "provider caller exited before readiness"
+    output += action_ready(ready, master, timeout=deadline - time.monotonic())
     assert not select.select([ready], [], [], 0)[0], "extra provider readiness"
     return output
 
@@ -1388,10 +1420,10 @@ def opaque_session_commands_case():
         actual = terminal_step(master, "/status")
         assert "Session: human/nul\\x00" in actual, (command, actual)
         os.write(master, b"propose two distinct Actions\n")
-        action_ready(ready_read)
+        proposal = action_ready(ready_read, master)
         for label, decision in (("Deny: ", "deny"), ("Allow once: ", "allow_once")):
             inspection = terminal_step(master, "/inspect-action", "Deny: ")
-            action_ready(ready_read)
+            inspection += action_ready(ready_read, master)
             while select.select([master], [], [], 0.05)[0]:
                 inspection += os.read(master, 65536).decode().replace("\r\n", "\n")
             printed = inspection.split(label, 1)[1].split("\n", 1)[0]
@@ -1431,6 +1463,13 @@ def opaque_session_commands_case():
         completed = True
         print("opaque Session: actual printed resume preserves NUL and rejects a configured prefix lookalike", flush=True)
     finally:
+        if sys.exc_info()[0] is not None:
+            preserve_failure_metadata(state / "pty-failure.json", lambda: {
+                "case": "opaque_session_commands", "error": sys.exc_info()[0].__name__,
+                "caller_returncode": entered.poll() if entered is not None else None,
+                "ready_pending": bool(select.select([ready_read], [], [], 0)[0]) if ready_read is not None else None,
+                "terminal_pending": bool(select.select([master], [], [], 0)[0]) if master is not None else None,
+            })
         if entered is not None and entered.poll() is None:
             entered.kill()
             entered.wait(timeout=5)
@@ -2325,12 +2364,12 @@ def main():
         os.close(slave)
         try:
             deadline = time.monotonic() + 15
-            read_terminal(master, "a: Allow once / d: Deny (Enter)", timeout=deadline - time.monotonic())
-            action_ready(ready_read, timeout=deadline - time.monotonic())
+            opening = read_terminal(master, "a: Allow once / d: Deny (Enter)", timeout=deadline - time.monotonic())
+            opening += action_ready(ready_read, master, timeout=deadline - time.monotonic())
             deadline = time.monotonic() + 15
             os.write(master, b"/status\n")
             status = read_terminal(master, "a: Allow once / d: Deny (Enter)", timeout=deadline - time.monotonic())
-            action_ready(ready_read, timeout=deadline - time.monotonic())
+            status += action_ready(ready_read, master, timeout=deadline - time.monotonic())
             assert status.count("Action requiring attention: ") == 2, status
             assert f"Action requiring attention: {pending}" in status and f"Action requiring attention: {running}" in status, status
             terminal_step(master, "/exit", "Detached.")
@@ -2357,7 +2396,7 @@ def main():
         os.close(slave)
         try:
             waiting = read_terminal(master, "a: Allow once / d: Deny (Enter)")
-            action_ready(ready_read)
+            waiting += action_ready(ready_read, master)
             assert "Run Bash:\n  printf x >> effect-count" in waiting, waiting
             assert counter.read_text() == "x" and not sibling_effect.exists(), "opening authorized pending sibling"
             run(home, "deny-action", "--store", store, "--session", sibling_session,
@@ -2587,7 +2626,7 @@ def main():
             assert "Permission:" not in read_terminal(master, "› ")
             os.write(master, b"interactive request\na\n")
             proposal = read_terminal(master, "a: Allow once / d: Deny (Enter)")
-            action_ready(ready_read)
+            proposal += action_ready(ready_read, master)
             assert counter.read_text() == "x", "pasted typeahead approved an unseen Action"
             assert "\n› interactive request" in proposal, proposal
             shown_command = proposal.split("\n? Run Bash:\n", 1)[1].split("\n  Workspace:", 1)[0]
@@ -2602,7 +2641,7 @@ def main():
             action_id = current_action["actionable_permissions"][0]["action"]
             assert [item["action"] for item in current_action["actionable_permissions"]] == [action_id], current_action
             inspection = terminal_step(master, "/inspect-action", "a: Allow once / d: Deny (Enter)")
-            action_ready(ready_read)
+            inspection += action_ready(ready_read, master)
             assert json.loads(inspection.split("Bash arguments: ", 1)[1].splitlines()[0]) == padded_arguments, inspection
             assert "\\r  " in inspection and "\u202e" not in inspection, inspection
             exact = json.loads(run(home, "inspect-action", "--store", store, "--session", interactive,
@@ -2616,7 +2655,7 @@ def main():
             before_choice = set(records.glob("*.json"))
             for invalid in ("l", " a ", "\x1b[200~a\x1b[201~", ""):
                 rejected_choice = terminal_step(master, invalid, "a: Allow once / d: Deny (Enter)")
-                action_ready(ready_read)
+                rejected_choice += action_ready(ready_read, master)
                 # The fresh explicit choice is the next action; a no-op need
                 # not add another notice to it. Durable effects are the oracle.
                 assert "a: Allow once / d: Deny (Enter)" in rejected_choice, (invalid, rejected_choice)

@@ -1,6 +1,8 @@
 """Bounded startup and cleanup for Host processes used by integration evidence."""
 
 import http.server
+import ctypes
+import functools
 import json
 import mmap
 import os
@@ -8,6 +10,7 @@ import pathlib
 import selectors
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -31,6 +34,7 @@ OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2,
                       "stop": 321 + 20 + 5 + 12 + 3 * 2 + 1 + 1,
                       "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 3 + 1}
 OBSERVATION_STATE_BYTES = 5 * 8  # version, pid, run, reserved count/loss, active writers.
+OBSERVATION_SEALED = 1 << 63
 OBSERVATION_FIELDS = (
     "rui_test_phase", "at_ns", "subject_kind", "subject", "turn", "operation",
     "attempt", "action", "scratch_used_bytes", "command_key", "kind", "control_key",
@@ -40,6 +44,40 @@ OBSERVATION_FIELDS = (
 )
 
 
+@functools.cache
+def _observation_atomics():
+    """Two native atomics on the existing mapping, not torn Python stores.
+
+    One small library per fixture interpreter; private temporary custody ends
+    at interpreter exit. Built only when observation is enabled, before startup.
+    """
+    directory = tempfile.TemporaryDirectory(prefix="rui-observation-atomics-")
+    library = pathlib.Path(directory.name) / "atomics.so"
+    source = r"""
+#include <stdatomic.h>
+#include <stdint.h>
+_Static_assert(ATOMIC_LONG_LOCK_FREE == 2 && ATOMIC_LLONG_LOCK_FREE == 2, "native lock-free u64 required");
+_Static_assert(sizeof(_Atomic(uint64_t)) == 8, "observation codec width");
+uint64_t observation_seal(void *p) {
+    return atomic_fetch_or_explicit((_Atomic(uint64_t) *)p,
+        UINT64_C(1) << 63, memory_order_acq_rel);
+}
+uint64_t observation_load(void *p) {
+    return atomic_load_explicit((_Atomic(uint64_t) *)p, memory_order_acquire);
+}
+"""
+    subprocess.run(["cc", "-std=c11", "-shared", "-fPIC", "-x", "c", "-", "-o", str(library)],
+                   input=source, text=True, check=True, timeout=10)
+    assert library.stat().st_size <= 64 * 1024, "fixed-source atomic accessor exceeds fixture setup bound"
+    native = ctypes.CDLL(str(library))
+    native.directory = directory
+    for name in ("observation_seal", "observation_load"):
+        operation = getattr(native, name)
+        operation.argtypes = [ctypes.c_void_p]
+        operation.restype = ctypes.c_uint64
+    return native
+
+
 class _Observations:
     """Fixture-owned bounded native channel; arrivals need not be sequence ordered."""
 
@@ -47,6 +85,7 @@ class _Observations:
         self.process, self.reader, self.limit = process, reader, OBSERVATION_LIMITS[plan]
         self.state = state
         self.final_state = None
+        self.sealed = False
         self.condition = threading.Condition()
         self.records = []
         self.pending_records = {}
@@ -105,6 +144,30 @@ class _Observations:
                 self.records.append(self.pending_records.pop(len(self.records) + 1))
             self.condition.notify_all()
 
+    def dispose(self, deadline):
+        """Revoke new publications, then drain existing custody before SIGKILL.
+
+        Required owner endpoints/populations remain the caller's independent
+        oracle. This is channel closure, never proof of semantic quiescence.
+        """
+        version, process, run, _, _ = struct.unpack("<QQQQQ", self.state[:])
+        assert version == 1 and process == self.process.pid and run > 0, "missing/foreign disposal state"
+        address = ctypes.addressof(ctypes.c_char.from_buffer(self.state))
+        native = _observation_atomics()
+        native.observation_seal(address + 32)
+        self.sealed = True
+        while True:
+            active = native.observation_load(address + 32)
+            count_loss = native.observation_load(address + 24)
+            with self.condition:
+                assert self.error is None, f"Host observation failed: {self.error}"
+                assert not count_loss & 1, "native loss during observation disposal"
+                if active == OBSERVATION_SEALED and count_loss >> 1 == len(self.records):
+                    return
+            assert self.process.poll() is None, "Host exited during observation disposal"
+            assert time.monotonic() < deadline, "observation custody did not retire within disposal budget"
+            time.sleep(.001)
+
     def close(self):
         assert self.process.poll() is not None, "observation custody ended before reap"
         self.thread.join(timeout=3)
@@ -117,10 +180,74 @@ class _Observations:
         assert self.error is None, f"Host observation failed: {self.error}"
         version, process, run, state, active = self.final_state
         assert version == 1 and process == self.process.pid and run > 0, "missing/foreign final observation state"
-        assert active == 0, "Host exited during observation publication"
+        assert active & ~OBSERVATION_SEALED == 0, "Host exited during observation publication"
+        assert bool(active & OBSERVATION_SEALED) == self.sealed, "foreign/reopened observation admission"
         assert not state & 1, "final native observation loss invalidates evidence"
         assert state >> 1 == len(self.records), "missing final observation sequence"
         assert all(item["run"] == str(run) for item in self.records), "mixed final observation run"
+
+    def snapshot(self):
+        # Bounded detached values before kill. Persistence must not spend reap
+        # credit; these sampled facts never claim an atomic owner-state census.
+        with self.condition:
+            return {
+                "stage": "pre_kill" if self.process.poll() is None else "already_reaped",
+                "atomic_census": False, "process": self.process.pid,
+                "returncode": self.process.poll(),
+                "shared_state": self.final_state or struct.unpack("<QQQQQ", self.state[:]),
+                "records": list(self.records), "pending": dict(self.pending_records),
+                "reader_error": type(self.error).__name__ if self.error is not None else None,
+            }
+
+    def preserve_failure(self, snapshot):
+        """Persist sampled facts after reap, before fixture-root deletion."""
+        arguments = list(map(str, getattr(self.process, "args", ())))
+        if "--store" not in arguments or snapshot is None:
+            return
+        root = pathlib.Path(arguments[arguments.index("--store") + 1]).parent
+        path = root / f"observation-failure-{self.process.pid}.json"
+        snapshot = dict(snapshot, post_reap_state=self.final_state,
+                        final_error=type(sys.exc_info()[1]).__name__ if sys.exc_info()[1] is not None else None)
+        if not preserve_failure_metadata(path, lambda: snapshot):
+            return
+        try:
+            destination = os.environ.get("RUI_FAILURE_ARTIFACTS")
+            if destination:
+                # Same existing job-wide helper/caps, while root still exists.
+                ci = str(pathlib.Path(__file__).resolve().parents[1] / "ci")
+                sys.path.insert(0, ci)
+                try:
+                    from run_selected import retain_failure_logs
+                    retain_failure_logs([root], pathlib.Path(destination))
+                finally:
+                    sys.path.remove(ci)
+        except Exception as error:
+            try:
+                print(f"Native failure copy unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
+            except Exception:
+                pass
+        finally:
+            try:
+                print(f"retained native observation failure state: {root}", file=sys.stderr, flush=True)
+            except Exception:
+                pass  # Optional reporting must never replace teardown failure.
+
+
+def preserve_failure_metadata(path, collect):
+    """Best-effort bounded fixture facts, including fallible metadata sampling."""
+    try:
+        data = (json.dumps(collect(), ensure_ascii=False) + "\n").encode()
+        assert len(data) <= 1024 * 1024, "fixture failure metadata exceeds file bound"
+        with path.open("xb") as output:
+            os.fchmod(output.fileno(), 0o600)
+            output.write(data)
+        return True
+    except Exception as error:
+        try:
+            print(f"Fixture failure metadata unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        return False  # Evidence is unavailable, not grounds to skip mandatory cleanup.
 
 
 def canonical_fixture_root(path):
@@ -249,17 +376,44 @@ class HostStartError(RuntimeError):
 
 
 def stop_process(process, timeout=10):
-    if process.poll() is None:
-        process.kill()
-    process.wait(timeout=timeout)
+    deadline = time.monotonic() + timeout
+    disposal_error = None
+    incoming_error = sys.exc_info()[1]
+    snapshot = None
+    observations = getattr(process, "rui_observations", None)
+    if process.poll() is None and observations is not None:
+        try:
+            # Leave bounded reap credit even when publication retirement fails.
+            observations.dispose(deadline - min(1, timeout / 2))
+        except BaseException as error:
+            disposal_error = error  # Still kill/reap; failed disposal never becomes acceptance.
+    if observations is not None:
+        try:
+            snapshot = observations.snapshot()
+        except Exception:
+            pass  # Final native validity remains mandatory even if capture fails.
     try:
-        if getattr(process, "rui_observations", None):
-            process.rui_observations.close()
+        try:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=max(0, deadline - time.monotonic()))
+        finally:
+            if observations is not None:
+                observations.close()
+        if disposal_error is not None:
+            raise disposal_error
     finally:
-        if process.stdout is not None:
-            process.stdout.close()
-        if process.stderr is not None:
-            process.stderr.close()
+        failed = incoming_error is not None or disposal_error is not None or sys.exc_info()[1] is not None
+        try:
+            if process.stdout is not None:
+                process.stdout.close()
+        finally:
+            try:
+                if process.stderr is not None:
+                    process.stderr.close()
+            finally:
+                if failed and observations is not None:
+                    observations.preserve_failure(snapshot)
 
 
 def _tail(buffer, chunk, limit):
@@ -284,12 +438,13 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
     try:
         if observations is not None:
             assert observations in OBSERVATION_LIMITS
+            _observation_atomics()  # Test setup is outside the original readiness deadline.
             reader, writer = os.pipe()
             os.set_blocking(writer, False)
             assert os.fpathconf(writer, "PC_PIPE_BUF") >= 512
             state_file = tempfile.TemporaryFile()
             state_file.truncate(OBSERVATION_STATE_BYTES)
-            state = mmap.mmap(state_file.fileno(), OBSERVATION_STATE_BYTES, access=mmap.ACCESS_READ)
+            state = mmap.mmap(state_file.fileno(), OBSERVATION_STATE_BYTES, access=mmap.ACCESS_WRITE)
             args += ["--test-observation-fd", str(writer), "--test-observation-plan", observations,
                      "--test-observation-state-fd", str(state_file.fileno())]
         process = subprocess.Popen(

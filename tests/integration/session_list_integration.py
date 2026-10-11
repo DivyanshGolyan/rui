@@ -225,11 +225,8 @@ def main():
             assert list((store / "scratch").iterdir()) == [], "named list capture leaked scratch"
             print(f"Session list native Host: fresh HOME, exact keyset, 100 dormant, long reference, idle resources 0→100: {baseline}→{grown}")
         finally:
-            if process.poll() is None:
-                process.kill()
-            process.wait(timeout=10)
-            diagnostics.close()  # Drain stderr before stop_process closes it.
             stop_process(process)
+            diagnostics.close()
             if original_home is None:
                 del os.environ["HOME"]
             else:

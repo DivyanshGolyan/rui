@@ -12,10 +12,12 @@ class FailureArtifactsTest(unittest.TestCase):
     def run_gate(self, failed):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in ("dispatch", "terminal"):
+            for name in ("dispatch", "terminal", "observation", "canonical", "permission", "opaque"):
                 state = root / name
                 state.mkdir()
                 (state / "probe.log").write_text("fixture evidence")
+                (state / "pty-failure.json").write_text('{"caller_returncode":null}\n')
+                (state / "observation-failure-17.json").write_text('{"atomic_census":false}\n')
                 (state / "rui.sqlite3").write_text("private canonical payload")
                 (state / "credentials.json").write_text("secret")
                 (state / "payload.log").write_text("private data despite diagnostic suffix")
@@ -25,6 +27,10 @@ class FailureArtifactsTest(unittest.TestCase):
             zig.write_text(f'''#!/bin/sh
 echo 'retained dispatch integration failure state: {root / "dispatch"}' >&2
 echo 'retained terminal restoration state (completed=False): {root / "terminal"}' >&2
+echo 'retained native observation failure state: {root / "observation"}' >&2
+echo 'retained canonical failure state: {root / "canonical"}' >&2
+echo 'retained persistent permission failure state: {root / "permission"}' >&2
+echo 'retained opaque-Session failure state: {root / "opaque"}' >&2
 exit {int(failed)}
 ''')
             zig.chmod(0o755)
@@ -36,7 +42,9 @@ exit {int(failed)}
             self.assertEqual(result.returncode, int(failed), result.stdout + result.stderr)
             if failed:
                 evidence = list(destination.rglob("probe.log"))
-                self.assertEqual(len(evidence), 2, "both retained failure markers must be collected")
+                self.assertEqual(len(evidence), 6, "all affected retained failure markers must be collected")
+                self.assertEqual(len(list(destination.rglob("pty-failure.json"))), 6)
+                self.assertEqual(len(list(destination.rglob("observation-failure-17.json"))), 6)
                 self.assertTrue(all(path.read_text() == "fixture evidence" for path in evidence))
                 self.assertFalse(list(destination.rglob("rui.sqlite3")))
                 self.assertFalse(list(destination.rglob("credentials.json")))
@@ -70,10 +78,19 @@ exit {int(failed)}
             with patch.multiple(run_selected, MAX_FILE_BYTES=4, MAX_TOTAL_BYTES=8,
                                 MAX_FILES=2, MAX_DIRECTORIES=1):
                 run_selected.retain_failure_logs([state, state], destination)
-            self.assertEqual(sorted(path.relative_to(destination).as_posix() for path in destination.rglob("*.log")),
-                             ["0/a/probe.log", "0/c/probe.log"])
+            targets = list(destination.iterdir())
+            self.assertEqual(len(targets), 1)
+            self.assertEqual(sorted(path.relative_to(targets[0]).as_posix() for path in destination.rglob("*.log")),
+                             ["a/probe.log", "c/probe.log"])
             self.assertEqual(sum(path.stat().st_size for path in destination.rglob("*.log")), 8)
-            self.assertFalse((destination / "1").exists())
+            # Later producers/recorder calls cannot reset aggregate bounds or
+            # overwrite the original diagnostic with changed source bytes.
+            (state / "a/probe.log").write_bytes(b"xxxx")
+            with patch.multiple(run_selected, MAX_FILE_BYTES=4, MAX_TOTAL_BYTES=8,
+                                MAX_FILES=2, MAX_DIRECTORIES=1):
+                run_selected.retain_failure_logs([state], destination, b"new")
+            self.assertEqual((targets[0] / "a/probe.log").read_bytes(), b"1234")
+            self.assertFalse((destination / "selected-gate.log").exists())
 
     def test_failed_job_without_retained_roots_still_keeps_published_diagnostics(self):
         with tempfile.TemporaryDirectory() as directory:

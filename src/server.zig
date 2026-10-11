@@ -4790,6 +4790,104 @@ test "cleanup publication follows complete execution retirement" {
         try std.testing.expect(boundary.observed);
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     }
+
+    // Exercise the distinct delayed Bash owner with real process/pipe
+    // retirement and charged capture/script resources, not a model stand-in.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root});
+    var storage = try store_module.Store.open(std.testing.io, database, root);
+    defer storage.close() catch unreachable;
+    const arguments = "{\"cmd\":\"printf x\",\"timeout_ms\":1000}";
+    const content = try store_module.testingPublicProjection(&storage, &tmp, &.{.{
+        .encoded = "{\\\"cmd\\\":\\\"printf x\\\",\\\"timeout_ms\\\":1000}",
+        .decoded = arguments,
+    }});
+    const reader = try storage.openPublicConversationContent(content);
+    var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+    try workspace.set(root);
+    var used: std.atomic.Value(u64) = .init(0);
+    const budget = protocol.ScratchBudget{ .used = &used, .limit = 4096 };
+    var entries: [2]output_retention.Entry = undefined;
+    var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
+    defer retention.cleanupAll();
+    host.retention = &retention;
+    var preparation = switch (bash.startPreparation(std.testing.io, std.testing.allocator, reader, arguments.len, workspace, root, default_bash_path, 1000, budget, 11, 2, .{})) {
+        .preparing => |value| value,
+        .failed => |initial| {
+            var failure = initial;
+            try failure.cleanup.cleanup();
+            return failure.cause;
+        },
+    };
+    var preparation_owned = true;
+    defer if (preparation_owned) {
+        var cleanup = preparation.cancel();
+        cleanup.cleanup() catch unreachable;
+    };
+    var prepared = while (true) {
+        switch (preparation.advance()) {
+            .pending => {},
+            .prepared => |value| {
+                preparation_owned = false;
+                break value;
+            },
+            .failed => |initial| {
+                preparation_owned = false;
+                var failure = initial;
+                try failure.cleanup.cleanup();
+                return failure.cause;
+            },
+        }
+    };
+    defer prepared.cleanup() catch unreachable;
+    const token = host.custody.reserve().?;
+    var permit = store_module.ActionDispatchPermit{ .binding = .{
+        .turn_id = 3,
+        .parent_operation_id = 7,
+        .action_id = 11,
+        .attempt_ordinal = 2,
+    } };
+    const binding = try host.custody.attachAction(token, &permit);
+    try host.custody.detach(token);
+    const deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).addDuration(.{
+        .raw = .fromSeconds(5),
+        .clock = .awake,
+    });
+    slot = .{ .bash = .{ .token = token, .binding = binding, .execution = try prepared.launch(), .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
+    var window: [bash.copy_window_bytes]u8 = undefined;
+    defer if (slot == .bash) {
+        slot.bash.execution.requestInfrastructureShutdown(.now(std.testing.io, .awake));
+        const cleanup_deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).addDuration(.{
+            .raw = .fromSeconds(5),
+            .clock = .awake,
+        });
+        while (!slot.bash.execution.retired()) {
+            std.debug.assert(std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds < cleanup_deadline.raw.nanoseconds);
+            _ = slot.bash.execution.service(&window);
+            std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+        }
+        slot.bash.execution.reclaim(&retention) catch unreachable;
+    };
+    while (!slot.bash.execution.retired()) {
+        try std.testing.expect(std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds < deadline.raw.nanoseconds);
+        const progress = slot.bash.execution.service(&window);
+        try std.testing.expect(progress.fault == null);
+        if (!progress.made_progress) try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try slot.bash.execution.checkRetired();
+    try std.testing.expectEqual(store_module.ActionResolutionCode.succeeded, (try slot.bash.execution.outcome(false)).code);
+    // Eight command bytes and one captured stdout byte remain owned.
+    try std.testing.expectEqual(@as(u64, 9), used.load(.acquire));
+    boundary.token = token;
+    boundary.observed = false;
+    try std.testing.expect(reclaimBash(&host, &slot, deadline));
+    try std.testing.expect(boundary.observed);
+    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
 test "named scratch retry releases custody through the shutdown owner path" {

@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import errno
 import os
 import pty
+import select
 import subprocess
 import sys
 import time
@@ -36,6 +37,8 @@ def child_pty(source):
 
 
 def check_exit_reader(wait_for_exit):
+    from human_cli_integration import action_ready
+    check_action_ready(action_ready)
     owner = sys.modules[wait_for_exit.__module__]
     # Exercise both platform EOF forms independently of this machine and
     # ensure unrelated read failures do not become successful EOF/reap.
@@ -122,3 +125,80 @@ raise SystemExit(17)
         assert output == b"x" * (1024 * 1024 - 1), "overflow altered retained bytes"
 
     print("host-launch exit reader: exact transcript/outcome/reap, remaining budget and overflow passed")
+
+
+def check_action_ready(action_ready):
+    """Real PTY saturation, followed by the OS drain/flush/notify ordering.
+
+    Linux tcdrain may return with unread master bytes; Darwin can wait there.
+    Saturation makes withheld credit deterministic on either platform without
+    replacing tcdrain with a fixture notification or sleeping writer.
+    """
+    master, slave = pty.openpty()
+    ready_read, ready_write = os.pipe()
+    held_read, held_write = os.pipe()
+    release_read, release_write = os.pipe()
+    caller = None
+    try:
+        source = """
+import os,sys,termios
+ready,held,release = map(int,sys.argv[1:])
+os.set_blocking(1, False)
+count = 0
+while True:
+    try:
+        count += os.write(1, b'q' * 4096)
+        assert count < 1024 * 1024, 'PTY did not saturate'
+    except BlockingIOError:
+        break
+os.set_blocking(1, True)
+os.write(held, str(count).encode())
+tail = b't' * 65536 + b':final-choice-prompt:'
+while tail:
+    tail = tail[os.write(1, tail):]
+termios.tcdrain(1)
+termios.tcflush(0, termios.TCIFLUSH)
+os.write(ready, b'xx')
+os.read(release, 1)
+"""
+        caller = subprocess.Popen([sys.executable, "-c", source,
+            str(ready_write), str(held_write), str(release_read)],
+            pass_fds=(ready_write, held_write, release_read),
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        assert select.select([held_read], [], [], 5)[0], "PTY saturation not reached"
+        count = int(os.read(held_read, 32))
+        # Execute the old pipe-only implementation at its intended assertion.
+        try:
+            assert select.select([ready_read], [], [], 0.05)[0], "Action input flush did not finish"
+        except AssertionError as error:
+            assert str(error) == "Action input flush did not finish"
+            print("action-ready counterexample RED: pipe-only wait blocked with actual PTY credit withheld")
+        else:
+            raise AssertionError("withheld PTY credit unexpectedly completed readiness")
+        assert caller.poll() is None
+        output = action_ready(ready_read, master, timeout=5)
+        assert output == "q" * count + "t" * 65536 + ":final-choice-prompt:", "final presentation bytes lost"
+        assert os.read(ready_read, 1) == b"x", "collector consumed future readiness"
+        os.write(release_write, b"x")
+        _, errors = caller.communicate(timeout=5)
+        assert caller.returncode == 0 and not errors, errors
+    finally:
+        if caller is not None and caller.poll() is None:
+            caller.kill()
+            caller.communicate(timeout=5)
+        for fd in (master, slave, ready_read, ready_write, held_read, held_write, release_read, release_write):
+            os.close(fd)
+
+    owner = sys.modules[action_ready.__module__]
+    # Original deadline, not a fresh budget after each credited output window.
+    with patch.object(owner.time, "monotonic", side_effect=[10, 11, 14]), \
+            patch.object(owner.select, "select", return_value=([123], [], [])) as waited, \
+            patch.object(owner.os, "read", return_value=b"prefix"):
+        try:
+            action_ready(456, 123, timeout=3)
+        except AssertionError as error:
+            assert error.args[0] == ("Action input flush did not finish", b"prefix"), error
+        else:
+            raise AssertionError("collector renewed its deadline")
+        waited.assert_called_once_with([456, 123], [], [], 2)
+    print("action-ready credit: exact final transcript, one notification and original deadline passed")

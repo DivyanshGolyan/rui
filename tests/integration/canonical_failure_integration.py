@@ -18,7 +18,7 @@ import threading
 import time
 
 import dispatch_integration as fixture
-from host_process import canonical_fixture_root
+from host_process import canonical_fixture_root, preserve_failure_metadata
 
 ERROR = {"version": "1", "type": "invocation_error", "code": "canonical_store_failure"}
 ERROR_BYTES = json.dumps(ERROR, separators=(",", ":")).encode()
@@ -442,7 +442,7 @@ def interactive_cases(state, binding=False, null_code=False):
                         proposal = human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
                         assert "Run Bash:\n  true" in proposal, proposal
                         human.assert_permission_workspace(proposal, state)
-                        human.action_ready(ready_read)
+                        proposal += human.action_ready(ready_read, master)
                     else:
                         human.read_terminal(master, "› ")
                         if route == "/v1/activity-page":
@@ -521,32 +521,27 @@ def interactive_cases(state, binding=False, null_code=False):
                         if route == "/v1/message":
                             if "a: Allow once / d: Deny (Enter)" not in output:
                                 output += human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
-                            human.action_ready(ready_read)
+                            output += human.action_ready(ready_read, master)
                     os.write(master, b"/exit\n")
                 # Supply output credit during the original exit budget for
                 # fatal cleanup and recoverable explicit detachment alike.
-                deadline = time.monotonic() + 10
-                transcript = bytearray()
-                while caller.poll() is None:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise subprocess.TimeoutExpired(caller.args, 10)
-                    if select.select([master], [], [], min(remaining, 0.05))[0]:
-                        transcript.extend(os.read(master, 65536))
-                        assert len(transcript) < 1024 * 1024, "unexpected unbounded terminal output"
+                try:
+                    transcript, errors = human.terminal_exit(caller, master, timeout=10)
+                except AssertionError as error:
+                    if isinstance(error.args[0], tuple) and error.args[0][0] == "terminal exit timeout":
+                        raise subprocess.TimeoutExpired(caller.args, 10,
+                            output=error.args[0][1], stderr=error.args[0][2]) from error
+                    raise
                 output += transcript.decode(errors="replace")
                 if binding and line is not None:
                     assert caller.returncode == 0, "explicit detachment failed"
                 else:
                     assert caller.returncode != 0, "fatal mutation resumed the Session prompt"
-                errors = caller.stderr.read().decode()
+                errors = errors.decode()
                 if not binding or line is None or route == "/v1/configure":
                     assert (reason if binding else "CanonicalStoreFailure") in errors, errors
                 else:
                     assert "CanonicalStoreFailure" not in errors, errors
-                # Drain before checking that there is no later prompt/success.
-                while select.select([master], [], [], 0.05)[0]:
-                    output += os.read(master, 65536).decode(errors="replace")
                 if route == "/v1/activity-page":
                     assert f"Message accepted; do not resubmit it. Use rui result {accepted_key} to inspect the same Message." in errors, errors
                     assert "outcome unconfirmed" not in errors and "Ctrl-R" not in errors, errors
@@ -578,6 +573,16 @@ def interactive_cases(state, binding=False, null_code=False):
                 record = home / ".config/rui/requests" / f"{key}.json"
                 assert json.loads(record.read_bytes())["key"] == key
             finally:
+                if sys.exc_info()[0] is not None:
+                    preserve_failure_metadata(home / "pty-failure.json", lambda: {
+                        "route": route, "bare_entry": line is None,
+                        "error": sys.exc_info()[0].__name__,
+                        "caller_returncode": caller.poll() if caller is not None else None,
+                        "ready_pending": bool(select.select([ready_read], [], [], 0)[0]),
+                        "terminal_pending": bool(select.select([master], [], [], 0)[0]),
+                        "exchanges": len(proxy.exchanges) if proxy is not None else 0,
+                        "mutation_routes": [route for route, _ in proxy.mutations] if proxy is not None else [],
+                    })
                 if proxy is not None:
                     proxy.close()
                 if caller is not None and caller.poll() is None:
@@ -630,17 +635,13 @@ def permission_read_cases(state):
             try:
                 caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "permission/read"],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-                output = bytearray()
-                deadline = time.monotonic() + 10
-                while caller.poll() is None:
-                    remaining = deadline - time.monotonic()
-                    assert remaining > 0, "failed permission read did not exit"
-                    if select.select([master], [], [], min(remaining, 0.05))[0]:
-                        output.extend(os.read(master, 65536))
-                        assert len(output) < 1024 * 1024
-                while select.select([master], [], [], 0.05)[0]:
-                    output.extend(os.read(master, 65536))
-                errors = caller.stderr.read().decode()
+                try:
+                    output, errors = human.terminal_exit(caller, master, timeout=10)
+                except AssertionError as error:
+                    if isinstance(error.args[0], tuple) and error.args[0][0] == "terminal exit timeout":
+                        raise AssertionError("failed permission read did not exit") from error
+                    raise
+                errors = errors.decode()
                 assert caller.returncode != 0 and expected in errors, (expected, errors)
                 assert b"a: Allow once" not in output and b"Run Bash:" not in output, output
                 assert len(proxy.exchanges) == 1 and proxy.mutations == [], proxy.mutations

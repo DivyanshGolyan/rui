@@ -4105,12 +4105,9 @@ def main():
             ).fetchall() == [(1, "interrupted")]
             assert database.execute("SELECT outcome_code FROM turn").fetchall() == [("cancelled",)]
         assert preparation_stop_endpoint.requests == []
-        preparation_stop_host.kill()
-        preparation_stop_host.wait(timeout=10)
+        stop_process(preparation_stop_host)
         processes.remove(preparation_stop_host)
         preparation_stop_trace.close()
-        preparation_stop_host.stdout.close()
-        preparation_stop_host.stderr.close()
         preparation_stop_endpoint.shutdown()
         preparation_stop_endpoint.server_close()
         preparation_stop_thread.join(timeout=5)

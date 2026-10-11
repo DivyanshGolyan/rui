@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Execute the existing selected DAGs, without caching their acceptance."""
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,7 +17,8 @@ from select_tests import execution_batches
 
 FAILURE_STATE = re.compile(
     r"^retained (?:(?:dispatch|control) integration failure state|"
-    r"terminal restoration state \(completed=False\)): (/.+)$")
+    r"terminal restoration state \(completed=False\)|native observation failure state|"
+    r"canonical failure state|persistent permission failure state|opaque-Session failure state): (/.+)$")
 MAX_DIRECTORIES = 16
 MAX_FILES = 128
 MAX_FILE_BYTES = 1024 * 1024
@@ -23,27 +26,54 @@ MAX_TOTAL_BYTES = 16 * 1024 * 1024
 
 
 def retain_failure_logs(states, destination, published_output=b""):
+    # Native fixtures may preserve before TemporaryDirectory teardown while
+    # the gate recorder also writes. One try-only directory lock keeps the
+    # existing job-wide caps exact; contention is reported, never waited on.
+    destination.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(destination, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("Failure diagnostic retention unavailable: busy custody", file=sys.stderr)
+            return
+        _retain_failure_logs(states, destination, published_output)
+    finally:
+        os.close(descriptor)
+
+
+def _retain_failure_logs(states, destination, published_output):
     """Copy bounded fixture diagnostics only; never open or query a Store.
 
     No SQLite, HOME, credentials, request records, provider capture, scratch,
     executables or arbitrary payload files. Symlinks and special files are not
     followed. Oversized diagnostics are omitted whole, not silently truncated.
     """
-    remaining, files = MAX_TOTAL_BYTES, 0
-    destination.mkdir(parents=True, exist_ok=True)
-    if published_output and len(published_output) <= min(MAX_FILE_BYTES, remaining):
+    retained = [path for path in destination.rglob("*") if path.is_file() and not path.is_symlink()]
+    remaining = MAX_TOTAL_BYTES - sum(path.stat().st_size for path in retained)
+    files = len(retained)
+    roots = sum(path.is_dir() and not path.is_symlink() for path in destination.iterdir())
+    if published_output and files < MAX_FILES and len(published_output) <= min(MAX_FILE_BYTES, remaining):
         # Exact bounded bytes already published to this job's Actions log, not
         # a new Host/provider capture. Needed when a retained root has only
         # private Store files, which must not be uploaded.
-        (destination / "selected-gate.log").write_bytes(published_output)
-        remaining -= len(published_output)
-        files += 1
-    for index, state in enumerate(states[:MAX_DIRECTORIES]):
+        output = destination / "selected-gate.log"
+        if not output.exists():
+            output.write_bytes(published_output)
+            remaining -= len(published_output)
+            files += 1
+    for state in states[:MAX_DIRECTORIES]:
         if state.is_symlink() or not state.is_dir():
             continue
-        target = destination / str(index)
+        # Stable custody across pre-teardown and post-gate calls; never replace
+        # earlier evidence or reset the existing aggregate retention bounds.
+        target = destination / hashlib.sha256(os.fsencode(state)).hexdigest()[:16]
+        if not target.exists():
+            if roots >= MAX_DIRECTORIES:
+                continue
+            roots += 1
         target.mkdir(parents=True, exist_ok=True)
-        # The terminal fixture owns probe.log: fixed labels, no payloads.
+        # Explicit fixture-owned labels and boundary metadata, no payloads.
         # Suffixes alone do not prove artifact custody/privacy.
         for directory, children, names in os.walk(state, followlinks=False):
             children[:] = sorted(name for name in children if not (
@@ -53,9 +83,12 @@ def retain_failure_logs(states, destination, published_output=b""):
             for name in sorted(names):
                 if files >= MAX_FILES:
                     return
-                if name != "probe.log":
+                if name not in ("probe.log", "pty-failure.json") and not re.fullmatch(r"observation-failure-[1-9][0-9]*\.json", name):
                     continue
                 source = Path(directory) / name
+                output = target / source.relative_to(state)
+                if output.exists():
+                    continue
                 try:
                     fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
                     with os.fdopen(fd, "rb") as stream:
@@ -65,7 +98,6 @@ def retain_failure_logs(states, destination, published_output=b""):
                         data = stream.read(min(MAX_FILE_BYTES, remaining) + 1)
                         if len(data) > min(MAX_FILE_BYTES, remaining):
                             continue
-                    output = target / source.relative_to(state)
                     output.parent.mkdir(parents=True, exist_ok=True)
                     output.write_bytes(data)
                     remaining -= len(data)

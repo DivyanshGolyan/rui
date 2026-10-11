@@ -19,7 +19,7 @@ import time
 import canonical_failure_integration as canonical
 import dispatch_integration as fixture
 import human_cli_integration as human
-from host_process import HostStartError, canonical_fixture_root, start_ready_process
+from host_process import HostStartError, canonical_fixture_root, preserve_failure_metadata, start_ready_process
 
 
 def assert_file_flags(actual, expected):
@@ -807,7 +807,7 @@ def consent_boundary_cases(state, library):
                 assert not select.select([read_ready], [], [], 0.2)[0], "unfinished paste authorized"
                 assert set(records.glob("*.json")) == before
                 os.write(master, b"\x1b[201~")
-                human.action_ready(read_ready)
+                presentation += human.action_ready(read_ready, master)
                 os.write(master, b"d\n")
                 human.read_terminal(master, "Permission denied.")
                 os.write(master, b"\x03")
@@ -824,6 +824,14 @@ def consent_boundary_cases(state, library):
                 assert set(records.glob("*.json")) == before, "cancel captured permission"
             print(f"persistent consent boundary: {case} passed", flush=True)
         finally:
+            if sys.exc_info()[0] is not None:
+                preserve_failure_metadata(root / "pty-failure.json", lambda: {
+                    "case": case, "error": sys.exc_info()[0].__name__,
+                    "caller_returncode": caller.poll() if caller is not None else None,
+                    "ready_pending": bool(select.select([read_ready], [], [], 0)[0]),
+                    "terminal_pending": bool(select.select([master], [], [], 0)[0]),
+                    "drain_released": drain.exists(),
+                })
             release.touch()
             drain.touch()
             if caller is not None and caller.poll() is None:
@@ -1029,8 +1037,8 @@ def decision_reporting_cases(state):
                 else:
                     proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
                 os.write(master, b"propose exact decision\n")
-                human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
-                human.action_ready(read_ready)
+                proposal = human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+                proposal += human.action_ready(read_ready, master)
                 os.write(master, b"a\n" if decision == "allow_once" else b"d\n")
                 if lost:
                     assert received.wait(10)
@@ -1080,6 +1088,15 @@ def decision_reporting_cases(state):
                 assert actual == original
                 print(f"decision reporting: {name} passed", flush=True)
             finally:
+                if sys.exc_info()[0] is not None:
+                    preserve_failure_metadata(root / "pty-failure.json", lambda: {
+                        "case": name, "error": sys.exc_info()[0].__name__,
+                        "caller_returncode": caller.poll() if caller is not None else None,
+                        "ready_pending": bool(select.select([read_ready], [], [], 0)[0]),
+                        "terminal_pending": bool(select.select([master], [], [], 0)[0]),
+                        "reply_released": reply_release.is_set(),
+                        "exchanges": len(proxy.exchanges) if proxy is not None else 0,
+                    })
                 reply_release.set()
                 if caller is not None and caller.poll() is None:
                     caller.kill()
@@ -1135,8 +1152,8 @@ def detach_reporting_cases(state, library):
                 proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: response)
                 os.write(master, b"accepted original\n")
                 if kind != "message":
-                    human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
-                    human.action_ready(read_ready)
+                    proposal = human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+                    proposal += human.action_ready(read_ready, master)
                     os.write(master, b"a\n" if kind == "allow_once" else b"d\n")
                 human.read_terminal(master, f"SETTLED-{name}", composer=True)
                 status = human.terminal_step(master, "/status")
@@ -1172,6 +1189,14 @@ def detach_reporting_cases(state, library):
                 assert (effect.read_bytes() if effect.exists() else b"") == (b"once" if kind == "allow_once" else b"")
                 print(f"detach reporting: {name} exact accepted guide, restored termios and saved replay passed", flush=True)
             finally:
+                if sys.exc_info()[0] is not None:
+                    preserve_failure_metadata(root / "pty-failure.json", lambda: {
+                        "case": name, "error": sys.exc_info()[0].__name__,
+                        "caller_returncode": caller.poll() if caller is not None else None,
+                        "ready_pending": bool(select.select([read_ready], [], [], 0)[0]),
+                        "terminal_pending": bool(select.select([master], [], [], 0)[0]),
+                        "exchanges": len(proxy.exchanges) if proxy is not None else 0,
+                    })
                 if caller is not None and caller.poll() is None:
                     caller.kill()
                     caller.wait(timeout=5)
@@ -1225,8 +1250,8 @@ def startup_reporting_cases(state, library):
             assert "Original reserved request:" not in human.terminal_step(master, "/status")
             if kind in ("allow_once", "deny"):
                 os.write(master, b"propose exact Action\n")
-                human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
-                human.action_ready(ready_read)
+                proposal = human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+                proposal += human.action_ready(ready_read, master)
                 proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
                 event = b"a\n" if kind == "allow_once" else b"d\n"
             else:
@@ -1280,6 +1305,15 @@ def startup_reporting_cases(state, library):
                 assert json.loads(human.run(home, "recover", request["key"], "--json"))["answer"]["replayed"] is True
             print(f"startup reporting: {kind} exact custody, publication/mutation conservation and cleanup precedence passed", flush=True)
         finally:
+            if sys.exc_info()[0] is not None:
+                preserve_failure_metadata(root / "pty-failure.json", lambda: {
+                    "case": kind, "error": sys.exc_info()[0].__name__,
+                    "caller_returncode": caller.poll() if caller is not None else None,
+                    "ready_pending": bool(select.select([ready_read], [], [], 0)[0]),
+                    "terminal_pending": bool(select.select([master], [], [], 0)[0]),
+                    "reply_released": release.is_set(),
+                    "exchanges": len(proxy.exchanges) if proxy is not None else 0,
+                })
             release.set()
             if caller is not None and caller.poll() is None:
                 caller.kill()

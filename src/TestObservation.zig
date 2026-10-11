@@ -11,14 +11,19 @@ const c = @cImport({
     @cInclude("sys/wait.h");
     @cInclude("signal.h");
     @cInclude("stdio.h");
+    @cInclude("poll.h");
 });
 const Self = @This();
+const TestHold = struct {
+    var before_retirement: ?*const fn () void = null;
+    var before_sealed_loss: ?*const fn () void = null;
+};
 
 pub const Plan = enum { control, status, stop, list, dispatch };
 pub const record_bytes = 512; // POSIX minimum atomic pipe-write size.
 const header_bytes = 28;
-// Fixture-owned unlinked backing, read only after reap. This survives SIGKILL
-// without a final pipe write, acknowledgment or changed crash semantics.
+// Fixture-owned unlinked backing. Fixture mutation is only atomic admission
+// sealing; immutable final readback survives SIGKILL without a footer or ack.
 const Shared = extern struct {
     version: u64,
     process: u64,
@@ -27,6 +32,9 @@ const Shared = extern struct {
     active: std.atomic.Value(u64),
 };
 pub const state_bytes = @sizeOf(Shared);
+// Fixture disposal revokes publication admission, not semantic work. Existing
+// handles retain their low-bit count; a selected attempt after sealing is loss.
+pub const sealed = @as(u64, 1) << 63;
 // Field order is the private fixture codec, not a public protocol.
 const Record = struct {
     rui_test_phase: []const u8,
@@ -95,7 +103,15 @@ pub fn close(self: *Self) void {
 // Selection uses owning native values, before optional JSON construction.
 pub fn begin(self: *Self, phase: []const u8, subject: ?[]const u8) ?Publication {
     if (!self.selected(phase, subject)) return null;
-    _ = self.shared.active.fetchAdd(1, .acq_rel);
+    const previous = self.shared.active.fetchAdd(1, .acq_rel);
+    if (previous & sealed != 0) {
+        // Increment first: SIGKILL before sticky loss still leaves custody.
+        // No observer acknowledgment, wait or effect on semantic execution.
+        if (@import("builtin").is_test) if (TestHold.before_sealed_loss) |hold| hold();
+        _ = self.shared.state.fetchOr(1, .acq_rel);
+        _ = self.shared.active.fetchSub(1, .acq_rel);
+        return null;
+    }
     return .{ .owner = self };
 }
 
@@ -105,6 +121,7 @@ pub const Publication = struct {
     pub fn record(self: *Publication, json: []const u8) void {
         const owner = self.owner.?;
         owner.record(json);
+        if (@import("builtin").is_test) if (TestHold.before_retirement) |hold| hold();
         // Native custody ends before optional stderr can be attempted.
         self.owner = null;
         _ = owner.shared.active.fetchSub(1, .acq_rel);
@@ -322,6 +339,94 @@ test "private owner observations preserve selected custody through SIGKILL" {
             // unfinished construction invalidates that prefix after reap.
             try std.testing.expectEqual(@as(u64, 2), std.mem.readInt(u64, bytes[24..32], .little));
             try std.testing.expectEqual(@as(u64, @intFromBool(selected_kill)), std.mem.readInt(u64, bytes[32..40], .little));
+        }
+    }
+}
+
+test "private owner observations seal admission without forgiving held or late publication" {
+    const Hold = struct {
+        var ready: c_int = undefined;
+        var release: c_int = undefined;
+        fn wait() void {
+            if (c.write(ready, "R", 1) != 1) c._exit(91);
+            var byte: [1]u8 = undefined;
+            if (c.read(release, &byte, 1) != 1) c._exit(92);
+        }
+    };
+    inline for (@typeInfo(Plan).@"enum".fields) |field| {
+        const plan: Plan = @enumFromInt(field.value);
+        const phase = switch (plan) {
+            .control => "cleanup_completed",
+            .dispatch => "control_store_queued",
+            .list, .status, .stop => "connection_resources_released",
+        };
+        for (0..3) |kind| {
+            var descriptors: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), c.pipe(&descriptors));
+            defer _ = c.close(descriptors[0]);
+            try std.testing.expectEqual(@as(c_int, 0), c.fcntl(descriptors[1], c.F_SETFL, @as(c_int, c.O_NONBLOCK)));
+            const backing = c.tmpfile() orelse return error.TestUnexpectedResult;
+            defer _ = c.fclose(backing);
+            try std.testing.expectEqual(@as(c_int, 0), c.ftruncate(c.fileno(backing), state_bytes));
+            var owner = try Self.init(descriptors[1], c.dup(c.fileno(backing)), plan, 37);
+            defer owner.close();
+            var ready: [2]c_int = undefined;
+            var release: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), c.pipe(&ready));
+            defer _ = c.close(ready[0]);
+            defer _ = c.close(ready[1]);
+            try std.testing.expectEqual(@as(c_int, 0), c.pipe(&release));
+            defer _ = c.close(release[0]);
+            defer _ = c.close(release[1]);
+            if (kind == 2) _ = owner.shared.active.fetchOr(sealed, .acq_rel);
+            var json: [128]u8 = undefined;
+            const event = try std.fmt.bufPrint(&json, "{{\"rui_test_phase\":\"{s}\"}}", .{phase});
+            const pid = c.fork();
+            try std.testing.expect(pid >= 0);
+            if (pid == 0) {
+                Hold.ready = ready[1];
+                Hold.release = release[0];
+                if (kind == 2) TestHold.before_sealed_loss = Hold.wait else TestHold.before_retirement = Hold.wait;
+                var publication = owner.begin(phase, null).?;
+                publication.record(event);
+                c._exit(0);
+            }
+            var reaped = false;
+            defer if (!reaped) {
+                _ = c.kill(pid, c.SIGKILL);
+                _ = c.waitpid(pid, null, 0);
+            };
+            var bytes: [512]u8 = undefined;
+            var ready_poll = c.struct_pollfd{ .fd = ready[0], .events = c.POLLIN, .revents = 0 };
+            try std.testing.expectEqual(@as(c_int, 1), c.poll(&ready_poll, 1, 3000));
+            try std.testing.expectEqual(@as(isize, 1), c.read(ready[0], &bytes, 1));
+            if (kind != 2) {
+                // The entire last frame is already observable, but its actual
+                // Publication.record call has not retired custody.
+                try std.testing.expect(c.read(descriptors[0], &bytes, bytes.len) > header_bytes);
+                try std.testing.expectEqual(@as(u64, 1), owner.shared.active.fetchOr(sealed, .acq_rel));
+                try std.testing.expectEqual(@as(u64, 2), owner.shared.state.load(.acquire));
+            }
+            try std.testing.expectEqual(sealed + 1, owner.shared.active.load(.acquire));
+            if (kind == 0) {
+                try std.testing.expectEqual(@as(isize, 1), c.write(release[1], "x", 1));
+            } else {
+                try std.testing.expectEqual(@as(c_int, 0), c.kill(pid, c.SIGKILL));
+            }
+            var status: c_int = 0;
+            try std.testing.expectEqual(pid, c.waitpid(pid, &status, 0));
+            reaped = true;
+            try std.testing.expectEqual(sealed + @intFromBool(kind != 0), owner.shared.active.load(.acquire));
+            if (kind == 0) {
+                try std.testing.expect(c.WIFEXITED(status) and c.WEXITSTATUS(status) == 0);
+                try std.testing.expect(owner.begin(phase, null) == null);
+                try std.testing.expectEqual(@as(u64, 3), owner.shared.state.load(.acquire));
+                try std.testing.expectEqual(sealed, owner.shared.active.load(.acquire));
+            } else {
+                try std.testing.expect(c.WIFSIGNALED(status) and c.WTERMSIG(status) == c.SIGKILL);
+                // Even interruption before late-attempt loss retains custody.
+                try std.testing.expectEqual(@as(u64, if (kind == 1) 2 else 0), owner.shared.state.load(.acquire));
+            }
         }
     }
 }

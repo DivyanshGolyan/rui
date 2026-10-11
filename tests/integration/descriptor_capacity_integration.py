@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import http.server
+import io
 import json
 import os
 import pathlib
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 
 import bash_integration as bash
 import control_integration as control
@@ -173,75 +175,6 @@ def open_gate(path):
     return os.open(path, os.O_RDWR | os.O_NONBLOCK)
 
 
-def fill_classification_capacity(socket_path, expected_exhaustion):
-    held = []
-    deadline = time.monotonic() + 10
-    try:
-        while time.monotonic() < deadline:
-            while len(held) < 2:
-                try:
-                    candidate = control.open_partial(
-                        socket_path,
-                        "/v1/control/held",
-                        complete_headers=False,
-                    )
-                except (BrokenPipeError, ConnectionResetError):
-                    continue
-                candidate.settimeout(0.01)
-                try:
-                    early = candidate.recv(1, socket.MSG_PEEK)
-                except TimeoutError:
-                    candidate.settimeout(5)
-                    held.append(candidate)
-                else:
-                    if early:
-                        head, body = control.read_http_response(candidate)
-                        assert b" 503 " in head, (head, body)
-                    candidate.close()
-
-            try:
-                extra = control.open_partial(
-                    socket_path,
-                    "/v1/control/extra",
-                    complete_headers=False,
-                )
-            except (BrokenPipeError, ConnectionResetError):
-                continue
-            try:
-                head, body = control.read_http_response(extra)
-            except TimeoutError:
-                held.append(extra)
-            else:
-                extra.close()
-                if expected_exhaustion in body:
-                    assert b" 503 " in head, (head, body)
-                    for connection in held[2:]:
-                        connection.close()
-                    return held[:2]
-
-            live = []
-            for candidate in held:
-                candidate.settimeout(0.001)
-                try:
-                    early = candidate.recv(1, socket.MSG_PEEK)
-                except TimeoutError:
-                    candidate.settimeout(5)
-                    live.append(candidate)
-                    continue
-                if early:
-                    head, body = control.read_http_response(candidate)
-                    assert b" 503 " in head, (head, body)
-                candidate.close()
-            held = live
-    except BaseException:
-        for connection in held:
-            connection.close()
-        raise
-    for connection in held:
-        connection.close()
-    raise AssertionError("classification admission never stabilized at capacity")
-
-
 def assert_connections_live(connections):
     for ordinal, connection in enumerate(connections):
         original_timeout = connection.gettimeout()
@@ -255,6 +188,98 @@ def assert_connections_live(connections):
         raise AssertionError(
             f"held connection {ordinal} responded or closed before Bash spawn: {unexpected!r}"
         )
+
+
+def borrower_release(diagnostics, started, deadline):
+    records = diagnostics.wait(
+        "connection_resources_released", subject_kind="request_number",
+        subject=started["subject"], timeout=max(0, deadline - time.monotonic()),
+    )
+    assert len(records) == 1, (started, records)
+    released = records[0]
+    assert released["process"] == started["process"] == str(diagnostics.process.pid), (started, released)
+    assert released["run"] == started["run"] and released["clock"] == started["clock"] == "awake_ns", (started, released)
+    assert int(released["sequence"]) > int(started["sequence"]), (started, released)
+    assert int(released["at_ns"]) >= int(started["at_ns"]), (started, released)
+    return released
+
+
+def admitted_at_gate(diagnostics, ordinal):
+    # Gate setup retains its existing optional trace oracle. The status plan
+    # deliberately excludes effect traces; only the private channel below is
+    # authority for connection retirement. Tail storage is already bounded.
+    def admitted():
+        for line in diagnostics.tail().splitlines():
+            try:
+                record = json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if (record.get("rui_test_phase") == "action_attempt_admitted"
+                    and record.get("action") == str(ordinal + 1)
+                    and record.get("attempt") == "1"):
+                return record
+        return None
+    return wait_for(admitted, f"Action {ordinal + 1} admitted at Bash gate")
+
+
+def borrower_census(diagnostics, deadline, expected_routes):
+    # Fixture-issued exchanges, not received records, define this population.
+    with diagnostics.condition:
+        while sum(record["rui_test_phase"].startswith("connection_request_")
+                  for record in diagnostics.records) < len(expected_routes):
+            assert diagnostics.read_error is None, diagnostics.read_error
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, "missing required borrower start population"
+            diagnostics.condition.wait(remaining)
+        started = [record for record in diagnostics.records
+                   if record["rui_test_phase"].startswith("connection_request_")]
+    assert len(started) == len(expected_routes), (expected_routes, started)
+    assert sorted(int(record["subject"]) for record in started) == list(range(len(expected_routes))), started
+    for record in started:
+        assert record["subject_kind"] == "request_number", record
+        assert record["rui_test_phase"] == f"connection_request_{expected_routes[int(record['subject'])]}", record
+    released = [borrower_release(diagnostics, record, deadline) for record in started]
+    assert len(diagnostics.matching("connection_resources_released")) == len(expected_routes), released
+    return released
+
+
+def prove_borrower_oracle():
+    # Independent golden endpoints for two fixture-issued exchanges. Channel
+    # validity is not authority for a missing last start/release before begin.
+    golden = [dict(rui_test_phase=phase, subject_kind="request_number", subject=str(subject),
+                   process="123", run="37", clock="awake_ns", sequence=str(sequence), at_ns=str(at))
+              for phase, subject, sequence, at in (
+                  ("connection_request_configure", 0, 1, 5), ("connection_resources_released", 0, 2, 7),
+                  ("connection_request_inspect", 1, 3, 11), ("connection_resources_released", 1, 4, 13))]
+    for case in ("normal", "missing-final-both", "missing-final-release", "wrong-route", "wrong-number", "wrong-run", "reversed", "duplicate"):
+        records = [dict(record) for record in golden]
+        if case == "missing-final-both":
+            records = records[:2]
+        elif case == "missing-final-release":
+            records = records[:3]
+        elif case == "wrong-route":
+            records[2]["rui_test_phase"] = "connection_request_message"
+        elif case == "wrong-number":
+            records[2]["subject"] = "2"
+        elif case == "wrong-run":
+            records[3]["run"] = "38"
+        elif case == "reversed":
+            records[3].update(sequence="1", at_ns="9")
+        elif case == "duplicate":
+            records.append(dict(records[3]))
+        process = SimpleNamespace(pid=123, poll=lambda: 0,
+            stderr=io.BytesIO(b"".join((json.dumps(record) + "\n").encode() for record in records)))
+        diagnostics = HostDiagnostics(process)
+        diagnostics.thread.join(1)
+        try:
+            borrower_census(diagnostics, time.monotonic() + .02, ["configure", "inspect"])
+        except AssertionError:
+            assert case != "normal", "complete asymmetric golden population was refused"
+        else:
+            assert case == "normal", ("invalid endpoint population accepted", case)
+        finally:
+            diagnostics.close()
+    print("descriptor oracle: independent final population, missing start/release, wrong route/number/run, reversed and duplicate controls passed", flush=True)
 
 
 def prove_bash_spawn_with_full_client_population(state, required):
@@ -297,11 +322,14 @@ def prove_bash_spawn_with_full_client_population(state, required):
     host = None
     diagnostics = None
     held = []
+    completed = False
+    expected_routes = []
     try:
-        # The FIFO gate itself is test-only and consumes one descriptor while
-        # it holds the production transition, so this witness supplies one
-        # descriptor beyond the production requirement.
-        witness_limit = required + 1
+        # Two inherited observation descriptors are counted by startup: writer
+        # and publication-state file (closed after mapping). The FIFO adds one
+        # live descriptor at spawn. Thus requirement = production + 2, and
+        # limit = production + 2 + 1; the unobserved main witness stays exact.
+        witness_limit = required + 2 + 1
         host, ready = start_ready_process(
             limited_host(
                 witness_limit,
@@ -318,38 +346,106 @@ def prove_bash_spawn_with_full_client_population(state, required):
                 "--test-transition-gate-path",
                 gate_path,
             ),
-            required_fields={"descriptor_requirement": str(required), "descriptor_limit": str(witness_limit)},
+            required_fields={"descriptor_requirement": str(required + 2), "descriptor_limit": str(witness_limit)},
+            observations="status",
         )
         diagnostics = HostDiagnostics(host)
         sessions = [f"direct/descriptor-bash-{ordinal}" for ordinal in range(2)]
         for ordinal, session in enumerate(sessions):
+            expected_routes.append("configure")
             bash.configure(state, store, f"bash-configure-{ordinal}", session, permission="bypass")
+            expected_routes.append("message")
             fixture.message(state, store, f"bash-message-{ordinal}", session, f"run bash {ordinal}")
-            diagnostics.wait("action_attempt_admitted", action=str(ordinal + 1), attempt="1")
+            admitted_at_gate(diagnostics, ordinal)
             if ordinal == 0:
                 os.write(keeper, b"x")
                 wait_for(markers[0].exists, "first Bash process")
 
         socket_path = ready["socket"]
-        held = control.fill_ordinary_capacity(socket_path)
-        control.assert_ordinary_capacity_busy(socket_path)
-        held += fill_classification_capacity(
-            socket_path, b"connection_capacity_exhausted"
-        )
+        borrower_census(diagnostics, time.monotonic() + 10, expected_routes)
+        starts = []
+        population_deadline = time.monotonic() + 10
+        # Ten numbered body borrowers, then exactly two incomplete request
+        # lines. No saturation retries can supply or hide retirement evidence.
+        for ordinal in range(10):
+            expected_routes.append("inspect")
+            held.append(control.open_partial(socket_path, "/v1/inspect-session"))
+            records = diagnostics.wait("connection_request_inspect", count=ordinal + 1,
+                                       timeout=max(0, population_deadline - time.monotonic()))
+            assert len(records) == ordinal + 1, records
+            starts.append(records[-1])
+        for _ in range(2):
+            connection = socket.socket(socket.AF_UNIX)
+            connection.settimeout(3)
+            connection.connect(socket_path)
+            connection.sendall(b"POST /v1/")
+            held.append(connection)
         assert len(held) == 12
+        control.assert_ordinary_capacity_busy(socket_path, b"connection_capacity_exhausted")
         assert_connections_live(held)
+        for started in starts:
+            assert not diagnostics.matching("connection_resources_released", subject=started["subject"]), started
 
         os.write(keeper, b"x")
         wait_for(markers[1].exists, "second Bash spawn with full clients")
-        for connection in held:
+        assert_connections_live(held)
+        deadline = time.monotonic() + 10
+        for connection, started in zip(held[:10], starts):
+            assert not diagnostics.matching("connection_resources_released", subject=started["subject"]), started
+            began_ns = time.monotonic_ns()
             connection.close()
+            released = borrower_release(diagnostics, started, deadline)
+            assert int(released["at_ns"]) >= began_ns, (started, released)
+        # These borrowers have no request number. Retire them serially to
+        # correlate each native admission decrement with its own local close.
+        classification_releases = []
+        for ordinal, connection in enumerate(held[10:]):
+            assert len(diagnostics.matching("connection_place_released")) == ordinal
+            began_ns = time.monotonic_ns()
+            connection.close()
+            records = diagnostics.wait("connection_place_released", count=ordinal + 1,
+                                       timeout=max(0, deadline - time.monotonic()))
+            assert len(records) == ordinal + 1, records
+            record = records[-1]
+            assert record["subject_kind"] == "place" and record["subject"] == "classification", record
+            assert record["process"] == str(host.pid) and record["run"] == starts[0]["run"], record
+            assert record["clock"] == "awake_ns" and int(record["at_ns"]) >= began_ns, record
+            assert int(record["sequence"]) > int(starts[-1]["sequence"]), record
+            if classification_releases:
+                previous = classification_releases[-1]
+                assert int(record["sequence"]) > int(previous["sequence"]), records
+                assert int(record["at_ns"]) >= int(previous["at_ns"]), records
+            classification_releases.append(record)
         held = []
+        borrower_census(diagnostics, deadline, expected_routes)
+        print("descriptor borrower retirement:", json.dumps(
+            [borrower_release(diagnostics, started, deadline) for started in starts]
+            + classification_releases), flush=True)
         for release in releases:
             release.touch()
+        probes = 0
+
+        def bounded_probe(predicate):
+            nonlocal probes
+            probes += 1
+            assert probes <= 40, "descriptor fixture exceeded status-plan probe population"
+            expected_routes.append("inspect")  # Both resolution and idle predicates issue one inspection.
+            result = predicate()
+            borrower_census(diagnostics, deadline, expected_routes)
+            return result
         for ordinal, session in enumerate(sessions):
-            wait_for(lambda session=session: bash.resolution(store, session) == "succeeded", f"Bash {ordinal} result")
-        wait_for(lambda: execution_idle(state, store, sessions[0]), "Bash overlap execution drain")
+            deadline = time.monotonic() + 10
+            wait_for(lambda session=session: bounded_probe(lambda: bash.resolution(store, session) == "succeeded"), f"Bash {ordinal} result")
+        deadline = time.monotonic() + 10
+        wait_for(lambda: bounded_probe(lambda: execution_idle(state, store, sessions[0])), "Bash overlap execution drain")
         assert host.poll() is None, diagnostics.tail()
+        completed = True
+    except BaseException:
+        if diagnostics is not None:
+            with diagnostics.condition:
+                print("descriptor failure endpoints:", json.dumps(diagnostics.records[-12:]), flush=True)
+            print("descriptor failure stderr:", repr(diagnostics.tail()), flush=True)
+        raise
     finally:
         for connection in held:
             connection.close()
@@ -359,6 +455,9 @@ def prove_bash_spawn_with_full_client_population(state, required):
             stop_process(host)
         if diagnostics is not None:
             diagnostics.close()
+            if completed:
+                borrower_census(diagnostics, time.monotonic(), expected_routes)
+                assert len(diagnostics.matching("connection_place_released")) == 2
         os.close(keeper)
         endpoint.shutdown()
         endpoint.server_close()
@@ -366,6 +465,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
 
 
 def main():
+    prove_borrower_oracle()
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-descriptor-capacity-"))
     state.chmod(0o700)
     endpoint = HeldEndpoint()
