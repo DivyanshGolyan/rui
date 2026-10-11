@@ -3,6 +3,7 @@
 
 import json
 import io
+import mmap
 import os
 import pathlib
 import struct
@@ -191,7 +192,7 @@ def prove_short_optional_receipt():
     reader, writer = os.pipe()
     process = subprocess.Popen(child("sys.stderr.write('short fixture receipt\\n'); sys.stderr.flush(); sys.stdin.read(1)"),
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    process.rui_observations = _Observations(process, reader, "list")
+    process.rui_observations = _Observations(process, reader, "list", observation_state(process.pid, 0))
     diagnostics = HostDiagnostics(process)
     try:
         deadline = time.monotonic() + 1
@@ -224,11 +225,18 @@ def observation_frame(sequence, *, phase="ordinary_classification_released", sub
                        os.getpid() if process is None else process) + body
 
 
+def observation_state(process, state, *, run=37, active=0, version=1):
+    mapping = mmap.mmap(-1, 40)
+    mapping[:] = struct.pack("<QQQQQ", version, process, run, state, active)
+    return mapping
+
+
 def prove_observation_channel():
     for case in ("reordered", "missing", "wrong-process", "loss", "duplicate", "overflow", "wrong-subject", "missing-final", "wrong-action", "missing-handoff"):
         reader, writer = os.pipe()
         process = SimpleNamespace(pid=os.getpid(), poll=lambda: 0, stderr=io.BytesIO())
-        process.rui_observations = _Observations(process, reader, "stop")
+        count = 2 if case == "reordered" else (0 if case == "missing-handoff" else 1)
+        process.rui_observations = _Observations(process, reader, "stop", observation_state(process.pid, count * 2))
         observations = process.rui_observations
         diagnostics = HostDiagnostics(process)
         try:
@@ -296,6 +304,35 @@ def prove_observation_channel():
             observations.thread.join(1)
             assert not observations.thread.is_alive(), "observation custody leaked"
     print("Host observation channel: withheld prefix, reordered arrival, missing middle/final/handoff, wrong Action, foreign subject/process, loss, duplicate and bounded overflow controls passed")
+    prove_final_observation_state()
+
+
+def prove_final_observation_state():
+    from host_process import OBSERVATION_LIMITS
+    for plan in OBSERVATION_LIMITS:
+        for case in ("normal", "tail-loss", "encoding-loss", "missing-tail", "in-flight", "missing-state", "foreign-process", "foreign-run"):
+            reader, writer = os.pipe()
+            process = SimpleNamespace(pid=os.getpid(), poll=lambda: -9)
+            state = observation_state(process.pid, {"tail-loss": 5, "encoding-loss": 3, "missing-tail": 4}.get(case, 2),
+                                      active=int(case == "in-flight"), version=0 if case == "missing-state" else 1,
+                                      run=38 if case == "foreign-run" else 37)
+            if case == "foreign-process":
+                state = observation_state(process.pid + 1, 2)
+            observations = _Observations(process, reader, plan, state)
+            os.write(writer, observation_frame(1))
+            os.close(writer)  # A complete received prefix and EOF, never a later loss-bearing frame.
+            try:
+                observations.close()
+            except AssertionError as error:
+                expected = {"tail-loss": "final native observation loss", "encoding-loss": "final native observation loss",
+                            "missing-tail": "missing final observation sequence", "in-flight": "during observation publication",
+                            "missing-state": "missing/foreign final observation state", "foreign-process": "missing/foreign final observation state",
+                            "foreign-run": "mixed final observation run"}.get(case)
+                assert expected and expected in str(error), (plan, case, error)
+            else:
+                assert case == "normal", (plan, case, "terminal channel loss accepted")
+                observations.close()  # Idempotent readback after mapping custody ends.
+    print("Host final observation helper: every plan rejects final loss, encoding loss, missing tail, interrupted publication and missing/foreign state with kill status; normal prefix accepted")
 
 
 if __name__ == "__main__":

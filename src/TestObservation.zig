@@ -3,17 +3,28 @@
 const std = @import("std");
 const c = @cImport({
     // The glibc fortified variadic open wrappers cannot be translated by Zig.
-    // This module uses only fcntl/fstat/fpathconf/write, not those wrappers.
     @cUndef("_FORTIFY_SOURCE");
     @cInclude("unistd.h");
     @cInclude("fcntl.h");
     @cInclude("sys/stat.h");
+    @cInclude("sys/mman.h");
+    @cInclude("stdio.h");
 });
 const Self = @This();
 
-pub const Plan = enum { control, status, stop, list };
+pub const Plan = enum { control, status, stop, list, dispatch };
 pub const record_bytes = 512; // POSIX minimum atomic pipe-write size.
 const header_bytes = 28;
+// Fixture-owned unlinked backing, read only after reap. This survives SIGKILL
+// without a final pipe write, acknowledgment or changed crash semantics.
+const Shared = extern struct {
+    version: u64,
+    process: u64,
+    run: u64,
+    state: std.atomic.Value(u64),
+    active: std.atomic.Value(u64),
+};
+pub const state_bytes = @sizeOf(Shared);
 // Field order is the private fixture codec, not a public protocol.
 const Record = struct {
     rui_test_phase: []const u8,
@@ -39,6 +50,7 @@ const Record = struct {
     host_total_ns: ?[]const u8 = null,
     start_ns: ?[]const u8 = null,
     wait_ns: ?[]const u8 = null,
+    custody_occupied: ?[]const u8 = null,
 };
 
 fd: c_int,
@@ -46,11 +58,14 @@ plan: Plan,
 run: u64,
 // Reserve sequence and snapshot sticky loss in one atomic operation. Arrival
 // may be reordered by descheduling; collectors order by this sequence.
-state: std.atomic.Value(u64) = .init(0),
+shared: *Shared,
 lifecycle_due: std.atomic.Value(bool) = .init(true),
 stop_classification_due: std.atomic.Value(bool) = .init(false),
+dispatch_boundary_due: std.atomic.Value(bool) = .init(true),
 
-pub fn init(fd: c_int, plan: Plan, run: u64) !Self {
+pub fn init(fd: c_int, state_fd: c_int, plan: Plan, run: u64) !Self {
+    if (state_fd <= 2 or state_fd == fd) return error.InvalidTestObservationDescriptor;
+    defer _ = c.close(state_fd);
     if (fd <= 2) return error.InvalidTestObservationDescriptor;
     const flags = c.fcntl(fd, c.F_GETFL);
     var info: c.struct_stat = undefined;
@@ -61,15 +76,31 @@ pub fn init(fd: c_int, plan: Plan, run: u64) !Self {
     // must not survive exec into effects. Host owns close after writer joins.
     if (c.fcntl(fd, c.F_SETFD, @as(c_int, c.FD_CLOEXEC)) != 0)
         return error.InvalidTestObservationDescriptor;
-    return .{ .fd = fd, .plan = plan, .run = run };
+    if (c.fstat(state_fd, &info) != 0 or info.st_mode & c.S_IFMT != c.S_IFREG or info.st_size != state_bytes)
+        return error.InvalidTestObservationDescriptor;
+    const address = c.mmap(null, state_bytes, c.PROT_READ | c.PROT_WRITE, c.MAP_SHARED, state_fd, 0);
+    if (address == c.MAP_FAILED) return error.InvalidTestObservationDescriptor;
+    const shared: *Shared = @ptrCast(@alignCast(address));
+    shared.* = .{ .version = 1, .process = @intCast(c.getpid()), .run = run, .state = .init(0), .active = .init(0) };
+    return .{ .fd = fd, .plan = plan, .run = run, .shared = shared };
 }
 
 pub fn close(self: *Self) void {
     _ = c.close(self.fd);
+    _ = c.munmap(self.shared, state_bytes);
 }
 
 fn selected(self: *Self, event: Record) bool {
     const phase = event.rui_test_phase;
+    if (self.plan == .dispatch) {
+        if (std.mem.eql(u8, phase, "attempt_admission_rolled_back") or
+            std.mem.eql(u8, phase, "preparation_advance_completed"))
+            return self.dispatch_boundary_due.swap(false, .acq_rel);
+        inline for (.{ "control_store_queued", "control_lock_acquired", "control_gate_released" }) |name| {
+            if (std.mem.eql(u8, phase, name)) return true;
+        }
+        return false;
+    }
     const connection = std.mem.startsWith(u8, phase, "connection_request_") or
         std.mem.eql(u8, phase, "connection_resources_released");
     if (self.plan == .list) return connection;
@@ -101,6 +132,8 @@ fn selected(self: *Self, event: Record) bool {
 }
 
 pub fn record(self: *Self, json: []const u8) void {
+    _ = self.shared.active.fetchAdd(1, .acq_rel);
+    defer _ = self.shared.active.fetchSub(1, .acq_rel);
     // Fixed decoding storage only when explicitly enabled. Internal trace
     // construction is trusted; malformed/oversized instrumentation is loss.
     var decoding: [2048]u8 = undefined;
@@ -108,7 +141,7 @@ pub fn record(self: *Self, json: []const u8) void {
     const parsed = std.json.parseFromSlice(Record, allocator.allocator(), json, .{
         .ignore_unknown_fields = true,
     }) catch {
-        _ = self.state.fetchOr(1, .acq_rel);
+        _ = self.shared.state.fetchOr(1, .acq_rel);
         return;
     };
     defer parsed.deinit();
@@ -119,7 +152,7 @@ pub fn record(self: *Self, json: []const u8) void {
         const value: ?[]const u8 = @field(parsed.value, field.name);
         if (value) |text| {
             if (length + 3 + text.len > bytes.len) {
-                _ = self.state.fetchOr(1, .acq_rel);
+                _ = self.shared.state.fetchOr(1, .acq_rel);
                 return;
             }
             bytes[length] = @intCast(index);
@@ -128,7 +161,7 @@ pub fn record(self: *Self, json: []const u8) void {
             length += 3 + text.len;
         }
     }
-    const state = self.state.fetchAdd(2, .acq_rel);
+    const state = self.shared.state.fetchAdd(2, .acq_rel);
     std.mem.writeInt(u16, bytes[0..2], @intCast(length), .little);
     bytes[2] = 1;
     bytes[3] = @intCast(state & 1);
@@ -136,7 +169,7 @@ pub fn record(self: *Self, json: []const u8) void {
     std.mem.writeInt(u64, bytes[12..20], self.run, .little);
     std.mem.writeInt(u64, bytes[20..28], @intCast(c.getpid()), .little);
     if (c.write(self.fd, &bytes, length) != @as(isize, @intCast(length)))
-        _ = self.state.fetchOr(1, .acq_rel);
+        _ = self.shared.state.fetchOr(1, .acq_rel);
 }
 
 test "private owner observations remain bounded under full and closed credit" {
@@ -146,9 +179,14 @@ test "private owner observations remain bounded under full and closed credit" {
     defer {
         if (reader_open) _ = c.close(descriptors[0]);
     }
-    defer _ = c.close(descriptors[1]);
     try std.testing.expectEqual(@as(c_int, 0), c.fcntl(descriptors[1], c.F_SETFL, @as(c_int, c.O_NONBLOCK)));
-    var owner = try Self.init(descriptors[1], .status, 37);
+    const backing = c.tmpfile() orelse return error.TestUnexpectedResult;
+    defer _ = c.fclose(backing);
+    try std.testing.expectEqual(@as(c_int, 0), c.ftruncate(c.fileno(backing), state_bytes));
+    const state_fd = c.dup(c.fileno(backing));
+    var owner = try Self.init(descriptors[1], state_fd, .status, 37);
+    var owner_open = true;
+    defer if (owner_open) owner.close();
     const event = "{\"rui_test_phase\":\"ordinary_classification_released\",\"at_ns\":\"1234567\",\"subject_kind\":\"route\",\"subject\":\"message\"}";
     owner.record(event);
     var bytes: [512]u8 = undefined;
@@ -157,12 +195,17 @@ test "private owner observations remain bounded under full and closed credit" {
     try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, bytes[4..12], .little));
     try std.testing.expectEqual(@as(u64, 37), std.mem.readInt(u64, bytes[12..20], .little));
     try std.testing.expectEqual(@as(u8, 0), bytes[3]);
+    owner.record("{"); // Encoding loss reserves no event and sends no later frame.
+    try std.testing.expectEqual(@as(isize, state_bytes), c.pread(c.fileno(backing), &bytes, state_bytes, 0));
+    try std.testing.expectEqual(@as(u64, 3), std.mem.readInt(u64, bytes[24..32], .little));
     const filler = [_]u8{'F'} ** record_bytes;
     var filled: usize = 0;
     while (c.write(descriptors[1], &filler, filler.len) > 0) filled += filler.len;
     try std.testing.expect(filled > 0);
     owner.record(event); // No collector/credit and no retry or semantic wait.
-    try std.testing.expectEqual(@as(u64, 1), owner.state.load(.acquire) & 1);
+    try std.testing.expectEqual(@as(u64, 1), owner.shared.state.load(.acquire) & 1);
+    try std.testing.expectEqual(@as(isize, state_bytes), c.pread(c.fileno(backing), &bytes, state_bytes, 0));
+    try std.testing.expectEqual(@as(u64, 5), std.mem.readInt(u64, bytes[24..32], .little));
     while (filled > 0) {
         const count = c.read(descriptors[0], &bytes, @min(bytes.len, filled));
         try std.testing.expect(count > 0);
@@ -175,6 +218,14 @@ test "private owner observations remain bounded under full and closed credit" {
     _ = c.close(descriptors[0]);
     reader_open = false;
     owner.record(event); // Existing test I/O initialization owns SIGPIPE.
-    try std.testing.expectEqual(@as(u64, 1), owner.state.load(.acquire) & 1);
+    try std.testing.expectEqual(@as(u64, 1), owner.shared.state.load(.acquire) & 1);
     try std.testing.expect(c.fcntl(descriptors[1], c.F_GETFL) & c.O_NONBLOCK != 0);
+    owner.close();
+    owner_open = false;
+    try std.testing.expectEqual(@as(isize, state_bytes), c.pread(c.fileno(backing), &bytes, state_bytes, 0));
+    try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, bytes[0..8], .little));
+    try std.testing.expectEqual(@as(u64, @intCast(c.getpid())), std.mem.readInt(u64, bytes[8..16], .little));
+    try std.testing.expectEqual(@as(u64, 37), std.mem.readInt(u64, bytes[16..24], .little));
+    try std.testing.expectEqual(@as(u64, 9), std.mem.readInt(u64, bytes[24..32], .little));
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, bytes[32..40], .little));
 }

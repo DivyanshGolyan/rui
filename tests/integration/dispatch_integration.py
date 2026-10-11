@@ -741,6 +741,7 @@ def main():
             "denial-first-deny,stop-first-stop",
             "--test-control-gate-path",
             control_gate,
+            observations="dispatch",
         )
         processes.append(proposal_host)
         proposal_milestones = HostDiagnostics(proposal_host)
@@ -3806,6 +3807,7 @@ def main():
             "--fault",
             "attempt-before-commit",
             "--test-phase-trace",
+            observations="dispatch",
         )
         processes.append(host)
         rollback_milestones = HostDiagnostics(host)
@@ -3984,6 +3986,7 @@ def main():
             "--test-phase-trace",
             "--test-request-preparation-advance-delay-ms",
             "1500",
+            observations="dispatch",
         )
         processes.append(preparation_stop_host)
         preparation_stop_trace = HostDiagnostics(preparation_stop_host)
@@ -4087,6 +4090,7 @@ def main():
             "--test-request-preparation-advance-delay-ms",
             "1500",
             accelerated_retries=False,
+            observations="dispatch",
         )
         processes.append(preparation_shutdown_host)
         preparation_shutdown_trace = HostDiagnostics(preparation_shutdown_host)

@@ -2,11 +2,13 @@
 
 import http.server
 import json
+import mmap
 import os
 import pathlib
 import selectors
 import struct
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -23,23 +25,28 @@ STDERR_TAIL_LIMIT = 16 * 1024
 # capture entry and Bash handoff. No release is filtered out by request kind.
 # control: at most 50 inspection attempts (capture + gate), four model owners
 # (ten selected phases), three controls (hint + timing), two boundaries.
+# dispatch: seven controls with queued/acquired/released endpoints; the first
+# rollback or preparation advance per separately observed Host, not retry history.
 OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2,
                       "stop": 321 + 20 + 5 + 12 + 3 * 2 + 1 + 1,
-                      "control": 50 * 2 + 4 * 10 + 3 * 2 + 2}
+                      "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 3 + 1}
+OBSERVATION_STATE_BYTES = 5 * 8  # version, pid, run, reserved count/loss, active writers.
 OBSERVATION_FIELDS = (
     "rui_test_phase", "at_ns", "subject_kind", "subject", "turn", "operation",
     "attempt", "action", "scratch_used_bytes", "command_key", "kind", "control_key",
     "store_queued_at_ns", "lock_acquired_at_ns", "store_complete_at_ns",
     "reply_complete_at_ns", "queue_wait_ns", "store_lock_wait_ns", "store_service_ns",
-    "post_commit_reply_ns", "host_total_ns", "start_ns", "wait_ns",
+    "post_commit_reply_ns", "host_total_ns", "start_ns", "wait_ns", "custody_occupied",
 )
 
 
 class _Observations:
     """Fixture-owned bounded native channel; arrivals need not be sequence ordered."""
 
-    def __init__(self, process, reader, plan):
+    def __init__(self, process, reader, plan, state):
         self.process, self.reader, self.limit = process, reader, OBSERVATION_LIMITS[plan]
+        self.state = state
+        self.final_state = None
         self.condition = threading.Condition()
         self.records = []
         self.pending_records = {}
@@ -102,7 +109,18 @@ class _Observations:
         assert self.process.poll() is not None, "observation custody ended before reap"
         self.thread.join(timeout=3)
         assert not self.thread.is_alive(), "observation channel did not drain after reap"
+        if self.final_state is None:
+            try:
+                self.final_state = struct.unpack("<QQQQQ", self.state[:])
+            finally:
+                self.state.close()
         assert self.error is None, f"Host observation failed: {self.error}"
+        version, process, run, state, active = self.final_state
+        assert version == 1 and process == self.process.pid and run > 0, "missing/foreign final observation state"
+        assert active == 0, "Host exited during observation publication"
+        assert not state & 1, "final native observation loss invalidates evidence"
+        assert state >> 1 == len(self.records), "missing final observation sequence"
+        assert all(item["run"] == str(run) for item in self.records), "mixed final observation run"
 
 
 def canonical_fixture_root(path):
@@ -262,22 +280,32 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
     # The caller retains the write descriptor; startup and reap own the reader.
     args = list(map(str, args))
     reader = writer = None
+    state_file = state = None
     try:
         if observations is not None:
             assert observations in OBSERVATION_LIMITS
             reader, writer = os.pipe()
             os.set_blocking(writer, False)
             assert os.fpathconf(writer, "PC_PIPE_BUF") >= 512
-            args += ["--test-observation-fd", str(writer), "--test-observation-plan", observations]
+            state_file = tempfile.TemporaryFile()
+            state_file.truncate(OBSERVATION_STATE_BYTES)
+            state = mmap.mmap(state_file.fileno(), OBSERVATION_STATE_BYTES, access=mmap.ACCESS_READ)
+            args += ["--test-observation-fd", str(writer), "--test-observation-plan", observations,
+                     "--test-observation-state-fd", str(state_file.fileno())]
         process = subprocess.Popen(
             args, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE if stderr_pipe is None else stderr_pipe[1], env=env,
-            pass_fds=() if writer is None else (writer,),
+            pass_fds=() if writer is None else (writer, state_file.fileno()),
         )
         if observations is not None:
-            process.rui_observations = _Observations(process, reader, observations)
+            process.rui_observations = _Observations(process, reader, observations, state)
             reader = None  # Reader custody starts before readiness collection.
+            state = None  # Mapping custody persists through reap, including SIGKILL.
     finally:
+        if state_file is not None:
+            state_file.close()
+        if state is not None:
+            state.close()
         if writer is not None:
             os.close(writer)
         if reader is not None:

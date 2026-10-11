@@ -989,6 +989,8 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--test-observation-fd")) {
             faults.test_observation_fd = try std.fmt.parseInt(c_int, try takeValue(args, &index), 10);
             faults.test_phase_trace = true;
+        } else if (std.mem.eql(u8, arg, "--test-observation-state-fd")) {
+            faults.test_observation_state_fd = try std.fmt.parseInt(c_int, try takeValue(args, &index), 10);
         } else if (std.mem.eql(u8, arg, "--test-observation-plan")) {
             faults.test_observation_plan = std.meta.stringToEnum(TestObservation.Plan, try takeValue(args, &index)) orelse
                 return error.InvalidTestObservationPlan;

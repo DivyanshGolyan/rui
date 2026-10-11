@@ -97,6 +97,7 @@ pub const Faults = struct {
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
     test_observation_fd: ?c_int = null,
+    test_observation_state_fd: ?c_int = null,
     test_observation_plan: ?TestObservation.Plan = null,
     test_transition: ?TestTransition = null,
     test_transition_gate_path: ?[]const u8 = null,
@@ -365,7 +366,7 @@ pub fn serve(
         .custody = execution.CustodyPool.initialize(custody_records),
     };
     var observation: ?TestObservation = if (faults.test_observation_fd) |fd|
-        try TestObservation.init(fd, faults.test_observation_plan orelse return error.MissingTestObservationPlan, host.trace_run_ns)
+        try TestObservation.init(fd, faults.test_observation_state_fd orelse return error.MissingTestObservationState, faults.test_observation_plan orelse return error.MissingTestObservationPlan, host.trace_run_ns)
     else
         null;
     // This scope outlives connection, execution and capture-writer joins.
