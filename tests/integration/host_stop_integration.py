@@ -31,7 +31,7 @@ def actor(*args, timeout=10):
 
 def exchange_phase(diagnostics, phase, began_ns, deadline, **fields):
     # This isolated Host has one fixture issuer. Earlier buffered milestones
-    # cannot satisfy this invocation; ambiguous or lost evidence is failure.
+    # cannot satisfy this invocation; ambiguous or missing evidence is failure.
     with diagnostics.condition:
         while True:
             assert diagnostics.read_error is None, diagnostics.read_error
@@ -43,7 +43,7 @@ def exchange_phase(diagnostics, phase, began_ns, deadline, **fields):
             if matches:
                 record = matches[0]
                 assert record.get("process") == str(diagnostics.process.pid), record
-                assert record.get("clock") == "awake_ns" and record.get("trace_lost") is False, record
+                assert record.get("clock") == "awake_ns" and isinstance(record.get("trace_lost"), bool), record
                 for field in ("run", "sequence", "at_ns"):
                     value = record.get(field, "")
                     assert isinstance(value, str) and value.isascii() and value.isdecimal(), record
@@ -60,7 +60,10 @@ def exchange_phase(diagnostics, phase, began_ns, deadline, **fields):
 def actor_after_classification(diagnostics, began_ns, deadline, pending_phase, store, target, *, invoke=actor):
     transferred_phase = exchange_phase(diagnostics, "ordinary_classification_released", began_ns, deadline,
                                        subject_kind="route", subject="observe")
+    assert transferred_phase["run"] == pending_phase["run"]
     assert int(transferred_phase["sequence"]) > int(pending_phase["sequence"])
+    assert int(transferred_phase["at_ns"]) >= int(pending_phase["at_ns"])
+    assert not pending_phase["trace_lost"] or transferred_phase["trace_lost"]
     assert time.monotonic() < deadline, "classification exceeded original stop budget"
     return invoke("stop", store, target, "after-commit", timeout=deadline - time.monotonic())
 
@@ -340,8 +343,9 @@ def main():
 
 
 if __name__ == "__main__":
-    from host_stop_integration_test import check_classification_oracle
+    from host_stop_integration_test import check_classification_oracle, check_missing_classification
     check_classification_oracle(actor_after_classification)
+    check_missing_classification(actor_after_classification)
     mixed_effect_drain(True)
     mixed_effect_drain(False)
     main()

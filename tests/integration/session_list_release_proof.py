@@ -57,12 +57,30 @@ def oracle_controls():
         diagnostics.records[-1]["scratch_used_bytes"] = "1"
         expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "retained scratch charge")
         diagnostics.records = copy.deepcopy(records)
-        diagnostics.records[1]["trace_lost"] = True
+        for item in diagnostics.records[1:]:
+            item["trace_lost"] = True
+        # An unrelated lost diagnostic does not remove required endpoints.
+        diagnostics.records[-1]["sequence"] = "6"
+        assert fixture.released_resources(1, diagnostics, invocation) == {"census": "observed"}
+        diagnostics.records[-1]["trace_lost"] = False
+        expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "not sticky")
+        diagnostics.records = copy.deepcopy(records)
+        diagnostics.records[1]["trace_lost"] = "true"
         expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "trace_lost")
         diagnostics.records = [records[0], records[2], records[3]]
-        expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "trace sequence gap")
+        expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "orphan release")
+        diagnostics.records = [records[1], records[2]]
+        expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "request_number")
+        diagnostics.records = [records[0], records[3]]
+        expect_failure(lambda: fixture.released_resources(1, diagnostics, (102, 102, time.monotonic())), "missing exchange release")
+        for missing in (2, 3):
+            diagnostics.records = records[:missing] + records[missing + 1:]
+            expect_failure(lambda: fixture.released_resources(1, diagnostics, (102, 102, time.monotonic())), "missing exchange release")
         diagnostics.records = records + [records[-1]]
         expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "duplicate exchange")
+        diagnostics.records = copy.deepcopy(records)
+        diagnostics.records[-1]["sequence"] = "3"
+        expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "[1, 2, 3, 3]")
         diagnostics.records = [record("connection_resources_released", 1, 0, "0")]
         expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "orphan release")
         diagnostics.records = []
@@ -110,7 +128,8 @@ def case(binary, probe, mode):
         # Only Host launch gets interception and replaces its existing stdin.
         # Reuse readiness; do not add a second stderr reader or shared helper API.
         def popen(*args, **kwargs):
-            return original_popen(*args, env=env, stdin=subprocess.PIPE, **kwargs)
+            kwargs.update(env=env, stdin=subprocess.PIPE)
+            return original_popen(*args, **kwargs)
         with patch.object(host_process.subprocess, "Popen", popen):
             process, _ = fixture.start_ready_process(
                 [binary, "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"],

@@ -300,8 +300,14 @@ pub fn serve(
     };
     var lease = try platform.StoreLease.acquire(io, store_path);
     defer lease.release();
+    // fd1 may alias fd2. Exclude flag borrowing before any continuing
+    // startup diagnostic, through readiness delivery and failed unwind.
+    if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;
+    var readiness_owned = true;
+    defer if (readiness_owned) stderr.release();
+    var diagnostic_open_error: ?anyerror = null;
     var diagnostics: ?HostDiagnostics = HostDiagnostics.open(io, lease.store_dir, HostDiagnostics.default_cap_bytes) catch |err| blk: {
-        stderr.print("rui: startup diagnostics unavailable ({s}); continuing under Store lease\n", .{@errorName(err)});
+        diagnostic_open_error = err;
         break :blk null;
     };
     defer if (diagnostics) |*writer| writer.close();
@@ -372,11 +378,6 @@ pub fn serve(
     }
     errdefer if (provider_initialization_owned) provider.deinitialize();
     try std.Io.randomSecure(io, &host.instance);
-    // fd1 may alias fd2. Exclude optional flag borrowing before execution
-    // writers exist, through required readiness delivery and failed unwind.
-    if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;
-    var readiness_owned = true;
-    defer if (readiness_owned) stderr.release();
     const execution_thread = try std.Thread.spawn(.{}, executionMain, .{&host});
     provider_initialization_owned = false;
     defer {
@@ -425,7 +426,10 @@ pub fn serve(
         return error.HostReadinessOutputUnavailable;
     stderr.release();
     readiness_owned = false;
+    if (diagnostic_open_error) |err|
+        stderr.print("rui: startup diagnostics unavailable ({s}); continuing under Store lease\n", .{@errorName(err)});
     if (diagnostics) |*writer| {
+        if (writer.failure != null) writer.reportFailure();
         writer.record("ready", "serving");
         writer.close();
         diagnostics = null;

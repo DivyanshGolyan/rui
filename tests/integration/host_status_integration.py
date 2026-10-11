@@ -163,7 +163,7 @@ def correlated_phase(diagnostics, phase, began_ns, **fields):
     assert len(current) == 1, (phase, current)
     record = current[0]
     assert record["process"] == str(diagnostics.process.pid), record
-    assert record["clock"] == "awake_ns" and record["trace_lost"] is False, record
+    assert record["clock"] == "awake_ns" and isinstance(record["trace_lost"], bool), record
     assert record["run"] == records[0]["run"], record
     return record
 
@@ -173,6 +173,9 @@ def discovery_released(diagnostics, began_ns):
     released = correlated_phase(diagnostics, "connection_resources_released", began_ns,
                                 subject_kind="request_number", subject=started["subject"])
     assert int(released["sequence"]) > int(started["sequence"]), (started, released)
+    assert int(released["at_ns"]) >= int(started["at_ns"]), (started, released)
+    assert released["run"] == started["run"], (started, released)
+    assert not started["trace_lost"] or released["trace_lost"], (started, released)
 
 
 def protected_saturation(root):
@@ -200,10 +203,11 @@ def protected_saturation(root):
             records = diagnostics.wait("ordinary_classification_released", count=index + 1,
                                        timeout=2, subject_kind="route", subject="message")
             record = records[index]
-            assert int(record["at_ns"]) >= began_ns and record["trace_lost"] is False, record
+            assert int(record["at_ns"]) >= began_ns and isinstance(record["trace_lost"], bool), record
             assert record["process"] == str(host.pid) and record["clock"] == "awake_ns", record
             assert record["run"] == records[0]["run"], records
             assert index == 0 or int(record["sequence"]) > int(records[index - 1]["sequence"]), records
+            assert index == 0 or not records[index - 1]["trace_lost"] or record["trace_lost"], records
         began_ns = time.monotonic_ns()
         observed = status(store)
         assert observed == initial, ("status lost ordinary headroom", observed)

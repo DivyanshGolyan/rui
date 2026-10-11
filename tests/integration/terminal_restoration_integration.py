@@ -111,6 +111,8 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
 
 static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     const char *readiness_fault = getenv("RUI_TERMINAL_FAULT");
+    if (fd == 1 && readiness_fault && !strcmp(readiness_fault, "alias-poison"))
+        record("readiness-write-entry\n");
     if (fd == 2 && atomic_load(&readiness_held)) record("readiness-fd2-write\n");
     if (fd == 1 && readiness_fault && !strncmp(readiness_fault, "readiness-held", 14)) {
         atomic_store(&readiness_held, 1);
@@ -218,6 +220,13 @@ int probe_fcntl(int fd, int command, ...) {
         return real_fcntl(fd, command, path);
     }
 #endif
+    if (command == F_GETLK || command == F_SETLK || command == F_SETLKW) {
+        va_list args;
+        va_start(args, command);
+        struct flock *lock = va_arg(args, struct flock *);
+        va_end(args);
+        return real_fcntl(fd, command, lock);
+    }
     /* Only the reached integer-valued commands are supported by this probe. */
     if (command != F_SETFL && command != F_SETFD && command != F_DUPFD
 #ifdef F_DUPFD_CLOEXEC
@@ -250,7 +259,7 @@ int probe_fcntl(int fd, int command, ...) {
             return result;
         }
         record("diagnostic-restore\n");
-        if (!strcmp(diagnostic_fault, "diagnostic-restore")) {
+        if (!strcmp(diagnostic_fault, "diagnostic-restore") || !strcmp(diagnostic_fault, "alias-poison")) {
             record("diagnostic-unrestored\n"); errno = EIO; return -1;
         }
         int result = real_fcntl(fd, command, value);
@@ -382,9 +391,11 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attrs, void *(*run)(
 FORWARD_DRIVER = r"""
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/param.h>
 #include <sys/uio.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -400,6 +411,28 @@ int main(void) {
     if (flags < 0 || fcntl(1, F_SETFL, flags | O_NONBLOCK) ||
         fcntl(1, F_GETFL) != (flags | O_NONBLOCK) || fcntl(1, F_SETFL, flags) ||
         fcntl(1, F_GETFL) != flags) return 6;
+    char name[] = "/tmp/rui-forward-lock.XXXXXX";
+    int fd = mkstemp(name);
+    if (fd < 0 || unlink(name)) return 9;
+    struct flock lock = { .l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 3, .l_len = 7 };
+    if (fcntl(fd, F_SETLK, &lock)) return 10;
+    pid_t child = fork();
+    if (child < 0) return 11;
+    if (!child) {
+        struct flock query = lock;
+        if (fcntl(fd, F_GETLK, &query) || query.l_type != F_WRLCK ||
+            query.l_start != 3 || query.l_len != 7 || query.l_pid != getppid()) _exit(12);
+        errno = 0;
+        if (fcntl(fd, F_SETLK, &lock) != -1 || (errno != EACCES && errno != EAGAIN)) _exit(13);
+        errno = 0;
+        if (fcntl(-1, F_GETLK, &query) != -1 || errno != EBADF) _exit(14);
+        _exit(0);
+    }
+    int status;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status)) return 15;
+    if (fcntl(fd, F_SETLKW, &lock)) return 16;
+    lock.l_type = F_UNLCK;
+    if (fcntl(fd, F_SETLK, &lock) || close(fd)) return 17;
     struct termios before, changed, after;
     if (tcgetattr(0, &before)) return 1;
     changed = before;
@@ -1217,6 +1250,121 @@ def visible_stream_handoff_cases(state, library):
 
 def host_diagnostic_cases(state, library):
     """Optional fd2 credit cannot own canonical progress or cleanup authority."""
+    root = state / "readiness-alias-poison"
+    root.mkdir(mode=0o700)
+    store, log, arm = (root / name for name in ("store", "probe.log", "arm"))
+    store.mkdir(mode=0o700)
+    (store / "diagnostics").mkdir(mode=0o755)
+    (store / "diagnostics").chmod(0o755)
+    arm.touch()
+    read_fd, write_fd = os.pipe()
+    flags = fcntl.fcntl(write_fd, fcntl.F_GETFL)
+    host = None
+    output = bytearray()
+    try:
+        fcntl.fcntl(write_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        filled = 0
+        for chunk in (b"F" * 4096, b"F"):
+            try:
+                while True:
+                    filled += os.write(write_fd, chunk)
+            except BlockingIOError:
+                pass
+        fcntl.fcntl(write_fd, fcntl.F_SETFL, flags)
+        assert filled > 0
+        host = subprocess.Popen(list(map(str, fixture.host_arguments(store, None))),
+            stdout=write_fd, stderr=write_fd,
+            env={**os.environ,
+                "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "alias-poison",
+                "RUI_DIAGNOSTIC_ARM": str(arm)})
+        fixture.wait_for(lambda: log.exists() and "readiness-write-entry\n" in log.read_text(),
+            "aliased required write entry without drainage")
+        actual = fcntl.fcntl(write_fd, fcntl.F_GETFL)
+        (root / "before-release.json").write_text(json.dumps({
+            "filled": filled, "flags": actual, "expected_flags": flags,
+            "returncode": host.poll()}) + "\n")
+        assert host.poll() is None and not actual & os.O_NONBLOCK, (
+            "required readiness must stay alive and blocking until caller releases credit",
+            host.poll(), actual, log.read_text())
+        assert_file_flags(actual, flags)
+        remaining = filled
+        while remaining:
+            assert select.select([read_fd], [], [], 8)[0], "filler drainage stalled"
+            chunk = os.read(read_fd, min(remaining, 4096))
+            assert chunk and chunk == b"F" * len(chunk), chunk
+            remaining -= len(chunk)
+        deadline = time.monotonic() + 8
+        while b"\n" not in output:
+            assert select.select([read_fd], [], [], max(0, deadline - time.monotonic()))[0], "readiness stalled"
+            chunk = os.read(read_fd, 1)
+            assert chunk, "Host exited before complete readiness"
+            output.extend(chunk)
+            assert len(output) <= 16 * 1024, "readiness exceeded 16 KiB"
+        parts = output.decode().split()
+        assert parts[0] == "ready", bytes(output)
+        fields = dict(part.split("=", 1) for part in parts[1:])
+        assert fields["execution"] == "unavailable", fields
+        status = subprocess.run([str(fixture.RUI), "host", "status", "--store", str(store)],
+            capture_output=True, text=True, timeout=8)
+        assert status.returncode == 0 and "Instance: " in status.stdout, status
+        (root / "host-status.stdout").write_text(status.stdout)
+        print("Host diagnostics: aliased full stdout, startup warning and failed restore: required readiness blocks until exact filler release; Host usable", flush=True)
+    finally:
+        if host is not None:
+            if host.poll() is None: host.kill()
+            host.wait(timeout=8)
+        os.set_blocking(read_fd, False)
+        while True:
+            try:
+                chunk = os.read(read_fd, 65536)
+            except BlockingIOError:
+                break
+            if not chunk: break
+            output.extend(chunk)
+        (root / "stdout-stderr.log").write_bytes(output)
+        os.close(read_fd)
+        os.close(write_fd)
+    root = state / "startup-record-failure"
+    root.mkdir(mode=0o700)
+    store = root / "store"
+    store.mkdir(mode=0o700)
+    diagnostics = store / "diagnostics"
+    diagnostics.mkdir(mode=0o700)
+    # Open succeeds with one full private file. Its next rotation fails at
+    # record time, not open time; no new fault hook or I/O interception.
+    last = diagnostics / f"host-{2**64 - 2}.jsonl"
+    with last.open("wb") as file:
+        last.chmod(0o600)
+        file.truncate(8 * 1024 * 1024)
+        file.seek(-1, os.SEEK_END)
+        file.write(b"\n")
+    host = None
+    output = bytearray()
+    try:
+        host = subprocess.Popen(list(map(str, fixture.host_arguments(store, None))),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        deadline = time.monotonic() + 8
+        while output.count(b"\n") < 2:
+            assert select.select([host.stdout], [], [], max(0, deadline - time.monotonic()))[0], "missing retained writer failure notice"
+            chunk = os.read(host.stdout.fileno(), 4096)
+            assert chunk, "Host exited before readiness and retained failure notice"
+            output.extend(chunk)
+            assert len(output) <= 16 * 1024
+        ready, notice, tail = output.split(b"\n", 2)
+        assert ready.startswith(b"ready ") and b"execution=unavailable" in ready, output
+        assert notice == b"rui: diagnostic writer unavailable (DiagnosticSequenceExhausted); no Host work was changed", output
+        assert not tail, output
+        assert last.stat().st_size == 8 * 1024 * 1024
+        assert list(diagnostics.iterdir()) == [last], "failed writer grew diagnostics"
+        status = subprocess.run([str(fixture.RUI), "host", "status", "--store", str(store)],
+            capture_output=True, text=True, timeout=8)
+        assert status.returncode == 0 and "Instance: " in status.stdout, status
+        print("Host diagnostics: record-time failure retained under exclusion; one notice follows required readiness; Host usable", flush=True)
+    finally:
+        (root / "stdout-stderr.log").write_bytes(output)
+        if host is not None:
+            fixture.stop_host(host)
     for kind in ("readiness-held", "readiness-held-error"):
         root = state / kind
         root.mkdir(mode=0o700)

@@ -18,7 +18,7 @@ oldest: u64 = 0,
 count: usize = 0,
 length: u64 = 0,
 file_cap: u64,
-disabled: bool = false,
+failure: ?anyerror = null,
 
 /// The Store lease is held by the caller. Only this writer mutates diagnostic
 /// files; a failure disables further writes without changing Host work.
@@ -64,11 +64,17 @@ pub fn close(self: *Self) void {
 }
 
 pub fn record(self: *Self, phase: []const u8, detail: []const u8) void {
-    if (self.disabled) return;
+    if (self.failure != null) return;
     self.write(phase, detail) catch |err| {
-        self.disabled = true;
-        stderr.print("rui: diagnostic writer unavailable ({s}); no Host work was changed\n", .{@errorName(err)});
+        self.failure = err;
+        self.reportFailure();
     };
+}
+
+/// Retain the failure when readiness exclusion drops the initial notice.
+pub fn reportFailure(self: *Self) void {
+    if (self.failure) |err|
+        stderr.print("rui: diagnostic writer unavailable ({s}); no Host work was changed\n", .{@errorName(err)});
 }
 
 fn write(self: *Self, phase: []const u8, detail: []const u8) !void {
@@ -153,7 +159,7 @@ test "startup diagnostics rotate before growth, repair tails and retain failures
     defer writer.close();
     const long_detail = [_]u8{'x'} ** 3900;
     for (0..17) |_| writer.record("ready", &long_detail);
-    try std.testing.expect(!writer.disabled);
+    try std.testing.expectEqual(null, writer.failure);
     try std.testing.expectEqual(@as(usize, 16), writer.count);
     try std.testing.expectEqual(@as(u64, 2), writer.oldest);
     var removed: [64]u8 = undefined;
@@ -171,7 +177,7 @@ test "startup diagnostics rotate before growth, repair tails and retain failures
     try writer.dir.deleteFile(io, target);
     try writer.dir.createDir(io, target, .fromMode(0o700));
     writer.record("ready", &long_detail);
-    try std.testing.expect(writer.disabled);
+    try std.testing.expect(writer.failure != null);
     try std.testing.expectEqual(@as(usize, 16), writer.count);
     try std.testing.expectEqual(@as(u64, 18), writer.next);
 }

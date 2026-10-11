@@ -62,13 +62,16 @@ def released_resources(pid, diagnostics, invocation):
         while True:
             assert diagnostics.read_error is None, diagnostics.read_error
             starts, releases, runs, sequences = {}, {}, set(), []
+            loss_seen = False
             for record in diagnostics.records:
                 phase = record["rui_test_phase"]
                 assert isinstance(phase, str), record
                 if phase in ("release_probe_held", "release_probe_leaked"):
                     continue  # Opt-in native proof records, not Host authority.
                 assert record.get("process") == str(pid) and record.get("clock") == "awake_ns", record
-                assert record.get("trace_lost") is False, record
+                assert isinstance(record.get("trace_lost"), bool), record
+                assert not loss_seen or record["trace_lost"], ("trace loss is not sticky", record)
+                loss_seen = record["trace_lost"]
                 for field in ("run", "sequence", "at_ns"):
                     trace_u64(record, field)
                 sequences.append(int(record["sequence"]))
@@ -88,7 +91,6 @@ def released_resources(pid, diagnostics, invocation):
             assert sequences == sorted(set(sequences)), sequences
             if sequences:
                 assert sequences[0] > 0, sequences
-                assert sequences == list(range(sequences[0], sequences[0] + len(sequences))), ("trace sequence gap", sequences)
             assert releases.keys() <= starts.keys(), ("orphan release", releases)
             current = [(key, record) for key, record in starts.items()
                        if record["rui_test_phase"] == "connection_request_list_sessions"
