@@ -586,6 +586,78 @@ def interactive_cases(state, binding=False, null_code=False):
     print(f"{'null' if null_code else 'binding' if binding else 'canonical'} PTY: Configure/Message/Permission/bare creation fail before outcome interpretation, restore terminal and retain original capture", flush=True)
 
 
+def permission_read_cases(state):
+    home = state / "permission-read"
+    home.mkdir()
+    store = home / "store"
+    endpoint = fixture.SuccessEndpoint([fixture.sse_tool_calls("permission-read", [("bash", "permission-call",
+        '{"cmd":"true","timeout_ms":null}')])])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = None
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        assert invoke(home, "configure", "--store", store, "--session", "permission/read",
+            "--workspace", state, "--provider", "codex", "--model", "model-a",
+            "--permission-mode", "ask").returncode == 0
+        assert invoke(home, "message", "--store", store, "--session", "permission/read",
+            "inspect exact permission").returncode == 0
+        records = home / ".config/rui/requests"
+        before = {path.name: path.read_bytes() for path in records.glob("*.json")}
+        for status, body, expected in (
+                (500, ERROR_BYTES, "CanonicalStoreFailure"),
+                (503, b'{"version":"1","type":"busy","code":"host_busy"}', "ActionReadFailed"),
+                (500, ERROR_BYTES[:-1], "InvalidResponse"),
+                (409, ERROR_BYTES, "InvalidResponse")):
+            response = (f"HTTP/1.1 {status} Rejected\r\nContent-Type: application/json\r\n"
+                f"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body
+            proxy = ReplyProxy(host, "/v1/read-action-arguments", lambda reply: response)
+            master, slave = pty.openpty()
+            original = termios.tcgetattr(slave)
+            caller = None
+            try:
+                caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "permission/read"],
+                    env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                output = bytearray()
+                deadline = time.monotonic() + 10
+                while caller.poll() is None:
+                    remaining = deadline - time.monotonic()
+                    assert remaining > 0, "failed permission read did not exit"
+                    if select.select([master], [], [], min(remaining, 0.05))[0]:
+                        output.extend(os.read(master, 65536))
+                        assert len(output) < 1024 * 1024
+                while select.select([master], [], [], 0.05)[0]:
+                    output.extend(os.read(master, 65536))
+                errors = caller.stderr.read().decode()
+                assert caller.returncode != 0 and expected in errors, (expected, errors)
+                assert b"a: Allow once" not in output and b"Run Bash:" not in output, output
+                assert len(proxy.exchanges) == 1 and proxy.mutations == [], proxy.mutations
+                assert {path.name: path.read_bytes() for path in records.glob("*.json")} == before
+                actual = termios.tcgetattr(slave)
+                if sys.platform == "darwin":
+                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                    actual[3] &= ~mask
+                    original[3] &= ~mask
+                assert actual == original, "failed permission read did not restore terminal"
+            finally:
+                proxy.close()
+                if caller is not None and caller.poll() is None:
+                    caller.kill()
+                    caller.wait(timeout=5)
+                if caller is not None:
+                    caller.stderr.close()
+                os.close(master)
+                os.close(slave)
+    finally:
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "permission provider fixture did not join"
+    print("automatic permission read: canonical/ordinary/invalid failures retain classification, restore terminal and never consent or mutate", flush=True)
+
+
 def keyed_observation_cases(state, only="keyed"):
     home = state / only
     home.mkdir(mode=0o700)
@@ -662,10 +734,10 @@ def main(selected="all"):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-canonical-failure."))
     completed = False
     try:
-        assert selected in ("all", "producers", "committed", "interactive", "bindings", "nulls", "binding-interactive", "null-interactive", "presentation", "keyed", "keyed-bindings", "keyed-output"), selected
+        assert selected in ("all", "producers", "committed", "interactive", "permission-read", "bindings", "nulls", "binding-interactive", "null-interactive", "presentation", "keyed", "keyed-bindings", "keyed-output"), selected
         if selected in ("keyed-bindings", "keyed-output"):
             keyed_observation_cases(state, selected)
-        for name, case in (("producers", producer_cases), ("committed", committed_cases), ("interactive", interactive_cases), ("bindings", binding_cases), ("nulls", lambda path: binding_cases(path, null_code=True)), ("binding-interactive", lambda path: interactive_cases(path, binding=True)), ("null-interactive", lambda path: interactive_cases(path, null_code=True)), ("presentation", presentation_cases), ("keyed", keyed_observation_cases)):
+        for name, case in (("producers", producer_cases), ("committed", committed_cases), ("interactive", interactive_cases), ("permission-read", permission_read_cases), ("bindings", binding_cases), ("nulls", lambda path: binding_cases(path, null_code=True)), ("binding-interactive", lambda path: interactive_cases(path, binding=True)), ("null-interactive", lambda path: interactive_cases(path, null_code=True)), ("presentation", presentation_cases), ("keyed", keyed_observation_cases)):
             if selected in ("all", name):
                 case(state)
         completed = True

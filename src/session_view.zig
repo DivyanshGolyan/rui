@@ -139,7 +139,10 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     try scratch.setLength(requests.io, 0);
     var reply: client.ReplyBuffer = .{};
     const result = try requests.readActionArguments(store, session, action, scratch, &reply);
-    if (result == .command) return error.ActionReadFailed;
+    if (result == .command) {
+        try client.checkCanonicalFailure(result.command);
+        return error.ActionReadFailed;
+    }
     var buffer: [4096]u8 = undefined;
     var reader = scratch.reader(requests.io, &buffer);
     const Source = struct {
