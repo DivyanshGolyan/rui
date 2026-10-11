@@ -4,7 +4,7 @@ const Editor = @import("TerminalEditor.zig");
 const Self = @This();
 
 pub const capacity = 65_536;
-pub const State = enum { submitting, unconfirmed, rejected };
+pub const State = enum { not_started, submitting, unconfirmed, rejected };
 pub const Ticket = struct { owner: *const Self, serial: u64 };
 pub const Event = union(enum) { editor: Editor.Event, message: Ticket, command, busy };
 pub const View = struct { bytes: []const u8, cursor: usize };
@@ -70,7 +70,7 @@ pub fn submitText(self: *Self, text: []const u8) Ticket {
 
 fn seal(self: *Self, literal: bool) Ticket {
     self.serial += 1;
-    self.submitted = .{ .bank = self.active, .state = .submitting, .literal = literal };
+    self.submitted = .{ .bank = self.active, .state = .not_started, .literal = literal };
     self.active ^= 1;
     self.clear();
     return .{ .owner = self, .serial = self.serial };
@@ -92,8 +92,8 @@ pub fn submissionState(self: *const Self, ticket: Ticket) !State {
     return (try self.checked(ticket)).state;
 }
 
-/// Only the joined capture/send owner calls transitions. Acceptance is a Host
-/// fact, not successful capture, a worker completion hint or a local timeout.
+/// The frontend changes startup state before launch, then only after join.
+/// Acceptance is a Host fact, not capture, completion or a local timeout.
 pub fn settle(self: *Self, ticket: Ticket, state: ?State) !void {
     const submitted = try self.checked(ticket);
     if (state) |value| {

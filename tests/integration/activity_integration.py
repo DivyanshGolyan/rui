@@ -5,6 +5,7 @@ import http.server
 import json
 import os
 import pathlib
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -99,7 +100,9 @@ def main():
             self.close_connection = True
         def log_message(self, *_args): pass
 
-    with tempfile.TemporaryDirectory(prefix="rui-activity-") as root:
+    root = tempfile.mkdtemp(prefix="rui-activity-")
+    completed = False
+    try:
         state = canonical_fixture_root(root)
         store = state / "store"
         store.mkdir(mode=0o700)
@@ -260,6 +263,12 @@ def main():
             endpoint.server_close()
             worker.join(timeout=5)
             assert not worker.is_alive()
+        completed = True
+    finally:
+        if completed:
+            shutil.rmtree(root)
+        else:
+            print(f"retained activity failure state: {root}", file=sys.stderr)
 
 
 if __name__ == "__main__": main()

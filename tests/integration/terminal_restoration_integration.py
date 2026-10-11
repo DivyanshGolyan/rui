@@ -25,7 +25,9 @@ PROBE = r"""
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -40,6 +42,22 @@ static void record(const char *text) {
     int fd = open(getenv("RUI_TERMINAL_PROBE"), O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (fd < 0 || write(fd, text, strlen(text)) != (ssize_t)strlen(text)) _exit(90);
     if (close(fd)) _exit(91);
+}
+
+static int probe_pthread_create(pthread_t *thread, const pthread_attr_t *attrs,
+        void *(*run)(void *), void *arg) {
+#ifdef __APPLE__
+    int (*real_create)(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *) = pthread_create;
+#else
+    int (*real_create)(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *) = dlsym(RTLD_NEXT, "pthread_create");
+#endif
+    if (!real_create || real_create == probe_pthread_create) _exit(89);
+    const char *arm = getenv("RUI_TERMINAL_STARTUP_ARM");
+    if (arm && !access(arm, F_OK)) {
+        record("worker-not-started\n");
+        return EAGAIN;
+    }
+    return real_create(thread, attrs, run, arg);
 }
 
 static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
@@ -117,12 +135,26 @@ int probe_fcntl(int fd, int command, ...) {
 #endif
     if (!real_fcntl || real_fcntl == probe_fcntl) _exit(98);
     if (command == F_GETFL || command == F_GETFD) return real_fcntl(fd, command);
+#ifdef F_GETPATH
+    if (command == F_GETPATH) {
+        va_list args;
+        va_start(args, command);
+        char *path = va_arg(args, char *);
+        va_end(args);
+        return real_fcntl(fd, command, path);
+    }
+#endif
     /* Only the reached integer-valued commands are supported by this probe. */
     if (command != F_SETFL && command != F_SETFD && command != F_DUPFD
 #ifdef F_DUPFD_CLOEXEC
         && command != F_DUPFD_CLOEXEC
 #endif
-    ) { record("unsupported-fcntl\n"); _exit(99); }
+    ) {
+        char text[64];
+        snprintf(text, sizeof(text), "unsupported-fcntl:%d\n", command);
+        record(text);
+        _exit(99);
+    }
     va_list args;
     va_start(args, command);
     int value = va_arg(args, int);
@@ -212,7 +244,8 @@ static int probe_tcsetattr(int fd, int action, const struct termios *attrs) {
     if (fd == 0 && (attrs->c_lflag & ICANON)) {
         record(action == TCSAFLUSH ? "restore-flush\n" : "restore-other\n");
         const char *fault = getenv("RUI_TERMINAL_FAULT");
-        if (!strcmp(fault, "restore") || !strcmp(fault, "both") || !strcmp(fault, "drain-both")) {
+        if (!strcmp(fault, "restore") || !strcmp(fault, "both") || !strcmp(fault, "drain-both") ||
+            (!strcmp(fault, "startup-restore") && !access(getenv("RUI_TERMINAL_STARTUP_ARM"), F_OK))) {
             errno = ENOTTY;
             return -1;
         }
@@ -234,23 +267,37 @@ INTERPOSE(probe_fsync, fsync)
 INTERPOSE(probe_tcdrain, tcdrain)
 INTERPOSE(probe_tcsetattr, tcsetattr)
 INTERPOSE(probe_fcntl, fcntl)
+INTERPOSE(probe_pthread_create, pthread_create)
 #else
 ssize_t writev(int fd, const struct iovec *iov, int count) { return probe_writev(fd, iov, count); }
 ssize_t write(int fd, const void *bytes, size_t count) { return probe_write(fd, bytes, count); }
 int fsync(int fd) { return probe_fsync(fd); }
 int tcdrain(int fd) { return probe_tcdrain(fd); }
 int tcsetattr(int fd, int action, const struct termios *attrs) { return probe_tcsetattr(fd, action, attrs); }
+int pthread_create(pthread_t *thread, const pthread_attr_t *attrs, void *(*run)(void *), void *arg) {
+    return probe_pthread_create(thread, attrs, run, arg);
+}
 #endif
 """
 
 
 FORWARD_DRIVER = r"""
+#include <errno.h>
 #include <fcntl.h>
+#include <string.h>
+#include <sys/param.h>
 #include <sys/uio.h>
 #include <termios.h>
 #include <unistd.h>
 
 int main(void) {
+#ifdef F_GETPATH
+    char path[MAXPATHLEN], expected[MAXPATHLEN];
+    if (ttyname_r(1, expected, sizeof(expected)) || fcntl(1, F_GETPATH, path) ||
+        strcmp(path, expected)) return 7;
+    errno = 0;
+    if (fcntl(-1, F_GETPATH, path) != -1 || errno != EBADF) return 8;
+#endif
     int flags = fcntl(1, F_GETFL);
     if (flags < 0 || fcntl(1, F_SETFL, flags | O_NONBLOCK) ||
         fcntl(1, F_GETFL) != (flags | O_NONBLOCK) || fcntl(1, F_SETFL, flags) ||
@@ -834,6 +881,114 @@ def detach_reporting_cases(state, library):
         thread.join(timeout=5)
 
 
+def startup_reporting_cases(state, library):
+    """Initial launch is definitely unsent; failed retry retains uncertainty."""
+    for kind in ("message", "allow_once", "deny", "message-restore", "retry"):
+        root = state / f"startup-{kind}"
+        root.mkdir()
+        home, store = root / "home", root / "store"
+        home.mkdir(mode=0o700)
+        responses = [fixture.sse_answer("seed", "seed-r", "seed-m", "SEED-ACCEPTED")[0]]
+        if kind in ("allow_once", "deny"):
+            responses.append(fixture.sse_tool_calls("choice", [("bash", "choice-call", json.dumps({"cmd": "touch must-not-run", "timeout_ms": 1000}))]))
+        elif kind == "retry":
+            responses.append(fixture.sse_answer("retry", "retry-r", "retry-m", "ORIGINAL-ACCEPTED")[0])
+        endpoint = fixture.SuccessEndpoint(responses)
+        thread = threading.Thread(target=endpoint.serve_forever)
+        thread.start()
+        host = caller = proxy = None
+        held, release = threading.Event(), threading.Event()
+        master, slave = pty.openpty()
+        ready_read, ready_write = os.pipe()
+        original = termios.tcgetattr(slave)
+        arm, log = root / "arm", root / "probe.log"
+        try:
+            host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+            human.run(home, "configure", "--store", store, "--session", "startup/case",
+                "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "startup/case"],
+                env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write),
+                    "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                    "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "startup-restore" if kind == "message-restore" else "startup",
+                    "RUI_TERMINAL_STARTUP_ARM": str(arm)},
+                pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            human.read_terminal(master, "› ")
+            os.write(master, b"seed accepted original\n")
+            human.read_terminal(master, "SEED-ACCEPTED")
+            assert "Original reserved request:" not in human.terminal_step(master, "/status")
+            if kind in ("allow_once", "deny"):
+                os.write(master, b"propose exact Action\n")
+                human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+                human.action_ready(ready_read)
+                proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
+                event = b"a\n" if kind == "allow_once" else b"d\n"
+            else:
+                if kind == "retry":
+                    proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: b"")
+                    os.write(master, b"retry this exact original\n")
+                    human.read_terminal(master, "Not confirmed")
+                def hold(response):
+                    held.set()
+                    assert release.wait(15), "startup observation not released"
+                    return response
+                if proxy is None:
+                    proxy = canonical.ReplyProxy(host, "/v1/inspect-session", hold)
+                else:
+                    proxy.route, proxy.rewrite = "/v1/inspect-session", hold
+                human.terminal_gate(caller, master, held, "startup borrower held")
+                event = b"\x12" if kind == "retry" else "definitely unsent café!\n".encode()
+            records = home / ".config/rui/requests"
+            before = {path: path.read_bytes() for path in records.glob("*.json")}
+            mutations = list(proxy.mutations)
+            arm.touch()
+            os.write(master, event)
+            output, errors = human.terminal_exit(caller, master)
+            assert caller.returncode == 1, (output, errors)
+            assert (b"TerminalRestoreFailed" if kind == "message-restore" else b"SystemResources") in errors, errors
+            assert log.read_text().count("worker-not-started\n") == 1, log.read_text()
+            if kind == "retry":
+                request, = [json.loads(body) for body in before.values()
+                    if json.loads(body).get("text", {}).get("value") == "retry this exact original"]
+                assert b"Message not confirmed" in errors and request["key"].encode() in errors
+                assert b"was not sent" not in errors
+            else:
+                intent = b"Decision" if kind in ("allow_once", "deny") else b"Message"
+                assert intent + b" was not sent" in errors and b"You may submit it again" in errors, errors
+                assert b"rui recover " not in errors and b"rui result " not in errors and b"reserved key" not in errors, errors
+            assert {path: path.read_bytes() for path in records.glob("*.json")} == before
+            assert proxy.mutations == mutations and not (root / "must-not-run").exists()
+            actual = termios.tcgetattr(slave)
+            if sys.platform == "darwin":
+                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                actual[3] &= ~mask
+                original[3] &= ~mask
+            if kind == "message-restore":
+                assert not actual[3] & termios.ICANON
+            else:
+                assert actual == original
+            release.set()
+            proxy.close()
+            proxy = None
+            if kind == "retry":
+                assert json.loads(human.run(home, "recover", request["key"], "--json"))["answer"]["replayed"] is True
+            print(f"startup reporting: {kind} exact custody, publication/mutation conservation and cleanup precedence passed", flush=True)
+        finally:
+            release.set()
+            if caller is not None and caller.poll() is None:
+                caller.kill()
+                caller.wait(timeout=5)
+            if proxy is not None:
+                proxy.close()
+            termios.tcsetattr(slave, termios.TCSANOW, original)
+            for fd in (master, slave, ready_read, ready_write):
+                os.close(fd)
+            if host is not None:
+                fixture.stop_host(host)
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
+
+
 def main(selected=None):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-terminal-restoration."))
     home = state / "home"
@@ -868,6 +1023,11 @@ def main(selected=None):
         if selected in (None, "detach"):
             detach_reporting_cases(state, library)
         if selected == "detach":
+            completed = True
+            return
+        if selected in (None, "startup"):
+            startup_reporting_cases(state, library)
+        if selected == "startup":
             completed = True
             return
         host = fixture.start_host(store, None)

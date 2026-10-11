@@ -14,7 +14,7 @@ const Self = @This();
 pub const Command = *const fn (std.process.Init, []const u8, []const u8, []u8) anyerror!void;
 const Submission = union(enum) {
     message: Input.Ticket,
-    decision: struct { action: u64, decision: protocol.PermissionDecision, state: Input.State = .submitting },
+    decision: struct { action: u64, decision: protocol.PermissionDecision, state: Input.State = .not_started },
 };
 init: std.process.Init,
 store: []const u8,
@@ -115,7 +115,9 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
 fn recoveryGuide(self: *const Self) void {
     const Text = @import("TerminalText.zig");
     if (self.submission != null) {
-        if (self.captured == null) {
+        if (self.submissionState() == .not_started) {
+            Text.diagnostic("rui: {s} was not sent: capture worker did not start. You may submit it again; no recovery record was published for this attempt.\n", .{if (self.submission.? == .decision) "Decision" else "Message"});
+        } else if (self.captured == null) {
             Text.diagnostic("rui: Capture not confirmed. Inspect rui requests for reserved key {s}; reservation does not prove publication. Recover only that original, never replacement input.\n", .{self.capture_key});
         } else if (self.submissionState() == .rejected) {
             Text.diagnostic("rui: Original request rejected. Use rui recover {s} to inspect its saved outcome.\n", .{self.capture_key});
@@ -178,14 +180,16 @@ fn settleSubmission(self: *Self, state: ?Input.State) !void {
 
 fn startSubmission(self: *Self, submission: Submission) !void {
     std.debug.assert(self.submission == null);
+    self.submission = submission;
+    errdefer self.settleSubmission(.not_started) catch unreachable;
     const target: client.CaptureTarget = .{ .generated = self.directory };
     self.capture_target = .{ .explicit = try target.resolve(self.init.io, &self.capture_path, &self.capture_key) };
-    self.submission = submission;
     self.reply = null;
+    try self.settleSubmission(.submitting);
     try self.admission.start(self.init.io, self, submit);
 }
 
-test "frontend reservation failure exposes no recoverable submission" {
+test "frontend reservation failure retains definitely unsent intent and next draft" {
     const Failing = struct {
         fn random(_: ?*anyopaque, _: []u8) std.Io.RandomSecureError!void {
             return error.EntropyUnavailable;
@@ -193,14 +197,20 @@ test "frontend reservation failure exposes no recoverable submission" {
     };
     var vtable = std.testing.io.vtable.*;
     vtable.randomSecure = Failing.random;
-    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false };
-    self.init.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    self.input.init();
-    const ticket = self.input.submitText("never sent");
-    try std.testing.expectError(error.EntropyUnavailable, self.startSubmission(.{ .message = ticket }));
-    try std.testing.expect(self.submission == null);
-    try std.testing.expect(self.admission.thread == null and self.captured == null);
-    try std.testing.expectEqualStrings("never sent", try self.input.message(ticket));
+    const Kind = enum { message, allow_once, deny };
+    for ([_]Kind{ .message, .allow_once, .deny }) |kind| {
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false, .accepted = .{ .kind = .message, .key = @splat('A') } };
+        self.init.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+        self.input.init();
+        const submission: Submission = if (kind == .message) .{ .message = self.input.submitText("original café!") } else .{ .decision = .{ .action = 9, .decision = if (kind == .allow_once) .allow_once else .deny } };
+        for ("next té!\x1b[D") |byte| _ = self.input.feed(byte);
+        try std.testing.expectError(error.EntropyUnavailable, self.startSubmission(submission));
+        try std.testing.expectEqual(Input.State.not_started, self.submissionState());
+        try std.testing.expect(self.admission.thread == null and self.captured == null);
+        if (kind == .message) try std.testing.expectEqualStrings("original café!", try self.input.message(submission.message));
+        try std.testing.expectEqualStrings("next té!", self.input.composition().bytes);
+        try std.testing.expectEqual("next té".len, self.input.composition().cursor);
+    }
 }
 
 fn driveActive(self: *Self) !void {
@@ -279,6 +289,7 @@ fn driveActive(self: *Self) !void {
         if (self.dirty and !self.opening and (self.reader.thread == null or !self.reader_output_started)) {
             const view: Input.View = if (self.choice_action != null) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
             const status = if (self.choice_action != null) "a: Allow once / d: Deny (Enter)" else if (self.submission != null) switch (self.submissionState()) {
+                .not_started => unreachable, // Startup failure exits before the next UI turn.
                 .submitting => "Sending…",
                 .unconfirmed => if (self.submission.? == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
                 .rejected => "Rejected · /discard",
