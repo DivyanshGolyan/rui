@@ -666,7 +666,7 @@ def fatal_reporting_cases(state):
             records = home / ".config/rui/requests"
             before = {path: path.read_bytes() for path in records.glob("*.json")}
             os.write(master, b"accepted A\n")
-            human.read_terminal(master, "ACCEPTED-A")
+            human.read_terminal(master, "ACCEPTED-A", composer=True)
             human.terminal_step(master, "/status")
             os.write(master, b"uncertain B\n")
             human.read_terminal(master, "Not confirmed")
@@ -756,7 +756,7 @@ def decision_reporting_cases(state):
                     assert received.wait(10)
                     caller.send_signal(signal.SIGINT)
                 else:
-                    human.read_terminal(master, f"SETTLED-{name}")
+                    human.read_terminal(master, f"SETTLED-{name}", composer=True)
                     status = human.terminal_step(master, "/status")
                     assert "Original reserved request:" not in status, status
                     os.write(master, b"\x1b[")
@@ -858,7 +858,7 @@ def detach_reporting_cases(state, library):
                     human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
                     human.action_ready(read_ready)
                     os.write(master, b"a\n" if kind == "allow_once" else b"d\n")
-                human.read_terminal(master, f"SETTLED-{name}")
+                human.read_terminal(master, f"SETTLED-{name}", composer=True)
                 status = human.terminal_step(master, "/status")
                 assert "Original reserved request:" not in status, status
                 before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
@@ -941,7 +941,7 @@ def startup_reporting_cases(state, library):
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             human.read_terminal(master, "› ")
             os.write(master, b"seed accepted original\n")
-            human.read_terminal(master, "SEED-ACCEPTED")
+            human.read_terminal(master, "SEED-ACCEPTED", composer=True)
             assert "Original reserved request:" not in human.terminal_step(master, "/status")
             if kind in ("allow_once", "deny"):
                 os.write(master, b"propose exact Action\n")
@@ -1065,6 +1065,7 @@ def visible_stream_handoff_cases(state, library):
             os.write(master, command)
             tail, errors = human.terminal_exit(caller, master)
             assert caller.returncode != 0 and b"Cancelled" in errors, (phase, tail, errors)
+            assert errors.startswith(b"\n"), "fatal diagnostics merged into incomplete transcript"
             assert b"Session: visible/stream" not in tail and b"Action:" not in tail, "cancelled stream dispatched command"
             assert marker not in tail.decode() and b"Detached." not in tail, "cancelled stream replayed or resumed"
             assert (prefix.encode() + tail).count(marker.encode()) == 1

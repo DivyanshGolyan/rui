@@ -68,7 +68,7 @@ def preference_edits(home, store):
     assert saved.read_text() == pinned
 
 
-def read_terminal(master, marker, timeout=15, preserve_colour=False):
+def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False):
     output = b""
     deadline = time.monotonic() + timeout
     # Foreground styling is orthogonal to text/Markdown assertions. A transcript
@@ -77,9 +77,12 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False):
     def visible():
         return re.sub(rb"\x1b\[(?:33|39|90|91|94)m", b"", output)
     def reached():
-        if marker == "› ":
-            return re.search("› [^\\r\\n]*(?:\\r\\n> [^\\r\\n]*)*(?:\\x1b\\[[0-9]+A)?\\r\\x1b\\[[0-9]+C".encode(), visible()) is not None
-        return marker.encode() in visible()
+        shown = visible()
+        if marker != "› ":
+            if marker.encode() not in shown: return False
+            if not composer: return True
+            shown = shown.split(marker.encode(), 1)[1]
+        return re.search("› [^\\r\\n]*(?:\\r\\n> [^\\r\\n]*)*(?:\\x1b\\[[0-9]+A)?\\r\\x1b\\[[0-9]+C".encode(), shown) is not None
     while not reached():
         remaining = deadline - time.monotonic()
         assert remaining > 0, (marker, output.decode(errors="replace"))
@@ -152,9 +155,9 @@ def terminal_gate(caller, master, reached, context, timeout=10):
     return bytes(streams[master])
 
 
-def terminal_step(master, command, marker="› "):
+def terminal_step(master, command, marker="› ", *, composer=False):
     os.write(master, (command + "\n").encode())
-    return read_terminal(master, marker)
+    return read_terminal(master, marker, composer=composer)
 
 
 def command_entry_cases():
@@ -2246,7 +2249,7 @@ def main():
             if "› " not in rejected.split("action_not_pending", 1)[1]:
                 rejected += read_terminal(master, "› ")
             caught_up = rejected + terminal_step(master, "/discard",
-                "› " if "siblings done" in rejected else "siblings done")
+                "› " if "siblings done" in rejected else "siblings done", composer=True)
             assert "siblings done" in caught_up and counter.read_text() == "x", caught_up
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
@@ -2501,7 +2504,7 @@ def main():
                 assert counter.read_text() == "x", "non-exact choice approved an Action"
                 assert set(records.glob("*.json")) == before_choice, "no-op choice captured authorization"
                 assert "Run Bash:" not in rejected_choice, "no-op repeated the command"
-            completed_turn = terminal_step(master, "a", "interactive complete")
+            completed_turn = terminal_step(master, "a", "interactive complete", composer=True)
             assert "\n  interactive complete" in completed_turn and "result:" not in completed_turn and "request:" not in completed_turn, completed_turn
             decision_record, = set(records.glob("*.json")) - before_choice
             saved_decision = json.loads(decision_record.read_bytes())
