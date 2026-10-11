@@ -1185,8 +1185,7 @@ fn exec(init: std.process.Init, args: []const []const u8) !void {
         var writer = std.Io.Writer.fixed(&bytes);
         try writer.writeAll("rui: approval required. Continue in the Session: rui resume --store ");
         try TerminalText.writeShellWord(&writer, saved.store.slice());
-        try writer.writeAll(" -- ");
-        try TerminalText.writeShellWord(&writer, saved.session.slice());
+        try TerminalText.writeShellSession(&writer, saved.session.slice(), true);
         try writer.writeAll("\n");
         try std.Io.File.stderr().writeStreamingAll(init.io, writer.buffered());
         return error.PermissionRequired;
@@ -1362,12 +1361,13 @@ fn runSession(init: std.process.Init, store: []const u8, reference: []const u8, 
 fn resumeSession(init: std.process.Init, args: []const []const u8) !void {
     var store: ?[]const u8 = null;
     var reference: ?[]const u8 = null;
+    var session_hex: [protocol.max_session_bytes]u8 = undefined;
     var last = false;
     var literal = false;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
-        if (!literal and std.mem.eql(u8, arg, "--store") and store == null) store = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--last") and !last) last = true else if (!literal and std.mem.eql(u8, arg, "--")) literal = true else if (reference == null and (literal or !std.mem.startsWith(u8, arg, "-"))) reference = arg else return usage();
+        if (!literal and std.mem.eql(u8, arg, "--store") and store == null) store = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--session-hex") and reference == null) reference = try decodeHexIdentity(try takeValue(args, &index), &session_hex) else if (!literal and std.mem.eql(u8, arg, "--last") and !last) last = true else if (!literal and std.mem.eql(u8, arg, "--")) literal = true else if (reference == null and (literal or !std.mem.startsWith(u8, arg, "-"))) reference = arg else return usage();
     }
     if (last == (reference != null)) return usage();
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) return error.InteractiveTerminalRequired;
@@ -1422,8 +1422,10 @@ fn sessionCommand(init: std.process.Init, destination: []const u8, reference: []
             inline for (.{ "allow-action", "deny-action" }, .{ "Allow once: ", "Deny: " }) |decision, label| {
                 try std.Io.File.stdout().writeStreamingAll(init.io, label ++ "rui " ++ decision ++ " --store ");
                 try writeShellWord(init.io, destination);
-                try std.Io.File.stdout().writeStreamingAll(init.io, " --session ");
-                try writeShellWord(init.io, reference);
+                var session_buffer: [2 * protocol.max_session_bytes + 32]u8 = undefined;
+                var session_writer = std.Io.File.stdout().writerStreaming(init.io, &session_buffer);
+                try TerminalText.writeShellSession(&session_writer.interface, reference, false);
+                try session_writer.flush();
                 try std.Io.File.stdout().writeStreamingAll(init.io, " --action ");
                 try std.Io.File.stdout().writeStreamingAll(init.io, id);
                 try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
@@ -1637,18 +1639,26 @@ fn decideAction(init: std.process.Init, args: []const []const u8, decision: @Fie
     var explicit_store: ?[]const u8 = null;
     var key_seen = false;
     var action_seen = false;
+    var session: ?[]const u8 = null;
+    var session_hex: [protocol.max_session_bytes]u8 = undefined;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
         if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) location.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
             location.key = try takeValue(args, &index);
             key_seen = true;
-        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--action")) {
+        } else if (std.mem.eql(u8, arg, "--session") or std.mem.eql(u8, arg, "--session-hex")) {
+            if (session != null) return error.DuplicateArgument;
+            const value = try takeValue(args, &index);
+            session = if (std.mem.eql(u8, arg, "--session-hex")) try decodeHexIdentity(value, &session_hex) else value;
+        } else if (std.mem.eql(u8, arg, "--action")) {
+            if (action_seen) return error.DuplicateArgument;
             input.action_id = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
             action_seen = true;
         } else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
+    input.session = session orelse return usage();
     if (input.session.len == 0 or !action_seen or (location.record.len == 0) != !key_seen) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, explicit_store, &selected_buffer);
@@ -1801,8 +1811,10 @@ fn readConversation(init: std.process.Init, args: []const []const u8) !void {
 }
 
 fn decodeHexIdentity(encoded: []const u8, buffer: []u8) ![]const u8 {
-    if (encoded.len % 2 != 0 or encoded.len / 2 > buffer.len) return error.InvalidHexIdentity;
-    return std.fmt.hexToBytes(buffer[0 .. encoded.len / 2], encoded) catch error.InvalidHexIdentity;
+    if (encoded.len == 0 or encoded.len % 2 != 0 or encoded.len / 2 > buffer.len) return error.InvalidHexIdentity;
+    const value = std.fmt.hexToBytes(buffer[0 .. encoded.len / 2], encoded) catch return error.InvalidHexIdentity;
+    if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidHexIdentity;
+    return value;
 }
 
 fn readResult(init: std.process.Init, args: []const []const u8) !void {

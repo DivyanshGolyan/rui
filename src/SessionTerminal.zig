@@ -75,8 +75,7 @@ pub fn detached(self: *Self, store: []const u8, session: []const u8) !void {
     var notice = std.Io.Writer.fixed(&buffer);
     try notice.writeAll("\nDetached. Host work continues.\nResume: rui resume --store ");
     try Text.writeShellWord(&notice, store);
-    try notice.writeAll(" -- ");
-    try Text.writeShellWord(&notice, session);
+    try Text.writeShellSession(&notice, session, true);
     try notice.writeAll("\n");
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
     if (std.c.fcntl(1, std.c.F.SETFL, self.flags[1] | nonblock) < 0) return error.TerminalCleanupFailed;

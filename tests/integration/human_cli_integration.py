@@ -1339,9 +1339,119 @@ def silent_read_edit_cases():
             print(f"retained silent-edit failure state: {state}", file=sys.stderr)
 
 
+def opaque_session_commands_case():
+    """Execute generated commands without losing opaque Session bytes in argv."""
+    from control_integration import raw_request
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-opaque-session."))
+    home = state / "home"
+    home.mkdir()
+    store = state / "store"
+    reference = "human/nul\x00' é\n--last"
+    endpoint = fixture.SuccessEndpoint([
+        fixture.sse_tool_calls("opaque-actions", [("bash", "opaque-deny", json.dumps({"cmd": "touch must-not-run", "timeout_ms": None})),
+                                                   ("bash", "opaque-allow", json.dumps({"cmd": "touch allowed-once", "timeout_ms": None}))]),
+        fixture.sse_answer("opaque-answer", "opaque-r", "opaque-m", "Opaque decisions complete.")[0],
+    ])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    ready_read, ready_write = os.pipe()
+    host = entered = None
+    master = slave = None
+    completed = False
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        for key, session in (("prefix", "human/nul"), ("opaque", reference)):
+            body = {"version": "1", "kind": "configure", "store": str(store), "key": key,
+                    "session": session, "configuration": {
+                        **{name: {"state": "value", "value": value} for name, value in
+                           (("workspace", str(state)), ("provider", "codex"), ("model", "model-a"))},
+                        **{name: {"state": "omitted"} for name in
+                           ("instructions", "tools", "permission_mode", "output_schema")}}}
+            body["configuration"]["permission_mode"] = {"state": "value", "value": "ask"}
+            head, answer = raw_request(host.rui_ready_fields["socket"], "/v1/configure", json.dumps(body).encode())
+            assert b" 200 " in head and json.loads(answer)["answer"]["status"] == "accepted", (head, answer)
+        master, slave = pty.openpty()
+        entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "--last"],
+            cwd=state, env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
+        read_terminal(master, "› ")
+        assert "Session: human/nul\\x00" in terminal_step(master, "/status")
+        farewell = terminal_step(master, "/exit", "Resume: ")
+        assert entered.wait(timeout=5) == 0
+        command = farewell.split("Resume: ", 1)[1].split("\n", 1)[0]
+        bin_dir = state / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "rui").symlink_to(fixture.RUI)
+        entered = subprocess.Popen(["bash", "-c", "exec " + command], cwd=state,
+            env={**os.environ, "HOME": str(home), "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+        read_terminal(master, "› ")
+        actual = terminal_step(master, "/status")
+        assert "Session: human/nul\\x00" in actual, (command, actual)
+        os.write(master, b"propose two distinct Actions\n")
+        action_ready(ready_read)
+        for label, decision in (("Deny: ", "deny"), ("Allow once: ", "allow_once")):
+            inspection = terminal_step(master, "/inspect-action", "Deny: ")
+            action_ready(ready_read)
+            while select.select([master], [], [], 0.05)[0]:
+                inspection += os.read(master, 65536).decode().replace("\r\n", "\n")
+            printed = inspection.split(label, 1)[1].split("\n", 1)[0]
+            reply = subprocess.run(["bash", "-c", "exec " + printed + " --json"], cwd=state,
+                env={**os.environ, "HOME": str(home), "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]},
+                capture_output=True, text=True, timeout=10)
+            assert reply.returncode == 0, (printed, reply.stdout, reply.stderr)
+            captured, admission = map(json.loads, reply.stdout.splitlines())
+            saved = json.loads((home / ".config/rui/requests" / (captured["request"] + ".json")).read_bytes())
+            assert admission["admission"]["answer"]["status"] == "accepted", admission
+            assert saved["session"] == reference and saved["decision"] == decision
+            assert saved["action"] == printed.rsplit(" --action ", 1)[1], (saved, printed)
+            print(json.dumps({"printed": printed, "decision": decision, "exact_session": True}), flush=True)
+        fixture.wait_for(lambda: (state / "allowed-once").exists(), "printed Allow executed its exact Action")
+        assert (state / "allowed-once").exists() and not (state / "must-not-run").exists()
+        terminal_step(master, "/exit", "Resume: ")
+        assert entered.wait(timeout=5) == 0
+        before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
+        invalid_hex = ("", "0", "zz", "ff", "61" * 129)
+        for route in ("resume", "allow-action", "deny-action"):
+            extra = [] if route == "resume" else ["--action", "1"]
+            negatives = [["--session-hex", value] for value in invalid_hex]
+            negatives += [["--session-hex", "61", "--session-hex", "62"]]
+            negatives += ([["--last", "--session-hex", "61"], ["--session-hex", "61", "other"],
+                           ["other", "--session-hex", "61"]] if route == "resume" else
+                          [["--session", "plain", "--session-hex", "61"],
+                           ["--session-hex", "61", "--session", "plain"],
+                           ["--session", "plain", "--session", "other"],
+                           ["--session-hex", reference.encode().hex(), "--action", "1"],
+                           ["--session-hex", reference.encode().hex(), "--action", "2"]])
+            for flags in negatives:
+                rejected = subprocess.run([str(fixture.RUI), route, "--store", str(store), *flags, *extra],
+                    env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=10)
+                assert rejected.returncode != 0 and b"InteractiveTerminalRequired" not in rejected.stderr, (route, flags, rejected)
+        assert {path: path.read_bytes() for path in before} == before
+        assert set((home / ".config/rui/requests").glob("*.json")) == set(before)
+        completed = True
+        print("opaque Session: actual printed resume preserves NUL and rejects a configured prefix lookalike", flush=True)
+    finally:
+        if entered is not None and entered.poll() is None:
+            entered.kill()
+            entered.wait(timeout=5)
+        for fd in (master, slave, ready_read, ready_write):
+            if fd is not None:
+                os.close(fd)
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+        if completed:
+            shutil.rmtree(state)
+        else:
+            print(f"retained opaque-Session failure state: {state}", file=sys.stderr)
+
+
 def main():
     import canonical_failure_integration
     import terminal_restoration_integration
+    opaque_session_commands_case()
     silent_read_edit_cases()
     command_entry_cases()
     persistent_opening_case()
