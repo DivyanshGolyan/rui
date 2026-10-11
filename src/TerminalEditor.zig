@@ -39,6 +39,20 @@ pub fn expire(self: *Editor) !void {
     }
 }
 
+/// Literal command-line text is not keyboard input or a permission choice.
+pub fn validateText(bytes: []const u8) !void {
+    var characters = (try std.unicode.Utf8View.init(bytes)).iterator();
+    while (characters.nextCodepoint()) |point| {
+        if (!validScalar(point, true)) return error.InvalidTerminalInput;
+    }
+}
+
+fn validScalar(point: u21, multiline: bool) bool {
+    return !((point < 32 and !(point == '\t' or (multiline and point == '\n'))) or
+        (point >= 0x7f and point < 0xa0) or
+        (utf8proc_category(@intCast(point)) == 27 and point != 0x200d));
+}
+
 /// Returns a slice borrowed from buffer until its caller next reuses it.
 /// No draft, terminal mode or buffered input survives a prompt.
 pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]const u8 {
@@ -90,8 +104,8 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
     try output.writeStreamingAll(io, "\x1b[?2004h");
     try output.writeStreamingAll(io, prompt);
     if (!allow_paste) {
-        // The exact Action is already printed. Nothing received before the
-        // complete fresh prompt may count as its decision.
+        // The provider choice must come after its complete fresh prompt,
+        // never from queued input or a marked paste.
         try freshChoice(io);
     }
     var editor: Editor = .{ .buffer = buffer, .allow_paste = allow_paste };
@@ -383,10 +397,7 @@ fn insert(self: *Editor, byte: u8, pasted_input: bool) Event {
         self.partial_length = 0;
         return .none;
     };
-    if ((codepoint < 32 and !(codepoint == '\t' or (pasted_input and codepoint == '\n'))) or
-        (codepoint >= 0x7f and codepoint < 0xa0) or
-        (utf8proc_category(@intCast(codepoint)) == 27 and codepoint != 0x200d))
-    {
+    if (!validScalar(codepoint, pasted_input)) {
         self.reject(.invalid);
         self.partial_length = 0;
         return .none;

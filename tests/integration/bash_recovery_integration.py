@@ -122,7 +122,7 @@ def prove_effect_without_result_becomes_indeterminate(state):
             env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         try:
-            human.read_terminal(master, "rui> ")
+            human.read_terminal(master, "› ")
             status = human.terminal_step(master, "/status")
             assert "Indeterminate Action: 1" in status, status
             assert "The command may have run; Rui did not replay it." in status, status

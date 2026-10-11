@@ -23,6 +23,7 @@ directory: []const u8,
 scratch: std.Io.File,
 command: Command,
 terminal: Terminal,
+colour: bool,
 input: Input = undefined,
 admission: Task = .{},
 reader: Task = .{},
@@ -33,6 +34,8 @@ capture_target: client.CaptureTarget = undefined,
 captured: ?client.CapturedRecord = null,
 reply_buffer: client.ReplyBuffer = .{},
 reply: ?client.MutationReply = null,
+admission_error: ?anyerror = null,
+accepted_message: ?[36]u8 = null,
 current: client.Current = undefined,
 observed: client.Current = undefined,
 cursor: client.ActivityCursor = .{},
@@ -71,15 +74,17 @@ fn signals(self: *Self, install: bool) void {
     }
 }
 
-pub fn run(init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, scratch: std.Io.File, command: Command) !void {
-    var self: Self = .{ .init = init, .store = store, .session = session, .directory = directory, .scratch = scratch, .command = command, .terminal = undefined };
+pub fn run(init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, scratch: std.Io.File, command: Command, initial_text: ?[]const u8) !void {
+    const no_colour: []const u8 = init.environ_map.get("NO_COLOR") orelse "";
+    const colour = no_colour.len == 0 and !std.mem.eql(u8, init.environ_map.get("TERM") orelse "", "dumb");
+    var self: Self = .{ .init = init, .store = store, .session = session, .directory = directory, .scratch = scratch, .command = command, .terminal = undefined, .colour = colour };
     self.input.init();
     interrupted.store(false, .release);
     self.signals(true);
     defer self.signals(false);
-    self.terminal = try Terminal.begin();
+    self.terminal = try Terminal.begin(colour);
     self.terminal.pump = .{ .context = &self, .step = pump };
-    const result = self.drive();
+    const result = self.drive(initial_text);
     const restored = self.terminal.finish();
     self.reader.cancel();
     self.admission.cancel();
@@ -88,15 +93,20 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
     if (self.reader.take() != null) self.reader.acknowledge();
     if (self.captured) |*capture| capture.close(init.io);
     try restored;
+    if (result) |_| {} else |err| {
+        if (err != error.InteractiveInterrupted) if (self.accepted_message) |key|
+            std.debug.print("rui: Message accepted; do not resubmit it. Use rui result {s} to inspect the same Message.\n", .{key});
+    }
     read_result catch |err| if (err == error.CanonicalStoreFailure) return err;
     admission_result catch |err| if (err == error.CanonicalStoreFailure) return err;
     result catch |err| if (err != error.InteractiveInterrupted) return err;
     read_result catch |err| if (err != error.Cancelled) return err;
     admission_result catch |err| if (err != error.Cancelled) return err;
-    try self.terminal.detached();
+    try self.terminal.detached(store, session);
 }
 
-fn drive(self: *Self) !void {
+fn drive(self: *Self, initial_text: ?[]const u8) !void {
+    if (initial_text) |text| try self.startSubmission(.{ .message = self.input.submitText(text) });
     while (!self.detached) {
         self.driveActive() catch |err| {
             if (interrupted.load(.acquire)) return error.InteractiveInterrupted;
@@ -132,6 +142,7 @@ fn settleSubmission(self: *Self, state: ?Input.State) !void {
         if (self.captured) |*capture| capture.close(self.init.io);
         self.captured = null;
         self.submission = null;
+        self.admission_error = null;
         self.poll_at = 0;
     }
 }
@@ -152,7 +163,6 @@ fn driveActive(self: *Self) !void {
         if (self.admission.thread != null and self.admission.completed()) {
             self.settleAdmission() catch |err| {
                 if (err == error.CanonicalStoreFailure) return err;
-                self.notice = if (self.submission.? == .decision) "! Decision not confirmed. Draft retained." else "! Not confirmed. Next draft retained.";
             };
             self.dirty = true;
         }
@@ -194,7 +204,9 @@ fn driveActive(self: *Self) !void {
             const notice = self.notice.?;
             self.notice = null;
             try self.terminal.permanent("\n");
+            try self.terminal.permanent((if (std.mem.startsWith(u8, notice, "!")) View.Style.failure else View.Style.normal).code(self.colour));
             try self.terminal.permanent(notice);
+            try self.terminal.permanent(View.Style.normal.code(self.colour));
             try self.terminal.permanent("\n");
             self.dirty = true;
         }
@@ -217,7 +229,7 @@ fn driveActive(self: *Self) !void {
             const view: Input.View = if (self.choice_action != null) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
             const status = if (self.choice_action != null) "a: Allow once / d: Deny (Enter)" else if (self.submission != null) switch (self.submissionState()) {
                 .submitting => "Sending…",
-                .unconfirmed => "Unconfirmed · Ctrl-R retries original",
+                .unconfirmed => if (self.submission.? == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
                 .rejected => "Rejected · /discard",
             } else switch (self.current.work.status.value) {
                 .runnable, .in_flight => "Working…",
@@ -227,7 +239,7 @@ fn driveActive(self: *Self) !void {
                 .idle, .completed => "",
             };
             self.dirty = false;
-            try self.terminal.redraw(view.bytes, view.cursor, status, if (self.choice_action != null) "> " else "rui> ");
+            try self.terminal.redraw(view.bytes, view.cursor, status, if (self.choice_action != null) "> " else "› ");
             if (self.choice_action != null and !self.choice_ready and self.choice.pending() == .none) {
                 try Editor.freshChoice(self.init.io);
                 self.choice_ready = true;
@@ -313,8 +325,8 @@ fn step(self: *Self, wait: i32) !bool {
         .busy => self.notice = if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (self.submission != null and self.submission.? == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |event| switch (event) {
             .interrupt, .eof => self.detached = true,
-            .invalid => self.notice = "! Input rejected; nothing sent.",
-            .overflow => self.notice = "! input too long; nothing sent. Use rui message --text FILE for longer input.",
+            .invalid => self.notice = "! Input rejected; nothing sent. Enter plain text or paste again.",
+            .overflow => self.notice = "! input too long; nothing sent. Shorten it and try again.",
             else => {},
         },
     }
@@ -362,16 +374,20 @@ fn settleAdmission(self: *Self) !void {
     if (self.admission.thread == null) return;
     const result = self.admission.join();
     result catch |err| {
+        self.admission_error = err;
         try self.settleSubmission(.unconfirmed);
         return err;
     };
     const reply = self.reply.?;
     const answer = reply.answer catch |err| {
+        self.admission_error = err;
         try self.settleSubmission(.unconfirmed);
         return err;
     };
+    self.admission_error = null;
     if (reply.isAccepted()) {
         if (self.submissionState() == .unconfirmed) self.notice = if (self.submission.? == .decision) "  • Decision confirmed." else "  • Original confirmed.";
+        if (self.submission.? == .message) self.accepted_message = self.capture_key;
         try self.settleSubmission(null);
     } else {
         try self.settleSubmission(.rejected);
@@ -425,12 +441,9 @@ fn handoff(self: *Self) !void {
         if (err != error.Cancelled) return err;
         self.notice = "! Activity observation interrupted; displayed prefix may be incomplete. Host work unchanged.";
     };
-    joined catch {
-        self.notice = if (read_result) |_|
-            "! Not confirmed. Ctrl-R retries the original; the next draft is safe."
-        else |_|
-            "! Observation interrupted; displayed text may be incomplete. Not confirmed. Ctrl-R retries the original; the next draft is safe.";
-    };
+    // A noncanonical Admission failure retains its original and diagnostic;
+    // the resumed composer presents the one actionable uncertainty status.
+    joined catch {};
     if (interrupted.load(.acquire)) return error.InteractiveInterrupted;
     try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
     {
@@ -447,8 +460,10 @@ fn handoff(self: *Self) !void {
                 }
             } else if (std.mem.startsWith(u8, text, "/recover ") and self.submission != null) {
                 if (std.mem.eql(u8, text[9..], &self.capture_key)) self.requestRetry() else self.notice = "! Recovery key does not match this original submission; nothing sent.";
-            } else if (std.mem.eql(u8, text, "/wait") or std.mem.eql(u8, text, "/login")) {
-                self.notice = "! Actions ask here when ready. Login uses rui login codex in your shell.";
+            } else if (std.mem.eql(u8, text, "/wait")) {
+                self.notice = "Work continues while you compose.";
+            } else if (std.mem.eql(u8, text, "/login")) {
+                self.notice = "Login uses rui login codex in your shell.";
             } else if (std.mem.eql(u8, text, "/help")) {
                 try std.Io.File.stdout().writeStreamingAll(self.init.io, "Actions show their command here. Type a + Enter to allow once, d + Enter to deny.\n/status settings and work · /inspect-action exact diagnostics\n/details recent conversation with full saved tool output\n/history older conversation\nCtrl-R: retry the same unconfirmed input or decision, keeping the draft\n/requests recovery records · /result KEY saved answer\n/setup future defaults · /configure Session settings\n/recover KEY original intent · /discard rejected intent\n/exit detach (Host work continues; unsent draft is lost)\nLogin: rui login codex in your shell.\n");
             } else {
@@ -459,11 +474,16 @@ fn handoff(self: *Self) !void {
                     try std.Io.File.stdout().writeStreamingAll(self.init.io, "Original reserved request: ");
                     try std.Io.File.stdout().writeStreamingAll(self.init.io, &self.capture_key);
                     try std.Io.File.stdout().writeStreamingAll(self.init.io, if (self.submissionState() == .rejected) "\nSubmission rejected; /discard releases only this original, retaining the next draft.\n" else "\nPublication/admission may be incomplete; Ctrl-R retries this exact original.\n");
+                    if (self.admission_error) |err| {
+                        try std.Io.File.stdout().writeStreamingAll(self.init.io, "Last submission error: ");
+                        try std.Io.File.stdout().writeStreamingAll(self.init.io, @errorName(err));
+                        try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
+                    }
                 }
             }
         }
     }
-    self.terminal = try Terminal.begin();
+    self.terminal = try Terminal.begin(self.colour);
     self.terminal.pump = .{ .context = self, .step = pump };
     self.choice_ready = false;
     self.dirty = true;
@@ -473,7 +493,7 @@ fn permission(raw: *anyopaque, task: *Task) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     self.observed = try View.current(task.requests(), self.store, self.session, self.scratch);
     if (self.observed.first_action) |action| {
-        try View.permission(task.requests(), self.store, self.session, action, self.observed.settings.workspace.slice(), self.scratch, task, self.read_columns);
+        try View.permission(task.requests(), self.store, self.session, action, self.observed.settings.workspace.slice(), self.scratch, task, self.read_columns, self.colour);
         self.prepared_action = action;
     }
 }
@@ -499,7 +519,7 @@ fn scan(raw: *anyopaque, task: *Task) !void {
         const pending = try View.pending(requests, self.store, self.session, page.facts.end);
         try pending.render(requests, self.store, self.session, task);
     }
-    try View.render(requests, self.store, self.session, &page, task, self.read_columns);
+    try View.render(requests, self.store, self.session, &page, task, self.read_columns, self.colour);
     if (self.opening) {
         self.next_cursor = .{ .position = page.facts.end };
         return;
@@ -516,6 +536,6 @@ fn history(raw: *anyopaque, task: *Task) !void {
     // Joined errors before this point retain the cursor without visible content.
     self.history_render_started = true;
     if (latest) try task.feed("\nRecent conversation — tool details\n");
-    try prepared.render(task.io, self.scratch, self.store, self.session, task, self.read_columns);
+    try prepared.render(task.io, self.scratch, self.store, self.session, task, self.read_columns, self.colour);
     if (!latest) self.next_history_cursor = prepared.page.continuation();
 }

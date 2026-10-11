@@ -10,6 +10,26 @@ const tools = @import("tools.zig");
 extern fn utf8proc_charwidth(scalar: i32) c_int;
 extern fn utf8proc_grapheme_break_stateful(i32, i32, *c_int) c_int;
 
+/// Only presentation-owned foreground changes. Content cannot select a style.
+pub const Style = enum {
+    user,
+    quiet,
+    attention,
+    failure,
+    normal,
+
+    pub fn code(self: Style, colour: bool) []const u8 {
+        if (!colour) return "";
+        return switch (self) {
+            .user => "\x1b[94m",
+            .quiet => "\x1b[90m",
+            .attention => "\x1b[33m",
+            .failure => "\x1b[91m",
+            .normal => "\x1b[39m",
+        };
+    }
+};
+
 /// Live conversation and inspection share hanging indentation. Input is already
 /// escaped or rendered; only trusted renderer SGR has zero display width.
 pub fn Indented(comptime Sink: type) type {
@@ -113,7 +133,7 @@ test "conversation wrapping preserves Unicode clusters across content windows" {
     }
 }
 
-pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, workspace: []const u8, scratch: std.Io.File, sink: anytype, columns: usize) !void {
+pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, workspace: []const u8, scratch: std.Io.File, sink: anytype, columns: usize, colour: bool) !void {
     // Action reads write at the descriptor's streaming offset, not positionally.
     try requests.io.vtable.fileSeekTo(requests.io.userdata, scratch, 0);
     try scratch.setLength(requests.io, 0);
@@ -137,7 +157,10 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     var source: Source = .{ .reader = &reader.interface };
     const arguments = try tools.inspectBashArguments(&source) orelse return error.InvalidBashArguments;
     try reader.seekTo(0);
-    try sink.feed("\n? Run Bash:\n  ");
+    try sink.feed(Style.attention.code(colour));
+    try sink.feed("\n? Run Bash:");
+    try sink.feed(Style.normal.code(colour));
+    try sink.feed("\n  ");
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };
     var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .multiline } };
     if (!try tools.writeBashCommand(&source, &escaped)) return error.InvalidBashArguments;
@@ -326,7 +349,7 @@ fn content(requests: client.Requests, store: []const u8, session: []const u8, it
     try sink.feed("\n");
 }
 
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const client.ActivityPage, sink: anytype, columns: usize) !void {
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const client.ActivityPage, sink: anytype, columns: usize, colour: bool) !void {
     const Drain = struct {
         pub fn feed(_: *@This(), _: []const u8) !void {}
     };
@@ -337,12 +360,21 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
         switch (item.value) {
             .admission => |message| {
                 if (historical and message.state == .applied) continue;
-                try sink.feed(if (historical) "\n! Unapplied input:\n› " else "\n› ");
+                if (historical) try sink.feed("\n! Unapplied input:");
+                try sink.feed("\n");
+                try sink.feed(Style.user.code(colour));
+                try sink.feed("›");
+                try sink.feed(Style.normal.code(colour));
+                try sink.feed(" ");
                 try content(requests, store, session, item, message.content, sink, columns);
             },
             .user => |message| {
                 if (!historical) continue; // Live Admission already showed it.
-                try sink.feed("\n› ");
+                try sink.feed("\n");
+                try sink.feed(Style.user.code(colour));
+                try sink.feed("›");
+                try sink.feed(Style.normal.code(colour));
+                try sink.feed(" ");
                 try content(requests, store, session, item, message.content, sink, columns);
             },
             .assistant => |reference| {
@@ -355,6 +387,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 // permission or outcome classification; /details stays exact.
                 const Summary = struct {
                     escaped: Escaped(@TypeOf(sink)),
+                    colour: bool,
                     line: [256]u8 = undefined,
                     length: usize = 0,
                     remaining: usize = 256,
@@ -387,6 +420,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                         } else {
                             if (self.emitted) try self.escaped.feed("\n  ") else {
                                 self.failed = !std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.") and !std.mem.eql(u8, line, "Permission denied.");
+                                try self.escaped.sink.feed((if (self.failed) Style.failure else Style.normal).code(self.colour));
                                 try self.escaped.feed(if (self.failed) "\n! " else "  • ");
                             }
                             try self.escaped.feed(if (std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.")) "Bash succeeded." else line);
@@ -397,13 +431,14 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                     fn finish(self: *@This()) !void {
                         if (self.length != 0) try self.emit();
                         try self.escaped.finish();
+                        try self.escaped.sink.feed(Style.normal.code(self.colour));
                     }
                 };
-                var summary: Summary = .{ .escaped = .{ .sink = sink, .text = .{ .mode = .multiline } } };
+                var summary: Summary = .{ .escaped = .{ .sink = sink, .text = .{ .mode = .multiline } }, .colour = colour };
                 if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &summary)) |failure| return failure.err();
                 try summary.finish();
                 if (summary.omitted) try sink.feed(" [summary shortened; /details]");
-                if (summary.failed) try sink.feed(" /details for output.");
+                if (summary.failed) try sink.feed("\n  /details for output.");
                 try sink.feed("\n");
             },
             .call => |call| {

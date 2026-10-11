@@ -14,7 +14,7 @@ editors: [2]Editor = undefined,
 command_buffer: [capacity]u8 = undefined,
 command_length: ?usize = null,
 active: u1 = 0,
-submitted: ?struct { bank: u1, state: State } = null,
+submitted: ?struct { bank: u1, state: State, literal: bool } = null,
 serial: u64 = 0,
 
 pub fn init(self: *Self) void {
@@ -53,11 +53,27 @@ pub fn feedSelected(self: *Self, byte: u8, selected: bool) Event {
         return .command;
     }
     if (!selected or self.submitted != null) return .busy;
+    return .{ .message = self.seal(false) };
+}
+
+/// Command-line text was validated before Session creation. It is literal,
+/// including leading slashes, and uses the same retained submission bank.
+pub fn submitText(self: *Self, text: []const u8) Ticket {
+    std.debug.assert(self.submitted == null and text.len <= capacity);
+    const editor = &self.editors[self.active];
+    @memcpy(editor.buffer[0..text.len], text);
+    editor.length = text.len;
+    editor.cursor = text.len;
+    editor.plain_ascii = false;
+    return self.seal(true);
+}
+
+fn seal(self: *Self, literal: bool) Ticket {
     self.serial += 1;
-    self.submitted = .{ .bank = self.active, .state = .submitting };
+    self.submitted = .{ .bank = self.active, .state = .submitting, .literal = literal };
     self.active ^= 1;
     self.clear();
-    return .{ .message = .{ .owner = self, .serial = self.serial } };
+    return .{ .owner = self, .serial = self.serial };
 }
 
 pub fn clear(self: *Self) void {
@@ -69,7 +85,7 @@ pub fn message(self: *const Self, ticket: Ticket) ![]const u8 {
     const submitted = try self.checked(ticket);
     const editor = &self.editors[submitted.bank];
     const bytes = editor.buffer[0..editor.length];
-    return if (std.mem.startsWith(u8, bytes, "//")) bytes[1..] else bytes;
+    return if (!submitted.literal and std.mem.startsWith(u8, bytes, "//")) bytes[1..] else bytes;
 }
 
 /// Only the joined capture/send owner calls transitions. Acceptance is a Host

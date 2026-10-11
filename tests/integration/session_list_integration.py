@@ -195,7 +195,8 @@ def main():
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert all_workspaces.returncode == 0, all_workspaces.stderr
             assert all_workspaces.stdout.count("Session: ") == 11
-            assert "Bash runs without approval" in all_workspaces.stdout
+            assert "Bash runs without approval" not in all_workspaces.stdout
+            assert all_workspaces.stdout.count("Permission: bypass\n") == 11
             assert exchange(address, "list-sessions", {**base("list_sessions"), "workspace": None, "after": "12", "ceiling": "11"})[0] == 400
             long_reference = "x" * 126 + "\x01\x00"
             assert configure("long-reference", long_reference, str(root))[1]["answer"]["status"] == "accepted"

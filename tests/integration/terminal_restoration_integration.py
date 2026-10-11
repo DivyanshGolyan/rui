@@ -247,7 +247,8 @@ def persistent_cases(state, library, home, store, host):
     records = home / ".config/rui/requests"
     records.mkdir(mode=0o700, parents=True, exist_ok=True)
     for case in ("sync-exit", "sync-handoff", "sync-command-int", "sync-command-term",
-                 "admission-interrupt", "backpressure", "backpressure-command", "disable", "restore", "both"):
+                 "admission-interrupt", "backpressure", "backpressure-command", "disable", "restore", "both",
+                 "incomplete-disable", "incomplete-restore", "incomplete-both"):
         master, slave = pty.openpty()
         output_master, output_slave = pty.openpty()
         original = termios.tcgetattr(slave)
@@ -256,17 +257,18 @@ def persistent_cases(state, library, home, store, host):
         reply_release = threading.Event()
         before = set(records.glob("*.json"))
         try:
+            fault = "backpressure" if case.startswith("backpressure") else case.removeprefix("incomplete-")
             environment = {**os.environ, "HOME": str(home),
                 "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
-                "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "backpressure" if case.startswith("backpressure") else case}
+                "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": fault}
             if case.startswith("sync-"):
                 environment["RUI_CAPTURE_SYNC_RELEASE"] = str(release)
                 if case == "sync-handoff":
                     environment["RUI_CAPTURE_SYNC_ERROR"] = "1"
-            caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
+            caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
                 "--session", "terminal/restoration"], env=environment,
                 stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
-            human.read_terminal(output_master, "rui> ")
+            human.read_terminal(output_master, "› ")
             if case.startswith("sync-"):
                 os.write(master, b"original synchronously captured\n")
                 fixture.wait_for(lambda: log.exists() and "capture-sync-held" in log.read_text(), "real capture directory sync")
@@ -287,12 +289,12 @@ def persistent_cases(state, library, home, store, host):
                 release.touch()
                 if case == "sync-handoff":
                     resumed = human.read_terminal(output_master, "Not confirmed")
-                    if "rui> " not in resumed.split("Not confirmed", 1)[1]:
-                        resumed += human.read_terminal(output_master, "rui> ")
+                    if "› " not in resumed.split("Not confirmed", 1)[1]:
+                        resumed += human.read_terminal(output_master, "› ")
                     assert "STALE" not in resumed, resumed
                     assert "No actionable permission" in resumed, resumed
                     os.write(master, "next café!\x1b[D\x1b[DX".encode())
-                    human.read_terminal(output_master, "rui> next cafXé!")
+                    human.read_terminal(output_master, "› next cafXé!")
                     os.write(master, b"\x12")
                     human.read_terminal(output_master, "\n› original synchronously captured")
                     assert record.read_bytes() == saved, "postpublication recovery replaced original record"
@@ -324,20 +326,29 @@ def persistent_cases(state, library, home, store, host):
                 # the frontend's actual activity reader fills stdout's PTY.
                 human.run(home, "message", "--store", store, "--session", "terminal/restoration", "z" * 50000)
                 fixture.wait_for(lambda: log.exists() and "output-blocked" in log.read_text(), "actual terminal EAGAIN")
-                os.write(master, b"/inspect-action\n" if case == "backpressure-command" else b"\x03")
+                os.write(master, b"/configure --permission-mode ask\n" if case == "backpressure-command" else b"\x03")
+            elif case.startswith("incomplete-"):
+                os.write(master, b"\xc3")
             else:
                 os.write(master, b"\x03")
-            expected = 1 if case in ("backpressure", "backpressure-command", "disable", "restore", "both") else 0
+            expected = 1 if fault in ("backpressure", "disable", "restore", "both") else 0
             assert caller.wait(timeout=5) == expected, caller.stderr.read()
             errors = caller.stderr.read().decode()
             if expected:
-                assert ("TerminalRestoreFailed" if case in ("restore", "both") else "TerminalCleanupFailed") in errors, errors
+                assert ("TerminalRestoreFailed" if fault in ("restore", "both") else "TerminalCleanupFailed") in errors, errors
+            if case.startswith("incomplete-"):
+                assert set(records.glob("*.json")) == before, "incomplete input created a capture"
+            if case == "backpressure-command":
+                assert all(json.loads(record.read_bytes())["kind"] == "message"
+                    for record in set(records.glob("*.json")) - before), "failed cleanup captured pending configuration"
+                assert fixture.command("inspect-session", "--store", store,
+                    "--session", "terminal/restoration")["session"]["permission_mode"] == "bypass", "failed cleanup executed pending configuration"
             if case.startswith("sync-command-"):
                 assert set(records.glob("*.json")) - before == {record}, "interrupt during join captured a pending configuration"
                 assert record.read_bytes() == saved, "interrupt replaced original capture"
                 assert fixture.command("inspect-session", "--store", store,
                     "--session", "terminal/restoration")["session"]["permission_mode"] == "bypass", "interrupt during join executed pending configuration"
-            if case not in ("restore", "both"):
+            if fault not in ("restore", "both"):
                 actual = termios.tcgetattr(slave)
                 if sys.platform == "darwin":
                     mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
@@ -387,165 +398,8 @@ def main(selected=None):
         host = fixture.start_host(store, None)
         human.run(home, "configure", "--store", store, "--session", "terminal/restoration",
             "--workspace", state, "--provider", "codex", "--model", "model-a")
-        if selected is None or selected == "persistent":
-            persistent_cases(state, library, home, store, host)
-        if selected == "persistent":
-            completed = True
-            return
-        cases = ("queued", "exit", "interrupt", "incomplete", "disable", "restore", "both",
-            "disable-incomplete", "restore-incomplete", "both-incomplete", "output",
-            "drain", "drain-both", "drain-incomplete", "drain-both-incomplete", "drain-eintr", "drain-held")
-        assert selected is None or selected in cases, selected
-        for case in cases if selected is None else (selected,):
-            master, slave = pty.openpty()
-            original = termios.tcgetattr(slave)
-            separate = case.startswith("drain")
-            output_master, output_slave = pty.openpty() if separate else (master, slave)
-            log = state / f"probe-{case}.log"
-            drain_release = state / f"drain-{case}.release"
-            records = home / ".config/rui/requests"
-            before = set(records.glob("*.json"))
-            env = {**os.environ, "HOME": str(home)}
-            fault = "drain-both" if case == "drain-both-incomplete" else case if separate else case.split("-", 1)[0]
-            injected = separate or fault in ("disable", "restore", "both", "output")
-            if injected:
-                env.update({"DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
-                    "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": fault,
-                    "RUI_TERMINAL_DRAIN_RELEASE": str(drain_release)})
-            received, release = threading.Event(), threading.Event()
-
-            def hold_reply(response):
-                received.set()
-                assert release.wait(15), "terminal witness did not release reply"
-                return response
-
-            output = bytearray()
-            reader_stop = threading.Event()
-            reader_errors = []
-            reader = None
-
-            def drain_output():
-                try:
-                    while not reader_stop.is_set() or select.select([output_master], [], [], 0)[0]:
-                        if select.select([output_master], [], [], 0.05)[0]:
-                            output.extend(os.read(output_master, 65536))
-                            assert len(output) < 1024 * 1024, "unbounded prompt output"
-                except BaseException as error:
-                    reader_errors.append(error)
-
-            def stop_reader():
-                if reader is not None:
-                    reader_stop.set()
-                    reader.join(timeout=5)
-                    assert not reader.is_alive(), "terminal output reader did not join"
-                    assert not reader_errors, reader_errors
-
-            caller = None
-            proxy = None
-            try:
-                caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-                    "--session", "terminal/restoration"], env=env,
-                    stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
-                human.read_terminal(output_master, "rui> ")
-                # A terminal consumes output while Rui drains it. Withholding
-                # PTY reads here would conflate peer credit with finalization.
-                reader = threading.Thread(target=drain_output)
-                reader.start()
-                proxy = canonical.ReplyProxy(host, "/v1/configure", hold_reply)
-                payload = {"exit": b"/exit\n", "interrupt": b"\x03", "incomplete": b"\xc3"}.get(
-                    case, b"/configure --permission-mode ask\nSTALE")
-                if case.endswith("-incomplete"):
-                    payload = b"\xc3"
-                os.write(master, payload)
-                if separate:
-                    fixture.wait_for(lambda: received.is_set() or (log.exists() and "drain" in log.read_text()),
-                        "stdout drain or premature handoff")
-                    assert log.exists() and "drain" in log.read_text(), "accepted input bypassed stdout drain"
-                if case == "drain-held":
-                    fixture.wait_for(lambda: "drain-held" in log.read_text(), "injected stdout drain wait")
-                    assert caller.poll() is None and not received.is_set() and not proxy.exchanges
-                    assert set(records.glob("*.json")) == before and not termios.tcgetattr(slave)[3] & termios.ICANON
-                    drain_release.touch()
-                if case == "output":
-                    fixture.wait_for(lambda: log.exists() and "output-stopped" in log.read_text(),
-                        "cleanup output flow stopped")
-                    assert caller.poll() is None and not received.is_set() and not proxy.exchanges
-                    assert set(records.glob("*.json")) == before, "blocked cleanup released accepted input"
-                    assert not termios.tcgetattr(slave)[3] & termios.ICANON
-                    termios.tcflow(slave, termios.TCOON)
-                if case in ("queued", "output", "drain-eintr", "drain-held"):
-                    assert received.wait(15), "post-cleanup request did not reach Host"
-                    assert termios.tcgetattr(slave) == original, "handoff did not restore exact attributes"
-                    os.write(master, b"\n")
-                    assert select.select([slave], [], [], 5)[0], "canonical input did not resume"
-                    assert os.read(slave, 4096) == b"\n", "restoration retained old queued typeahead"
-                    if separate:
-                        # The stdout reader cannot consume this terminal's echo.
-                        assert select.select([master], [], [], 0)[0], "canonical echo did not reach input terminal"
-                        assert os.read(master, 4096) == b"\r\n", "unexpected split input-terminal echo"
-                    after = set(records.glob("*.json"))
-                    assert len(after - before) == 1
-                    saved = json.loads((after - before).pop().read_text())
-                    assert saved["kind"] == "configure" and saved["session"] == "terminal/restoration", saved
-                    assert json.loads(proxy.exchanges[0][0]) == saved, "Host received different captured bytes"
-                    stop_reader()  # Transfer the sole output-reader role before the held reply is released.
-                    assert b"\x1b[?2004l" in output, "paste disable did not reach terminal"
-                    release.set()
-                    human.read_terminal(output_master, "rui> ")
-                    os.write(master, b"/exit\n")
-                    human.read_terminal(output_master, "Detached.")
-                    assert caller.wait(timeout=5) == 0
-                    if injected:
-                        first = (["output-stopped", "disable", "drain", "restore-flush"] if case == "output"
-                            else ["disable", "drain", "drain", "restore-flush"] if case == "drain-eintr"
-                            else ["disable", "drain", "drain-held", "restore-flush"])
-                        last = ["disable", "drain"] + (["drain-held"] if case == "drain-held" else []) + ["restore-flush"]
-                        assert log.read_text().splitlines() == first + last, log.read_text()
-                else:
-                    assert caller.wait(timeout=7) == (0 if case in ("exit", "interrupt") else 1)
-                    errors = caller.stderr.read().decode()
-                    stop_reader()
-                    assert b"rui> " not in output and b"Configured." not in output, output
-                    if fault not in ("disable", "both"):
-                        assert b"\x1b[?2004l" in output, "paste disable did not reach terminal"
-                    expected = {"incomplete": "IncompleteTerminalInput", "disable": "TerminalCleanupFailed",
-                        "restore": "TerminalRestoreFailed", "both": "TerminalRestoreFailed",
-                        "drain": "TerminalCleanupFailed", "drain-both": "TerminalRestoreFailed",
-                        "drain-incomplete": "TerminalCleanupFailed"}.get(fault)
-                    if expected:
-                        assert expected in errors, errors
-                        if case.endswith("-incomplete"):
-                            assert "IncompleteTerminalInput" not in errors, errors
-                    assert set(records.glob("*.json")) == before, "failed/empty prompt captured a request"
-                    assert not received.is_set() and not proxy.exchanges, "failed cleanup sent to Host"
-                    if injected:
-                        assert log.read_text().splitlines() == ["disable"] + (
-                            [] if fault in ("disable", "both") else ["drain"]) + ["restore-flush"], log.read_text()
-                    if fault not in ("restore", "both", "drain-both"):
-                        assert termios.tcgetattr(slave) == original, "exit did not restore exact attributes"
-                print(f"terminal restoration: {case} passed", flush=True)
-            finally:
-                termios.tcflow(slave, termios.TCOON)
-                drain_release.touch()
-                release.set()
-                if proxy is not None:
-                    proxy.close()
-                if caller is not None:
-                    if caller.poll() is None:
-                        caller.kill()
-                        caller.wait(timeout=5)
-                    caller.stderr.close()
-                # Dispose only after owned writers stop. Discard residual
-                # fixture output rather than waiting for its transmission.
-                termios.tcflush(output_slave, termios.TCOFLUSH)
-                termios.tcflush(slave, termios.TCOFLUSH)
-                termios.tcsetattr(slave, termios.TCSAFLUSH, original)
-                stop_reader()
-                os.close(master)
-                os.close(slave)
-                if separate:
-                    os.close(output_master)
-                    os.close(output_slave)
+        assert selected in (None, "persistent"), selected
+        persistent_cases(state, library, home, store, host)
         completed = True
     finally:
         if host is not None:

@@ -411,10 +411,10 @@ def interactive_cases(state, binding=False, null_code=False):
         assert configured.returncode == 0, configured
         codex.credentials(home / ".config/rui/codex.json")
         for route, line in (("/v1/configure", "/configure --permission-mode ask"),
-                ("/v1/message", "original terminal bytes"), ("/v1/control/permission-decision", "/wait"),
-                ("/v1/configure", None), ("/v1/observe-command", "confirmed terminal bytes")):
-            if binding and route == "/v1/observe-command":
-                continue  # Streaming observation belongs to the subsequent unit.
+                ("/v1/message", "original terminal bytes"), ("/v1/control/permission-decision", "d"),
+                ("/v1/configure", None), ("/v1/activity-page", "confirmed terminal bytes")):
+            if binding and route == "/v1/activity-page":
+                continue  # Activity framing/binding is covered by opening cases.
             master, slave = pty.openpty()
             original_terminal = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
@@ -423,30 +423,57 @@ def interactive_cases(state, binding=False, null_code=False):
             proxy = None
             caller = None
             try:
-                if line is None:
+                if line is None or route == "/v1/control/permission-decision":
                     proxy = ReplyProxy(host, route, rewrite)
                 caller = subprocess.Popen([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                     pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 if line is not None:
-                    human.read_terminal(master, "rui> ")
-                    proxy = ReplyProxy(host, route, rewrite)
-                    os.write(master, (line + "\n").encode())
                     if route == "/v1/control/permission-decision":
-                        human.read_terminal(master, "Allow once, deny, or later?")
+                        proposal = human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+                        assert "Run Bash:\n  true" in proposal and f"Workspace: {state}" in proposal, proposal
                         human.action_ready(ready_read)
-                        os.write(master, b"d\n")
-                if route == "/v1/observe-command":
-                    output = ""
-                else:
-                    output = human.read_terminal(master, reason if binding else "canonical_store_failure")
-                if binding:
-                    assert "other/session" not in output and '"answer"' not in output, output
+                    else:
+                        human.read_terminal(master, "› ")
+                        if route == "/v1/activity-page":
+                            def fail_activity_after_accept(response):
+                                proxy.route = route
+                                proxy.rewrite = None
+                                return response
+                            proxy = ReplyProxy(host, "/v1/message", fail_activity_after_accept)
+                        else:
+                            proxy = ReplyProxy(host, route, rewrite)
+                    os.write(master, (line + "\n").encode())
+                output = ""
                 if binding and line is not None:
-                    # Keep the existing recoverable invocation-error workflow;
-                    # only canonical Store failure requires fatal detachment.
-                    if "rui> " not in output:
-                        output += human.read_terminal(master, "rui> ")
+                    marker = reason if route == "/v1/configure" else "Decision not confirmed" if route == "/v1/control/permission-decision" else "Not confirmed"
+                    output = human.read_terminal(master, marker)
+                    assert "other/session" not in output and '"answer"' not in output, output
+                    original = proxy.exchanges[0][0]
+                    key = json.loads(original)["key"]
+                    record = home / ".config/rui/requests" / f"{key}.json"
+                    assert record.read_bytes() == original, "unconfirmed reply replaced captured authority"
+                    if route != "/v1/configure":
+                        os.write(master, b"/status\n")
+                        diagnostic = human.read_terminal(master, f"Last submission error: {reason}")
+                        assert key in diagnostic and "Ctrl-R retries this exact original" in diagnostic, diagnostic
+                        if "› " not in diagnostic.split(f"Last submission error: {reason}", 1)[1]:
+                            human.read_terminal(master, "› ")
+                        # No ordinary no-op may retry an unresolved submission.
+                        os.write(master, b"\n")
+                        human.read_terminal(master, "› ")
+                        assert len(proxy.exchanges) == 1, "empty input retried unconfirmed intent"
+                        proxy.rewrite = lambda response: response
+                        os.write(master, b"\x12")
+                        output += human.read_terminal(master, "Decision confirmed." if route == "/v1/control/permission-decision" else "Original confirmed.")
+                        assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == original
+                        recovered = json.loads(proxy.exchanges[1][1].split(b"\r\n\r\n", 1)[1])["answer"]
+                        assert recovered["status"] == "accepted" and recovered["replayed"] is True, recovered
+                        assert record.read_bytes() == original
+                        if route == "/v1/message":
+                            if "a: Allow once / d: Deny (Enter)" not in output:
+                                output += human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+                            human.action_ready(ready_read)
                     os.write(master, b"/exit\n")
                 # Supply output credit during the original exit budget for
                 # fatal cleanup and recoverable explicit detachment alike.
@@ -465,21 +492,28 @@ def interactive_cases(state, binding=False, null_code=False):
                 else:
                     assert caller.returncode != 0, "fatal mutation resumed the Session prompt"
                 errors = caller.stderr.read().decode()
-                assert (reason if binding else "CanonicalStoreFailure") in errors, errors
-                if route == "/v1/observe-command":
-                    assert "Message accepted" in errors and "do not resubmit it" in errors and "admission may be uncertain" not in errors, errors
+                if not binding or line is None or route == "/v1/configure":
+                    assert (reason if binding else "CanonicalStoreFailure") in errors, errors
+                else:
+                    assert "CanonicalStoreFailure" not in errors, errors
                 # Drain before checking that there is no later prompt/success.
                 while select.select([master], [], [], 0.05)[0]:
                     output += os.read(master, 65536).decode(errors="replace")
                 assert "admitted:" not in output and "Configured." not in output, output
-                if route != "/v1/observe-command":
-                    assert "You: " not in output, output
+                assert "You: " not in output, output
                 if not binding or line is None:
-                    assert "rui> " not in output and "Detached." not in output, output
-                assert termios.tcgetattr(slave) == original_terminal, "fatal invocation did not restore the terminal"
+                    assert "Detached." not in output, output
+                    if line is None:
+                        assert "› " not in output, "unaccepted fresh configuration entered the frontend"
+                actual = termios.tcgetattr(slave)
+                if sys.platform == "darwin":
+                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                    actual[3] &= ~mask
+                    original_terminal[3] &= ~mask
+                assert actual == original_terminal, "fatal invocation did not restore the terminal"
                 request, reply = proxy.exchanges[0]
                 decoded = json.loads(reply.split(b"\r\n\r\n", 1)[1])
-                assert decoded["observation" if route == "/v1/observe-command" else "answer"]["status"] == "accepted"
+                assert decoded["answer"]["status"] == "accepted"
                 key = json.loads(request)["key"]
                 record = home / ".config/rui/requests" / f"{key}.json"
                 assert json.loads(record.read_bytes())["key"] == key

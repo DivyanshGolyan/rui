@@ -21,8 +21,16 @@ from host_process import start_ready_process, stop_process
 def sample(pid):
     root = pathlib.Path(f"/proc/{pid}")
     fields = dict(line.split(":", 1) for line in (root / "status").read_text().splitlines())
+    descriptors = []
+    for descriptor in (root / "fd").iterdir():
+        try:
+            descriptors.append(os.readlink(descriptor))
+        except FileNotFoundError:
+            pass  # The independently polling activity reader closed its socket.
     return {"rss_kib": int(fields["VmRSS"].split()[0]),
-        "peak_kib": int(fields["VmHWM"].split()[0]), "fds": len(list((root / "fd").iterdir()))}
+        "peak_kib": int(fields["VmHWM"].split()[0]), "fds": len(descriptors),
+        "retained_fds": sum(not descriptor.startswith("socket:") for descriptor in descriptors),
+        "sockets": sum(descriptor.startswith("socket:") for descriptor in descriptors)}
 
 
 def capture(state, binary, label, size, repetition):
@@ -77,7 +85,7 @@ def retained(state, binary, label):
         stdin=slave, stdout=slave, stderr=slave)
     os.close(slave)
     try:
-        cli.read_terminal(master, "rui> ")
+        cli.read_terminal(master, "› ")
         samples = [sample(process.pid)]
         for _ in range(3):
             for _ in range(10):
@@ -88,7 +96,10 @@ def retained(state, binary, label):
             samples.append(sample(process.pid))
         cli.terminal_step(master, "/exit", "Detached.")
         assert process.wait(timeout=5) == 0
-        assert all(value["fds"] == 3 for value in samples), samples
+        # Legacy baselines own stdio; the sole frontend additionally owns its
+        # unlinked render scratch. A single polling reader may own one socket.
+        assert samples[0]["retained_fds"] in (3, 4), samples
+        assert all(value["retained_fds"] == samples[0]["retained_fds"] and value["sockets"] <= 1 for value in samples), samples
         return {"binary": label, "retained_samples": samples, "configuration_cycles": 30, "invalid_records": 100}
     finally:
         if process.poll() is None:

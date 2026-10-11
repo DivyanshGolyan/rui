@@ -19,6 +19,18 @@ pub fn finish(self: *Self, out: *std.Io.Writer) !void {
     self.utf8_len = 0;
 }
 
+/// Bash ANSI-C quoting preserves exact selectors without terminal controls.
+pub fn writeShellWord(out: *std.Io.Writer, value: []const u8) !void {
+    try out.writeAll("$'");
+    for (value) |byte| switch (byte) {
+        '\'' => try out.writeAll("\\'"),
+        '\\' => try out.writeAll("\\\\"),
+        32...38, 40...91, 93...126 => try out.writeByte(byte),
+        else => try out.print("\\{o:0>3}", .{byte}),
+    };
+    try out.writeByte('\'');
+}
+
 fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
     if (self.utf8_len == 0) {
         if (value < 0x80) {

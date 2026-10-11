@@ -1,6 +1,9 @@
 //! Persistent terminal custody, separate from the fresh one-shot choice owner.
 const std = @import("std");
 const Editor = @import("TerminalEditor.zig");
+const Text = @import("TerminalText.zig");
+const Style = @import("session_view.zig").Style;
+const protocol = @import("protocol.zig");
 const termios = @cImport(@cInclude("termios.h"));
 const Self = @This();
 extern fn utf8proc_grapheme_break_stateful(c_int, c_int, *c_int) c_int;
@@ -8,6 +11,7 @@ extern fn utf8proc_charwidth(c_int) c_int;
 
 original: std.posix.termios,
 flags: [2]c_int,
+colour: bool,
 active: bool = true,
 result: anyerror!void = {},
 size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 },
@@ -16,7 +20,7 @@ caret_row: usize = 0,
 pending_at: i96 = 0,
 pump: ?struct { context: *anyopaque, step: *const fn (*anyopaque) anyerror!void } = null,
 
-pub fn begin() !Self {
+pub fn begin(colour: bool) !Self {
     const original = try std.posix.tcgetattr(0);
     var mode = original;
     mode.lflag.ICANON = false;
@@ -34,7 +38,7 @@ pub fn begin() !Self {
     if (std.c.fcntl(1, std.c.F.SETFL, flags[1] | nonblock) < 0) return error.TerminalCleanupFailed;
     errdefer _ = std.c.fcntl(1, std.c.F.SETFL, flags[1]);
     try std.posix.tcsetattr(0, .FLUSH, mode);
-    var self: Self = .{ .original = original, .flags = flags };
+    var self: Self = .{ .original = original, .flags = flags, .colour = colour };
     if (std.c.write(1, "\x1b[?2004h", 8) != 8) {
         try self.finish();
         return error.TerminalCleanupFailed;
@@ -43,7 +47,7 @@ pub fn begin() !Self {
 }
 
 /// Restore before cancelling or joining any Client borrower. No output-credit
-/// dependency or drain here; exact fresh approval remains readLine's owner.
+/// dependency or drain here; SessionFrontend owns fresh exact approval input.
 pub fn finish(self: *Self) !void {
     if (!self.active) return self.result;
     self.active = false;
@@ -64,12 +68,19 @@ pub fn finish(self: *Self) !void {
 }
 
 /// Optional exit notice cannot hold a restored caller on stdout backpressure.
-pub fn detached(self: *Self) !void {
+pub fn detached(self: *Self, store: []const u8, session: []const u8) !void {
     std.debug.assert(!self.active);
+    // Four characters per escaped byte, plus fixed labels and quoting.
+    var buffer: [4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 128]u8 = undefined;
+    var notice = std.Io.Writer.fixed(&buffer);
+    try notice.writeAll("\nDetached. Host work continues.\nResume: rui resume --store ");
+    try Text.writeShellWord(&notice, store);
+    try notice.writeAll(" -- ");
+    try Text.writeShellWord(&notice, session);
+    try notice.writeAll("\n");
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
     if (std.c.fcntl(1, std.c.F.SETFL, self.flags[1] | nonblock) < 0) return error.TerminalCleanupFailed;
-    const notice = "\nRui: Detached. Host work continues.\n";
-    _ = std.c.write(1, notice, notice.len);
+    _ = std.c.write(1, notice.buffered().ptr, notice.buffered().len);
     if (std.c.fcntl(1, std.c.F.SETFL, self.flags[1]) < 0) return error.TerminalCleanupFailed;
 }
 
@@ -162,24 +173,33 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
     }
     const status_view = try viewport(status_writer.buffered(), 0, size.col - 1, 5);
     const heading: usize = if (status.len == 0) 0 else status_view.rows;
-    if (heading >= size.row) return error.UncertainTerminalCursor;
-    const view = try viewport(bytes, cursor, size.col - prompt.len - 1, @min(5, size.row - heading));
+    const prompt_columns = try std.unicode.utf8CountCodepoints(prompt);
+    if (heading + 1 >= size.row) return error.UncertainTerminalCursor;
+    const view = try viewport(bytes, cursor, size.col - prompt_columns - 1, @min(5, size.row - heading - 1));
     try self.clear();
+    // Own the spacer along with the composer, so repeated redraws erase it
+    // rather than growing scrollback or moving transcript rows.
+    try self.write("\r\n");
+    const status_style: Style = if (std.mem.eql(u8, prompt, "> ")) .attention else if (std.mem.startsWith(u8, status, "!") or std.mem.startsWith(u8, status, "Rejected") or std.mem.startsWith(u8, status, "Work failed")) .failure else .quiet;
+    try self.write(status_style.code(self.colour));
     for (0..heading) |row| {
         if (row != 0) try self.write("\r\n");
         try self.write(status_view.data[row][0..status_view.lengths[row]]);
     }
+    try self.write(Style.normal.code(self.colour));
     for (0..view.rows) |row| {
         if (row != 0 or heading != 0) try self.write("\r\n");
+        try self.write((if (std.mem.eql(u8, prompt, "> ")) Style.attention else Style.user).code(self.colour));
         try self.write(if (row == 0) prompt else "> ");
+        try self.write(Style.normal.code(self.colour));
         try self.write(view.data[row][0..view.lengths[row]]);
     }
     var control: [32]u8 = undefined;
     const up = view.rows - 1 - view.caret.row;
     if (up != 0) try self.write(try std.fmt.bufPrint(&control, "\x1b[{d}A", .{up}));
-    try self.write(try std.fmt.bufPrint(&control, "\r\x1b[{d}C", .{view.caret.col + @as(usize, if (view.caret.row == 0) prompt.len else 2)}));
-    self.rows = view.rows + heading;
-    self.caret_row = view.caret.row + heading;
+    try self.write(try std.fmt.bufPrint(&control, "\r\x1b[{d}C", .{view.caret.col + @as(usize, if (view.caret.row == 0) prompt_columns else 2)}));
+    self.rows = view.rows + heading + 1;
+    self.caret_row = view.caret.row + heading + 1;
     self.size = size;
 }
 
