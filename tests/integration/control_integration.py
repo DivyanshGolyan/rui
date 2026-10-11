@@ -291,7 +291,8 @@ def start_host(store, endpoint=None, *extra, active_capacity=2):
         args += ["--provider-endpoint", endpoint]
         required = {"execution": "enabled", "curl": "8.22.0"}
     args += extra
-    return start_ready_process(args, required_fields=required)
+    return start_ready_process(args, required_fields=required,
+                               observations="control" if "--test-phase-trace" in extra else None)
 
 
 def configure(state, store, key, session):
@@ -1058,6 +1059,9 @@ def prove_delivery_and_settlement_contention(
             results = [future.result(timeout=10) for future in futures]
         for reply, _ in results:
             assert reply["answer"]["status"] == "accepted", reply
+        # Accepted controls establish the race. Evidence collection must not
+        # extend the workload's deliberate settlement gate.
+        settlement_gate.release()
         timings = milestones.wait(
             "control_timing", count=CONTROL_HEADROOM, timeout=8
         )
@@ -1076,7 +1080,6 @@ def prove_delivery_and_settlement_contention(
             assert int(publication["at_ns"]) <= int(
                 timing_by_key[command_key]["reply_complete_at_ns"]
             )
-        settlement_gate.release()
         milestones.wait("model_settlement_superseded", timeout=8)
         if sample_host is not None:
             resource_samples["controls_acknowledged"] = sample_host(

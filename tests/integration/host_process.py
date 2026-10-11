@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import selectors
+import struct
 import subprocess
 import threading
 import time
@@ -12,6 +13,96 @@ import time
 
 READINESS_LIMIT = 16 * 1024
 STDERR_TAIL_LIMIT = 16 * 1024
+# Explicit finite native populations, not an execution-duration history.
+# list: 101 configuration + 37 list exchanges, two endpoints each.
+# status: 12 simultaneous clients + 40 repeated status calls + at most 20
+# setup/guard probes, three phases per connection, plus two boundaries.
+# stop: at most 321 Action probes (8 seconds / 25ms interval + final probe)
+# plus twenty non-poll numbered exchanges, each with a release; five stop
+# issuers, twelve observe classifications, three two-phase cleanup owners,
+# capture entry and Bash handoff. No release is filtered out by request kind.
+# control: at most 50 inspection attempts (capture + gate), four model owners
+# (ten selected phases), three controls (hint + timing), two boundaries.
+OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2,
+                      "stop": 321 + 20 + 5 + 12 + 3 * 2 + 1 + 1,
+                      "control": 50 * 2 + 4 * 10 + 3 * 2 + 2}
+OBSERVATION_FIELDS = (
+    "rui_test_phase", "at_ns", "subject_kind", "subject", "turn", "operation",
+    "attempt", "action", "scratch_used_bytes", "command_key", "kind", "control_key",
+    "store_queued_at_ns", "lock_acquired_at_ns", "store_complete_at_ns",
+    "reply_complete_at_ns", "queue_wait_ns", "store_lock_wait_ns", "store_service_ns",
+    "post_commit_reply_ns", "host_total_ns", "start_ns", "wait_ns",
+)
+
+
+class _Observations:
+    """Fixture-owned bounded native channel; arrivals need not be sequence ordered."""
+
+    def __init__(self, process, reader, plan):
+        self.process, self.reader, self.limit = process, reader, OBSERVATION_LIMITS[plan]
+        self.condition = threading.Condition()
+        self.records = []
+        self.pending_records = {}
+        self.error = None
+        self.thread = threading.Thread(target=self._read, daemon=True)
+        self.thread.start()
+
+    def _read(self):
+        pending = bytearray()
+        try:
+            while chunk := os.read(self.reader, 512):
+                pending.extend(chunk)  # At most one partial frame + one 512-byte read.
+                while len(pending) >= 2:
+                    length = struct.unpack_from("<H", pending)[0]
+                    assert 28 <= length <= 512, "invalid observation frame length"
+                    if len(pending) < length:
+                        break
+                    frame = bytes(pending[:length])
+                    del pending[:length]
+                    self._accept(frame)
+            assert not pending, "incomplete observation at Host exit"
+            assert not self.pending_records, "missing observation sequence at Host exit"
+        except Exception as error:
+            with self.condition:
+                self.error = error
+                self.condition.notify_all()
+        finally:
+            os.close(self.reader)
+
+    def _accept(self, frame):
+        length, version, lost, sequence, run, process = struct.unpack_from("<HBBQQQ", frame)
+        assert length == len(frame) and version == 1 and lost in (0, 1), "invalid observation header"
+        assert not lost, "native observation loss invalidates evidence"
+        assert process == self.process.pid and run > 0 and sequence > 0, "foreign observation"
+        record = {"process": str(process), "run": str(run), "sequence": str(sequence),
+                  "clock": "awake_ns", "trace_lost": bool(lost)}
+        offset = 28
+        while offset < length:
+            assert offset + 3 <= length, "incomplete observation field"
+            field, size = struct.unpack_from("<BH", frame, offset)
+            offset += 3
+            assert field < len(OBSERVATION_FIELDS) and offset + size <= length, "invalid observation field"
+            name = OBSERVATION_FIELDS[field]
+            assert name not in record, "duplicate observation field"
+            record[name] = frame[offset:offset + size].decode("utf-8")
+            offset += size
+        assert "rui_test_phase" in record, "missing observation phase"
+        with self.condition:
+            assert len(self.records) + len(self.pending_records) < self.limit, "observation population exceeded fixture bound"
+            assert sequence > len(self.records) and sequence not in self.pending_records, "duplicate observation sequence"
+            assert all(item["run"] == record["run"] for item in self.records), "mixed observation runs"
+            assert all(item["run"] == record["run"] for item in self.pending_records.values()), "mixed observation runs"
+            self.pending_records[sequence] = record
+            # Expose only a complete selected prefix, never 'sorted so far'.
+            while len(self.records) + 1 in self.pending_records:
+                self.records.append(self.pending_records.pop(len(self.records) + 1))
+            self.condition.notify_all()
+
+    def close(self):
+        assert self.process.poll() is not None, "observation custody ended before reap"
+        self.thread.join(timeout=3)
+        assert not self.thread.is_alive(), "observation channel did not drain after reap"
+        assert self.error is None, f"Host observation failed: {self.error}"
 
 
 def canonical_fixture_root(path):
@@ -52,15 +143,27 @@ class HostDiagnostics:
 
     def __init__(self, process):
         self.process = process
-        self.condition = threading.Condition()
-        self.records = []
+        self.observations = getattr(process, "rui_observations", None)
+        self.condition = self.observations.condition if self.observations else threading.Condition()
+        self.records = self.observations.records if self.observations else []
         self.stderr_tail = bytearray()
-        self.read_error = None
+        self._read_error = None
         self.thread = threading.Thread(target=self._read, daemon=True)
         self.thread.start()
 
+    @property
+    def read_error(self):
+        return self._read_error or (self.observations.error if self.observations else None)
+
     def _read(self):
         try:
+            if self.observations:
+                # Do not withhold a short fixture receipt waiting for filler
+                # diagnostics or EOF. There is still exactly one stderr owner.
+                while chunk := self.process.stderr.read1(4096):
+                    with self.condition:
+                        _tail(self.stderr_tail, chunk, STDERR_TAIL_LIMIT)
+                return  # Optional stderr is never positive native evidence.
             for raw_line in self.process.stderr:
                 with self.condition:
                     _tail(self.stderr_tail, raw_line, STDERR_TAIL_LIMIT)
@@ -74,7 +177,7 @@ class HostDiagnostics:
                     self.records.append(record)
                     self.condition.notify_all()
         except Exception as error:
-            self.read_error = error
+            self._read_error = error
             with self.condition:
                 self.condition.notify_all()
 
@@ -91,6 +194,7 @@ class HostDiagnostics:
         deadline = time.monotonic() + timeout
         with self.condition:
             while True:
+                assert self.read_error is None, self.read_error
                 matches = [
                     record
                     for record in self.records
@@ -111,6 +215,8 @@ class HostDiagnostics:
         assert self.process.poll() is not None, "Host diagnostics closed before process exit"
         self.thread.join(timeout=3)
         assert not self.thread.is_alive(), "Host stderr reader did not drain within 3 seconds"
+        if self.observations:
+            self.observations.close()
         assert self.read_error is None, f"Host stderr reader failed: {self.read_error}"
 
     def tail(self):
@@ -128,10 +234,14 @@ def stop_process(process, timeout=10):
     if process.poll() is None:
         process.kill()
     process.wait(timeout=timeout)
-    if process.stdout is not None:
-        process.stdout.close()
-    if process.stderr is not None:
-        process.stderr.close()
+    try:
+        if getattr(process, "rui_observations", None):
+            process.rui_observations.close()
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
 
 
 def _tail(buffer, chunk, limit):
@@ -147,15 +257,31 @@ def _start_error(reason, process, stdout, stderr_tail):
     )
 
 
-def start_ready_process(args, *, timeout=10, required_fields=None, env=None, stderr_pipe=None):
+def start_ready_process(args, *, timeout=10, required_fields=None, env=None, stderr_pipe=None, observations=None):
     """Start a Host and transfer ownership only after one valid ready line."""
     # The caller retains the write descriptor; startup and reap own the reader.
-    process = subprocess.Popen(
-        list(map(str, args)),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE if stderr_pipe is None else stderr_pipe[1],
-        env=env,
-    )
+    args = list(map(str, args))
+    reader = writer = None
+    try:
+        if observations is not None:
+            assert observations in OBSERVATION_LIMITS
+            reader, writer = os.pipe()
+            os.set_blocking(writer, False)
+            assert os.fpathconf(writer, "PC_PIPE_BUF") >= 512
+            args += ["--test-observation-fd", str(writer), "--test-observation-plan", observations]
+        process = subprocess.Popen(
+            args, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE if stderr_pipe is None else stderr_pipe[1], env=env,
+            pass_fds=() if writer is None else (writer,),
+        )
+        if observations is not None:
+            process.rui_observations = _Observations(process, reader, observations)
+            reader = None  # Reader custody starts before readiness collection.
+    finally:
+        if writer is not None:
+            os.close(writer)
+        if reader is not None:
+            os.close(reader)
     if stderr_pipe is not None:
         process.stderr = stderr_pipe[0]
     stdout = bytearray()

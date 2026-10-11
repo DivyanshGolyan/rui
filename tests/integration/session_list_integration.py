@@ -135,7 +135,7 @@ def main():
         home.mkdir()
         original_home = os.environ.get("HOME")
         os.environ["HOME"] = str(home)
-        process, fields = start_ready_process([RUI, "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"], required_fields={"execution": "unavailable"})
+        process, fields = start_ready_process([RUI, "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"], required_fields={"execution": "unavailable"}, observations="list")
         diagnostics = HostDiagnostics(process)
         try:
             address = fields["socket"]

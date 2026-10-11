@@ -132,7 +132,7 @@ def mixed_effect_drain(provider_first):
                 "--test-response-capture-gate-path", gate.path,
                 "--test-response-capture-gate-min-written-bytes", "4096",
                 "--test-model-cleanup-gate-path", cleanup_gate,
-                "--test-phase-trace", active_capacity=3,
+                "--test-phase-trace", active_capacity=3, observations="stop",
             )
             diagnostics = HostDiagnostics(host)
             bash_fixture.configure(state, store, "configure-bash", "bash/session")
@@ -232,7 +232,7 @@ def main():
         pending = None
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
-                                      "--test-bash-cleanup-gate-path", gate, "--test-phase-trace")
+                                      "--test-bash-cleanup-gate-path", gate, "--test-phase-trace", observations="stop")
             diagnostics = HostDiagnostics(host)
             target = instance(store)
             sock = socket_path(store)

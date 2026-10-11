@@ -3,6 +3,7 @@ const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalText = @import("TerminalText.zig");
 const AnswerRenderer = @import("AnswerRenderer.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
+const TestObservation = @import("TestObservation.zig");
 const client = @import("client.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
@@ -985,6 +986,12 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
             if (faults.client_send_buffer_bytes.? == 0 or faults.client_send_buffer_bytes.? > std.math.maxInt(c_int)) return error.InvalidClientSendBuffer;
         } else if (std.mem.eql(u8, arg, "--test-phase-trace")) {
             faults.test_phase_trace = true;
+        } else if (std.mem.eql(u8, arg, "--test-observation-fd")) {
+            faults.test_observation_fd = try std.fmt.parseInt(c_int, try takeValue(args, &index), 10);
+            faults.test_phase_trace = true;
+        } else if (std.mem.eql(u8, arg, "--test-observation-plan")) {
+            faults.test_observation_plan = std.meta.stringToEnum(TestObservation.Plan, try takeValue(args, &index)) orelse
+                return error.InvalidTestObservationPlan;
         } else if (std.mem.eql(u8, arg, "--test-transition")) {
             const transition = try takeValue(args, &index);
             if (std.mem.eql(u8, transition, "action-attempt-admitted")) faults.test_transition = .action_attempt_admitted else if (std.mem.eql(u8, transition, "action-result-ready")) faults.test_transition = .action_result_ready else if (std.mem.eql(u8, transition, "action-result-committed")) faults.test_transition = .action_result_committed else return error.UnknownTestTransition;

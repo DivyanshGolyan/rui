@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const HostDiagnostics = @import("HostDiagnostics.zig");
+const TestObservation = @import("TestObservation.zig");
 const trace_native = @cImport({
     @cInclude("unistd.h");
 });
@@ -95,6 +96,8 @@ pub const Faults = struct {
     report_unlink: bool = false,
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
+    test_observation_fd: ?c_int = null,
+    test_observation_plan: ?TestObservation.Plan = null,
     test_transition: ?TestTransition = null,
     test_transition_gate_path: ?[]const u8 = null,
     model_cleanup_gate_path: ?[]const u8 = null,
@@ -192,6 +195,7 @@ const Host = struct {
     trace_run_ns: u64 = 0,
     trace_sequence: u64 = 0,
     trace_lost: std.atomic.Value(bool) = .init(false),
+    test_observation: ?*TestObservation = null,
     last_unprocessed_completions: ?u64 = null,
     drain_mutex: std.Io.Mutex = .init,
     drain_condition: std.Io.Condition = .init,
@@ -360,6 +364,13 @@ pub fn serve(
         .trace_run_ns = @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds),
         .custody = execution.CustodyPool.initialize(custody_records),
     };
+    var observation: ?TestObservation = if (faults.test_observation_fd) |fd|
+        try TestObservation.init(fd, faults.test_observation_plan orelse return error.MissingTestObservationPlan, host.trace_run_ns)
+    else
+        null;
+    // This scope outlives connection, execution and capture-writer joins.
+    defer if (observation) |*writer| writer.close();
+    host.test_observation = if (observation) |*writer| writer else null;
     var retention = output_retention.Queue.initializeWithRemoval(
         io,
         lease.paths.scratch.slice(),
@@ -775,6 +786,7 @@ fn executionMain(host: *Host) void {
         .io = host.io,
         .test_gate_path = host.faults.response_capture_gate_path,
         .test_gate_min_written_bytes = host.faults.response_capture_gate_min_written_bytes,
+        .test_observation = host.test_observation,
     };
     const capture_thread: ?std.Thread = if (host.provider_endpoint != null)
         std.Thread.spawn(.{}, provider.CaptureWriter.run, .{&capture_writer}) catch |err| {
@@ -2424,6 +2436,7 @@ fn nowNs(host: *Host) u64 {
 
 fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer) void {
     if (!host.faults.test_phase_trace) return;
+    if (host.test_observation) |writer| writer.record(trace.slice());
     if (!stderr.tryAcquire()) {
         host.trace_lost.store(true, .release);
         return;
