@@ -190,20 +190,6 @@ def assert_connections_live(connections):
         )
 
 
-def borrower_release(diagnostics, started, deadline):
-    records = diagnostics.wait(
-        "connection_resources_released", subject_kind="request_number",
-        subject=started["subject"], timeout=max(0, deadline - time.monotonic()),
-    )
-    assert len(records) == 1, (started, records)
-    released = records[0]
-    assert released["process"] == started["process"] == str(diagnostics.process.pid), (started, released)
-    assert released["run"] == started["run"] and released["clock"] == started["clock"] == "awake_ns", (started, released)
-    assert int(released["sequence"]) > int(started["sequence"]), (started, released)
-    assert int(released["at_ns"]) >= int(started["at_ns"]), (started, released)
-    return released
-
-
 def admitted_at_gate(diagnostics, ordinal):
     # Gate setup retains its existing optional trace oracle. The status plan
     # deliberately excludes effect traces; only the private channel below is
@@ -220,27 +206,6 @@ def admitted_at_gate(diagnostics, ordinal):
                 return record
         return None
     return wait_for(admitted, f"Action {ordinal + 1} admitted at Bash gate")
-
-
-def borrower_census(diagnostics, deadline, expected_routes):
-    # Fixture-issued exchanges, not received records, define this population.
-    with diagnostics.condition:
-        while sum(record["rui_test_phase"].startswith("connection_request_")
-                  for record in diagnostics.records) < len(expected_routes):
-            assert diagnostics.read_error is None, diagnostics.read_error
-            remaining = deadline - time.monotonic()
-            assert remaining > 0, "missing required borrower start population"
-            diagnostics.condition.wait(remaining)
-        started = [record for record in diagnostics.records
-                   if record["rui_test_phase"].startswith("connection_request_")]
-    assert len(started) == len(expected_routes), (expected_routes, started)
-    assert sorted(int(record["subject"]) for record in started) == list(range(len(expected_routes))), started
-    for record in started:
-        assert record["subject_kind"] == "request_number", record
-        assert record["rui_test_phase"] == f"connection_request_{expected_routes[int(record['subject'])]}", record
-    released = [borrower_release(diagnostics, record, deadline) for record in started]
-    assert len(diagnostics.matching("connection_resources_released")) == len(expected_routes), released
-    return released
 
 
 def prove_borrower_oracle():
@@ -272,7 +237,7 @@ def prove_borrower_oracle():
         diagnostics = HostDiagnostics(process)
         diagnostics.thread.join(1)
         try:
-            borrower_census(diagnostics, time.monotonic() + .02, ["configure", "inspect"])
+            diagnostics.borrower_census(time.monotonic() + .02, ["configure", "inspect"])
         except AssertionError:
             assert case != "normal", "complete asymmetric golden population was refused"
         else:
@@ -362,7 +327,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
                 wait_for(markers[0].exists, "first Bash process")
 
         socket_path = ready["socket"]
-        borrower_census(diagnostics, time.monotonic() + 10, expected_routes)
+        diagnostics.borrower_census(time.monotonic() + 10, expected_routes)
         starts = []
         population_deadline = time.monotonic() + 10
         # Ten numbered body borrowers, then exactly two incomplete request
@@ -394,7 +359,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
             assert not diagnostics.matching("connection_resources_released", subject=started["subject"]), started
             began_ns = time.monotonic_ns()
             connection.close()
-            released = borrower_release(diagnostics, started, deadline)
+            released = diagnostics.borrower_release(started, deadline)
             assert int(released["at_ns"]) >= began_ns, (started, released)
         # These borrowers have no request number. Retire them serially to
         # correlate each native admission decrement with its own local close.
@@ -417,9 +382,9 @@ def prove_bash_spawn_with_full_client_population(state, required):
                 assert int(record["at_ns"]) >= int(previous["at_ns"]), records
             classification_releases.append(record)
         held = []
-        borrower_census(diagnostics, deadline, expected_routes)
+        diagnostics.borrower_census(deadline, expected_routes)
         print("descriptor borrower retirement:", json.dumps(
-            [borrower_release(diagnostics, started, deadline) for started in starts]
+            [diagnostics.borrower_release(started, deadline) for started in starts]
             + classification_releases), flush=True)
         for release in releases:
             release.touch()
@@ -431,7 +396,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
             assert probes <= 40, "descriptor fixture exceeded status-plan probe population"
             expected_routes.append("inspect")  # Both resolution and idle predicates issue one inspection.
             result = predicate()
-            borrower_census(diagnostics, deadline, expected_routes)
+            diagnostics.borrower_census(deadline, expected_routes)
             return result
         for ordinal, session in enumerate(sessions):
             deadline = time.monotonic() + 10
@@ -456,7 +421,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
         if diagnostics is not None:
             diagnostics.close()
             if completed:
-                borrower_census(diagnostics, time.monotonic(), expected_routes)
+                diagnostics.borrower_census(time.monotonic(), expected_routes)
                 assert len(diagnostics.matching("connection_place_released")) == 2
         os.close(keeper)
         endpoint.shutdown()

@@ -532,46 +532,55 @@ def main():
         first = None
         diagnostics = None
         before_fd = after_fd = None
+        expected_routes = []
+        completed = False
+
+        def exchange(route, invoke, timeout=10):
+            expected_routes.append(route)
+            began_ns = time.monotonic_ns()
+            deadline = time.monotonic() + timeout
+            value = invoke()
+            released = diagnostics.borrower_census(deadline, expected_routes)
+            current = next(record for record in released if int(record["subject"]) == len(expected_routes) - 1)
+            assert began_ns <= int(current["at_ns"]) <= began_ns + int(timeout * 1e9), current
+            return value
+
         # start_ready_process inherits this test's environment.
         old = os.environ.get("RUI_CODEX_CREDENTIAL_FILE")
         os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
         try:
-            trace_options = ("--test-phase-trace",) if sys.platform == "linux" else ()
-            first, fields = start(store, 3, "--codex", *trace_options)
+            first, fields = start(store, 3, "--codex", "--test-phase-trace")
             assert fields["execution"] == "enabled"
+            diagnostics = HostDiagnostics(first)
             if sys.platform == "linux":
                 # Readiness precedes execution-thread initialization. Its first
                 # boundary proves reactor wake descriptors have been created.
-                diagnostics = HostDiagnostics(first)
                 diagnostics.wait("lifecycle_boundary")
-                # No other client has connected. EOF proves this warm-up socket
-                # closed, unlike framed response completion in hostStatus.
-                assert b'"type":"host_info"' in raw_info(stale, store.resolve())
+                assert b'"type":"host_info"' in exchange("host_info", lambda: raw_info(stale, store.resolve()), 5)
                 before = wait_for_descriptors(first.pid)
                 before_fd = len(before)
-            first_status = status(store)
+            first_status = exchange("host_info", lambda: status(store))
             match = re.fullmatch(r"ready ([0-9a-f]{32}) 3 true true true", first_status)
             assert match, first_status
             alias = store.parent / "alias"
             alias.symlink_to(store, target_is_directory=True)
-            assert status(alias) == first_status
-            setup = subprocess.run([RUI, "setup", "--store", str(alias)],
-                env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
+            assert exchange("host_info", lambda: status(alias)) == first_status
+            setup = exchange("host_info", lambda: subprocess.run([RUI, "setup", "--store", str(alias)],
+                env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10))
             assert setup.returncode == 0, setup.stderr
-            selected = cli_status(home)
+            selected = exchange("host_info", lambda: cli_status(home))
             assert selected.startswith(f"Host: ready\nStore: {store.resolve()}\nWire: 1\nActive capacity: 3\n"), selected
             assert "Bash: enabled\nModel: enabled\nManaged authentication: enabled\n" in selected, selected
             assert f"Instance: {match.group(1)}\n" in selected, selected
-            assert cli_status(home, "--store", alias) == selected
+            assert exchange("host_info", lambda: cli_status(home, "--store", alias)) == selected
             assert not credential.exists()
             for _ in range(40):
-                assert status(alias) == first_status
+                assert exchange("host_info", lambda: status(alias)) == first_status
             if before_fd is not None:
-                # The last framed reply may precede its owner's close. Require
-                # exact descriptor identities after drain, not an extra allowance.
+                # Independent FD readback is not admission-retirement authority.
                 after_fd = len(wait_for_descriptors(first.pid, before))
             assert list((store / "scratch").iterdir()) == []
-            head, body = raw_info(stale, store.resolve()).split(b"\r\n\r\n", 1)
+            head, body = exchange("host_info", lambda: raw_info(stale, store.resolve()), 5).split(b"\r\n\r\n", 1)
             assert head.startswith(b"HTTP/1.1 200 OK\r\n")
             assert f"Content-Length: {len(body)}".encode() in head.split(b"\r\n")
             assert json.loads(body) == {
@@ -579,38 +588,54 @@ def main():
                 "instance": match.group(1), "active_capacity": "3",
                 "capabilities": {"bash": True, "model": True, "managed_authentication": True},
             }
-            assert b'"type":"host_info"' in raw_info(stale, store.resolve(), match.group(1))
-            changed = raw_info(stale, store.resolve(), "0" * 32)
+            assert b'"type":"host_info"' in exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)
+            changed = exchange("host_info", lambda: raw_info(stale, store.resolve(), "0" * 32), 5)
             assert b"host_instance_changed" in changed and changed.startswith(b"HTTP/1.1 409")
-            guarded = raw_info(stale, store.resolve(), "0" * 32, kind="session_stop", route="control/session-stop", extra={"key": "guarded-stop", "session": "none"})
+            guarded = exchange("session_stop", lambda: raw_info(stale, store.resolve(), "0" * 32, kind="session_stop", route="control/session-stop", extra={"key": "guarded-stop", "session": "none"}), 5)
             assert b"host_instance_changed" in guarded and guarded.startswith(b"HTTP/1.1 409")
-            observation = raw_info(stale, store.resolve(), kind="observe_command", route="observe-command", extra={"key": "guarded-stop"})
+            observation = exchange("observe", lambda: raw_info(stale, store.resolve(), kind="observe_command", route="observe-command", extra={"key": "guarded-stop"}), 5)
             assert b'"status":"absent"' in observation, observation
-            wrong = raw_info(stale, store.parent)
+            wrong = exchange("host_info", lambda: raw_info(stale, store.parent), 5)
             assert b"wrong_store_identity" in wrong and wrong.startswith(b"HTTP/1.1 409")
+            completed = True
         finally:
-            if first is not None:
-                stop_process(first)
-            if diagnostics is not None:
-                diagnostics.close()
-            if old is None:
-                os.environ.pop("RUI_CODEX_CREDENTIAL_FILE", None)
-            else:
-                os.environ["RUI_CODEX_CREDENTIAL_FILE"] = old
+            try:
+                if first is not None:
+                    stop_process(first)
+            finally:
+                try:
+                    if diagnostics is not None:
+                        diagnostics.close()
+                        if completed:
+                            diagnostics.borrower_census(time.monotonic(), expected_routes)
+                finally:
+                    if old is None:
+                        os.environ.pop("RUI_CODEX_CREDENTIAL_FILE", None)
+                    else:
+                        os.environ["RUI_CODEX_CREDENTIAL_FILE"] = old
         assert status(store) == "unavailable"
-        second, _ = start(store, 7)
+        second, _ = start(store, 7, "--test-phase-trace")
+        diagnostics = HostDiagnostics(second)
+        expected_routes = []
+        completed = False
         try:
-            second_status = status(store)
+            second_status = exchange("host_info", lambda: status(store))
             match_second = re.fullmatch(r"ready ([0-9a-f]{32}) 7 true false false", second_status)
             assert match_second, second_status
-            selected = cli_status(home)
+            selected = exchange("host_info", lambda: cli_status(home))
             assert "Active capacity: 7\nBash: enabled\nModel: disabled\nManaged authentication: disabled\n" in selected, selected
             assert f"Instance: {match_second.group(1)}\n" in selected, selected
             assert match_second.group(1) != match.group(1), "replacement reused instance identity"
-            old_instance = raw_info(stale, store.resolve(), match.group(1))
+            old_instance = exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)
             assert b"host_instance_changed" in old_instance and old_instance.startswith(b"HTTP/1.1 409")
+            completed = True
         finally:
-            stop_process(second)
+            try:
+                stop_process(second)
+            finally:
+                diagnostics.close()
+                if completed:
+                    diagnostics.borrower_census(time.monotonic(), expected_routes)
         assert status(store) == "unavailable"
         print(f"host-status passed: capacity=3/7 replacement identity, 40 reads, fd={before_fd}->{after_fd}, scratch=0")
 

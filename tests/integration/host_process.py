@@ -356,6 +356,37 @@ class HostDiagnostics:
                     )
                 self.condition.wait(remaining)
 
+    def borrower_release(self, started, deadline):
+        records = self.wait("connection_resources_released", subject_kind="request_number",
+            subject=started["subject"], timeout=max(0, deadline - time.monotonic()))
+        assert len(records) == 1, (started, records)
+        released = records[0]
+        assert released["process"] == started["process"] == str(self.process.pid), (started, released)
+        assert released["run"] == started["run"] and released["clock"] == started["clock"] == "awake_ns", (started, released)
+        assert int(released["sequence"]) > int(started["sequence"]), (started, released)
+        assert int(released["at_ns"]) >= int(started["at_ns"]), (started, released)
+        return released
+
+    def borrower_census(self, deadline, expected_routes):
+        # Fixture-issued exchanges, not received records, define this population.
+        with self.condition:
+            while sum(record["rui_test_phase"].startswith("connection_request_")
+                      for record in self.records) < len(expected_routes):
+                assert self.read_error is None, self.read_error
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, "missing required borrower start population"
+                self.condition.wait(remaining)
+            started = [record for record in self.records
+                       if record["rui_test_phase"].startswith("connection_request_")]
+        assert len(started) == len(expected_routes), (expected_routes, started)
+        assert sorted(int(record["subject"]) for record in started) == list(range(len(expected_routes))), started
+        for record in started:
+            assert record["subject_kind"] == "request_number", record
+            assert record["rui_test_phase"] == f"connection_request_{expected_routes[int(record['subject'])]}", record
+        released = [self.borrower_release(record, deadline) for record in started]
+        assert len(self.matching("connection_resources_released")) == len(expected_routes), released
+        return released
+
     def close(self):
         assert self.process.poll() is not None, "Host diagnostics closed before process exit"
         self.thread.join(timeout=3)

@@ -574,7 +574,7 @@ def interactive_cases(state, binding=False, null_code=False):
                 assert json.loads(record.read_bytes())["key"] == key
             finally:
                 if sys.exc_info()[0] is not None:
-                    preserve_failure_metadata(home / "pty-failure.json", lambda: {
+                    preserve_failure_metadata(state / "pty-failure.json", lambda: {
                         "route": route, "bare_entry": line is None,
                         "error": sys.exc_info()[0].__name__,
                         "caller_returncode": caller.poll() if caller is not None else None,
@@ -604,6 +604,7 @@ def interactive_cases(state, binding=False, null_code=False):
 
 
 def permission_read_cases(state):
+    import human_cli_integration as human
     home = state / "permission-read"
     home.mkdir()
     store = home / "store"
@@ -653,6 +654,14 @@ def permission_read_cases(state):
                     original[3] &= ~mask
                 assert actual == original, "failed permission read did not restore terminal"
             finally:
+                if sys.exc_info()[0] is not None:
+                    preserve_failure_metadata(state / "pty-failure.json", lambda: {
+                        "case": "permission_read", "response_status": status,
+                        "error": sys.exc_info()[0].__name__,
+                        "caller_returncode": caller.poll() if caller is not None else None,
+                        "terminal_pending": bool(select.select([master], [], [], 0)[0]),
+                        "exchanges": len(proxy.exchanges), "mutations": len(proxy.mutations),
+                    })
                 proxy.close()
                 if caller is not None and caller.poll() is None:
                     caller.kill()
