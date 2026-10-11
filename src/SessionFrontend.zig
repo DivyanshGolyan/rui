@@ -172,11 +172,29 @@ fn settleSubmission(self: *Self, state: ?Input.State) !void {
 
 fn startSubmission(self: *Self, submission: Submission) !void {
     std.debug.assert(self.submission == null);
-    self.submission = submission;
     const target: client.CaptureTarget = .{ .generated = self.directory };
     self.capture_target = .{ .explicit = try target.resolve(self.init.io, &self.capture_path, &self.capture_key) };
+    self.submission = submission;
     self.reply = null;
     try self.admission.start(self.init.io, self, submit);
+}
+
+test "frontend reservation failure exposes no recoverable submission" {
+    const Failing = struct {
+        fn random(_: ?*anyopaque, _: []u8) std.Io.RandomSecureError!void {
+            return error.EntropyUnavailable;
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.randomSecure = Failing.random;
+    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false };
+    self.init.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    self.input.init();
+    const ticket = self.input.submitText("never sent");
+    try std.testing.expectError(error.EntropyUnavailable, self.startSubmission(.{ .message = ticket }));
+    try std.testing.expect(self.submission == null);
+    try std.testing.expect(self.admission.thread == null and self.captured == null);
+    try std.testing.expectEqualStrings("never sent", try self.input.message(ticket));
 }
 
 fn driveActive(self: *Self) !void {
