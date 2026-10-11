@@ -92,17 +92,35 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
     const admission_result = self.settleAdmission();
     if (self.reader.take() != null) self.reader.acknowledge();
     if (self.captured) |*capture| capture.close(init.io);
-    try restored;
-    if (result) |_| {} else |err| {
-        if (err != error.InteractiveInterrupted) if (self.accepted_message) |key|
-            std.debug.print("rui: Message accepted; do not resubmit it. Use rui result {s} to inspect the same Message.\n", .{key});
+    const failure: ?anyerror = blk: {
+        restored catch |err| break :blk err;
+        read_result catch |err| if (err == error.CanonicalStoreFailure) break :blk err;
+        admission_result catch |err| if (err == error.CanonicalStoreFailure) break :blk err;
+        result catch |err| if (err != error.InteractiveInterrupted) break :blk err;
+        read_result catch |err| if (err != error.Cancelled) break :blk err;
+        admission_result catch |err| if (err != error.Cancelled) break :blk err;
+        break :blk null;
+    };
+    if (failure) |err| {
+        self.recoveryGuide();
+        return err;
     }
-    read_result catch |err| if (err == error.CanonicalStoreFailure) return err;
-    admission_result catch |err| if (err == error.CanonicalStoreFailure) return err;
-    result catch |err| if (err != error.InteractiveInterrupted) return err;
-    read_result catch |err| if (err != error.Cancelled) return err;
-    admission_result catch |err| if (err != error.Cancelled) return err;
     try self.terminal.detached(store, session);
+}
+
+fn recoveryGuide(self: *const Self) void {
+    const Text = @import("TerminalText.zig");
+    if (self.submission != null) {
+        if (self.captured == null) {
+            Text.diagnostic("rui: Capture not confirmed. Inspect rui requests for reserved key {s}; reservation does not prove publication. Recover only that original, never replacement input.\n", .{self.capture_key});
+        } else if (self.submissionState() == .rejected) {
+            Text.diagnostic("rui: Original request rejected. Use rui recover {s} to inspect its saved outcome.\n", .{self.capture_key});
+        } else {
+            Text.diagnostic("rui: {s} not confirmed. Use rui recover {s} to retry the exact original; do not resubmit it.\n", .{ if (self.submission.? == .decision) "Decision" else "Message", self.capture_key });
+        }
+    } else if (self.accepted_message) |key| {
+        Text.diagnostic("rui: Message accepted; do not resubmit it. Use rui result {s} to inspect the same Message.\n", .{key});
+    }
 }
 
 fn drive(self: *Self, initial_text: ?[]const u8) !void {
@@ -126,14 +144,19 @@ fn requestRetry(self: *Self) void {
 
 fn submissionState(self: *const Self) Input.State {
     return switch (self.submission.?) {
-        .message => self.input.submitted.?.state,
+        .message => |ticket| self.input.submissionState(ticket) catch unreachable,
         .decision => |decision| decision.state,
     };
 }
 
 fn settleSubmission(self: *Self, state: ?Input.State) !void {
     switch (self.submission.?) {
-        .message => |ticket| try self.input.settle(ticket, state),
+        .message => |ticket| {
+            if (state == null and try self.input.submissionState(ticket) == .rejected)
+                try self.input.discard(ticket)
+            else
+                try self.input.settle(ticket, state);
+        },
         .decision => {
             if (state) |value| self.submission.?.decision.state = value;
         },
@@ -241,8 +264,23 @@ fn driveActive(self: *Self) !void {
             self.dirty = false;
             try self.terminal.redraw(view.bytes, view.cursor, status, if (self.choice_action != null) "> " else "› ");
             if (self.choice_action != null and !self.choice_ready and self.choice.pending() == .none) {
-                try Editor.freshChoice(self.init.io);
-                self.choice_ready = true;
+                // Every prompt byte was accepted by stdout. Discard input
+                // through its decoder, not tcflush: a paste prefix or Ctrl-C
+                // arriving during the final write must retain its meaning.
+                var empty = false;
+                for (0..1024) |_| {
+                    if (!try self.step(0)) {
+                        empty = true;
+                        break;
+                    }
+                    if (self.detached) break;
+                }
+                if (interrupted.load(.acquire)) return error.InteractiveInterrupted;
+                if (self.detached) break;
+                if (empty and self.choice.pending() == .none) {
+                    self.choice_ready = true;
+                    try Editor.testChoiceReady(self.init.io);
+                }
             }
         }
         _ = try self.step(16);

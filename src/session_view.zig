@@ -169,7 +169,9 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     var location: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .line } };
     try location.feed(workspace);
     try location.finish();
-    if (arguments.timeout_ms) |timeout| try print(&indented, "\nTime limit: {d} ms", .{timeout});
+    if (arguments.timeout_ms) |timeout| {
+        try print(&indented, "\nTime limit: {d} ms", .{timeout});
+    } else try indented.feed("\nTime limit: Host default");
     try indented.feed("\n");
     try indented.finish();
 }

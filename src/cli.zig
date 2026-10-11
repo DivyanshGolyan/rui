@@ -28,6 +28,13 @@ test "detached launcher reports exec failure before claiming Host readiness" {
 }
 
 pub fn main(init: std.process.Init) !void {
+    run(init) catch |err| {
+        TerminalText.diagnostic("error: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+}
+
+fn run(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const args = try init.minimal.args.toSlice(allocator);
     if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return newSession(init, args[1..]);
@@ -1337,12 +1344,12 @@ fn runSession(init: std.process.Init, store: []const u8, reference: []const u8, 
     // Resolve aliases and enforce the Store's existing private/canonical selector
     // before any Session request. Explicit --store does not read preferences.
     const paths = platform.resolveClientPaths(init.io, store) catch |err| {
-        std.debug.print("rui: selected Store unavailable ({s}); check --store or rui setup; no alternate Store selected.\n", .{@errorName(err)});
+        TerminalText.diagnostic("rui: selected Store unavailable ({s}); check --store or rui setup; no alternate Store selected.\n", .{@errorName(err)});
         return err;
     };
     const destination = paths.store.slice();
     showSessionStatus(init, destination, reference, .opening) catch |err| {
-        if (err == error.SessionNotConfigured) std.debug.print("rui: configure this Session before entering it\n", .{});
+        if (err == error.SessionNotConfigured) TerminalText.diagnostic("rui: configure this Session before entering it\n", .{});
         return err;
     };
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Real editor handoff, queued input and independently failed cleanup effects."""
+import fcntl
 import json
 import os
 import pathlib
@@ -81,6 +82,18 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     if (!real_write || real_write == probe_write) _exit(96);
     ssize_t result = real_write(fd, bytes, count);
     int saved_errno = errno;
+    static int choice = 0, choice_held = 0;
+    const char *fault = getenv("RUI_TERMINAL_FAULT");
+    if (fd == 1 && result == (ssize_t)count && fault && !strncmp(fault, "consent-", 8)) {
+        if (count == strlen("a: Allow once / d: Deny (Enter)") &&
+            !memcmp(bytes, "a: Allow once / d: Deny (Enter)", count)) choice = 1;
+        if (choice && !choice_held && count >= 4 &&
+            !memcmp(bytes, "\r\033[", 3) && ((const char *)bytes)[count - 1] == 'C') {
+            choice_held = 1;
+            record("choice-output-complete\n");
+            while (access(getenv("RUI_TERMINAL_CHOICE_RELEASE"), F_OK)) usleep(1000);
+        }
+    }
     static int blocked = 0;
     if (fd == 1 && result < 0 && saved_errno == EAGAIN && !blocked &&
         !strcmp(getenv("RUI_TERMINAL_FAULT"), "backpressure")) {
@@ -119,6 +132,10 @@ static int probe_tcdrain(int fd) {
     if (real_tcdrain == tcdrain) _exit(94);
 #endif
     if (!real_tcdrain || real_tcdrain == probe_tcdrain) _exit(94);
+    if (fd == 1 && !strcmp(getenv("RUI_TERMINAL_FAULT"), "consent-cancel")) {
+        record("choice-drain-held\n");
+        while (access(getenv("RUI_TERMINAL_DRAIN_RELEASE"), F_OK)) usleep(1000);
+    }
     if (fd == 1 && disabled) {
         record("drain\n");
         const char *fault = getenv("RUI_TERMINAL_FAULT");
@@ -379,6 +396,174 @@ def persistent_cases(state, library, home, store, host):
                 os.close(fd)
 
 
+def consent_boundary_cases(state, library):
+    """Input arriving during final presentation cannot consent or lose Ctrl-C."""
+    for case in ("cancel", "paste"):
+        root = state / f"consent-{case}"
+        root.mkdir()
+        home, store = root / "home", root / "store"
+        home.mkdir(mode=0o700)
+        endpoint = fixture.SuccessEndpoint([
+            fixture.sse_tool_calls("consent-call", [("bash", "consent-id",
+                json.dumps({"cmd": "printf forbidden > effect", "timeout_ms": None}))]),
+            fixture.sse_answer("consent-answer", "consent-reason", "consent-message", "Denied.")[0],
+        ])
+        thread = threading.Thread(target=endpoint.serve_forever)
+        thread.start()
+        host = caller = None
+        master, slave = pty.openpty()
+        original = termios.tcgetattr(slave)
+        read_ready, write_ready = os.pipe()
+        release, drain, log = root / "choice.release", root / "drain.release", root / "probe.log"
+        try:
+            host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+            human.run(home, "configure", "--store", store, "--session", "consent/boundary",
+                "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+            caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+                "--session", "consent/boundary"], stdin=slave, stdout=slave, stderr=subprocess.PIPE,
+                env={**os.environ, "HOME": str(home), "NO_COLOR": "1",
+                    "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                    "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": f"consent-{case}",
+                    "RUI_TERMINAL_CHOICE_RELEASE": str(release), "RUI_TERMINAL_DRAIN_RELEASE": str(drain),
+                    "RUI_TEST_ACTION_READY_FD": str(write_ready)}, pass_fds=(write_ready,))
+            human.read_terminal(master, "› ")
+            os.write(master, b"propose command\n")
+            presentation = human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+            assert "Time limit: Host default" in presentation, presentation
+            fixture.wait_for(lambda: log.exists() and "choice-output-complete" in log.read_text(), "final choice write")
+            records = home / ".config/rui/requests"
+            before = set(records.glob("*.json"))
+            os.write(master, b"\x03" if case == "cancel" else b"\x1b[200~")
+            release.touch()
+            if case == "cancel":
+                fixture.wait_for(lambda: termios.tcgetattr(slave)[3] & termios.ICANON,
+                    "restoration without releasing consent drain", timeout=3)
+                assert not drain.exists(), "fixture released the drain"
+                assert not select.select([read_ready], [], [], 0)[0], "cancelled choice became ready"
+            else:
+                assert not select.select([read_ready], [], [], 0.2)[0], "paste prefix opened consent"
+                os.write(master, b"a\n")
+                assert not select.select([read_ready], [], [], 0.2)[0], "unfinished paste authorized"
+                assert set(records.glob("*.json")) == before
+                os.write(master, b"\x1b[201~")
+                human.action_ready(read_ready)
+                os.write(master, b"d\n")
+                human.read_terminal(master, "Permission denied.")
+                os.write(master, b"\x03")
+            output, errors = human.terminal_exit(caller, master)
+            assert caller.wait(timeout=5) == 0, (output, errors)
+            actual = termios.tcgetattr(slave)
+            if sys.platform == "darwin":
+                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                actual[3] &= ~mask
+                original[3] &= ~mask
+            assert actual == original
+            assert not (root / "effect").exists(), "pre-boundary input ran Bash"
+            if case == "cancel":
+                assert set(records.glob("*.json")) == before, "cancel captured permission"
+            print(f"persistent consent boundary: {case} passed", flush=True)
+        finally:
+            release.touch()
+            drain.touch()
+            if caller is not None and caller.poll() is None:
+                caller.kill()
+                caller.wait(timeout=5)
+            if host is not None:
+                fixture.stop_host(host)
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
+            termios.tcflush(slave, termios.TCOFLUSH)
+            termios.tcsetattr(slave, termios.TCSAFLUSH, original)
+            for fd in (master, slave, read_ready, write_ready):
+                os.close(fd)
+
+
+def fatal_reporting_cases(state):
+    """Optional fatal text cannot hold exit or name a superseded original."""
+    root = state / "fatal-reporting"
+    root.mkdir()
+    home, store = root / "home", root / "store"
+    home.mkdir(mode=0o700)
+    endpoint = fixture.SuccessEndpoint([
+        fixture.sse_answer("fatal-a", "fatal-ar", "fatal-am", "ACCEPTED-A")[0],
+        fixture.sse_answer("fatal-b", "fatal-br", "fatal-bm", "COMMITTED-B")[0],
+    ])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = caller = proxy = None
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        human.run(home, "configure", "--store", store, "--session", "fatal/original",
+            "--workspace", root, "--provider", "codex", "--model", "model-a")
+        for stopped in (False, True):
+            master, slave = pty.openpty()
+            error_master, error_slave = pty.openpty()
+            original = termios.tcgetattr(slave)
+            error_flags = fcntl.fcntl(error_slave, fcntl.F_GETFL)
+            try:
+                if stopped:
+                    termios.tcflow(error_slave, termios.TCOOFF)
+                caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "missing/fatal"],
+                    env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=error_slave)
+                assert caller.wait(timeout=3) == 1, "fatal diagnostic did not exit"
+                assert termios.tcgetattr(slave) == original
+                assert fcntl.fcntl(error_slave, fcntl.F_GETFL) == error_flags
+                if not stopped:
+                    assert select.select([error_master], [], [], 1)[0]
+                    assert b"SessionNotConfigured" in os.read(error_master, 65536)
+                print(f"fatal reporting: stopped stderr={stopped} passed", flush=True)
+            finally:
+                if caller is not None and caller.poll() is None:
+                    caller.kill()
+                    caller.wait(timeout=5)
+                termios.tcflow(error_slave, termios.TCOON)
+                for fd in (master, slave, error_master, error_slave):
+                    os.close(fd)
+        master, slave = pty.openpty()
+        original = termios.tcgetattr(slave)
+        try:
+            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "fatal/original"],
+                env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            human.read_terminal(master, "› ")
+            proxy = canonical.ReplyProxy(host, "/v1/message",
+                lambda response: b"" if len(proxy.exchanges) == 2 else response)
+            os.write(master, b"accepted A\n")
+            human.read_terminal(master, "ACCEPTED-A")
+            human.terminal_step(master, "/status")
+            os.write(master, b"uncertain B\n")
+            human.read_terminal(master, "Not confirmed")
+            first, second = [json.loads(body) for body, _ in proxy.exchanges]
+            saved = (home / ".config/rui/requests" / f"{second['key']}.json").read_bytes()
+            os.write(master, b"\x1b[")
+            output, errors = human.terminal_exit(caller, master, timeout=6)
+            assert caller.returncode == 1, (output, errors)
+            assert second["key"].encode() in errors and first["key"].encode() not in errors, errors
+            assert b"not confirmed" in errors and b"rui recover" in errors and b"IncompleteTerminalInput" in errors, errors
+            assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == saved, "fatal exit replaced original"
+            actual = termios.tcgetattr(slave)
+            if sys.platform == "darwin":
+                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                actual[3] &= ~mask
+                original[3] &= ~mask
+            assert actual == original
+            print("fatal reporting: current unconfirmed original passed", flush=True)
+        finally:
+            if caller is not None and caller.poll() is None:
+                caller.kill()
+                caller.wait(timeout=5)
+            os.close(master)
+            os.close(slave)
+    finally:
+        if proxy is not None:
+            proxy.close()
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+
+
 def main(selected=None):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-terminal-restoration."))
     home = state / "home"
@@ -393,6 +578,16 @@ def main(selected=None):
             "-fPIC", str(source), *(["-ldl"] if sys.platform == "linux" else []), "-o", str(library)], check=True)
         check_forwarding(state, library)
         if selected == "forwarding":
+            completed = True
+            return
+        if selected in (None, "consent"):
+            consent_boundary_cases(state, library)
+        if selected == "consent":
+            completed = True
+            return
+        if selected in (None, "fatal"):
+            fatal_reporting_cases(state)
+        if selected == "fatal":
             completed = True
             return
         host = fixture.start_host(store, None)

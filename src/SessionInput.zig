@@ -88,6 +88,10 @@ pub fn message(self: *const Self, ticket: Ticket) ![]const u8 {
     return if (!submitted.literal and std.mem.startsWith(u8, bytes, "//")) bytes[1..] else bytes;
 }
 
+pub fn submissionState(self: *const Self, ticket: Ticket) !State {
+    return (try self.checked(ticket)).state;
+}
+
 /// Only the joined capture/send owner calls transitions. Acceptance is a Host
 /// fact, not successful capture, a worker completion hint or a local timeout.
 pub fn settle(self: *Self, ticket: Ticket, state: ?State) !void {

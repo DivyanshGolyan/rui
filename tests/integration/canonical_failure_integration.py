@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import pty
+import re
 import select
 import shutil
 import socket
@@ -436,15 +437,38 @@ def interactive_cases(state, binding=False, null_code=False):
                     else:
                         human.read_terminal(master, "› ")
                         if route == "/v1/activity-page":
-                            def fail_activity_after_accept(response):
-                                proxy.route = route
-                                proxy.rewrite = None
-                                return response
-                            proxy = ReplyProxy(host, "/v1/message", fail_activity_after_accept)
+                            # Keep opening and pre-Message Activity polls healthy.
+                            # Backend delivery is not frontend Admission settlement.
+                            proxy = ReplyProxy(host, "/v1/message", lambda response: response)
                         else:
                             proxy = ReplyProxy(host, route, rewrite)
                     os.write(master, (line + "\n").encode())
                 output = ""
+                if route == "/v1/activity-page":
+                    fixture.wait_for(lambda: proxy.exchanges, "healthy Message reply")
+                    accepted_request = proxy.exchanges[0][0]
+                    accepted_key = json.loads(accepted_request)["key"]
+                    deadline = time.monotonic() + 10
+                    while True:
+                        os.write(master, b"/status\n")
+                        status = human.read_terminal(master, "Session: original/session")
+                        if not re.search(r"› [^\r\n]*(?:\x1b\[[0-9]+A)?\r\x1b\[[0-9]+C", status.split("Session: original/session", 1)[1]):
+                            status += human.read_terminal(master, "› ")
+                        # /status exposes unresolved frontend custody, independently
+                        # of the accepted backend reply and canonical database.
+                        if "Original reserved request:" not in status:
+                            assert "Publication/admission may be incomplete" not in status, status
+                            break
+                        assert accepted_key in status, status
+                        assert time.monotonic() < deadline, ("frontend did not settle Admission", status)
+                    message_records = {
+                        path.name: path.read_bytes()
+                        for path in (home / ".config/rui/requests").glob("*.json")
+                        if json.loads(path.read_bytes())["kind"] == "message"
+                    }
+                    assert message_records[f"{accepted_key}.json"] == accepted_request
+                    proxy.rewrite = None
+                    proxy.route = route
                 if binding and line is not None:
                     marker = reason if route == "/v1/configure" else "Decision not confirmed" if route == "/v1/control/permission-decision" else "Not confirmed"
                     output = human.read_terminal(master, marker)
@@ -499,6 +523,17 @@ def interactive_cases(state, binding=False, null_code=False):
                 # Drain before checking that there is no later prompt/success.
                 while select.select([master], [], [], 0.05)[0]:
                     output += os.read(master, 65536).decode(errors="replace")
+                if route == "/v1/activity-page":
+                    assert f"Message accepted; do not resubmit it. Use rui result {accepted_key} to inspect the same Message." in errors, errors
+                    assert "outcome unconfirmed" not in errors and "Ctrl-R" not in errors, errors
+                    assert "Original reserved request:" not in output and "Not confirmed" not in output, output
+                    assert "› " not in output, "fatal Activity read resumed the composer"
+                    assert {
+                        path.name: path.read_bytes()
+                        for path in (home / ".config/rui/requests").glob("*.json")
+                        if json.loads(path.read_bytes())["kind"] == "message"
+                    } == message_records, "fatal observation captured replacement intent"
+                    assert proxy.exchanges[0][0] == accepted_request
                 assert "admitted:" not in output and "Configured." not in output, output
                 assert "You: " not in output, output
                 if not binding or line is None:

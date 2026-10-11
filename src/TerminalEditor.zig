@@ -91,6 +91,10 @@ pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool)
 /// Complete presentation, then discard pre-prompt input before consent.
 pub fn freshChoice(io: std.Io) !void {
     if (termios.tcdrain(1) != 0 or termios.tcflush(0, termios.TCIFLUSH) != 0) return error.TerminalFlushFailed;
+    try testChoiceReady(io);
+}
+
+pub fn testChoiceReady(io: std.Io) !void {
     // Borrowed fixture descriptor witnesses the completed input boundary.
     if (std.c.getenv("RUI_TEST_ACTION_READY_FD")) |text| {
         const fd = try std.fmt.parseInt(std.posix.fd_t, std.mem.span(text), 10);

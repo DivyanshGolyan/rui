@@ -125,7 +125,12 @@ test "historical export preserves opaque identities without terminal or shell in
 
 test "history preparation binds wire and staged bytes before exposure" {
     const Peer = struct {
-        var clients: [2]std.posix.fd_t = undefined;
+        var clients: [3]std.posix.fd_t = undefined;
+        var large: bool = false;
+        var empty_second: bool = false;
+        var fault_offset: u64 = 0;
+        var fault_hits: usize = 0;
+        const large_body = "a" ** 4096 ++ "Z";
         var connected: usize = 0;
         var mode: enum { intact, corrupt, missing, short_wire, wrong_domain, extra_wire } = .intact;
         var failure: ?anyerror = null;
@@ -134,24 +139,34 @@ test "history preparation binds wire and staged bytes before exposure" {
             return clients[connected];
         }
         fn stage(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) std.Io.File.WritePositionalError!usize {
-            if (mode == .missing) {
+            if (mode == .missing and offset == fault_offset) {
+                fault_hits += 1;
                 var count = header.len;
                 for (data[0 .. data.len - 1]) |bytes| count += bytes.len;
                 return count + data[data.len - 1].len * splat;
             }
             const count = try std.testing.io.vtable.fileWritePositional(userdata, file, header, data, splat, offset);
-            if (mode == .corrupt and offset == 0) _ = try std.testing.io.vtable.fileWritePositional(userdata, file, "", &.{"X"}, 1, 0);
+            if (mode == .corrupt and offset == fault_offset) {
+                fault_hits += 1;
+                _ = try std.testing.io.vtable.fileWritePositional(userdata, file, "", &.{"X"}, 1, offset);
+            }
             return count;
         }
-        fn serve(fds: [2]std.posix.fd_t) void {
+        fn serve(fds: []const std.posix.fd_t) void {
             exchange(fds) catch |err| {
                 failure = err;
             };
         }
-        fn exchange(fds: [2]std.posix.fd_t) !void {
+        fn exchange(fds: []const std.posix.fd_t) !void {
             // Independent Python hashlib oracle for domain-prefixed "first".
             const metadata = "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"2\",\"items\":[{\"position\":\"2\",\"ordinal\":\"0\",\"kind\":\"user\",\"content\":{\"bytes\":\"5\",\"sha256\":\"2e37afae3fe85c8c30175c6f0a1b578b3cbe5f4482248f77cb55656781d2790b\",\"display\":\"omitted\"}}],\"more\":false}";
-            for (fds, [2][]const u8{ metadata, "first" }, [2][]const u8{ "application/json", "application/octet-stream" }, 0..) |fd, normal_body, content_type, index| {
+            // Independent hashlib oracles: a*4096 + Z, end, and empty.
+            var metadata_buffer: [1024]u8 = undefined;
+            const large_metadata = try std.fmt.bufPrint(&metadata_buffer, "{{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"2\",\"items\":[{{\"position\":\"2\",\"ordinal\":\"0\",\"kind\":\"user\",\"content\":{{\"bytes\":\"4097\",\"sha256\":\"c4507c75ffffb20c21aad1b5eecab12e273533475e6d3204a866471d86c5a3cb\",\"display\":\"omitted\"}}}},{{\"position\":\"1\",\"ordinal\":\"0\",\"kind\":\"assistant\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\",\"display\":\"omitted\"}}}}],\"more\":false}}", .{ @as(usize, if (empty_second) 0 else 3), if (empty_second) "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528" else "743b6084710002f2040770ad1e35947dce27acfb1b5c6d3a1ddc28f74b462972" });
+            const bodies: [3][]const u8 = if (large) .{ large_metadata, large_body, if (empty_second) "" else "end" } else .{ metadata, "first", "" };
+            for (fds, 0..) |fd, index| {
+                const normal_body = bodies[index];
+                const content_type = if (index == 0) "application/json" else "application/octet-stream";
                 const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
                 defer file.close(std.testing.io);
                 var head: [512]u8 = undefined;
@@ -164,7 +179,7 @@ test "history preparation binds wire and staged bytes before exposure" {
                 const start = (std.mem.indexOf(u8, head[0..used], marker) orelse return error.TestRequestTruncated) + marker.len;
                 const end = start + (std.mem.indexOf(u8, head[start..used], "\r\n") orelse return error.TestRequestTruncated);
                 var remaining = try std.fmt.parseInt(usize, head[start..end], 10);
-                var buffer: [1024]u8 = undefined;
+                var buffer: [4608]u8 = undefined;
                 while (remaining != 0) {
                     const count = std.posix.system.read(fd, &buffer, @min(buffer.len, remaining));
                     if (count <= 0) return error.TestRequestTruncated;
@@ -199,21 +214,42 @@ test "history preparation binds wire and staged bytes before exposure" {
     vtable.netConnectUnix = Peer.connect;
     vtable.fileWritePositional = Peer.stage;
     const requests: client.Requests = .{ .io = .{ .userdata = io.userdata, .vtable = &vtable } };
-    for ([_]@TypeOf(Peer.mode){ .intact, .corrupt, .missing, .short_wire, .wrong_domain, .extra_wire }) |mode| {
+    const Case = struct { mode: @TypeOf(Peer.mode), large: bool = false, empty_second: bool = false, fault_offset: u64 = 0 };
+    for ([_]Case{
+        .{ .mode = .intact },
+        .{ .mode = .corrupt },
+        .{ .mode = .missing },
+        .{ .mode = .short_wire },
+        .{ .mode = .wrong_domain },
+        .{ .mode = .extra_wire },
+        .{ .mode = .intact, .large = true },
+        .{ .mode = .corrupt, .large = true, .fault_offset = 4096 },
+        .{ .mode = .corrupt, .large = true, .fault_offset = 4097 },
+        .{ .mode = .missing, .large = true, .fault_offset = 4097 },
+        // Empty item cannot extend the file and mask the dropped boundary byte.
+        .{ .mode = .missing, .large = true, .empty_second = true, .fault_offset = 4096 },
+        .{ .mode = .intact, .large = true, .empty_second = true },
+    }) |case| {
+        const mode = case.mode;
         Peer.mode = mode;
+        Peer.large = case.large;
+        Peer.empty_second = case.empty_second;
+        Peer.fault_offset = case.fault_offset;
+        Peer.fault_hits = 0;
         Peer.connected = 0;
         Peer.failure = null;
-        var servers: [2]std.posix.fd_t = undefined;
-        for (&Peer.clients, &servers) |*caller, *server| {
+        const exchanges: usize = if (case.large) 3 else 2;
+        var servers: [3]std.posix.fd_t = undefined;
+        for (Peer.clients[0..exchanges], servers[0..exchanges]) |*caller, *server| {
             var sockets: [2]std.posix.fd_t = undefined;
             if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
             caller.* = sockets[0];
             server.* = sockets[1];
         }
-        const peer = try std.Thread.spawn(.{}, Peer.serve, .{servers});
+        const peer = try std.Thread.spawn(.{}, Peer.serve, .{servers[0..exchanges]});
         const result = prepare(requests, root, "history/session", .{ .end = 2 }, scratch);
         // Release any request never reached after an earlier protocol failure.
-        for (Peer.clients[Peer.connected..]) |fd| {
+        for (Peer.clients[Peer.connected..exchanges]) |fd| {
             const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
             file.close(io);
         }
@@ -222,8 +258,23 @@ test "history preparation binds wire and staged bytes before exposure" {
             _ = try result;
             return err;
         }
+        if (mode == .corrupt or mode == .missing) try std.testing.expectEqual(@as(usize, 1), Peer.fault_hits);
+        if (case.large) try std.testing.expectEqual(exchanges, Peer.connected);
         if (mode == .intact) {
-            try std.testing.expectEqual(@as(usize, 1), (try result).page.count);
+            const prepared = try result;
+            try std.testing.expectEqual(@as(usize, if (case.large) 2 else 1), prepared.page.count);
+            try std.testing.expectEqual(@as(u64, 0), prepared.offsets[0]);
+            if (case.large) try std.testing.expectEqual(@as(u64, 4097), prepared.offsets[1]);
+            var staged: [4100]u8 = undefined;
+            const wanted: usize = if (case.large) (if (case.empty_second) 4097 else 4100) else 5;
+            try std.testing.expectEqual(wanted, try scratch.readPositionalAll(io, staged[0..wanted], 0));
+            var tail: [1]u8 = undefined;
+            try std.testing.expectEqual(@as(usize, 0), try scratch.readPositionalAll(io, &tail, wanted));
+            try std.testing.expectEqualStrings(if (case.large) Peer.large_body else "first", staged[0..if (case.large) 4097 else 5]);
+            if (case.large) try std.testing.expectEqualStrings(if (case.empty_second) "" else "end", staged[4097..wanted]);
+            for (prepared.page.items[0..prepared.page.count], prepared.offsets[0..prepared.page.count]) |item, start| {
+                try std.testing.expectEqualSlices(u8, &item.content.digest, &protocol.contentDigest(staged[@intCast(start)..][0..@intCast(item.content.bytes)]));
+            }
         } else {
             const err = if (result) |_| return error.UnverifiedHistoryExposed else |err| err;
             try std.testing.expectEqual(@as(anyerror, switch (mode) {

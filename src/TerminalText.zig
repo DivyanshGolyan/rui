@@ -31,6 +31,19 @@ pub fn writeShellWord(out: *std.Io.Writer, value: []const u8) !void {
     try out.writeByte('\'');
 }
 
+/// Optional fatal guidance cannot retain a restored caller on stderr credit.
+/// One bounded write is best-effort; its failure never replaces the real error.
+pub fn diagnostic(comptime format: []const u8, args: anytype) void {
+    var buffer: [1024]u8 = undefined;
+    const bytes = std.fmt.bufPrint(&buffer, format, args) catch return;
+    const flags = std.c.fcntl(2, std.c.F.GETFL);
+    if (flags < 0) return;
+    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    if (std.c.fcntl(2, std.c.F.SETFL, flags | nonblock) < 0) return;
+    _ = std.c.write(2, bytes.ptr, bytes.len);
+    _ = std.c.fcntl(2, std.c.F.SETFL, flags);
+}
+
 fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
     if (self.utf8_len == 0) {
         if (value < 0x80) {

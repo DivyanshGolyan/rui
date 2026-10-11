@@ -85,14 +85,15 @@ def retained(state, binary, label):
         stdin=slave, stdout=slave, stderr=slave)
     os.close(slave)
     try:
-        cli.read_terminal(master, "› ")
+        prompt = "rui> " if label == "baseline" else "› "
+        cli.read_terminal(master, prompt)
         samples = [sample(process.pid)]
         for _ in range(3):
             for _ in range(10):
-                assert "Configured." in cli.terminal_step(master, "/configure --model model-a")
-                listing = cli.terminal_step(master, "/requests")
+                assert "Configured." in cli.terminal_step(master, "/configure --model model-a", prompt)
+                listing = cli.terminal_step(master, "/requests", prompt)
                 assert "01234567-89ab-4cde-8012-" not in listing
-                cli.terminal_step(master, "/status")
+                cli.terminal_step(master, "/status", prompt)
             samples.append(sample(process.pid))
         cli.terminal_step(master, "/exit", "Detached.")
         assert process.wait(timeout=5) == 0
