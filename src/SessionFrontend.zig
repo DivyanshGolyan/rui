@@ -16,6 +16,59 @@ const Submission = union(enum) {
     message: Input.Ticket,
     decision: struct { action: u64, decision: protocol.PermissionDecision, state: Input.State = .not_started },
 };
+const ReadPhase = enum { activity, history, details, permission };
+const SettlementMode = enum { active, handoff, final_exit };
+const CaptureTruth = enum { not_sent, publication_unknown, published };
+const AdmissionOrigin = enum { initial, retry };
+const ReadEnd = union(enum) {
+    absent,
+    complete,
+    cancelled: Progress,
+    failed: struct { err: anyerror, progress: Progress },
+
+    const Progress = struct { phase: ReadPhase, rendering: bool, output_owned: bool };
+
+    fn preparationFailure(self: ReadEnd) bool {
+        return self == .failed and self.failed.err != error.CanonicalStoreFailure and
+            (self.failed.progress.phase == .history or self.failed.progress.phase == .details) and
+            !self.failed.progress.rendering;
+    }
+
+    fn failure(self: ReadEnd, mode: SettlementMode) ?anyerror {
+        return switch (self) {
+            .absent, .complete => null,
+            .cancelled => |progress| if (mode == .active or mode == .handoff and progress.output_owned) error.Cancelled else null,
+            .failed => |failed| if (mode != .final_exit and self.preparationFailure()) null else failed.err,
+        };
+    }
+};
+const AdmissionEnd = union(enum) {
+    absent,
+    accepted,
+    rejected,
+    failed: struct { err: anyerror, state: Input.State, capture: CaptureTruth, origin: AdmissionOrigin },
+
+    fn failure(self: AdmissionEnd) ?anyerror {
+        return if (self == .failed) self.failed.err else null;
+    }
+};
+const Settled = struct {
+    restored: anyerror!void,
+    reader: ReadEnd,
+    admission: AdmissionEnd,
+
+    fn failure(self: Settled, mode: SettlementMode, cause: ?anyerror) ?anyerror {
+        self.restored catch |err| return err;
+        const reader_error = self.reader.failure(mode);
+        const admission_error = self.admission.failure();
+        if (reader_error) |err| if (err == error.CanonicalStoreFailure) return err;
+        if (admission_error) |err| if (err == error.CanonicalStoreFailure) return err;
+        if (cause) |err| if (err != error.InteractiveInterrupted) return err;
+        if (reader_error) |err| return err;
+        if (mode == .final_exit) if (admission_error) |err| if (err != error.Cancelled) return err;
+        return null;
+    }
+};
 init: std.process.Init,
 store: []const u8,
 session: []const u8,
@@ -35,6 +88,9 @@ captured: ?client.CapturedRecord = null,
 reply_buffer: client.ReplyBuffer = .{},
 reply: ?client.MutationReply = null,
 admission_error: ?anyerror = null,
+// Provenance is set before launch; capture entry is worker-owned until join.
+admission_origin: AdmissionOrigin = .initial,
+capture_truth: CaptureTruth = .not_sent,
 accepted: ?struct { kind: std.meta.Tag(Submission), key: [36]u8 } = null,
 current: client.Current = undefined,
 observed: client.Current = undefined,
@@ -43,7 +99,7 @@ next_cursor: client.ActivityCursor = .{},
 history_cursor: ?client.ConversationCursor = null,
 next_history_cursor: ?client.ConversationCursor = null,
 history_requested: ?enum { older, latest } = null,
-read_phase: enum { activity, history, details, permission } = .activity,
+read_phase: ReadPhase = .activity,
 read_columns: usize = 0,
 // Worker result is inspected only after join; input policy stays UI-owned.
 history_render_started: bool = false,
@@ -85,23 +141,10 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
     self.terminal = try Terminal.begin(colour);
     self.terminal.pump = .{ .context = &self, .step = pump };
     const result = self.drive(initial_text);
-    const restored = self.terminal.finish();
-    self.reader.cancel();
-    self.admission.cancel();
-    const read_result = self.reader.join();
-    const admission_result = self.settleAdmission();
-    if (self.reader.take() != null) self.reader.acknowledge();
+    const settled = self.quiesce();
     if (self.captured) |*capture| capture.close(init.io);
-    const failure: ?anyerror = blk: {
-        restored catch |err| break :blk err;
-        read_result catch |err| if (err == error.CanonicalStoreFailure) break :blk err;
-        admission_result catch |err| if (err == error.CanonicalStoreFailure) break :blk err;
-        result catch |err| if (err != error.InteractiveInterrupted) break :blk err;
-        read_result catch |err| if (err != error.Cancelled) break :blk err;
-        admission_result catch |err| if (err != error.Cancelled) break :blk err;
-        break :blk null;
-    };
-    if (failure) |err| {
+    const cause: ?anyerror = if (result) |_| null else |err| err;
+    if (settled.failure(.final_exit, cause)) |err| {
         self.recoveryGuide();
         return err;
     }
@@ -112,22 +155,38 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
     };
 }
 
+fn quiesce(self: *Self) Settled {
+    const restored = self.terminal.finish();
+    self.reader.cancel();
+    self.admission.cancel();
+    const reader = self.joinReader();
+    const admission = self.joinAdmission();
+    if (self.reader.take() != null) self.reader.acknowledge();
+    return .{ .restored = restored, .reader = reader, .admission = admission };
+}
+
 fn recoveryGuide(self: *const Self) void {
-    const Text = @import("TerminalText.zig");
+    var buffer: [512]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    self.writeRecoveryGuide(&out) catch unreachable;
+    if (out.buffered().len != 0) @import("TerminalText.zig").diagnostic("{s}", .{out.buffered()});
+}
+
+fn writeRecoveryGuide(self: *const Self, out: *std.Io.Writer) !void {
     if (self.submission != null) {
         if (self.submissionState() == .not_started) {
-            Text.diagnostic("rui: {s} was not sent: capture worker did not start. You may submit it again; no recovery record was published for this attempt.\n", .{if (self.submission.? == .decision) "Decision" else "Message"});
-        } else if (self.captured == null) {
-            Text.diagnostic("rui: Capture not confirmed. Inspect rui requests for reserved key {s}; reservation does not prove publication. Recover only that original, never replacement input.\n", .{self.capture_key});
+            try out.print("rui: {s} was not sent: capture did not begin. You may submit it again; no recovery record was published for this attempt.\n", .{if (self.submission.? == .decision) "Decision" else "Message"});
+        } else if (self.capture_truth != .published) {
+            try out.print("rui: Capture not confirmed. Inspect rui requests for reserved key {s}; reservation does not prove publication. Recover only that original, never replacement input.\n", .{self.capture_key});
         } else if (self.submissionState() == .rejected) {
-            Text.diagnostic("rui: Original request rejected. Use rui recover {s} to inspect its saved outcome.\n", .{self.capture_key});
+            try out.print("rui: Original request rejected. Use rui recover {s} to inspect its saved outcome.\n", .{self.capture_key});
         } else {
-            Text.diagnostic("rui: {s} not confirmed. Use rui recover {s} to retry the exact original; do not resubmit it.\n", .{ if (self.submission.? == .decision) "Decision" else "Message", self.capture_key });
+            try out.print("rui: {s} not confirmed. Use rui recover {s} to retry the exact original; do not resubmit it.\n", .{ if (self.submission.? == .decision) "Decision" else "Message", self.capture_key });
         }
     } else if (self.accepted) |accepted| {
         if (accepted.kind == .message) {
-            Text.diagnostic("rui: Message accepted; do not resubmit it. Use rui result {s} to inspect the same Message.\n", .{accepted.key});
-        } else Text.diagnostic("rui: Decision accepted; do not repeat it. Use rui recover {s} to inspect the same saved admission.\n", .{accepted.key});
+            try out.print("rui: Message accepted; do not resubmit it. Use rui result {s} to inspect the same Message.\n", .{accepted.key});
+        } else try out.print("rui: Decision accepted; do not repeat it. Use rui recover {s} to inspect the same saved admission.\n", .{accepted.key});
     }
 }
 
@@ -135,11 +194,15 @@ fn drive(self: *Self, initial_text: ?[]const u8) !void {
     if (initial_text) |text| try self.startSubmission(.{ .message = self.input.submitText(text) });
     while (!self.detached) {
         self.driveActive() catch |err| {
-            if (interrupted.load(.acquire)) return error.InteractiveInterrupted;
-            if (err != error.CommandHandoff) return err;
+            const failure = driveFailure(err, interrupted.load(.acquire));
+            if (failure != error.CommandHandoff) return failure;
             try self.handoff();
         };
     }
+}
+
+fn driveFailure(err: anyerror, signalled: bool) anyerror {
+    return if (signalled and err == error.CommandHandoff) error.InteractiveInterrupted else err;
 }
 
 fn pendingHandoff(self: *Self) bool {
@@ -172,6 +235,7 @@ fn settleSubmission(self: *Self, state: ?Input.State) !void {
     if (state == null) {
         if (self.captured) |*capture| capture.close(self.init.io);
         self.captured = null;
+        self.capture_truth = .not_sent;
         self.submission = null;
         self.admission_error = null;
         self.poll_at = 0;
@@ -185,6 +249,8 @@ fn startSubmission(self: *Self, submission: Submission) !void {
     const target: client.CaptureTarget = .{ .generated = self.directory };
     self.capture_target = .{ .explicit = try target.resolve(self.init.io, &self.capture_path, &self.capture_key) };
     self.reply = null;
+    self.admission_origin = .initial;
+    self.capture_truth = .not_sent;
     try self.settleSubmission(.submitting);
     try self.admission.start(self.init.io, self, submit);
 }
@@ -213,6 +279,161 @@ test "frontend reservation failure retains definitely unsent intent and next dra
     }
 }
 
+test "frontend consumed canonical reader and admission failures survive external interruption" {
+    const Worker = struct {
+        fn fail(_: *anyopaque, _: *Task) !void {
+            return error.CanonicalStoreFailure;
+        }
+    };
+    for ([_]bool{ false, true }) |admission| {
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false };
+        self.init.io = std.testing.io;
+        self.input.init();
+        const failure: anyerror = blk: {
+            if (admission) {
+                self.submission = .{ .message = self.input.submitText("original B") };
+                try self.settleSubmission(.submitting);
+                try self.admission.start(std.testing.io, &self, Worker.fail);
+                self.settleAdmission() catch |err| break :blk err;
+            } else {
+                try self.reader.start(std.testing.io, &self, Worker.fail);
+                self.settleReader() catch |err| break :blk err;
+            }
+            return error.TestUnexpectedResult;
+        };
+        try std.testing.expectEqual(error.CanonicalStoreFailure, failure);
+        try std.testing.expectEqual(error.CanonicalStoreFailure, driveFailure(failure, true));
+    }
+}
+
+test "frontend initial cancellation before capture is definitely unsent for Message Allow and Deny" {
+    const Worker = struct {
+        fn cancelled(raw: *anyopaque, task: *Task) !void {
+            task.cancellation.requestStop();
+            try submit(raw, task);
+        }
+    };
+    const Kind = enum { message, allow_once, deny };
+    for ([_]Kind{ .message, .allow_once, .deny }) |kind| {
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false, .accepted = .{ .kind = .message, .key = @splat('A') } };
+        self.init.io = std.testing.io;
+        self.input.init();
+        self.submission = if (kind == .message) .{ .message = self.input.submitText("original café!") } else .{ .decision = .{ .action = 9, .decision = if (kind == .allow_once) .allow_once else .deny } };
+        self.capture_key = @splat('B');
+        for ("next té!\x1b[D") |byte| _ = self.input.feed(byte);
+        try self.settleSubmission(.submitting);
+        try self.admission.start(std.testing.io, &self, Worker.cancelled);
+        try std.testing.expectError(error.Cancelled, self.settleAdmission());
+        try std.testing.expectEqual(Input.State.not_started, self.submissionState());
+        try std.testing.expect(self.captured == null);
+        try std.testing.expectEqualStrings("next té!", self.input.composition().bytes);
+        try std.testing.expectEqual("next té".len, self.input.composition().cursor);
+    }
+}
+
+test "frontend settlement precedence and reader exit policies retain independent facts" {
+    const admission: AdmissionEnd = .{ .failed = .{ .err = error.CanonicalStoreFailure, .state = .unconfirmed, .capture = .published, .origin = .retry } };
+    for ([_]SettlementMode{ .active, .handoff, .final_exit }) |mode| {
+        const settled: Settled = .{ .restored = error.TerminalRestoreFailed, .reader = .absent, .admission = admission };
+        try std.testing.expectEqual(error.TerminalRestoreFailed, settled.failure(mode, error.InteractiveInterrupted).?);
+        const restored: Settled = .{ .restored = {}, .reader = .absent, .admission = admission };
+        try std.testing.expectEqual(error.CanonicalStoreFailure, restored.failure(mode, error.InteractiveInterrupted).?);
+    }
+    for ([_]ReadPhase{ .history, .details }) |phase| {
+        const preparation: ReadEnd = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = phase, .rendering = false, .output_owned = false } } };
+        try std.testing.expect(preparation.failure(.active) == null);
+        try std.testing.expect(preparation.failure(.handoff) == null);
+        try std.testing.expectEqual(error.ConnectionResetByPeer, preparation.failure(.final_exit).?);
+        var rendering = preparation;
+        rendering.failed.progress.rendering = true;
+        try std.testing.expectEqual(error.ConnectionResetByPeer, rendering.failure(.handoff).?);
+    }
+    for ([_]ReadPhase{ .activity, .permission, .history, .details }) |phase| {
+        for ([_]bool{ false, true }) |output_owned| {
+            const cancelled: ReadEnd = .{ .cancelled = .{ .phase = phase, .rendering = true, .output_owned = output_owned } };
+            try std.testing.expectEqual(if (output_owned) @as(?anyerror, error.Cancelled) else null, cancelled.failure(.handoff));
+            // Deliberate exit retires the invocation; it never resumes/replays.
+            try std.testing.expect(cancelled.failure(.final_exit) == null);
+        }
+    }
+}
+
+test "frontend failed and cancelled retries retain current original before older accepted guidance" {
+    const Worker = struct {
+        fn cancelled(raw: *anyopaque, task: *Task) !void {
+            task.cancellation.requestStop();
+            try resend(raw, task);
+        }
+        fn failed(_: *anyopaque, _: *Task) !void {
+            return error.ConnectionResetByPeer;
+        }
+    };
+    const Kind = enum { message, allow_once, deny };
+    for ([_]Kind{ .message, .allow_once, .deny }) |kind| {
+        for ([_]CaptureTruth{ .not_sent, .publication_unknown, .published }) |truth| {
+            for ([_]bool{ false, true }) |cancelled| {
+                var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false, .accepted = .{ .kind = .message, .key = @splat('A') }, .capture_truth = truth, .admission_origin = .retry };
+                self.init.io = std.testing.io;
+                self.input.init();
+                self.submission = if (kind == .message) .{ .message = self.input.submitText("original B café!") } else .{ .decision = .{ .action = 19, .decision = if (kind == .allow_once) .allow_once else .deny } };
+                self.capture_key = @splat('B');
+                for ("newer té!\x1b[D") |byte| _ = self.input.feed(byte);
+                try self.settleSubmission(.unconfirmed);
+                try self.admission.start(std.testing.io, &self, if (cancelled) Worker.cancelled else Worker.failed);
+                const end = self.joinAdmission();
+                try std.testing.expectEqual(if (cancelled) error.Cancelled else error.ConnectionResetByPeer, end.failed.err);
+                try std.testing.expectEqual(truth, end.failed.capture);
+                try std.testing.expectEqual(AdmissionOrigin.retry, end.failed.origin);
+                try std.testing.expectEqual(if (truth == .not_sent) Input.State.not_started else Input.State.unconfirmed, self.submissionState());
+                var buffer: [512]u8 = undefined;
+                var out = std.Io.Writer.fixed(&buffer);
+                try self.writeRecoveryGuide(&out);
+                const guidance = out.buffered();
+                if (truth == .not_sent) {
+                    try std.testing.expect(std.mem.indexOf(u8, guidance, "was not sent") != null);
+                } else {
+                    try std.testing.expect(std.mem.indexOf(u8, guidance, &self.capture_key) != null);
+                    try std.testing.expect(std.mem.indexOf(u8, guidance, if (truth == .published) "retry the exact original; do not resubmit" else "reservation does not prove publication") != null);
+                }
+                try std.testing.expect(std.mem.indexOf(u8, guidance, &self.accepted.?.key) == null);
+                try std.testing.expectEqualStrings("newer té!", self.input.composition().bytes);
+                try std.testing.expectEqual("newer té".len, self.input.composition().cursor);
+            }
+        }
+    }
+}
+
+test "frontend cleanup joins both borrowers and retires output before reporting restoration failure" {
+    const Worker = struct {
+        fn read(_: *anyopaque, task: *Task) !void {
+            try task.feed("borrowed nonempty prefix");
+        }
+        fn admit(_: *anyopaque, _: *Task) !void {
+            return error.CanonicalStoreFailure;
+        }
+    };
+    for ([_]ReadPhase{ .activity, .permission, .history, .details }) |phase| {
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = .{ .original = undefined, .flags = undefined, .colour = false, .active = false, .result = error.TerminalRestoreFailed }, .colour = false, .read_phase = phase };
+        self.init.io = std.testing.io;
+        self.input.init();
+        self.submission = .{ .message = self.input.submitText("current original B") };
+        try self.settleSubmission(.submitting);
+        try self.reader.start(std.testing.io, &self, Worker.read);
+        try self.admission.start(std.testing.io, &self, Worker.admit);
+        while (self.reader.take() == null) std.Thread.yield() catch {};
+        self.reader_output_started = true;
+        const settled = self.quiesce();
+        try std.testing.expectEqual(error.TerminalRestoreFailed, settled.failure(.handoff, error.InteractiveInterrupted).?);
+        try std.testing.expectEqual(error.CanonicalStoreFailure, settled.admission.failed.err);
+        try std.testing.expect(settled.reader.cancelled.output_owned);
+        try std.testing.expect(self.reader.thread == null and self.admission.thread == null);
+        try std.testing.expect(self.reader.take() == null);
+        // A second cleanup cannot reconstruct or consume the errors again.
+        const repeated = self.quiesce();
+        try std.testing.expect(repeated.reader == .absent and repeated.admission == .absent);
+    }
+}
+
 fn driveActive(self: *Self) !void {
     while (!self.detached) {
         if (interrupted.load(.acquire)) return error.InteractiveInterrupted;
@@ -234,8 +455,10 @@ fn driveActive(self: *Self) !void {
         if (self.admission.thread == null) if (self.retry) |requested| {
             self.retry = null;
             if (self.submission != null) {
-                if (std.mem.eql(u8, &requested, &self.capture_key) and self.submissionState() != .rejected)
+                if (std.mem.eql(u8, &requested, &self.capture_key) and self.submissionState() != .rejected) {
+                    self.admission_origin = .retry;
                     try self.admission.start(self.init.io, self, resend);
+                }
             }
         };
         if (self.reader.thread == null and (self.choice_action == null or self.history_requested != null) and self.prepared_action == null) {
@@ -289,7 +512,7 @@ fn driveActive(self: *Self) !void {
         if (self.dirty and !self.opening and (self.reader.thread == null or !self.reader_output_started)) {
             const view: Input.View = if (self.choice_action != null) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
             const status = if (self.choice_action != null) "a: Allow once / d: Deny (Enter)" else if (self.submission != null) switch (self.submissionState()) {
-                .not_started => unreachable, // Startup failure exits before the next UI turn.
+                .not_started => "Not sent · Ctrl-R retries original",
                 .submitting => "Sending…",
                 .unconfirmed => if (self.submission.? == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
                 .rejected => "Rejected · /discard",
@@ -414,15 +637,19 @@ fn step(self: *Self, wait: i32) !bool {
 fn submit(raw: *anyopaque, task: *Task) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
+    // Do not erase confirmed publication if an existing original is retried.
+    if (self.capture_truth == .not_sent) self.capture_truth = .publication_unknown;
     self.captured = switch (self.submission.?) {
         .message => |ticket| try client.captureMessage(task.io, .{ .store = self.store, .session = self.session, .text_path = "", .text = try self.input.message(ticket) }, self.capture_target),
         .decision => |decision| try client.capturePermissionDecision(task.io, .{ .store = self.store, .session = self.session, .action_id = decision.action, .decision = decision.decision }, self.capture_target),
     };
+    self.capture_truth = .published;
     self.reply = try task.requests().sendCaptured(&self.captured.?, null, &self.reply_buffer);
 }
 
 fn resend(raw: *anyopaque, task: *Task) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
     if (self.captured == null) {
         // Capture never returned, hence send never began. Reconcile publication
         // first; absent publication may be retried with the SAME reserved intent.
@@ -443,29 +670,36 @@ fn resend(raw: *anyopaque, task: *Task) !void {
             },
             .decision => |decision| if (!capture.saved.kind.eql("permission_decision") or capture.target != .permission_decision or capture.target.permission_decision.action != decision.action or capture.target.permission_decision.decision != decision.decision) return error.OriginalBindingMismatch,
         }
+        self.capture_truth = .published;
     }
     self.reply = try task.requests().sendCaptured(&self.captured.?, null, &self.reply_buffer);
 }
 
 fn settleAdmission(self: *Self) !void {
-    if (self.admission.thread == null) return;
+    if (self.joinAdmission().failure()) |err| return err;
+}
+
+fn joinAdmission(self: *Self) AdmissionEnd {
+    if (self.admission.thread == null) return .absent;
     const result = self.admission.join();
-    result catch |err| {
+    return self.applyAdmission(result) catch |err| {
         self.admission_error = err;
-        try self.settleSubmission(.unconfirmed);
-        return err;
+        const state: Input.State = if (self.capture_truth == .not_sent) .not_started else .unconfirmed;
+        self.settleSubmission(state) catch unreachable;
+        return .{ .failed = .{ .err = err, .state = state, .capture = self.capture_truth, .origin = self.admission_origin } };
     };
+}
+
+fn applyAdmission(self: *Self, result: anyerror!void) !AdmissionEnd {
+    try result;
     const reply = self.reply.?;
-    const answer = reply.answer catch |err| {
-        self.admission_error = err;
-        try self.settleSubmission(.unconfirmed);
-        return err;
-    };
+    const answer = try reply.answer;
     self.admission_error = null;
     if (reply.isAccepted()) {
         if (self.submissionState() == .unconfirmed) self.notice = if (self.submission.? == .decision) "  • Decision confirmed." else "  • Original confirmed.";
         self.accepted = .{ .kind = std.meta.activeTag(self.submission.?), .key = self.capture_key };
         try self.settleSubmission(null);
+        return .accepted;
     } else {
         try self.settleSubmission(.rejected);
         var writer = std.Io.Writer.fixed(&self.notice_buffer);
@@ -475,17 +709,31 @@ fn settleAdmission(self: *Self) !void {
         try text.finish(&writer);
         try writer.writeAll(". /discard clears it; the next draft is safe.");
         self.notice = writer.buffered();
+        return .rejected;
     }
 }
 
 fn settleReader(self: *Self) !void {
-    if (self.reader.thread == null) return;
-    self.reader.join() catch |err| {
-        if ((self.read_phase != .history and self.read_phase != .details) or self.history_render_started or err == error.CanonicalStoreFailure or err == error.Cancelled) return err;
+    const end = self.joinReader();
+    self.applyReader(end);
+    if (end.failure(.active)) |err| return err;
+}
+
+fn joinReader(self: *Self) ReadEnd {
+    if (self.reader.thread == null) return .absent;
+    const result = self.reader.join();
+    const progress: ReadEnd.Progress = .{ .phase = self.read_phase, .rendering = self.history_render_started, .output_owned = self.reader_output_started };
+    result catch |err| return if (err == error.Cancelled) .{ .cancelled = progress } else .{ .failed = .{ .err = err, .progress = progress } };
+    return .complete;
+}
+
+fn applyReader(self: *Self, end: ReadEnd) void {
+    if (end.preparationFailure()) {
         self.notice = if (self.read_phase == .details) "! Details unavailable; draft retained." else "! History unavailable; older cursor and draft retained.";
         self.dirty = true;
         return;
-    };
+    }
+    if (end != .complete) return;
     if (self.read_phase == .history) {
         self.history_cursor = self.next_history_cursor;
         self.notice = "  History page complete.";
@@ -505,21 +753,9 @@ fn settleReader(self: *Self) !void {
 }
 
 fn handoff(self: *Self) !void {
-    const restored = self.terminal.finish();
-    self.reader.cancel();
-    self.admission.cancel();
-    const read_result = self.settleReader();
-    const joined = self.settleAdmission();
-    if (self.reader.take() != null) self.reader.acknowledge();
-    try restored;
-    read_result catch |err| if (err == error.CanonicalStoreFailure) return err;
-    joined catch |err| if (err == error.CanonicalStoreFailure) return err;
-    read_result catch |err| {
-        if (err != error.Cancelled or self.reader_output_started) return err;
-    };
-    // A noncanonical Admission failure retains its original and diagnostic;
-    // the resumed composer presents the one actionable uncertainty status.
-    joined catch {};
+    const settled = self.quiesce();
+    self.applyReader(settled.reader);
+    if (settled.failure(.handoff, null)) |err| return err;
     if (interrupted.load(.acquire)) return error.InteractiveInterrupted;
     try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
     {
