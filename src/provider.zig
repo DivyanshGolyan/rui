@@ -4,6 +4,7 @@ const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 const store = @import("store.zig");
 const transport_options = @import("transport_options");
+const stderr = @import("stderr.zig");
 
 const c = @cImport({
     @cInclude("curl/curl.h");
@@ -318,7 +319,7 @@ pub const CaptureWriter = struct {
                 var notice_buffer: [96]u8 = undefined;
                 const notice = std.fmt.bufPrint(&notice_buffer, "{{\"rui_test_phase\":\"capture_write_gate_entered\",\"written_bytes\":{d}}}\n", .{capture.length}) catch unreachable;
                 // Diagnostics are best effort and must not fail the capture.
-                std.Io.File.stderr().writeStreamingAll(self.io, notice) catch {};
+                _ = stderr.write(notice);
                 if (std.Io.Dir.cwd().openFile(self.io, path, .{})) |gate| {
                     defer gate.close(self.io);
                     var release: [1]u8 = undefined;

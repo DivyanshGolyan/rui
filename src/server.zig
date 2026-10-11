@@ -16,6 +16,7 @@ const platform = @import("platform.zig");
 const provider = @import("provider.zig");
 const protocol = @import("protocol.zig");
 const store_module = @import("store.zig");
+const stderr = @import("stderr.zig");
 
 pub const default_active_capacity = 1000;
 pub const default_retry_waits_ms = [3]u64{ 2_000, 4_000, 8_000 };
@@ -188,10 +189,9 @@ const Host = struct {
     admission: Admission = .{},
     scratch_used: std.atomic.Value(u64) = .init(0),
     launch_mutex: std.Io.Mutex = .init,
-    trace_mutex: std.Io.Mutex = .init,
     trace_run_ns: u64 = 0,
     trace_sequence: u64 = 0,
-    trace_lost: bool = false,
+    trace_lost: std.atomic.Value(bool) = .init(false),
     last_unprocessed_completions: ?u64 = null,
     drain_mutex: std.Io.Mutex = .init,
     drain_condition: std.Io.Condition = .init,
@@ -281,7 +281,7 @@ pub fn serve(
         descriptor_observation.soft_limit,
     ) catch |err| {
         if (err == error.DescriptorCapacityInsufficient) {
-            std.debug.print(
+            stderr.print(
                 "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d}\n",
                 .{
                     active_capacity,
@@ -301,7 +301,7 @@ pub fn serve(
     var lease = try platform.StoreLease.acquire(io, store_path);
     defer lease.release();
     var diagnostics: ?HostDiagnostics = HostDiagnostics.open(io, lease.store_dir, HostDiagnostics.default_cap_bytes) catch |err| blk: {
-        std.debug.print("rui: startup diagnostics unavailable ({s}); continuing under Store lease\n", .{@errorName(err)});
+        stderr.print("rui: startup diagnostics unavailable ({s}); continuing under Store lease\n", .{@errorName(err)});
         break :blk null;
     };
     defer if (diagnostics) |*writer| writer.close();
@@ -313,7 +313,7 @@ pub fn serve(
         lease.paths.store.slice(),
         .{ .cache_spill = faults.sqlite_cache_spill, .cache_kib = faults.sqlite_cache_kib },
     );
-    defer storage.close() catch |err| std.debug.print("rui: Store close failed: {s}\n", .{@errorName(err)});
+    defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
     try storage.validateRetryWaits(faults.retry_waits_ms);
     try lease.prepareForServing(faults.startup_cleanup);
 
@@ -324,7 +324,7 @@ pub fn serve(
     errdefer {
         if (listener_open) listener.deinit(io);
         if (socket_owned) std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
-            std.debug.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
+            stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
     }
     var socket_path: [257:0]u8 = undefined;
@@ -372,6 +372,11 @@ pub fn serve(
     }
     errdefer if (provider_initialization_owned) provider.deinitialize();
     try std.Io.randomSecure(io, &host.instance);
+    // fd1 may alias fd2. Exclude optional flag borrowing before execution
+    // writers exist, through required readiness delivery and failed unwind.
+    if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;
+    var readiness_owned = true;
+    defer if (readiness_owned) stderr.release();
     const execution_thread = try std.Thread.spawn(.{}, executionMain, .{&host});
     provider_initialization_owned = false;
     defer {
@@ -382,7 +387,7 @@ pub fn serve(
         std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
             // The lock still protects this failed cleanup. A later startup
             // removes the owned socket or refuses to serve if it cannot.
-            std.debug.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
+            stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
         socket_owned = false;
         host.launch_mutex.lockUncancelable(host.io);
@@ -418,6 +423,8 @@ pub fn serve(
     try ready.append("\n");
     if (rui_write_readiness(1, ready.slice().ptr, ready.slice().len) != 0)
         return error.HostReadinessOutputUnavailable;
+    stderr.release();
+    readiness_owned = false;
     if (diagnostics) |*writer| {
         writer.record("ready", "serving");
         writer.close();
@@ -1915,7 +1922,7 @@ fn launchPreparedRequest(
             retainDispatchFence(host, "response scratch unlink", err);
             return;
         }
-        std.debug.print("rui: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
+        stderr.print("rui: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         if (err == error.ResponseCaptureAcquisitionFailed) {
             settleAttemptFailure(host, token, binding, "response_capture_failed", .terminal);
         } else {
@@ -1931,7 +1938,7 @@ fn launchPreparedRequest(
     }
     host.custody.consumeLaunchAuthority(token, binding) catch |err| {
         active.transfer.deinit();
-        std.debug.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
+        stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
         finishCustodyNow(host, token);
         slot.* = .free;
@@ -1962,7 +1969,7 @@ fn launchPreparedRequest(
             slot.* = .free;
             return;
         }
-        std.debug.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
+        stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
         finishCustodyNow(host, token);
         slot.* = .free;
@@ -2104,7 +2111,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
             retainDispatchFence(host, "response metadata unlink", err);
             return .{ .named_scratch = retained };
         }
-        std.debug.print("rui: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
+        stderr.print("rui: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         settleAttemptFailure(host, owner.token, owner.binding, "response_metadata_exhausted", .terminal);
         return .cleanup;
     };
@@ -2114,7 +2121,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         .metadata = host.faults.response_metadata,
     }) catch |err| {
         traceOperation(host, "validation_failed", owner.binding);
-        std.debug.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
+        stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         settleAttemptFailure(host, owner.token, owner.binding, model_adapter.Output.failureCode(err), .terminal);
         return .cleanup;
     };
@@ -2381,7 +2388,7 @@ fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
     host.dispatch_fenced.store(true, .release);
     host.launch_mutex.unlock(host.io);
     if (already_shutting_down) return;
-    std.debug.print("rui: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
+    stderr.print("rui: dispatch fenced after {s} failure: {s}\nHost cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
     wakeListener(host);
 }
 
@@ -2390,11 +2397,11 @@ fn wakeListener(host: *Host) void {
     // connections, joins the execution thread (which detaches any active
     // effects under custody), drains existing clients, then releases Store.
     const address = std.Io.net.UnixAddress.init(host.lease.paths.socket.slice()) catch |address_err| {
-        std.debug.print("rui: listener wake address after dispatch fence failed: {s}\n", .{@errorName(address_err)});
+        stderr.print("rui: listener wake address after dispatch fence failed: {s}\n", .{@errorName(address_err)});
         return;
     };
     const wake = address.connect(host.io) catch |connect_err| {
-        std.debug.print("rui: listener wake after dispatch fence failed: {s}\n", .{@errorName(connect_err)});
+        stderr.print("rui: listener wake after dispatch fence failed: {s}\n", .{@errorName(connect_err)});
         return;
     };
     wake.close(host.io);
@@ -2404,7 +2411,7 @@ fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {
     host.launch_mutex.lockUncancelable(host.io);
     host.dispatch_fenced.store(true, .release);
     host.launch_mutex.unlock(host.io);
-    std.debug.print("rui: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
+    stderr.print("rui: dispatch fenced after {s} failure: {s}\nNew work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
 }
 
 fn nowNs(host: *Host) u64 {
@@ -2413,29 +2420,30 @@ fn nowNs(host: *Host) u64 {
 
 fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer) void {
     if (!host.faults.test_phase_trace) return;
-    host.trace_mutex.lockUncancelable(host.io);
-    defer host.trace_mutex.unlock(host.io);
+    if (!stderr.tryAcquire()) {
+        host.trace_lost.store(true, .release);
+        return;
+    }
+    defer stderr.release();
     host.trace_sequence += 1;
     const original = trace.slice();
     if (original.len == 0 or original[original.len - 1] != '}') {
-        host.trace_lost = true;
+        host.trace_lost.store(true, .release);
         return;
     }
     var complete: protocol.ResponseBuffer = .{};
     complete.append(original[0 .. original.len - 1]) catch {
-        host.trace_lost = true;
+        host.trace_lost.store(true, .release);
         return;
     };
     complete.appendFmt(
         ",\"process\":\"{d}\",\"run\":\"{d}\",\"clock\":\"awake_ns\",\"sequence\":\"{d}\",\"trace_lost\":{s}}}\n",
-        .{ trace_native.getpid(), host.trace_run_ns, host.trace_sequence, if (host.trace_lost) "true" else "false" },
+        .{ trace_native.getpid(), host.trace_run_ns, host.trace_sequence, if (host.trace_lost.load(.acquire)) "true" else "false" },
     ) catch {
-        host.trace_lost = true;
+        host.trace_lost.store(true, .release);
         return;
     };
-    std.Io.File.stderr().writeStreamingAll(host.io, complete.slice()) catch {
-        host.trace_lost = true;
-    };
+    if (!stderr.writeHeld(complete.slice())) host.trace_lost.store(true, .release);
 }
 
 fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
@@ -3033,11 +3041,11 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
         .scratch_budget = host.retention.sharedBudget(),
         .expected_kind = route.kind(),
     }) catch |err| {
-        if (cleanup_failed) std.debug.print("rui: retained ingress file and charge after cleanup failure\n", .{});
+        if (cleanup_failed) stderr.print("rui: retained ingress file and charge after cleanup failure\n", .{});
         return respondStatic(host.io, fd, if (err == error.ScratchCapacityExhausted) @as(u16, 507) else 400, "invocation_error", @errorName(err));
     };
     defer request.removeTemporaryContent(host.io) catch |err| {
-        std.debug.print("rui: retained scratch charge after cleanup failure: {s}\n", .{@errorName(err)});
+        stderr.print("rui: retained scratch charge after cleanup failure: {s}\n", .{@errorName(err)});
     };
     if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
         return respondStatic(host.io, fd, 409, "invocation_error", "wrong_store_identity");
@@ -5245,7 +5253,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     defer retention.cleanupAll();
 
     var stdout = try tmp.dir.createFile(std.testing.io, "stdout", .{ .read = true });
-    var stderr = try tmp.dir.createFile(std.testing.io, "stderr", .{ .read = true });
+    var stderr_file = try tmp.dir.createFile(std.testing.io, "stderr", .{ .read = true });
     try std.testing.expect(root_budget.reserve(2));
     const pair = (try retention.reservePair("stdout", 1, "stderr", 1)).?;
     var retained_metadata: ?named_scratch.Owner = null;
@@ -5265,7 +5273,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     try std.testing.expectEqual(@as(usize, 2), retention.occupied());
 
     stdout.close(std.testing.io);
-    stderr.close(std.testing.io);
+    stderr_file.close(std.testing.io);
     try retention.publishPair(pair);
     try metadata.append(.{ .tag = .usage, .start = 0, .length = 0 });
     try std.testing.expectEqual(@as(u64, 104), used.load(.acquire));

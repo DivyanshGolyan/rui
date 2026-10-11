@@ -1,4 +1,5 @@
 const std = @import("std");
+const stderr = @import("stderr.zig");
 const c = @cImport({
     @cInclude("sys/stat.h");
     @cInclude("unistd.h");
@@ -66,7 +67,7 @@ pub fn record(self: *Self, phase: []const u8, detail: []const u8) void {
     if (self.disabled) return;
     self.write(phase, detail) catch |err| {
         self.disabled = true;
-        std.debug.print("rui: diagnostic writer unavailable ({s}); no Host work was changed\n", .{@errorName(err)});
+        stderr.print("rui: diagnostic writer unavailable ({s}); no Host work was changed\n", .{@errorName(err)});
     };
 }
 

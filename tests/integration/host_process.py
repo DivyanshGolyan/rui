@@ -147,14 +147,17 @@ def _start_error(reason, process, stdout, stderr_tail):
     )
 
 
-def start_ready_process(args, *, timeout=10, required_fields=None, env=None):
+def start_ready_process(args, *, timeout=10, required_fields=None, env=None, stderr_pipe=None):
     """Start a Host and transfer ownership only after one valid ready line."""
+    # The caller retains the write descriptor; startup and reap own the reader.
     process = subprocess.Popen(
         list(map(str, args)),
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.PIPE if stderr_pipe is None else stderr_pipe[1],
         env=env,
     )
+    if stderr_pipe is not None:
+        process.stderr = stderr_pipe[0]
     stdout = bytearray()
     stderr_tail = bytearray()
     selector = selectors.DefaultSelector()

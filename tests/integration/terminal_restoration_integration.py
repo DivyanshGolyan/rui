@@ -8,6 +8,7 @@ import pty
 import select
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,7 @@ import time
 import canonical_failure_integration as canonical
 import dispatch_integration as fixture
 import human_cli_integration as human
-from host_process import canonical_fixture_root
+from host_process import HostStartError, canonical_fixture_root, start_ready_process
 
 
 def assert_file_flags(actual, expected):
@@ -35,7 +36,9 @@ PROBE = r"""
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,11 +49,20 @@ PROBE = r"""
 
 static int disabled = 0;
 static int detach_phase = 0;
+static atomic_int readiness_held = 0;
 
 static void record(const char *text) {
     int fd = open(getenv("RUI_TERMINAL_PROBE"), O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (fd < 0 || write(fd, text, strlen(text)) != (ssize_t)strlen(text)) _exit(90);
     if (close(fd)) _exit(91);
+}
+
+__attribute__((constructor)) static void diagnostic_alias(void) {
+    const char *fault = getenv("RUI_TERMINAL_FAULT");
+    if (fault && (!strcmp(fault, "readiness-alias") || !strncmp(fault, "readiness-held", 14))) {
+        if (dup2(1, 2) < 0) _exit(88);
+        record("readiness-aliased\n");
+    }
 }
 
 static int probe_pthread_create(pthread_t *thread, const pthread_attr_t *attrs,
@@ -98,6 +110,20 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
 }
 
 static ssize_t probe_write(int fd, const void *bytes, size_t count) {
+    const char *readiness_fault = getenv("RUI_TERMINAL_FAULT");
+    if (fd == 2 && atomic_load(&readiness_held)) record("readiness-fd2-write\n");
+    if (fd == 1 && readiness_fault && !strncmp(readiness_fault, "readiness-held", 14)) {
+        atomic_store(&readiness_held, 1);
+        record("readiness-held\n");
+        while (access(getenv("RUI_DIAGNOSTIC_RELEASE"), F_OK)) usleep(1000);
+        atomic_store(&readiness_held, 0);
+        if (!strcmp(readiness_fault, "readiness-held-error")) {
+            record("readiness-write-failed\n"); errno = EIO; return -1;
+        }
+    }
+    if (fd == 1 && readiness_fault && !strcmp(readiness_fault, "readiness-error")) {
+        record("readiness-write-failed\n"); errno = EIO; return -1;
+    }
     if (fd == 1 && count == 8 && !memcmp(bytes, "\033[?2004l", 8)) {
         struct iovec iov = { (void *)bytes, count };
         return probe_writev(fd, &iov, 1);
@@ -110,6 +136,26 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
 #endif
     if (!real_write || real_write == probe_write) _exit(96);
     const char *fault = getenv("RUI_TERMINAL_FAULT");
+    const char *diagnostic_arm = getenv("RUI_DIAGNOSTIC_ARM");
+    if (fd == 2 && diagnostic_arm && !access(diagnostic_arm, F_OK)) {
+        record("diagnostic-write\n");
+        static int partial_done = 0;
+        static uint64_t partial_hash = 0;
+        static size_t partial_count = 0;
+        uint64_t hash = 14695981039346656037ULL;
+        if (!strcmp(fault, "diagnostic-partial")) {
+            for (size_t i = 0; i < count; ++i) hash = (hash ^ ((const unsigned char *)bytes)[i]) * 1099511628211ULL;
+            if (partial_done && ((count == partial_count && hash == partial_hash) ||
+                (count && ((const char *)bytes)[0] != '{'))) record("diagnostic-partial-retry\n");
+        }
+        if (!strcmp(fault, "diagnostic-partial") && !partial_done) {
+            partial_done = 1;
+            partial_hash = hash;
+            partial_count = count;
+            record("diagnostic-partial\n");
+            return real_write(fd, bytes, count > 1 ? 1 : 0);
+        }
+    }
     const char *arm = getenv("RUI_TERMINAL_STREAM_ARM");
     const char *marker = "VISIBLE-CANCEL-PREFIX";
     static size_t matched = 0;
@@ -161,6 +207,7 @@ int probe_fcntl(int fd, int command, ...) {
     int (*real_fcntl)(int, int, ...) = dlsym(RTLD_NEXT, "fcntl");
 #endif
     if (!real_fcntl || real_fcntl == probe_fcntl) _exit(98);
+    if (fd == 2 && atomic_load(&readiness_held)) record("readiness-fd2-borrow\n");
     if (command == F_GETFL || command == F_GETFD) return real_fcntl(fd, command);
 #ifdef F_GETPATH
     if (command == F_GETPATH) {
@@ -186,6 +233,30 @@ int probe_fcntl(int fd, int command, ...) {
     va_start(args, command);
     int value = va_arg(args, int);
     va_end(args);
+    const char *diagnostic_arm = getenv("RUI_DIAGNOSTIC_ARM");
+    const char *diagnostic_fault = getenv("RUI_TERMINAL_FAULT");
+    if (fd == 2 && command == F_SETFL && diagnostic_arm && !access(diagnostic_arm, F_OK)) {
+        if (value & O_NONBLOCK) {
+            record("diagnostic-enable\n");
+            if (!strcmp(diagnostic_fault, "diagnostic-enable-unmutated")) { errno = EIO; return -1; }
+            int result = real_fcntl(fd, command, value);
+            if (result) return result;
+            record("diagnostic-mutated\n");
+            if (!strcmp(diagnostic_fault, "diagnostic-contention")) {
+                record("diagnostic-held\n");
+                while (access(getenv("RUI_DIAGNOSTIC_RELEASE"), F_OK)) usleep(1000);
+            }
+            if (!strcmp(diagnostic_fault, "diagnostic-enable")) { errno = EIO; return -1; }
+            return result;
+        }
+        record("diagnostic-restore\n");
+        if (!strcmp(diagnostic_fault, "diagnostic-restore")) {
+            record("diagnostic-unrestored\n"); errno = EIO; return -1;
+        }
+        int result = real_fcntl(fd, command, value);
+        if (!result) record("diagnostic-restored\n");
+        return result;
+    }
     if (fd == 1 && command == F_SETFL && detach_phase) {
         const char *fault = getenv("RUI_TERMINAL_FAULT");
         if (detach_phase == 1 && !(value & O_NONBLOCK)) {
@@ -1144,6 +1215,352 @@ def visible_stream_handoff_cases(state, library):
             assert not thread.is_alive()
 
 
+def host_diagnostic_cases(state, library):
+    """Optional fd2 credit cannot own canonical progress or cleanup authority."""
+    for kind in ("readiness-held", "readiness-held-error"):
+        root = state / kind
+        root.mkdir(mode=0o700)
+        store, log, release = (root / name for name in ("store", "probe.log", "release"))
+        # Save queued work without an execution adapter, then restart it under
+        # the native readiness gate. No live raw Store reads or new hooks.
+        seed = fixture.start_host(store, None)
+        try:
+            fixture.configure(root, store, "config", "ready/session", "model-a")
+            fixture.message(root, store, "queued", "ready/session", "READY-ANSWER")
+        finally:
+            fixture.stop_host(seed)
+        endpoint = fixture.SuccessEndpoint([
+            fixture.sse_answer("ready-a", "ready-r", "ready-m", "READY-ANSWER")[0]])
+        server = threading.Thread(target=endpoint.serve_forever)
+        server.start()
+        result = []
+        env = {**os.environ,
+            "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+            "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": kind,
+            "RUI_DIAGNOSTIC_RELEASE": str(release)}
+
+        def start():
+            try:
+                result.append(start_ready_process(fixture.host_arguments(store,
+                    f"http://127.0.0.1:{endpoint.server_port}/responses", "--test-phase-trace"),
+                    env=env, required_fields={"execution": "enabled", "curl": "8.22.0"}))
+            except BaseException as error:
+                result.append(error)
+
+        starter = threading.Thread(target=start)
+        starter.start()
+        host = None
+        try:
+            fixture.wait_for(lambda: log.exists() and "readiness-held\n" in log.read_text(), "required readiness gate")
+            # Receiving the request requires preparation and handoff, both of
+            # which attempt production opt-in traces before transport service.
+            fixture.wait_for(lambda: endpoint.requests, "execution during readiness exclusion")
+            assert starter.is_alive() and not result, result
+            effects = log.read_text()
+            assert "readiness-fd2-borrow\n" not in effects and "readiness-fd2-write\n" not in effects, effects
+            release.touch()
+            starter.join(timeout=10)
+            assert not starter.is_alive() and len(result) == 1, result
+            if kind == "readiness-held-error":
+                assert isinstance(result[0], HostStartError), result
+                assert "readiness-write-failed\n" in log.read_text()
+                try:
+                    os.kill(result[0].pid, 0)
+                except ProcessLookupError:
+                    pass
+                else:
+                    raise AssertionError("failed readiness was not reaped")
+            else:
+                assert not isinstance(result[0], BaseException), result
+                host, fields = result[0]
+                assert fields["execution"] == "enabled"
+                observation = fixture.wait_for(lambda: fixture.completed_observation(store, "queued"), "queued exact answer")
+                assert observation["result"]["status"] == "completed", observation
+                assert fixture.read_result(store, "queued") == b"READY-ANSWER"
+            print(f"Host diagnostics: {kind}: execution traces attempted under exclusion; no fd2 borrow/write; required outcome checked", flush=True)
+        finally:
+            release.touch()
+            starter.join(timeout=10)
+            if host is None and result and isinstance(result[0], tuple): host = result[0][0]
+            if host is not None: fixture.stop_host(host)
+            endpoint.shutdown()
+            endpoint.server_close()
+            server.join(timeout=5)
+            assert not server.is_alive() and not starter.is_alive()
+    for kind in ("readiness-alias", "readiness-error"):
+        root = state / kind
+        root.mkdir(mode=0o700)
+        log = root / "probe.log"
+        env = {**os.environ,
+            "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+            "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": kind}
+        host = None
+        try:
+            try:
+                host, fields = start_ready_process(fixture.host_arguments(root / "store", None),
+                    env=env, required_fields={"execution": "unavailable"})
+            except HostStartError as error:
+                assert kind == "readiness-error", error
+                assert "readiness-write-failed\n" in log.read_text()
+                # start_ready_process's failure owner has already reaped it.
+                try:
+                    os.kill(error.pid, 0)
+                except ProcessLookupError:
+                    pass
+                else:
+                    raise AssertionError("readiness failure left Host alive")
+            else:
+                assert kind == "readiness-alias" and fields["execution"] == "unavailable"
+                assert "readiness-aliased\n" in log.read_text()
+                fixture.configure(root, root / "store", "alias-config", "alias/session", "model-a")
+                assert fixture.command("inspect-session", "--store", root / "store", "--session", "alias/session")["session"]
+            print(f"Host diagnostics: {kind}: required stdout outcome checked", flush=True)
+        finally:
+            if host is not None: fixture.stop_host(host)
+    population = [
+        ("normal", "response-acquire"), ("filled", "response-acquire"),
+        ("closed", "response-acquire"), ("normal", "response-metadata"),
+        ("filled", "response-metadata"), ("filled", "response-commit"),
+        ("normal", "response-write"), ("normal", "response-commit"),
+        ("diagnostic-enable", "response-acquire"),
+        ("diagnostic-enable-unmutated", "response-acquire"),
+        ("diagnostic-partial", "response-acquire"),
+        ("diagnostic-nonblock", "response-acquire"),
+        ("diagnostic-restore", "response-acquire"),
+        ("diagnostic-restore-startup", "response-acquire"),
+        ("diagnostic-contention", "response-acquire"),
+        ("normal", "response-unlink"),
+        ("filled", "success"), ("closed", "success"),
+        ("diagnostic-restore", "success"),
+    ]
+    for credit, fault in population:
+        root = state / f"host-{credit}-{fault}"
+        root.mkdir(mode=0o700)
+        store, log, arm, release = (root / name for name in ("store", "probe.log", "arm", "release"))
+        count = 2 if credit in ("diagnostic-enable", "diagnostic-enable-unmutated", "diagnostic-restore", "diagnostic-restore-startup") else 1
+        endpoint = fixture.SuccessEndpoint([
+            fixture.sse_answer(f"diagnostic-a-{index}", f"diagnostic-r-{index}", f"diagnostic-m-{index}", "ANSWER")[0]
+            for index in range(count)
+        ])
+        thread = threading.Thread(target=endpoint.serve_forever)
+        thread.start()
+        read_fd, write_fd = os.pipe()
+        reader = os.fdopen(read_fd, "rb", buffering=0)
+        flags = fcntl.fcntl(write_fd, fcntl.F_GETFL)
+        if credit == "diagnostic-nonblock" or (credit == "filled" and fault == "success"):
+            # Traced successful work can write while idle: establish its
+            # nonblocking flags before spawn, not through an external race.
+            flags |= os.O_NONBLOCK
+            fcntl.fcntl(write_fd, fcntl.F_SETFL, flags)
+        host = pending = None
+        env = {**os.environ,
+            "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+            "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "diagnostic-restore" if credit == "diagnostic-restore-startup" else credit,
+            "RUI_DIAGNOSTIC_ARM": str(arm), "RUI_DIAGNOSTIC_RELEASE": str(release)}
+        try:
+            if credit == "diagnostic-restore-startup":
+                # An optional startup-file warning poisons later borrowing,
+                # not required readiness or already accepted work.
+                store.mkdir(mode=0o700)
+                (store / "diagnostics").mkdir(mode=0o755)
+                (store / "diagnostics").chmod(0o755)
+                arm.touch()
+            host, _ = start_ready_process(fixture.host_arguments(store,
+                f"http://127.0.0.1:{endpoint.server_port}/responses",
+                *(["--fault", fault] if fault != "success" else []),
+                *(["--test-phase-trace"] if fault == "success" or credit in ("diagnostic-contention", "diagnostic-partial") else [])), env=env, stderr_pipe=(reader, write_fd),
+                required_fields={"execution": "enabled", "curl": "8.22.0"})
+            session = "diagnostic/session"
+            fixture.configure(root, store, "config", session, "model-a")
+            status = subprocess.run([str(fixture.RUI), "host", "status", "--store", str(store)],
+                capture_output=True, text=True, timeout=8)
+            assert status.returncode == 0 and "Instance: " in status.stdout, status
+            instance = status.stdout.split("Instance: ", 1)[1].splitlines()[0]
+            # Fill only while idle. The inherited open file description starts
+            # submissions with exactly its original flags, not Python's flags.
+            if credit == "filled":
+                fcntl.fcntl(write_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                filled = 0
+                try:
+                    while True:
+                        filled += os.write(write_fd, b"F" * 4096)
+                except BlockingIOError:
+                    try:
+                        while True:
+                            filled += os.write(write_fd, b"F")
+                    except BlockingIOError:
+                        pass
+                finally:
+                    fcntl.fcntl(write_fd, fcntl.F_SETFL, flags)
+                assert filled > 0
+            if credit == "closed":
+                reader.close()
+            if credit.startswith("diagnostic-"):
+                arm.touch()
+            if credit == "diagnostic-partial":
+                fixture.command("inspect-session", "--store", store, "--session", session)
+                assert "diagnostic-partial\n" in log.read_text()
+                arm.unlink()
+            if credit == "diagnostic-contention":
+                pending = fixture.start_command("inspect-session", "--store", store, "--session", session)
+                fixture.wait_for(lambda: log.exists() and "diagnostic-held" in log.read_text(), "native fd2 held")
+                concurrent = fixture.start_command("inspect-session", "--store", store, "--session", session)
+                out, err = concurrent.communicate(timeout=3)
+                assert concurrent.returncode == 0, (out, err)
+                assert pending.poll() is None, "first inspection escaped native gate"
+                release.touch()
+                fixture.finish_command(pending)
+                pending = None
+                arm.unlink()
+            for index in range(count):
+                key = f"message-{index}"
+                # The original regression payload: exactly 156000 decoded bytes.
+                text = 'é中🙂\n\\"/' * 12000
+                assert len(text.encode()) == 156000
+                fixture.message(root, store, key, session, text)
+                if fault == "response-commit":
+                    fixture.wait_for(lambda: host.poll() is not None, "canonical fence exits")
+                    assert host.returncode != 0
+                    with sqlite3.connect(f"file:{store / 'rui.sqlite3'}?mode=ro", uri=True) as database:
+                        assert database.execute("SELECT uncertain,resolution_code FROM model_operation").fetchone() == (1, None)
+                        assert database.execute("SELECT count(*) FROM model_output_item").fetchone() == (0,)
+                    break
+                if fault == "response-unlink":
+                    resources = fixture.wait_for(lambda: (value if (value := fixture.command(
+                        "inspect-session", "--store", store, "--session", session)["execution"])["dispatch_fenced"] else None),
+                        "retained response cleanup")
+                    assert resources["custody_occupied"] == "1", resources
+                    leftovers = list((store / "scratch").glob("response-[0-9]*.tmp"))
+                    assert len(leftovers) == 1, leftovers
+                    # This existing acquisition fault retains an empty named
+                    # file before provider launch, so its correct charge is 0.
+                    assert int(resources["scratch_used_bytes"]) == leftovers[0].stat().st_size == 0, resources
+                    assert not endpoint.requests, endpoint.requests
+                    stopped = subprocess.run([str(fixture.RUI), "host", "stop", "--store", str(store), "--instance", instance],
+                        capture_output=True, text=True, timeout=8)
+                    (root / "host-stop.stdout").write_text(stopped.stdout)
+                    (root / "host-stop.stderr").write_text(stopped.stderr)
+                    assert stopped.returncode == 0, stopped
+                    assert "Stop acknowledged; completion and lease release are not confirmed" in stopped.stdout, stopped
+                    print(f"Host diagnostics: retained response file, charge=0, custody=1; stop reply={stopped.stdout!r}", flush=True)
+                    # A stop acknowledgement is not cleanup completion: the
+                    # injected unlink refusal remains active during shutdown.
+                    assert host.poll() is None, "stop falsely completed retained cleanup"
+                    (root / "retained-resources.json").write_text(json.dumps(resources, indent=2) + "\n")
+                    host.kill()
+                    assert host.wait(timeout=8) == -signal.SIGKILL
+                    assert leftovers[0].exists()
+                    with sqlite3.connect(f"file:{store / 'rui.sqlite3'}?mode=ro", uri=True) as database:
+                        assert database.execute("SELECT uncertain,resolution_code FROM model_operation").fetchone() == (1, None)
+                        assert database.execute("SELECT count(*) FROM model_output_item").fetchone() == (0,)
+                    fresh = fixture.start_host(store, None)
+                    try:
+                        assert not leftovers[0].exists()
+                        clean = fixture.command("inspect-session", "--store", store, "--session", session)["execution"]
+                        assert clean["custody_occupied"] == "0" and clean["scratch_used_bytes"] == "0", clean
+                        (root / "fresh-resources.json").write_text(json.dumps(clean, indent=2) + "\n")
+                    finally:
+                        fixture.stop_host(fresh)
+                    break
+                if fault == "success":
+                    observation = fixture.wait_for(lambda: fixture.completed_observation(store, key), f"{credit} answer settles")
+                    assert observation["result"]["status"] == "completed", observation
+                    assert fixture.read_result(store, key) == b"ANSWER"
+                else:
+                    expected = {"response-acquire": "response_capture_failed", "response-metadata": "response_metadata_failed",
+                        "response-write": "response_write_failed"}[fault]
+                    observation = fixture.wait_for(lambda: (value if (value := fixture.observe(store, key)).get("result", {}).get("code") else None),
+                        f"{credit} {fault} settles")
+                    assert observation["result"]["code"] == expected, observation
+                resources = fixture.wait_for(lambda: (value if (value := fixture.command(
+                    "inspect-session", "--store", store, "--session", session)["execution"])["custody_occupied"] == "0" else None),
+                    "diagnostic custody retirement")
+                assert resources["scratch_used_bytes"] == "0", resources
+                if index == 0 and credit in ("diagnostic-enable", "diagnostic-enable-unmutated"):
+                    arm.unlink()
+            assert_file_flags(fcntl.fcntl(write_fd, fcntl.F_GETFL),
+                flags | os.O_NONBLOCK if credit.startswith("diagnostic-restore") else flags)
+            if credit in ("diagnostic-enable", "diagnostic-enable-unmutated", "diagnostic-restore", "diagnostic-restore-startup"):
+                effects = log.read_text()
+                assert ("diagnostic-mutated\n" in effects) == (credit != "diagnostic-enable-unmutated"), effects
+                if not credit.startswith("diagnostic-restore"):
+                    assert "diagnostic-restored\n" in effects, effects
+                    assert effects.count("diagnostic-enable\n") == 1, effects
+                    assert "diagnostic-write\n" not in effects, effects
+                else:
+                    assert effects.count("diagnostic-enable\n") == 1 and "diagnostic-unrestored\n" in effects, effects
+                    assert effects.count("diagnostic-write\n") == 1, effects
+            if credit == "diagnostic-partial":
+                effects = log.read_text()
+                assert effects.count("diagnostic-partial\n") == 1, effects
+                assert "diagnostic-partial-retry\n" not in effects, effects
+                assert "diagnostic-restored\n" in effects, effects
+            if credit == "diagnostic-nonblock":
+                effects = log.read_text()
+                assert effects.count("diagnostic-write\n") == 1, effects
+                assert "diagnostic-enable\n" not in effects and "diagnostic-restore\n" not in effects, effects
+            errors = bytearray()
+            if not reader.closed:
+                os.set_blocking(reader.fileno(), False)
+                while True:
+                    try:
+                        chunk = os.read(reader.fileno(), 65536)
+                    except BlockingIOError:
+                        break
+                    if not chunk: break
+                    errors.extend(chunk)
+            (root / "stderr.log").write_bytes(errors)
+            contexts = {"response-acquire": b"provider preparation failed for operation",
+                "response-metadata": b"provider output rejected for operation 1: InjectedMetadataFailure",
+                "response-commit": b"dispatch fenced after", "response-unlink": b"dispatch fenced after"}
+            if credit == "normal" and fault in contexts:
+                assert contexts[fault] in errors, bytes(errors[-2000:])
+            if credit == "normal" and fault in ("response-commit", "response-unlink"):
+                guidance = b"Host cannot safely continue; wait for shutdown" if fault == "response-commit" else b"New work is blocked; retained cleanup is still owned."
+                assert guidance in errors and b"do not resubmit uncertain work." in errors, bytes(errors)
+            if credit in ("diagnostic-enable", "diagnostic-enable-unmutated"):
+                assert errors.count(contexts["response-acquire"]) == 1, bytes(errors)
+            if credit in ("diagnostic-contention", "diagnostic-partial"):
+                records = []
+                for line in errors.splitlines():
+                    if not line.startswith(b'{'): continue
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        assert credit == "diagnostic-partial" and line.startswith(b'{{'), line
+                assert any(record.get("trace_lost") is True for record in records), records
+                lost = next(i for i, record in enumerate(records) if record.get("trace_lost") is True)
+                assert all(record.get("trace_lost") is True for record in records[lost:]), records
+                assert "diagnostic-restored\n" in log.read_text()
+            warnings = [line for line in errors.splitlines() if line.startswith(b"rui:")]
+            print(f"Host diagnostics: {credit}/{fault}: public outcome checked, flags checked; warnings={warnings!r}", flush=True)
+        finally:
+            release.touch()
+            if pending is not None:
+                pending.communicate(timeout=5)
+            if host is not None:
+                if host.poll() is None:
+                    host.kill()
+                host.wait(timeout=8)
+                if not reader.closed:
+                    os.set_blocking(reader.fileno(), False)
+                    with (root / "stderr.log").open("ab") as retained:
+                        while True:
+                            try:
+                                chunk = os.read(reader.fileno(), 65536)
+                            except BlockingIOError:
+                                break
+                            if not chunk: break
+                            retained.write(chunk)
+                fixture.stop_host(host)
+            elif not reader.closed: reader.close()
+            os.close(write_fd)
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+
+
 def main(selected=None):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-terminal-restoration."))
     home = state / "home"
@@ -1158,6 +1575,11 @@ def main(selected=None):
             "-fPIC", str(source), *(["-ldl"] if sys.platform == "linux" else []), "-o", str(library)], check=True)
         check_forwarding(state, library)
         if selected == "forwarding":
+            completed = True
+            return
+        if selected in (None, "host-diagnostics"):
+            host_diagnostic_cases(state, library)
+        if selected == "host-diagnostics":
             completed = True
             return
         if selected in (None, "consent"):
@@ -1199,10 +1621,10 @@ def main(selected=None):
     finally:
         if host is not None:
             fixture.stop_host(host)
-        if completed:
+        if completed and selected != "host-diagnostics":
             shutil.rmtree(state)
         else:
-            print(f"retained terminal restoration failure state: {state}", file=sys.stderr)
+            print(f"retained terminal restoration state (completed={completed}): {state}", file=sys.stderr)
 
 
 if __name__ == "__main__":

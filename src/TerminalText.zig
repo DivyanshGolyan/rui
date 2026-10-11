@@ -1,4 +1,5 @@
 const std = @import("std");
+const stderr = @import("stderr.zig");
 const Self = @This();
 
 pub const Mode = enum { line, multiline };
@@ -66,15 +67,8 @@ test "opaque Session shell selectors preserve NUL position and maximum length" {
 /// Optional fatal guidance cannot retain a restored caller on stderr credit.
 /// One bounded write is best-effort; its failure never replaces the real error.
 pub fn diagnostic(comptime format: []const u8, args: anytype) void {
-    var buffer: [1024]u8 = undefined;
     // The preceding transcript may end mid-line, including a partial command.
-    const bytes = std.fmt.bufPrint(&buffer, "\n" ++ format, args) catch return;
-    const flags = std.c.fcntl(2, std.c.F.GETFL);
-    if (flags < 0) return;
-    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
-    if (std.c.fcntl(2, std.c.F.SETFL, flags | nonblock) < 0) return;
-    _ = std.c.write(2, bytes.ptr, bytes.len);
-    _ = std.c.fcntl(2, std.c.F.SETFL, flags);
+    stderr.print("\n" ++ format, args);
 }
 
 fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
