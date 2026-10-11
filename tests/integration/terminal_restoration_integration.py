@@ -21,6 +21,15 @@ import human_cli_integration as human
 from host_process import canonical_fixture_root
 
 
+def assert_file_flags(actual, expected):
+    # XNU xnu-11417.140.69 exposes kernel-only FWASWRITTEN through F_GETFL.
+    # A positive write sets it; successful F_SETFL cannot clear write history.
+    # Keep every other bit, including access mode and O_NONBLOCK, exact.
+    history = 0x00010000 if sys.platform == "darwin" else 0
+    assert actual & ~history == expected & ~history, (
+        f"file flags actual={actual:#x} expected={expected:#x} excluded={history:#x}")
+
+
 PROBE = r"""
 #include <dlfcn.h>
 #include <errno.h>
@@ -616,7 +625,7 @@ def fatal_reporting_cases(state):
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=error_slave)
                 assert caller.wait(timeout=3) == 1, "fatal diagnostic did not exit"
                 assert termios.tcgetattr(slave) == original
-                assert fcntl.fcntl(error_slave, fcntl.F_GETFL) == error_flags
+                assert_file_flags(fcntl.fcntl(error_slave, fcntl.F_GETFL), error_flags)
                 if not stopped:
                     assert select.select([error_master], [], [], 1)[0]
                     assert error in os.read(error_master, 65536)
@@ -854,7 +863,7 @@ def detach_reporting_cases(state, library):
                     actual[3] &= ~mask
                     original[3] &= ~mask
                 assert actual == original
-                assert fcntl.fcntl(slave, fcntl.F_GETFL) == (flags if fault == "detach-enable" else flags | os.O_NONBLOCK)
+                assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL), flags if fault == "detach-enable" else flags | os.O_NONBLOCK)
                 assert {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")} == before
                 messages = [before[path] for path in records if json.loads(before[path])["kind"] == "message"]
                 assert proxy.mutations == [("/v1/message", messages[0])] + ([] if kind == "message" else [("/v1/control/permission-decision", before[record])])
