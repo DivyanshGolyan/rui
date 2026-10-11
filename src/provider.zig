@@ -322,11 +322,15 @@ pub const CaptureWriter = struct {
                 var notice_buffer: [96]u8 = undefined;
                 const notice = std.fmt.bufPrint(&notice_buffer, "{{\"rui_test_phase\":\"capture_write_gate_entered\",\"written_bytes\":{d}}}\n", .{capture.length}) catch unreachable;
                 if (self.test_observation) |writer| {
-                    var observation: protocol.FixedJsonBuffer(128) = .{};
-                    observation.appendFmt("{{\"rui_test_phase\":\"capture_write_gate_entered\",\"at_ns\":\"{d}\"}}", .{
-                        @as(u64, @intCast(std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds)),
-                    }) catch unreachable;
-                    writer.record(observation.slice());
+                    if (writer.begin("capture_write_gate_entered", null)) |initial| {
+                        var publication = initial;
+                        defer publication.finish();
+                        var observation: protocol.FixedJsonBuffer(128) = .{};
+                        observation.appendFmt("{{\"rui_test_phase\":\"capture_write_gate_entered\",\"at_ns\":\"{d}\"}}", .{
+                            @as(u64, @intCast(std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds)),
+                        }) catch unreachable;
+                        publication.record(observation.slice());
+                    }
                 }
                 // Diagnostics are best effort and must not fail the capture.
                 _ = stderr.write(notice);

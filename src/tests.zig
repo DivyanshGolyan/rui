@@ -10,6 +10,7 @@ test {
     _ = @import("platform.zig");
     _ = @import("socket_fixture.zig");
     _ = @import("HostDiagnostics.zig");
+    _ = @import("TestObservation.zig");
     _ = @import("store.zig");
     _ = @import("server.zig");
     _ = @import("client.zig");

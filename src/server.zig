@@ -2005,6 +2005,8 @@ fn completeTransfer(
     traceCompletionQueue(host, completion.queued_after, owner.binding);
     defer traceOperation(host, "provider_completion_serviced", owner.binding);
     if (host.authentication != null and host.faults.test_phase_trace) {
+        var publication = beginTestObservation(host, "codex_transfer", null);
+        defer if (publication) |*value| value.finish();
         const observation = active.transfer.protocolObservation();
         const correlation = active.transfer.requestId();
         var digest: [32]u8 = undefined;
@@ -2018,7 +2020,7 @@ fn completeTransfer(
             if (correlation.len != 0) "true" else "false",
             digest,
         }) catch unreachable;
-        writeTestTrace(host, &trace);
+        writeTestTrace(host, &trace, &publication);
     }
     const evidence = switch (completion.outcome) {
         .response_capture_failed => |failure| {
@@ -2395,8 +2397,20 @@ fn settleAttemptFailure(
 }
 
 fn finishCustodyNow(host: *Host, token: execution.CustodyToken) void {
+    // Capture checked identity while attached, but observe only after callers
+    // have retired their resources and this owner has released custody.
+    const model_binding = if (host.faults.test_phase_trace)
+        host.custody.binding(token) catch null
+    else
+        null;
+    const action_binding = if (host.faults.test_phase_trace and model_binding == null)
+        host.custody.actionBinding(token) catch unreachable
+    else
+        null;
     host.custody.detach(token) catch unreachable;
     host.custody.cleanupComplete(token) catch unreachable;
+    if (model_binding) |binding| traceOperation(host, "cleanup_completed", binding);
+    if (action_binding) |binding| traceAction(host, "cleanup_completed", binding);
 }
 
 fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
@@ -2435,9 +2449,14 @@ fn nowNs(host: *Host) u64 {
     return @intCast(std.Io.Clock.Timestamp.now(host.io, .awake).raw.nanoseconds);
 }
 
-fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer) void {
+fn beginTestObservation(host: *Host, phase: []const u8, subject: ?[]const u8) ?TestObservation.Publication {
+    const writer = host.test_observation orelse return null;
+    return writer.begin(phase, subject);
+}
+
+fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer, publication: *?TestObservation.Publication) void {
     if (!host.faults.test_phase_trace) return;
-    if (host.test_observation) |writer| writer.record(trace.slice());
+    if (publication.*) |*value| value.record(trace.slice());
     if (!stderr.tryAcquire()) {
         host.trace_lost.store(true, .release);
         return;
@@ -2466,6 +2485,8 @@ fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer) void {
 
 fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, subject);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2474,11 +2495,13 @@ fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subjec
     trace.append(",\"subject\":") catch return;
     trace.appendJsonString(subject) catch return;
     trace.append("}") catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceRequest(host: *Host, phase: []const u8, request_number: u64, scratch_used_bytes: ?u64) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2489,11 +2512,13 @@ fn traceRequest(host: *Host, phase: []const u8, request_number: u64, scratch_use
     if (scratch_used_bytes) |used|
         trace.appendFmt(",\"scratch_used_bytes\":\"{d}\"", .{used}) catch return;
     trace.append("}") catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceAttemptRollback(host: *Host) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, "attempt_admission_rolled_back", null);
+    defer if (publication) |*value| value.finish();
     // Sample after this reservation is released, before another owner turn
     // can reserve it again. A later inspection is not this boundary's state.
     var trace: protocol.ResponseBuffer = .{};
@@ -2501,31 +2526,37 @@ fn traceAttemptRollback(host: *Host) void {
         "{{\"rui_test_phase\":\"attempt_admission_rolled_back\",\"at_ns\":\"{d}\",\"subject_kind\":\"attempt_kind\",\"subject\":\"model\",\"custody_occupied\":\"{d}\"}}",
         .{ nowNs(host), host.custody.occupied() },
     ) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceServiceBoundary(host: *Host, start_ns: u64, end_ns: u64, wait_ns: u64) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, "lifecycle_boundary", null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"lifecycle_boundary\",\"at_ns\":\"{d}\",\"start_ns\":\"{d}\",\"wait_ns\":\"{d}\"}}",
         .{ end_ns, start_ns, wait_ns },
     ) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceLifecycleService(host: *Host, maximum_gap_ns: u64) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, "lifecycle_service_observation", null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"lifecycle_service_observation\",\"at_ns\":\"{d}\",\"maximum_gap_ns\":\"{d}\",\"owner\":\"execution\"}}",
         .{ nowNs(host), maximum_gap_ns },
     ) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptBinding) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2535,7 +2566,7 @@ fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptB
         binding.operation_id,
         binding.attempt_ordinal,
     }) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn tracePreparationAdvance(
@@ -2545,6 +2576,8 @@ fn tracePreparationAdvance(
     binding: store_module.AttemptBinding,
 ) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2552,7 +2585,7 @@ fn tracePreparationAdvance(
         ",\"at_ns\":\"{d}\",\"work_bytes\":\"{d}\",\"work_items\":\"{d}\",\"request_bytes\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
         .{ nowNs(host), stats.work_bytes, stats.work_items, stats.request_bytes, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
     ) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn tracePreparationAdvanceError(
@@ -2563,6 +2596,8 @@ fn tracePreparationAdvanceError(
     binding: store_module.AttemptBinding,
 ) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2572,21 +2607,25 @@ fn tracePreparationAdvanceError(
         ",\"work_bytes\":\"{d}\",\"work_items\":\"{d}\",\"request_bytes\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
         .{ stats.work_bytes, stats.work_items, stats.request_bytes, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
     ) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceCompletionQueue(host: *Host, queued_after: usize, binding: store_module.AttemptBinding) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, "provider_completion_removed", null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"provider_completion_removed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
         .{ nowNs(host), queued_after, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
     ) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttemptBinding) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2597,7 +2636,7 @@ fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttem
         binding.action_id,
         binding.attempt_ordinal,
     }) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceOperationControl(
@@ -2607,6 +2646,8 @@ fn traceOperationControl(
     binding: store_module.AttemptBinding,
 ) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2617,7 +2658,7 @@ fn traceOperationControl(
         binding.operation_id,
         binding.attempt_ordinal,
     }) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceActionControl(
@@ -2627,6 +2668,8 @@ fn traceActionControl(
     binding: store_module.ActionAttemptBinding,
 ) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2638,7 +2681,7 @@ fn traceActionControl(
         binding.action_id,
         binding.attempt_ordinal,
     }) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceActionControlOutcome(
@@ -2650,6 +2693,8 @@ fn traceActionControlOutcome(
     binding: store_module.ActionAttemptBinding,
 ) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2663,7 +2708,7 @@ fn traceActionControlOutcome(
         binding.action_id,
         binding.attempt_ordinal,
     }) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceActionDeadline(
@@ -2674,6 +2719,8 @@ fn traceActionDeadline(
     binding: store_module.ActionAttemptBinding,
 ) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2686,7 +2733,7 @@ fn traceActionDeadline(
         binding.action_id,
         binding.attempt_ordinal,
     }) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn testTransition(host: *Host, transition: TestTransition, binding: store_module.ActionAttemptBinding) void {
@@ -2737,12 +2784,14 @@ fn observeUnprocessedCompletions(host: *Host, reactor: *provider.Reactor) void {
     }
     host.last_unprocessed_completions = count;
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, "native_completions_unprocessed", null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"native_completions_unprocessed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\"}}",
         .{ nowNs(host), count },
     ) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn appendOptionalUnsigned(
@@ -2771,6 +2820,8 @@ fn appendOptionalSigned(
 
 fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
     if (!host.faults.test_phase_trace or !host.faults.sqlite_diagnostics) return;
+    var publication = beginTestObservation(host, "sqlite_diagnostic", subject);
+    defer if (publication) |*value| value.finish();
     const value = host.store.sqliteDiagnostic();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"") catch return;
@@ -2806,7 +2857,7 @@ fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
         trace.appendJsonString(mode.slice()) catch return;
     } else trace.append("null") catch return;
     trace.append("}") catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn publishControlHint(host: *Host, command_key: []const u8) void {
@@ -2888,6 +2939,8 @@ const ControlTiming = struct {
         if (!self.host.faults.test_phase_trace) return;
         const reply_complete_ns = nowNs(self.host);
         if (self.store_queued_ns == 0 or self.lock_acquired_ns == 0 or self.store_complete_ns == 0) return;
+        var publication = beginTestObservation(self.host, "control_timing", null);
+        defer if (publication) |*value| value.finish();
         var trace: protocol.ResponseBuffer = .{};
         trace.append("{\"rui_test_phase\":\"control_timing\",\"command_key\":") catch return;
         trace.appendJsonString(self.command_key) catch return;
@@ -2904,7 +2957,7 @@ const ControlTiming = struct {
             reply_complete_ns - self.store_complete_ns,
             reply_complete_ns - self.accepted_at_ns,
         }) catch return;
-        writeTestTrace(self.host, &trace);
+        writeTestTrace(self.host, &trace, &publication);
     }
 };
 

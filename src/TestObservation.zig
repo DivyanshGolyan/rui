@@ -8,6 +8,8 @@ const c = @cImport({
     @cInclude("fcntl.h");
     @cInclude("sys/stat.h");
     @cInclude("sys/mman.h");
+    @cInclude("sys/wait.h");
+    @cInclude("signal.h");
     @cInclude("stdio.h");
 });
 const Self = @This();
@@ -90,8 +92,33 @@ pub fn close(self: *Self) void {
     _ = c.munmap(self.shared, state_bytes);
 }
 
-fn selected(self: *Self, event: Record) bool {
-    const phase = event.rui_test_phase;
+// Selection uses owning native values, before optional JSON construction.
+pub fn begin(self: *Self, phase: []const u8, subject: ?[]const u8) ?Publication {
+    if (!self.selected(phase, subject)) return null;
+    _ = self.shared.active.fetchAdd(1, .acq_rel);
+    return .{ .owner = self };
+}
+
+pub const Publication = struct {
+    owner: ?*Self,
+
+    pub fn record(self: *Publication, json: []const u8) void {
+        const owner = self.owner.?;
+        owner.record(json);
+        // Native custody ends before optional stderr can be attempted.
+        self.owner = null;
+        _ = owner.shared.active.fetchSub(1, .acq_rel);
+    }
+
+    pub fn finish(self: *Publication) void {
+        const owner = self.owner orelse return;
+        self.owner = null;
+        _ = owner.shared.state.fetchOr(1, .acq_rel);
+        _ = owner.shared.active.fetchSub(1, .acq_rel);
+    }
+};
+
+fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
     if (self.plan == .dispatch) {
         if (std.mem.eql(u8, phase, "attempt_admission_rolled_back") or
             std.mem.eql(u8, phase, "preparation_advance_completed"))
@@ -115,7 +142,7 @@ fn selected(self: *Self, event: Record) bool {
             return true;
         }
         if (std.mem.eql(u8, phase, "ordinary_classification_released"))
-            return std.mem.eql(u8, event.subject orelse "", "observe") and
+            return std.mem.eql(u8, subject orelse "", "observe") and
                 self.stop_classification_due.load(.acquire);
         return std.mem.eql(u8, phase, "connection_resources_released") or
             std.mem.eql(u8, phase, "bash_handoff_committed") or
@@ -131,9 +158,7 @@ fn selected(self: *Self, event: Record) bool {
     return false;
 }
 
-pub fn record(self: *Self, json: []const u8) void {
-    _ = self.shared.active.fetchAdd(1, .acq_rel);
-    defer _ = self.shared.active.fetchSub(1, .acq_rel);
+fn record(self: *Self, json: []const u8) void {
     // Fixed decoding storage only when explicitly enabled. Internal trace
     // construction is trusted; malformed/oversized instrumentation is loss.
     var decoding: [2048]u8 = undefined;
@@ -145,7 +170,6 @@ pub fn record(self: *Self, json: []const u8) void {
         return;
     };
     defer parsed.deinit();
-    if (!self.selected(parsed.value)) return;
     var bytes: [record_bytes]u8 = undefined;
     var length: usize = header_bytes;
     inline for (@typeInfo(Record).@"struct".fields, 0..) |field, index| {
@@ -188,21 +212,36 @@ test "private owner observations remain bounded under full and closed credit" {
     var owner_open = true;
     defer if (owner_open) owner.close();
     const event = "{\"rui_test_phase\":\"ordinary_classification_released\",\"at_ns\":\"1234567\",\"subject_kind\":\"route\",\"subject\":\"message\"}";
-    owner.record(event);
+    var publication = owner.begin("ordinary_classification_released", "message").?;
+    publication.record(event);
     var bytes: [512]u8 = undefined;
     const read = c.read(descriptors[0], &bytes, bytes.len);
     try std.testing.expect(read > header_bytes and read <= record_bytes);
     try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, bytes[4..12], .little));
     try std.testing.expectEqual(@as(u64, 37), std.mem.readInt(u64, bytes[12..20], .little));
     try std.testing.expectEqual(@as(u8, 0), bytes[3]);
-    owner.record("{"); // Encoding loss reserves no event and sends no later frame.
+    const unselected = "{"; // Native phase is unselected; malformed optional text cannot taint evidence.
+    if (owner.begin("lifecycle_service_observation", null)) |initial| {
+        var ignored = initial;
+        defer ignored.finish();
+        ignored.record(unselected);
+    }
+    try std.testing.expectEqual(@as(u64, 2), owner.shared.state.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), owner.shared.active.load(.acquire));
+    publication = owner.begin("ordinary_classification_released", "message").?;
+    try std.testing.expectEqual(@as(u64, 1), owner.shared.active.load(.acquire));
+    publication.finish(); // Failed construction before any JSON or sequence.
+    try std.testing.expectEqual(@as(u64, 0), owner.shared.active.load(.acquire));
+    publication = owner.begin("ordinary_classification_released", "message").?;
+    publication.record("{"); // Encoding loss reserves no event and sends no later frame.
     try std.testing.expectEqual(@as(isize, state_bytes), c.pread(c.fileno(backing), &bytes, state_bytes, 0));
     try std.testing.expectEqual(@as(u64, 3), std.mem.readInt(u64, bytes[24..32], .little));
     const filler = [_]u8{'F'} ** record_bytes;
     var filled: usize = 0;
     while (c.write(descriptors[1], &filler, filler.len) > 0) filled += filler.len;
     try std.testing.expect(filled > 0);
-    owner.record(event); // No collector/credit and no retry or semantic wait.
+    publication = owner.begin("ordinary_classification_released", "message").?;
+    publication.record(event); // No collector/credit and no retry or semantic wait.
     try std.testing.expectEqual(@as(u64, 1), owner.shared.state.load(.acquire) & 1);
     try std.testing.expectEqual(@as(isize, state_bytes), c.pread(c.fileno(backing), &bytes, state_bytes, 0));
     try std.testing.expectEqual(@as(u64, 5), std.mem.readInt(u64, bytes[24..32], .little));
@@ -211,13 +250,15 @@ test "private owner observations remain bounded under full and closed credit" {
         try std.testing.expect(count > 0);
         filled -= @intCast(count);
     }
-    owner.record(event);
+    publication = owner.begin("ordinary_classification_released", "message").?;
+    publication.record(event);
     try std.testing.expect(c.read(descriptors[0], &bytes, bytes.len) > header_bytes);
     try std.testing.expectEqual(@as(u64, 3), std.mem.readInt(u64, bytes[4..12], .little));
     try std.testing.expectEqual(@as(u8, 1), bytes[3]);
     _ = c.close(descriptors[0]);
     reader_open = false;
-    owner.record(event); // Existing test I/O initialization owns SIGPIPE.
+    publication = owner.begin("ordinary_classification_released", "message").?;
+    publication.record(event); // Existing test I/O initialization owns SIGPIPE.
     try std.testing.expectEqual(@as(u64, 1), owner.shared.state.load(.acquire) & 1);
     try std.testing.expect(c.fcntl(descriptors[1], c.F_GETFL) & c.O_NONBLOCK != 0);
     owner.close();
@@ -228,4 +269,59 @@ test "private owner observations remain bounded under full and closed credit" {
     try std.testing.expectEqual(@as(u64, 37), std.mem.readInt(u64, bytes[16..24], .little));
     try std.testing.expectEqual(@as(u64, 9), std.mem.readInt(u64, bytes[24..32], .little));
     try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, bytes[32..40], .little));
+}
+
+test "private owner observations preserve selected custody through SIGKILL" {
+    inline for (@typeInfo(Plan).@"enum".fields) |field| {
+        const plan: Plan = @enumFromInt(field.value);
+        const phase = switch (plan) {
+            .control => "cleanup_completed",
+            .dispatch => "control_store_queued",
+            .list, .status, .stop => "connection_resources_released",
+        };
+        for ([_]bool{ false, true }) |selected_kill| {
+            var descriptors: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), c.pipe(&descriptors));
+            defer _ = c.close(descriptors[0]);
+            try std.testing.expectEqual(@as(c_int, 0), c.fcntl(descriptors[1], c.F_SETFL, @as(c_int, c.O_NONBLOCK)));
+            const backing = c.tmpfile() orelse return error.TestUnexpectedResult;
+            defer _ = c.fclose(backing);
+            try std.testing.expectEqual(@as(c_int, 0), c.ftruncate(c.fileno(backing), state_bytes));
+            var owner = try Self.init(descriptors[1], c.dup(c.fileno(backing)), plan, 37);
+            defer owner.close();
+            var publication = owner.begin(phase, null).?;
+            var json: [128]u8 = undefined;
+            publication.record(try std.fmt.bufPrint(&json, "{{\"rui_test_phase\":\"{s}\"}}", .{phase}));
+            var bytes: [512]u8 = undefined;
+            try std.testing.expect(c.read(descriptors[0], &bytes, bytes.len) > header_bytes);
+            var ready: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), c.pipe(&ready));
+            defer _ = c.close(ready[0]);
+            defer _ = c.close(ready[1]);
+            const pid = c.fork();
+            try std.testing.expect(pid >= 0);
+            if (pid == 0) {
+                // Only fixed native selection/atomic operations after fork.
+                _ = owner.begin(if (selected_kill) phase else "lifecycle_service_observation", null);
+                if (c.write(ready[1], "R", 1) != 1) c._exit(1);
+                while (true) _ = c.pause();
+            }
+            var reaped = false;
+            defer if (!reaped) {
+                _ = c.kill(pid, c.SIGKILL);
+                _ = c.waitpid(pid, null, 0);
+            };
+            try std.testing.expectEqual(@as(isize, 1), c.read(ready[0], &bytes, 1));
+            try std.testing.expectEqual(@as(c_int, 0), c.kill(pid, c.SIGKILL));
+            var status: c_int = 0;
+            try std.testing.expectEqual(pid, c.waitpid(pid, &status, 0));
+            reaped = true;
+            try std.testing.expect(c.WIFSIGNALED(status) and c.WTERMSIG(status) == c.SIGKILL);
+            try std.testing.expectEqual(@as(isize, state_bytes), c.pread(c.fileno(backing), &bytes, state_bytes, 0));
+            // The complete selected prefix survives both kills. Only a selected
+            // unfinished construction invalidates that prefix after reap.
+            try std.testing.expectEqual(@as(u64, 2), std.mem.readInt(u64, bytes[24..32], .little));
+            try std.testing.expectEqual(@as(u64, @intFromBool(selected_kill)), std.mem.readInt(u64, bytes[32..40], .little));
+        }
+    }
 }

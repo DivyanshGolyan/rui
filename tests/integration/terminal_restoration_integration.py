@@ -140,6 +140,30 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     const char *fault = getenv("RUI_TERMINAL_FAULT");
     const char *diagnostic_arm = getenv("RUI_DIAGNOSTIC_ARM");
     if (fd == 2 && diagnostic_arm && !access(diagnostic_arm, F_OK)) {
+        const char phase[] = "{\"rui_test_phase\":\"inspection_captured\",";
+        const char subject[] = ",\"subject_kind\":\"session\",\"subject\":\"diagnostic/session\"";
+        static atomic_int contention_claimed = 0;
+        int selected = 0;
+        if (!strcmp(fault, "diagnostic-contention") && count >= sizeof(phase) - 1 &&
+            !memcmp(bytes, phase, sizeof(phase) - 1) && count >= 2 &&
+            !memcmp((const char *)bytes + count - 2, "}\n", 2)) {
+            for (size_t i = 0; i + sizeof(subject) - 1 < count; ++i) {
+                if (!memcmp((const char *)bytes + i, subject, sizeof(subject) - 1) &&
+                    (((const char *)bytes)[i + sizeof(subject) - 1] == ',' ||
+                     ((const char *)bytes)[i + sizeof(subject) - 1] == '}')) selected = 1;
+            }
+        }
+        if (selected && !atomic_exchange(&contention_claimed, 1)) {
+            /* Complete fixed fixture identity, before the owned native write.
+               The 512-byte buffer exceeds this phase/Session plus u64 metadata. */
+            char correlation[512];
+            if (count >= sizeof(correlation)) _exit(100);
+            memcpy(correlation, bytes, count);
+            correlation[count] = 0;
+            record(correlation);
+            record("diagnostic-held-inspection\n");
+            while (access(getenv("RUI_DIAGNOSTIC_RELEASE"), F_OK)) usleep(1000);
+        }
         record("diagnostic-write\n");
         static int partial_done = 0;
         static uint64_t partial_hash = 0;
@@ -257,10 +281,6 @@ int probe_fcntl(int fd, int command, ...) {
             int result = real_fcntl(fd, command, value);
             if (result) return result;
             record("diagnostic-mutated\n");
-            if (!strcmp(diagnostic_fault, "diagnostic-contention")) {
-                record("diagnostic-held\n");
-                while (access(getenv("RUI_DIAGNOSTIC_RELEASE"), F_OK)) usleep(1000);
-            }
             if (!strcmp(diagnostic_fault, "diagnostic-enable")) { errno = EIO; return -1; }
             return result;
         }
@@ -405,7 +425,27 @@ FORWARD_DRIVER = r"""
 #include <termios.h>
 #include <unistd.h>
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc == 2) {
+        const char *negative[] = {
+            "{\"rui_test_phase\":\"lifecycle_service_observation\",\"subject_kind\":\"session\",\"subject\":\"diagnostic/session\"}\n",
+            "{\"rui_test_phase\":\"inspection_captured\",\"subject_kind\":\"session\",\"subject\":\"diagnostic/session-extra\"}\n",
+            "{\"rui_test_phase\":\"inspection_captured\",\"subject_kind\":\"path\",\"subject\":\"diagnostic/session\"}\n",
+            "{\"rui_test_phase\":\"inspection_captured\",\"subject_kind\":\"session\",\"subject\":\"diagnostic/session\"}",
+        };
+        const char *positive = "{\"rui_test_phase\":\"inspection_captured\",\"subject_kind\":\"session\",\"subject\":\"diagnostic/session\",\"process\":\"driver\",\"run\":\"37\",\"sequence\":\"1\"}\n";
+        int flags = fcntl(2, F_GETFL);
+        if (flags < 0) return 30;
+        int count = !strcmp(argv[1], "contention-negatives") ? 4 : 1;
+        if (count == 1 && strcmp(argv[1], "contention-positive")) return 31;
+        for (int i = 0; i < count; ++i) {
+            const char *text = count == 4 ? negative[i] : positive;
+            if (fcntl(2, F_SETFL, flags | O_NONBLOCK) || write(2, text, strlen(text)) != (ssize_t)strlen(text) ||
+                fcntl(2, F_SETFL, flags)) return 32;
+            if ((fcntl(2, F_GETFL) & O_NONBLOCK) != (flags & O_NONBLOCK)) return 33;
+        }
+        return 0;
+    }
 #ifdef F_GETPATH
     char path[MAXPATHLEN], expected[MAXPATHLEN];
     if (ttyname_r(1, expected, sizeof(expected)) || fcntl(1, F_GETPATH, path) ||
@@ -526,6 +566,54 @@ def check_forwarding(state, library):
         termios.tcsetattr(slave, termios.TCSAFLUSH, original)
         os.close(master)
         os.close(slave)
+
+    negative_root = state / "forward-contention-negatives"
+    negative_root.mkdir(mode=0o700)
+    arm, release, log = (negative_root / name for name in ("arm", "release", "probe.log"))
+    arm.touch()
+    release.touch()
+    env = {**os.environ,
+        "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+        "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "diagnostic-contention",
+        "RUI_DIAGNOSTIC_ARM": str(arm), "RUI_DIAGNOSTIC_RELEASE": str(release)}
+    negative = subprocess.run([str(executable), "contention-negatives"], env=env,
+        capture_output=True, timeout=5)
+    assert negative.returncode == 0 and negative.stdout == b"", negative
+    records = [json.loads(line) for line in negative.stderr.splitlines()]
+    assert len(records) == 4 and not negative.stderr.endswith(b"\n"), negative.stderr
+    assert [(item["rui_test_phase"], item["subject_kind"], item["subject"]) for item in records] == [
+        ("lifecycle_service_observation", "session", "diagnostic/session"),
+        ("inspection_captured", "session", "diagnostic/session-extra"),
+        ("inspection_captured", "path", "diagnostic/session"),
+        ("inspection_captured", "session", "diagnostic/session")], records
+    assert "diagnostic-held" not in log.read_text(), "wrong phase, subject or fragment captured native contention"
+    release.unlink()
+    positive_root = state / "forward-contention-positive"
+    positive_root.mkdir(mode=0o700)
+    log = positive_root / "probe.log"
+    env["RUI_TERMINAL_PROBE"] = str(log)
+    caller = subprocess.Popen([str(executable), "contention-positive"], env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        fixture.wait_for(lambda: log.exists() and "diagnostic-held-inspection\n" in log.read_text(),
+            "exact native inspection write held", timeout=5)
+        assert caller.poll() is None, "selected native write did not retain custody"
+        release.touch()
+        out, err = caller.communicate(timeout=5)
+        assert caller.returncode == 0 and out == b"", (out, err)
+        record = json.loads(err)
+        assert record == {"rui_test_phase": "inspection_captured", "subject_kind": "session",
+            "subject": "diagnostic/session", "process": "driver", "run": "37", "sequence": "1"}, record
+        assert log.read_text().count("diagnostic-held-inspection\n") == 1
+        assert "diagnostic-restored\n" in log.read_text()
+        print("terminal fixture contention: wrong phase/Session/kind/fragment forwarded; exact write held, released and flags restored", flush=True)
+    finally:
+        release.touch()
+        if caller.poll() is None:
+            caller.kill()
+            caller.wait(timeout=5)
+        caller.stdout.close()
+        caller.stderr.close()
 
 
 def persistent_cases(state, library, home, store, host):
@@ -1559,6 +1647,8 @@ def host_diagnostic_cases(state, library):
                 required_fields={"execution": "enabled", "curl": "8.22.0"})
             session = "diagnostic/session"
             fixture.configure(root, store, "config", session, "model-a")
+            if credit == "diagnostic-contention":
+                fixture.configure(root, store, "config-other", "diagnostic/session-extra", "model-a")
             status = subprocess.run([str(fixture.RUI), "host", "status", "--store", str(store)],
                 capture_output=True, text=True, timeout=8)
             assert status.returncode == 0 and "Instance: " in status.stdout, status
@@ -1589,8 +1679,22 @@ def host_diagnostic_cases(state, library):
                 assert "diagnostic-partial\n" in log.read_text()
                 arm.unlink()
             if credit == "diagnostic-contention":
+                # Wrong phase and prefix-lookalike Session must not claim the
+                # hold. No target inspection is outstanding before pending.
+                status = subprocess.run([str(fixture.RUI), "host", "status", "--store", str(store)],
+                    capture_output=True, text=True, timeout=3)
+                assert status.returncode == 0 and "diagnostic-held" not in log.read_text(), status
+                unrelated = fixture.start_command("inspect-session", "--store", store, "--session", "diagnostic/session-extra")
+                out, err = unrelated.communicate(timeout=3)
+                assert unrelated.returncode == 0 and "diagnostic-held" not in log.read_text(), (out, err)
                 pending = fixture.start_command("inspect-session", "--store", store, "--session", session)
-                fixture.wait_for(lambda: log.exists() and "diagnostic-held" in log.read_text(), "native fd2 held")
+                fixture.wait_for(lambda: log.exists() and "diagnostic-held-inspection\n" in log.read_text(), "native inspection fd2 held")
+                captured = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
+                assert len(captured) == 1, captured
+                held = captured[0]
+                assert held["rui_test_phase"] == "inspection_captured" and held["subject_kind"] == "session" and held["subject"] == session, held
+                assert held["process"] == str(host.pid) and int(held["run"]) > 0 and int(held["sequence"]) > 0 and held["clock"] == "awake_ns", held
+                assert pending.poll() is None, "first inspection escaped native gate"
                 concurrent = fixture.start_command("inspect-session", "--store", store, "--session", session)
                 out, err = concurrent.communicate(timeout=3)
                 assert concurrent.returncode == 0, (out, err)
