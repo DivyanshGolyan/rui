@@ -179,6 +179,9 @@ def persistent_opening_case():
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         output = read_terminal(master, "rui> ")
         assert output.count("literal **user** é") == 1, ("opening lost or duplicated User", output)
+        assert "\n› literal **user** é" in output, output
+        assert "\n  \x1b[1mSaved heading" in output, output
+        assert all(noise not in output for noise in ("You:", "Assistant:", "Rui:", "item_id:", "call_id:", "Capturing original", "Original reserved request")), output
         assert output.count("\x1b[1mSaved heading\x1b[0m") == 1, ("opening bypassed assistant renderer", output)
         assert output.count("\x1b[1msaved bold\x1b[0m é") == 1, output
         assert "Provider:" not in output and "Workspace (Bash cwd):" not in output, ("opening is not compact", output)
@@ -250,7 +253,7 @@ def persistent_opening_case():
             fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "history saved answer")
         # A queued local traversal is not eligible until opening establishes its
         # cursor. Both command and inspection cancellation must retain it.
-        for handoff in (b"/status\n", b"\x07"):
+        for handoff in (b"/status\n", b"/inspect-action\n"):
             opening_release.clear()
             opening_held = threading.Event()
 
@@ -512,6 +515,7 @@ def persistent_input_cases():
         assert set(records.glob("*.json")) == before, "busy Enter created replacement intent"
         admission_release.set()
         uncertain = read_terminal(master, "Not confirmed")
+        assert "! Not confirmed" in uncertain and "Rui:" not in uncertain, uncertain
         assert "Original reserved request" not in uncertain, ("normal recovery exposed a UUID", uncertain)
         assert len(proxy.exchanges) == 1
         saved = proxy.exchanges[0][0]
@@ -534,7 +538,8 @@ def persistent_input_cases():
         assert json.loads(proxy.exchanges[-1][0])["text"]["value"] == "next cafXYé!"
         assert len(endpoint.requests) == 2
         os.write(master, b"\x15bad\xc3(\n")
-        read_terminal(master, "InvalidTerminalInput")
+        rejected = read_terminal(master, "Input rejected; nothing sent.")
+        assert "InvalidTerminalInput" not in rejected, ("internal error name leaked", rejected)
         os.write(master, b"valid after rejection\n")
         uncertain = read_terminal(master, "Not confirmed")
         if "valid after malformed" not in uncertain:
@@ -551,7 +556,7 @@ def persistent_input_cases():
         os.write(master, b"original before capture failure\n")
         failed = read_terminal(master, "Not confirmed")
         assert "Original reserved request" not in failed, failed
-        diagnostic = terminal_step(master, "/status")
+        diagnostic = terminal_step(master, "/status", "Ctrl-R retries this exact original.")
         reserved = diagnostic.split("Original reserved request: ", 1)[1].splitlines()[0]
         os.write(master, "next café!\x1b[D\x1b[DX".encode())
         failed += read_terminal(master, "rui> next cafXé!")
@@ -616,8 +621,9 @@ def persistent_input_cases():
             print(f"retained persistent input failure state: {state}", file=sys.stderr)
 
 
-def persistent_permission_case(decision="deny-action", exit_code=0, signal_failure=False):
-    """Staged inspection cannot authorize; the canonical exact one-shot still can."""
+def persistent_permission_case(decision="deny-action", exit_code=0, signal_failure=False,
+                               lost_reply=False, fragmented_paste=False, stale_target=False):
+    """Fresh inline choices retain draft custody and exact canonical targets."""
     import canonical_failure_integration as canonical
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-permission."))
     home = state / "home"
@@ -626,15 +632,22 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
     reference = "persistent/permission'$(false) é\n"
     answer = "after explicit denial" if decision == "deny-action" else "after explicit approval"
     arguments = json.dumps({"cmd": f"printf inspection-only-output; printf unsafe >> effect-count; exit {exit_code}", "timeout_ms": None})
+    calls = [("bash", "persistent-call-id", arguments)]
+    second_command = "printf distinct >> second-effect"
+    if stale_target:
+        calls.append(("bash", "persistent-second-id", json.dumps({"cmd": second_command, "timeout_ms": None})))
     endpoint = fixture.SuccessEndpoint([
-        fixture.sse_tool_calls("persistent-call", [("bash", "persistent-call-id", arguments)]),
+        fixture.sse_tool_calls("persistent-call", calls),
         fixture.sse_answer("persistent-answer", "persistent-reason", "persistent-message", answer)[0],
+        fixture.sse_answer("retained-answer", "retained-reason", "retained-message", "retained draft complete")[0],
     ])
     thread = threading.Thread(target=endpoint.serve_forever)
     thread.start()
     host = caller = proxy = None
     master = slave = None
-    observation_release = threading.Event()
+    arguments_release = threading.Event()
+    arguments_held = threading.Event()
+    ready_read, ready_write = os.pipe()
     completed = False
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
@@ -642,89 +655,147 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         run(home, "configure", "--store", store, "--session", reference,
             "--workspace", state, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
         master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
         original = termios.tcgetattr(slave)
         caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
-            "--session", reference], env={**os.environ, "HOME": str(home)},
+            "--session", reference], env={**os.environ, "HOME": str(home),
+                "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         opening = read_terminal(master, "rui> ")
         assert all(noise not in opening for noise in ("model-a", "Workspace:", "Session:", "Store:", "/help commands")), opening
-        proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: response)
-        os.write(master, b"requires permission\n")
-        transcript = read_terminal(master, "Needs approval")
-        assert "Capturing original" not in transcript and "Original reserved request" not in transcript, transcript
-        assert "item_id:" not in transcript and "call_id:" not in transcript and "arguments:" not in transcript, transcript
-        assert "Tool: bash" not in transcript and "Ctrl-G" in transcript, transcript
-        for command in ("/wait", "/login"):
-            os.write(master, (command + "\n").encode())
-            read_terminal(master, "no nested approval/login prompt")
-        os.write(master, "next café!\x1b[D\x1b[DX".encode())
-        read_terminal(master, "rui> next cafXé!")
-        # The real periodic Current reply has no first byte yet. Inspection
-        # must cancel that observation, not wait for an unrelated read to end.
-        observation_held = threading.Event()
-
-        def hold_first_observation(response):
-            if not observation_held.is_set():
-                observation_held.set()
-                assert observation_release.wait(15), "observation gate was not released"
+        def hold_arguments(response):
+            if not arguments_held.is_set():
+                arguments_held.set()
+                assert arguments_release.wait(15), "Action arguments gate was not released"
             return response
 
-        proxy.rewrite = hold_first_observation
-        proxy.route = "/v1/inspect-session"
-        assert observation_held.wait(10), "periodic Current read did not reach Host"
+        proxy = canonical.ReplyProxy(host, "/v1/read-action-arguments", hold_arguments)
+        os.write(master, b"requires permission\n")
+        terminal_gate(caller, master, arguments_held, "automatic Action arguments")
+        os.write(master, "next café!\x1b[D\x1b[DX".encode())
+        read_terminal(master, "rui> next cafXé!")
         records = home / ".config/rui/requests"
-        before_inspection = set(records.glob("*.json"))
-        os.write(master, b"\x07UNREAD suffix\n")
-        inspected = read_terminal(master, "Inspection only; no decision sent", timeout=5)
-        assert not observation_release.is_set(), "inspection depended on silent observation release"
-        assert set(records.glob("*.json")) == before_inspection, "inspection suffix became captured Message intent"
-        if "rui> next cafXé!" not in inspected.split("Inspection only", 1)[1]:
-            inspected += read_terminal(master, "rui> next cafXé!")
-        assert "Inspection only; no decision sent" in inspected and "Allow once, deny, or later?" not in inspected, inspected
-        assert f"Workspace: {state}" in inspected, inspected
-        commands = {label: next(line.removeprefix(label) for line in inspected.splitlines() if line.startswith(label))
-            for label in ("Allow once: ", "Deny: ")}
-        assert all(32 <= ord(char) < 127 for command in commands.values() for char in command), commands
-        action = inspected.split("Action ", 1)[1].splitlines()[0]
-        observation_release.set()
-        proxy.route = "/v1/message"
-        proxy.rewrite = lambda response: response
+        before_choice = set(records.glob("*.json"))
+        os.write(master, b"a\n\x1b[200~" if fragmented_paste else b"a\n")
+        arguments_release.set()
+        transcript = read_terminal(master, json.loads(arguments)["cmd"])
+        if fragmented_paste:
+            assert not select.select([ready_read], [], [], 1)[0], "unfinished chat paste opened consent scope"
+            os.write(master, b"\x1b[201~\n")
+        action_ready(ready_read)
+        if "a: Allow once / d: Deny (Enter)" not in transcript:
+            transcript += read_terminal(master, "a: Allow once / d: Deny (Enter)")
+        assert "Capturing original" not in transcript and "Original reserved request" not in transcript, transcript
+        assert "item_id:" not in transcript and "call_id:" not in transcript and "arguments:" not in transcript, transcript
+        assert transcript.count("Workspace:") == 1 and transcript.count("Run Bash:") == 1, transcript
+        assert f"\n? Run Bash:\n  {json.loads(arguments)['cmd']}\n" in transcript, transcript
+        assert f"Workspace: {state}" in transcript, transcript
+        assert transcript.count(json.loads(arguments)["cmd"]) == 1, transcript
+        assert all(noise not in transcript for noise in ("You:", "Assistant:", "Rui:", "persistent-call-id")), transcript
+        assert set(records.glob("*.json")) == before_choice, "queued chat created a record"
+        assert not (state / "effect-count").exists(), "queued chat authorized an effect"
+        for invalid in (b"Y\n", b"\x1b[200~a\x1b[201~\n"):
+            os.write(master, invalid)
+            action_ready(ready_read)
+            rejected = read_terminal(master, "a: Allow once / d: Deny (Enter)")
+            assert "Run Bash:" not in rejected, "invalid choice repeated command"
+            assert set(records.glob("*.json")) == before_choice, "invalid choice captured authority"
+            assert not (state / "effect-count").exists()
+        for command in ("/wait", "/login"):
+            os.write(master, (command + "\n").encode())
+            restricted = read_terminal(master, "Login uses rui login codex in your shell.")
+            action_ready(ready_read)
+            assert "Run Bash:" not in restricted, restricted
+            assert set(records.glob("*.json")) == before_choice, "nested prompt created intent"
         current = fixture.command("inspect-session", "--store", store, "--session", reference)
-        assert [row["action"] for row in current["actionable_permissions"]] == [action]
-        assert json.loads(inspected.split("Bash arguments: ", 1)[1].splitlines()[0]) == arguments
-        os.write(master, b"Y\n")
-        read_terminal(master, "You: next cafXYé!")
-        assert json.loads(proxy.exchanges[-1][0])["text"]["value"] == "next cafXYé!"
-        # Pasted 'a' remains Message input, never a permission decision.
-        os.write(master, b"\x1b[200~a\x1b[201~\n")
-        read_terminal(master, "You: a")
-        saved = [json.loads(path.read_text()) for path in (home / ".config/rui/requests").glob("*.json")]
-        assert not any(row["kind"] == "permission_decision" for row in saved)
-        assert not (state / "effect-count").exists(), "persistent input approved an unseen Action"
-        executables = state / "bin"
-        executables.mkdir()
-        (executables / "rui").symlink_to(fixture.RUI.resolve())
-        command = commands["Deny: " if decision == "deny-action" else "Allow once: "]
-        result = subprocess.run(["bash", "-c", command + " --json"], env={**os.environ, "HOME": str(home),
-            "PATH": str(executables) + os.pathsep + os.environ["PATH"]}, capture_output=True, text=True, timeout=10)
-        assert result.returncode == 0, (command, result.stdout, result.stderr)
-        admission = json.loads(result.stdout.splitlines()[-1])
-        assert admission["admission"]["answer"]["status"] == "accepted", admission
-        settled = read_terminal(master, answer)
+        action = current["actionable_permissions"][0]["action"]
+        proxy.exchanges.clear()
+        proxy.route = "/v1/control/permission-decision"
+        proxy.rewrite = lambda response: b"" if lost_reply and len(proxy.exchanges) == 1 else response
+        if stale_target:
+            run(home, "deny-action", "--store", store, "--session", reference, "--action", action)
+            proxy.exchanges.clear()
+        os.write(master, b"d\n" if decision == "deny-action" and not stale_target else b"a\n")
+        settled = ""
+        if lost_reply:
+            settled = read_terminal(master, "Decision not confirmed")
+            assert "! Decision not confirmed" in settled and "Rui:" not in settled, settled
+            os.write(master, b"\x12")
+            settled += read_terminal(master, "Decision confirmed.")
+        if stale_target:
+            read_terminal(master, "action_not_pending")
+            assert len(proxy.exchanges) == 1
+            assert json.loads(proxy.exchanges[0][0])["action"] == action
+            assert not (state / "effect-count").exists() and not (state / "second-effect").exists()
+            assert len(endpoint.requests) == 1
+            os.write(master, b"\x01\x0b/discard\n")
+            shown = read_terminal(master, second_command)
+            action_ready(ready_read)
+            if "a: Allow once / d: Deny (Enter)" not in shown:
+                shown += read_terminal(master, "a: Allow once / d: Deny (Enter)")
+            assert f"\n? Run Bash:\n  {second_command}\n" in shown, shown
+            os.write(master, b"/details\n")
+            details = read_terminal(master, "Details complete")
+            assert "\n› requires permission" in details, details
+            action_ready(ready_read)
+            assert fixture.command("inspect-session", "--store", store, "--session", reference)["actionable_permissions"][0]["action"] == current["actionable_permissions"][1]["action"]
+            os.write(master, b"/exit\n")
+            assert caller.wait(timeout=5) == 0, caller.stderr.read()
+            actual = termios.tcgetattr(slave)
+            if sys.platform == "darwin":
+                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                actual[3] &= ~mask
+                original[3] &= ~mask
+            assert actual == original
+            assert len(endpoint.requests) == 1
+            assert not (state / "effect-count").exists() and not (state / "second-effect").exists()
+            completed = True
+            return
+        if answer not in settled:
+            settled += read_terminal(master, answer)
+        assert len(proxy.exchanges) == (2 if lost_reply else 1), proxy.exchanges
+        if lost_reply:
+            assert proxy.exchanges[0][0] == proxy.exchanges[1][0], "decision retry changed intent"
+        submitted = json.loads(proxy.exchanges[0][0])
+        assert submitted["action"] == action and submitted["session"] == reference
+        assert submitted["decision"] == ("deny" if decision == "deny-action" else "allow_once")
+        for _, response in proxy.exchanges:
+            assert json.loads(response.split(b"\r\n\r\n", 1)[1])["answer"]["status"] == "accepted"
+        saved = [json.loads(path.read_text()) for path in records.glob("*.json")]
+        assert sum(row["kind"] == "permission_decision" for row in saved) == 1, saved
+        assert len(endpoint.requests) == 2
         if exit_code:
-            assert f"Bash failed. Exit code: {exit_code}." in settled, ("quiet view hid tool failure", settled)
+            assert f"! Bash failed. Exit code: {exit_code}." in settled, ("quiet view hid tool failure", settled)
+            assert "/details for output." in settled, settled
         elif decision == "allow-action":
-            assert "Bash succeeded." in settled, ("quiet view hid tool outcome", settled)
+            assert "  • Bash succeeded." in settled, ("quiet view hid tool outcome", settled)
             assert "Exit code: 0." not in settled, ("routine zero exit code leaked", settled)
+        else:
+            assert "  • Permission denied." in settled, ("intentional denial was not a settled outcome", settled)
+            assert "! Permission denied." not in settled and "/details for output." not in settled, settled
         if signal_failure:
             assert "Process-group signaling reported a failure." in settled, ("quiet view hid cleanup warning", settled)
+        assert f"\n  {answer}" in settled, settled
+        assert all(noise not in settled for noise in ("You:", "Assistant:", "Rui:", "item_id:", "call_id:", "Capturing original", "Original reserved request")), settled
         assert "inspection-only-output" not in settled, ("routine tool output leaked", settled)
         effect = state / "effect-count"
         assert effect.read_text() == "unsafe" if decision == "allow-action" else not effect.exists()
+        if "rui> next cafXaé!" not in settled:
+            read_terminal(master, "rui> next cafXaé!")
+        proxy.route = "/v1/message"
+        proxy.exchanges.clear()
+        proxy.rewrite = lambda response: response
+        os.write(master, b"Y\n")
+        submitted_draft = read_terminal(master, "\n› next cafXaYé!")
+        fixture.wait_for(lambda: proxy.exchanges, "retained draft queued Message")
+        assert json.loads(proxy.exchanges[0][0])["text"]["value"] == "next cafXaYé!"
+        if "retained draft complete" not in submitted_draft:
+            read_terminal(master, "retained draft complete")
         os.write(master, b"/details\n")
         details = read_terminal(master, "Details complete")
-        assert "Tool Result:" in details, details
+        assert "Recent conversation — tool details" in details and "  Tool result:\n" in details, details
+        assert "\n› requires permission" in details and f"\n  {answer}" in details, details
+        assert all(noise not in details for noise in ("You:", "Assistant:", "Rui:", "Tool Result:")), details
         if decision == "allow-action":
             assert "inspection-only-output" in details, ("saved tool output unavailable on inspection", details)
             assert f"Exit code: {exit_code}." in details, ("exact exit code unavailable on inspection", details)
@@ -758,9 +829,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             actual[3] &= ~mask
         assert actual == original, "hidden proposal failure left terminal configuration changed"
         completed = True
-        print(f"persistent permission: quiet transcript, exact fresh inspection, paste grants nothing, executable {decision}, quiet resize/cursor, hidden-field validation, TERM cleanup passed", flush=True)
+        print(f"persistent permission: inline {decision}, lost={lost_reply}, fragmented={fragmented_paste}, quiet outcome, retained cursor, hidden-field validation and TERM cleanup passed", flush=True)
     finally:
-        observation_release.set()
+        arguments_release.set()
         if caller is not None and caller.poll() is None:
             caller.kill()
             caller.wait(timeout=5)
@@ -769,6 +840,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         if master is not None:
             os.close(master)
             os.close(slave)
+        os.close(ready_read)
+        os.close(ready_write)
         if host is not None:
             fixture.stop_host(host)
         endpoint.shutdown()
@@ -1009,6 +1082,9 @@ def main():
     persistent_permission_case("allow-action")
     persistent_permission_case("allow-action", exit_code=7)
     persistent_permission_case("allow-action", signal_failure=True)
+    persistent_permission_case("allow-action", lost_reply=True)
+    persistent_permission_case(fragmented_paste=True)
+    persistent_permission_case(stale_target=True)
     terminal_restoration_integration.main()
     canonical_failure_integration.main()
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-human-cli."))

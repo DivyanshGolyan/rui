@@ -1355,7 +1355,7 @@ fn sessionCommand(init: std.process.Init, destination: []const u8, reference: []
             const id = try std.fmt.bufPrint(&buffer, "{d}", .{action});
             try writeSafeField(init.io, "Workspace: ", report.current.settings.workspace.slice());
             try inspectAction(init, &.{ "--store", destination, "--session", reference, "--action", id }, true);
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Inspection only; no decision sent.\nIn another Bash terminal, run ONE exact decision command:\n");
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Inspection only; no decision sent.\n");
             inline for (.{ "allow-action", "deny-action" }, .{ "Allow once: ", "Deny: " }) |decision, label| {
                 try std.Io.File.stdout().writeStreamingAll(init.io, label ++ "rui " ++ decision ++ " --store ");
                 try writeShellWord(init.io, destination);
@@ -1365,7 +1365,6 @@ fn sessionCommand(init: std.process.Init, destination: []const u8, reference: []
                 try std.Io.File.stdout().writeStreamingAll(init.io, id);
                 try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
             }
-            try std.Io.File.stdout().writeStreamingAll(init.io, "The Host rechecks that exact Action; this inspection does not reserve it.\n/exit also returns to your shell without stopping work, but loses the unsent draft.\n");
         } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No actionable permission in this Current snapshot; no decision sent.\n");
         return;
     }
@@ -2534,8 +2533,7 @@ fn inspectAction(init: std.process.Init, args: []const []const u8, interactive: 
     try std.Io.File.stdout().writeStreamingAll(io, "\"\n");
 }
 
-// Bash ANSI-C quoting preserves every selector byte while keeping generated
-// commands printable, including controls, bidi, quotes and trailing newlines.
+// Diagnostics preserve opaque selectors without printable shell ambiguity.
 fn writeShellWord(io: std.Io, value: []const u8) !void {
     var storage: [256]u8 = undefined;
     var writer = std.Io.File.stdout().writerStreaming(io, &storage);
@@ -2607,7 +2605,7 @@ fn usage() error{InvalidArguments} {
         \\  rui session [--store PATH] --session REF [--persistent]
         \\    All new commands use --store, then saved Store, then HOME/.local/share/rui/store.
         \\    Type /help for in-Session commands (including /setup).
-        \\    --persistent stages continuous drafting and new activity; decisions/login stay one-shot.
+        \\    --persistent previews continuous drafting and in-session Allow once / Deny.
         \\  One-shot commands (never prompt or change meaning on redirection):
         \\  rui message [--store PATH] --session REF TEXT|- [--json]
         \\    --text FILE|- also captures a file or stdin before sending.

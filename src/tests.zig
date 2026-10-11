@@ -28,5 +28,6 @@ test {
     _ = @import("TerminalText.zig");
     _ = @import("SessionInput.zig");
     _ = @import("session_history.zig");
+    _ = @import("session_view.zig");
     _ = @import("ClientTask.zig");
 }

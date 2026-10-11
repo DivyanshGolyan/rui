@@ -107,7 +107,7 @@ fn write(self: *Self, bytes: []const u8) !void {
     }
 }
 
-fn geometry() std.posix.winsize {
+pub fn geometry() std.posix.winsize {
     var size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
     if (std.c.ioctl(1, @intCast(std.c.T.IOCGWINSZ), &size) != 0 or size.row == 0 or size.col == 0)
         return .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
@@ -142,25 +142,42 @@ pub fn permanent(self: *Self, bytes: []const u8) !void {
     try self.write(bytes);
 }
 
-pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8) !void {
+pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8, prompt: []const u8) !void {
     const size = geometry();
     if (size.row < 2 or size.col < 8) return error.UncertainTerminalCursor;
     // Stage the bounded view before output can pump and mutate the draft.
-    const view = try viewport(bytes, cursor, size.col - 6, @min(5, size.row - 1));
+    var status_buffer: [256]u8 = undefined;
+    var status_writer = std.Io.Writer.fixed(&status_buffer);
+    var words = std.mem.splitScalar(u8, status, ' ');
+    var column: usize = 0;
+    while (words.next()) |word| {
+        const width = try std.unicode.utf8CountCodepoints(word);
+        if (column != 0) {
+            const wrap = column + 1 + width >= size.col;
+            try status_writer.writeByte(if (wrap) '\n' else ' ');
+            column = if (wrap) 0 else column + 1;
+        }
+        try status_writer.writeAll(word);
+        column += width;
+    }
+    const status_view = try viewport(status_writer.buffered(), 0, size.col - 1, 5);
+    const heading: usize = if (status.len == 0) 0 else status_view.rows;
+    if (heading >= size.row) return error.UncertainTerminalCursor;
+    const view = try viewport(bytes, cursor, size.col - prompt.len - 1, @min(5, size.row - heading));
     try self.clear();
-    const heading: usize = @intFromBool(status.len != 0);
-    var status_end = @min(status.len, size.col - 1);
-    while (status_end != 0 and status_end < status.len and status[status_end] & 0xc0 == 0x80) status_end -= 1;
-    if (heading != 0) try self.write(status[0..status_end]);
+    for (0..heading) |row| {
+        if (row != 0) try self.write("\r\n");
+        try self.write(status_view.data[row][0..status_view.lengths[row]]);
+    }
     for (0..view.rows) |row| {
         if (row != 0 or heading != 0) try self.write("\r\n");
-        try self.write(if (row == 0) "rui> " else "> ");
+        try self.write(if (row == 0) prompt else "> ");
         try self.write(view.data[row][0..view.lengths[row]]);
     }
     var control: [32]u8 = undefined;
     const up = view.rows - 1 - view.caret.row;
     if (up != 0) try self.write(try std.fmt.bufPrint(&control, "\x1b[{d}A", .{up}));
-    try self.write(try std.fmt.bufPrint(&control, "\r\x1b[{d}C", .{view.caret.col + @as(usize, if (view.caret.row == 0) 5 else 2)}));
+    try self.write(try std.fmt.bufPrint(&control, "\r\x1b[{d}C", .{view.caret.col + @as(usize, if (view.caret.row == 0) prompt.len else 2)}));
     self.rows = view.rows + heading;
     self.caret_row = view.caret.row + heading;
     self.size = size;

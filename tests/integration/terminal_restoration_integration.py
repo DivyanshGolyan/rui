@@ -275,9 +275,7 @@ def persistent_cases(state, library, home, store, host):
                 key = json.loads(saved)["key"]
                 assert fixture.command("observe-command", "--store", store, "--key", key)["observation"]["status"] == "absent"
                 if case == "sync-handoff":
-                    os.write(master, "next café!\x1b[D\x1b[DX".encode())
-                    human.read_terminal(output_master, "rui> next cafXé!")
-                    os.write(master, b"\x07")
+                    os.write(master, b"/inspect-action\nSTALE")
                 elif case.startswith("sync-command-"):
                     os.write(master, b"/configure --permission-mode ask\n")
                 else:
@@ -289,13 +287,17 @@ def persistent_cases(state, library, home, store, host):
                 release.touch()
                 if case == "sync-handoff":
                     resumed = human.read_terminal(output_master, "Not confirmed")
-                    resumed += human.read_terminal(output_master, "rui> next cafXé!")
+                    if "rui> " not in resumed.split("Not confirmed", 1)[1]:
+                        resumed += human.read_terminal(output_master, "rui> ")
+                    assert "STALE" not in resumed, resumed
                     assert "No actionable permission" in resumed, resumed
+                    os.write(master, "next café!\x1b[D\x1b[DX".encode())
+                    human.read_terminal(output_master, "rui> next cafXé!")
                     os.write(master, b"\x12")
-                    human.read_terminal(output_master, "You: original synchronously captured")
+                    human.read_terminal(output_master, "\n› original synchronously captured")
                     assert record.read_bytes() == saved, "postpublication recovery replaced original record"
                     os.write(master, b"Y\n")
-                    human.read_terminal(output_master, "You: next cafXYé!")
+                    human.read_terminal(output_master, "\n› next cafXYé!")
                     os.write(master, b"\x03")
                 elif not case.startswith("sync-command-"):
                     # The finished prompt's suffix must not reach the next owner.
@@ -322,7 +324,7 @@ def persistent_cases(state, library, home, store, host):
                 # the frontend's actual activity reader fills stdout's PTY.
                 human.run(home, "message", "--store", store, "--session", "terminal/restoration", "z" * 50000)
                 fixture.wait_for(lambda: log.exists() and "output-blocked" in log.read_text(), "actual terminal EAGAIN")
-                os.write(master, b"\x07" if case == "backpressure-command" else b"\x03")
+                os.write(master, b"/inspect-action\n" if case == "backpressure-command" else b"\x03")
             else:
                 os.write(master, b"\x03")
             expected = 1 if case in ("backpressure", "backpressure-command", "disable", "restore", "both") else 0

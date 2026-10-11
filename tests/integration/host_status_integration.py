@@ -271,24 +271,35 @@ def hostile_discovery(root):
     diagnostics = HostDiagnostics(host)
     try:
         diagnostics.wait("lifecycle_boundary")
+        began_ns = time.monotonic_ns()
         assert b'"type":"host_info"' in raw_info(socket_path(store), store)
+        discovery_released(diagnostics, began_ns)
         baseline = wait_for_descriptors(host.pid) if sys.platform == "linux" else None
         for kind, extra in (("message", {"key": "hostile", "session": "hostile/session", "text": {"state": "value", "value": "x" * 128}}),
                             ("configure", {"key": "hostile", "session": "hostile/session", "configuration": {
                                 "workspace": {"state": "omitted"}, "provider": {"state": "omitted"},
                                 "model": {"state": "omitted"}, "instructions": {"state": "value", "value": "x" * 128}}})):
             for route in ("host-info", "control/host-stop"):
+                began_ns = time.monotonic_ns()
                 response = raw_info(socket_path(store), store, route=route, kind=kind, extra=extra)
                 assert b"RouteKindMismatch" in response and b"InjectedContentAcquireFailure" not in response, response
+                if route == "host-info":
+                    discovery_released(diagnostics, began_ns)
             assert list((store / "scratch").iterdir()) == [], "hostile discovery created scratch"
             observed = raw_info(socket_path(store), store, kind="observe_command", route="observe-command", extra={"key": "hostile"})
             assert b'"status":"absent"' in observed, observed
+            began_ns = time.monotonic_ns()
             assert status(store).startswith("ready ")
+            discovery_released(diagnostics, began_ns)
+        began_ns = time.monotonic_ns()
         with held_request(store, "host-info", length=1000000) as stream:
             response = complete_response(stream)
         assert response.startswith(b"HTTP/1.1 400") and b"DiscoveryRequestTooLarge" in response, response
+        discovery_released(diagnostics, began_ns)
         assert list((store / "scratch").iterdir()) == []
+        began_ns = time.monotonic_ns()
         assert b'"type":"host_info"' in raw_info(socket_path(store), store)
+        discovery_released(diagnostics, began_ns)
         if baseline is not None:
             wait_for_descriptors(host.pid, baseline)
         print("hostile discovery passed: oversized before body, message/configure before scratch, no saved command, healthy reuse")

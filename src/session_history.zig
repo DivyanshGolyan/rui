@@ -13,7 +13,7 @@ pub const Prepared = struct {
     page: client.ConversationPage,
     offsets: [protocol.public_conversation_page_items]u64 = undefined,
 
-    pub fn render(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype) !void {
+    pub fn render(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype, columns: usize) !void {
         var window: [protocol.content_window_bytes]u8 = undefined;
         for (0..self.page.count) |reverse| {
             const index = self.page.count - 1 - reverse;
@@ -28,13 +28,14 @@ pub const Prepared = struct {
                 continue;
             }
             try sink.feed(switch (item.kind) {
-                .user => "You: ",
-                .assistant => "Assistant: ",
-                .tool_result => "Tool Result:\n",
+                .user => "\n› ",
+                .assistant => "\n  ",
+                .tool_result => "\n  Tool result:\n  ",
             });
-            var answer: View.Answer(@TypeOf(sink)) = undefined;
-            answer.init(sink);
-            var escaped: View.Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .multiline } };
+            var indented: View.Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };
+            var answer: View.Answer(@TypeOf(&indented)) = undefined;
+            answer.init(&indented);
+            var escaped: View.Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .multiline } };
             var offset: u64 = 0;
             while (offset < item.content.bytes) {
                 const wanted: usize = @intCast(@min(item.content.bytes - offset, window.len));
@@ -43,6 +44,7 @@ pub const Prepared = struct {
                 offset += wanted;
             }
             if (item.kind == .assistant) try answer.finish() else try escaped.finish();
+            try indented.finish();
             try sink.feed("\n");
         }
     }
@@ -114,7 +116,7 @@ test "historical export preserves opaque identities without terminal or shell in
     var prepared: Prepared = .{ .page = .{ .end = 2, .count = 1, .more = false } };
     prepared.page.items[0] = .{ .position = 2, .ordinal = 0, .kind = .user, .content = .{ .bytes = 8193, .digest = @splat(0) } };
     var sink: Sink = .{};
-    try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)", "team\x1b[2J\n\x00é\u{202e}", &sink);
+    try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)", "team\x1b[2J\n\x00é\u{202e}", &sink, 0);
     // Independent UTF-8 byte-to-hex oracle, including NUL and directional text.
     try std.testing.expectEqualStrings("Rui: Historical item omitted: position 2, ordinal 0, 8193 raw bytes.\nRaw export: rui read-conversation --store-hex 2f746d702f6127242866616c736529 --session-hex 7465616d1b5b324a0a00c3a9e280ae --position 2 --ordinal 0\n", sink.bytes[0..sink.length]);
 }

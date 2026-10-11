@@ -5,6 +5,151 @@ const client = @import("client.zig");
 const protocol = @import("protocol.zig");
 const Text = @import("TerminalText.zig");
 const Renderer = @import("AnswerRenderer.zig");
+const tools = @import("tools.zig");
+
+extern fn utf8proc_charwidth(scalar: i32) c_int;
+extern fn utf8proc_grapheme_break_stateful(i32, i32, *c_int) c_int;
+
+/// Live conversation and inspection share hanging indentation. Input is already
+/// escaped or rendered; only trusted renderer SGR has zero display width.
+pub fn Indented(comptime Sink: type) type {
+    return struct {
+        sink: Sink,
+        columns: usize = 0,
+        column: usize = 2,
+        line_start: bool = false,
+        sgr: bool = false,
+        scalar: [4]u8 = undefined,
+        used: usize = 0,
+        prior: ?i32 = null,
+        grapheme_state: c_int = 0,
+        cluster_width: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
+            var storage: [4096]u8 = undefined;
+            var out = std.Io.Writer.fixed(&storage);
+            for (bytes) |byte| {
+                if (storage.len - out.end < 8) {
+                    try self.sink.feed(out.buffered());
+                    out.end = 0;
+                }
+                if (self.sgr or byte == 0x1b) {
+                    if (self.line_start) {
+                        try out.writeAll("  ");
+                        self.column = 2;
+                        self.line_start = false;
+                    }
+                    self.sgr = byte != 'm';
+                    try out.writeByte(byte);
+                    continue;
+                }
+                if (byte == '\n') {
+                    try out.writeByte(byte);
+                    self.column = 0;
+                    self.line_start = true;
+                    self.prior = null;
+                    self.grapheme_state = 0;
+                    continue;
+                }
+                self.scalar[self.used] = byte;
+                self.used += 1;
+                const length = try std.unicode.utf8ByteSequenceLength(self.scalar[0]);
+                if (self.used != length) continue;
+                const value = try std.unicode.utf8Decode(self.scalar[0..length]);
+                const scalar: i32 = @intCast(value);
+                const boundary = if (self.prior) |prior| utf8proc_grapheme_break_stateful(prior, scalar, &self.grapheme_state) != 0 else true;
+                var width: usize = if (value == '\t') 8 - self.column % 8 else @intCast(@max(0, utf8proc_charwidth(scalar)));
+                if (value == 0xfe0f or value == 0x20e3 or value >= 0x1f1e6 and value <= 0x1f1ff) width = @max(width, 2);
+                // Reserve a wide cell at each cluster start: a later variation
+                // selector may widen it, but never permits a mid-cluster wrap.
+                if (boundary and self.columns > 3 and !self.line_start and self.column + @max(width, 2) >= self.columns) {
+                    try out.writeByte('\n');
+                    self.column = 0;
+                    self.line_start = true;
+                }
+                if (self.line_start) {
+                    try out.writeAll("  ");
+                    self.column = 2;
+                    self.line_start = false;
+                }
+                if (value == '\t') width = 8 - self.column % 8;
+                if (boundary) self.cluster_width = 0;
+                try out.writeAll(self.scalar[0..length]);
+                self.column += @max(width, self.cluster_width) - self.cluster_width;
+                self.cluster_width = @max(width, self.cluster_width);
+                self.prior = scalar;
+                self.used = 0;
+            }
+            if (out.end != 0) try self.sink.feed(out.buffered());
+        }
+        pub fn finish(self: *@This()) !void {
+            if (self.used != 0 or self.sgr) return error.IncompleteRenderedText;
+        }
+    };
+}
+
+test "conversation wrapping preserves Unicode clusters across content windows" {
+    const Sink = struct {
+        bytes: [128]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    const cases = .{
+        .{ "abc👩‍💻de", "  abc👩‍💻\n  de" },
+        .{ "abc❤️de", "  abc❤️\n  de" },
+        .{ "abc🇺🇸de", "  abc🇺🇸\n  de" },
+    };
+    inline for (cases) |case| {
+        for (0..case[0].len + 1) |split| {
+            var sink: Sink = .{};
+            var presentation: Indented(*Sink) = .{ .sink = &sink, .columns = 8, .line_start = true };
+            try presentation.feed(case[0][0..split]);
+            try presentation.feed(case[0][split..]);
+            try presentation.finish();
+            try std.testing.expectEqualStrings(case[1], sink.bytes[0..sink.length]);
+        }
+    }
+}
+
+pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, workspace: []const u8, scratch: std.Io.File, sink: anytype, columns: usize) !void {
+    // Action reads write at the descriptor's streaming offset, not positionally.
+    try requests.io.vtable.fileSeekTo(requests.io.userdata, scratch, 0);
+    try scratch.setLength(requests.io, 0);
+    var reply: client.ReplyBuffer = .{};
+    const result = try requests.readActionArguments(store, session, action, scratch, &reply);
+    if (result == .command) return error.ActionReadFailed;
+    var buffer: [4096]u8 = undefined;
+    var reader = scratch.reader(requests.io, &buffer);
+    const Source = struct {
+        reader: *std.Io.Reader,
+        pub fn peek(self: *@This()) !?u8 {
+            return self.reader.peekByte() catch |err| switch (err) {
+                error.EndOfStream => null,
+                else => return err,
+            };
+        }
+        pub fn take(self: *@This()) !u8 {
+            return self.reader.takeByte();
+        }
+    };
+    var source: Source = .{ .reader = &reader.interface };
+    const arguments = try tools.inspectBashArguments(&source) orelse return error.InvalidBashArguments;
+    try reader.seekTo(0);
+    try sink.feed("\n? Run Bash:\n  ");
+    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };
+    var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .multiline } };
+    if (!try tools.writeBashCommand(&source, &escaped)) return error.InvalidBashArguments;
+    try escaped.finish();
+    try indented.feed("\nWorkspace: ");
+    var location: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .line } };
+    try location.feed(workspace);
+    try location.finish();
+    if (arguments.timeout_ms) |timeout| try print(&indented, "\nTime limit: {d} ms", .{timeout});
+    try indented.feed("\n");
+    try indented.finish();
+}
 
 pub fn current(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File) !client.Current {
     try scratch.setLength(requests.io, 0);
@@ -31,23 +176,33 @@ pub fn Escaped(comptime Sink: type) type {
     return struct {
         sink: Sink,
         text: Text,
+        storage: [256]u8 = undefined,
+        used: usize = 0,
+        pub fn writeAll(self: *@This(), bytes: []const u8) anyerror!void {
+            try self.feed(bytes);
+        }
         pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
-            var storage: [256]u8 = undefined;
-            var out = std.Io.Writer.fixed(&storage);
+            var out = std.Io.Writer.fixed(&self.storage);
+            out.end = self.used;
             for (bytes) |byte| {
-                if (storage.len - out.end < 16) {
+                if (self.storage.len - out.end < 16) {
                     try self.sink.feed(out.buffered());
                     out.end = 0;
                 }
                 try self.text.feed(&out, &.{byte});
             }
-            if (out.end != 0) try self.sink.feed(out.buffered());
+            self.used = out.end;
         }
         pub fn finish(self: *@This()) anyerror!void {
-            var storage: [16]u8 = undefined;
-            var out = std.Io.Writer.fixed(&storage);
+            var out = std.Io.Writer.fixed(&self.storage);
+            out.end = self.used;
+            if (self.storage.len - out.end < 16) {
+                try self.sink.feed(out.buffered());
+                out.end = 0;
+            }
             try self.text.finish(&out);
             if (out.end != 0) try self.sink.feed(out.buffered());
+            self.used = 0;
         }
     };
 }
@@ -155,21 +310,23 @@ pub fn pending(requests: client.Requests, store: []const u8, session: []const u8
     }
 }
 
-fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, sink: anytype) !void {
+fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, sink: anytype, columns: usize) !void {
+    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };
     if (item.value == .assistant) {
-        var answer: Answer(@TypeOf(sink)) = undefined;
-        answer.init(sink);
+        var answer: Answer(@TypeOf(&indented)) = undefined;
+        answer.init(&indented);
         if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &answer)) |failure| return failure.err();
         try answer.finish();
     } else {
-        var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .multiline } };
+        var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .multiline } };
         if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &escaped)) |failure| return failure.err();
         try escaped.finish();
     }
+    try indented.finish();
     try sink.feed("\n");
 }
 
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const client.ActivityPage, sink: anytype) !void {
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const client.ActivityPage, sink: anytype, columns: usize) !void {
     const Drain = struct {
         pub fn feed(_: *@This(), _: []const u8) !void {}
     };
@@ -180,17 +337,17 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
         switch (item.value) {
             .admission => |message| {
                 if (historical and message.state == .applied) continue;
-                try sink.feed(if (historical) "Rui: Unapplied input:\n" else "You: ");
-                try content(requests, store, session, item, message.content, sink);
+                try sink.feed(if (historical) "\n! Unapplied input:\n› " else "\n› ");
+                try content(requests, store, session, item, message.content, sink, columns);
             },
             .user => |message| {
                 if (!historical) continue; // Live Admission already showed it.
-                try sink.feed("You: ");
-                try content(requests, store, session, item, message.content, sink);
+                try sink.feed("\n› ");
+                try content(requests, store, session, item, message.content, sink, columns);
             },
             .assistant => |reference| {
-                try sink.feed("Assistant: ");
-                try content(requests, store, session, item, reference, sink);
+                try sink.feed("\n  ");
+                try content(requests, store, session, item, reference, sink, columns);
             },
             .tool_result => |reference| {
                 // Keep outcomes and warnings, not routine zero exit codes or
@@ -204,6 +361,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                     emitted: bool = false,
                     ended: bool = false,
                     omitted: bool = false,
+                    failed: bool = false,
                     pub fn feed(self: *@This(), bytes: []const u8) !void {
                         for (bytes) |byte| {
                             if (self.ended) return;
@@ -227,7 +385,10 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                         if (std.mem.eql(u8, line, "stdout tail:") or std.mem.eql(u8, line, "stderr tail:")) {
                             self.ended = true;
                         } else {
-                            if (self.emitted) try self.escaped.feed("\n");
+                            if (self.emitted) try self.escaped.feed("\n  ") else {
+                                self.failed = !std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.") and !std.mem.eql(u8, line, "Permission denied.");
+                                try self.escaped.feed(if (self.failed) "\n! " else "  • ");
+                            }
                             try self.escaped.feed(if (std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.")) "Bash succeeded." else line);
                             self.emitted = true;
                         }
@@ -239,10 +400,10 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                     }
                 };
                 var summary: Summary = .{ .escaped = .{ .sink = sink, .text = .{ .mode = .multiline } } };
-                try sink.feed("Tool: ");
                 if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &summary)) |failure| return failure.err();
                 try summary.finish();
                 if (summary.omitted) try sink.feed(" [summary shortened; /details]");
+                if (summary.failed) try sink.feed(" /details for output.");
                 try sink.feed("\n");
             },
             .call => |call| {
@@ -256,9 +417,9 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             .outcome => |outcome| {
                 // Successful content aggregates assistant rows, never a second answer.
                 if (outcome.code.eql("completed")) continue;
-                try print(sink, "Rui: Work ended: {s}. /status for details.\n", .{outcome.code.slice()});
+                try print(sink, "\n! Work ended: {s}. /status for details.\n", .{outcome.code.slice()});
             },
-            .stop => try sink.feed("Rui: Session stop accepted.\n"),
+            .stop => try sink.feed("\n! Session stopped.\n"),
         }
     }
 }
