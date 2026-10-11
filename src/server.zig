@@ -1158,8 +1158,7 @@ fn cancelSupersededTransfers(
             traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
             preparation.cancel();
             preparation_active.* = false;
-            finishCustodyNow(host, active.token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, active.token);
         },
         .model_authenticating => |*active| {
             if (active.cancelled) continue;
@@ -1287,13 +1286,13 @@ fn admitBashAttempt(
     testTransition(host, .action_attempt_admitted, action_binding);
     const input = host.store.readBashExecutionInput(action_binding) catch |err| {
         settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be read.");
-        finishCustodyNow(host, token);
+        finishCustodyNow(host, slot, token);
         if (host.store.isFenced()) fenceDispatch(host, "Bash canonical input", err);
         return .admitted;
     };
     const arguments = host.store.openContent(input.arguments) catch |err| {
         settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be opened.");
-        finishCustodyNow(host, token);
+        finishCustodyNow(host, slot, token);
         fenceDispatch(host, "Bash canonical input", err);
         return .admitted;
     };
@@ -1394,8 +1393,7 @@ fn finishBashPreparationFailure(
         retainBashPreparedCleanup(host, slot, token, failure.cleanup, cleanup_err);
         return;
     };
-    finishCustodyNow(host, token);
-    slot.* = .free;
+    finishCustodyNow(host, slot, token);
     if (canonical_failure or host.store.isFenced()) {
         fenceDispatch(host, "Bash canonical preparation", failure.cause);
     }
@@ -1414,8 +1412,7 @@ fn discardBashResources(
         retainBashPreparedCleanup(host, slot, token, cleanup, err);
         return;
     };
-    finishCustodyNow(host, token);
-    slot.* = .free;
+    finishCustodyNow(host, slot, token);
 }
 
 fn launchPreparedBash(
@@ -1492,8 +1489,7 @@ fn stopSupersededBash(
                 retainBashPreparedCleanup(host, slot, active.token, cleanup, cleanup_err);
                 continue;
             };
-            finishCustodyNow(host, active.token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, active.token);
         },
         .bash => |*active| {
             const stopped = host.store.actionSupersededByStop(active.binding) catch |err| {
@@ -1601,8 +1597,8 @@ fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) b
     const token = active.token;
     const binding = active.binding;
     host.custody.cleanupComplete(token) catch unreachable;
-    traceAction(host, "cleanup_completed", binding);
     slot.* = .free;
+    traceAction(host, "cleanup_completed", binding);
     return true;
 }
 
@@ -1717,13 +1713,11 @@ fn beginAdmittedAttempt(
     slot.* = .{ .model_preparing = .{ .token = token, .binding = binding } };
     const view = host.store.openHistoricalView(binding) catch |err| {
         if (err == error.SupersededByControl) {
-            finishCustodyNow(host, token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, token);
             return .admitted;
         }
         fenceDispatch(host, "historical view", err);
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, token);
         return .admitted;
     };
     const request_budget = host.retention.sharedBudget().narrowed(
@@ -1755,18 +1749,15 @@ fn beginAdmittedAttempt(
         }
         if (host.store.isFenced()) {
             fenceDispatch(host, "canonical request read", err);
-            finishCustodyNow(host, token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, token);
             return .admitted;
         }
         if (err == error.SupersededByControl) {
-            finishCustodyNow(host, token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, token);
             return .admitted;
         }
         settleAttemptFailure(host, token, binding, model_adapter.preparationFailureCode(err), .terminal);
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, token);
         return .admitted;
     };
     preparation_active.* = true;
@@ -1797,8 +1788,7 @@ fn advanceModelPreparation(
         preparation.cancel();
         preparation_active.* = false;
         // Infrastructure fencing does not invent a user stop or a Resolution.
-        finishCustodyNow(host, owner.token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, owner.token);
         return true;
     }
     traceOperation(host, "preparation_advance_started", owner.binding);
@@ -1843,15 +1833,13 @@ fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *Executi
             launchPreparedRequest(host, reactor, slot, owner, &request, result.ready);
         } else {
             request.deinit();
-            finishCustodyNow(host, owner.token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, owner.token);
         }
     } else {
         request.deinit();
         if (!active.cancelled)
             settleAttemptFailure(host, owner.token, owner.binding, model_adapter.authenticationFailureCode(result.failed), .terminal);
-        finishCustodyNow(host, owner.token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, owner.token);
     }
     return true;
 }
@@ -1867,8 +1855,7 @@ fn finishModelPreparationFailure(
     } else if (err != error.SupersededByControl) {
         settleAttemptFailure(host, owner.token, owner.binding, model_adapter.preparationFailureCode(err), .terminal);
     }
-    finishCustodyNow(host, owner.token);
-    slot.* = .free;
+    finishCustodyNow(host, slot, owner.token);
 }
 
 fn launchPreparedRequest(
@@ -1883,8 +1870,7 @@ fn launchPreparedRequest(
     const binding = owner.binding;
     if (!host.launchAllowed()) {
         request.deinit();
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, token);
         return;
     }
     const request_budget = host.retention.sharedBudget().narrowed(
@@ -1896,8 +1882,7 @@ fn launchPreparedRequest(
         settleAttemptFailure(host, token, binding, "provider_transport_failure", .{ .retryable = .{
             .waits_ms = host.faults.retry_waits_ms,
         } });
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, token);
         return;
     }
     var headers: model_adapter.Headers = .{};
@@ -1906,8 +1891,7 @@ fn launchPreparedRequest(
         headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity) catch |err| {
             request.deinit();
             fenceDispatch(host, "provider preparation", err);
-            finishCustodyNow(host, token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, token);
             return;
         };
     }
@@ -1945,8 +1929,7 @@ fn launchPreparedRequest(
         } else {
             fenceDispatch(host, "provider preparation", err);
         }
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, token);
         return;
     };
     if (host.faults.before_launch_delay_ms != 0) {
@@ -1957,8 +1940,7 @@ fn launchPreparedRequest(
         active.transfer.deinit();
         stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, token);
         return;
     };
     host.store.withDispatchHandoff(
@@ -1976,20 +1958,17 @@ fn launchPreparedRequest(
     ) catch |err| {
         active.transfer.deinit();
         if (err == error.HostDispatchSuppressed) {
-            finishCustodyNow(host, token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, token);
             return;
         }
         if (err == error.SupersededByControl) {
             traceOperation(host, "canonical_handoff_superseded", binding);
-            finishCustodyNow(host, token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, token);
             return;
         }
         stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, token);
         return;
     };
     traceOperation(host, "transport_handoff_committed", binding);
@@ -2271,8 +2250,8 @@ fn finishSlotCleanup(host: *Host, slot: *ExecutionSlot) void {
     const owner = slot.cleanup.owner;
     const token = owner.token;
     host.custody.cleanupComplete(token) catch unreachable;
-    traceOperation(host, "cleanup_completed", owner.binding);
     slot.* = .free;
+    traceOperation(host, "cleanup_completed", owner.binding);
 }
 
 fn advanceRetainedCleanup(
@@ -2319,13 +2298,11 @@ fn shutdownExecution(
             std.debug.assert(model_preparation_active.*);
             model_preparation.cancel();
             model_preparation_active.* = false;
-            finishCustodyNow(host, active.token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, active.token);
         },
         .model_authenticating => |*active| {
             active.request.deinit();
-            finishCustodyNow(host, active.owner.token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, active.owner.token);
         },
         .bash_preparing => |active| {
             const cleanup = preparation.*.?.cancel();
@@ -2396,9 +2373,9 @@ fn settleAttemptFailure(
         fenceDispatch(host, "model failure save", err);
 }
 
-fn finishCustodyNow(host: *Host, token: execution.CustodyToken) void {
+fn finishCustodyNow(host: *Host, slot: *ExecutionSlot, token: execution.CustodyToken) void {
     // Capture checked identity while attached, but observe only after callers
-    // have retired their resources and this owner has released custody.
+    // have retired resources and this owner has released custody and the slot.
     const model_binding = if (host.faults.test_phase_trace)
         host.custody.binding(token) catch null
     else
@@ -2409,6 +2386,7 @@ fn finishCustodyNow(host: *Host, token: execution.CustodyToken) void {
         null;
     host.custody.detach(token) catch unreachable;
     host.custody.cleanupComplete(token) catch unreachable;
+    slot.* = .free;
     if (model_binding) |binding| traceOperation(host, "cleanup_completed", binding);
     if (action_binding) |binding| traceAction(host, "cleanup_completed", binding);
 }
@@ -4739,6 +4717,79 @@ test "cleanup delay follows elapsed time and preserves custody reuse" {
     beginCleanupAt(&host, &slots[0], third, start);
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     try std.testing.expect(slots[0] == .free);
+}
+
+test "cleanup publication follows complete execution retirement" {
+    const Boundary = struct {
+        slot: *const ExecutionSlot = undefined,
+        custody: *execution.CustodyPool = undefined,
+        token: execution.CustodyToken = undefined,
+        observed: bool = false,
+
+        fn now(context: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            // The completion timestamp is constructed before either native
+            // publication or optional stderr. Inspect actual owner facts here.
+            std.debug.assert(self.slot.* == .free);
+            self.custody.checkFree(self.token) catch unreachable;
+            checkSlotCustodyAgreement(@as([*]const ExecutionSlot, @ptrCast(self.slot))[0..1], self.custody) catch unreachable;
+            self.observed = true;
+            return clock.now(std.testing.io);
+        }
+    };
+    var boundary: Boundary = .{};
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Boundary.now;
+    var records: [1]execution.CustodyRecord = undefined;
+    var host = Host{
+        .io = .{ .userdata = &boundary, .vtable = &vtable },
+        .allocator = std.testing.allocator,
+        .lease = undefined,
+        .store = undefined,
+        .faults = .{ .test_phase_trace = true },
+        .custody = execution.CustodyPool.initialize(&records),
+    };
+    var slot: ExecutionSlot = .free;
+    boundary.slot = &slot;
+    boundary.custody = &host.custody;
+    // Both typed owners, delayed model retirement, and admission-local Action
+    // custody before an execution payload is installed share this boundary.
+    for (0..4) |kind| {
+        const token = host.custody.reserve().?;
+        boundary.token = token;
+        boundary.observed = false;
+        if (kind < 2) {
+            var permit = store_module.DispatchPermit{ .binding = .{
+                .turn_id = 3,
+                .operation_id = 7,
+                .attempt_ordinal = 2,
+            } };
+            const binding = try host.custody.attach(token, &permit);
+            if (kind == 0) {
+                slot = .{ .model_preparing = .{ .token = token, .binding = binding } };
+                finishCustodyNow(&host, &slot, token);
+            } else {
+                try host.custody.detach(token);
+                slot = .{ .cleanup = .{
+                    .owner = .{ .token = token, .binding = binding },
+                    .cleanup_deadline = .{ .raw = .fromNanoseconds(0), .clock = .awake },
+                } };
+                finishSlotCleanup(&host, &slot);
+            }
+        } else {
+            var permit = store_module.ActionDispatchPermit{ .binding = .{
+                .turn_id = 3,
+                .parent_operation_id = 7,
+                .action_id = 11,
+                .attempt_ordinal = 2,
+            } };
+            const binding = try host.custody.attachAction(token, &permit);
+            if (kind == 2) slot = .{ .bash_preparing = .{ .token = token, .binding = binding } };
+            finishCustodyNow(&host, &slot, token);
+        }
+        try std.testing.expect(boundary.observed);
+        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    }
 }
 
 test "named scratch retry releases custody through the shutdown owner path" {
