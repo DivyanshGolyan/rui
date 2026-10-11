@@ -714,6 +714,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         settled = read_terminal(master, answer)
         if exit_code:
             assert f"Bash failed. Exit code: {exit_code}." in settled, ("quiet view hid tool failure", settled)
+        elif decision == "allow-action":
+            assert "Bash succeeded." in settled, ("quiet view hid tool outcome", settled)
+            assert "Exit code: 0." not in settled, ("routine zero exit code leaked", settled)
         if signal_failure:
             assert "Process-group signaling reported a failure." in settled, ("quiet view hid cleanup warning", settled)
         assert "inspection-only-output" not in settled, ("routine tool output leaked", settled)
@@ -724,6 +727,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert "Tool Result:" in details, details
         if decision == "allow-action":
             assert "inspection-only-output" in details, ("saved tool output unavailable on inspection", details)
+            assert f"Exit code: {exit_code}." in details, ("exact exit code unavailable on inspection", details)
         # A resize must retain the exact non-tail Unicode cursor without prose.
         os.write(master, "next café!\x1b[D\x1b[DX".encode())
         read_terminal(master, "rui> next cafXé!")

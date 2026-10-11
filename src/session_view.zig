@@ -193,9 +193,9 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 try content(requests, store, session, item, reference, sink);
             },
             .tool_result => |reference| {
-                // Preserve the canonical result header, including cleanup and
-                // capture warnings. Tail delimiters affect presentation only,
-                // never execution, permission or outcome classification.
+                // Keep outcomes and warnings, not routine zero exit codes or
+                // output tails. This affects presentation only, never execution,
+                // permission or outcome classification; /details stays exact.
                 const Summary = struct {
                     escaped: Escaped(@TypeOf(sink)),
                     line: [256]u8 = undefined,
@@ -228,7 +228,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                             self.ended = true;
                         } else {
                             if (self.emitted) try self.escaped.feed("\n");
-                            try self.escaped.feed(line);
+                            try self.escaped.feed(if (std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.")) "Bash succeeded." else line);
                             self.emitted = true;
                         }
                         self.length = 0;
