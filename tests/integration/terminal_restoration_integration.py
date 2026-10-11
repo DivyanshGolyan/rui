@@ -210,7 +210,13 @@ int probe_fcntl(int fd, int command, ...) {
 #endif
     if (!real_fcntl || real_fcntl == probe_fcntl) _exit(98);
     if (fd == 2 && atomic_load(&readiness_held)) record("readiness-fd2-borrow\n");
-    if (command == F_GETFL || command == F_GETFD) return real_fcntl(fd, command);
+    /* Reached no-argument/ignored-argument commands: descriptor queries and
+       SQLite's macOS full_fsync. Never fetch an absent variadic argument. */
+    if (command == F_GETFL || command == F_GETFD
+#ifdef F_FULLFSYNC
+        || command == F_FULLFSYNC
+#endif
+    ) return real_fcntl(fd, command);
 #ifdef F_GETPATH
     if (command == F_GETPATH) {
         va_list args;
@@ -414,6 +420,30 @@ int main(void) {
     char name[] = "/tmp/rui-forward-lock.XXXXXX";
     int fd = mkstemp(name);
     if (fd < 0 || unlink(name)) return 9;
+    int descriptor_flags = fcntl(fd, F_GETFD);
+    if (descriptor_flags < 0 || fcntl(fd, F_SETFD, descriptor_flags | FD_CLOEXEC) ||
+        fcntl(fd, F_GETFD) != (descriptor_flags | FD_CLOEXEC) ||
+        fcntl(fd, F_SETFD, descriptor_flags) || fcntl(fd, F_GETFD) != descriptor_flags) return 18;
+    int duplicate = fcntl(fd, F_DUPFD, 19);
+    if (duplicate < 19 || fcntl(duplicate, F_GETFD) != 0 || close(duplicate)) return 19;
+#ifdef F_DUPFD_CLOEXEC
+    duplicate = fcntl(fd, F_DUPFD_CLOEXEC, 23);
+    if (duplicate < 23 || fcntl(duplicate, F_GETFD) != FD_CLOEXEC || close(duplicate)) return 20;
+#endif
+    errno = 0;
+    if (fcntl(-1, F_GETFD) != -1 || errno != EBADF) return 21;
+    errno = 0;
+    if (fcntl(-1, F_SETFD, FD_CLOEXEC) != -1 || errno != EBADF) return 22;
+#ifdef F_FULLFSYNC
+    /* Exercise actual local-file durability, with both caller spellings.
+       SQLite supplies zero, but the SDK says arg is ignored. */
+    if (write(fd, "durable", 7) != 7 || fcntl(fd, F_FULLFSYNC) ||
+        fcntl(fd, F_FULLFSYNC, 0)) return 23;
+    errno = 0;
+    if (fcntl(-1, F_FULLFSYNC) != -1 || errno != EBADF) return 24;
+    errno = 0;
+    if (fcntl(-1, F_FULLFSYNC, 0) != -1 || errno != EBADF) return 25;
+#endif
     struct flock lock = { .l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 3, .l_len = 7 };
     if (fcntl(fd, F_SETLK, &lock)) return 10;
     pid_t child = fork();
@@ -433,6 +463,14 @@ int main(void) {
     if (fcntl(fd, F_SETLKW, &lock)) return 16;
     lock.l_type = F_UNLCK;
     if (fcntl(fd, F_SETLK, &lock) || close(fd)) return 17;
+    child = fork();
+    if (child < 0) return 26;
+    if (!child) {
+        /* No guessed va_arg for unknown commands, even without a third arg. */
+        fcntl(-1, 2147483647);
+        _exit(27);
+    }
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 99) return 28;
     struct termios before, changed, after;
     if (tcgetattr(0, &before)) return 1;
     changed = before;
@@ -474,7 +512,8 @@ def check_forwarding(state, library):
         result = caller.wait(timeout=5)
         assert result == 0, (result, caller.stderr.read())
         assert output == b"\x1b[?2004l" * 2, output
-        assert log.read_text().splitlines() == ["restore-flush", "restore-flush", "disable", "disable", "drain"]
+        assert log.read_text().splitlines() == ["unsupported-fcntl:2147483647",
+            "restore-flush", "restore-flush", "disable", "disable", "drain"]
         assert termios.tcgetattr(slave) == original, "fixture forwarder did not restore attributes"
         print("terminal fixture forwarding: write/writev/tcdrain/tcsetattr/fcntl passed", flush=True)
     finally:
