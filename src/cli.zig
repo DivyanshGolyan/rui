@@ -1166,11 +1166,16 @@ fn waitForSession(init: std.process.Init, store: []const u8, session_ref: []cons
     return null;
 }
 
-fn showSessionStatus(init: std.process.Init, store: []const u8, session_ref: []const u8, brief: bool) !void {
+fn showSessionStatus(init: std.process.Init, store: []const u8, session_ref: []const u8, view: enum { opening, preview, full }) !void {
     const report = try inspectWork(init, store, session_ref);
     defer report.file.close(init.io);
     const work = &report.current;
-    if (brief) {
+    if (view == .preview) {
+        if (work.settings.tools.bash and work.settings.permission_mode.value == .bypass)
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Bash runs without approval.\n");
+        return;
+    }
+    if (view == .opening) {
         try writeSafeField(init.io, "Session: ", session_ref);
         try writeSafeField(init.io, "Workspace (Bash cwd): ", work.settings.workspace.slice());
         try writeSafeField(init.io, "Provider: ", @tagName(work.settings.provider.value));
@@ -1183,6 +1188,8 @@ fn showSessionStatus(init: std.process.Init, store: []const u8, session_ref: []c
     try writeSafeField(init.io, "Session: ", session_ref);
     try writeSafeField(init.io, "Store: ", store);
     try writeSafeField(init.io, "Workspace (Bash cwd): ", work.settings.workspace.slice());
+    try writeSafeField(init.io, "Provider: ", @tagName(work.settings.provider.value));
+    try writeSafeField(init.io, "Model: ", work.settings.model.slice());
     try writeSafeField(init.io, "Permission: ", @tagName(work.settings.permission_mode.value));
     if (work.settings.tools.bash and work.settings.permission_mode.value == .bypass)
         try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Bash runs without approval.\n");
@@ -1288,11 +1295,11 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         return err;
     };
     const destination = paths.store.slice();
-    showSessionStatus(init, destination, reference, true) catch |err| {
+    showSessionStatus(init, destination, reference, if (persistent) .preview else .opening) catch |err| {
         if (err == error.SessionNotConfigured) std.debug.print("rui: configure this Session before entering it\n", .{});
         return err;
     };
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Type a message or /help. /exit detaches without stopping work.\n");
+    if (!persistent) try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Type a message or /help. /exit detaches without stopping work.\n");
     if (persistent) {
         var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const directory = try requestDirectory(init, &directory_buffer);
@@ -1346,8 +1353,19 @@ fn sessionCommand(init: std.process.Init, destination: []const u8, reference: []
         if (report.current.first_action) |action| {
             var buffer: [20]u8 = undefined;
             const id = try std.fmt.bufPrint(&buffer, "{d}", .{action});
+            try writeSafeField(init.io, "Workspace: ", report.current.settings.workspace.slice());
             try inspectAction(init, &.{ "--store", destination, "--session", reference, "--action", id }, true);
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Inspection only; no decision sent. Use rui allow-action or deny-action with this Store, Session and exact Action ID.\n");
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Inspection only; no decision sent.\nIn another Bash terminal, run ONE exact decision command:\n");
+            inline for (.{ "allow-action", "deny-action" }, .{ "Allow once: ", "Deny: " }) |decision, label| {
+                try std.Io.File.stdout().writeStreamingAll(init.io, label ++ "rui " ++ decision ++ " --store ");
+                try writeShellWord(init.io, destination);
+                try std.Io.File.stdout().writeStreamingAll(init.io, " --session ");
+                try writeShellWord(init.io, reference);
+                try std.Io.File.stdout().writeStreamingAll(init.io, " --action ");
+                try std.Io.File.stdout().writeStreamingAll(init.io, id);
+                try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+            }
+            try std.Io.File.stdout().writeStreamingAll(init.io, "The Host rechecks that exact Action; this inspection does not reserve it.\n/exit also returns to your shell without stopping work, but loses the unsent draft.\n");
         } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No actionable permission in this Current snapshot; no decision sent.\n");
         return;
     }
@@ -1371,7 +1389,7 @@ fn sessionCommand(init: std.process.Init, destination: []const u8, reference: []
         setup(init, setup_args[0..count]) catch |err| std.debug.print("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
         break :blk null;
     } else if (std.mem.eql(u8, text, "/status")) blk: {
-        showSessionStatus(init, destination, reference, false) catch |err| {
+        showSessionStatus(init, destination, reference, .full) catch |err| {
             if (err == error.CanonicalStoreFailure) return err;
             std.debug.print("rui: status: {s}\n", .{@errorName(err)});
         };
@@ -2514,6 +2532,22 @@ fn inspectAction(init: std.process.Init, args: []const []const u8, interactive: 
     try std.Io.File.stdout().writeStreamingAll(io, "Bash arguments: \"");
     try writeJsonFileAt(io, file, call_bytes, arguments.answer.bytes, true);
     try std.Io.File.stdout().writeStreamingAll(io, "\"\n");
+}
+
+// Bash ANSI-C quoting preserves every selector byte while keeping generated
+// commands printable, including controls, bidi, quotes and trailing newlines.
+fn writeShellWord(io: std.Io, value: []const u8) !void {
+    var storage: [256]u8 = undefined;
+    var writer = std.Io.File.stdout().writerStreaming(io, &storage);
+    try writer.interface.writeAll("$'");
+    for (value) |byte| switch (byte) {
+        '\'' => try writer.interface.writeAll("\\'"),
+        '\\' => try writer.interface.writeAll("\\\\"),
+        32...38, 40...91, 93...126 => try writer.interface.writeByte(byte),
+        else => try writer.interface.print("\\{o:0>3}", .{byte}),
+    };
+    try writer.interface.writeByte('\'');
+    try writer.flush();
 }
 
 fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escape_unicode: bool) !void {

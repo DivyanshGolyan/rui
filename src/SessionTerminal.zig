@@ -119,7 +119,9 @@ fn clear(self: *Self) !void {
     var control: [32]u8 = undefined;
     if (self.rows != 0) {
         if (size.row != self.size.row or size.col != self.size.col) {
-            try self.write("\r\n[Rui: terminal resized; draft retained]\r\n");
+            // Old physical rows cannot be erased reliably after reflow. Start
+            // the retained composer on a fresh line without transcript chatter.
+            try self.write("\r\n");
         } else {
             if (self.caret_row != 0) try self.write(try std.fmt.bufPrint(&control, "\x1b[{d}A", .{self.caret_row}));
             try self.write("\r");
@@ -146,9 +148,12 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8)
     // Stage the bounded view before output can pump and mutate the draft.
     const view = try viewport(bytes, cursor, size.col - 6, @min(5, size.row - 1));
     try self.clear();
-    try self.write(status[0..@min(status.len, size.col - 1)]);
+    const heading: usize = @intFromBool(status.len != 0);
+    var status_end = @min(status.len, size.col - 1);
+    while (status_end != 0 and status_end < status.len and status[status_end] & 0xc0 == 0x80) status_end -= 1;
+    if (heading != 0) try self.write(status[0..status_end]);
     for (0..view.rows) |row| {
-        try self.write("\r\n");
+        if (row != 0 or heading != 0) try self.write("\r\n");
         try self.write(if (row == 0) "rui> " else "> ");
         try self.write(view.data[row][0..view.lengths[row]]);
     }
@@ -156,8 +161,8 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8)
     const up = view.rows - 1 - view.caret.row;
     if (up != 0) try self.write(try std.fmt.bufPrint(&control, "\x1b[{d}A", .{up}));
     try self.write(try std.fmt.bufPrint(&control, "\r\x1b[{d}C", .{view.caret.col + @as(usize, if (view.caret.row == 0) 5 else 2)}));
-    self.rows = view.rows + 1;
-    self.caret_row = view.caret.row + 1;
+    self.rows = view.rows + heading;
+    self.caret_row = view.caret.row + heading;
     self.size = size;
 }
 

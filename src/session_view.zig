@@ -113,7 +113,7 @@ pub const Pending = struct {
 
     pub fn render(self: *const Pending, requests: client.Requests, store: []const u8, session: []const u8, sink: anytype) !void {
         if (self.total == 0) return;
-        try print(sink, "Rui: {d} pending at opening snapshot.\n", .{self.total});
+        try print(sink, "Rui: {d} queued messages.\n", .{self.total});
         const Preview = struct {
             escaped: Escaped(@TypeOf(sink)),
             remaining: usize = 256,
@@ -126,7 +126,7 @@ pub const Pending = struct {
             }
         };
         for (self.items[0..self.count]) |item| {
-            try sink.feed("Rui: queued preview: ");
+            try sink.feed("Queued: ");
             var preview: Preview = .{ .escaped = .{ .sink = sink, .text = .{ .mode = .line } } };
             if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = item.content.length, .digest = item.content.digest }, &preview)) |failure| return failure.err();
             try preview.escaped.finish();
@@ -170,6 +170,10 @@ fn content(requests: client.Requests, store: []const u8, session: []const u8, it
 }
 
 pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const client.ActivityPage, sink: anytype) !void {
+    const Drain = struct {
+        pub fn feed(_: *@This(), _: []const u8) !void {}
+    };
+    var drain: Drain = .{};
     const historical = page.facts.direction == .backward;
     for (0..page.facts.count) |index| {
         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
@@ -189,26 +193,70 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 try content(requests, store, session, item, reference, sink);
             },
             .tool_result => |reference| {
-                try sink.feed("Tool Result:\n");
-                try content(requests, store, session, item, reference, sink);
+                // Preserve the canonical result header, including cleanup and
+                // capture warnings. Tail delimiters affect presentation only,
+                // never execution, permission or outcome classification.
+                const Summary = struct {
+                    escaped: Escaped(@TypeOf(sink)),
+                    line: [256]u8 = undefined,
+                    length: usize = 0,
+                    remaining: usize = 256,
+                    emitted: bool = false,
+                    ended: bool = false,
+                    omitted: bool = false,
+                    pub fn feed(self: *@This(), bytes: []const u8) !void {
+                        for (bytes) |byte| {
+                            if (self.ended) return;
+                            if (self.remaining == 0) {
+                                try self.emit();
+                                self.omitted = true;
+                                self.ended = true;
+                                return;
+                            }
+                            self.remaining -= 1;
+                            if (byte == '\n') {
+                                try self.emit();
+                            } else {
+                                self.line[self.length] = byte;
+                                self.length += 1;
+                            }
+                        }
+                    }
+                    fn emit(self: *@This()) !void {
+                        const line = self.line[0..self.length];
+                        if (std.mem.eql(u8, line, "stdout tail:") or std.mem.eql(u8, line, "stderr tail:")) {
+                            self.ended = true;
+                        } else {
+                            if (self.emitted) try self.escaped.feed("\n");
+                            try self.escaped.feed(line);
+                            self.emitted = true;
+                        }
+                        self.length = 0;
+                    }
+                    fn finish(self: *@This()) !void {
+                        if (self.length != 0) try self.emit();
+                        try self.escaped.finish();
+                    }
+                };
+                var summary: Summary = .{ .escaped = .{ .sink = sink, .text = .{ .mode = .multiline } } };
+                try sink.feed("Tool: ");
+                if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &summary)) |failure| return failure.err();
+                try summary.finish();
+                if (summary.omitted) try sink.feed(" [summary shortened; /details]");
+                try sink.feed("\n");
             },
             .call => |call| {
-                try sink.feed("Rui: Proposal; inspection is NOT authorization.\n");
-                if (call.action) |action| try print(sink, "Action identity: {d}\n", .{action});
-                if (call.rejection) |rejection| try print(sink, "Immutable rejection: {s}\n", .{@tagName(rejection)});
-                inline for (std.meta.tags(client.ProposalField), 0..) |field, field_index| {
-                    try print(sink, "{s}:\n", .{@tagName(field)});
-                    var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .multiline } };
+                // Proposal bookkeeping is inspection-only. Even hidden fields
+                // must drain and validate before advancing the Activity cursor.
+                for (std.meta.tags(client.ProposalField), 0..) |field, field_index| {
                     const reference = call.fields[field_index];
-                    if (try requests.readProposalField(store, session, item.position, field, .{ .bytes = reference.length, .digest = reference.digest }, &escaped)) |failure| return failure.err();
-                    try escaped.finish();
-                    try sink.feed("\n");
+                    if (try requests.readProposalField(store, session, item.position, field, .{ .bytes = reference.length, .digest = reference.digest }, &drain)) |failure| return failure.err();
                 }
             },
             .outcome => |outcome| {
                 // Successful content aggregates assistant rows, never a second answer.
                 if (outcome.code.eql("completed")) continue;
-                try print(sink, "Rui: saved work outcome: {s}\n", .{outcome.code.slice()});
+                try print(sink, "Rui: Work ended: {s}. /status for details.\n", .{outcome.code.slice()});
             },
             .stop => try sink.feed("Rui: Session stop accepted.\n"),
         }

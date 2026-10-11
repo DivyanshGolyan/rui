@@ -34,8 +34,8 @@ cursor: client.ActivityCursor = .{},
 next_cursor: client.ActivityCursor = .{},
 history_cursor: ?client.ConversationCursor = null,
 next_history_cursor: ?client.ConversationCursor = null,
-history_requested: bool = false,
-read_phase: enum { activity, history_preparing, history_rendering } = .activity,
+history_requested: ?enum { older, latest } = null,
+read_phase: enum { activity, history_preparing, history_rendering, details_preparing, details_rendering } = .activity,
 opening: bool = true,
 poll_at: i96 = 0,
 dirty: bool = true,
@@ -106,7 +106,7 @@ fn driveActive(self: *Self) !void {
         if (self.admission.thread != null and self.admission.completed()) {
             self.settleAdmission() catch |err| {
                 if (err == error.CanonicalStoreFailure) return err;
-                self.notice = "Admission unconfirmed; Ctrl-R retries the original capture. Next draft retained.";
+                self.notice = "Not confirmed. Ctrl-R retries the original; the next draft is safe.";
             };
             self.dirty = true;
         }
@@ -123,10 +123,11 @@ fn driveActive(self: *Self) !void {
             }
         };
         if (self.reader.thread == null) {
-            if (self.history_requested and !self.opening) {
-                self.history_requested = false;
-                if (self.history_cursor != null) {
-                    self.read_phase = .history_preparing;
+            if (self.history_requested != null and !self.opening) {
+                const requested = self.history_requested.?;
+                self.history_requested = null;
+                if (requested == .latest or self.history_cursor != null) {
+                    self.read_phase = if (requested == .latest) .details_preparing else .history_preparing;
                     try self.reader.start(self.init.io, self, history);
                 } else self.notice = "No older Conversation rows.";
             } else if (std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at) {
@@ -139,11 +140,6 @@ fn driveActive(self: *Self) !void {
             try self.terminal.permanent("\nRui: ");
             try self.terminal.permanent(notice);
             try self.terminal.permanent("\n");
-            if (self.ticket != null) {
-                try self.terminal.permanent("Original reserved request: ");
-                try self.terminal.permanent(&self.capture_key);
-                try self.terminal.permanent("\n");
-            }
             self.dirty = true;
         }
         for (0..1024) |_| {
@@ -155,10 +151,16 @@ fn driveActive(self: *Self) !void {
         if (self.dirty and self.reader.thread == null and !self.opening) {
             const view = self.input.composition();
             const status = if (self.ticket != null) switch (self.input.submitted.?.state) {
-                .submitting => "Rui: submitting; next draft retained",
-                .unconfirmed => "Rui: unconfirmed; Ctrl-R original /recover KEY",
-                .rejected => "Rui: rejected; /discard retains next draft",
-            } else if (self.opening) "Rui: opening" else if (self.current.actionable_count != 0) "Rui: attention; Ctrl-G inspects exact Action" else @tagName(self.current.work.status.value);
+                .submitting => "Sending…",
+                .unconfirmed => "Unconfirmed · Ctrl-R retry",
+                .rejected => "Rejected · /discard",
+            } else if (self.current.actionable_count != 0) "Needs approval · Ctrl-G" else switch (self.current.work.status.value) {
+                .runnable, .in_flight => "Working…",
+                .waiting_for_permission => "Needs approval · Ctrl-G",
+                .failed => "Work failed · /status",
+                .cancelled => "Work stopped · /status",
+                .idle, .completed => "",
+            };
             self.dirty = false;
             try self.terminal.redraw(view.bytes, view.cursor, status);
         }
@@ -202,18 +204,17 @@ fn step(self: *Self, wait: i32) !bool {
             const target: client.CaptureTarget = .{ .generated = self.directory };
             self.capture_target = .{ .explicit = try target.resolve(self.init.io, &self.capture_path, &self.capture_key) };
             self.reply = null;
-            self.notice = "Capturing original request; next draft retained.";
             try self.admission.start(self.init.io, self, submit);
         },
         .command => {
             const text = self.input.command_buffer[0..self.input.command_length.?];
-            if (std.mem.eql(u8, text, "/exit")) self.detached = true else if (std.mem.eql(u8, text, "/history")) {
+            if (std.mem.eql(u8, text, "/exit")) self.detached = true else if (std.mem.eql(u8, text, "/history") or std.mem.eql(u8, text, "/details")) {
                 // Local read work never cancels the independent Admission owner.
                 self.input.command_length = null;
-                self.history_requested = true;
+                self.history_requested = if (std.mem.eql(u8, text, "/details")) .latest else .older;
             }
         },
-        .busy => self.notice = "Submission unresolved; editing remains available. Recover the original request, not replacement intent.",
+        .busy => self.notice = "Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |event| switch (event) {
             .interrupt, .eof => self.detached = true,
             .invalid => self.notice = "input rejected (InvalidTerminalInput); nothing sent.",
@@ -269,6 +270,7 @@ fn settleAdmission(self: *Self) !void {
         return err;
     };
     if (reply.isAccepted()) {
+        if (self.input.submitted.?.state == .unconfirmed) self.notice = "Original confirmed. Next draft retained.";
         try self.input.settle(self.ticket.?, null);
         self.captured.?.close(self.init.io);
         self.captured = null;
@@ -276,21 +278,23 @@ fn settleAdmission(self: *Self) !void {
     } else {
         try self.input.settle(self.ticket.?, .rejected);
         _ = answer;
-        self.notice = "Submission rejected; original request retained. /discard abandons only that rejected draft; next composition is unchanged.";
+        self.notice = "Input rejected. /discard clears it; the next draft is safe.";
     }
 }
 
 fn settleReader(self: *Self) !void {
     if (self.reader.thread == null) return;
     self.reader.join() catch |err| {
-        if (self.read_phase != .history_preparing or err == error.CanonicalStoreFailure or err == error.Cancelled) return err;
-        self.notice = "History unavailable; older cursor and draft retained.";
+        if ((self.read_phase != .history_preparing and self.read_phase != .details_preparing) or err == error.CanonicalStoreFailure or err == error.Cancelled) return err;
+        self.notice = if (self.read_phase == .details_preparing) "Details unavailable; draft retained." else "History unavailable; older cursor and draft retained.";
         self.dirty = true;
         return;
     };
     if (self.read_phase == .history_rendering) {
         self.history_cursor = self.next_history_cursor;
         self.notice = "History page complete.";
+    } else if (self.read_phase == .details_rendering) {
+        self.notice = "Details complete.";
     } else {
         self.current = self.observed;
         self.cursor = self.next_cursor;
@@ -317,9 +321,9 @@ fn handoff(self: *Self) !void {
     };
     joined catch {
         self.notice = if (read_result) |_|
-            "Admission unconfirmed; Ctrl-R retries the original capture. Next draft retained."
+            "Not confirmed. Ctrl-R retries the original; the next draft is safe."
         else |_|
-            "Activity observation interrupted; displayed prefix may be incomplete. Admission unconfirmed; Ctrl-R retries the original capture. Next draft retained.";
+            "Observation interrupted; displayed text may be incomplete. Not confirmed. Ctrl-R retries the original; the next draft is safe.";
     };
     if (interrupted.load(.acquire)) return error.InteractiveInterrupted;
     try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
@@ -345,10 +349,19 @@ fn handoff(self: *Self) !void {
             } else if (std.mem.startsWith(u8, text, "/recover ") and self.ticket != null) {
                 if (std.mem.eql(u8, text[9..], &self.capture_key)) self.requestRetry() else self.notice = "Recovery key does not match this original submission; nothing sent.";
             } else if (std.mem.eql(u8, text, "/wait") or std.mem.eql(u8, text, "/login")) {
-                self.notice = "Staged persistent mode has no nested approval/login prompt. Ctrl-G inspects; use explicit one-shot commands for decisions/login.";
+                self.notice = "Preview has no nested approval/login prompt. Ctrl-G shows exact arguments and decision commands; login uses rui login codex.";
             } else if (std.mem.eql(u8, text, "/help")) {
-                try std.Io.File.stdout().writeStreamingAll(self.init.io, "Rui: /status /history /requests /result KEY /setup /configure /recover KEY /discard /exit. Opening replays the newest 16 Activity rows; /history reads older Conversation pages at that frozen end. Historical items over 8192 raw bytes are omitted with a raw export command. Ctrl-R retries the original uncertain capture; Ctrl-G inspects the fresh exact Action without granting approval. Decisions and login use explicit one-shot commands.\n");
-            } else try self.command(self.init, self.store, self.session, text);
+                try std.Io.File.stdout().writeStreamingAll(self.init.io, "/status settings and work · /history older conversation\n/details recent conversation with full saved tool output\nCtrl-G or /inspect-action: exact arguments and allow/deny commands\nCtrl-R: retry the same unconfirmed input, keeping the next draft\n/requests recovery records · /result KEY saved answer\n/setup future defaults · /configure Session settings\n/recover KEY original input · /discard rejected input\n/exit detach (Host work continues; unsent draft is lost)\nLogin: rui login codex in your shell. Decisions use the exact one-shot commands shown by inspection.\n");
+            } else {
+                try self.command(self.init, self.store, self.session, text);
+                if (self.ticket != null and (std.mem.eql(u8, text, "/status") or std.mem.eql(u8, text, "/requests"))) {
+                    // A reserved key is diagnostic identity, not proof that a
+                    // capture exists. Ctrl-R also repairs prepublication failure.
+                    try std.Io.File.stdout().writeStreamingAll(self.init.io, "Original reserved request: ");
+                    try std.Io.File.stdout().writeStreamingAll(self.init.io, &self.capture_key);
+                    try std.Io.File.stdout().writeStreamingAll(self.init.io, if (self.input.submitted.?.state == .rejected) "\nSubmission rejected; /discard releases only this original, retaining the next draft.\n" else "\nPublication/admission may be incomplete; Ctrl-R retries this exact original.\n");
+                }
+            }
         }
     }
     self.terminal = try Terminal.begin();
@@ -389,9 +402,10 @@ fn scan(raw: *anyopaque, task: *Task) !void {
 
 fn history(raw: *anyopaque, task: *Task) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const prepared = try History.prepare(task.requests(), self.store, self.session, self.history_cursor.?, self.scratch);
+    const latest = self.read_phase == .details_preparing;
+    const prepared = try History.prepare(task.requests(), self.store, self.session, if (latest) .{ .end = 0 } else self.history_cursor.?, self.scratch);
     // Joined errors before this point retain the cursor without visible content.
-    self.read_phase = .history_rendering;
+    self.read_phase = if (latest) .details_rendering else .history_rendering;
     try prepared.render(task.io, self.scratch, self.store, self.session, task);
-    self.next_history_cursor = prepared.page.continuation();
+    if (!latest) self.next_history_cursor = prepared.page.continuation();
 }

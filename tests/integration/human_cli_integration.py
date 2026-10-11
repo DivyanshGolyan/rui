@@ -181,6 +181,7 @@ def persistent_opening_case():
         assert output.count("literal **user** é") == 1, ("opening lost or duplicated User", output)
         assert output.count("\x1b[1mSaved heading\x1b[0m") == 1, ("opening bypassed assistant renderer", output)
         assert output.count("\x1b[1msaved bold\x1b[0m é") == 1, output
+        assert "Provider:" not in output and "Workspace (Bash cwd):" not in output, ("opening is not compact", output)
         assert "OPENING-COMPLETE" in output, "opening applied the historical omission limit"
         assert len(endpoint.requests) == 1, "opening restarted saved work"
         os.write(master, b"\x03")
@@ -296,6 +297,10 @@ def persistent_opening_case():
         message = admit(home, "message", "--store", store, "--session", "persistent/opening", "late input")
         fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "late saved answer")
         read_terminal(master, "late beyond captured end")
+        # Explicit latest details cannot move the frozen older-history cursor.
+        os.write(master, b"/details\n")
+        details = read_terminal(master, "Details complete")
+        assert "late beyond captured end" in details and "literal **user** é" not in details, details
 
         history_held = threading.Event()
 
@@ -417,8 +422,8 @@ def persistent_pending_case():
         admit(home, "message", "--store", store, "--session", "persistent/pending", "late queued beyond snapshot")
         opening_release.set()
         output = startup.decode(errors="replace").replace("\r\n", "\n") + read_terminal(master, "rui> ")
-        assert "24 pending at opening snapshot" in output, ("opening counted only its newest page or fresh Current", output)
-        previews = [line for line in output.splitlines() if "Rui: queued preview: " in line]
+        assert "24 queued messages" in output, ("opening counted only its newest page or fresh Current", output)
+        previews = [line for line in output.splitlines() if "Queued: " in line]
         assert len(previews) == 4, previews
         for i, preview in enumerate(previews, 1):
             assert preview.endswith(f"queued-{i:02d} é"), previews
@@ -499,14 +504,15 @@ def persistent_input_cases():
         assert received.wait(10), "original Message did not reach Host"
         os.write(master, "next café!\x1b[D\x1b[DX".encode())
         composed = read_terminal(master, "rui> next cafXé!")
-        assert "submitting" in composed, composed
+        assert "Sending" in composed and "Original reserved request" not in composed, composed
         records = home / ".config/rui/requests"
         before = set(records.glob("*.json"))
         os.write(master, b"\n")
-        assert "Submission unresolved" in read_terminal(master, "Submission unresolved")
+        assert "Input still pending" in read_terminal(master, "Input still pending")
         assert set(records.glob("*.json")) == before, "busy Enter created replacement intent"
         admission_release.set()
-        read_terminal(master, "Admission unconfirmed")
+        uncertain = read_terminal(master, "Not confirmed")
+        assert "Original reserved request" not in uncertain, ("normal recovery exposed a UUID", uncertain)
         assert len(proxy.exchanges) == 1
         saved = proxy.exchanges[0][0]
         assert json.loads(saved)["text"]["value"] == "original éZ"
@@ -514,7 +520,7 @@ def persistent_input_cases():
         read_terminal(master, "first exact answer")
         assert len(proxy.exchanges) == 1, "idle Ctrl-R retried unrelated uncertain intent"
         os.write(master, b"\x12")
-        read_terminal(master, "completed")
+        read_terminal(master, "Original confirmed")
         assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == saved, "Ctrl-R changed original capture"
         assert len(endpoint.requests) == 1, "recovery repeated provider work"
         # Cursor still sits before é; insert at that exact logical position.
@@ -530,23 +536,25 @@ def persistent_input_cases():
         os.write(master, b"\x15bad\xc3(\n")
         read_terminal(master, "InvalidTerminalInput")
         os.write(master, b"valid after rejection\n")
-        uncertain = read_terminal(master, "Admission unconfirmed")
+        uncertain = read_terminal(master, "Not confirmed")
         if "valid after malformed" not in uncertain:
             read_terminal(master, "valid after malformed")
         assert json.loads(proxy.exchanges[-1][0])["text"]["value"] == "valid after rejection"
         assert len(proxy.exchanges) == 4, "accepted ticket's Ctrl-R retried a later submission"
         os.write(master, b"\x12")
-        read_terminal(master, "completed")
+        read_terminal(master, "Original confirmed")
         assert len(proxy.exchanges) == 5 and proxy.exchanges[4][0] == proxy.exchanges[3][0], "fresh Ctrl-R did not recover the current original"
         # Actual prepublication access failure, followed by repair. Recovery
         # must capture the original under its reserved key, not wedge forever.
         before_failure = set(records.glob("*.json"))
         records.chmod(0o500)
         os.write(master, b"original before capture failure\n")
-        failed = read_terminal(master, "Admission unconfirmed")
+        failed = read_terminal(master, "Not confirmed")
+        assert "Original reserved request" not in failed, failed
+        diagnostic = terminal_step(master, "/status")
+        reserved = diagnostic.split("Original reserved request: ", 1)[1].splitlines()[0]
         os.write(master, "next café!\x1b[D\x1b[DX".encode())
         failed += read_terminal(master, "rui> next cafXé!")
-        reserved = failed.split("Original reserved request: ", 1)[1].splitlines()[0]
         assert set(records.glob("*.json")) == before_failure
         assert len(proxy.exchanges) == 5, "capture failure transmitted input"
         records.chmod(0o700)
@@ -608,17 +616,19 @@ def persistent_input_cases():
             print(f"retained persistent input failure state: {state}", file=sys.stderr)
 
 
-def persistent_permission_case():
+def persistent_permission_case(decision="deny-action", exit_code=0, signal_failure=False):
     """Staged inspection cannot authorize; the canonical exact one-shot still can."""
     import canonical_failure_integration as canonical
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-permission."))
     home = state / "home"
     home.mkdir(mode=0o700)
-    store = state / "store"
-    arguments = json.dumps({"cmd": "printf unsafe >> effect-count", "timeout_ms": None})
+    store = state / "store'$(false)"
+    reference = "persistent/permission'$(false) é\n"
+    answer = "after explicit denial" if decision == "deny-action" else "after explicit approval"
+    arguments = json.dumps({"cmd": f"printf inspection-only-output; printf unsafe >> effect-count; exit {exit_code}", "timeout_ms": None})
     endpoint = fixture.SuccessEndpoint([
         fixture.sse_tool_calls("persistent-call", [("bash", "persistent-call-id", arguments)]),
-        fixture.sse_answer("persistent-answer", "persistent-reason", "persistent-message", "after explicit denial")[0],
+        fixture.sse_answer("persistent-answer", "persistent-reason", "persistent-message", answer)[0],
     ])
     thread = threading.Thread(target=endpoint.serve_forever)
     thread.start()
@@ -627,19 +637,24 @@ def persistent_permission_case():
     observation_release = threading.Event()
     completed = False
     try:
-        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        run(home, "configure", "--store", store, "--session", "persistent/permission",
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
+            *(("--fault", "bash-signal") if signal_failure else ()))
+        run(home, "configure", "--store", store, "--session", reference,
             "--workspace", state, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         original = termios.tcgetattr(slave)
         caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
-            "--session", "persistent/permission"], env={**os.environ, "HOME": str(home)},
+            "--session", reference], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-        assert "Permission: ask" in read_terminal(master, "rui> ")
+        opening = read_terminal(master, "rui> ")
+        assert all(noise not in opening for noise in ("model-a", "Workspace:", "Session:", "Store:", "/help commands")), opening
         proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: response)
         os.write(master, b"requires permission\n")
-        read_terminal(master, "Rui: attention")
+        transcript = read_terminal(master, "Needs approval")
+        assert "Capturing original" not in transcript and "Original reserved request" not in transcript, transcript
+        assert "item_id:" not in transcript and "call_id:" not in transcript and "arguments:" not in transcript, transcript
+        assert "Tool: bash" not in transcript and "Ctrl-G" in transcript, transcript
         for command in ("/wait", "/login"):
             os.write(master, (command + "\n").encode())
             read_terminal(master, "no nested approval/login prompt")
@@ -666,12 +681,16 @@ def persistent_permission_case():
         assert set(records.glob("*.json")) == before_inspection, "inspection suffix became captured Message intent"
         if "rui> next cafXé!" not in inspected.split("Inspection only", 1)[1]:
             inspected += read_terminal(master, "rui> next cafXé!")
-        assert "Inspection only; no decision sent" in inspected and "Allow once" not in inspected, inspected
+        assert "Inspection only; no decision sent" in inspected and "Allow once, deny, or later?" not in inspected, inspected
+        assert f"Workspace: {state}" in inspected, inspected
+        commands = {label: next(line.removeprefix(label) for line in inspected.splitlines() if line.startswith(label))
+            for label in ("Allow once: ", "Deny: ")}
+        assert all(32 <= ord(char) < 127 for command in commands.values() for char in command), commands
         action = inspected.split("Action ", 1)[1].splitlines()[0]
         observation_release.set()
         proxy.route = "/v1/message"
         proxy.rewrite = lambda response: response
-        current = fixture.command("inspect-session", "--store", store, "--session", "persistent/permission")
+        current = fixture.command("inspect-session", "--store", store, "--session", reference)
         assert [row["action"] for row in current["actionable_permissions"]] == [action]
         assert json.loads(inspected.split("Bash arguments: ", 1)[1].splitlines()[0]) == arguments
         os.write(master, b"Y\n")
@@ -683,10 +702,36 @@ def persistent_permission_case():
         saved = [json.loads(path.read_text()) for path in (home / ".config/rui/requests").glob("*.json")]
         assert not any(row["kind"] == "permission_decision" for row in saved)
         assert not (state / "effect-count").exists(), "persistent input approved an unseen Action"
-        decision = admit(home, "deny-action", "--store", store, "--session", "persistent/permission", "--action", action)
-        assert decision["admission"]["answer"]["status"] == "accepted", decision
-        read_terminal(master, "after explicit denial")
-        assert not (state / "effect-count").exists()
+        executables = state / "bin"
+        executables.mkdir()
+        (executables / "rui").symlink_to(fixture.RUI.resolve())
+        command = commands["Deny: " if decision == "deny-action" else "Allow once: "]
+        result = subprocess.run(["bash", "-c", command + " --json"], env={**os.environ, "HOME": str(home),
+            "PATH": str(executables) + os.pathsep + os.environ["PATH"]}, capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, (command, result.stdout, result.stderr)
+        admission = json.loads(result.stdout.splitlines()[-1])
+        assert admission["admission"]["answer"]["status"] == "accepted", admission
+        settled = read_terminal(master, answer)
+        if exit_code:
+            assert f"Bash failed. Exit code: {exit_code}." in settled, ("quiet view hid tool failure", settled)
+        if signal_failure:
+            assert "Process-group signaling reported a failure." in settled, ("quiet view hid cleanup warning", settled)
+        assert "inspection-only-output" not in settled, ("routine tool output leaked", settled)
+        effect = state / "effect-count"
+        assert effect.read_text() == "unsafe" if decision == "allow-action" else not effect.exists()
+        os.write(master, b"/details\n")
+        details = read_terminal(master, "Details complete")
+        assert "Tool Result:" in details, details
+        if decision == "allow-action":
+            assert "inspection-only-output" in details, ("saved tool output unavailable on inspection", details)
+        # A resize must retain the exact non-tail Unicode cursor without prose.
+        os.write(master, "next café!\x1b[D\x1b[DX".encode())
+        read_terminal(master, "rui> next cafXé!")
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 32, 0, 0))
+        resized = read_terminal(master, "rui> next cafXé!")
+        assert "terminal resized" not in resized, resized
+        os.write(master, b"Y")
+        read_terminal(master, "rui> next cafXYé!")
         caller.send_signal(signal.SIGTERM)
         assert caller.wait(timeout=5) == 0, caller.stderr.read()
         actual = termios.tcgetattr(slave)
@@ -695,8 +740,21 @@ def persistent_permission_case():
             actual[3] &= ~mask
             original[3] &= ~mask
         assert actual == original, "signal after inspection handoff did not restore terminal"
+        # Quiet proposal fields must still be consumed and validated on opening.
+        proxy.route = "/v1/proposal-field"
+        proxy.rewrite = lambda response: response[:-1] if b"effect-count" in response else response
+        caller = subprocess.Popen([str(fixture.RUI), "session", "--persistent", "--store", str(store),
+            "--session", reference], env={**os.environ, "HOME": str(home)},
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        _, errors = terminal_exit(caller, master)
+        assert caller.returncode != 0 and b"TruncatedResponse" in errors, errors
+        actual = termios.tcgetattr(slave)
+        if sys.platform == "darwin":
+            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+            actual[3] &= ~mask
+        assert actual == original, "hidden proposal failure left terminal configuration changed"
         completed = True
-        print("persistent permission: draft/cursor retained, exact fresh inspection, paste grants nothing, one-shot denial, external TERM cleanup passed", flush=True)
+        print(f"persistent permission: quiet transcript, exact fresh inspection, paste grants nothing, executable {decision}, quiet resize/cursor, hidden-field validation, TERM cleanup passed", flush=True)
     finally:
         observation_release.set()
         if caller is not None and caller.poll() is None:
@@ -944,6 +1002,9 @@ def main():
     persistent_pending_case()
     persistent_input_cases()
     persistent_permission_case()
+    persistent_permission_case("allow-action")
+    persistent_permission_case("allow-action", exit_code=7)
+    persistent_permission_case("allow-action", signal_failure=True)
     terminal_restoration_integration.main()
     canonical_failure_integration.main()
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-human-cli."))

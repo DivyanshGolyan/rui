@@ -288,7 +288,7 @@ def persistent_cases(state, library, home, store, host):
                     caller.send_signal(signal.SIGINT if case.endswith("-int") else signal.SIGTERM)
                 release.touch()
                 if case == "sync-handoff":
-                    resumed = human.read_terminal(output_master, "Admission unconfirmed")
+                    resumed = human.read_terminal(output_master, "Not confirmed")
                     resumed += human.read_terminal(output_master, "rui> next cafXé!")
                     assert "No actionable permission" in resumed, resumed
                     os.write(master, b"\x12")
