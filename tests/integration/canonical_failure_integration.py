@@ -458,11 +458,14 @@ def interactive_cases(state, binding=False, null_code=False):
                     accepted_request = proxy.exchanges[0][0]
                     accepted_key = json.loads(accepted_request)["key"]
                     deadline = time.monotonic() + 10
+                    # A backend reply does not join the visible transcript.
+                    # Finish this answer before a diagnostic command can cancel it.
+                    human.read_terminal(master, "accepted work remains accepted",
+                        timeout=deadline - time.monotonic(), composer=True)
                     while True:
                         os.write(master, b"/status\n")
-                        status = human.read_terminal(master, "Session: original/session")
-                        if not re.search(r"› [^\r\n]*(?:\x1b\[[0-9]+A)?\r\x1b\[[0-9]+C", status.split("Session: original/session", 1)[1]):
-                            status += human.read_terminal(master, "› ")
+                        status = human.read_terminal(master, "Session: original/session",
+                            timeout=deadline - time.monotonic(), composer=True)
                         # /status exposes unresolved frontend custody, independently
                         # of the accepted backend reply and canonical database.
                         if "Original reserved request:" not in status:
@@ -483,18 +486,27 @@ def interactive_cases(state, binding=False, null_code=False):
                     proxy.route = route
                 if binding and line is not None:
                     marker = reason if route == "/v1/configure" else "Decision not confirmed" if route == "/v1/control/permission-decision" else "Not confirmed"
-                    output = human.read_terminal(master, marker)
+                    deadline = time.monotonic() + 15
+                    output = human.read_terminal(master, marker, timeout=deadline - time.monotonic(),
+                        composer=route != "/v1/configure")
                     assert "other/session" not in output and '"answer"' not in output, output
                     original = proxy.exchanges[0][0]
                     key = json.loads(original)["key"]
                     record = home / ".config/rui/requests" / f"{key}.json"
                     assert record.read_bytes() == original, "unconfirmed reply replaced captured authority"
                     if route != "/v1/configure":
+                        # An unresolved Message intentionally suppresses consent
+                        # until exact recovery. Its composer, not Action readiness,
+                        # owns this diagnostic handoff.
+                        if route == "/v1/control/permission-decision":
+                            if "denied tool saved" not in output:
+                                output += human.read_terminal(master, "denied tool saved",
+                                    timeout=deadline - time.monotonic(), composer=True)
+                            elif "› " not in output.split("denied tool saved", 1)[1]:
+                                output += human.read_terminal(master, "› ", timeout=deadline - time.monotonic())
                         os.write(master, b"/status\n")
-                        diagnostic = human.read_terminal(master, f"Last submission error: {reason}")
+                        diagnostic = human.read_terminal(master, f"Last submission error: {reason}", composer=True)
                         assert key in diagnostic and "Ctrl-R retries this exact original" in diagnostic, diagnostic
-                        if "› " not in diagnostic.split(f"Last submission error: {reason}", 1)[1]:
-                            human.read_terminal(master, "› ")
                         # No ordinary no-op may retry an unresolved submission.
                         os.write(master, b"\n")
                         human.read_terminal(master, "› ")

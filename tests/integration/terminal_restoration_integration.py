@@ -655,6 +655,27 @@ def fatal_reporting_cases(state):
                 termios.tcflow(error_slave, termios.TCOON)
                 for fd in (master, slave, error_master, error_slave):
                     os.close(fd)
+        # Popen restores default SIGPIPE before exec. Rui's initialized IO
+        # runtime must still preserve the real error when stderr disconnects.
+        for args, error in diagnostics:
+            master, slave = pty.openpty()
+            read_error, write_error = os.pipe()
+            os.close(read_error)
+            original = termios.tcgetattr(slave)
+            error_flags = fcntl.fcntl(write_error, fcntl.F_GETFL)
+            try:
+                caller = subprocess.Popen([str(fixture.RUI), *args],
+                    env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=write_error)
+                assert caller.wait(timeout=3) == 1, "disconnected stderr replaced the real exit"
+                assert termios.tcgetattr(slave) == original
+                assert_file_flags(fcntl.fcntl(write_error, fcntl.F_GETFL), error_flags)
+                print(f"fatal reporting: {error.decode()} disconnected stderr passed", flush=True)
+            finally:
+                if caller is not None and caller.poll() is None:
+                    caller.kill()
+                    caller.wait(timeout=5)
+                for fd in (master, slave, write_error):
+                    os.close(fd)
         master, slave = pty.openpty()
         original = termios.tcgetattr(slave)
         try:
@@ -695,6 +716,34 @@ def fatal_reporting_cases(state):
                 caller.wait(timeout=5)
             os.close(master)
             os.close(slave)
+        master, slave = pty.openpty()
+        read_error, write_error = os.pipe()
+        os.close(read_error)
+        original = termios.tcgetattr(slave)
+        error_flags = fcntl.fcntl(write_error, fcntl.F_GETFL)
+        records_before = {path: path.read_bytes() for path in records.glob("*.json")}
+        try:
+            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "fatal/original"],
+                env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=write_error)
+            human.read_terminal(master, "› ", composer=True)
+            os.write(master, b"\x1b[")
+            assert caller.wait(timeout=6) == 1, "disconnected stderr bypassed acquired-terminal cleanup"
+            actual = termios.tcgetattr(slave)
+            if sys.platform == "darwin":
+                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                actual[3] &= ~mask
+                original[3] &= ~mask
+            assert actual == original
+            assert_file_flags(fcntl.fcntl(write_error, fcntl.F_GETFL), error_flags)
+            assert {path: path.read_bytes() for path in records.glob("*.json")} == records_before
+            assert fixture.command("inspect-session", "--store", store, "--session", "fatal/original")["session"]
+            print("fatal reporting: acquired terminal disconnected stderr passed", flush=True)
+        finally:
+            if caller is not None and caller.poll() is None:
+                caller.kill()
+                caller.wait(timeout=5)
+            for fd in (master, slave, write_error):
+                os.close(fd)
     finally:
         if proxy is not None:
             proxy.close()

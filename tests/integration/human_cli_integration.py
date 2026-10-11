@@ -1116,8 +1116,8 @@ def store_selection_cases(state, workspace, valid_store):
                 fixture.wait_for(lambda: "Host: unavailable" in run(home, "host", "status", "--store", destination), "created Host stopped")
 
 
-def action_ready(descriptor):
-    assert select.select([descriptor], [], [], 15)[0], "Action input flush did not finish"
+def action_ready(descriptor, timeout=15):
+    assert select.select([descriptor], [], [], timeout)[0], "Action input flush did not finish"
     assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
 
 
@@ -2207,13 +2207,20 @@ def main():
         assert permissions == {"event": "actionable_permissions", "actions": [pending, running]}, permissions
         assert attention["return"] == "attention" and attention["action"] == pending, attention
         master, slave = pty.openpty()
+        ready_read, ready_write = os.pipe()
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", sibling_session], env={**os.environ, "HOME": str(fresh_home)},
+            "--session", sibling_session], env={**os.environ, "HOME": str(fresh_home),
+                "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         try:
-            read_terminal(master, "a: Allow once / d: Deny (Enter)")
-            status = terminal_step(master, "/status", "a: Allow once / d: Deny (Enter)")
+            deadline = time.monotonic() + 15
+            read_terminal(master, "a: Allow once / d: Deny (Enter)", timeout=deadline - time.monotonic())
+            action_ready(ready_read, timeout=deadline - time.monotonic())
+            deadline = time.monotonic() + 15
+            os.write(master, b"/status\n")
+            status = read_terminal(master, "a: Allow once / d: Deny (Enter)", timeout=deadline - time.monotonic())
+            action_ready(ready_read, timeout=deadline - time.monotonic())
             assert status.count("Action requiring attention: ") == 2, status
             assert f"Action requiring attention: {pending}" in status and f"Action requiring attention: {running}" in status, status
             terminal_step(master, "/exit", "Detached.")
@@ -2223,6 +2230,8 @@ def main():
                 entered.kill()
                 entered.wait(timeout=5)
             os.close(master)
+            os.close(ready_read)
+            os.close(ready_write)
         run(home, "allow-action", "--store", store, "--session", sibling_session,
             "--action", running)
         fixture.wait_for(lambda: sibling_started.exists(), "approved sibling in flight")
