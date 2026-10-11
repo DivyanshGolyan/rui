@@ -1168,11 +1168,11 @@ def provider_prompt(master, ready, command=None):
     return output
 
 
-def terminal_bulk(master, command, marker="› "):
+def terminal_bulk(master, command, marker="› ", *, submit=True):
     fixture.wait_for(lambda: not termios.tcgetattr(master)[3] & termios.ICANON,
         "noncanonical terminal input")
     def send():
-        payload = (command + "\n").encode()
+        payload = (command + ("\n" if submit else "")).encode()
         for offset in range(0, len(payload), 1024):
             os.write(master, payload[offset:offset + 1024])
 
@@ -2844,12 +2844,54 @@ def main():
             body = json.loads(endpoint.requests[-1])
             assert next(item["content"][0]["text"] for item in reversed(body["input"])
                 if item.get("role") == "user") == long_text
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+            long_cluster = "a" + "\u0301" * 2048
+            for index, draft in enumerate((long_cluster, ("e" + "\u0301" * 1024) * 3,
+                                           "ab" + "\u0301" * 32767)):
+                marker = f"encoded row accepted {index}"
+                endpoint.responses.append(fixture.sse_answer(f"encoded-answer-{index}",
+                    f"encoded-reason-{index}", f"encoded-message-{index}", marker)[0])
+                before_draft = len(endpoint.requests)
+                # Do not race Enter against redraw: the complete unsent draft
+                # must remain renderable before any capture/transmission.
+                terminal_bulk(master, "\x1b[200~" + draft + "\x1b[201~", draft, submit=False)
+                assert entered.poll() is None and len(endpoint.requests) == before_draft
+                terminal_step(master, "", marker, composer=True)
+                body = json.loads(endpoint.requests[-1])
+                assert next(item["content"][0]["text"] for item in reversed(body["input"])
+                    if item.get("role") == "user") == draft
+            for index, (columns, draft, drawn) in enumerate((
+                    (80, "A中e\u0301\tB", "A中e\u0301    B\r\x1b[11C"),
+                    (8, "abcd\tQ", "› abcd\n>      \n> Q\r\x1b[3C"))):
+                fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
+                marker = f"tab row accepted {index}"
+                endpoint.responses.append(fixture.sse_answer(f"tab-answer-{index}",
+                    f"tab-reason-{index}", f"tab-message-{index}", marker)[0])
+                before_draft = len(endpoint.requests)
+                output = terminal_bulk(master, "\x1b[200~" + draft + "\x1b[201~",
+                    drawn.split("\n")[-1], submit=False)
+                assert drawn in output.replace("\r\n", "\n"), output
+                assert entered.poll() is None and len(endpoint.requests) == before_draft
+                fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+                terminal_step(master, "", marker, composer=True)
+                body = json.loads(endpoint.requests[-1])
+                assert next(item["content"][0]["text"] for item in reversed(body["input"])
+                    if item.get("role") == "user") == draft
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+            endpoint.responses.append(fixture.sse_answer("encoded-delete-answer", "encoded-delete-reason",
+                "encoded-delete-message", "encoded deletion intact")[0])
+            terminal_bulk(master, "\x1b[200~" + long_cluster + "\x1b[201~", long_cluster, submit=False)
+            terminal_step(master, "\x7fZ", "encoded deletion intact", composer=True)
+            body = json.loads(endpoint.requests[-1])
+            assert next(item["content"][0]["text"] for item in reversed(body["input"])
+                if item.get("role") == "user") == "Z", body
+            accepted_count = len(endpoint.requests)
             rejected = terminal_bulk(master, "Y" * (64 * 1024 + 1) + "\x7f", "input too long")
             assert "input too long" in rejected and "nothing sent" in rejected, rejected[-1000:]
-            assert len(endpoint.requests) == before + 1, "oversized input reached Host"
+            assert len(endpoint.requests) == accepted_count, "oversized input reached Host"
             rejected = terminal_step(master, "invalid\x00x", "Input rejected; nothing sent.")
             assert "Input rejected; nothing sent." in rejected and "--text FILE" not in rejected, rejected
-            assert len(endpoint.requests) == before + 1, "unsupported control reached Host"
+            assert len(endpoint.requests) == accepted_count, "unsupported control reached Host"
             assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
             assert termios.tcgetattr(master)[3] & termios.ICANON

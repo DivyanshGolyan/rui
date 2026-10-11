@@ -170,11 +170,16 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
         try status_writer.writeAll(word);
         column += width;
     }
-    const status_view = try viewport(status_writer.buffered(), 0, size.col - 1, 5);
+    var status_snapshot: [status_buffer.len]u8 = undefined;
+    const status_view = try viewport(status_writer.buffered(), 0, size.col - 1, 5, &status_snapshot);
     const heading: usize = if (status.len == 0) 0 else status_view.rows;
     const prompt_columns = try std.unicode.utf8CountCodepoints(prompt);
     if (heading + 1 >= size.row) return error.UncertainTerminalCursor;
-    const view = try viewport(bytes, cursor, size.col - prompt_columns - 1, @min(5, size.row - heading - 1));
+    // Visible raw bytes cannot exceed the complete semantic draft. Tabs expand
+    // only during emission, without consuming a second semantic-byte budget.
+    var snapshot: [@import("SessionInput.zig").capacity]u8 = undefined;
+    const columns = size.col - prompt_columns - 1;
+    const view = try viewport(bytes, cursor, columns, @min(5, size.row - heading - 1), &snapshot);
     try self.clear();
     // Own the spacer along with the composer, so repeated redraws erase it
     // rather than growing scrollback or moving transcript rows.
@@ -183,7 +188,7 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
     try self.write(status_style.code(self.colour));
     for (0..heading) |row| {
         if (row != 0) try self.write("\r\n");
-        try self.write(status_view.data[row][0..status_view.lengths[row]]);
+        try self.writeRow(status_view.data[row], size.col - 1);
     }
     try self.write(Style.normal.code(self.colour));
     for (0..view.rows) |row| {
@@ -191,7 +196,7 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
         try self.write((if (std.mem.eql(u8, prompt, "> ")) Style.attention else Style.user).code(self.colour));
         try self.write(if (row == 0) prompt else "> ");
         try self.write(Style.normal.code(self.colour));
-        try self.write(view.data[row][0..view.lengths[row]]);
+        try self.writeRow(view.data[row], columns);
     }
     var control: [32]u8 = undefined;
     const up = view.rows - 1 - view.caret.row;
@@ -202,54 +207,96 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
     self.size = size;
 }
 
+fn writeRow(self: *Self, bytes: []const u8, columns: usize) !void {
+    if (std.mem.indexOfScalar(u8, bytes, '\t') == null) return self.write(bytes);
+    var clusters: Clusters = .{ .bytes = bytes };
+    var start: usize = 0;
+    var column: usize = 0;
+    while (try clusters.next()) |cluster| {
+        const width = cluster.widthAt(column, columns);
+        if (cluster.bytes[0] == '\t') {
+            try self.write(bytes[start .. clusters.offset - cluster.bytes.len]);
+            try self.write("        "[0..width]);
+            start = clusters.offset;
+        }
+        column += width;
+    }
+    try self.write(bytes[start..]);
+}
+
 const Position = struct { row: usize = 0, col: usize = 0 };
 const Viewport = struct {
-    data: [5][4096]u8 = undefined,
-    lengths: [5]usize = @splat(0),
+    data: [5][]const u8 = @splat(""),
     rows: usize,
     first: usize,
     caret: Position,
 };
 
-fn viewport(bytes: []const u8, cursor: usize, columns: usize, limit: usize) !Viewport {
+const Clusters = struct {
+    bytes: []const u8,
+    offset: usize = 0,
+    prior: ?c_int = null,
+    state: c_int = 0,
+
+    const Cluster = struct {
+        bytes: []const u8,
+        width: usize,
+
+        fn widthAt(self: Cluster, column: usize, columns: usize) usize {
+            return if (self.bytes[0] == '\t') @min(8 - column % 8, columns) else self.width;
+        }
+    };
+
+    fn next(self: *Clusters) !?Cluster {
+        if (self.offset == self.bytes.len) return null;
+        const start = self.offset;
+        var width: usize = 0;
+        while (self.offset < self.bytes.len) {
+            const n = std.unicode.utf8ByteSequenceLength(self.bytes[self.offset]) catch return error.UncertainTerminalCursor;
+            if (n > self.bytes.len - self.offset) return error.UncertainTerminalCursor;
+            const scalar: c_int = @intCast(std.unicode.utf8Decode(self.bytes[self.offset..][0..n]) catch return error.UncertainTerminalCursor);
+            if (self.prior) |p| {
+                var next_state = self.state;
+                if (utf8proc_grapheme_break_stateful(p, scalar, &next_state) != 0 and self.offset != start) break;
+                self.state = next_state;
+            }
+            self.prior = scalar;
+            self.offset += n;
+            width = @max(width, @as(usize, @intCast(@max(0, utf8proc_charwidth(scalar)))));
+            if (scalar == 0xfe0f or scalar == 0x20e3 or scalar >= 0x1f1e6 and scalar <= 0x1f1ff) width = @max(width, 2);
+        }
+        return .{ .bytes = self.bytes[start..self.offset], .width = width };
+    }
+};
+
+fn viewport(bytes: []const u8, cursor: usize, columns: usize, limit: usize, storage: []u8) !Viewport {
     var caret: Position = .{};
     var result: Viewport = undefined;
     for (0..2) |pass| {
         var pos: Position = .{};
-        var offset: usize = 0;
-        var prior: ?c_int = null;
-        var state: c_int = 0;
-        while (offset < bytes.len) {
-            const start = offset;
-            var width: usize = 0;
-            while (offset < bytes.len) {
-                const n = std.unicode.utf8ByteSequenceLength(bytes[offset]) catch return error.UncertainTerminalCursor;
-                const scalar: c_int = @intCast(std.unicode.utf8Decode(bytes[offset..][0..n]) catch return error.UncertainTerminalCursor);
-                if (prior) |p| {
-                    var next_state = state;
-                    if (utf8proc_grapheme_break_stateful(p, scalar, &next_state) != 0 and offset != start) break;
-                    state = next_state;
-                }
-                prior = scalar;
-                offset += n;
-                width = @max(width, @as(usize, @intCast(@max(0, utf8proc_charwidth(scalar)))));
-                if (scalar == 0xfe0f or scalar == 0x20e3 or scalar >= 0x1f1e6 and scalar <= 0x1f1ff) width = @max(width, 2);
-            }
-            const special = bytes[start];
-            if (special == '\t') width = @min(8 - pos.col % 8, columns);
+        var clusters: Clusters = .{ .bytes = bytes };
+        var used: usize = 0;
+        while (try clusters.next()) |cluster| {
+            const start = clusters.offset - cluster.bytes.len;
+            const special = cluster.bytes[0];
+            var width = cluster.widthAt(pos.col, columns);
             if (width > columns) return error.UncertainTerminalCursor;
-            if (special != '\n' and pos.col + width > columns) pos = .{ .row = pos.row + 1 };
+            if (special != '\n' and pos.col + width > columns) {
+                pos = .{ .row = pos.row + 1 };
+                width = cluster.widthAt(0, columns);
+            }
             if (start == cursor) caret = pos;
             if (pass == 1 and special != '\n' and pos.row >= result.first and pos.row < result.first + result.rows) {
                 const row = pos.row - result.first;
-                const n = if (special == '\t') width else offset - start;
-                const used = result.lengths[row];
-                if (used + n > result.data[row].len) return error.UncertainTerminalCursor;
-                if (special == '\t') @memset(result.data[row][used..][0..n], ' ') else @memcpy(result.data[row][used..][0..n], bytes[start..offset]);
-                result.lengths[row] += n;
+                const n = cluster.bytes.len;
+                if (n > storage.len - used) return error.UncertainTerminalCursor;
+                @memcpy(storage[used..][0..n], cluster.bytes);
+                const row_start = used - result.data[row].len;
+                used += n;
+                result.data[row] = storage[row_start..used];
             }
             if (special == '\n') pos = .{ .row = pos.row + 1 } else pos.col += width;
-            if (offset == cursor) caret = pos;
+            if (clusters.offset == cursor) caret = pos;
         }
         if (cursor == 0) caret = .{};
         if (pass == 0) {
