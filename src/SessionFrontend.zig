@@ -48,7 +48,7 @@ read_columns: usize = 0,
 // Worker result is inspected only after join; input policy stays UI-owned.
 history_render_started: bool = false,
 prepared_action: ?u64 = null,
-permission_output_started: bool = false,
+reader_output_started: bool = false,
 choice_action: ?u64 = null,
 choice_buffer: [64]u8 = undefined,
 choice: Editor = undefined,
@@ -106,7 +106,10 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
         return err;
     }
     if (self.submission != null) self.recoveryGuide();
-    try self.terminal.detached(store, session);
+    self.terminal.detached(store, session) catch |err| {
+        if (self.submission == null) self.recoveryGuide();
+        return err;
+    };
 }
 
 fn recoveryGuide(self: *const Self) void {
@@ -211,8 +214,10 @@ fn driveActive(self: *Self) !void {
             self.dirty = true;
         }
         if (self.reader.take()) |bytes| {
-            if (self.read_phase == .permission) self.permission_output_started = true;
-            try self.terminal.permanent(bytes);
+            if (bytes.len != 0) {
+                self.reader_output_started = true;
+                try self.terminal.permanent(bytes);
+            }
             self.reader.acknowledge();
         }
         if (self.reader.thread != null and self.reader.completed()) try self.settleReader();
@@ -231,20 +236,22 @@ fn driveActive(self: *Self) !void {
                 if (requested == .latest or self.history_cursor != null) {
                     self.read_phase = if (requested == .latest) .details else .history;
                     self.history_render_started = false;
+                    self.reader_output_started = false;
                     try self.reader.start(self.init.io, self, history);
                 } else self.notice = "  No older Conversation rows.";
             } else if (std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at) {
                 self.read_phase = .activity;
+                self.reader_output_started = false;
                 try self.reader.start(self.init.io, self, scan);
             } else if (!self.opening and self.submission == null and self.current.first_action != null and self.input.pending() == .none) {
                 self.read_phase = .permission;
                 self.prepared_action = null;
-                self.permission_output_started = false;
+                self.reader_output_started = false;
                 try self.reader.start(self.init.io, self, permission);
             }
         }
         // A transcript stream is indivisible: notices cannot split its text.
-        if (self.notice != null and self.reader.thread == null) {
+        if (self.notice != null and !self.opening and (self.reader.thread == null or !self.reader_output_started)) {
             const notice = self.notice.?;
             self.notice = null;
             try self.terminal.permanent("\n");
@@ -269,7 +276,7 @@ fn driveActive(self: *Self) !void {
             self.read_phase = .activity;
             self.dirty = true;
         }
-        if (self.dirty and !self.opening and (self.reader.thread == null or self.read_phase == .permission and !self.permission_output_started)) {
+        if (self.dirty and !self.opening and (self.reader.thread == null or !self.reader_output_started)) {
             const view: Input.View = if (self.choice_action != null) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
             const status = if (self.choice_action != null) "a: Allow once / d: Deny (Enter)" else if (self.submission != null) switch (self.submissionState()) {
                 .submitting => "Sending…",

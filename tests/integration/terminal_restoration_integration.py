@@ -25,6 +25,7 @@ PROBE = r"""
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -33,6 +34,7 @@ PROBE = r"""
 #include <unistd.h>
 
 static int disabled = 0;
+static int detach_phase = 0;
 
 static void record(const char *text) {
     int fd = open(getenv("RUI_TERMINAL_PROBE"), O_WRONLY | O_CREAT | O_APPEND, 0600);
@@ -102,6 +104,47 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     }
     errno = saved_errno;
     return result;
+}
+
+#ifndef __APPLE__
+#define probe_fcntl fcntl
+#endif
+int probe_fcntl(int fd, int command, ...) {
+#ifdef __APPLE__
+    int (*real_fcntl)(int, int, ...) = fcntl;
+#else
+    int (*real_fcntl)(int, int, ...) = dlsym(RTLD_NEXT, "fcntl");
+#endif
+    if (!real_fcntl || real_fcntl == probe_fcntl) _exit(98);
+    if (command == F_GETFL || command == F_GETFD) return real_fcntl(fd, command);
+    /* Only the reached integer-valued commands are supported by this probe. */
+    if (command != F_SETFL && command != F_SETFD && command != F_DUPFD
+#ifdef F_DUPFD_CLOEXEC
+        && command != F_DUPFD_CLOEXEC
+#endif
+    ) { record("unsupported-fcntl\n"); _exit(99); }
+    va_list args;
+    va_start(args, command);
+    int value = va_arg(args, int);
+    va_end(args);
+    if (fd == 1 && command == F_SETFL && detach_phase) {
+        const char *fault = getenv("RUI_TERMINAL_FAULT");
+        if (detach_phase == 1 && !(value & O_NONBLOCK)) {
+            int result = real_fcntl(fd, command, value);
+            if (!result) { detach_phase = 2; record("cleanup-flags-restored\n"); }
+            return result;
+        }
+        if (detach_phase == 2 && (value & O_NONBLOCK)) {
+            detach_phase = 3;
+            record("detach-enable\n");
+            if (!strcmp(fault, "detach-enable")) { errno = EIO; return -1; }
+        } else if (detach_phase == 3 && !(value & O_NONBLOCK)) {
+            detach_phase = 4;
+            record("detach-reset\n");
+            if (!strcmp(fault, "detach-reset")) { errno = EIO; return -1; }
+        }
+    }
+    return real_fcntl(fd, command, value);
 }
 
 static int probe_fsync(int fd) {
@@ -174,7 +217,10 @@ static int probe_tcsetattr(int fd, int action, const struct termios *attrs) {
             return -1;
         }
     }
-    return real_tcsetattr(fd, action, attrs);
+    int result = real_tcsetattr(fd, action, attrs);
+    const char *arm = getenv("RUI_TERMINAL_DETACH_ARM");
+    if (!result && fd == 0 && (attrs->c_lflag & ICANON) && arm && !access(arm, F_OK)) detach_phase = 1;
+    return result;
 }
 
 #ifdef __APPLE__
@@ -187,6 +233,7 @@ INTERPOSE(probe_write, write)
 INTERPOSE(probe_fsync, fsync)
 INTERPOSE(probe_tcdrain, tcdrain)
 INTERPOSE(probe_tcsetattr, tcsetattr)
+INTERPOSE(probe_fcntl, fcntl)
 #else
 ssize_t writev(int fd, const struct iovec *iov, int count) { return probe_writev(fd, iov, count); }
 ssize_t write(int fd, const void *bytes, size_t count) { return probe_write(fd, bytes, count); }
@@ -198,11 +245,16 @@ int tcsetattr(int fd, int action, const struct termios *attrs) { return probe_tc
 
 
 FORWARD_DRIVER = r"""
+#include <fcntl.h>
 #include <sys/uio.h>
 #include <termios.h>
 #include <unistd.h>
 
 int main(void) {
+    int flags = fcntl(1, F_GETFL);
+    if (flags < 0 || fcntl(1, F_SETFL, flags | O_NONBLOCK) ||
+        fcntl(1, F_GETFL) != (flags | O_NONBLOCK) || fcntl(1, F_SETFL, flags) ||
+        fcntl(1, F_GETFL) != flags) return 6;
     struct termios before, changed, after;
     if (tcgetattr(0, &before)) return 1;
     changed = before;
@@ -246,7 +298,7 @@ def check_forwarding(state, library):
         assert output == b"\x1b[?2004l" * 2, output
         assert log.read_text().splitlines() == ["restore-flush", "restore-flush", "disable", "disable", "drain"]
         assert termios.tcgetattr(slave) == original, "fixture forwarder did not restore attributes"
-        print("terminal fixture forwarding: write/writev/tcdrain/tcsetattr passed", flush=True)
+        print("terminal fixture forwarding: write/writev/tcdrain/tcsetattr/fcntl passed", flush=True)
     finally:
         if caller is not None:
             if caller.poll() is None:
@@ -537,6 +589,8 @@ def fatal_reporting_cases(state):
             human.read_terminal(master, "› ")
             proxy = canonical.ReplyProxy(host, "/v1/message",
                 lambda response: b"" if len(proxy.exchanges) == 2 else response)
+            records = home / ".config/rui/requests"
+            before = {path: path.read_bytes() for path in records.glob("*.json")}
             os.write(master, b"accepted A\n")
             human.read_terminal(master, "ACCEPTED-A")
             human.terminal_step(master, "/status")
@@ -550,6 +604,10 @@ def fatal_reporting_cases(state):
             assert second["key"].encode() in errors and first["key"].encode() not in errors, errors
             assert b"not confirmed" in errors and b"rui recover" in errors and b"IncompleteTerminalInput" in errors, errors
             assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == saved, "fatal exit replaced original"
+            assert proxy.mutations == [("/v1/message", body) for body, _ in proxy.exchanges]
+            after = {path: path.read_bytes() for path in records.glob("*.json")}
+            assert set(after) - set(before) == {records / f"{request['key']}.json" for request in (first, second)}
+            assert after == {**before, **{records / f"{json.loads(body)['key']}.json": body for body, _ in proxy.exchanges}}
             actual = termios.tcgetattr(slave)
             if sys.platform == "darwin":
                 mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
@@ -598,6 +656,7 @@ def decision_reporting_cases(state):
             session = f"reporting/{name}"
             human.run(home, "configure", "--store", store, "--session", session,
                 "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+            before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
             master, slave = pty.openpty()
             read_ready, write_ready = os.pipe()
             original = termios.tcgetattr(slave)
@@ -607,15 +666,17 @@ def decision_reporting_cases(state):
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(write_ready)},
                     pass_fds=(write_ready,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 human.read_terminal(master, "› ")
-                os.write(master, b"propose exact decision\n")
-                human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
-                human.action_ready(read_ready)
                 if lost:
                     def hold(response):
                         received.set()
                         assert reply_release.wait(15)
                         return b""
                     proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", hold)
+                else:
+                    proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
+                os.write(master, b"propose exact decision\n")
+                human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+                human.action_ready(read_ready)
                 os.write(master, b"a\n" if decision == "allow_once" else b"d\n")
                 if lost:
                     assert received.wait(10)
@@ -632,7 +693,14 @@ def decision_reporting_cases(state):
                 record, = [path for path in records if json.loads(path.read_bytes())["kind"] == "permission_decision"]
                 saved = record.read_bytes()
                 request = json.loads(saved)
-                message, = [json.loads(path.read_bytes()) for path in records if json.loads(path.read_bytes())["kind"] == "message"]
+                message_record, = [path for path in records if json.loads(path.read_bytes())["kind"] == "message"]
+                message_bytes = message_record.read_bytes()
+                message = json.loads(message_bytes)
+                after = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
+                assert set(after) - set(before) == {record, message_record}
+                assert after == {**before, record: saved, message_record: message_bytes}
+                assert proxy.mutations == [("/v1/message", message_bytes), ("/v1/control/permission-decision", saved)]
+                assert len(proxy.exchanges) == 1 and proxy.exchanges[0][0] == saved
                 assert request["key"].encode() in errors and message["key"].encode() not in errors, errors
                 assert request["decision"] == decision
                 assert b"rui recover " + request["key"].encode() in errors and b"rui result" not in errors, errors
@@ -642,8 +710,8 @@ def decision_reporting_cases(state):
                 if lost:
                     assert proxy.exchanges[0][0] == saved and not reply_release.is_set()
                     reply_release.set()
-                    proxy.close()
-                    proxy = None
+                proxy.close()
+                proxy = None
                 recovered = json.loads(human.run(home, "recover", request["key"], "--json"))["answer"]
                 assert recovered["status"] == "accepted" and recovered["replayed"] is True, recovered
                 assert record.read_bytes() == saved
@@ -659,6 +727,97 @@ def decision_reporting_cases(state):
                 print(f"decision reporting: {name} passed", flush=True)
             finally:
                 reply_release.set()
+                if caller is not None and caller.poll() is None:
+                    caller.kill()
+                    caller.wait(timeout=5)
+                if proxy is not None:
+                    proxy.close()
+                    proxy = None
+                for fd in (master, slave, read_ready, write_ready):
+                    os.close(fd)
+    finally:
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+
+
+def detach_reporting_cases(state, library):
+    """A post-restoration notice error cannot erase an accepted intent."""
+    root = state / "detach-reporting"
+    root.mkdir()
+    home, store = root / "home", root / "store"
+    home.mkdir(mode=0o700)
+    cases = [(kind, fault) for kind in ("message", "allow_once", "deny") for fault in ("detach-enable", "detach-reset")]
+    responses = []
+    for kind, fault in cases:
+        name = f"{kind}-{fault}"
+        if kind != "message":
+            responses.append(fixture.sse_tool_calls(name, [("bash", name, json.dumps({"cmd": f"printf once >> effect-{name}", "timeout_ms": 1000}))]))
+        responses.append(fixture.sse_answer(f"{name}-a", f"{name}-r", f"{name}-m", f"SETTLED-{name}")[0])
+    endpoint = fixture.SuccessEndpoint(responses)
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = caller = proxy = None
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        for kind, fault in cases:
+            name = f"{kind}-{fault}"
+            session = f"detach/{name}"
+            human.run(home, "configure", "--store", store, "--session", session,
+                "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+            master, slave = pty.openpty()
+            read_ready, write_ready = os.pipe()
+            original, flags = termios.tcgetattr(slave), fcntl.fcntl(slave, fcntl.F_GETFL)
+            log, arm = root / f"{name}.log", root / f"{name}.arm"
+            try:
+                caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), session],
+                    env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(write_ready),
+                        "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                        "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": fault, "RUI_TERMINAL_DETACH_ARM": str(arm)},
+                    pass_fds=(write_ready,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                human.read_terminal(master, "› ")
+                proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: response)
+                os.write(master, b"accepted original\n")
+                if kind != "message":
+                    human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+                    human.action_ready(read_ready)
+                    os.write(master, b"a\n" if kind == "allow_once" else b"d\n")
+                human.read_terminal(master, f"SETTLED-{name}")
+                status = human.terminal_step(master, "/status")
+                assert "Original reserved request:" not in status, status
+                before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
+                records = [path for path in before if json.loads(before[path]).get("session") == session]
+                intent_kind = "message" if kind == "message" else "permission_decision"
+                record, = [path for path in records if json.loads(before[path])["kind"] == intent_kind]
+                request = json.loads(before[record])
+                arm.touch()
+                os.write(master, b"\x03")
+                output, errors = human.terminal_exit(caller, master)
+                assert caller.returncode == 1 and b"TerminalCleanupFailed" in errors, (output, errors)
+                guide = b"Message accepted; do not resubmit it" if kind == "message" else b"Decision accepted; do not repeat it"
+                assert guide in errors and request["key"].encode() in errors, errors
+                assert (b"rui result " if kind == "message" else b"rui recover ") + request["key"].encode() in errors
+                assert "cleanup-flags-restored\ndetach-enable\n" in log.read_text(), log.read_text()
+                assert log.read_text().count(fault + "\n") == 1
+                actual = termios.tcgetattr(slave)
+                if sys.platform == "darwin":
+                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                    actual[3] &= ~mask
+                    original[3] &= ~mask
+                assert actual == original
+                assert fcntl.fcntl(slave, fcntl.F_GETFL) == (flags if fault == "detach-enable" else flags | os.O_NONBLOCK)
+                assert {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")} == before
+                messages = [before[path] for path in records if json.loads(before[path])["kind"] == "message"]
+                assert proxy.mutations == [("/v1/message", messages[0])] + ([] if kind == "message" else [("/v1/control/permission-decision", before[record])])
+                proxy.close()
+                proxy = None
+                assert json.loads(human.run(home, "recover", request["key"], "--json"))["answer"]["replayed"] is True
+                effect = root / f"effect-{name}"
+                assert (effect.read_bytes() if effect.exists() else b"") == (b"once" if kind == "allow_once" else b"")
+                print(f"detach reporting: {name} exact accepted guide, restored termios and saved replay passed", flush=True)
+            finally:
                 if caller is not None and caller.poll() is None:
                     caller.kill()
                     caller.wait(timeout=5)
@@ -704,6 +863,11 @@ def main(selected=None):
         if selected in (None, "decisions"):
             decision_reporting_cases(state)
         if selected == "decisions":
+            completed = True
+            return
+        if selected in (None, "detach"):
+            detach_reporting_cases(state, library)
+        if selected == "detach":
             completed = True
             return
         host = fixture.start_host(store, None)

@@ -140,6 +140,7 @@ class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         self.route = route
         self.rewrite = rewrite
         self.exchanges = []
+        self.mutations = []
         super().__init__(str(self.path), Exchange)
         os.chmod(self.path, 0o600)
         self.thread = threading.Thread(target=self.serve_forever)
@@ -169,6 +170,9 @@ class Exchange(socketserver.BaseRequestHandler):
             part = self.request.recv(length - len(body))
             assert part, "truncated request body"
             body += part
+        route = head.split(b" ")[1].decode()
+        if route in ("/v1/message", "/v1/control/permission-decision"):
+            self.server.mutations.append((route, body))
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as backend:
             backend.settimeout(15)
             backend.connect(str(self.server.backend))
@@ -179,7 +183,6 @@ class Exchange(socketserver.BaseRequestHandler):
                 if not part:
                     break
                 response += part
-        route = head.split(b" ")[1].decode()
         if route == self.server.route:
             self.server.exchanges.append((body, response))
             if self.server.rewrite is not None:
@@ -423,6 +426,11 @@ def interactive_cases(state, binding=False, null_code=False):
                 else ["--store", str(store), "--provider", "codex", "--model", "gpt-6-luna"])
             proxy = None
             caller = None
+            before_messages = {
+                path.name: path.read_bytes()
+                for path in (home / ".config/rui/requests").glob("*.json")
+                if json.loads(path.read_bytes())["kind"] == "message"
+            }
             try:
                 if line is None or route == "/v1/control/permission-decision":
                     proxy = ReplyProxy(host, route, rewrite)
@@ -432,7 +440,8 @@ def interactive_cases(state, binding=False, null_code=False):
                 if line is not None:
                     if route == "/v1/control/permission-decision":
                         proposal = human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
-                        assert "Run Bash:\n  true" in proposal and f"Workspace: {state}" in proposal, proposal
+                        assert "Run Bash:\n  true" in proposal, proposal
+                        human.assert_permission_workspace(proposal, state)
                         human.action_ready(ready_read)
                     else:
                         human.read_terminal(master, "› ")
@@ -466,7 +475,10 @@ def interactive_cases(state, binding=False, null_code=False):
                         for path in (home / ".config/rui/requests").glob("*.json")
                         if json.loads(path.read_bytes())["kind"] == "message"
                     }
+                    assert message_records == {**before_messages, f"{accepted_key}.json": accepted_request}
+                    assert set(message_records) - set(before_messages) == {f"{accepted_key}.json"}
                     assert message_records[f"{accepted_key}.json"] == accepted_request
+                    assert len(proxy.exchanges) == 1 and proxy.mutations == [("/v1/message", accepted_request)]
                     proxy.rewrite = None
                     proxy.route = route
                 if binding and line is not None:
@@ -528,6 +540,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     assert "outcome unconfirmed" not in errors and "Ctrl-R" not in errors, errors
                     assert "Original reserved request:" not in output and "Not confirmed" not in output, output
                     assert "› " not in output, "fatal Activity read resumed the composer"
+                    assert proxy.mutations == [("/v1/message", accepted_request)], "fatal read retransmitted Message"
                     assert {
                         path.name: path.read_bytes()
                         for path in (home / ".config/rui/requests").glob("*.json")

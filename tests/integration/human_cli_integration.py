@@ -90,6 +90,13 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False):
         .replace("\x1b[?2004h", "").replace("\x1b[?2004l", ""))
 
 
+def assert_permission_workspace(output, workspace, columns=80):
+    """Join only hanging-indent layout breaks; retain every exact path byte."""
+    shown = output.split("\n  Workspace: ", 1)[1].split("\n  Time limit:", 1)[0]
+    assert shown.replace("\n  ", "") == str(workspace), output
+    assert all(len(line) <= columns for line in ("  Workspace: " + shown).splitlines()), output
+
+
 def terminal_exit(caller, master, timeout=5):
     """Own both output streams until exit, including a late rendering prefix."""
     errors_fd = caller.stderr.fileno()
@@ -498,6 +505,8 @@ def persistent_opening_case():
         record = (set(records.glob("*.json")) - before).pop()
         fixture.wait_for(lambda: fixture.completed_observation(store, record.stem), "Admission while history preparation is held")
         assert json.loads(record.read_text())["text"]["value"] == "during history é"
+        composing = read_terminal(master, "› next cafXé!", timeout=5)
+        assert not history_release.is_set() and "saved answer" not in composing and "saved user" not in composing
         history_release.set()
         failed = read_terminal(master, "History unavailable; older cursor and draft retained")
         assert "saved answer" not in failed and "saved user" not in failed, "failed history exposed a staged prefix"
@@ -874,7 +883,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert "item_id:" not in transcript and "call_id:" not in transcript and "arguments:" not in transcript, transcript
         assert transcript.count("Workspace:") == 1 and transcript.count("Run Bash:") == 1, transcript
         assert f"\n? Run Bash:\n  {json.loads(arguments)['cmd']}\n" in transcript, transcript
-        assert f"Workspace: {state}" in transcript, transcript
+        assert_permission_workspace(transcript, state, 100)
         assert transcript.count("Time limit: 30000 ms") == 1, transcript
         assert transcript.count(json.loads(arguments)["cmd"]) == 1, transcript
         assert all(noise not in transcript for noise in ("You:", "Assistant:", "Rui:", "persistent-call-id")), transcript
@@ -1260,9 +1269,77 @@ int fsync(int fd) {
         "sync uncertainty, listing asymmetry", flush=True)
 
 
+def silent_read_edit_cases():
+    """Silent observation must not hide accepted draft edits with ECHO off."""
+    import canonical_failure_integration as canonical
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-silent-edit."))
+    home, store = state / "home", state / "store"
+    home.mkdir(mode=0o700)
+    host = caller = proxy = None
+    completed = False
+    try:
+        host = fixture.start_host(store, None)
+        for index, route in enumerate(("/v1/inspect-session", "/v1/activity-page")):
+            reference = f"silent/{index}"
+            run(home, "configure", "--store", store, "--session", reference,
+                "--workspace", state, "--provider", "codex", "--model", "model-a")
+            master, slave = pty.openpty()
+            original = termios.tcgetattr(slave)
+            held, release = threading.Event(), threading.Event()
+            try:
+                caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), reference],
+                    env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                read_terminal(master, "› ")
+                def hold(response):
+                    held.set()
+                    assert release.wait(15), "silent read was not released"
+                    return response
+                proxy = canonical.ReplyProxy(host, route, hold)
+                terminal_gate(caller, master, held, ("silent observation", route))
+                os.write(master, "visible café!\x1b[D\x1b[DX".encode())
+                output = read_terminal(master, "› visible cafXé!", timeout=5)
+                assert not release.is_set() and "Run Bash:" not in output
+                release.set()
+                before = set((home / ".config/rui/requests").glob("*.json"))
+                os.write(master, b"\n")
+                fixture.wait_for(lambda: len(set((home / ".config/rui/requests").glob("*.json")) - before) == 1,
+                    "visible draft capture")
+                record, = set((home / ".config/rui/requests").glob("*.json")) - before
+                assert json.loads(record.read_bytes())["text"]["value"] == "visible cafXé!"
+                os.write(master, b"\x03")
+                _, errors = terminal_exit(caller, master)
+                assert caller.returncode == 0, errors
+                actual = termios.tcgetattr(slave)
+                if sys.platform == "darwin":
+                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                    actual[3] &= ~mask
+                    original[3] &= ~mask
+                assert actual == original
+                print(f"silent observation: {route} visible Unicode edit and exact capture passed", flush=True)
+            finally:
+                release.set()
+                if caller is not None and caller.poll() is None:
+                    caller.kill()
+                    caller.wait(timeout=5)
+                if proxy is not None:
+                    proxy.close()
+                    proxy = None
+                os.close(master)
+                os.close(slave)
+        completed = True
+    finally:
+        if host is not None:
+            fixture.stop_host(host)
+        if completed:
+            shutil.rmtree(state)
+        else:
+            print(f"retained silent-edit failure state: {state}", file=sys.stderr)
+
+
 def main():
     import canonical_failure_integration
     import terminal_restoration_integration
+    silent_read_edit_cases()
     command_entry_cases()
     persistent_opening_case()
     persistent_pending_case()
@@ -2393,7 +2470,7 @@ def main():
             assert "\n› interactive request" in proposal, proposal
             shown_command = proposal.split("\n? Run Bash:\n", 1)[1].split("\n  Workspace:", 1)[0]
             assert "".join(line.removeprefix("  ") for line in shown_command.splitlines()) == json.loads(padded_arguments)["cmd"], proposal
-            assert f"Workspace: {workspace.resolve()}" in proposal, proposal
+            assert_permission_workspace(proposal, workspace.resolve())
             assert "call ID:" not in proposal and "request:" not in proposal and "return:" not in proposal, proposal
             assert "é" in proposal and "\u202e" not in proposal and "hidden" not in proposal, proposal
             interactive_key = fixture.command("inspect-session", "--store", store, "--session", interactive)["selected_message"]
@@ -2857,6 +2934,7 @@ def main():
             assert b"Message accepted; do not resubmit it" in errors, errors
             assert f"rui result {saved_key}".encode() in errors, errors
             assert b"Detached." not in lost and b"Not confirmed" not in lost, lost
+            assert proxy.mutations == [("/v1/message", original)], "fatal observation retransmitted Message"
             actual = termios.tcgetattr(slave)
             if sys.platform == "darwin":
                 mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
