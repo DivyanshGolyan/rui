@@ -515,8 +515,7 @@ fn handoff(self: *Self) !void {
     read_result catch |err| if (err == error.CanonicalStoreFailure) return err;
     joined catch |err| if (err == error.CanonicalStoreFailure) return err;
     read_result catch |err| {
-        if (err != error.Cancelled) return err;
-        self.notice = "! Activity observation interrupted; displayed prefix may be incomplete. Host work unchanged.";
+        if (err != error.Cancelled or self.reader_output_started) return err;
     };
     // A noncanonical Admission failure retains its original and diagnostic;
     // the resumed composer presents the one actionable uncertainty status.

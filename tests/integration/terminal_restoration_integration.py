@@ -109,10 +109,28 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     if (real_write == write) _exit(96);
 #endif
     if (!real_write || real_write == probe_write) _exit(96);
+    const char *fault = getenv("RUI_TERMINAL_FAULT");
+    const char *arm = getenv("RUI_TERMINAL_STREAM_ARM");
+    const char *marker = "VISIBLE-CANCEL-PREFIX";
+    static size_t matched = 0;
+    static int visible = 0, stream_held = 0;
+    int stream = fd == 1 && fault && !strcmp(fault, "visible-stream") && arm && !access(arm, F_OK);
+    int reset = count == 4 && !memcmp(bytes, "\033[0m", 4);
+    if (stream && visible && !disabled && !reset) {
+        if (!stream_held) { record("visible-stream-held\n"); stream_held = 1; }
+        errno = EAGAIN;
+        return -1;
+    }
     ssize_t result = real_write(fd, bytes, count);
     int saved_errno = errno;
+    if (stream && result > 0 && !visible) {
+        for (ssize_t i = 0; i < result; ++i) {
+            char byte = ((const char *)bytes)[i];
+            matched = byte == marker[matched] ? matched + 1 : (byte == marker[0] ? 1 : 0);
+            if (!marker[matched]) { visible = 1; record("visible-prefix-written\n"); break; }
+        }
+    }
     static int choice = 0, choice_held = 0;
-    const char *fault = getenv("RUI_TERMINAL_FAULT");
     if (fd == 1 && result == (ssize_t)count && fault && !strncmp(fault, "consent-", 8)) {
         if (count == strlen("a: Allow once / d: Deny (Enter)") &&
             !memcmp(bytes, "a: Allow once / d: Deny (Enter)", count)) choice = 1;
@@ -998,6 +1016,84 @@ def startup_reporting_cases(state, library):
             thread.join(timeout=5)
 
 
+def visible_stream_handoff_cases(state, library):
+    """A cancelled visible stream retires, rather than replaying its prefix."""
+    marker = "VISIBLE-CANCEL-PREFIX"
+    long = marker + "\n" + "complete saved content\n" * 240 + "VISIBLE-END"
+    for phase in ("opening", "activity", "permission", "history", "details"):
+        root = state / f"visible-{phase}"
+        root.mkdir()
+        home, store = root / "home", root / "store"
+        home.mkdir(mode=0o700)
+        text = json.dumps({"cmd": "echo " + marker + " # " + "x" * 6000, "timeout_ms": 1000})
+        responses = [fixture.sse_tool_calls("visible", [("bash", "visible-call", text)])] if phase == "permission" else [
+            fixture.sse_answer("visible", "visible-r", "visible-m", long)[0]]
+        if phase == "history":
+            responses += [fixture.sse_answer(f"short-{i}", f"short-{i}-r", f"short-{i}-m", "OPENING-READY")[0] for i in range(8)]
+        endpoint = fixture.SuccessEndpoint(responses)
+        thread = threading.Thread(target=endpoint.serve_forever)
+        thread.start()
+        host = caller = None
+        master, slave = pty.openpty()
+        original = termios.tcgetattr(slave)
+        flags = fcntl.fcntl(slave, fcntl.F_GETFL)
+        arm, log = root / "arm", root / "probe.log"
+        try:
+            host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+            human.run(home, "configure", "--store", store, "--session", "visible/stream",
+                "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+            if phase not in ("activity", "permission"):
+                for i in range(len(responses)):
+                    admission = human.admit(home, "message", "--store", store, "--session", "visible/stream", f"saved input {i}")
+                    fixture.wait_for(lambda: fixture.completed_observation(store, admission["request"]), "saved stream content")
+            if phase == "opening": arm.touch()
+            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "visible/stream"],
+                env={**os.environ, "HOME": str(home), "NO_COLOR": "1",
+                    "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                    "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "visible-stream", "RUI_TERMINAL_STREAM_ARM": str(arm)},
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            if phase != "opening":
+                ready = "VISIBLE-END" if phase == "details" else "OPENING-READY" if phase == "history" else "› "
+                opening = human.read_terminal(master, ready)
+                if ready != "› " and "› " not in opening.split(ready, 1)[1]: human.read_terminal(master, "› ")
+                arm.touch()
+                os.write(master, (f"/{phase}\n" if phase in ("history", "details") else "produce content\n").encode())
+            prefix = human.read_terminal(master, marker)
+            fixture.wait_for(lambda: log.exists() and "visible-stream-held" in log.read_text(), "post-prefix output gate")
+            before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
+            command = b"/inspect-action\n" if phase == "permission" else b"/status\n"
+            os.write(master, command)
+            tail, errors = human.terminal_exit(caller, master)
+            assert caller.returncode != 0 and b"Cancelled" in errors, (phase, tail, errors)
+            assert b"Session: visible/stream" not in tail and b"Action:" not in tail, "cancelled stream dispatched command"
+            assert marker not in tail.decode() and b"Detached." not in tail, "cancelled stream replayed or resumed"
+            assert (prefix.encode() + tail).count(marker.encode()) == 1
+            actual = termios.tcgetattr(slave)
+            if sys.platform == "darwin":
+                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                actual[3] &= ~mask
+                original[3] &= ~mask
+            assert actual == original
+            assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL), flags)
+            assert {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")} == before
+            assert "restore-other" in log.read_text() and "disable" in log.read_text()
+            assert len(endpoint.requests) == len(responses), "command cancellation restarted Host work"
+            print(f"visible {phase}: command cancellation restores/joins and retires without dispatch or prefix replay", flush=True)
+        finally:
+            if caller is not None and caller.poll() is None:
+                caller.kill()
+                caller.wait(timeout=5)
+            if caller is not None: caller.stderr.close()
+            termios.tcsetattr(slave, termios.TCSANOW, original)
+            os.close(master)
+            os.close(slave)
+            if host is not None: fixture.stop_host(host)
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+
+
 def main(selected=None):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-terminal-restoration."))
     home = state / "home"
@@ -1037,6 +1133,11 @@ def main(selected=None):
         if selected in (None, "startup"):
             startup_reporting_cases(state, library)
         if selected == "startup":
+            completed = True
+            return
+        if selected in (None, "visible-stream"):
+            visible_stream_handoff_cases(state, library)
+        if selected == "visible-stream":
             completed = True
             return
         host = fixture.start_host(store, None)
