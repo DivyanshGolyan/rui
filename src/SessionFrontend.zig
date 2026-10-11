@@ -35,7 +35,7 @@ captured: ?client.CapturedRecord = null,
 reply_buffer: client.ReplyBuffer = .{},
 reply: ?client.MutationReply = null,
 admission_error: ?anyerror = null,
-accepted_message: ?[36]u8 = null,
+accepted: ?struct { kind: std.meta.Tag(Submission), key: [36]u8 } = null,
 current: client.Current = undefined,
 observed: client.Current = undefined,
 cursor: client.ActivityCursor = .{},
@@ -105,6 +105,7 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
         self.recoveryGuide();
         return err;
     }
+    if (self.submission != null) self.recoveryGuide();
     try self.terminal.detached(store, session);
 }
 
@@ -118,8 +119,10 @@ fn recoveryGuide(self: *const Self) void {
         } else {
             Text.diagnostic("rui: {s} not confirmed. Use rui recover {s} to retry the exact original; do not resubmit it.\n", .{ if (self.submission.? == .decision) "Decision" else "Message", self.capture_key });
         }
-    } else if (self.accepted_message) |key| {
-        Text.diagnostic("rui: Message accepted; do not resubmit it. Use rui result {s} to inspect the same Message.\n", .{key});
+    } else if (self.accepted) |accepted| {
+        if (accepted.kind == .message) {
+            Text.diagnostic("rui: Message accepted; do not resubmit it. Use rui result {s} to inspect the same Message.\n", .{accepted.key});
+        } else Text.diagnostic("rui: Decision accepted; do not repeat it. Use rui recover {s} to inspect the same saved admission.\n", .{accepted.key});
     }
 }
 
@@ -443,7 +446,7 @@ fn settleAdmission(self: *Self) !void {
     self.admission_error = null;
     if (reply.isAccepted()) {
         if (self.submissionState() == .unconfirmed) self.notice = if (self.submission.? == .decision) "  • Decision confirmed." else "  • Original confirmed.";
-        if (self.submission.? == .message) self.accepted_message = self.capture_key;
+        self.accepted = .{ .kind = std.meta.activeTag(self.submission.?), .key = self.capture_key };
         try self.settleSubmission(null);
     } else {
         try self.settleSubmission(.rejected);

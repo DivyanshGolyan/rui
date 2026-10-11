@@ -195,7 +195,12 @@ def command_entry_cases():
         terminal_step(master, "/exit", "Resume: ")
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0 and not errors, errors
-        assert termios.tcgetattr(slave) == original
+        actual = termios.tcgetattr(slave)
+        if sys.platform == "darwin":
+            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+            actual[3] &= ~mask
+            original[3] &= ~mask
+        assert actual == original
         initial_session = json.loads(run(home, "sessions", "--all", "--json"))["sessions"][0]["reference"]
         # More than one eight-row page here; a newer foreign Workspace must not
         # win --last. Exact resume is independent of that cwd filtering.
@@ -222,7 +227,11 @@ def command_entry_cases():
                 terminal_step(master, "/exit", "Resume: ")
                 _, errors = terminal_exit(caller, master)
                 assert caller.returncode == 0 and not errors, errors
-                assert termios.tcgetattr(slave) == original
+                actual = termios.tcgetattr(slave)
+                if sys.platform == "darwin":
+                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                    actual[3] &= ~mask
+                assert actual == original
         assert len(endpoint.requests) == 2, "resume submitted or restarted work"
         env = {**os.environ, "HOME": str(home)}
         executor = subprocess.Popen([str(fixture.RUI), "exec", "held prompt"], cwd=workspace,

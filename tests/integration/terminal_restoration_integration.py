@@ -374,6 +374,10 @@ def persistent_cases(state, library, home, store, host):
                 assert actual == original, (case, actual, original)
             if case == "admission-interrupt":
                 assert not reply_release.is_set(), "borrower cleanup needed the Host reply"
+                body, = [body for body, _ in proxy.exchanges]
+                request = json.loads(body)
+                assert (records / f"{request['key']}.json").read_bytes() == body
+                assert f"Message not confirmed. Use rui recover {request['key']}" in errors, errors
             reply_release.set()
             if proxy is not None:
                 proxy.close()
@@ -496,7 +500,12 @@ def fatal_reporting_cases(state):
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         human.run(home, "configure", "--store", store, "--session", "fatal/original",
             "--workspace", root, "--provider", "codex", "--model", "model-a")
-        for stopped in (False, True):
+        diagnostics = [
+            (["resume", "--store", str(store), "missing/fatal"], b"SessionNotConfigured"),
+            (["setup", "--provider", "unsupported"], b"UnsupportedPreferenceProvider"),
+            (["--store", str(store), "--provider", "unsupported", "--model", "model-a"], b"UnsupportedSelectionProvider"),
+        ]
+        for args, error, stopped in ((args, error, stopped) for args, error in diagnostics for stopped in (False, True)):
             master, slave = pty.openpty()
             error_master, error_slave = pty.openpty()
             original = termios.tcgetattr(slave)
@@ -504,15 +513,15 @@ def fatal_reporting_cases(state):
             try:
                 if stopped:
                     termios.tcflow(error_slave, termios.TCOOFF)
-                caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "missing/fatal"],
+                caller = subprocess.Popen([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=error_slave)
                 assert caller.wait(timeout=3) == 1, "fatal diagnostic did not exit"
                 assert termios.tcgetattr(slave) == original
                 assert fcntl.fcntl(error_slave, fcntl.F_GETFL) == error_flags
                 if not stopped:
                     assert select.select([error_master], [], [], 1)[0]
-                    assert b"SessionNotConfigured" in os.read(error_master, 65536)
-                print(f"fatal reporting: stopped stderr={stopped} passed", flush=True)
+                    assert error in os.read(error_master, 65536)
+                print(f"fatal reporting: {error.decode()} stopped stderr={stopped} passed", flush=True)
             finally:
                 if caller is not None and caller.poll() is None:
                     caller.kill()
@@ -564,6 +573,108 @@ def fatal_reporting_cases(state):
         thread.join(timeout=5)
 
 
+def decision_reporting_cases(state):
+    """Both accepted and interrupted choices retain the exact decision identity."""
+    root = state / "decision-reporting"
+    root.mkdir()
+    home, store = root / "home", root / "store"
+    home.mkdir(mode=0o700)
+    cases = [(decision, lost) for decision in ("allow_once", "deny") for lost in (False, True)]
+    responses = []
+    for decision, lost in cases:
+        name = f"{decision}-{lost}"
+        responses.extend([
+            fixture.sse_tool_calls(name, [("bash", name, json.dumps({"cmd": f"printf once >> effect-{name}", "timeout_ms": 1000}))]),
+            fixture.sse_answer(f"{name}-a", f"{name}-r", f"{name}-m", f"SETTLED-{name}")[0],
+        ])
+    endpoint = fixture.SuccessEndpoint(responses)
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = caller = proxy = None
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        for decision, lost in cases:
+            name = f"{decision}-{lost}"
+            session = f"reporting/{name}"
+            human.run(home, "configure", "--store", store, "--session", session,
+                "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+            master, slave = pty.openpty()
+            read_ready, write_ready = os.pipe()
+            original = termios.tcgetattr(slave)
+            reply_release, received = threading.Event(), threading.Event()
+            try:
+                caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), session],
+                    env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(write_ready)},
+                    pass_fds=(write_ready,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                human.read_terminal(master, "› ")
+                os.write(master, b"propose exact decision\n")
+                human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+                human.action_ready(read_ready)
+                if lost:
+                    def hold(response):
+                        received.set()
+                        assert reply_release.wait(15)
+                        return b""
+                    proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", hold)
+                os.write(master, b"a\n" if decision == "allow_once" else b"d\n")
+                if lost:
+                    assert received.wait(10)
+                    caller.send_signal(signal.SIGINT)
+                else:
+                    human.read_terminal(master, f"SETTLED-{name}")
+                    status = human.terminal_step(master, "/status")
+                    assert "Original reserved request:" not in status, status
+                    os.write(master, b"\x1b[")
+                output, errors = human.terminal_exit(caller, master, timeout=6)
+                assert caller.returncode == (0 if lost else 1), (output, errors)
+                records = [path for path in (home / ".config/rui/requests").glob("*.json")
+                    if json.loads(path.read_bytes()).get("session") == session]
+                record, = [path for path in records if json.loads(path.read_bytes())["kind"] == "permission_decision"]
+                saved = record.read_bytes()
+                request = json.loads(saved)
+                message, = [json.loads(path.read_bytes()) for path in records if json.loads(path.read_bytes())["kind"] == "message"]
+                assert request["key"].encode() in errors and message["key"].encode() not in errors, errors
+                assert request["decision"] == decision
+                assert b"rui recover " + request["key"].encode() in errors and b"rui result" not in errors, errors
+                assert (b"Decision not confirmed" if lost else b"Decision accepted; do not repeat it") in errors, errors
+                if not lost:
+                    assert b"IncompleteTerminalInput" in errors and b"not confirmed" not in errors, errors
+                if lost:
+                    assert proxy.exchanges[0][0] == saved and not reply_release.is_set()
+                    reply_release.set()
+                    proxy.close()
+                    proxy = None
+                recovered = json.loads(human.run(home, "recover", request["key"], "--json"))["answer"]
+                assert recovered["status"] == "accepted" and recovered["replayed"] is True, recovered
+                assert record.read_bytes() == saved
+                fixture.wait_for(lambda: fixture.completed_observation(store, message["key"]), "decision continuation")
+                effect = root / f"effect-{name}"
+                assert (effect.read_bytes() if effect.exists() else b"") == (b"once" if decision == "allow_once" else b"")
+                actual = termios.tcgetattr(slave)
+                if sys.platform == "darwin":
+                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                    actual[3] &= ~mask
+                    original[3] &= ~mask
+                assert actual == original
+                print(f"decision reporting: {name} passed", flush=True)
+            finally:
+                reply_release.set()
+                if caller is not None and caller.poll() is None:
+                    caller.kill()
+                    caller.wait(timeout=5)
+                if proxy is not None:
+                    proxy.close()
+                    proxy = None
+                for fd in (master, slave, read_ready, write_ready):
+                    os.close(fd)
+    finally:
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+
+
 def main(selected=None):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-terminal-restoration."))
     home = state / "home"
@@ -588,6 +699,11 @@ def main(selected=None):
         if selected in (None, "fatal"):
             fatal_reporting_cases(state)
         if selected == "fatal":
+            completed = True
+            return
+        if selected in (None, "decisions"):
+            decision_reporting_cases(state)
+        if selected == "decisions":
             completed = True
             return
         host = fixture.start_host(store, None)
