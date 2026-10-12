@@ -309,6 +309,7 @@ pub const Prepared = struct {
             .script = script,
             .scratch_path = self.scratch_path,
             .started = started,
+            .timeout_ms = self.timeout_ms,
             .faults = self.faults,
         };
         execution.process.running.deadline = execution.started.addDuration(.{
@@ -397,6 +398,7 @@ pub const Execution = struct {
     script: OwnedFile,
     scratch_path: []const u8,
     started: std.Io.Clock.Timestamp,
+    timeout_ms: u64,
     faults: Faults,
     stop_reason: StopReason = .none,
     capture_failure: CaptureFailure = .none,
@@ -949,6 +951,15 @@ pub const Execution = struct {
             .signal => |signal_value| try writer.print("Signal: {d}.\n", .{signal_value}),
             .unknown => |status| try writer.print("Unknown process status: {d}.\n", .{status}),
         }
+        if (code == .timed_out) {
+            try writer.print(
+                "Execution timed out after a {d} ms total budget from process start; output does not reset it. " ++
+                    "No background handle is available. Partial effects may remain: inspect state before retrying. " ++
+                    "For safe repeatable work, narrow the command or choose a longer timeout_ms. " ++
+                    "A timed-out search does not establish absence.\n",
+                .{self.timeout_ms},
+            );
+        }
         if (self.capture_failure != .none) {
             try writer.print("Capture failure: {s}; output may be incomplete.\n", .{@tagName(self.capture_failure)});
         } else if (pipeIncomplete(self.stdout_pipe) or pipeIncomplete(self.stderr_pipe)) {
@@ -1240,6 +1251,7 @@ test "a due deadline starts termination from a later service-time observation" {
         .script = undefined,
         .scratch_path = "",
         .started = started,
+        .timeout_ms = 100,
         .faults = .{ .lifecycle = .signal },
     };
     const before = started.addDuration(.{ .raw = .fromMilliseconds(99), .clock = .awake });
@@ -1270,6 +1282,7 @@ fn runningWithDeadline(started: std.Io.Clock.Timestamp, deadline: std.Io.Clock.T
         .script = undefined,
         .scratch_path = "",
         .started = started,
+        .timeout_ms = @intCast(@divTrunc(deadline.raw.nanoseconds - started.raw.nanoseconds, std.time.ns_per_ms)),
         // Signaling is faulted to a no-op so no real process is signaled.
         .faults = .{ .lifecycle = .signal },
     };
@@ -1394,6 +1407,7 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
             .script = undefined,
             .scratch_path = root,
             .started = started,
+            .timeout_ms = 100,
             .faults = .{},
         };
         stdout_read_owned = false;
@@ -1464,6 +1478,7 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
         .script = undefined,
         .scratch_path = root,
         .started = started,
+        .timeout_ms = 100,
         .faults = .{},
     };
     gone_read_owned = false;
@@ -1616,6 +1631,7 @@ test "retired execution is independent of outstanding capture reclamation" {
         .script = undefined,
         .scratch_path = "",
         .started = started,
+        .timeout_ms = 100,
         .faults = .{},
     };
     // Gone with both pipes closed retires even though capture and script
@@ -1676,6 +1692,7 @@ test "output publication closes producer aliases before making output evictable"
             .script = script,
             .scratch_path = root,
             .started = started,
+            .timeout_ms = 100,
             .faults = .{},
         };
     }

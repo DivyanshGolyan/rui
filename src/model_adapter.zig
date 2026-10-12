@@ -222,6 +222,9 @@ pub const Preparation = struct {
         model_prefix,
         model,
         envelope,
+        runtime_instructions,
+        workspace,
+        instructions_separator,
         instructions_content,
         input_prefix,
         history_next,
@@ -353,7 +356,14 @@ pub const Preparation = struct {
                 },
                 .model_prefix => self.emitFixed("{\"model\":\"", .model),
                 .model => self.emitJsonBytes(self.settings.?.model.slice(), .envelope),
-                .envelope => self.emitFixed("\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"", .instructions_content),
+                .envelope => self.emitFixed("\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"", .runtime_instructions),
+                .runtime_instructions => self.emitJsonBytes(
+                    "You are Rui, a local coding agent. Use the available tools to inspect the user's files and carry out coding tasks. " ++
+                        "Ground claims about the local environment in tool results.\nWorkspace: ",
+                    .workspace,
+                ),
+                .workspace => self.emitJsonBytes(self.settings.?.workspace.slice(), .instructions_separator),
+                .instructions_separator => self.emitJsonBytes("\n\nSession instructions:\n", .instructions_content),
                 .instructions_content => {
                     const reader = self.view.openContent(self.settings.?.baseline_instructions) catch |err| return .{ .failed = err };
                     self.emitJsonReader(reader, .input_prefix);
@@ -740,7 +750,9 @@ test "real preparation consumes the configured allowance across multiple advance
     var last_request: u64 = 0;
     while (true) {
         advances += 1;
-        try std.testing.expect(advances < 64);
+        // Fixture runaway guard, not a request limit: allow the full scratch
+        // budget even if an advance makes only one byte of output progress.
+        try std.testing.expect(advances < 4096);
         var progress = preparation.advance(16, 2);
         const stats = preparation.advanceStats();
         try std.testing.expect(stats.work_bytes <= 16);
@@ -900,8 +912,21 @@ const DrainedRequest = struct { bytes: []u8, length: u64, digest: [32]u8 };
 
 // Independently authored tool definitions for full-request goldens. These
 // literals must match the provider's frozen tool catalog, not reference it.
-const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"Run Bash\",\"strict\":true,\"parameters\":{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":[\"integer\",\"null\"],\"minimum\":1,\"maximum\":9223372036854775807}},\"required\":[\"cmd\",\"timeout_ms\"],\"additionalProperties\":false}}";
+const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed.\",\"strict\":true,\"parameters\":{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":[\"integer\",\"null\"],\"description\":\"Use null for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.\",\"minimum\":1,\"maximum\":9223372036854775807}},\"required\":[\"cmd\",\"timeout_ms\"],\"additionalProperties\":false}}";
 const edit_tool_json = "{\"type\":\"function\",\"name\":\"edit\",\"description\":\"Edit one file\"}";
+
+// Supply only fixture inputs, never the adapter's emitted context or constants.
+fn requestGolden(workspace: []const u8, request: []const u8) ![]u8 {
+    const context = try std.fmt.allocPrint(std.testing.allocator, "You are Rui, a local coding agent. Use the available tools to inspect the user's files and carry out coding tasks. Ground claims about the local environment in tool results.\nWorkspace: {s}\n\nSession instructions:\n", .{workspace});
+    defer std.testing.allocator.free(context);
+    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, context, .{});
+    defer std.testing.allocator.free(encoded);
+    const marker = "\"instructions\":\"";
+    const offset = std.mem.indexOf(u8, request, marker).? + marker.len;
+    return std.fmt.allocPrint(std.testing.allocator, "{s}{s}{s}", .{
+        request[0..offset], encoded[1 .. encoded.len - 1], request[offset..],
+    });
+}
 
 fn drainPreparation(
     preparation: *Preparation,
@@ -1211,8 +1236,15 @@ const composed_expected =
     "\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":{\"type\":\"object\"}}}}";
 
 test "request preparation minimal golden is exact across schedules" {
+    var workspace_tmp = std.testing.tmpDir(.{});
+    defer workspace_tmp.cleanup();
+    const workspace_name = "workspace\"\\\n雪";
+    try workspace_tmp.dir.createDir(std.testing.io, workspace_name, .default_dir);
+    var workspace_dir = try workspace_tmp.dir.openDir(std.testing.io, workspace_name, .{});
+    defer workspace_dir.close(std.testing.io);
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = workspace_buffer[0..try workspace_dir.realPath(std.testing.io, &workspace_buffer)];
     const expected = "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}]";
-    const full_expected = expected ++ ",\"tools\":[]}";
     const schedules = [_][2]usize{ .{ 16, 2 }, .{ 1, 1 }, .{ 16384, 64 }, .{ 7, 3 } };
     var first_bytes: ?[]u8 = null;
     defer if (first_bytes) |bytes| std.testing.allocator.free(bytes);
@@ -1222,6 +1254,9 @@ test "request preparation minimal golden is exact across schedules" {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
+        setup.workspace = workspace;
+        const full_expected = try requestGolden(setup.workspace, expected ++ ",\"tools\":[]}");
+        defer std.testing.allocator.free(full_expected);
         try setup.configure("prep-golden-config", "direct/prep-golden");
         // Explicit empty tool list selects no tools for an exact small envelope.
         {
@@ -1370,8 +1405,11 @@ test "request preparation frozen selection excludes later messages" {
     try setup.submit("prep-frozen-second-file", "prep-frozen-second", "direct/prep-frozen", "second");
     const result = try drainPreparation(&preparation, 16, 2, 4096);
     defer std.testing.allocator.free(result.bytes);
-    try std.testing.expect(std.mem.indexOf(u8, result.bytes, "first") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.bytes, "second") == null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
+    defer parsed.deinit();
+    const input = parsed.value.object.get("input").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), input.len);
+    try std.testing.expectEqualStrings("first", input[0].object.get("content").?.array.items[0].object.get("text").?.string);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
@@ -1413,8 +1451,10 @@ test "request preparation freezes settings at admission" {
     defer std.testing.allocator.free(result.bytes);
     const expected = "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}],\"tools\":[" ++
         bash_tool_json ++ "," ++ edit_tool_json ++ "]}";
-    try std.testing.expectEqualStrings(expected, result.bytes);
-    try std.testing.expectEqual(@as(u64, expected.len), result.length);
+    const full_expected = try requestGolden(setup.workspace, expected);
+    defer std.testing.allocator.free(full_expected);
+    try std.testing.expectEqualStrings(full_expected, result.bytes);
+    try std.testing.expectEqual(@as(u64, full_expected.len), result.length);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
@@ -1765,9 +1805,11 @@ test "request preparation composes replay tool results and schema" {
         try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
         const result = try drainPreparation(&preparation, schedule[0], schedule[1], 16384);
         defer std.testing.allocator.free(result.bytes);
-        try std.testing.expectEqualStrings(composed_expected, result.bytes);
-        try std.testing.expectEqual(@as(u64, composed_expected.len), result.length);
-        try std.testing.expectEqual(protocol.contentDigest(composed_expected), result.digest);
+        const expected = try requestGolden(setup.workspace, composed_expected);
+        defer std.testing.allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, result.bytes);
+        try std.testing.expectEqual(@as(u64, expected.len), result.length);
+        try std.testing.expectEqual(protocol.contentDigest(expected), result.digest);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
 }
@@ -1775,16 +1817,19 @@ test "request preparation composes replay tool results and schema" {
 test "request preparation cancels inside schema and replay emissions" {
     // Checkpoint offsets come straight from the independently authored
     // composed golden the dedicated test already verifies byte-for-byte.
-    const schema_target = std.mem.indexOf(u8, composed_expected, "{\"type\":\"object\"}").? + 2;
-    const replay_target = std.mem.indexOf(u8, composed_expected, composed_replayed).? + composed_replayed.len / 2;
-
     // Each target lies strictly inside its emission's output span, so the
     // corresponding raw or replay reader is necessarily still open with a
     // partial charge outstanding when preparation is cancelled.
-    for ([_]u64{ schema_target, replay_target }) |target| {
+    for ([_]bool{ true, false }) |schema| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
+        const expected = try requestGolden(setup.workspace, composed_expected);
+        defer std.testing.allocator.free(expected);
+        const target = if (schema)
+            std.mem.indexOf(u8, expected, "{\"type\":\"object\"}").? + 2
+        else
+            std.mem.indexOf(u8, expected, composed_replayed).? + composed_replayed.len / 2;
         const binding = try establishComposedHistory(&setup, "direct/prep-cancel-spans");
         const view = try setup.storage.openHistoricalView(binding);
         var used: std.atomic.Value(u64) = .init(0);
