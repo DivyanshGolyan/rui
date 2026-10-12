@@ -1382,7 +1382,10 @@ def visible_stream_handoff_cases(state, library):
                 arm.unlink()
                 human.read_terminal(master, "VISIBLE-END", composer=True)
                 os.write(master, b"/configure --permission-mode bypass\nUNREAD suffix\n")
-                human.read_terminal(master, "Configured.", composer=True)
+                configured = human.read_terminal(master, "Configured.", composer=True)
+                resumed = configured.split("Configured.", 1)[1]
+                assert resumed.endswith("› \r\x1b[2C"), configured
+                assert "UNREAD suffix" not in resumed, configured
                 records = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
                 assert all(records.get(path) == value for path, value in before.items())
                 added = [json.loads(value) for path, value in records.items() if path not in before]
