@@ -33,10 +33,12 @@ pub fn begin(colour: bool) !Self {
     const flags = [2]c_int{ std.c.fcntl(0, std.c.F.GETFL), std.c.fcntl(1, std.c.F.GETFL) };
     if (flags[0] < 0 or flags[1] < 0) return error.TerminalCleanupFailed;
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
-    if (std.c.fcntl(0, std.c.F.SETFL, flags[0] | nonblock) < 0) return error.TerminalCleanupFailed;
+    // SETFL may mutate before reporting failure. Register restoration before
+    // each attempt; an enable failure already reports TerminalCleanupFailed.
     errdefer _ = std.c.fcntl(0, std.c.F.SETFL, flags[0]);
-    if (std.c.fcntl(1, std.c.F.SETFL, flags[1] | nonblock) < 0) return error.TerminalCleanupFailed;
+    if (std.c.fcntl(0, std.c.F.SETFL, flags[0] | nonblock) < 0) return error.TerminalCleanupFailed;
     errdefer _ = std.c.fcntl(1, std.c.F.SETFL, flags[1]);
+    if (std.c.fcntl(1, std.c.F.SETFL, flags[1] | nonblock) < 0) return error.TerminalCleanupFailed;
     try std.posix.tcsetattr(0, .FLUSH, mode);
     var self: Self = .{ .original = original, .flags = flags, .colour = colour };
     if (std.c.write(1, "\x1b[?2004h", 8) != 8) {
@@ -78,9 +80,11 @@ pub fn detached(self: *Self, store: []const u8, session: []const u8) !void {
     try Text.writeShellSession(&notice, session, true);
     try notice.writeAll("\n");
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
-    if (std.c.fcntl(1, std.c.F.SETFL, self.flags[1] | nonblock) < 0) return error.TerminalCleanupFailed;
-    _ = std.c.write(1, notice.buffered().ptr, notice.buffered().len);
+    const enabled = std.c.fcntl(1, std.c.F.SETFL, self.flags[1] | nonblock) == 0;
+    if (enabled) _ = std.c.write(1, notice.buffered().ptr, notice.buffered().len);
+    // Restore every attempted enable, without writing after a failed attempt.
     if (std.c.fcntl(1, std.c.F.SETFL, self.flags[1]) < 0) return error.TerminalCleanupFailed;
+    if (!enabled) return error.TerminalCleanupFailed;
 }
 
 pub fn next(self: *Self, io: std.Io, pending: Editor.Pending, wait: i32) !?u8 {

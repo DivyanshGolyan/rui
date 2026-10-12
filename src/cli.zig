@@ -788,7 +788,21 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
         return error.InteractiveTerminalRequired;
     }
     const saved = (try createSession(init, options, true)) orelse return;
-    try runSession(init, saved.store.slice(), saved.session.slice(), options.prompt);
+    runSession(init, saved.store.slice(), saved.session.slice(), options.prompt) catch |err| {
+        // Configuration acceptance and local entry are independent outcomes.
+        // Four bytes per escaped selector byte, plus labels and two UUIDs.
+        var bytes: [4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 256]u8 = undefined;
+        var notice = std.Io.Writer.fixed(&bytes);
+        notice.print("\nrui: Session configuration accepted.\nConfiguration request: {s} (rui recover {s})\n", .{ saved.key.slice(), saved.key.slice() }) catch return err;
+        if (err == error.InvalidTemporaryDirectory)
+            notice.writeAll("rui: Fix or unset TMPDIR before resuming.\n") catch return err;
+        notice.writeAll("Resume: rui resume --store ") catch return err;
+        TerminalText.writeShellWord(&notice, saved.store.slice()) catch return err;
+        TerminalText.writeShellSession(&notice, saved.session.slice(), true) catch return err;
+        notice.writeByte('\n') catch return err;
+        _ = @import("stderr.zig").write(notice.buffered());
+        return err;
+    };
 }
 
 fn createSession(init: std.process.Init, options: NewSessionOptions, interactive_login: bool) !?client.CapturedIdentity {

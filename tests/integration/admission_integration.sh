@@ -19,6 +19,7 @@ extra_pid=
 client_pid=
 
 cleanup() {
+    result=$?
     if [ -n "$host_pid" ]; then
         kill -9 "$host_pid" 2>/dev/null || true
         wait "$host_pid" 2>/dev/null || true
@@ -31,9 +32,15 @@ cleanup() {
         kill -9 "$client_pid" 2>/dev/null || true
         wait "$client_pid" 2>/dev/null || true
     fi
-    rm -rf "$state"
+    if [ "$result" -eq 0 ]; then
+        rm -rf "$state"
+    else
+        echo "retained admission failure state: $state" >&2
+    fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 start_host() {
     : >"$ready"
@@ -174,7 +181,6 @@ fi
 drain_store="$state/drain-store"
 drain_ready="$state/drain-ready"
 drain_error="$state/drain-error"
-drain_client_ready="$state/drain-client-ready"
 "$rui" serve --store "$drain_store" --fault shutdown-after-accept >"$drain_ready" 2>"$drain_error" &
 extra_pid=$!
 attempts=0
@@ -191,9 +197,11 @@ while ! grep -q '^ready ' "$drain_ready"; do
     sleep 0.01
 done
 drain_socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$drain_ready")
-python3 - "$drain_socket" "$drain_store" "$root" "$drain_client_ready" <<'PY' &
-import json, os, socket, sys, time
-socket_path, store, workspace, client_ready = sys.argv[1:]
+PYTHONPATH="$root/tests/integration" python3 - "$rui" "$drain_socket" "$drain_store" "$root" "$state" <<'PY'
+import json, os, pathlib, socket, subprocess, sys, time
+from host_process import preserve_failure_metadata, stop_process
+rui, socket_path, store, workspace, state = sys.argv[1:]
+state = pathlib.Path(state)
 body = json.dumps({
     "version": "1",
     "kind": "configure",
@@ -211,6 +219,7 @@ body = json.dumps({
     },
 }, separators=(",", ":")).encode()
 client = socket.socket(socket.AF_UNIX)
+client.settimeout(3)
 client.connect(socket_path)
 header = (
     "POST /v1/configure HTTP/1.1\r\n"
@@ -219,66 +228,73 @@ header = (
     f"Content-Length: {len(body)}\r\n"
     "X-Rui-Wire-Version: 1\r\n\r\n"
 ).encode()
-client.sendall(header + body[:1])
-with open(client_ready, "xb"):
-    pass
-time.sleep(0.5)
-client.sendall(body[1:])
-response = b""
-while True:
-    chunk = client.recv(4096)
-    if not chunk:
-        break
-    response += chunk
-client.close()
-if not response.startswith(b"HTTP/1.1 200 "):
-    raise SystemExit("transferred request did not finish during drain")
-PY
-client_pid=$!
-attempts=0
-while [ ! -e "$drain_client_ready" ]; do
-    if ! kill -0 "$client_pid" 2>/dev/null; then
-        wait "$client_pid"
-    fi
-    attempts=$((attempts + 1))
-    if [ "$attempts" -gt 500 ]; then
-        echo "drain fixture client did not transfer custody" >&2
-        exit 1
-    fi
-    sleep 0.01
-done
-kill -0 "$extra_pid"
-python3 - "$drain_socket" <<'PY'
-import socket, sys, time
-deadline = time.monotonic() + 1.0
-while True:
-    client = socket.socket(socket.AF_UNIX)
-    client.settimeout(0.2)
-    try:
-        client.connect(sys.argv[1])
-        data = client.recv(1)
-        if not data:
+competitor = None
+released = False
+response = bytearray()
+try:
+    # This owner withholds the remainder through the refusal assertion. Elapsed
+    # time alone cannot establish that an incomplete connection is still held.
+    client.sendall(header + body[:1])
+    deadline = time.monotonic() + 1.0
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "connection remained stranded after listener shutdown"
+        probe = socket.socket(socket.AF_UNIX)
+        probe.settimeout(min(0.2, remaining))
+        try:
+            probe.connect(socket_path)
+            if not probe.recv(1):
+                break
+        except (ConnectionRefusedError, FileNotFoundError, ConnectionResetError, BrokenPipeError):
             break
-    except (ConnectionRefusedError, FileNotFoundError, ConnectionResetError, BrokenPipeError):
-        break
-    except socket.timeout:
-        if time.monotonic() >= deadline:
-            raise SystemExit("connection remained stranded after listener shutdown")
-    finally:
-        client.close()
+        except socket.timeout:
+            pass
+        finally:
+            probe.close()
+    with (state / "drain-competing.out").open("wb") as out, (state / "drain-competing.err").open("wb") as err:
+        competitor = subprocess.Popen([rui, "serve", "--store", store], stdout=out, stderr=err)
+        competitor.wait(timeout=3)
+    assert competitor.returncode != 0 and b"StoreAlreadyOwned" in (state / "drain-competing.err").read_bytes(), "draining Host released its Store lock early"
+    released = True
+    client.sendall(body[1:])
+    deadline = time.monotonic() + 3
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "transferred request did not finish during drain"
+        client.settimeout(remaining)
+        chunk = client.recv(4096)
+        if not chunk:
+            break
+        response.extend(chunk)
+        assert len(response) <= 16384, "drain response exceeded fixture bound"
+    assert response.startswith(b"HTTP/1.1 200 "), "transferred request did not finish during drain"
+    (state / "drain-response.bin").write_bytes(response)
+    head, payload = response.split(b"\r\n\r\n", 1)
+    lengths = [line.split(b":", 1)[1].strip() for line in head.split(b"\r\n")[1:]
+        if line.lower().startswith(b"content-length:")]
+    assert len(lengths) == 1 and lengths[0].isdigit() and len(payload) == int(lengths[0]), "incomplete drain reply"
+    reply = json.loads(payload)
+    assert reply["version"] == "1" and reply["type"] == "configuration_reply", reply
+    assert reply["answer"] == {"status": "accepted", "replayed": False,
+        "session": "direct/draining", "revision": "1", "created": True}, reply
+finally:
+    if sys.exc_info()[0] is not None:
+        preserve_failure_metadata(state / "drain-failure.json", lambda: {
+            "body_released": released, "response_bytes": len(response),
+            "competitor_pid": competitor.pid if competitor else None,
+            "competitor_returncode": competitor.poll() if competitor else None})
+    client.close()
+    if competitor is not None:
+        stop_process(competitor, timeout=3)
 PY
-if "$rui" serve --store "$drain_store" >"$state/drain-competing.out" 2>"$state/drain-competing.err"; then
-    echo "draining Host released its Store lock early" >&2
-    exit 1
-fi
-contains "$(cat "$state/drain-competing.err")" "StoreAlreadyOwned"
-wait "$client_pid"
-client_pid=
-if wait "$extra_pid"; then
-    echo "injected listener failure exited successfully" >&2
-    exit 1
-fi
+# Use the existing bounded failure wait for this second Host as well.
+drain_pid=$extra_pid
+extra_pid=$host_pid
+host_pid=$drain_pid
+wait_host_failure
+host_pid=$extra_pid
 extra_pid=
+contains "$(cat "$drain_error")" "InjectedListenerFailure"
 
 # Fill all ordinary places with sealed headers and incomplete bodies. A short
 # control classification still receives its explicit development response; two

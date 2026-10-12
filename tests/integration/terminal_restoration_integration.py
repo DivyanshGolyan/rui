@@ -278,6 +278,24 @@ int probe_fcntl(int fd, int command, ...) {
     va_end(args);
     const char *diagnostic_arm = getenv("RUI_DIAGNOSTIC_ARM");
     const char *diagnostic_fault = getenv("RUI_TERMINAL_FAULT");
+    if (command == F_SETFL && diagnostic_fault && !strncmp(diagnostic_fault, "entry-", 6)) {
+        const int target = diagnostic_fault[6] - '0';
+        if (fd == target) {
+            if (value & O_NONBLOCK) {
+                record("entry-enable\n");
+                if (strstr(diagnostic_fault, "unmutated")) { errno = EIO; return -1; }
+                int result = real_fcntl(fd, command, value);
+                if (result) return result;
+                record("entry-mutated\n");
+                errno = EIO; return -1;
+            }
+            record("entry-restore\n");
+            if (strstr(diagnostic_fault, "reset")) { errno = EIO; return -1; }
+            int result = real_fcntl(fd, command, value);
+            if (!result) record("entry-restored\n");
+            return result;
+        }
+    }
     if (fd == 2 && command == F_SETFL && diagnostic_arm && !access(diagnostic_arm, F_OK)) {
         if (value & O_NONBLOCK) {
             record("diagnostic-enable\n");
@@ -307,10 +325,16 @@ int probe_fcntl(int fd, int command, ...) {
             detach_phase = 3;
             record("detach-enable\n");
             if (!strcmp(fault, "detach-enable")) { errno = EIO; return -1; }
+            if (!strncmp(fault, "detach-enable-mutated", 21)) {
+                int result = real_fcntl(fd, command, value);
+                if (result) return result;
+                record("detach-mutated\n");
+                errno = EIO; return -1;
+            }
         } else if (detach_phase == 3 && !(value & O_NONBLOCK)) {
             detach_phase = 4;
             record("detach-reset\n");
-            if (!strcmp(fault, "detach-reset")) { errno = EIO; return -1; }
+            if (!strcmp(fault, "detach-reset") || !strcmp(fault, "detach-enable-mutated-reset")) { errno = EIO; return -1; }
         }
     }
     return real_fcntl(fd, command, value);
@@ -1118,13 +1142,69 @@ def decision_reporting_cases(state):
         thread.join(timeout=5)
 
 
+def entry_enable_cases(state, library):
+    """Failed acquisition restores each attempted descriptor, without alias masking."""
+    root = state / "entry-enable"
+    root.mkdir()
+    home, store = root / "home", root / "store"
+    home.mkdir(mode=0o700)
+    host = fixture.start_host(store, None)
+    try:
+        human.run(home, "configure", "--store", store, "--session", "entry/enable",
+            "--workspace", root, "--provider", "codex", "--model", "model-a")
+        before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
+        for target in (0, 1):
+            for mode in ("mutated", "unmutated", "mutated-reset"):
+                name = f"entry-{target}-{mode}"
+                input_master, input_slave = pty.openpty()
+                output_master, output_slave = pty.openpty()
+                slaves = (input_slave, output_slave)
+                flags = [fcntl.fcntl(fd, fcntl.F_GETFL) for fd in slaves]
+                original = termios.tcgetattr(input_slave)
+                log = root / f"{name}.log"
+                caller = None
+                try:
+                    caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "entry/enable"],
+                        env={**os.environ, "HOME": str(home),
+                            "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                            "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": name},
+                        stdin=input_slave, stdout=output_slave, stderr=subprocess.PIPE)
+                    _, errors = caller.communicate(timeout=6)
+                    assert caller.returncode == 1 and b"TerminalCleanupFailed" in errors, errors
+                    assert b"Detached" not in errors and b"accepted" not in errors, errors
+                    assert termios.tcgetattr(input_slave) == original
+                    for fd, saved, index in zip(slaves, flags, (0, 1)):
+                        assert_file_flags(fcntl.fcntl(fd, fcntl.F_GETFL),
+                            saved | os.O_NONBLOCK if index == target and mode == "mutated-reset" else saved)
+                    events = log.read_text()
+                    assert events.count("entry-enable\n") == 1 and events.count("entry-restore\n") == 1, events
+                    assert events.count("entry-mutated\n") == (mode != "unmutated"), events
+                    assert events.count("entry-restored\n") == (mode != "mutated-reset"), events
+                    assert {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")} == before
+                    print(f"entry enable: {name} exact flags, unchanged termios, no intent and cleanup error passed", flush=True)
+                finally:
+                    if sys.exc_info()[0] is not None:
+                        preserve_failure_metadata(root / "pty-failure.json", lambda: {
+                            "case": name, "caller_returncode": caller.poll() if caller else None,
+                            "flags": [fcntl.fcntl(fd, fcntl.F_GETFL) for fd in slaves],
+                            "saved_flags": flags, "termios_unchanged": termios.tcgetattr(input_slave) == original})
+                    if caller is not None and caller.poll() is None:
+                        caller.kill()
+                        caller.wait(timeout=5)
+                    for fd in (input_master, input_slave, output_master, output_slave):
+                        os.close(fd)
+    finally:
+        fixture.stop_host(host)
+
+
 def detach_reporting_cases(state, library):
     """A post-restoration notice error cannot erase an accepted intent."""
     root = state / "detach-reporting"
     root.mkdir()
     home, store = root / "home", root / "store"
     home.mkdir(mode=0o700)
-    cases = [(kind, fault) for kind in ("message", "allow_once", "deny") for fault in ("detach-enable", "detach-reset")]
+    cases = [(kind, fault) for kind in ("message", "allow_once", "deny") for fault in
+        ("detach-enable-mutated", "detach-enable", "detach-enable-mutated-reset", "detach-reset")]
     responses = []
     for kind, fault in cases:
         name = f"{kind}-{fault}"
@@ -1175,14 +1255,20 @@ def detach_reporting_cases(state, library):
                 assert guide in errors and request["key"].encode() in errors, errors
                 assert (b"rui result " if kind == "message" else b"rui recover ") + request["key"].encode() in errors
                 assert "cleanup-flags-restored\ndetach-enable\n" in log.read_text(), log.read_text()
-                assert log.read_text().count(fault + "\n") == 1
+                assert log.read_text().count("detach-enable\n") == 1
+                assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL),
+                    flags | os.O_NONBLOCK if fault.endswith("reset") else flags)
+                assert log.read_text().count("detach-reset\n") == 1
+                if fault.startswith("detach-enable"):
+                    assert b"Detached. Host work continues." not in output, output
+                if "mutated" in fault:
+                    assert log.read_text().count("detach-mutated\n") == 1
                 actual = termios.tcgetattr(slave)
                 if sys.platform == "darwin":
                     mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
                     actual[3] &= ~mask
                     original[3] &= ~mask
                 assert actual == original
-                assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL), flags if fault == "detach-enable" else flags | os.O_NONBLOCK)
                 assert {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")} == before
                 messages = [before[path] for path in records if json.loads(before[path])["kind"] == "message"]
                 assert proxy.mutations == [("/v1/message", messages[0])] + ([] if kind == "message" else [("/v1/control/permission-decision", before[record])])
@@ -1199,6 +1285,7 @@ def detach_reporting_cases(state, library):
                         "caller_returncode": caller.poll() if caller is not None else None,
                         "ready_pending": bool(select.select([read_ready], [], [], 0)[0]),
                         "terminal_pending": bool(select.select([master], [], [], 0)[0]),
+                        "flags": fcntl.fcntl(slave, fcntl.F_GETFL), "saved_flags": flags,
                         "exchanges": len(proxy.exchanges) if proxy is not None else 0,
                     })
                 if caller is not None and caller.poll() is None:
@@ -2050,6 +2137,11 @@ def main(selected=None):
         if selected in (None, "decisions"):
             decision_reporting_cases(state)
         if selected == "decisions":
+            completed = True
+            return
+        if selected in (None, "entry-enable"):
+            entry_enable_cases(state, library)
+        if selected == "entry-enable":
             completed = True
             return
         if selected in (None, "detach"):

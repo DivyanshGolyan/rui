@@ -622,11 +622,11 @@ fn step(self: *Self, wait: i32) !bool {
                 self.history_requested = if (std.mem.eql(u8, text, "/details")) .latest else .older;
             }
         },
-        .busy => self.notice = if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (self.submission != null and self.submission.? == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
+        .busy => self.notice = if (self.submission != null and self.submissionState() == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (self.submission != null and self.submission.? == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |event| switch (event) {
             .interrupt, .eof => self.detached = true,
             .invalid => self.notice = "! Input rejected; nothing sent. Enter plain text or paste again.",
-            .overflow => self.notice = "! input too long; nothing sent. Shorten it and try again.",
+            .overflow => self.notice = "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
             else => {},
         },
     }

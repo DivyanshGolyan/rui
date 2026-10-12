@@ -297,8 +297,44 @@ def command_entry_cases():
             capture_output=True, timeout=10)
         assert missing.returncode != 0 and missing.stdout == b"" and b"rui login codex" in missing.stderr, missing
         assert not (missing_home / ".config").exists() and not (missing_home / ".local").exists(), "exec prompted or mutated before login"
+        # Accepted configuration survives failure before conversation entry.
+        records = home / ".config/rui/requests"
+        before_entry = set(records.glob("*.json"))
+        caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+            env={**env, "TMPDIR": "not-absolute"}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        output, errors = terminal_exit(caller, master)
+        assert caller.returncode != 0 and b"InvalidTemporaryDirectory" in errors, (output, errors)
+        caller.stderr.close()
+        added = set(records.glob("*.json")) - before_entry
+        assert len(added) == 1, added
+        saved = json.loads(next(iter(added)).read_bytes())
+        assert "configuration" in saved, saved
+        assert json.loads(run(home, "recover", saved["key"], "--json"))["answer"]["replayed"] is True
+        assert f"Configuration request: {saved['key']}".encode() in errors, errors
+        assert b"Fix or unset TMPDIR before resuming." in errors, errors
+        resume = errors.decode().split("Resume: ", 1)[1].splitlines()[0]
+        assert "rui resume --store " in resume, resume
+        public_bin = state / "bin"
+        public_bin.mkdir()
+        (public_bin / "rui").symlink_to(fixture.RUI)
+        caller = subprocess.Popen(["bash", "-c", resume], cwd=workspace,
+            env={**env, "PATH": str(public_bin) + os.pathsep + os.environ["PATH"]},
+            stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        read_terminal(master, "› ")
+        status = terminal_step(master, "/status")
+        assert f"Session: {saved['session']}\n" in status, status
+        terminal_step(master, "/exit", "Resume: ")
+        _, resumed_errors = terminal_exit(caller, master)
+        assert caller.returncode == 0 and not resumed_errors, resumed_errors
+        caller.stderr.close()
+        assert set(records.glob("*.json")) == before_entry | added, "resume created a replacement Session"
+        assert len(endpoint.requests) == 7, "entry recovery submitted provider work"
+        actual = termios.tcgetattr(slave)
+        if sys.platform == "darwin":
+            actual[3] &= ~mask
+        assert actual == original
         completed = True
-        print("CLI entry/resume/exec: literal prompt, canonical scoped paginated last vs older activity, exact resume, colour/NO_COLOR, waited escaped answer, stdin, failure, exact lost-reply recovery, permission block and missing-login controls passed", flush=True)
+        print("CLI entry/resume/exec: literal prompt, canonical scoped paginated last vs older activity, exact resume, colour/NO_COLOR, waited escaped answer, stdin, failure, exact lost-reply recovery, permission block, missing-login and accepted-entry recovery controls passed", flush=True)
     finally:
         exec_release.set()
         permission_release.set()
@@ -923,14 +959,24 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             os.write(master, b"\x12")
             settled += read_terminal(master, "Decision confirmed.")
         if stale_target:
-            read_terminal(master, "action_not_pending")
+            read_terminal(master, "action_not_pending", composer=True)
             assert len(proxy.exchanges) == 1
             assert json.loads(proxy.exchanges[0][0])["action"] == action
             assert not (state / "effect-count").exists() and not (state / "second-effect").exists()
             assert len(endpoint.requests) == 1
+            before_rejected = {path: path.read_bytes() for path in records.glob("*.json")}
+            busy = terminal_step(master, "", "Keep editing;", composer=True)
+            assert "/discard" in busy and "Ctrl-R" not in busy, busy
+            assert "› next cafXaé!" in busy, busy
+            os.write(master, b"\x12Y")
+            retained = read_terminal(master, "› next cafXaYé!")
+            assert "› next cafXaYé!" in retained, retained
+            assert len(proxy.exchanges) == 1, "Ctrl-R retried a rejected decision"
+            assert {path: path.read_bytes() for path in records.glob("*.json")} == before_rejected
             os.write(master, b"\x01\x0b/discard\n")
             shown = read_terminal(master, second_command)
             shown += action_ready(ready_read, master)
+            assert {path: path.read_bytes() for path in records.glob("*.json")} == before_rejected
             if "a: Allow once / d: Deny (Enter)" not in shown:
                 shown += read_terminal(master, "a: Allow once / d: Deny (Enter)")
             assert f"\n? Run Bash:\n  {second_command}\n" in shown, shown
@@ -2407,9 +2453,23 @@ def main():
             assert "Decision rejected" in rejected and counter.read_text() == "x", rejected
             if "› " not in rejected.split("action_not_pending", 1)[1]:
                 rejected += read_terminal(master, "› ")
-            caught_up = rejected + terminal_step(master, "/discard",
+            records = home / ".config/rui/requests"
+            sealed = {path: path.read_bytes() for path in records.glob("*.json")}
+            oversized = terminal_bulk(master, "Y" * (64 * 1024 + 1), "input too long")
+            assert "Draft cleared. Enter a shorter message." in oversized, oversized[-1000:]
+            os.write(master, "next café!\x1b[D\x1b[DX".encode())
+            rejected += oversized + read_terminal(master, "› next cafXé!")
+            busy = terminal_step(master, "", "Keep editing;", composer=True)
+            assert "/discard" in busy and "Ctrl-R" not in busy, busy
+            os.write(master, b"\x12Y")
+            rejected += busy + read_terminal(master, "› next cafXYé!")
+            assert {path: path.read_bytes() for path in records.glob("*.json")} == sealed
+            # Slash commands are composition: replacing this draft is an
+            # explicit caller edit, not discard consuming a separate draft.
+            caught_up = rejected + terminal_step(master, "\x01\x0b/discard",
                 "› " if "siblings done" in rejected else "siblings done", composer=True)
             assert "siblings done" in caught_up and counter.read_text() == "x", caught_up
+            assert {path: path.read_bytes() for path in records.glob("*.json")} == sealed
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
@@ -2889,7 +2949,19 @@ def main():
             accepted_count = len(endpoint.requests)
             rejected = terminal_bulk(master, "Y" * (64 * 1024 + 1) + "\x7f", "input too long")
             assert "input too long" in rejected and "nothing sent" in rejected, rejected[-1000:]
+            assert "Draft cleared. Enter a shorter message." in rejected, rejected[-1000:]
+            if "› \r\x1b[2C" not in rejected:
+                rejected += read_terminal(master, "› ")
+            assert "› \r\x1b[2C" in rejected, rejected[-1000:]
             assert len(endpoint.requests) == accepted_count, "oversized input reached Host"
+            endpoint.responses.append(fixture.sse_answer("shorter-answer", "shorter-reason",
+                "shorter-message", "shorter replacement intact")[0])
+            terminal_step(master, "shorter replacement", "shorter replacement intact", composer=True)
+            assert len(endpoint.requests) == accepted_count + 1
+            body = json.loads(endpoint.requests[-1])
+            assert next(item["content"][0]["text"] for item in reversed(body["input"])
+                if item.get("role") == "user") == "shorter replacement", body
+            accepted_count += 1
             rejected = terminal_step(master, "invalid\x00x", "Input rejected; nothing sent.")
             assert "Input rejected; nothing sent." in rejected and "--text FILE" not in rejected, rejected
             assert len(endpoint.requests) == accepted_count, "unsupported control reached Host"
