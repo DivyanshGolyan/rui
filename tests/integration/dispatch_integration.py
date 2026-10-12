@@ -603,24 +603,33 @@ def retry_message(state, store, key):
 
 
 def observe(store, key, *, deadline=None):
+    if deadline is not None:
+        deadline = min(deadline, time.monotonic() + 15)
     remaining = 15 if deadline is None else deadline - time.monotonic()
     assert remaining > 0, "result observation exhausted original deadline"
-    return command(
+    result = command(
         "observe-command", "--store", store, "--key", key, timeout=remaining,
     )["observation"]
+    assert deadline is None or time.monotonic() < deadline, "result observation exceeded original deadline"
+    return result
 
 
-def read_result(store, key):
+def read_result(store, key, *, deadline=None):
+    if deadline is not None:
+        deadline = min(deadline, time.monotonic() + 15)
+    remaining = 15 if deadline is None else deadline - time.monotonic()
+    assert remaining > 0, "result read exhausted original deadline"
     completed = subprocess.run(
         [str(RUI), "read-result", "--store", str(store), "--key", key],
         capture_output=True,
-        timeout=15,
+        timeout=remaining,
     )
     if completed.returncode != 0:
         raise AssertionError(
             f"read-result failed for {key}: {completed.returncode}\n"
             f"stdout: {completed.stdout!r}\nstderr: {completed.stderr!r}"
         )
+    assert deadline is None or time.monotonic() < deadline, "result read exceeded original deadline"
     return completed.stdout
 
 

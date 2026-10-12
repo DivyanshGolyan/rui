@@ -385,18 +385,26 @@ def assert_round_trip_history(streams, capacity, rounds, answers):
             expected.extend((reasoning, message))
 
 
-def closed_host_request(socket_path, store, kind, *, timeout=15, **fields):
+def closed_host_request(socket_path, store, kind, *, timeout=15, deadline=None, **fields):
+    if deadline is not None:
+        deadline = min(deadline, time.monotonic() + timeout)
     payload = json.dumps({"version": "1", "kind": kind, "store": str(store.resolve()),
                           **fields}, separators=(",", ":")).encode()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(timeout)
+        def set_timeout():
+            remaining = timeout if deadline is None else min(timeout, deadline - time.monotonic())
+            assert remaining > 0, "Host request exhausted original deadline"
+            connection.settimeout(remaining)
+
+        set_timeout()
         connection.connect(socket_path)
+        set_timeout()
         connection.sendall(
             f"POST /v1/{kind.replace('_', '-')} HTTP/1.1\r\n".encode()
             + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\n"
             + f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload
         )
-        head, body = control.read_http_response(connection, timeout=timeout)
+        head, body = control.read_http_response(connection, timeout=timeout, deadline=deadline)
         assert b" 200 " in head, (head, body)
         headers = dict(line.lower().split(b":", 1) for line in head.split(b"\r\n")[1:])
         assert len(body) == int(headers[b"content-length"]), "truncated Host response"
@@ -404,8 +412,11 @@ def closed_host_request(socket_path, store, kind, *, timeout=15, **fields):
         assert headers[b"content-type"].strip().startswith(expected_type), head
         # Every caller, not just inspection, must release its server-side
         # content/report handles and socket before an idle FD sample.
+        set_timeout()
         assert connection.recv(1) == b"", "Host must close after its response"
-    return body if kind == "read_result" else json.loads(body)
+    result = body if kind == "read_result" else json.loads(body)
+    assert deadline is None or time.monotonic() < deadline, "Host request exceeded original deadline"
+    return result
 
 
 def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
@@ -455,21 +466,23 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
             for index in range(capacity):
                 key = f"message-{capacity}-{round_number}-{index}"
                 result_deadline = time.monotonic() + 45
-                dispatch.wait_for(
+                result = dispatch.wait_for(
                     lambda key=key: closed_host_request(
                         ready["socket"], store, "observe_command", key=key,
-                        timeout=min(15, result_deadline - time.monotonic()),
+                        deadline=result_deadline,
                     )["observation"].get("result"),
                     f"H2 result {key}", deadline=result_deadline,
                 )
-                assert closed_host_request(ready["socket"], store, "observe_command", key=key)["observation"]["result"]["status"] == "completed"
-                assert closed_host_request(ready["socket"], store, "read_result", key=key) == endpoint.answers[f"h2-{capacity}-{round_number}-{index}"]
+                assert result["status"] == "completed", result
+                assert closed_host_request(ready["socket"], store, "read_result", key=key,
+                                           deadline=result_deadline) == endpoint.answers[f"h2-{capacity}-{round_number}-{index}"]
+            drain_deadline = min(result_deadline, time.monotonic() + 20)
             wait_for_drain(
                 lambda remaining: closed_host_request(
                     ready["socket"], store, "inspect_session", session=f"direct/h2-{capacity}-0",
-                    timeout=remaining,
+                    timeout=remaining, deadline=drain_deadline,
                 )["execution"],
-                min(result_deadline, time.monotonic() + 20),
+                drain_deadline,
             )
             # Every preceding request reached EOF; no caller socket or report
             # can inflate the first baseline or mask later retained FDs.
@@ -561,12 +574,12 @@ def queued_h1(root):
                 result_deadline = time.monotonic() + 40
                 result = dispatch.wait_for(
                     lambda key=key: dispatch.observe(
-                        store, key, deadline=min(result_deadline, time.monotonic() + 15),
+                        store, key, deadline=result_deadline,
                     ).get("result"),
                     f"queued H1 result {key}", deadline=result_deadline,
                 )
                 assert result["status"] == "completed", result
-                assert dispatch.read_result(store, key) == f"answer-h1-{round_number}-{index}".encode()
+                assert dispatch.read_result(store, key, deadline=result_deadline) == f"answer-h1-{round_number}-{index}".encode()
             wait_for_drain(
                 lambda remaining: dispatch.command("inspect-session", "--store", store,
                                                   "--session", "direct/h1-0", timeout=remaining)["execution"],
@@ -617,12 +630,13 @@ def queued_h1_inactivity(root):
         queued = 1 if held == "queued-0" else 0
         assert dispatch.observe(store, f"queued-message-{queued}").get("result") is None
         endpoint.release_first.set()
+        result_deadline = time.monotonic() + 10
         held_result = dispatch.wait_for(
-            lambda: dispatch.observe(store, f"queued-message-{1 - queued}").get("result"),
-            "trickling H1 request completes", timeout=10,
+            lambda: dispatch.observe(store, f"queued-message-{1 - queued}", deadline=result_deadline).get("result"),
+            "trickling H1 request completes", deadline=result_deadline,
         )
         assert held_result["status"] == "completed", held_result
-        assert dispatch.read_result(store, f"queued-message-{1 - queued}") == f"answer-{held}".encode()
+        assert dispatch.read_result(store, f"queued-message-{1 - queued}", deadline=result_deadline) == f"answer-{held}".encode()
     finally:
         dispatch.stop_host(host)
         endpoint.release_first.set()
@@ -687,7 +701,7 @@ def stalled_capture(root, endpoint, after_progress=False):
             result_deadline = time.monotonic() + 45
             result = dispatch.wait_for(
                 lambda key=key: dispatch.observe(
-                    store, key, deadline=min(result_deadline, time.monotonic() + 15),
+                    store, key, deadline=result_deadline,
                 ).get("result"),
                 f"stalled result {index}", deadline=result_deadline,
             )
@@ -695,7 +709,7 @@ def stalled_capture(root, endpoint, after_progress=False):
                 assert result["status"] == "cancelled", result
             else:
                 assert result["status"] == "completed", result
-                assert dispatch.read_result(store, key) == endpoint.answers[f"stalled-{index}"]
+                assert dispatch.read_result(store, key, deadline=result_deadline) == endpoint.answers[f"stalled-{index}"]
         wait_for_drain(
             lambda remaining: dispatch.command("inspect-session", "--store", store,
                                               "--session", "direct/stalled-0", timeout=remaining)["execution"],
@@ -749,12 +763,12 @@ def paused_capture_inactivity(root, endpoint):
             result_deadline = time.monotonic() + 20
             result = dispatch.wait_for(
                 lambda key=key: dispatch.observe(
-                    store, key, deadline=min(result_deadline, time.monotonic() + 15),
+                    store, key, deadline=result_deadline,
                 ).get("result"),
                 f"paused capture result {index}", deadline=result_deadline,
             )
             assert result["status"] == "completed", result
-            assert dispatch.read_result(store, key) == endpoint.answers[f"paused-{index}"]
+            assert dispatch.read_result(store, key, deadline=result_deadline) == endpoint.answers[f"paused-{index}"]
         wait_for_drain(
             lambda remaining: dispatch.command("inspect-session", "--store", store,
                                               "--session", "direct/paused-0", timeout=remaining)["execution"],
@@ -804,13 +818,13 @@ def capture_failure_on_resume(root, endpoint):
             result_deadline = time.monotonic() + 20
             result = dispatch.wait_for(
                 lambda key=key: dispatch.observe(
-                    store, key, deadline=min(result_deadline, time.monotonic() + 15),
+                    store, key, deadline=result_deadline,
                 ).get("result"), f"resume result {index}", deadline=result_deadline,
             )
             outcomes.append(result.get("code"))
             if result["status"] == "completed":
                 completed += 1
-                assert dispatch.read_result(store, key) == endpoint.answers[f"resume-{index}"]
+                assert dispatch.read_result(store, key, deadline=result_deadline) == endpoint.answers[f"resume-{index}"]
         assert outcomes.count("response_write_failed") == 1, outcomes
         assert len(diagnostics.matching("transport_resume_capture_failure")) == 1, diagnostics.records[-12:]
         assert completed == 19, outcomes
@@ -819,12 +833,12 @@ def capture_failure_on_resume(root, endpoint):
         result_deadline = time.monotonic() + 20
         later = dispatch.wait_for(
             lambda: dispatch.observe(
-                store, "resume-after-message", deadline=min(result_deadline, time.monotonic() + 15),
+                store, "resume-after-message", deadline=result_deadline,
             ).get("result"),
             "new admission after local capture failure", deadline=result_deadline,
         )
         assert later["status"] == "completed", later
-        assert dispatch.read_result(store, "resume-after-message") == endpoint.answers["resume-after"]
+        assert dispatch.read_result(store, "resume-after-message", deadline=result_deadline) == endpoint.answers["resume-after"]
         wait_for_drain(
             lambda remaining: dispatch.command("inspect-session", "--store", store,
                                               "--session", "direct/resume-0", timeout=remaining)["execution"],
@@ -851,11 +865,12 @@ def refused_stream(root, endpoint, phase):
     try:
         dispatch.configure(root, store, f"refused-{phase}-config", "direct/refused", "model-a")
         dispatch.message(root, store, f"refused-{phase}-message", "direct/refused", "refused-request")
-        dispatch.wait_for(
-            lambda: dispatch.observe(store, f"refused-{phase}-message").get("result"),
-            "REFUSED_STREAM same-Attempt settlement", timeout=20,
+        result_deadline = time.monotonic() + 20
+        result = dispatch.wait_for(
+            lambda: dispatch.observe(store, f"refused-{phase}-message", deadline=result_deadline).get("result"),
+            "REFUSED_STREAM same-Attempt settlement", deadline=result_deadline,
         )
-        assert dispatch.observe(store, f"refused-{phase}-message")["result"]["code"] == "provider_http_422"
+        assert result["code"] == "provider_http_422", result
         assert len(endpoint.streams) == 2, endpoint.streams
         assert [text for _, _, text, _ in endpoint.streams] == (
             [None, "refused-request"] if phase == "headers" else ["refused-request"] * 2
@@ -886,11 +901,12 @@ def dead_reused_connection(root, endpoint):
         for text in ("warm", "dead"):
             dispatch.configure(root, store, f"dead-{text}-config", f"direct/{text}", "model-a")
             dispatch.message(root, store, f"dead-{text}-message", f"direct/{text}", text)
-            dispatch.wait_for(
-                lambda text=text: dispatch.observe(store, f"dead-{text}-message").get("result"),
-                f"settled {text} after reused H2 failure", timeout=20,
+            result_deadline = time.monotonic() + 20
+            result = dispatch.wait_for(
+                lambda text=text: dispatch.observe(store, f"dead-{text}-message", deadline=result_deadline).get("result"),
+                f"settled {text} after reused H2 failure", deadline=result_deadline,
             )
-            assert dispatch.observe(store, f"dead-{text}-message")["result"]["code"] == "provider_http_422"
+            assert result["code"] == "provider_http_422", result
         assert [text for _, _, text, _ in endpoint.streams] == ["warm", "dead", "dead"]
         assert endpoint.streams[0][0] == endpoint.streams[1][0]
         assert endpoint.streams[2][0] != endpoint.streams[1][0]
@@ -918,16 +934,17 @@ def isolated_bad_header(root, endpoint):
         for index in range(2):
             dispatch.configure(root, store, f"sibling-config-{index}", f"direct/sibling-{index}", "model-a")
             dispatch.message(root, store, f"sibling-message-{index}", f"direct/sibling-{index}", f"sibling-{index}")
+        codes = []
         for index in range(2):
             result_deadline = time.monotonic() + 20
-            dispatch.wait_for(
+            result = dispatch.wait_for(
                 lambda index=index: dispatch.observe(
-                    store, f"sibling-message-{index}", deadline=min(result_deadline, time.monotonic() + 15),
+                    store, f"sibling-message-{index}", deadline=result_deadline,
                 ).get("result"),
                 f"sibling {index} settlement", deadline=result_deadline,
             )
-        assert sorted(dispatch.observe(store, f"sibling-message-{index}")["result"]["code"]
-                      for index in range(2)) == ["invalid_provider_headers", "provider_http_422"]
+            codes.append(result["code"])
+        assert sorted(codes) == ["invalid_provider_headers", "provider_http_422"], codes
         assert len(endpoint.streams) == 2
         assert len(endpoint.connections) == 1
         wait_for_drain(
@@ -960,9 +977,10 @@ def isolated_terminal_stream(root, endpoint, mode):
                 "--turn", processing["turn"], "--operation", processing["operation"],
             )
             assert reply["answer"]["status"] == "accepted", reply
+        target_deadline = time.monotonic() + 20
         target = dispatch.wait_for(
-            lambda: dispatch.observe(store, f"{mode}-target-message").get("result"),
-            f"{mode} target settlement", timeout=20,
+            lambda: dispatch.observe(store, f"{mode}-target-message", deadline=target_deadline).get("result"),
+            f"{mode} target settlement", deadline=target_deadline,
         )
         assert (target["status"], target.get("code")) == (
             ("cancelled", "cancelled") if mode == "cancel" else ("failed", "response_scratch_exhausted")
@@ -970,12 +988,12 @@ def isolated_terminal_stream(root, endpoint, mode):
         result_deadline = time.monotonic() + 20
         sibling = dispatch.wait_for(
             lambda: dispatch.observe(
-                store, f"{mode}-sibling-message", deadline=min(result_deadline, time.monotonic() + 15),
+                store, f"{mode}-sibling-message", deadline=result_deadline,
             ).get("result"),
             f"{mode} sibling completion", deadline=result_deadline,
         )
         assert sibling["status"] == "completed", sibling
-        assert dispatch.read_result(store, f"{mode}-sibling-message") == b"unaffected sibling"
+        assert dispatch.read_result(store, f"{mode}-sibling-message", deadline=result_deadline) == b"unaffected sibling"
         dispatch.wait_for(lambda: endpoint.resets, f"{mode} stream reset", deadline=result_deadline)
         assert endpoint.resets == [endpoint.stream_ids["isolation-target"]], endpoint.resets
         assert len(endpoint.connections) == 1 and len(endpoint.streams) == 2
@@ -1013,13 +1031,13 @@ def connection_failure(root, endpoint):
             dispatch.message(root, store, f"drop-message-{index}", f"direct/drop-{index}", f"drop-{index}")
         for index in range(2):
             result_deadline = time.monotonic() + 20
-            dispatch.wait_for(
+            result = dispatch.wait_for(
                 lambda index=index: dispatch.observe(
-                    store, f"drop-message-{index}", deadline=min(result_deadline, time.monotonic() + 15),
+                    store, f"drop-message-{index}", deadline=result_deadline,
                 ).get("result"),
                 f"connection failure settlement {index}", deadline=result_deadline,
             )
-            assert dispatch.observe(store, f"drop-message-{index}")["result"]["code"] == "provider_http_422"
+            assert result["code"] == "provider_http_422", result
         assert len(endpoint.streams) == 4, endpoint.streams
         assert sorted(text for _, _, text, _ in endpoint.streams) == ["drop-0", "drop-0", "drop-1", "drop-1"]
         wait_for_drain(
@@ -1053,9 +1071,10 @@ def unsupported_https(root):
     try:
         dispatch.configure(root, store, "non-h2-config", "direct/non-h2", "model-a")
         dispatch.message(root, store, "non-h2-message", "direct/non-h2", "non-h2")
+        result_deadline = time.monotonic() + 20
         result = dispatch.wait_for(
-            lambda: dispatch.observe(store, "non-h2-message").get("result"),
-            "non-H2 HTTPS failure", timeout=20,
+            lambda: dispatch.observe(store, "non-h2-message", deadline=result_deadline).get("result"),
+            "non-H2 HTTPS failure", deadline=result_deadline,
         )
         assert result["code"] == "provider_http2_required", result
         assert endpoint.requests == []
@@ -1083,9 +1102,10 @@ def negotiated_h2_early_error(root, endpoint):
     try:
         dispatch.configure(root, store, "early-h2-config", "direct/early-h2", "model-a")
         dispatch.message(root, store, "early-h2-message", "direct/early-h2", "early-h2")
+        result_deadline = time.monotonic() + 20
         result = dispatch.wait_for(
-            lambda: dispatch.observe(store, "early-h2-message").get("result"),
-            "negotiated H2 protocol failure settlement", timeout=20,
+            lambda: dispatch.observe(store, "early-h2-message", deadline=result_deadline).get("result"),
+            "negotiated H2 protocol failure settlement", deadline=result_deadline,
         )
         assert result["code"] == "retry_exhausted", result
         assert len(endpoint.streams) == 4, endpoint.streams

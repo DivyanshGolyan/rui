@@ -392,11 +392,21 @@ def percentile_95(values):
     return ordered[max(0, (95 * len(ordered) + 99) // 100 - 1)]
 
 
-def read_http_response(connection, timeout=3):
+def read_http_response(connection, timeout=3, *, deadline=None):
     connection.settimeout(timeout)
+
+    def receive():
+        if deadline is not None:
+            remaining = min(timeout, deadline - time.monotonic())
+            assert remaining > 0, "Host response exhausted original deadline"
+            connection.settimeout(remaining)
+        chunk = connection.recv(4096)
+        assert deadline is None or time.monotonic() < deadline, "Host response exceeded original deadline"
+        return chunk
+
     response = bytearray()
     while b"\r\n\r\n" not in response:
-        chunk = connection.recv(4096)
+        chunk = receive()
         if not chunk:
             break
         response.extend(chunk)
@@ -406,7 +416,7 @@ def read_http_response(connection, timeout=3):
         if line.lower().startswith(b"content-length:"):
             length = int(line.split(b":", 1)[1])
     while len(body) < length:
-        chunk = connection.recv(4096)
+        chunk = receive()
         if not chunk:
             break
         body += chunk

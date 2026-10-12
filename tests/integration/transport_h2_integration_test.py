@@ -130,6 +130,9 @@ class ShapedWorkTests(unittest.TestCase):
             calls.append(kind)
             if kind == "message" and calls.count(kind) == 2:
                 raise RuntimeError("wave 2 failed")
+            if kind == "read_result":
+                self.assertEqual(fields.get("deadline"), 45.0,
+                                 "exact result read must retain the original result deadline")
             return {
                 "configure": {"answer": {"status": "accepted"}},
                 "message": {"answer": {"status": "accepted"}},
@@ -141,6 +144,7 @@ class ShapedWorkTests(unittest.TestCase):
         output = io.StringIO()
         with contextlib.ExitStack() as stack:
             stack.enter_context(contextlib.redirect_stdout(output))
+            stack.enter_context(patch.object(transport.time, "monotonic", return_value=0.0))
             stack.enter_context(patch.object(transport.dispatch, "start_ready_process",
                                             return_value=(SimpleNamespace(pid=123), {"socket": "/fixture/socket"})))
             stop = stack.enter_context(patch.object(transport.dispatch, "stop_host"))
@@ -151,7 +155,7 @@ class ShapedWorkTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "wave 2 failed"):
                 transport.round_trip(pathlib.Path("/fixture"), endpoint, 1, pathlib.Path("/fixture/ca"))
             stop.assert_called_once()
-        self.assertEqual(calls, ["configure", "message", "observe_command", "observe_command",
+        self.assertEqual(calls, ["configure", "message", "observe_command",
                                  "read_result", "inspect_session", "message"])
         rows = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(len(rows), 2, "completed wave and failure evidence must both survive")
@@ -186,6 +190,71 @@ class ManagedDescriptorTests(unittest.TestCase):
 
 
 class ObservationDeadlineTests(unittest.TestCase):
+    def test_result_exchanges_keep_caps_and_reject_late_or_exhausted_evidence(self):
+        for kind in ("observe", "read_result"):
+            for remaining, elapsed in ((0, 0), (0.25, 0.1), (0.25, 0.25), (0.25, 1), (20, 0.1), (20, 16)):
+                with self.subTest(kind=kind, remaining=remaining, elapsed=elapsed):
+                    clock = [10.0]
+                    budgets = []
+
+                    def exchange(*args, timeout, **kwargs):
+                        budgets.append(timeout)
+                        clock[0] += elapsed
+                        return ({"observation": {"result": {"status": "completed"}}} if kind == "observe"
+                                else SimpleNamespace(returncode=0, stdout=b"exact answer", stderr=b""))
+
+                    with patch.object(transport.time, "monotonic", side_effect=lambda: clock[0]), \
+                            patch.object(transport.dispatch, "command", side_effect=exchange), \
+                            patch.object(transport.dispatch.subprocess, "run", side_effect=exchange):
+                        operation = getattr(transport.dispatch, kind)
+                        if min(15, remaining) <= elapsed:
+                            with self.assertRaisesRegex(AssertionError, "original deadline"):
+                                operation(pathlib.Path("/fixture"), "key", deadline=10 + remaining)
+                        else:
+                            result = operation(pathlib.Path("/fixture"), "key", deadline=10 + remaining)
+                            self.assertEqual(result, {"result": {"status": "completed"}} if kind == "observe" else b"exact answer")
+                    self.assertEqual(budgets, [] if remaining == 0 else [min(15, remaining)])
+
+    def test_fragmented_result_and_eof_share_one_exchange_budget(self):
+        class TimedReply(HostReply):
+            def __init__(self, clock, arrivals):
+                super().__init__(content_type=b"text/plain")
+                self.clock, self.arrivals = clock, iter(arrivals)
+                self.chunks = iter((b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 6\r\n\r\n", b"answer", b""))
+                self.request = None
+
+            def settimeout(self, timeout):
+                self.timeout = timeout
+
+            def sendall(self, data):
+                self.request = data
+
+            def recv(self, size):
+                arrival = next(self.arrivals)
+                if arrival - self.clock[0] >= self.timeout:
+                    raise TimeoutError("remaining socket credit exhausted")
+                self.clock[0] = arrival
+                chunk = next(self.chunks)
+                self.released = not chunk
+                return chunk
+
+        for deadline, arrivals, timely in ((1, (0.2, 0.7, 0.9), True), (1, (0.2, 1, 1.1), False),
+                                           (1, (0.2, 0.7, 1), False), (45, (8, 16, 16.1), False)):
+            with self.subTest(deadline=deadline, arrivals=arrivals):
+                clock = [0.0]
+                reply = TimedReply(clock, arrivals)
+                with patch.object(transport.time, "monotonic", side_effect=lambda: clock[0]), \
+                        patch.object(transport.socket, "socket", return_value=reply):
+                    if timely:
+                        self.assertEqual(transport.closed_host_request("/fixture/socket", pathlib.Path("/fixture"),
+                                                                       "read_result", deadline=deadline), b"answer")
+                        self.assertTrue(reply.released)
+                        self.assertNotIn(b'"deadline"', reply.request)
+                    else:
+                        with self.assertRaises((TimeoutError, AssertionError)):
+                            transport.closed_host_request("/fixture/socket", pathlib.Path("/fixture"),
+                                                          "read_result", deadline=deadline)
+
     def test_blocking_predicate_cannot_publish_a_late_clean_observation(self):
         for completed_at in (7.999, 8.0, 15.0):
             with self.subTest(completed_at=completed_at):
