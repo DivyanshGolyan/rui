@@ -81,10 +81,10 @@ pub fn detached(self: *Self, store: []const u8, session: []const u8) !void {
     try notice.writeAll("\n");
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
     const enabled = std.c.fcntl(1, std.c.F.SETFL, self.flags[1] | nonblock) == 0;
-    if (enabled) _ = std.c.write(1, notice.buffered().ptr, notice.buffered().len);
+    const written = if (enabled) std.c.write(1, notice.buffered().ptr, notice.buffered().len) else -1;
     // Restore every attempted enable, without writing after a failed attempt.
     if (std.c.fcntl(1, std.c.F.SETFL, self.flags[1]) < 0) return error.TerminalCleanupFailed;
-    if (!enabled) return error.TerminalCleanupFailed;
+    if (written != @as(isize, @intCast(notice.buffered().len))) return error.TerminalCleanupFailed;
 }
 
 pub fn next(self: *Self, io: std.Io, pending: Editor.Pending, wait: i32) !?u8 {

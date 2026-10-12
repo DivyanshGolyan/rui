@@ -139,6 +139,13 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
 #endif
     if (!real_write || real_write == probe_write) _exit(96);
     const char *fault = getenv("RUI_TERMINAL_FAULT");
+    if (fd == 1 && detach_phase == 3 && fault && !strncmp(fault, "detach-write-", 13)) {
+        record("detach-write\n");
+        if (!(fcntl(fd, F_GETFL) & O_NONBLOCK)) record("detach-write-blocking\n");
+        if (!strcmp(fault, "detach-write-error")) { errno = EAGAIN; return -1; }
+        if (!strcmp(fault, "detach-write-zero")) return 0;
+        if (!strcmp(fault, "detach-write-short")) return real_write(fd, bytes, 1);
+    }
     const char *diagnostic_arm = getenv("RUI_DIAGNOSTIC_ARM");
     if (fd == 2 && diagnostic_arm && !access(diagnostic_arm, F_OK)) {
         const int lifecycle = !strcmp(fault, "diagnostic-contention-host");
@@ -1280,6 +1287,7 @@ def detach_reporting_cases(state, library):
     home.mkdir(mode=0o700)
     cases = [(kind, fault) for kind in ("message", "allow_once", "deny") for fault in
         ("detach-enable-mutated", "detach-enable", "detach-enable-mutated-reset", "detach-reset")]
+    cases += [("message", f"detach-write-{result}") for result in ("error", "zero", "short", "full")]
     responses = []
     for kind, fault in cases:
         name = f"{kind}-{fault}"
@@ -1325,12 +1333,19 @@ def detach_reporting_cases(state, library):
                 arm.touch()
                 os.write(master, b"\x03")
                 output, errors = human.terminal_exit(caller, master)
-                assert caller.returncode == 1 and b"TerminalCleanupFailed" in errors, (output, errors)
                 guide = b"Message accepted; do not resubmit it" if kind == "message" else b"Decision accepted; do not repeat it"
-                assert guide in errors and request["key"].encode() in errors, errors
-                assert (b"rui result " if kind == "message" else b"rui recover ") + request["key"].encode() in errors
+                if fault == "detach-write-full":
+                    assert caller.returncode == 0 and not errors, (output, errors)
+                    assert b"Detached. Host work continues." in output and session.encode() in output, output
+                else:
+                    assert caller.returncode == 1 and b"TerminalCleanupFailed" in errors, (output, errors)
+                    assert guide in errors and request["key"].encode() in errors, errors
+                    assert (b"rui result " if kind == "message" else b"rui recover ") + request["key"].encode() in errors
                 assert "cleanup-flags-restored\ndetach-enable\n" in log.read_text(), log.read_text()
                 assert log.read_text().count("detach-enable\n") == 1
+                if fault.startswith("detach-write-"):
+                    assert log.read_text().count("detach-write\n") == 1, "notice write was retried"
+                    assert "detach-write-blocking" not in log.read_text(), log.read_text()
                 assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL),
                     flags | os.O_NONBLOCK if fault.endswith("reset") else flags)
                 assert log.read_text().count("detach-reset\n") == 1
