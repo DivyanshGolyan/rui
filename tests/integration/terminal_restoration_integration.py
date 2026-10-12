@@ -1338,7 +1338,7 @@ def visible_stream_handoff_cases(state, library):
     """A cancelled visible stream retires, rather than replaying its prefix."""
     marker = "VISIBLE-CANCEL-PREFIX"
     long = marker + "\n" + "complete saved content\n" * 240 + "VISIBLE-END"
-    for phase in ("opening", "activity", "permission", "history", "details"):
+    for phase in ("opening", "activity", "permission", "history", "details", "completion"):
         root = state / f"visible-{phase}"
         root.mkdir()
         home, store = root / "home", root / "store"
@@ -1360,7 +1360,7 @@ def visible_stream_handoff_cases(state, library):
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
             human.run(home, "configure", "--store", store, "--session", "visible/stream",
                 "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
-            if phase not in ("activity", "permission"):
+            if phase not in ("activity", "permission", "completion"):
                 for i in range(len(responses)):
                     admission = human.admit(home, "message", "--store", store, "--session", "visible/stream", f"saved input {i}")
                     fixture.wait_for(lambda: fixture.completed_observation(store, admission["request"]), "saved stream content")
@@ -1372,21 +1372,36 @@ def visible_stream_handoff_cases(state, library):
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             if phase != "opening":
                 ready = "VISIBLE-END" if phase == "details" else "OPENING-READY" if phase == "history" else "› "
-                opening = human.read_terminal(master, ready)
-                if ready != "› " and "› " not in opening.split(ready, 1)[1]: human.read_terminal(master, "› ")
+                human.read_terminal(master, ready, composer=True)
                 arm.touch()
                 os.write(master, (f"/{phase}\n" if phase in ("history", "details") else "produce content\n").encode())
             prefix = human.read_terminal(master, marker)
             fixture.wait_for(lambda: log.exists() and "visible-stream-held" in log.read_text(), "post-prefix output gate")
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
-            command = b"/inspect-action\n" if phase == "permission" else b"/status\n"
-            os.write(master, command)
-            tail, errors = human.terminal_exit(caller, master)
-            assert caller.returncode != 0 and b"Cancelled" in errors, (phase, tail, errors)
-            assert errors.startswith(b"\n"), "fatal diagnostics merged into incomplete transcript"
-            assert b"Session: visible/stream" not in tail and b"Action:" not in tail, "cancelled stream dispatched command"
-            assert marker not in tail.decode() and b"Detached." not in tail, "cancelled stream replayed or resumed"
-            assert (prefix.encode() + tail).count(marker.encode()) == 1
+            if phase == "completion":
+                arm.unlink()
+                human.read_terminal(master, "VISIBLE-END", composer=True)
+                os.write(master, b"/configure --permission-mode bypass\nUNREAD suffix\n")
+                human.read_terminal(master, "Configured.", composer=True)
+                records = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
+                assert all(records.get(path) == value for path, value in before.items())
+                added = [json.loads(value) for path, value in records.items() if path not in before]
+                assert len(added) == 1 and "configuration" in added[0], "completed handoff captured command suffix"
+                assert fixture.command("inspect-session", "--store", store,
+                    "--session", "visible/stream")["session"]["permission_mode"] == "bypass"
+                os.write(master, b"\x03")
+                tail, errors = human.terminal_exit(caller, master)
+                assert caller.returncode == 0, (tail, errors)
+            else:
+                command = b"/inspect-action\n" if phase == "permission" else b"/status\n"
+                os.write(master, command)
+                tail, errors = human.terminal_exit(caller, master)
+                assert caller.returncode != 0 and b"Cancelled" in errors, (phase, tail, errors)
+                assert errors.startswith(b"\n"), "fatal diagnostics merged into incomplete transcript"
+                assert b"Session: visible/stream" not in tail and b"Action:" not in tail, "cancelled stream dispatched command"
+                assert marker not in tail.decode() and b"Detached." not in tail, "cancelled stream replayed or resumed"
+                assert (prefix.encode() + tail).count(marker.encode()) == 1
+                assert {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")} == before
             actual = termios.tcgetattr(slave)
             if sys.platform == "darwin":
                 mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
@@ -1394,10 +1409,10 @@ def visible_stream_handoff_cases(state, library):
                 original[3] &= ~mask
             assert actual == original
             assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL), flags)
-            assert {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")} == before
             assert "restore-other" in log.read_text() and "disable" in log.read_text()
             assert len(endpoint.requests) == len(responses), "command cancellation restarted Host work"
-            print(f"visible {phase}: command cancellation restores/joins and retires without dispatch or prefix replay", flush=True)
+            print(f"visible {phase}: " + ("joined completion permits one command without suffix capture" if phase == "completion"
+                else "command cancellation restores/joins and retires without dispatch or prefix replay"), flush=True)
         finally:
             if caller is not None and caller.poll() is None:
                 caller.kill()
@@ -1916,7 +1931,10 @@ def host_diagnostic_cases(state, library):
             cleanup_errors = []
             if host is not None and credit == "diagnostic-contention-host":
                 preserve_failure_metadata(root / "contention-pre-kill.json", host.rui_observations.snapshot)
-            release.touch()
+            try:
+                release.touch()
+            except Exception as error:
+                cleanup_errors.append(error)
             inspector_deadline = time.monotonic() + 5
             for inspector in inspectors:
                 try:
@@ -1942,29 +1960,57 @@ def host_diagnostic_cases(state, library):
                                         retained.write(chunk)
                         except Exception as error:
                             cleanup_errors.append(error)
+                    except Exception as error:
+                        cleanup_errors.append(error)
                     finally:
-                        fixture.stop_host(host)
+                        try:
+                            fixture.stop_host(host)
+                        except Exception as error:
+                            cleanup_errors.append(error)
                     if credit == "diagnostic-contention-host":
                         preserve_failure_metadata(root / "contention-final.json", lambda: {
                             "returncode": host.returncode, "state": host.rui_observations.final_state,
                             "records": host.rui_observations.records})
                         if contention_complete:
-                            assert host.returncode == -signal.SIGKILL
-                            assert host.rui_observations.records == population, "native population changed after complete census"
+                            try:
+                                assert host.returncode == -signal.SIGKILL
+                            except Exception as error:
+                                cleanup_errors.append(error)
+                            try:
+                                assert host.rui_observations.records == population, "native population changed after complete census"
+                            except Exception as error:
+                                cleanup_errors.append(error)
                 elif not reader.closed: reader.close()
+            except Exception as error:
+                cleanup_errors.append(error)
             finally:
-                os.close(write_fd)
-                endpoint.shutdown()
-                endpoint.server_close()
-                thread.join(timeout=5)
-                assert not thread.is_alive()
+                try:
+                    os.close(write_fd)
+                except Exception as error:
+                    cleanup_errors.append(error)
+                try:
+                    endpoint.shutdown()
+                except Exception as error:
+                    cleanup_errors.append(error)
+                try:
+                    endpoint.server_close()
+                except Exception as error:
+                    cleanup_errors.append(error)
+                try:
+                    thread.join(timeout=5)
+                    assert not thread.is_alive()
+                except Exception as error:
+                    cleanup_errors.append(error)
             if cleanup_errors:
                 preserve_failure_metadata(root / "contention-cleanup.json", lambda: {
                     "original_error": type(incoming_error).__name__ if incoming_error else None,
                     "cleanup_errors": [type(error).__name__ for error in cleanup_errors]})
                 if incoming_error is None:
                     raise cleanup_errors[0]
-                print("Fixture diagnostic cleanup failed; original failure retained", file=sys.stderr)
+                try:
+                    print("Fixture diagnostic cleanup failed; original failure retained", file=sys.stderr)
+                except Exception:
+                    pass  # Optional reporting cannot replace the original failure.
 
 
 def main(selected=None):

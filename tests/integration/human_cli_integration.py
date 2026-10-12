@@ -763,7 +763,8 @@ def persistent_input_cases():
         assert recovered["key"] == reserved and recovered["text"]["value"] == "original before capture failure", recovered
         assert len(set(records.glob("*.json")) - before_failure) == 1
         os.write(master, b"Y\n")
-        read_terminal(master, "next after capture retry")
+        # Visible answer bytes are not joined-reader readiness for a command.
+        read_terminal(master, "next after capture retry", composer=True)
         assert json.loads(proxy.exchanges[-1][0])["text"]["value"] == "next cafXYé!"
         assert len(endpoint.requests) == 5 and len(proxy.exchanges) == 7
         # A command selects a handoff, not another input/submission window.
