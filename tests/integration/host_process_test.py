@@ -7,6 +7,7 @@ import contextlib
 import mmap
 import os
 import pathlib
+import socket
 import struct
 import subprocess
 import sys
@@ -590,6 +591,76 @@ def prove_execution_release_oracles():
         else:
             refused(invoke, "timed out")
     print("Execution release oracle: simultaneous accounting, exact cleanup owners/final population, withheld custody/scratch, late replies, caller and inspection bounds")
+
+
+def prove_capacity_refusal_oracle(probe):
+    module = sys.modules[probe.__module__]
+    class ConnectedSocket(socket.socket):
+        def connect(self, _path):
+            pass  # The socketpair is already connected; send/receive/close are real.
+
+    connection_body = b'{"version":"1","type":"busy","code":"connection_capacity_exhausted"}'
+    ordinary_body = b'{"version":"1","type":"busy","code":"ordinary_capacity_exhausted"}'
+    for case in ("early-complete", "ordinary-complete", "empty", "truncated", "wrong-code",
+                 "wrong-status", "code-suffix", "missing-length", "duplicate-length"):
+        body = connection_body
+        if case == "wrong-code":
+            body = ordinary_body
+        elif case == "code-suffix":
+            body = connection_body.replace(b'"connection_capacity_exhausted"', b'"connection_capacity_exhausted_extra"')
+        elif case == "ordinary-complete":
+            body = ordinary_body
+        status = b"200 OK" if case == "wrong-status" else b"503 Service Unavailable"
+        length = b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+        if case == "missing-length":
+            length = b""
+        elif case == "duplicate-length":
+            length *= 2
+        response = b"HTTP/1.1 " + status + b"\r\n" + length + b"\r\n" + body
+        if case == "truncated":
+            response = response[:-1]
+        elif case == "empty":
+            response = b""
+        client, peer = socket.socketpair()
+        client = ConnectedSocket(fileno=client.detach())
+        peer.settimeout(3)
+        errors = []
+
+        def respond():
+            try:
+                if case == "ordinary-complete":
+                    request = bytearray()
+                    while b"\r\n" not in request:
+                        chunk = peer.recv(4096)
+                        assert chunk, "ordinary probe closed before classification"
+                        request.extend(chunk)
+                peer.sendall(response)
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                peer.close()
+
+        thread = None
+        if case == "ordinary-complete":
+            thread = threading.Thread(target=respond)
+            thread.start()
+        else:
+            respond()  # A complete refusal can precede the client's first write.
+        try:
+            with patch.object(module.socket, "socket", return_value=client):
+                probe("unused", b"ordinary_capacity_exhausted" if case == "ordinary-complete"
+                      else b"connection_capacity_exhausted")
+        except (AssertionError, ValueError):
+            assert case not in ("early-complete", "ordinary-complete"), case
+        else:
+            assert case in ("early-complete", "ordinary-complete"), ("invalid refusal accepted", case)
+        finally:
+            client.close()
+            if thread is not None:
+                thread.join(3)
+                assert not thread.is_alive(), case
+            assert not errors, errors
+    print("Capacity refusal oracle: pre-write close and classified replies; empty, truncated, wrong status/code/framing refused")
 
 
 def prove_control_disposal_oracle(dispose):

@@ -766,10 +766,21 @@ def assert_ordinary_capacity_busy(
     try:
         extra.settimeout(3)
         extra.connect(socket_path)
-        extra.sendall(b"POST /v1/inspect-session HTTP/1.1\r\n")
+        try:
+            extra.sendall(b"POST /v1/inspect-session HTTP/1.1\r\n")
+        except BrokenPipeError:
+            # Reservation can refuse and close before reading the request line.
+            # The write failure alone proves nothing; verify its actual reply.
+            pass
         extra_head, extra_body = read_http_response(extra)
-        assert b" 503 " in extra_head, extra_head
-        assert expected_code in extra_body, extra_body
+        assert extra_head.startswith(b"HTTP/1.1 503 "), extra_head
+        lengths = [line.split(b":", 1)[1].strip() for line in extra_head.split(b"\r\n")[1:]
+                   if line.lower().startswith(b"content-length:")]
+        assert len(lengths) == 1 and lengths[0].isdigit(), extra_head
+        assert int(lengths[0]) == len(extra_body), (extra_head, extra_body)
+        assert json.loads(extra_body) == {
+            "version": "1", "type": "busy", "code": expected_code.decode("ascii")
+        }, extra_body
     finally:
         extra.close()
 
@@ -1832,7 +1843,8 @@ def prove_retry_wait_control(state, kind):
 
 
 def main():
-    from host_process_test import prove_control_disposal_oracle
+    from host_process_test import prove_capacity_refusal_oracle, prove_control_disposal_oracle
+    prove_capacity_refusal_oracle(assert_ordinary_capacity_busy)
     prove_control_disposal_oracle(stop_control_case)
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-control-integration-"))
     store = state / "store"

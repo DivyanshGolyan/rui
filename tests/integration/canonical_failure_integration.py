@@ -488,7 +488,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     marker = reason if route == "/v1/configure" else "Decision not confirmed" if route == "/v1/control/permission-decision" else "Not confirmed"
                     deadline = time.monotonic() + 15
                     output = human.read_terminal(master, marker, timeout=deadline - time.monotonic(),
-                        composer=route != "/v1/configure")
+                        composer=True)
                     assert "other/session" not in output and '"answer"' not in output, output
                     original = proxy.exchanges[0][0]
                     key = json.loads(original)["key"]
@@ -577,6 +577,8 @@ def interactive_cases(state, binding=False, null_code=False):
                     preserve_failure_metadata(state / "pty-failure.json", lambda: {
                         "route": route, "bare_entry": line is None,
                         "error": sys.exc_info()[0].__name__,
+                        "terminal": getattr(sys.exc_info()[1], "terminal_metadata", None),
+                        "terminal_canonical": bool(termios.tcgetattr(slave)[3] & termios.ICANON),
                         "caller_returncode": caller.poll() if caller is not None else None,
                         "ready_pending": bool(select.select([ready_read], [], [], 0)[0]),
                         "terminal_pending": bool(select.select([master], [], [], 0)[0]),

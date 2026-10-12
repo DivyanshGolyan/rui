@@ -19,7 +19,7 @@ import termios
 import threading
 import time
 
-from host_process import canonical_fixture_root, preserve_failure_metadata
+from host_process import canonical_fixture_root, preserve_failure_metadata, stop_process
 import dispatch_integration as fixture
 import codex_integration as codex_fixture
 
@@ -68,9 +68,12 @@ def preference_edits(home, store):
     assert saved.read_text() == pinned
 
 
-def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False):
+def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False):
     output = b""
+    received = 0
     deadline = time.monotonic() + timeout
+    limit = 1024 * 1024
+    assert len(marker.encode()) < limit, "terminal marker exceeds retained output bound"
     # Foreground styling is orthogonal to text/Markdown assertions. A transcript
     # User shares the › marker, so an empty-composer wait also needs its final
     # cursor placement, not merely the first saved User encountered on opening.
@@ -83,14 +86,80 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
             if not composer: return True
             shown = shown.split(marker.encode(), 1)[1]
         return re.search("› [^\\r\\n]*(?:\\r\\n> [^\\r\\n]*)*(?:\\x1b\\[[0-9]+A)?\\r\\x1b\\[[0-9]+C".encode(), shown) is not None
-    while not reached():
-        remaining = deadline - time.monotonic()
-        assert remaining > 0, (marker, output.decode(errors="replace"))
-        assert select.select([master], [], [], remaining)[0], (marker, output.decode(errors="replace"))
-        output += os.read(master, 65536)
-        assert len(output) < 1024 * 1024, "unexpected unbounded terminal output"
+    try:
+        while not reached():
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, (marker, output.decode(errors="replace"))
+            assert select.select([master], [], [], remaining)[0], (marker, output.decode(errors="replace"))
+            chunk = os.read(master, 65536)
+            received += len(chunk)
+            output += chunk
+            if redraw:
+                # Replaced composer frames are not a semantic transcript. Retain a
+                # bounded suffix containing the complete required redraw and cursor.
+                output = output[-(limit - 1):]
+            assert len(output) < limit, "unexpected unbounded terminal output"
+    except AssertionError as error:
+        error.terminal_metadata = {"received_bytes": received, "retained_bytes": len(output),
+            "marker_bytes": len(marker.encode()), "redraw": redraw, "composer": composer}
+        raise
     return ((output if preserve_colour else visible()).decode(errors="replace").replace("\r\n", "\n")
         .replace("\x1b[?2004h", "").replace("\x1b[?2004l", ""))
+
+
+def terminal_wait_oracles():
+    """Bound retained redraws; never confuse diagnostic text with readiness."""
+    def collect(frames, marker, *, redraw=False, composer=False, error=None):
+        reader, writer = os.pipe()
+        stopped = threading.Event()
+
+        def produce():
+            try:
+                for frame in frames:
+                    while frame:
+                        frame = frame[os.write(writer, frame):]
+                stopped.wait()
+            except BrokenPipeError:
+                pass  # The expected collector refusal closes its reader.
+            finally:
+                os.close(writer)
+
+        thread = threading.Thread(target=produce)
+        thread.start()
+        try:
+            try:
+                output = read_terminal(reader, marker, timeout=0.5, redraw=redraw, composer=composer)
+            except AssertionError as failure:
+                assert error is not None, failure
+                if error == "deadline":
+                    assert isinstance(failure.args[0], tuple) and failure.args[0][0] == marker, failure
+                else:
+                    assert str(failure) == error, failure
+            else:
+                assert error is None, "incomplete terminal boundary was accepted"
+                return output
+        finally:
+            os.close(reader)
+            stopped.set()
+            thread.join(timeout=2)
+            assert not thread.is_alive(), "terminal oracle producer did not retire"
+
+    draft = "ab" + "\u0301" * 32767
+    marker = draft + "\r\x1b[4C"
+    # A legal sequence of growing, replaced frames exceeds one MiB overall.
+    # Each final frame still fits the unchanged retained-output budget.
+    frames = [b"\r\x1b[2K\r\n\xe2\x80\xba " + draft.encode()[:n * 1024] + b"\r\x1b[4C"
+              for n in range(1, 65)]
+    output = collect(frames, marker, redraw=True)
+    assert marker in output and len(output) < 1024 * 1024, "required redraw was not retained within bound"
+    collect(frames, marker, error="unexpected unbounded terminal output")
+    for suffix in (b"", b"\r\x1b[3C"):
+        collect(frames[:-1] + [draft.encode() + suffix], marker, redraw=True, error="deadline")
+    diagnostic = "RequestBindingMismatch"
+    collect([diagnostic.encode()], diagnostic, composer=True, error="deadline")
+    output = collect([diagnostic.encode(), b"\n\xe2\x80\xba \r", b"\x1b[2C"], diagnostic, composer=True)
+    assert diagnostic in output and "› \r\x1b[2C" in output
+    print("terminal wait oracles passed: bounded redraw suffix, exact cursor, strict transcript cap and returned composer", flush=True)
 
 
 def assert_permission_workspace(output, workspace, columns=80):
@@ -1225,7 +1294,7 @@ def terminal_bulk(master, command, marker="› ", *, submit=True):
 
     writer = threading.Thread(target=send, daemon=True)
     writer.start()
-    output = read_terminal(master, marker)
+    output = read_terminal(master, marker, redraw=not submit)
     writer.join(timeout=5)
     assert not writer.is_alive(), "bulk terminal writer stalled"
     return output
@@ -1534,24 +1603,164 @@ def opaque_session_commands_case():
             print(f"retained opaque-Session failure state: {state}", file=sys.stderr)
 
 
-def main():
+def long_input_case(home, store, workspace, endpoint, host):
+    import canonical_failure_integration as canonical
+    endpoint.responses.append(fixture.sse_answer("long-answer", "long-reason", "long-message", "long input intact")[0])
+    long_session = "human/long-input"
+    run(home, "configure", "--store", store, "--session", long_session,
+        "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+    proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: response)
+    master = slave = entered = None
+    try:
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 40, 0, 0))
+        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+            "--session", long_session], env={**os.environ, "HOME": str(home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        slave = None
+        greeting = read_terminal(master, "› ")
+        assert "Permission:" not in greeting, greeting
+        assert "Bash runs without approval" in greeting, greeting
+        assert "Bash commands can run without asking you" not in greeting, greeting
+        binding = terminal_step(master, "/status")
+        assert "Permission: bypass\n" in binding and "Provider: codex" in binding and "Model: model-a" in binding, binding
+        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
+        before = len(endpoint.requests)
+        long_text = "X" * 5000
+        answer = terminal_bulk(master, long_text, "long input intact")
+        assert "long input intact" in answer, answer
+        assert len(endpoint.requests) == before + 1
+        body = json.loads(endpoint.requests[-1])
+        assert next(item["content"][0]["text"] for item in reversed(body["input"])
+            if item.get("role") == "user") == long_text
+        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        long_cluster = "a" + "\u0301" * 2048
+        for index, draft in enumerate((long_cluster, ("e" + "\u0301" * 1024) * 3,
+                                       "ab" + "\u0301" * 32767)):
+            marker = f"encoded row accepted {index}"
+            endpoint.responses.append(fixture.sse_answer(f"encoded-answer-{index}",
+                f"encoded-reason-{index}", f"encoded-message-{index}", marker)[0])
+            before_draft = len(endpoint.requests)
+            before_messages = len(proxy.mutations)
+            before_records = set((home / ".config/rui/requests").glob("*.json"))
+            # Do not race Enter against redraw: the complete unsent draft
+            # must remain renderable before any capture/transmission.
+            caret = (3, 5, 4)[index]  # Independent display-cell expectations.
+            terminal_bulk(master, "\x1b[200~" + draft + "\x1b[201~",
+                draft + f"\r\x1b[{caret}C", submit=False)
+            assert entered.poll() is None and len(endpoint.requests) == before_draft
+            assert len(proxy.mutations) == before_messages, "unsent draft transmitted a Message"
+            assert set((home / ".config/rui/requests").glob("*.json")) == before_records, "unsent draft published a capture"
+            terminal_step(master, "", marker, composer=True)
+            body = json.loads(endpoint.requests[-1])
+            assert next(item["content"][0]["text"] for item in reversed(body["input"])
+                if item.get("role") == "user") == draft
+        for index, (columns, draft, drawn) in enumerate((
+                (80, "A中e\u0301\tB", "A中e\u0301    B\r\x1b[11C"),
+                (8, "abcd\tQ", "› abcd\n>      \n> Q\r\x1b[3C"))):
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
+            marker = f"tab row accepted {index}"
+            endpoint.responses.append(fixture.sse_answer(f"tab-answer-{index}",
+                f"tab-reason-{index}", f"tab-message-{index}", marker)[0])
+            before_draft = len(endpoint.requests)
+            before_messages = len(proxy.mutations)
+            before_records = set((home / ".config/rui/requests").glob("*.json"))
+            output = terminal_bulk(master, "\x1b[200~" + draft + "\x1b[201~",
+                drawn.split("\n")[-1], submit=False)
+            assert drawn in output.replace("\r\n", "\n"), output
+            assert entered.poll() is None and len(endpoint.requests) == before_draft
+            assert len(proxy.mutations) == before_messages, "unsent draft transmitted a Message"
+            assert set((home / ".config/rui/requests").glob("*.json")) == before_records, "unsent draft published a capture"
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+            terminal_step(master, "", marker, composer=True)
+            body = json.loads(endpoint.requests[-1])
+            assert next(item["content"][0]["text"] for item in reversed(body["input"])
+                if item.get("role") == "user") == draft
+        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        endpoint.responses.append(fixture.sse_answer("encoded-delete-answer", "encoded-delete-reason",
+            "encoded-delete-message", "encoded deletion intact")[0])
+        terminal_bulk(master, "\x1b[200~" + long_cluster + "\x1b[201~",
+            long_cluster + "\r\x1b[3C", submit=False)
+        terminal_step(master, "\x7fZ", "encoded deletion intact", composer=True)
+        body = json.loads(endpoint.requests[-1])
+        assert next(item["content"][0]["text"] for item in reversed(body["input"])
+            if item.get("role") == "user") == "Z", body
+        accepted_count = len(endpoint.requests)
+        rejected = terminal_bulk(master, "Y" * (64 * 1024 + 1) + "\x7f", "input too long")
+        assert "input too long" in rejected and "nothing sent" in rejected, rejected[-1000:]
+        assert "Draft cleared. Enter a shorter message." in rejected, rejected[-1000:]
+        if "› \r\x1b[2C" not in rejected:
+            rejected += read_terminal(master, "› ")
+        assert "› \r\x1b[2C" in rejected, rejected[-1000:]
+        assert len(endpoint.requests) == accepted_count, "oversized input reached Host"
+        endpoint.responses.append(fixture.sse_answer("shorter-answer", "shorter-reason",
+            "shorter-message", "shorter replacement intact")[0])
+        terminal_step(master, "shorter replacement", "shorter replacement intact", composer=True)
+        assert len(endpoint.requests) == accepted_count + 1
+        body = json.loads(endpoint.requests[-1])
+        assert next(item["content"][0]["text"] for item in reversed(body["input"])
+            if item.get("role") == "user") == "shorter replacement", body
+        accepted_count += 1
+        rejected = terminal_step(master, "invalid\x00x", "Input rejected; nothing sent.")
+        assert "Input rejected; nothing sent." in rejected and "--text FILE" not in rejected, rejected
+        assert len(endpoint.requests) == accepted_count, "unsupported control reached Host"
+        assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
+        assert entered.wait(timeout=5) == 0
+        assert termios.tcgetattr(master)[3] & termios.ICANON
+    finally:
+        incoming = sys.exc_info()[1]
+        if incoming is not None:
+            preserve_failure_metadata(home.parent / "pty-failure.json", lambda: {
+                "case": "long_input", "error": type(incoming).__name__,
+                "terminal": getattr(incoming, "terminal_metadata", None),
+                "caller_returncode": entered.poll() if entered is not None else None,
+                "message_transmissions": len(proxy.mutations),
+                "provider_requests": len(endpoint.requests),
+                "request_records": len(list((home / ".config/rui/requests").glob("*.json"))),
+            })
+        errors = []
+        disposals = ([lambda: stop_process(entered, timeout=5)] if entered is not None else [])
+        disposals += [lambda fd=fd: os.close(fd) for fd in (master, slave) if fd is not None]
+        disposals.append(proxy.close)
+        for dispose in disposals:
+            try:
+                dispose()
+            except BaseException as error:
+                errors.append(error)
+        for error in errors:
+            try:
+                print(f"long-input disposal failure: {type(error).__name__}", file=sys.stderr)
+            except Exception:
+                pass  # Optional reporting cannot replace the primary failure.
+        if incoming is None and errors:
+            raise errors[0]
+
+
+def main(selected="all"):
     import canonical_failure_integration
     import terminal_restoration_integration
-    opaque_session_commands_case()
-    silent_read_edit_cases()
-    command_entry_cases()
-    persistent_opening_case()
-    persistent_pending_case()
-    persistent_input_cases()
-    persistent_permission_case()
-    persistent_permission_case("allow-action")
-    persistent_permission_case("allow-action", exit_code=7)
-    persistent_permission_case("allow-action", signal_failure=True)
-    persistent_permission_case("allow-action", lost_reply=True)
-    persistent_permission_case(fragmented_paste=True)
-    persistent_permission_case(stale_target=True)
-    terminal_restoration_integration.main()
-    canonical_failure_integration.main()
+    assert selected in ("all", "long-input", "terminal-waits"), selected
+    if selected in ("all", "terminal-waits"):
+        terminal_wait_oracles()
+    if selected == "terminal-waits":
+        return
+    if selected == "all":
+        opaque_session_commands_case()
+        silent_read_edit_cases()
+        command_entry_cases()
+        persistent_opening_case()
+        persistent_pending_case()
+        persistent_input_cases()
+        persistent_permission_case()
+        persistent_permission_case("allow-action")
+        persistent_permission_case("allow-action", exit_code=7)
+        persistent_permission_case("allow-action", signal_failure=True)
+        persistent_permission_case("allow-action", lost_reply=True)
+        persistent_permission_case(fragmented_paste=True)
+        persistent_permission_case(stale_target=True)
+        terminal_restoration_integration.main()
+        canonical_failure_integration.main()
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-human-cli."))
     home = state / "home"
     home.mkdir()
@@ -1576,7 +1785,7 @@ def main():
         fixture.sse_tool_calls("sibling-calls", [("bash", "pending-call", arguments),
             ("bash", "running-call", sibling_arguments)]),
         fixture.sse_answer("sibling-answer", "sibling-reason", "sibling-message", "siblings done")[0],
-    ])
+    ] if selected == "all" else [])
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
     url = f"http://127.0.0.1:{endpoint.server_port}/responses"
@@ -1594,6 +1803,11 @@ def main():
     completed = False
     try:
         host = fixture.start_host(store, url)
+        if selected == "long-input":
+            long_input_case(home, store, workspace, endpoint, host)
+            completed = True
+            print("long-input selected case passed (partial human CLI suite)", flush=True)
+            return
         store_selection_cases(state, workspace, store)
         saved_capture_cases(state, store, workspace)
         preferences_home = state / "preferences-home"
@@ -2879,100 +3093,7 @@ def main():
                 empty_wait.communicate(timeout=5)
         current = fixture.command("inspect-session", "--store", store, "--session", empty_session)
         assert current["selected_message"] is None and current["recent_messages"][0]["message"] == "", current
-        endpoint.responses.append(fixture.sse_answer("long-answer", "long-reason", "long-message", "long input intact")[0])
-        long_session = "human/long-input"
-        run(home, "configure", "--store", store, "--session", long_session,
-            "--workspace", workspace, "--provider", "codex", "--model", "model-a")
-        master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 40, 0, 0))
-        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", long_session], env={**os.environ, "HOME": str(home)},
-            stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
-        try:
-            greeting = read_terminal(master, "› ")
-            assert "Permission:" not in greeting, greeting
-            assert "Bash runs without approval" in greeting, greeting
-            assert "Bash commands can run without asking you" not in greeting, greeting
-            binding = terminal_step(master, "/status")
-            assert "Permission: bypass\n" in binding and "Provider: codex" in binding and "Model: model-a" in binding, binding
-            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
-            before = len(endpoint.requests)
-            long_text = "X" * 5000
-            answer = terminal_bulk(master, long_text, "long input intact")
-            assert "long input intact" in answer, answer
-            assert len(endpoint.requests) == before + 1
-            body = json.loads(endpoint.requests[-1])
-            assert next(item["content"][0]["text"] for item in reversed(body["input"])
-                if item.get("role") == "user") == long_text
-            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
-            long_cluster = "a" + "\u0301" * 2048
-            for index, draft in enumerate((long_cluster, ("e" + "\u0301" * 1024) * 3,
-                                           "ab" + "\u0301" * 32767)):
-                marker = f"encoded row accepted {index}"
-                endpoint.responses.append(fixture.sse_answer(f"encoded-answer-{index}",
-                    f"encoded-reason-{index}", f"encoded-message-{index}", marker)[0])
-                before_draft = len(endpoint.requests)
-                # Do not race Enter against redraw: the complete unsent draft
-                # must remain renderable before any capture/transmission.
-                terminal_bulk(master, "\x1b[200~" + draft + "\x1b[201~", draft, submit=False)
-                assert entered.poll() is None and len(endpoint.requests) == before_draft
-                terminal_step(master, "", marker, composer=True)
-                body = json.loads(endpoint.requests[-1])
-                assert next(item["content"][0]["text"] for item in reversed(body["input"])
-                    if item.get("role") == "user") == draft
-            for index, (columns, draft, drawn) in enumerate((
-                    (80, "A中e\u0301\tB", "A中e\u0301    B\r\x1b[11C"),
-                    (8, "abcd\tQ", "› abcd\n>      \n> Q\r\x1b[3C"))):
-                fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
-                marker = f"tab row accepted {index}"
-                endpoint.responses.append(fixture.sse_answer(f"tab-answer-{index}",
-                    f"tab-reason-{index}", f"tab-message-{index}", marker)[0])
-                before_draft = len(endpoint.requests)
-                output = terminal_bulk(master, "\x1b[200~" + draft + "\x1b[201~",
-                    drawn.split("\n")[-1], submit=False)
-                assert drawn in output.replace("\r\n", "\n"), output
-                assert entered.poll() is None and len(endpoint.requests) == before_draft
-                fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
-                terminal_step(master, "", marker, composer=True)
-                body = json.loads(endpoint.requests[-1])
-                assert next(item["content"][0]["text"] for item in reversed(body["input"])
-                    if item.get("role") == "user") == draft
-            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
-            endpoint.responses.append(fixture.sse_answer("encoded-delete-answer", "encoded-delete-reason",
-                "encoded-delete-message", "encoded deletion intact")[0])
-            terminal_bulk(master, "\x1b[200~" + long_cluster + "\x1b[201~", long_cluster, submit=False)
-            terminal_step(master, "\x7fZ", "encoded deletion intact", composer=True)
-            body = json.loads(endpoint.requests[-1])
-            assert next(item["content"][0]["text"] for item in reversed(body["input"])
-                if item.get("role") == "user") == "Z", body
-            accepted_count = len(endpoint.requests)
-            rejected = terminal_bulk(master, "Y" * (64 * 1024 + 1) + "\x7f", "input too long")
-            assert "input too long" in rejected and "nothing sent" in rejected, rejected[-1000:]
-            assert "Draft cleared. Enter a shorter message." in rejected, rejected[-1000:]
-            if "› \r\x1b[2C" not in rejected:
-                rejected += read_terminal(master, "› ")
-            assert "› \r\x1b[2C" in rejected, rejected[-1000:]
-            assert len(endpoint.requests) == accepted_count, "oversized input reached Host"
-            endpoint.responses.append(fixture.sse_answer("shorter-answer", "shorter-reason",
-                "shorter-message", "shorter replacement intact")[0])
-            terminal_step(master, "shorter replacement", "shorter replacement intact", composer=True)
-            assert len(endpoint.requests) == accepted_count + 1
-            body = json.loads(endpoint.requests[-1])
-            assert next(item["content"][0]["text"] for item in reversed(body["input"])
-                if item.get("role") == "user") == "shorter replacement", body
-            accepted_count += 1
-            rejected = terminal_step(master, "invalid\x00x", "Input rejected; nothing sent.")
-            assert "Input rejected; nothing sent." in rejected and "--text FILE" not in rejected, rejected
-            assert len(endpoint.requests) == accepted_count, "unsupported control reached Host"
-            assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
-            assert entered.wait(timeout=5) == 0
-            assert termios.tcgetattr(master)[3] & termios.ICANON
-        finally:
-            if entered.poll() is None:
-                entered.kill()
-                entered.wait(timeout=5)
-            os.close(master)
+        long_input_case(home, store, workspace, endpoint, host)
         editor_session = "human/editor"
         run(home, "configure", "--store", store, "--session", editor_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
@@ -3271,4 +3392,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[2] if len(sys.argv) == 3 else "all")
