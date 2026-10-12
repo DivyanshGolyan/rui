@@ -1,58 +1,26 @@
 # Research evidence
 
-Maintained executable checks and recorded qualification live in [tests/qualification](../tests/qualification/README.md).
+Use this index to find experiments and the sources behind design decisions. For maintained production checks and results, see [qualification evidence](../tests/qualification/README.md).
+
+Research is not release certification. [Architecture](../ARCHITECTURE.md) defines accepted behavior; [Verification](../VERIFICATION.md) defines required proof. Each record's platform, source revision, assumptions and limitations apply only to that experiment. Historical schemas, binaries and fixture limits are not the current runtime contract.
+
+Run commands below from the repository root, sequentially in a disposable checkout. Some runners overwrite results. Check each runner's dependencies first; many native probes require macOS, Apple Clang, Python 3, Zig 0.16 and pinned SQLite. Keep source, tool versions, raw results and counterexamples together, and record your own machine and build for new measurements. Live-provider probes require explicit opt-in.
 
 ## Retained design research
 
-[Host memory explanation](memory-trial/README.md) reproduces a small ReleaseSafe macOS workload with native heap/VM tools and optional Instruments. Includes field/population arithmetic, ownership gaps and an interactive recorded explanation; no new runtime policy or demo qualification.
+| Question | Sources and scope |
+| --- | --- |
+| What consumes memory? | [Host memory explanation](memory-trial/README.md), [Linux allocation origins](linux-allocations/README.md), [resource profiling](resource-profiling-sources.md). Allocation attribution and measurement methods, not a complete Host footprint proof. |
+| Which tests and timings are useful? | [Testing practices](testing-practices-sources.md), [measurement synchronization](measurement-synchronization.md), [build latency](build-times-sources.md), [integration-test wall time](integration-test-wall-time-sources.md). Includes failed controls and platform-specific measurements; no compiler-speedup claim. |
+| How should the CLI work? | [CLI guidelines](cli-guidelines-rui.md), [modes and reconnect](cli-ux-sources.md), [line editing](terminal-line-editing-sources.md), [Unicode boundaries](rui-terminal-unicode-sources.md). Design sources, not human-use or terminal-display qualification. |
+| How does macOS report child exits? | [Darwin child status](darwin-waitid-status-sources.md). One reproduced `waitid`/`waitpid` mismatch and checks for nearby boundaries. |
+| Who owns tool approval and failure? | [Permission ownership](permission-prior-art.md), [rejected calls](rejected-tool-call-prior-art.md), [request failures](request-failure-ownership.md). Pinned comparisons with other coding-agent runtimes. |
+| How are parallel tool results ordered? | [Tool-result ordering](tool-result-ordering.md). Provider and SDK evidence, not a live reordered-output test. |
+| How do instructions and reasoning settings affect requests? | [Instruction updates and caching](instruction-update-prompt-caching.md), [Codex reasoning effort](codex-reasoning-effort.md). Client defaults are distinct from unknown backend defaults; no live effort test. |
+| How should optional output be retained? | [Output retention](output-retention-prior-art.md). Byte/count budgets, FIFO tracking and cleanup. |
+| How are names and retries identified? | [Session identity](session-identity-evidence.md), [idempotency keys](idempotency-identity-evidence.md), [key collisions](idempotency-collision-evidence.md). Representation, binding and retention sources. |
 
-[Linux allocation origins](linux-allocations/README.md) attributes live heap to SQLite, TLS, HTTP/H2 and Rui across 100 concurrent requests and 1/2/20 waves. Includes a validated Heaptrack canary, Linux/macOS SQLite-flag comparisons, capture-queue experiments and preserved gate failures; synthetic evidence, not a whole-footprint decomposition or live-provider qualification.
-
-[Proportionate testing evidence](testing-practices-sources.md) compares primary-source guidance on product goals, failure checks, noisy measurements and explicit assumptions; recommendations only, with no qualification-contract change.
-
-[Measurement synchronization](measurement-synchronization.md) derives a postcondition-rechecking wall wait and separate deterministic Store-transaction exclusion versus ungated latency evidence for two issue #168 measurement defects; primary-source recommendations only, with no runner or contract change.
-
-[Resource profiling sources](resource-profiling-sources.md) evaluates reusable CPU, memory, waiting and I/O evidence, platform tools and measurement validity; recommendations only, with no runtime or qualification change.
-
-[Development build latency](build-times-sources.md) records Linux/Mac gate timings, the routine/long-gate split, owner-boundary fixture redesign and Mac stack-enforcement corrections, with reproducible failures and qualification limits; no compiler-speedup claim.
-
-[CLI guideline evidence](cli-guidelines-rui.md) compares primary clig.dev guidance with Rui's explicit Host, exact request recovery, acceptance/completion, Action approval and uncertain-effect boundaries; research input only, with no interface-model choice or human-use study.
-
-[CLI mode and reconnect evidence](cli-ux-sources.md) compares official Codex and Claude Code interactive/headless modes, permission handling and resume identity with Rui's caller requirements; product patterns, not an interface decision or human-use study.
-
-[Terminal line-editing sources](terminal-line-editing-sources.md) compares primary terminal, Ghostty, libedit, Readline, linenoise and macOS key-mapping evidence against Rui's bounded input and approval boundary; candidate evaluation, not platform qualification.
-
-[Terminal Unicode boundaries](rui-terminal-unicode-sources.md) compares strict UTF-8, grapheme segmentation and provisional cell-width evidence for bounded CLI editing; research behind the pinned utf8proc choice, not Mac display qualification.
-
-[Darwin child-status boundary](darwin-waitid-status-sources.md) compares pinned POSIX and XNU `waitid`/`waitpid` exit representations against a native Mac probe and Rui's Bash adapter. It identifies one reproduced mismatch; nearby boundaries are checks, not additional demonstrated defects.
-
-[Warm integration-test wall time](integration-test-wall-time-sources.md) cites Zig and Python primary sources for build scheduling and fixture shutdown, with measured Linux baselines and the fast/full gate boundary; it does not qualify platform latency or cold compilation.
-
-[Permission ownership prior art](permission-prior-art.md) compares Pi, DeepSeek Harness, OpenCode v2 and Codex CLI approval ownership, grant lifetimes and client reconnect versus process restart; pinned source evidence only, with no accepted contract change.
-
-[Rejected tool-call prior art](rejected-tool-call-prior-art.md) compares malformed provider output, invalid parameters, unknown tools, execution failures, denial, sibling isolation and model feedback across the same four runtimes; the accepted contract now uses its provider-envelope versus call-descriptor boundary for issue #198.
-
-[Parallel tool-result ordering](tool-result-ordering.md) compares the Responses `call_id` contract with call-ordered rendering in first-party Codex, SDK and Agents implementations. It supports deriving results from authoritative terminal facts without a publication copy; no live reordered-output fixture or provider qualification.
-
-[Request-failure ownership](request-failure-ownership.md) classifies failures from Message admission through provider output against source, the pre-decision contract and pinned Pi, community DeepSeek CLI, OpenCode v2 and Codex CLI evidence. Its finding that no concrete provider-independent pre-Operation rejection exists led to removing issue #201's premise; decision evidence only, with no runtime qualification.
-
-[Instruction updates under prompt caching](instruction-update-prompt-caching.md) compares current OpenAI and Anthropic prefix matching, later authoritative messages and same-level precedence. It supports the accepted separation between append-only canonical instruction history and adapter-owned provider projection; primary-source decision evidence only, with no provider qualification.
-
-[Codex reasoning effort](codex-reasoning-effort.md) pins first-party request grammar, default selection and continuation/compaction construction against Rui's omitted-effort live journey. It distinguishes client defaults from unknown backend defaults and identifies unqualified explicit model/effort pairs; no live effort test was run for this note.
-
-[Output retention prior art](output-retention-prior-art.md) compares byte/count budgets, disk-backed FIFO bookkeeping and cleanup behavior in primary sources; design evidence only, with no accepted contract change or runtime qualification.
-
-[Session identity evidence](session-identity-evidence.md) records SQLite integer-allocation guarantees and JavaScript integer/JSON representation limits from primary sources; no runtime qualification.
-
-[Core idempotency identity evidence](idempotency-identity-evidence.md) records AWS retry-token/outbox guidance and Stripe key, comparison and retention policies; no runtime qualification.
-
-[Command-key collision evidence](idempotency-collision-evidence.md) compares stable-key conflicts, replacement and enforced namespaces against AWS, Stripe, TigerBeetle and RFC 9562; no contract change or runtime qualification.
-
-These artifacts answer bounded questions; they are not production implementation or release certification. [ARCHITECTURE.md](../ARCHITECTURE.md) owns current behavior and [VERIFICATION.md](../VERIFICATION.md) owns required proof. Historical native runtime/resource measurements are generally Mac-specific; the development build timings above are Linux-specific and do not qualify runtime behavior. Synthetic SQLite schemas, historical evaluator binaries, model assumptions and experimental limits do not establish current Linux behavior, wire compatibility or whole-Host guarantees.
-
-Run commands below from the repository root, sequentially in a disposable checkout: some runners overwrite adjacent results or generate reports. Native probes generally need macOS, Apple Clang, Python 3, Zig 0.16 and the pinned SQLite package; inspect each runner's dependency handling. Pure Python probes use the standard library unless stated. Keep source, compiler/library metadata, raw results and counterexamples together. New observations must identify their own machine/build rather than silently inheriting recorded provenance.
-
-Historical contract snapshots and longer reports are available at [commit 4ee987e](https://github.com/DivyanshGolyan/rui/tree/4ee987e6479b8010d052b3fd31a5acca044eb269). Retained provenance JSON refers to that revision's files and hashes, including removed snapshots. This index replaces their narrative, not their measured data.
+Historical contracts and longer reports remain in the [research snapshot](https://github.com/DivyanshGolyan/rui/tree/4ee987e6479b8010d052b3fd31a5acca044eb269). Some retained provenance refers to files removed from the active tree.
 
 ## Session and workflow behavior
 

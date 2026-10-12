@@ -1,133 +1,162 @@
 # Rui
 
-Rui (रुई, Hindi for cotton) is a local runtime for coding-agent workflows. It keeps reusable conversations working after clients disconnect and recovers committed work after a Rui process crash with bounded memory and temporary storage. Zig owns execution and recovery; SQLite stores committed state. OS-crash and power-loss recovery are not guaranteed.
+Rui (रुई, Hindi for cotton) runs coding-agent conversations on your machine. Ask it to investigate a project, run Bash commands, and save the answer. Close the terminal and work continues; return later to the same conversation.
+
+Rui is written in Zig and saves messages, decisions and results in SQLite. After a Rui process crash, it recovers saved work without blindly repeating commands that may already have run.
 
 ## Status
 
-Rui is in development. Today the direct CLI can configure reusable Sessions, queue messages, receive text-model responses, stop or interrupt work, inspect proposed tools, authorize Bash and read saved results. `rui resume` is a terminal caller for an already configured Session. All new commands select a Store by explicit `--store`, then saved preference, then the HOME fallback; low-level one-shot mutations stay nonblocking and scriptable, and scripts can pin `--store` for deterministic targeting. `rui host start [--store PATH]` launches a detached capacity-8 managed Host or attaches to the existing owner without changing its settings; readiness does not require credentials. `rui host status [--store PATH]` reads protected readiness, actual capacity and capabilities without starting a Host; unavailable or owned-but-unavailable does not prove cleanup. `rui setup` reports prospective provider/model selection, local credential state and separate Host capability without creating a Session or starting a Host. The Host is not installed as an OS service and has no automatic restart. Mutations save generated keys before transmission; the explicit-key/record commands remain available. Keyed requests, permission decisions and admitted work survive restart.
+Rui is in development. It supports Codex sign-in, interactive conversations, scripts, optional Bash approval and saved-result recovery. JavaScript workflows, a dedicated file-editing tool and structured answers are not available yet.
 
-`rui sessions [--store PATH] [--all] [--json]` lists Host-owned configured Sessions, including those absent from local request records, in bounded pages. By default it filters exact canonical cwd; `--all` spans Workspaces. JSON emits one complete page per line. It observes only and does not select a Session for resume.
+Supported platforms are Linux x86-64 and Apple Silicon macOS. Linux ARM64 and Intel macOS cross-builds are experimental. The live `gpt-6-luna` conversation, approved Bash and restart-recovery checks have passed on both supported platforms. Other models, live credential refresh and the complete mixed-workload qualification remain outstanding. See [test results and limitations](tests/qualification/README.md#current-checks-and-qualification).
 
-The Host exposes [bounded public Conversation pages](ARCHITECTURE.md#public-conversation-pages) and byte-range content continuation. The staged persistent caller browses them with `/history`; `rui read-conversation` exports an exact item without terminal formatting.
+Before using Rui on a project:
 
-Typed Client reads expose [seven-kind Session activity](ARCHITECTURE.md#public-session-activity), including historical complete proposals, admissions, outcomes and stops, with frozen bounded pages, reverse replay, forward catch-up and complete content streaming.
-
-`rui` creates a fresh conversation in cwd using saved defaults; `rui "PROMPT"` also submits literal initial text. `rui resume REF` re-enters an existing Session, while `rui resume --last` selects the newest created Session in canonical cwd. All use the same conversation-first frontend; `session --session REF` and `--persistent` remain compatibility spellings, not other implementations. The composer keeps a separate next draft and grapheme cursor during capture and uncertain Admission. Normal output shows the conversation, concise tool outcomes and transient status, without configuration banners, routine IDs or capture bookkeeping. `/status` and `/requests` retain diagnostics; `/details` shows recent conversation with full saved tool output. Ctrl-R retries the original exact intent, including repair after a failed capture. Opening replays the newest 16 Activity rows chronologically and reports the exact queued count with the oldest four previews at that frozen end. `/history` reads older Conversation pages without advancing on preparation failure; historical items over 8,192 raw bytes are omitted with an executable exact raw-export command. All content streams validate completely, including hidden tool fields, and only assistant text receives Markdown rendering. A permission block shows one exact Action's Workspace and decoded Run Bash command, then `a: Allow once / d: Deny (Enter)`. Type a fresh `a` or `d` and Enter; queued chat and pasted choices authorize nothing. The next draft and cursor remain intact. `/details` and `/history` return to the same choice; `/inspect-action` retains exact inspection diagnostics without granting permission. `/exit` detaches and loses the unsent draft. Nested `/wait` and `/login` prompts are unsupported; login uses the one-shot command. `/help` describes the commands and limits. See the [persistent-input contract](ARCHITECTURE.md#staged-persistent-input).
-
-The precise model is documented in [Architecture](ARCHITECTURE.md): valid Bash descriptors become inspectable Actions, unknown tools and invalid descriptors become stable call-local rejections, and a Bash attempt that loses local custody resolves as indeterminate rather than replaying automatically.
-
-JavaScript workflows, Edit and structured answers are not implemented. Rui now packages a pinned QuickJS child and a private evaluator lifecycle owner with compile-only validation of a direct default-exported async function and capability-only entry invocation, checked by `zig build workflow-check` and `zig build evaluator-host-integration`. Its read-only prepared-input descriptor is reserved for later saved-result lookup; this slice does not decode those results. No production Host path invokes it yet: Workflow creation/admission and Session-call bindings are follow-on slices, and full cross-platform evaluator qualification remains outstanding. Rui-owned Codex login, private credentials and managed transport have deterministic/native fixture coverage. The exact `gpt-6-luna` subscription journey passed natively on Linux x86-64 and macOS arm64: private reasoning replayed within one Session, exact approved Bash, continuation, fresh-Host recovery and a new live request over HTTP/2. The same-Session replay is the accepted [#272 proof](VERIFICATION.md#context-provider-output-and-compaction); a reasoning item in the Bash proposal itself is not required. Disposable instrumented runs also recorded [native TLS allocator requests](tests/qualification/issue-272/README.md) on both platforms. Live refresh, other models and complete 1,000-operation mixed qualification remain outstanding. Retained full output is optional: FIFO eviction or restart may remove it without changing the saved result.
-
-Supported platforms are Linux x86-64 and macOS Apple Silicon. Linux ARM64 and Intel macOS cross-builds are experimental, not supported runtime qualification. Broad runtime/resource qualification has run on Apple Silicon macOS. The model-queue workload has run on Linux and macOS; its macOS run passed the required physical-footprint target.
-
-Authorized commands run with your user privileges, not in a promised sandbox. Internal allocation and accounting limits remain exact; OS-level runaway protection is best effort. Detached descendants, blocked I/O and scheduling delays can outlast termination requests. See [supported guarantees](ARCHITECTURE.md#supported-guarantees).
+- Bash runs without approval by default. Enable approval as shown below if you want to review commands first.
+- The project directory is not a sandbox. Commands have your user's access. Detached subprocesses and blocked I/O can outlast a stop request.
+- If a crash leaves a command's outcome unknown, Rui reports it as indeterminate and does not automatically repeat it. OS-crash and power-loss recovery are not guaranteed.
+- Full tool output is temporary. Saved results and excerpts remain available after that output is evicted or removed on restart.
 
 ## Build
 
-Requires Zig 0.16.0, Python 3, Perl, `patch`, a C toolchain and Make. The build pins native dependencies.
+Install Zig 0.16.0, Python 3, Perl, `patch`, a C toolchain and Make. From this repository:
 
 ```sh
 zig build
 zig build test-logic
-zig build check
-./zig-out/bin/rui serve \
-  --store /absolute/path/to/private-store \
-  --active-capacity 8
 ```
 
-Use the [subsystem test mapping](VERIFICATION.md#canonical-gates) while developing and on review-ready changes. Platform-sensitive changes need affected native checks before merge. `check` runs native and process suites concurrently, then isolates short-deadline Host-startup and Debug artifact/recovery smoke cases. `check-full` adds the evaluator string sanitizer and runs suites serially for build/dependency changes and isolated full-suite evidence. Long timeout, churn and full Debug admission checks remain separate where affected. The daily Mac backstop runs only changed main and reports its tested SHA; it does not qualify every intermediate merge.
+The executable is `zig-out/bin/rui`. Use `rui --help` for command usage. The examples below use its absolute path so you can run it from your project directory.
 
-The production default Active Capacity remains 1,000. Startup rejects a requested population when the process descriptor limit cannot support it, so this development command selects a smaller population that fits ordinary finite limits. Model transport is disabled by default. Development testing requires an explicit `--provider-endpoint`: HTTPS (negotiated HTTP/2 required) or loopback HTTP/1.1, with no authentication attached. A private test CA can be selected with `--provider-ca-file PATH`; peer and hostname verification remain enabled. Run `./zig-out/bin/rui --help` to print command usage without starting a Session.
+## Start a conversation
 
-On macOS, Host startup applies [memory-efficient allocator defaults](ARCHITECTURE.md#resident-memory-invariant). Prefix `rui serve` with `RUI_HOST_MALLOC_DEFAULTS=0` to disable Rui's defaults; explicit Apple allocator environment values remain untouched. Linux startup is unchanged.
-
-For a private default Store, `./zig-out/bin/rui host start` starts a managed background Host using saved Store preferences or `$HOME/.local/share/rui/store`; use `--store PATH` to select an explicit Store. The caller waits up to ten seconds for protected readiness and prints its `diagnostics/` location. Startup records are private and bounded (128 MiB, at most 16 files); a startup failure before lease acquisition may leave no record. On timeout or a disconnected caller, inspect `rui host status` and those records if present rather than assuming the Host was stopped or repeating a mutation. Existing ready Hosts retain their original capacity and capabilities. `rui host stop [--store PATH]` targets one observed instance and affects **all** work in that Store. It prints the target before sending; if its reply is lost, retain the same Store and use `--instance HEX` to retry without stopping a replacement. Acknowledgement means shutdown was requested, not that cleanup and lease release finished. `zig build host-launch-integration` and `host-stop-integration` have run natively on Linux x86-64 and macOS arm64, including mixed-effect shutdown and held cleanup; the [complete platform-specific launch acceptance matrix](VERIFICATION.md#server-ownership-and-connection-capacity) remains outstanding.
-
-For the qualified exact `gpt-6-luna` binding, sign in once with Rui, then run bare `rui` from your project directory:
+From the Rui repository, sign in once:
 
 ```sh
 RUI="$PWD/zig-out/bin/rui"
 "$RUI" login codex
+```
+
+Follow the device-code instructions. Your account must have Codex access. Rui stores its credentials privately under `~/.config/rui/codex.json`.
+
+Then move to the project you want to work on and start Rui:
+
+```sh
+cd /path/to/your/project
 "$RUI"
 ```
 
-Bare entry uses the existing Store/provider/model defaults and attaches to or starts the capacity-8 managed Host. It creates a fresh Session in canonical cwd, which Bash uses as its working directory. Later conversations need only bare `rui`; use `rui resume REF` to re-enter an exact Session or `rui resume --last` for the newest created Session in this Workspace. Detachment prints an exact Store/Session resume command.
+This creates a fresh conversation in the current directory and starts or connects to Rui's background process. To review Bash commands before they run, enter this before your first request:
 
-```sh
-rui "Investigate the failing test"   # Start a conversation with initial text
-rui resume --last                  # Resume this Workspace's newest Session
-rui exec "Explain the build"       # Wait for an answer; stdout is answer text
-printf '%s' 'Explain the build' | rui exec -
+```text
+/configure --permission-mode ask
 ```
 
-Exec reports recovery handles on stderr and returns nonzero on failure, uncertainty or a permission block. It does not grant approval; a block prints the exact command to enter that Session. Use `--` before flag-like prompts or text equal to a command name. Unlike `exec`, the low-level `message` command returns after Admission, not completion.
+Type a request at `›`, such as `Investigate the failing test`. In approval mode, Rui shows the proposed command and its working directory. Type `a` and Enter to allow it once, or `d` and Enter to deny it. Pasted choices do not grant approval.
 
-For an explicit named Session, keep the configure-and-enter route:
+| Command | What it does |
+| --- | --- |
+| `/help` | Lists available commands. |
+| `/history` | Shows older conversation. |
+| `/details` | Shows recent conversation with full saved tool output. |
+| `/status` | Shows settings and current work. |
+| `/requests` | Lists saved requests for recovery. |
+| `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
+
+You can edit and paste multiline text at the prompt. There is no input history or completion. For input longer than 64 KiB, use `message --text FILE`. If a submission is uncertain, Ctrl-R retries that same request rather than creating a new one.
+
+## Return to your work
+
+Rui calls a saved conversation a **Session**. To return to the newest Session created in your current project:
 
 ```sh
-RUI="$PWD/zig-out/bin/rui"
+"$RUI" resume --last
+```
+
+Use `"$RUI" sessions` to list this project's Sessions, or `sessions --all` to include other projects. `"$RUI" resume SESSION_REF` opens an exact Session. Rui also prints an exact resume command when you leave.
+
+Bare `rui` always creates a new Session. Existing Sessions keep their saved settings, including approval mode. `/setup` changes defaults for future Sessions, not the current one.
+
+## Use Rui from scripts
+
+For a fresh conversation that waits for an answer:
+
+```sh
+"$RUI" exec "Explain the build"
+printf '%s' 'Explain the build' | "$RUI" exec -
+```
+
+`exec` writes answer text to stdout and recovery handles to stderr. It returns nonzero on failure, uncertainty or a permission block. It uses the same new-Session defaults, including Bash without approval. Use `--` before flag-like prompts or text equal to a command name.
+
+For repeated work in an explicitly named Session with approval enabled:
+
+```sh
 STORE="$HOME/.local/share/rui/store"
 "$RUI" host start --store "$STORE"
-"$RUI" configure --store "$STORE" --session my/codex --workspace "$PWD" \
-  --provider codex --model gpt-6-luna
-"$RUI" session --store "$STORE" --session my/codex
+"$RUI" configure --store "$STORE" --session my/project --workspace "$PWD" \
+  --provider codex --model gpt-6-luna --permission-mode ask
+"$RUI" message --store "$STORE" --session my/project "Investigate the failing test"
+"$RUI" follow SAVED_MESSAGE_HANDLE
+"$RUI" result SAVED_MESSAGE_HANDLE
 ```
 
-Both routes use the new Session defaults: Bash only and `bypass`, so Bash can run without a permission prompt. Entry with Bash and bypass shows one short notice, `Bash runs without approval.` Existing Sessions keep their saved settings; `/status` shows them exactly. Use `--permission-mode ask` at configuration (or `/configure --permission-mode ask` while entered) when you want the inline Allow once/Deny choice for each proposed Action. `--persistent` uses the same frontend and defaults.
+Replace `SAVED_MESSAGE_HANDLE` with the handle printed by `message`. Unlike `exec`, `message` returns after acceptance, not completion. `follow` and `result` stay attached to that message even after the Session does newer work. Add `--json` for machine-readable output where supported.
 
-At `›`, type a message. Submitted text uses the same marker at the margin; assistant prose is indented without repeated speaker labels, and one blank row separates the composer. Blue user/input markers, subdued transient status, yellow permission decisions and red failures reinforce these distinctions. Settled outcomes remain neutral and readable, quiet through concise wording and indentation rather than low contrast. `NO_COLOR=1` or `TERM=dumb` disables foreground colours without removing glyphs or guidance. Working status stays near the composer. `/help` lists commands; `/requests` retains local recovery handles and `/status` shows exact settings and work. `/setup` edits future defaults, never this Session's binding. `rui login codex` in the shell installs Rui-owned credentials without verifying remote model acceptance. `/result KEY` reads a saved answer; `/configure --model MODEL` edits this Session. File-valued settings require a path, not terminal stdin. `/exit` or Ctrl+C detaches without stopping Host work. Lines beyond 64 KiB are rejected without sending; use one-shot `message --text FILE` for longer input. Unknown Sessions require configuration before explicit entry. Non-TTY Session entry rejects without mutation. After an uncertain submission or decision, retry the original with Ctrl-R or saved-request recovery rather than create a replacement. A confirmed admission whose later observation fails remains accepted.
-
-The inline composer supports arrows, Home/End, Backspace/Delete, Ctrl-A/E/U/K/W/D and ESC-Backspace for word deletion. Terminal-marked paste can include newlines as one Message; ordinary Enter sends. There is no message history or completion. Option-Backspace works when your terminal sends ESC-Backspace. Command-Backspace clears to the line start only if your terminal sends Ctrl-U; Ghostty's default legacy encoding sends the same DEL byte as ordinary Backspace, so Rui cannot distinguish them. An overlong or invalid draft is rejected in full, even if you later delete characters. An Action choice accepts only fresh `a` or `d` and Enter, never marked paste; unmarked paste after readiness cannot be distinguished from typing.
-
-For one-shot/scripted use, omit both `--record` and `--key` from `configure`, `message`, `allow-action` or `deny-action`. Each prints a saved request handle before sending, then an admission and destination/next step; a human receipt points to `rui session` for conversation, while scripts can still use the saved handle with `follow` or `result` to observe precisely that Message. `--json` gives deterministic newline-delimited capture and admission objects. Pin `--store` for deterministic scripts and supply the full Session reference on each new mutation:
+If approval is needed, inspect the reported Action ID before allowing it:
 
 ```sh
-./zig-out/bin/rui configure --store /absolute/path/to/private-store --session my/codex \
-  --workspace /absolute/path/to/workspace --provider codex --model gpt-6-luna \
-  --permission-mode ask
-./zig-out/bin/rui message --store /absolute/path/to/private-store --session my/codex "Investigate the failing test"
-./zig-out/bin/rui follow SAVED_MESSAGE_HANDLE
-./zig-out/bin/rui wait-session --store /absolute/path/to/private-store --session my/codex
-./zig-out/bin/rui inspect-action --store /absolute/path/to/private-store --session my/codex --action ACTION_ID
-./zig-out/bin/rui allow-action --store /absolute/path/to/private-store --session my/codex --action ACTION_ID
-./zig-out/bin/rui result SAVED_MESSAGE_HANDLE
-./zig-out/bin/rui requests
-./zig-out/bin/rui recover SAVED_MESSAGE_HANDLE
+"$RUI" inspect-action --store "$STORE" --session my/project --action ACTION_ID
 ```
 
-`message` accepts literal positional text, `-` for stdin, or `--text FILE` to capture a file. `wait-session` selects work once and returns idle immediately if none; `--terminal` waits past permission attention for the selected terminal outcome. `follow HANDLE` always stays bound to that saved Message and can show an earlier Turn's permission while its Message is queued. `requests` only lists local records; `recover` reuses the exact saved inputs after an uncertain reply, even if the input file changes. The private records live under `~/.config/rui/requests` and do not expire independently. A new message needs a new command/key. Result and inspection rendering use unlinked temporary scratch under `TMPDIR` (or `/tmp`), not durable request records. Explicit `--record`/`--key` mutations and `retry` render semantic JSON from the same validated Client result as human/generated JSON output, with original request context and typed failure diagnostics, not raw Host wire bytes. An invocation failure is nonzero and unconfirmed, never proof of rejection or noncommit. `rui setup` inspects the private Store/provider/model defaults without changing them, or saves them with `--store PATH --provider codex --model gpt-6-luna`. Only that qualified model is a supported managed setup default; other exact model strings remain available to explicit one-shot configuration. Without a saved choice, the sole locally configured supported provider is proposed; otherwise setup asks for a provider choice. Missing, expired/pending or unreadable Rui credentials are reported without refresh or network check; a saved preference never silently falls back. `/setup` works within an interactive Session but changes only future defaults; quote values containing spaces (for example `/setup --store "/path/to/my store"`), escaping embedded `"` or `\` as needed. The same quoting works for `/configure`; these commands do not perform shell expansion. `rui session --session REF` uses the saved Store or `$HOME/.local/share/rui/store` when `--store` is omitted. Store paths must already exist and pass the canonical/private checks; setup does not start a Host or configure a new Session.
+After reviewing the command, approve it once:
 
-Bare `rui` creates a distinct Session in canonical cwd with Bash and `bypass`, after attaching to or starting a Host and selecting a locally ready supported provider. Existing Sessions keep their saved permission modes. Entry omits binding banners and successful receipts, retaining only the short Bash bypass notice; `/status` shows the exact settings and `/requests` exposes its recoverable configuration handle. `rui recover HANDLE` retries that exact request after a lost reply; another bare invocation creates a new Session. `rui --store PATH --provider codex --model gpt-6-luna` overrides future defaults for that invocation. Non-TTY entry rejects before mutation; one-shot commands remain unchanged. Workflow Session discovery waits for the Host Workflow inspection operation. The [Bash walkthrough](#try-the-implemented-development-path) demonstrates the explicit-key route with a deterministic endpoint.
+```sh
+"$RUI" allow-action --store "$STORE" --session my/project --action ACTION_ID
+```
 
-Managed mode uses `POST /backend-api/codex/responses` with verified TLS and negotiated HTTP/2; it does not attach credentials to a development endpoint. The device-code login requires account/workspace enablement and persists under `~/.config/rui/codex.json` for reuse across Host restarts. `RUI_CODEX_CREDENTIAL_FILE` may instead select another absolute path under an owner-only directory. Rui refreshes when required, but a failed or interrupted refresh may require a new login; live refresh was not exercised. Edit and output schemas fail before managed dispatch. The live responses reported `gpt-6-luna` in their bodies; served-model headers and provider correlation were absent, and direct ALPN observation was unavailable. This qualifies only the stated model, route and native platform pairs—not general Codex model availability or a release-wide resource bound.
+Use `deny-action` instead to reject it, then `follow` the original message again. If a command loses its reply, use `requests` and `recover HANDLE` to retry the saved request. Do not submit a new message to guess whether the first arrived.
 
-`zig build codex-integration` exercises a synthetic credential, exact Bash approval, private continuation and fresh-Host recovery through public callers. `zig build codex-h2-integration` additionally needs Python `h2==4.3.0` and OpenSSL and checks managed TLS/HTTP2 negotiation, connection reuse and conditional FedRAMP routing. Neither uses live credentials.
+## Manage the background process
 
-`zig build codex-credential-integration` also tests cross-process credential mutation without live tokens. The opt-in `python3 tests/integration/codex_live.py /absolute/path/to/rui --live --model gpt-6-luna` runs the accepted public-caller journey with isolated disposable credentials and payload-free observations; it is not in ordinary build gates. For repeated authorized runs, `--credential-file /absolute/path/to/private/codex.json` reuses a Rui-owned credential instead of prompting for a fresh device login each time.
+The **Host** runs work in the background. The **Store** is its private directory of saved state. Commands use an explicit `--store`, then your saved preference, then `$HOME/.local/share/rui/store`. Pin `--store` in scripts for a predictable destination.
 
-## Try the implemented development path
+```sh
+"$RUI" host status
+```
 
-Run the narrated public-caller journey from issue [#260](https://github.com/DivyanshGolyan/rui/issues/260): configure an ask-mode Session, submit a message, inspect and approve one exact Bash Action, read its saved answer, crash the Host, then recover the original submission without repeating the effect.
+`host start` starts a Host with capacity for eight active executions, or connects to an existing one without changing its settings. It prints the diagnostic-log location. Rui does not install an OS service or restart a crashed Host automatically. If startup times out, inspect status and diagnostics; a timeout does not prove the Host stopped.
+
+To shut down the Host and interrupt **all work in the selected Store**:
+
+```sh
+"$RUI" host stop
+```
+
+If the reply is lost, use the printed retry command. It targets the same Host instance so it cannot stop a replacement. An acknowledgment means shutdown was requested, not that cleanup has finished.
+
+For foreground operation and explicit capacity, use `serve --store PATH --active-capacity 8 --codex`. Without `--codex` or a development endpoint, `serve` makes no model requests. See the [Host reference](ARCHITECTURE.md#platforms-and-server-lifetime) for startup and shutdown guarantees.
+
+<a id="try-the-implemented-development-path"></a>
+
+## Try Rui without a provider account
 
 ```sh
 zig build bash-walkthrough
 ```
 
-The prerequisites are the same as [Build](#build). The walkthrough prints the actual `configure`, `message`, `inspect-session`, Action-read, `allow-action`, `read-result` and `retry` commands with their observations. It creates an explicit temporary Workspace and Store, starts only its own local Host and deterministic provider endpoint, and removes those owned resources on success. The Workspace is a working directory, not a sandbox. Acceptance is not completion, and approval authorizes only the inspected Action.
+The walkthrough prints real CLI commands, approves one Bash action, saves its answer, crashes its own Host and recovers the same result. It uses a deterministic local provider and removes its temporary project and Store on success.
 
-This development smoke check is not a live-provider quickstart or power-loss test. Its process crash occurs after the result and effect cleanup are committed; the fresh Host proves recovery of those saved facts without another Bash or provider effect. See the [acceptance audit and limits](VERIFICATION.md#runnable-bash-caller-acceptance-audit). Run `zig build bash-integration` for the full maintained Bash journey.
+The crash occurs after the result and cleanup are saved. This checks saved-result recovery, not an interrupted command or power loss. See the [walkthrough's checks](VERIFICATION.md#runnable-bash-caller-acceptance-audit).
 
 ## Development direction
 
-The [delivery plan](https://github.com/DivyanshGolyan/rui/issues/164) separates [direct-core development readiness](https://github.com/DivyanshGolyan/rui/issues/168) from [full qualification](https://github.com/DivyanshGolyan/rui/issues/231). Essential safety evidence stays with each capability; broad qualification does not block independent feature development after the readiness checkpoint. Full stage, support, performance and release claims still require their evidence.
+[Durable JavaScript workflows](https://github.com/DivyanshGolyan/rui/issues/273) remain in development. The private evaluator exists, but the production Host does not yet invoke it. The [delivery plan](https://github.com/DivyanshGolyan/rui/issues/164) tracks feature work separately from [full qualification](https://github.com/DivyanshGolyan/rui/issues/231).
 
-The runnable #260 slice and native [Codex path](https://github.com/DivyanshGolyan/rui/issues/272) are described above. Local qualification evidence is complete for that exact-model slice; publishing changes and closing the issue are separate delivery actions. A [minimal durable workflow](https://github.com/DivyanshGolyan/rui/issues/273) remains planned; these links do not expand the implemented surface described in [Status](#status).
+Use [the subsystem test selector](VERIFICATION.md#canonical-gates) to choose checks for a change. Build/dependency changes and release qualification require additional evidence; a historical test result is not a pass for new code.
 
 ## Read next
 
-- To explain ordinary work, recovery, ownership or resource policy, read [Architecture](ARCHITECTURE.md).
-- To locate the source that owns a behavior, use the [implementation map](ARCHITECTURE.md#finding-the-implementation).
-- To change Session behavior or verify an implementation slice, find the owning behavior in Architecture and its required evidence in [Verification](VERIFICATION.md).
-- To run or interpret qualification, start with [current qualification](tests/qualification/README.md#current-checks-and-qualification); it records revision-specific observations and their limits.
-- To inspect design evidence or archived experiments, read [Research](research/README.md).
-- Contributors should follow [working rules](AGENTS.md). Dependencies and notices live in [third-party notices](THIRD_PARTY_NOTICES.md).
+- [Architecture](ARCHITECTURE.md): behavior, ownership and recovery, including the planned V1 contract.
+- [Verification](VERIFICATION.md): required checks and what they prove.
+- [Research](research/README.md): experiments and design sources.
+- [Contributing rules](AGENTS.md) and [third-party notices](THIRD_PARTY_NOTICES.md).
