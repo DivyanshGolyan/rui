@@ -1925,20 +1925,25 @@ def host_diagnostic_cases(state, library):
                     cleanup_errors.append(error)
             try:
                 if host is not None:
-                    if host.poll() is None:
-                        host.kill()
-                    host.wait(timeout=8)
-                    if not reader.closed:
-                        os.set_blocking(reader.fileno(), False)
-                        with (root / "stderr.log").open("ab") as retained:
-                            while True:
-                                try:
-                                    chunk = os.read(reader.fileno(), 65536)
-                                except BlockingIOError:
-                                    break
-                                if not chunk: break
-                                retained.write(chunk)
-                    fixture.stop_host(host)
+                    try:
+                        if host.poll() is None:
+                            host.kill()
+                        host.wait(timeout=8)
+                        try:
+                            if not reader.closed:
+                                os.set_blocking(reader.fileno(), False)
+                                with (root / "stderr.log").open("ab") as retained:
+                                    while True:
+                                        try:
+                                            chunk = os.read(reader.fileno(), 65536)
+                                        except BlockingIOError:
+                                            break
+                                        if not chunk: break
+                                        retained.write(chunk)
+                        except Exception as error:
+                            cleanup_errors.append(error)
+                    finally:
+                        fixture.stop_host(host)
                     if credit == "diagnostic-contention-host":
                         preserve_failure_metadata(root / "contention-final.json", lambda: {
                             "returncode": host.returncode, "state": host.rui_observations.final_state,
@@ -1959,7 +1964,7 @@ def host_diagnostic_cases(state, library):
                     "cleanup_errors": [type(error).__name__ for error in cleanup_errors]})
                 if incoming_error is None:
                     raise cleanup_errors[0]
-                print("Inspection cleanup failed; original failure retained", file=sys.stderr)
+                print("Fixture diagnostic cleanup failed; original failure retained", file=sys.stderr)
 
 
 def main(selected=None):
