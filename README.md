@@ -17,23 +17,40 @@ Before using Rui on a project:
 - If a crash leaves a command's outcome unknown, Rui reports it as indeterminate and does not automatically repeat it. OS-crash and power-loss recovery are not guaranteed.
 - Full tool output is temporary. Saved results and excerpts remain available after that output is evicted or removed on restart.
 
+## Install from source
+
+Requires Zig 0.16.0, Python 3, Git, Perl, `patch`, a C toolchain and Make. On macOS, install the Xcode command-line tools with `xcode-select --install` if needed. The build pins native dependencies.
+
+From the checkout you want to install, run:
+
+```sh
+./install.sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+To use `rui` in future shells, add the PATH line to your shell profile if `~/.local/bin` is not already on PATH. Then [start a conversation](#start-a-conversation).
+
+Run `./install.sh` again to update. It builds the current checkout, including local changes; it does not fetch or switch branches. It prepares the selected Zig cache, validates the built command, and replaces `~/.local/bin/rui` and its evaluator with links to a complete build under `~/.local/lib/rui`. Failed builds leave the previous installation unchanged. Earlier installed builds remain available because running processes may still use them.
+
+Installation preserves Stores, credentials and shell profiles. It reports the selected Store's Host status without starting or stopping anything. A running Host retains its old executable. After its work finishes, run `rui host stop`, wait for `rui host status` to report unavailable, then start `rui` again. If your shell still runs an older command, inspect `type -a rui` and run `rehash` in Zsh or `hash -r` in Bash.
+
 ## Build
 
-Install Zig 0.16.0, Python 3, Perl, `patch`, a C toolchain and Make. From this repository:
+After [installation](#install-from-source) has prepared the dependencies, build a development binary and run portable checks from this repository. For build-only dependency preparation, use the [empty-cache steps](VERIFICATION.md#canonical-gates).
 
 ```sh
 zig build
 zig build test-logic
 ```
 
-The executable is `zig-out/bin/rui`. Use `rui --help` for command usage. The examples below use its absolute path so you can run it from your project directory.
+The development executable is `zig-out/bin/rui`. Use `rui --help` for command usage. The examples below use the installed command; set `RUI="$PWD/zig-out/bin/rui"` instead to try a development build.
 
 ## Start a conversation
 
-From the Rui repository, sign in once:
+Sign in once, unless you already signed in with Rui:
 
 ```sh
-RUI="$PWD/zig-out/bin/rui"
+RUI="$HOME/.local/bin/rui"
 "$RUI" login codex
 ```
 

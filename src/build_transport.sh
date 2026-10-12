@@ -75,6 +75,7 @@ if [ "${sdk:-}" ]; then
     ln -s "$sdk/usr/lib" "$prefix/sdk/usr/lib"
 fi
 
+printf 'Building pinned OpenSSL ...\n' >&2
 (
     cd "$openssl_build"
     CC="$cc" AR="$zig ar" RANLIB="$zig ranlib" \
@@ -88,6 +89,7 @@ fi
     exit 1
 }
 
+printf 'Building pinned nghttp2 ...\n' >&2
 (
     cd "$nghttp2_build"
     CC="$cc" AR="$zig ar" RANLIB="$zig ranlib" \
@@ -107,6 +109,7 @@ fi
 cp -R "$curl_source" "$curl_patched"
 (cd "$curl_patched" && git apply "$curl_patch") >>"$log" 2>&1
 
+printf 'Building pinned curl ...\n' >&2
 (
     cd "$curl_build"
     CC="$cc" AR="$zig ar" RANLIB="$zig ranlib" \
