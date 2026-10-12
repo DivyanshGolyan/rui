@@ -1,0 +1,465 @@
+//! Bounded public Activity presentation with one forward-only content pass.
+//! A failed stream may leave a visible prefix; the terminal owner must not retry it.
+const std = @import("std");
+const client = @import("client.zig");
+const protocol = @import("protocol.zig");
+const Text = @import("TerminalText.zig");
+const Renderer = @import("AnswerRenderer.zig");
+const tools = @import("tools.zig");
+
+extern fn utf8proc_charwidth(scalar: i32) c_int;
+extern fn utf8proc_grapheme_break_stateful(i32, i32, *c_int) c_int;
+
+/// Only presentation-owned foreground changes. Content cannot select a style.
+pub const Style = enum {
+    user,
+    quiet,
+    attention,
+    failure,
+    normal,
+
+    pub fn code(self: Style, colour: bool) []const u8 {
+        if (!colour) return "";
+        return switch (self) {
+            .user => "\x1b[94m",
+            .quiet => "\x1b[90m",
+            .attention => "\x1b[33m",
+            .failure => "\x1b[91m",
+            .normal => "\x1b[39m",
+        };
+    }
+};
+
+/// Live conversation and inspection share hanging indentation. Input is already
+/// escaped or rendered; only trusted renderer SGR has zero display width.
+pub fn Indented(comptime Sink: type) type {
+    return struct {
+        sink: Sink,
+        columns: usize = 0,
+        column: usize = 2,
+        line_start: bool = false,
+        sgr: bool = false,
+        scalar: [4]u8 = undefined,
+        used: usize = 0,
+        prior: ?i32 = null,
+        grapheme_state: c_int = 0,
+        cluster_width: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
+            var storage: [4096]u8 = undefined;
+            var out = std.Io.Writer.fixed(&storage);
+            for (bytes) |byte| {
+                if (storage.len - out.end < 8) {
+                    try self.sink.feed(out.buffered());
+                    out.end = 0;
+                }
+                if (self.sgr or byte == 0x1b) {
+                    if (self.line_start) {
+                        try out.writeAll("  ");
+                        self.column = 2;
+                        self.line_start = false;
+                    }
+                    self.sgr = byte != 'm';
+                    try out.writeByte(byte);
+                    continue;
+                }
+                if (byte == '\n') {
+                    try out.writeByte(byte);
+                    self.column = 0;
+                    self.line_start = true;
+                    self.prior = null;
+                    self.grapheme_state = 0;
+                    continue;
+                }
+                self.scalar[self.used] = byte;
+                self.used += 1;
+                const length = try std.unicode.utf8ByteSequenceLength(self.scalar[0]);
+                if (self.used != length) continue;
+                const value = try std.unicode.utf8Decode(self.scalar[0..length]);
+                const scalar: i32 = @intCast(value);
+                const boundary = if (self.prior) |prior| utf8proc_grapheme_break_stateful(prior, scalar, &self.grapheme_state) != 0 else true;
+                var width: usize = if (value == '\t') 8 - self.column % 8 else @intCast(@max(0, utf8proc_charwidth(scalar)));
+                if (value == 0xfe0f or value == 0x20e3 or value >= 0x1f1e6 and value <= 0x1f1ff) width = @max(width, 2);
+                // Reserve a wide cell at each cluster start: a later variation
+                // selector may widen it, but never permits a mid-cluster wrap.
+                if (boundary and self.columns > 3 and !self.line_start and self.column + @max(width, 2) >= self.columns) {
+                    try out.writeByte('\n');
+                    self.column = 0;
+                    self.line_start = true;
+                }
+                if (self.line_start) {
+                    try out.writeAll("  ");
+                    self.column = 2;
+                    self.line_start = false;
+                }
+                if (value == '\t') width = 8 - self.column % 8;
+                if (boundary) self.cluster_width = 0;
+                try out.writeAll(self.scalar[0..length]);
+                self.column += @max(width, self.cluster_width) - self.cluster_width;
+                self.cluster_width = @max(width, self.cluster_width);
+                self.prior = scalar;
+                self.used = 0;
+            }
+            if (out.end != 0) try self.sink.feed(out.buffered());
+        }
+        pub fn finish(self: *@This()) !void {
+            if (self.used != 0 or self.sgr) return error.IncompleteRenderedText;
+        }
+    };
+}
+
+test "conversation wrapping preserves Unicode clusters across content windows" {
+    const Sink = struct {
+        bytes: [128]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    const cases = .{
+        .{ "abc👩‍💻de", "  abc👩‍💻\n  de" },
+        .{ "abc❤️de", "  abc❤️\n  de" },
+        .{ "abc🇺🇸de", "  abc🇺🇸\n  de" },
+    };
+    inline for (cases) |case| {
+        for (0..case[0].len + 1) |split| {
+            var sink: Sink = .{};
+            var presentation: Indented(*Sink) = .{ .sink = &sink, .columns = 8, .line_start = true };
+            try presentation.feed(case[0][0..split]);
+            try presentation.feed(case[0][split..]);
+            try presentation.finish();
+            try std.testing.expectEqualStrings(case[1], sink.bytes[0..sink.length]);
+        }
+    }
+}
+
+pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, workspace: []const u8, scratch: std.Io.File, sink: anytype, columns: usize, colour: bool) !void {
+    // Action reads write at the descriptor's streaming offset, not positionally.
+    try requests.io.vtable.fileSeekTo(requests.io.userdata, scratch, 0);
+    try scratch.setLength(requests.io, 0);
+    var reply: client.ReplyBuffer = .{};
+    const result = try requests.readActionArguments(store, session, action, scratch, &reply);
+    if (result == .command) {
+        try client.checkCanonicalFailure(result.command);
+        return error.ActionReadFailed;
+    }
+    var buffer: [4096]u8 = undefined;
+    var reader = scratch.reader(requests.io, &buffer);
+    const Source = struct {
+        reader: *std.Io.Reader,
+        pub fn peek(self: *@This()) !?u8 {
+            return self.reader.peekByte() catch |err| switch (err) {
+                error.EndOfStream => null,
+                else => return err,
+            };
+        }
+        pub fn take(self: *@This()) !u8 {
+            return self.reader.takeByte();
+        }
+    };
+    var source: Source = .{ .reader = &reader.interface };
+    const arguments = try tools.inspectBashArguments(&source) orelse return error.InvalidBashArguments;
+    try reader.seekTo(0);
+    try sink.feed(Style.attention.code(colour));
+    try sink.feed("\n? Run Bash:");
+    try sink.feed(Style.normal.code(colour));
+    try sink.feed("\n  ");
+    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };
+    var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .multiline } };
+    if (!try tools.writeBashCommand(&source, &escaped)) return error.InvalidBashArguments;
+    try escaped.finish();
+    try indented.feed("\nWorkspace: ");
+    var location: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .line } };
+    try location.feed(workspace);
+    try location.finish();
+    if (arguments.timeout_ms) |timeout| {
+        try print(&indented, "\nTime limit: {d} ms", .{timeout});
+    } else try indented.feed("\nTime limit: Host default");
+    try indented.feed("\n");
+    try indented.finish();
+}
+
+pub fn current(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File) !client.Current {
+    try scratch.setLength(requests.io, 0);
+    const Capture = struct {
+        io: std.Io,
+        file: std.Io.File,
+        offset: u64 = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.file.writePositionalAll(self.io, bytes, self.offset);
+            self.offset += bytes.len;
+        }
+    };
+    var capture: Capture = .{ .io = requests.io, .file = scratch };
+    var reply: client.ReplyBuffer = .{};
+    const report = try requests.inspectSession(store, session, .current, &capture, &reply);
+    return switch (try client.CurrentReply.decode(requests.io, scratch, session, report)) {
+        .current => |value| value,
+        .unconfigured => error.SessionNotConfigured,
+        .failure => |failure| failure.err(),
+    };
+}
+
+pub fn Escaped(comptime Sink: type) type {
+    return struct {
+        sink: Sink,
+        text: Text,
+        storage: [256]u8 = undefined,
+        used: usize = 0,
+        pub fn writeAll(self: *@This(), bytes: []const u8) anyerror!void {
+            try self.feed(bytes);
+        }
+        pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
+            var out = std.Io.Writer.fixed(&self.storage);
+            out.end = self.used;
+            for (bytes) |byte| {
+                if (self.storage.len - out.end < 16) {
+                    try self.sink.feed(out.buffered());
+                    out.end = 0;
+                }
+                try self.text.feed(&out, &.{byte});
+            }
+            self.used = out.end;
+        }
+        pub fn finish(self: *@This()) anyerror!void {
+            var out = std.Io.Writer.fixed(&self.storage);
+            out.end = self.used;
+            if (self.storage.len - out.end < 16) {
+                try self.sink.feed(out.buffered());
+                out.end = 0;
+            }
+            try self.text.finish(&out);
+            if (out.end != 0) try self.sink.feed(out.buffered());
+            self.used = 0;
+        }
+    };
+}
+
+/// Initialize in final storage: Renderer borrows the embedded Writer. Preserve
+/// the original rendezvous error rather than narrowing Cancelled to WriteFailed.
+pub fn Answer(comptime Sink: type) type {
+    return struct {
+        sink: Sink,
+        storage: [4096]u8 = undefined,
+        writer: std.Io.Writer,
+        renderer: Renderer,
+        failure: ?anyerror = null,
+        pub fn init(self: *@This(), sink: Sink) void {
+            self.* = .{ .sink = sink, .writer = undefined, .renderer = undefined };
+            self.writer = .{ .vtable = &.{ .drain = drain }, .buffer = &self.storage };
+            self.renderer = .{ .out = &self.writer };
+        }
+        pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
+            if (self.failure) |err| return err;
+            self.renderer.feed(bytes) catch |err| return self.failure orelse err;
+            self.writer.flush() catch |err| return self.failure orelse err;
+        }
+        pub fn finish(self: *@This()) anyerror!void {
+            if (self.failure) |err| return err;
+            self.renderer.finish() catch |err| return self.failure orelse err;
+            self.writer.flush() catch |err| return self.failure orelse err;
+        }
+        fn forward(self: *@This(), bytes: []const u8) std.Io.Writer.Error!void {
+            if (bytes.len == 0) return;
+            self.sink.feed(bytes) catch |err| {
+                self.failure = err;
+                return error.WriteFailed;
+            };
+        }
+        fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const self: *@This() = @fieldParentPtr("writer", writer);
+            try self.forward(writer.buffered());
+            writer.end = 0;
+            var consumed: usize = 0;
+            for (data[0 .. data.len - 1]) |bytes| {
+                try self.forward(bytes);
+                consumed += bytes.len;
+            }
+            const last = data[data.len - 1];
+            for (0..splat) |_| try self.forward(last);
+            return consumed + last.len * splat;
+        }
+    };
+}
+
+fn print(sink: anytype, comptime format: []const u8, args: anytype) !void {
+    var storage: [256]u8 = undefined;
+    try sink.feed(try std.fmt.bufPrint(&storage, format, args));
+}
+
+/// Exact fixed-end summary requires a metadata walk, not Current or the newest
+/// page. Retain only the oldest four identities; never retain history payloads.
+pub const Pending = struct {
+    total: u64 = 0,
+    count: usize = 0,
+    items: [4]struct { position: u64, ordinal: u64, content: protocol.ActivityItem.Content } = undefined,
+
+    pub fn render(self: *const Pending, requests: client.Requests, store: []const u8, session: []const u8, sink: anytype) !void {
+        if (self.total == 0) return;
+        try print(sink, "Rui: {d} queued messages.\n", .{self.total});
+        const Preview = struct {
+            escaped: Escaped(@TypeOf(sink)),
+            remaining: usize = 256,
+            omitted: bool = false,
+            pub fn feed(self_: *@This(), bytes: []const u8) !void {
+                const count = @min(self_.remaining, bytes.len);
+                try self_.escaped.feed(bytes[0..count]);
+                self_.remaining -= count;
+                self_.omitted = self_.omitted or count != bytes.len;
+            }
+        };
+        for (self.items[0..self.count]) |item| {
+            try sink.feed("Queued: ");
+            var preview: Preview = .{ .escaped = .{ .sink = sink, .text = .{ .mode = .line } } };
+            if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = item.content.length, .digest = item.content.digest }, &preview)) |failure| return failure.err();
+            try preview.escaped.finish();
+            if (preview.omitted) try sink.feed(" [preview truncated]");
+            try sink.feed("\n");
+        }
+    }
+};
+
+pub fn pending(requests: client.Requests, store: []const u8, session: []const u8, end: u64) !Pending {
+    var summary: Pending = .{};
+    var cursor: client.ActivityCursor = .{ .end = end };
+    while (true) {
+        const page = switch (try requests.activityPage(store, session, cursor)) {
+            .page => |page| page,
+            .failure => |failure| return failure.err(),
+        };
+        for (page.facts.items[0..page.facts.count]) |item| {
+            if (item.value != .admission or item.value.admission.state != .queued) continue;
+            summary.total += 1;
+            if (summary.count == summary.items.len) continue;
+            summary.items[summary.count] = .{ .position = item.position, .ordinal = item.ordinal, .content = item.value.admission.content };
+            summary.count += 1;
+        }
+        cursor = page.continuation() orelse return summary;
+    }
+}
+
+fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, sink: anytype, columns: usize) !void {
+    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };
+    if (item.value == .assistant) {
+        var answer: Answer(@TypeOf(&indented)) = undefined;
+        answer.init(&indented);
+        if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &answer)) |failure| return failure.err();
+        try answer.finish();
+    } else {
+        var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .multiline } };
+        if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &escaped)) |failure| return failure.err();
+        try escaped.finish();
+    }
+    try indented.finish();
+    try sink.feed("\n");
+}
+
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const client.ActivityPage, sink: anytype, columns: usize, colour: bool) !void {
+    const Drain = struct {
+        pub fn feed(_: *@This(), _: []const u8) !void {}
+    };
+    var drain: Drain = .{};
+    const historical = page.facts.direction == .backward;
+    for (0..page.facts.count) |index| {
+        const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
+        switch (item.value) {
+            .admission => |message| {
+                if (historical and message.state == .applied) continue;
+                if (historical) try sink.feed("\n! Unapplied input:");
+                try sink.feed("\n");
+                try sink.feed(Style.user.code(colour));
+                try sink.feed("›");
+                try sink.feed(Style.normal.code(colour));
+                try sink.feed(" ");
+                try content(requests, store, session, item, message.content, sink, columns);
+            },
+            .user => |message| {
+                if (!historical) continue; // Live Admission already showed it.
+                try sink.feed("\n");
+                try sink.feed(Style.user.code(colour));
+                try sink.feed("›");
+                try sink.feed(Style.normal.code(colour));
+                try sink.feed(" ");
+                try content(requests, store, session, item, message.content, sink, columns);
+            },
+            .assistant => |reference| {
+                try sink.feed("\n  ");
+                try content(requests, store, session, item, reference, sink, columns);
+            },
+            .tool_result => |reference| {
+                // Keep outcomes and warnings, not routine zero exit codes or
+                // output tails. This affects presentation only, never execution,
+                // permission or outcome classification; /details stays exact.
+                const Summary = struct {
+                    escaped: Escaped(@TypeOf(sink)),
+                    colour: bool,
+                    line: [256]u8 = undefined,
+                    length: usize = 0,
+                    remaining: usize = 256,
+                    emitted: bool = false,
+                    ended: bool = false,
+                    omitted: bool = false,
+                    failed: bool = false,
+                    pub fn feed(self: *@This(), bytes: []const u8) !void {
+                        for (bytes) |byte| {
+                            if (self.ended) return;
+                            if (self.remaining == 0) {
+                                try self.emit();
+                                self.omitted = true;
+                                self.ended = true;
+                                return;
+                            }
+                            self.remaining -= 1;
+                            if (byte == '\n') {
+                                try self.emit();
+                            } else {
+                                self.line[self.length] = byte;
+                                self.length += 1;
+                            }
+                        }
+                    }
+                    fn emit(self: *@This()) !void {
+                        const line = self.line[0..self.length];
+                        if (std.mem.eql(u8, line, "stdout tail:") or std.mem.eql(u8, line, "stderr tail:")) {
+                            self.ended = true;
+                        } else {
+                            if (self.emitted) try self.escaped.feed("\n  ") else {
+                                self.failed = !std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.") and !std.mem.eql(u8, line, "Permission denied.");
+                                try self.escaped.sink.feed((if (self.failed) Style.failure else Style.normal).code(self.colour));
+                                try self.escaped.feed(if (self.failed) "\n! " else "  • ");
+                            }
+                            try self.escaped.feed(if (std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.")) "Bash succeeded." else line);
+                            self.emitted = true;
+                        }
+                        self.length = 0;
+                    }
+                    fn finish(self: *@This()) !void {
+                        if (self.length != 0) try self.emit();
+                        try self.escaped.finish();
+                        try self.escaped.sink.feed(Style.normal.code(self.colour));
+                    }
+                };
+                var summary: Summary = .{ .escaped = .{ .sink = sink, .text = .{ .mode = .multiline } }, .colour = colour };
+                if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &summary)) |failure| return failure.err();
+                try summary.finish();
+                if (summary.omitted) try sink.feed(" [summary shortened; /details]");
+                if (summary.failed) try sink.feed("\n  /details for output.");
+                try sink.feed("\n");
+            },
+            .call => |call| {
+                // Proposal bookkeeping is inspection-only. Even hidden fields
+                // must drain and validate before advancing the Activity cursor.
+                for (std.meta.tags(client.ProposalField), 0..) |field, field_index| {
+                    const reference = call.fields[field_index];
+                    if (try requests.readProposalField(store, session, item.position, field, .{ .bytes = reference.length, .digest = reference.digest }, &drain)) |failure| return failure.err();
+                }
+            },
+            .outcome => |outcome| {
+                // Successful content aggregates assistant rows, never a second answer.
+                if (outcome.code.eql("completed")) continue;
+                try print(sink, "\n! Work ended: {s}. /status for details.\n", .{outcome.code.slice()});
+            },
+            .stop => try sink.feed("\n! Session stopped.\n"),
+        }
+    }
+}

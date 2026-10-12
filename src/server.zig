@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const HostDiagnostics = @import("HostDiagnostics.zig");
+const TestObservation = @import("TestObservation.zig");
 const trace_native = @cImport({
     @cInclude("unistd.h");
 });
@@ -16,6 +17,7 @@ const platform = @import("platform.zig");
 const provider = @import("provider.zig");
 const protocol = @import("protocol.zig");
 const store_module = @import("store.zig");
+const stderr = @import("stderr.zig");
 
 pub const default_active_capacity = 1000;
 pub const default_retry_waits_ms = [3]u64{ 2_000, 4_000, 8_000 };
@@ -94,6 +96,9 @@ pub const Faults = struct {
     report_unlink: bool = false,
     client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
+    test_observation_fd: ?c_int = null,
+    test_observation_state_fd: ?c_int = null,
+    test_observation_plan: ?TestObservation.Plan = null,
     test_transition: ?TestTransition = null,
     test_transition_gate_path: ?[]const u8 = null,
     model_cleanup_gate_path: ?[]const u8 = null,
@@ -109,6 +114,7 @@ pub const Faults = struct {
 
 const TestTransition = enum {
     action_attempt_admitted,
+    prepared_before_handoff,
     action_result_ready,
     action_result_committed,
 };
@@ -188,10 +194,10 @@ const Host = struct {
     admission: Admission = .{},
     scratch_used: std.atomic.Value(u64) = .init(0),
     launch_mutex: std.Io.Mutex = .init,
-    trace_mutex: std.Io.Mutex = .init,
     trace_run_ns: u64 = 0,
     trace_sequence: u64 = 0,
-    trace_lost: bool = false,
+    trace_lost: std.atomic.Value(bool) = .init(false),
+    test_observation: ?*TestObservation = null,
     last_unprocessed_completions: ?u64 = null,
     drain_mutex: std.Io.Mutex = .init,
     drain_condition: std.Io.Condition = .init,
@@ -281,7 +287,7 @@ pub fn serve(
         descriptor_observation.soft_limit,
     ) catch |err| {
         if (err == error.DescriptorCapacityInsufficient) {
-            std.debug.print(
+            stderr.print(
                 "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d}\n",
                 .{
                     active_capacity,
@@ -300,8 +306,14 @@ pub fn serve(
     };
     var lease = try platform.StoreLease.acquire(io, store_path);
     defer lease.release();
+    // fd1 may alias fd2. Exclude flag borrowing before any continuing
+    // startup diagnostic, through readiness delivery and failed unwind.
+    if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;
+    var readiness_owned = true;
+    defer if (readiness_owned) stderr.release();
+    var diagnostic_open_error: ?anyerror = null;
     var diagnostics: ?HostDiagnostics = HostDiagnostics.open(io, lease.store_dir, HostDiagnostics.default_cap_bytes) catch |err| blk: {
-        std.debug.print("rui: startup diagnostics unavailable ({s}); continuing under Store lease\n", .{@errorName(err)});
+        diagnostic_open_error = err;
         break :blk null;
     };
     defer if (diagnostics) |*writer| writer.close();
@@ -313,7 +325,7 @@ pub fn serve(
         lease.paths.store.slice(),
         .{ .cache_spill = faults.sqlite_cache_spill, .cache_kib = faults.sqlite_cache_kib },
     );
-    defer storage.close() catch |err| std.debug.print("rui: Store close failed: {s}\n", .{@errorName(err)});
+    defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
     try storage.validateRetryWaits(faults.retry_waits_ms);
     try lease.prepareForServing(faults.startup_cleanup);
 
@@ -324,7 +336,7 @@ pub fn serve(
     errdefer {
         if (listener_open) listener.deinit(io);
         if (socket_owned) std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
-            std.debug.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
+            stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
     }
     var socket_path: [257:0]u8 = undefined;
@@ -354,6 +366,13 @@ pub fn serve(
         .trace_run_ns = @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds),
         .custody = execution.CustodyPool.initialize(custody_records),
     };
+    var observation: ?TestObservation = if (faults.test_observation_fd) |fd|
+        try TestObservation.init(fd, faults.test_observation_state_fd orelse return error.MissingTestObservationState, faults.test_observation_plan orelse return error.MissingTestObservationPlan, host.trace_run_ns)
+    else
+        null;
+    // This scope outlives connection, execution and capture-writer joins.
+    defer if (observation) |*writer| writer.close();
+    host.test_observation = if (observation) |*writer| writer else null;
     var retention = output_retention.Queue.initializeWithRemoval(
         io,
         lease.paths.scratch.slice(),
@@ -382,7 +401,7 @@ pub fn serve(
         std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
             // The lock still protects this failed cleanup. A later startup
             // removes the owned socket or refuses to serve if it cannot.
-            std.debug.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
+            stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
         socket_owned = false;
         host.launch_mutex.lockUncancelable(host.io);
@@ -418,7 +437,12 @@ pub fn serve(
     try ready.append("\n");
     if (rui_write_readiness(1, ready.slice().ptr, ready.slice().len) != 0)
         return error.HostReadinessOutputUnavailable;
+    stderr.release();
+    readiness_owned = false;
+    if (diagnostic_open_error) |err|
+        stderr.print("rui: startup diagnostics unavailable ({s}); continuing under Store lease\n", .{@errorName(err)});
     if (diagnostics) |*writer| {
+        if (writer.failure != null) writer.reportFailure();
         writer.record("ready", "serving");
         writer.close();
         diagnostics = null;
@@ -764,6 +788,7 @@ fn executionMain(host: *Host) void {
         .io = host.io,
         .test_gate_path = host.faults.response_capture_gate_path,
         .test_gate_min_written_bytes = host.faults.response_capture_gate_min_written_bytes,
+        .test_observation = host.test_observation,
     };
     const capture_thread: ?std.Thread = if (host.provider_endpoint != null)
         std.Thread.spawn(.{}, provider.CaptureWriter.run, .{&capture_writer}) catch |err| {
@@ -1134,8 +1159,7 @@ fn cancelSupersededTransfers(
             traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
             preparation.cancel();
             preparation_active.* = false;
-            finishCustodyNow(host, active.token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, active.token);
         },
         .model_authenticating => |*active| {
             if (active.cancelled) continue;
@@ -1263,13 +1287,13 @@ fn admitBashAttempt(
     testTransition(host, .action_attempt_admitted, action_binding);
     const input = host.store.readBashExecutionInput(action_binding) catch |err| {
         settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be read.");
-        finishCustodyNow(host, token);
+        finishCustodyNow(host, slot, token);
         if (host.store.isFenced()) fenceDispatch(host, "Bash canonical input", err);
         return .admitted;
     };
     const arguments = host.store.openContent(input.arguments) catch |err| {
         settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be opened.");
-        finishCustodyNow(host, token);
+        finishCustodyNow(host, slot, token);
         fenceDispatch(host, "Bash canonical input", err);
         return .admitted;
     };
@@ -1370,8 +1394,7 @@ fn finishBashPreparationFailure(
         retainBashPreparedCleanup(host, slot, token, failure.cleanup, cleanup_err);
         return;
     };
-    finishCustodyNow(host, token);
-    slot.* = .free;
+    finishCustodyNow(host, slot, token);
     if (canonical_failure or host.store.isFenced()) {
         fenceDispatch(host, "Bash canonical preparation", failure.cause);
     }
@@ -1390,8 +1413,7 @@ fn discardBashResources(
         retainBashPreparedCleanup(host, slot, token, cleanup, err);
         return;
     };
-    finishCustodyNow(host, token);
-    slot.* = .free;
+    finishCustodyNow(host, slot, token);
 }
 
 fn launchPreparedBash(
@@ -1401,6 +1423,7 @@ fn launchPreparedBash(
     action_binding: store_module.ActionAttemptBinding,
     prepared: *bash.Prepared,
 ) void {
+    testTransition(host, .prepared_before_handoff, action_binding);
     if (host.faults.before_launch_delay_ms != 0) {
         traceAction(host, "prepared_before_handoff", action_binding);
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
@@ -1468,8 +1491,7 @@ fn stopSupersededBash(
                 retainBashPreparedCleanup(host, slot, active.token, cleanup, cleanup_err);
                 continue;
             };
-            finishCustodyNow(host, active.token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, active.token);
         },
         .bash => |*active| {
             const stopped = host.store.actionSupersededByStop(active.binding) catch |err| {
@@ -1577,8 +1599,8 @@ fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) b
     const token = active.token;
     const binding = active.binding;
     host.custody.cleanupComplete(token) catch unreachable;
-    traceAction(host, "cleanup_completed", binding);
     slot.* = .free;
+    traceAction(host, "cleanup_completed", binding);
     return true;
 }
 
@@ -1693,13 +1715,11 @@ fn beginAdmittedAttempt(
     slot.* = .{ .model_preparing = .{ .token = token, .binding = binding } };
     const view = host.store.openHistoricalView(binding) catch |err| {
         if (err == error.SupersededByControl) {
-            finishCustodyNow(host, token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, token);
             return .admitted;
         }
         fenceDispatch(host, "historical view", err);
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, token);
         return .admitted;
     };
     const request_budget = host.retention.sharedBudget().narrowed(
@@ -1731,18 +1751,15 @@ fn beginAdmittedAttempt(
         }
         if (host.store.isFenced()) {
             fenceDispatch(host, "canonical request read", err);
-            finishCustodyNow(host, token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, token);
             return .admitted;
         }
         if (err == error.SupersededByControl) {
-            finishCustodyNow(host, token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, token);
             return .admitted;
         }
         settleAttemptFailure(host, token, binding, model_adapter.preparationFailureCode(err), .terminal);
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, token);
         return .admitted;
     };
     preparation_active.* = true;
@@ -1773,8 +1790,7 @@ fn advanceModelPreparation(
         preparation.cancel();
         preparation_active.* = false;
         // Infrastructure fencing does not invent a user stop or a Resolution.
-        finishCustodyNow(host, owner.token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, owner.token);
         return true;
     }
     traceOperation(host, "preparation_advance_started", owner.binding);
@@ -1819,15 +1835,13 @@ fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *Executi
             launchPreparedRequest(host, reactor, slot, owner, &request, result.ready);
         } else {
             request.deinit();
-            finishCustodyNow(host, owner.token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, owner.token);
         }
     } else {
         request.deinit();
         if (!active.cancelled)
             settleAttemptFailure(host, owner.token, owner.binding, model_adapter.authenticationFailureCode(result.failed), .terminal);
-        finishCustodyNow(host, owner.token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, owner.token);
     }
     return true;
 }
@@ -1843,8 +1857,7 @@ fn finishModelPreparationFailure(
     } else if (err != error.SupersededByControl) {
         settleAttemptFailure(host, owner.token, owner.binding, model_adapter.preparationFailureCode(err), .terminal);
     }
-    finishCustodyNow(host, owner.token);
-    slot.* = .free;
+    finishCustodyNow(host, slot, owner.token);
 }
 
 fn launchPreparedRequest(
@@ -1859,8 +1872,7 @@ fn launchPreparedRequest(
     const binding = owner.binding;
     if (!host.launchAllowed()) {
         request.deinit();
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, token);
         return;
     }
     const request_budget = host.retention.sharedBudget().narrowed(
@@ -1872,8 +1884,7 @@ fn launchPreparedRequest(
         settleAttemptFailure(host, token, binding, "provider_transport_failure", .{ .retryable = .{
             .waits_ms = host.faults.retry_waits_ms,
         } });
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, token);
         return;
     }
     var headers: model_adapter.Headers = .{};
@@ -1882,8 +1893,7 @@ fn launchPreparedRequest(
         headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity) catch |err| {
             request.deinit();
             fenceDispatch(host, "provider preparation", err);
-            finishCustodyNow(host, token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, token);
             return;
         };
     }
@@ -1915,14 +1925,13 @@ fn launchPreparedRequest(
             retainDispatchFence(host, "response scratch unlink", err);
             return;
         }
-        std.debug.print("rui: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
+        stderr.print("rui: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         if (err == error.ResponseCaptureAcquisitionFailed) {
             settleAttemptFailure(host, token, binding, "response_capture_failed", .terminal);
         } else {
             fenceDispatch(host, "provider preparation", err);
         }
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, token);
         return;
     };
     if (host.faults.before_launch_delay_ms != 0) {
@@ -1931,10 +1940,9 @@ fn launchPreparedRequest(
     }
     host.custody.consumeLaunchAuthority(token, binding) catch |err| {
         active.transfer.deinit();
-        std.debug.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
+        stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, token);
         return;
     };
     host.store.withDispatchHandoff(
@@ -1952,20 +1960,17 @@ fn launchPreparedRequest(
     ) catch |err| {
         active.transfer.deinit();
         if (err == error.HostDispatchSuppressed) {
-            finishCustodyNow(host, token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, token);
             return;
         }
         if (err == error.SupersededByControl) {
             traceOperation(host, "canonical_handoff_superseded", binding);
-            finishCustodyNow(host, token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, token);
             return;
         }
-        std.debug.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
+        stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         fenceDispatch(host, "dispatch handoff", err);
-        finishCustodyNow(host, token);
-        slot.* = .free;
+        finishCustodyNow(host, slot, token);
         return;
     };
     traceOperation(host, "transport_handoff_committed", binding);
@@ -1981,6 +1986,8 @@ fn completeTransfer(
     traceCompletionQueue(host, completion.queued_after, owner.binding);
     defer traceOperation(host, "provider_completion_serviced", owner.binding);
     if (host.authentication != null and host.faults.test_phase_trace) {
+        var publication = beginTestObservation(host, "codex_transfer", null);
+        defer if (publication) |*value| value.finish();
         const observation = active.transfer.protocolObservation();
         const correlation = active.transfer.requestId();
         var digest: [32]u8 = undefined;
@@ -1994,7 +2001,7 @@ fn completeTransfer(
             if (correlation.len != 0) "true" else "false",
             digest,
         }) catch unreachable;
-        writeTestTrace(host, &trace);
+        writeTestTrace(host, &trace, &publication);
     }
     const evidence = switch (completion.outcome) {
         .response_capture_failed => |failure| {
@@ -2104,7 +2111,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
             retainDispatchFence(host, "response metadata unlink", err);
             return .{ .named_scratch = retained };
         }
-        std.debug.print("rui: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
+        stderr.print("rui: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         settleAttemptFailure(host, owner.token, owner.binding, "response_metadata_exhausted", .terminal);
         return .cleanup;
     };
@@ -2114,7 +2121,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         .metadata = host.faults.response_metadata,
     }) catch |err| {
         traceOperation(host, "validation_failed", owner.binding);
-        std.debug.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
+        stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         settleAttemptFailure(host, owner.token, owner.binding, model_adapter.Output.failureCode(err), .terminal);
         return .cleanup;
     };
@@ -2245,8 +2252,8 @@ fn finishSlotCleanup(host: *Host, slot: *ExecutionSlot) void {
     const owner = slot.cleanup.owner;
     const token = owner.token;
     host.custody.cleanupComplete(token) catch unreachable;
-    traceOperation(host, "cleanup_completed", owner.binding);
     slot.* = .free;
+    traceOperation(host, "cleanup_completed", owner.binding);
 }
 
 fn advanceRetainedCleanup(
@@ -2293,13 +2300,11 @@ fn shutdownExecution(
             std.debug.assert(model_preparation_active.*);
             model_preparation.cancel();
             model_preparation_active.* = false;
-            finishCustodyNow(host, active.token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, active.token);
         },
         .model_authenticating => |*active| {
             active.request.deinit();
-            finishCustodyNow(host, active.owner.token);
-            slot.* = .free;
+            finishCustodyNow(host, slot, active.owner.token);
         },
         .bash_preparing => |active| {
             const cleanup = preparation.*.?.cancel();
@@ -2370,9 +2375,22 @@ fn settleAttemptFailure(
         fenceDispatch(host, "model failure save", err);
 }
 
-fn finishCustodyNow(host: *Host, token: execution.CustodyToken) void {
+fn finishCustodyNow(host: *Host, slot: *ExecutionSlot, token: execution.CustodyToken) void {
+    // Capture checked identity while attached, but observe only after callers
+    // have retired resources and this owner has released custody and the slot.
+    const model_binding = if (host.faults.test_phase_trace)
+        host.custody.binding(token) catch null
+    else
+        null;
+    const action_binding = if (host.faults.test_phase_trace and model_binding == null)
+        host.custody.actionBinding(token) catch unreachable
+    else
+        null;
     host.custody.detach(token) catch unreachable;
     host.custody.cleanupComplete(token) catch unreachable;
+    slot.* = .free;
+    if (model_binding) |binding| traceOperation(host, "cleanup_completed", binding);
+    if (action_binding) |binding| traceAction(host, "cleanup_completed", binding);
 }
 
 fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
@@ -2381,7 +2399,7 @@ fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
     host.dispatch_fenced.store(true, .release);
     host.launch_mutex.unlock(host.io);
     if (already_shutting_down) return;
-    std.debug.print("rui: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
+    stderr.print("rui: dispatch fenced after {s} failure: {s}\nHost cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
     wakeListener(host);
 }
 
@@ -2390,11 +2408,11 @@ fn wakeListener(host: *Host) void {
     // connections, joins the execution thread (which detaches any active
     // effects under custody), drains existing clients, then releases Store.
     const address = std.Io.net.UnixAddress.init(host.lease.paths.socket.slice()) catch |address_err| {
-        std.debug.print("rui: listener wake address after dispatch fence failed: {s}\n", .{@errorName(address_err)});
+        stderr.print("rui: listener wake address after dispatch fence failed: {s}\n", .{@errorName(address_err)});
         return;
     };
     const wake = address.connect(host.io) catch |connect_err| {
-        std.debug.print("rui: listener wake after dispatch fence failed: {s}\n", .{@errorName(connect_err)});
+        stderr.print("rui: listener wake after dispatch fence failed: {s}\n", .{@errorName(connect_err)});
         return;
     };
     wake.close(host.io);
@@ -2404,42 +2422,51 @@ fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {
     host.launch_mutex.lockUncancelable(host.io);
     host.dispatch_fenced.store(true, .release);
     host.launch_mutex.unlock(host.io);
-    std.debug.print("rui: dispatch fenced after {s} failure: {s}\n", .{ phase, @errorName(err) });
+    stderr.print("rui: dispatch fenced after {s} failure: {s}\nNew work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
 }
 
 fn nowNs(host: *Host) u64 {
     return @intCast(std.Io.Clock.Timestamp.now(host.io, .awake).raw.nanoseconds);
 }
 
-fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer) void {
+fn beginTestObservation(host: *Host, phase: []const u8, subject: ?[]const u8) ?TestObservation.Publication {
+    const writer = host.test_observation orelse return null;
+    return writer.begin(phase, subject);
+}
+
+fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer, publication: *?TestObservation.Publication) void {
     if (!host.faults.test_phase_trace) return;
-    host.trace_mutex.lockUncancelable(host.io);
-    defer host.trace_mutex.unlock(host.io);
+    if (publication.*) |*value| value.record(trace.slice());
+    if (!stderr.tryAcquire()) {
+        host.trace_lost.store(true, .release);
+        return;
+    }
+    defer stderr.release();
     host.trace_sequence += 1;
     const original = trace.slice();
     if (original.len == 0 or original[original.len - 1] != '}') {
-        host.trace_lost = true;
+        host.trace_lost.store(true, .release);
         return;
     }
     var complete: protocol.ResponseBuffer = .{};
     complete.append(original[0 .. original.len - 1]) catch {
-        host.trace_lost = true;
+        host.trace_lost.store(true, .release);
         return;
     };
     complete.appendFmt(
         ",\"process\":\"{d}\",\"run\":\"{d}\",\"clock\":\"awake_ns\",\"sequence\":\"{d}\",\"trace_lost\":{s}}}\n",
-        .{ trace_native.getpid(), host.trace_run_ns, host.trace_sequence, if (host.trace_lost) "true" else "false" },
+        .{ trace_native.getpid(), host.trace_run_ns, host.trace_sequence, if (host.trace_lost.load(.acquire)) "true" else "false" },
     ) catch {
-        host.trace_lost = true;
+        host.trace_lost.store(true, .release);
         return;
     };
-    std.Io.File.stderr().writeStreamingAll(host.io, complete.slice()) catch {
-        host.trace_lost = true;
-    };
+    if (!stderr.writeHeld(complete.slice())) host.trace_lost.store(true, .release);
 }
 
 fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, subject);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2448,11 +2475,13 @@ fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subjec
     trace.append(",\"subject\":") catch return;
     trace.appendJsonString(subject) catch return;
     trace.append("}") catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceRequest(host: *Host, phase: []const u8, request_number: u64, scratch_used_bytes: ?u64) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2463,11 +2492,13 @@ fn traceRequest(host: *Host, phase: []const u8, request_number: u64, scratch_use
     if (scratch_used_bytes) |used|
         trace.appendFmt(",\"scratch_used_bytes\":\"{d}\"", .{used}) catch return;
     trace.append("}") catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceAttemptRollback(host: *Host) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, "attempt_admission_rolled_back", null);
+    defer if (publication) |*value| value.finish();
     // Sample after this reservation is released, before another owner turn
     // can reserve it again. A later inspection is not this boundary's state.
     var trace: protocol.ResponseBuffer = .{};
@@ -2475,31 +2506,37 @@ fn traceAttemptRollback(host: *Host) void {
         "{{\"rui_test_phase\":\"attempt_admission_rolled_back\",\"at_ns\":\"{d}\",\"subject_kind\":\"attempt_kind\",\"subject\":\"model\",\"custody_occupied\":\"{d}\"}}",
         .{ nowNs(host), host.custody.occupied() },
     ) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceServiceBoundary(host: *Host, start_ns: u64, end_ns: u64, wait_ns: u64) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, "lifecycle_boundary", null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"lifecycle_boundary\",\"at_ns\":\"{d}\",\"start_ns\":\"{d}\",\"wait_ns\":\"{d}\"}}",
         .{ end_ns, start_ns, wait_ns },
     ) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceLifecycleService(host: *Host, maximum_gap_ns: u64) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, "lifecycle_service_observation", null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"lifecycle_service_observation\",\"at_ns\":\"{d}\",\"maximum_gap_ns\":\"{d}\",\"owner\":\"execution\"}}",
         .{ nowNs(host), maximum_gap_ns },
     ) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptBinding) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2509,7 +2546,7 @@ fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptB
         binding.operation_id,
         binding.attempt_ordinal,
     }) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn tracePreparationAdvance(
@@ -2519,6 +2556,8 @@ fn tracePreparationAdvance(
     binding: store_module.AttemptBinding,
 ) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2526,7 +2565,7 @@ fn tracePreparationAdvance(
         ",\"at_ns\":\"{d}\",\"work_bytes\":\"{d}\",\"work_items\":\"{d}\",\"request_bytes\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
         .{ nowNs(host), stats.work_bytes, stats.work_items, stats.request_bytes, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
     ) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn tracePreparationAdvanceError(
@@ -2537,6 +2576,8 @@ fn tracePreparationAdvanceError(
     binding: store_module.AttemptBinding,
 ) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2546,21 +2587,25 @@ fn tracePreparationAdvanceError(
         ",\"work_bytes\":\"{d}\",\"work_items\":\"{d}\",\"request_bytes\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
         .{ stats.work_bytes, stats.work_items, stats.request_bytes, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
     ) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceCompletionQueue(host: *Host, queued_after: usize, binding: store_module.AttemptBinding) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, "provider_completion_removed", null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"provider_completion_removed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
         .{ nowNs(host), queued_after, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
     ) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttemptBinding) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2571,7 +2616,7 @@ fn traceAction(host: *Host, phase: []const u8, binding: store_module.ActionAttem
         binding.action_id,
         binding.attempt_ordinal,
     }) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceOperationControl(
@@ -2581,6 +2626,8 @@ fn traceOperationControl(
     binding: store_module.AttemptBinding,
 ) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2591,7 +2638,7 @@ fn traceOperationControl(
         binding.operation_id,
         binding.attempt_ordinal,
     }) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceActionControl(
@@ -2601,6 +2648,8 @@ fn traceActionControl(
     binding: store_module.ActionAttemptBinding,
 ) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2612,7 +2661,7 @@ fn traceActionControl(
         binding.action_id,
         binding.attempt_ordinal,
     }) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceActionControlOutcome(
@@ -2624,6 +2673,8 @@ fn traceActionControlOutcome(
     binding: store_module.ActionAttemptBinding,
 ) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2637,7 +2688,7 @@ fn traceActionControlOutcome(
         binding.action_id,
         binding.attempt_ordinal,
     }) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceActionDeadline(
@@ -2648,6 +2699,8 @@ fn traceActionDeadline(
     binding: store_module.ActionAttemptBinding,
 ) void {
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
@@ -2660,7 +2713,7 @@ fn traceActionDeadline(
         binding.action_id,
         binding.attempt_ordinal,
     }) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn testTransition(host: *Host, transition: TestTransition, binding: store_module.ActionAttemptBinding) void {
@@ -2711,12 +2764,14 @@ fn observeUnprocessedCompletions(host: *Host, reactor: *provider.Reactor) void {
     }
     host.last_unprocessed_completions = count;
     if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, "native_completions_unprocessed", null);
+    defer if (publication) |*value| value.finish();
     var trace: protocol.ResponseBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"native_completions_unprocessed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\"}}",
         .{ nowNs(host), count },
     ) catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn appendOptionalUnsigned(
@@ -2745,6 +2800,8 @@ fn appendOptionalSigned(
 
 fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
     if (!host.faults.test_phase_trace or !host.faults.sqlite_diagnostics) return;
+    var publication = beginTestObservation(host, "sqlite_diagnostic", subject);
+    defer if (publication) |*value| value.finish();
     const value = host.store.sqliteDiagnostic();
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"") catch return;
@@ -2780,7 +2837,7 @@ fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
         trace.appendJsonString(mode.slice()) catch return;
     } else trace.append("null") catch return;
     trace.append("}") catch return;
-    writeTestTrace(host, &trace);
+    writeTestTrace(host, &trace, &publication);
 }
 
 fn publishControlHint(host: *Host, command_key: []const u8) void {
@@ -2862,6 +2919,8 @@ const ControlTiming = struct {
         if (!self.host.faults.test_phase_trace) return;
         const reply_complete_ns = nowNs(self.host);
         if (self.store_queued_ns == 0 or self.lock_acquired_ns == 0 or self.store_complete_ns == 0) return;
+        var publication = beginTestObservation(self.host, "control_timing", null);
+        defer if (publication) |*value| value.finish();
         var trace: protocol.ResponseBuffer = .{};
         trace.append("{\"rui_test_phase\":\"control_timing\",\"command_key\":") catch return;
         trace.appendJsonString(self.command_key) catch return;
@@ -2878,7 +2937,7 @@ const ControlTiming = struct {
             reply_complete_ns - self.store_complete_ns,
             reply_complete_ns - self.accepted_at_ns,
         }) catch return;
-        writeTestTrace(self.host, &trace);
+        writeTestTrace(self.host, &trace, &publication);
     }
 };
 
@@ -3033,11 +3092,11 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
         .scratch_budget = host.retention.sharedBudget(),
         .expected_kind = route.kind(),
     }) catch |err| {
-        if (cleanup_failed) std.debug.print("rui: retained ingress file and charge after cleanup failure\n", .{});
+        if (cleanup_failed) stderr.print("rui: retained ingress file and charge after cleanup failure\n", .{});
         return respondStatic(host.io, fd, if (err == error.ScratchCapacityExhausted) @as(u16, 507) else 400, "invocation_error", @errorName(err));
     };
     defer request.removeTemporaryContent(host.io) catch |err| {
-        std.debug.print("rui: retained scratch charge after cleanup failure: {s}\n", .{@errorName(err)});
+        stderr.print("rui: retained scratch charge after cleanup failure: {s}\n", .{@errorName(err)});
     };
     if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
         return respondStatic(host.io, fd, 409, "invocation_error", "wrong_store_identity");
@@ -4662,6 +4721,177 @@ test "cleanup delay follows elapsed time and preserves custody reuse" {
     try std.testing.expect(slots[0] == .free);
 }
 
+test "cleanup publication follows complete execution retirement" {
+    const Boundary = struct {
+        slot: *const ExecutionSlot = undefined,
+        custody: *execution.CustodyPool = undefined,
+        token: execution.CustodyToken = undefined,
+        observed: bool = false,
+
+        fn now(context: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            // The completion timestamp is constructed before either native
+            // publication or optional stderr. Inspect actual owner facts here.
+            std.debug.assert(self.slot.* == .free);
+            self.custody.checkFree(self.token) catch unreachable;
+            checkSlotCustodyAgreement(@as([*]const ExecutionSlot, @ptrCast(self.slot))[0..1], self.custody) catch unreachable;
+            self.observed = true;
+            return clock.now(std.testing.io);
+        }
+    };
+    var boundary: Boundary = .{};
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Boundary.now;
+    var records: [1]execution.CustodyRecord = undefined;
+    var host = Host{
+        .io = .{ .userdata = &boundary, .vtable = &vtable },
+        .allocator = std.testing.allocator,
+        .lease = undefined,
+        .store = undefined,
+        .faults = .{ .test_phase_trace = true },
+        .custody = execution.CustodyPool.initialize(&records),
+    };
+    var slot: ExecutionSlot = .free;
+    boundary.slot = &slot;
+    boundary.custody = &host.custody;
+    // Both typed owners, delayed model retirement, and admission-local Action
+    // custody before an execution payload is installed share this boundary.
+    for (0..4) |kind| {
+        const token = host.custody.reserve().?;
+        boundary.token = token;
+        boundary.observed = false;
+        if (kind < 2) {
+            var permit = store_module.DispatchPermit{ .binding = .{
+                .turn_id = 3,
+                .operation_id = 7,
+                .attempt_ordinal = 2,
+            } };
+            const binding = try host.custody.attach(token, &permit);
+            if (kind == 0) {
+                slot = .{ .model_preparing = .{ .token = token, .binding = binding } };
+                finishCustodyNow(&host, &slot, token);
+            } else {
+                try host.custody.detach(token);
+                slot = .{ .cleanup = .{
+                    .owner = .{ .token = token, .binding = binding },
+                    .cleanup_deadline = .{ .raw = .fromNanoseconds(0), .clock = .awake },
+                } };
+                finishSlotCleanup(&host, &slot);
+            }
+        } else {
+            var permit = store_module.ActionDispatchPermit{ .binding = .{
+                .turn_id = 3,
+                .parent_operation_id = 7,
+                .action_id = 11,
+                .attempt_ordinal = 2,
+            } };
+            const binding = try host.custody.attachAction(token, &permit);
+            if (kind == 2) slot = .{ .bash_preparing = .{ .token = token, .binding = binding } };
+            finishCustodyNow(&host, &slot, token);
+        }
+        try std.testing.expect(boundary.observed);
+        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    }
+
+    // Exercise the distinct delayed Bash owner with real process/pipe
+    // retirement and charged capture/script resources, not a model stand-in.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root});
+    var storage = try store_module.Store.open(std.testing.io, database, root);
+    defer storage.close() catch unreachable;
+    const arguments = "{\"cmd\":\"printf x\",\"timeout_ms\":1000}";
+    const content = try store_module.testingPublicProjection(&storage, &tmp, &.{.{
+        .encoded = "{\\\"cmd\\\":\\\"printf x\\\",\\\"timeout_ms\\\":1000}",
+        .decoded = arguments,
+    }});
+    const reader = try storage.openPublicConversationContent(content);
+    var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+    try workspace.set(root);
+    var used: std.atomic.Value(u64) = .init(0);
+    const budget = protocol.ScratchBudget{ .used = &used, .limit = 4096 };
+    var entries: [2]output_retention.Entry = undefined;
+    var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
+    defer retention.cleanupAll();
+    host.retention = &retention;
+    var preparation = switch (bash.startPreparation(std.testing.io, std.testing.allocator, reader, arguments.len, workspace, root, default_bash_path, 1000, budget, 11, 2, .{})) {
+        .preparing => |value| value,
+        .failed => |initial| {
+            var failure = initial;
+            try failure.cleanup.cleanup();
+            return failure.cause;
+        },
+    };
+    var preparation_owned = true;
+    defer if (preparation_owned) {
+        var cleanup = preparation.cancel();
+        cleanup.cleanup() catch unreachable;
+    };
+    var prepared = while (true) {
+        switch (preparation.advance()) {
+            .pending => {},
+            .prepared => |value| {
+                preparation_owned = false;
+                break value;
+            },
+            .failed => |initial| {
+                preparation_owned = false;
+                var failure = initial;
+                try failure.cleanup.cleanup();
+                return failure.cause;
+            },
+        }
+    };
+    defer prepared.cleanup() catch unreachable;
+    const token = host.custody.reserve().?;
+    var permit = store_module.ActionDispatchPermit{ .binding = .{
+        .turn_id = 3,
+        .parent_operation_id = 7,
+        .action_id = 11,
+        .attempt_ordinal = 2,
+    } };
+    const binding = try host.custody.attachAction(token, &permit);
+    try host.custody.detach(token);
+    const deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).addDuration(.{
+        .raw = .fromSeconds(5),
+        .clock = .awake,
+    });
+    slot = .{ .bash = .{ .token = token, .binding = binding, .execution = try prepared.launch(), .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
+    var window: [bash.copy_window_bytes]u8 = undefined;
+    defer if (slot == .bash) {
+        slot.bash.execution.requestInfrastructureShutdown(.now(std.testing.io, .awake));
+        const cleanup_deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).addDuration(.{
+            .raw = .fromSeconds(5),
+            .clock = .awake,
+        });
+        while (!slot.bash.execution.retired()) {
+            std.debug.assert(std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds < cleanup_deadline.raw.nanoseconds);
+            _ = slot.bash.execution.service(&window);
+            std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+        }
+        slot.bash.execution.reclaim(&retention) catch unreachable;
+    };
+    while (!slot.bash.execution.retired()) {
+        try std.testing.expect(std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds < deadline.raw.nanoseconds);
+        const progress = slot.bash.execution.service(&window);
+        try std.testing.expect(progress.fault == null);
+        if (!progress.made_progress) try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try slot.bash.execution.checkRetired();
+    try std.testing.expectEqual(store_module.ActionResolutionCode.succeeded, (try slot.bash.execution.outcome(false)).code);
+    // Eight command bytes and one captured stdout byte remain owned.
+    try std.testing.expectEqual(@as(u64, 9), used.load(.acquire));
+    boundary.token = token;
+    boundary.observed = false;
+    try std.testing.expect(reclaimBash(&host, &slot, deadline));
+    try std.testing.expect(boundary.observed);
+    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
 test "named scratch retry releases custody through the shutdown owner path" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -5245,7 +5475,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     defer retention.cleanupAll();
 
     var stdout = try tmp.dir.createFile(std.testing.io, "stdout", .{ .read = true });
-    var stderr = try tmp.dir.createFile(std.testing.io, "stderr", .{ .read = true });
+    var stderr_file = try tmp.dir.createFile(std.testing.io, "stderr", .{ .read = true });
     try std.testing.expect(root_budget.reserve(2));
     const pair = (try retention.reservePair("stdout", 1, "stderr", 1)).?;
     var retained_metadata: ?named_scratch.Owner = null;
@@ -5265,7 +5495,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     try std.testing.expectEqual(@as(usize, 2), retention.occupied());
 
     stdout.close(std.testing.io);
-    stderr.close(std.testing.io);
+    stderr_file.close(std.testing.io);
     try retention.publishPair(pair);
     try metadata.append(.{ .tag = .usage, .start = 0, .length = 0 });
     try std.testing.expectEqual(@as(u64, 104), used.load(.acquire));

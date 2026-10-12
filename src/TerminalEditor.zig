@@ -21,8 +21,37 @@ paste_prefix_length: usize = 0,
 rejected: ?Event = null,
 plain_ascii: bool = true,
 
-const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow };
+pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow };
 const paste_end = "\x1b[201~";
+
+pub const Pending = enum { none, escape, incomplete };
+
+pub fn pending(self: *const Editor) Pending {
+    if (self.paste or self.partial_length != 0 or self.escape == .csi or self.escape == .ss3) return .incomplete;
+    return if (self.escape == .esc) .escape else .none;
+}
+
+pub fn expire(self: *Editor) !void {
+    switch (self.pending()) {
+        .none => {},
+        .escape => self.escape = .none,
+        .incomplete => return error.IncompleteTerminalInput,
+    }
+}
+
+/// Literal command-line text is not keyboard input or a permission choice.
+pub fn validateText(bytes: []const u8) !void {
+    var characters = (try std.unicode.Utf8View.init(bytes)).iterator();
+    while (characters.nextCodepoint()) |point| {
+        if (!validScalar(point, true)) return error.InvalidTerminalInput;
+    }
+}
+
+fn validScalar(point: u21, multiline: bool) bool {
+    return !((point < 32 and !(point == '\t' or (multiline and point == '\n'))) or
+        (point >= 0x7f and point < 0xa0) or
+        (utf8proc_category(@intCast(point)) == 27 and point != 0x200d));
+}
 
 /// Returns a slice borrowed from buffer until its caller next reuses it.
 /// No draft, terminal mode or buffered input survives a prompt.
@@ -59,21 +88,29 @@ pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool)
     return try result;
 }
 
+/// Complete presentation, then discard pre-prompt input before consent.
+pub fn freshChoice(io: std.Io) !void {
+    if (termios.tcdrain(1) != 0 or termios.tcflush(0, termios.TCIFLUSH) != 0) return error.TerminalFlushFailed;
+    try testChoiceReady(io);
+}
+
+pub fn testChoiceReady(io: std.Io) !void {
+    // Borrowed fixture descriptor witnesses the completed input boundary.
+    if (std.c.getenv("RUI_TEST_ACTION_READY_FD")) |text| {
+        const fd = try std.fmt.parseInt(std.posix.fd_t, std.mem.span(text), 10);
+        const ready: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+        try ready.writeStreamingAll(io, "x");
+    }
+}
+
 fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]const u8 {
     const output = std.Io.File.stdout();
     try output.writeStreamingAll(io, "\x1b[?2004h");
     try output.writeStreamingAll(io, prompt);
     if (!allow_paste) {
-        // The exact Action is already printed. Nothing received before the
-        // complete fresh prompt may count as its decision.
-        if (termios.tcdrain(1) != 0 or termios.tcflush(0, termios.TCIFLUSH) != 0) return error.TerminalFlushFailed;
-        // Borrowed fixture descriptor: prompt visibility alone does not prove
-        // the input flush finished. Signal only after that boundary.
-        if (std.c.getenv("RUI_TEST_ACTION_READY_FD")) |text| {
-            const fd = try std.fmt.parseInt(std.posix.fd_t, std.mem.span(text), 10);
-            const ready: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
-            try ready.writeStreamingAll(io, "x");
-        }
+        // The provider choice must come after its complete fresh prompt,
+        // never from queued input or a marked paste.
+        try freshChoice(io);
     }
     var editor: Editor = .{ .buffer = buffer, .allow_paste = allow_paste };
     const initial_size = windowSize();
@@ -231,7 +268,7 @@ fn visibleRow(editor: *const Editor, prompt_size: usize, size: std.posix.winsize
 
 // This transition is also the production byte-ingress path. Its result is
 // observable through the accepted line; no escape parser reads past a prompt.
-fn feed(self: *Editor, byte: u8) Event {
+pub fn feed(self: *Editor, byte: u8) Event {
     if (self.paste) return self.pasted(byte);
     if (self.escape != .none and (byte == 3 or byte == 4 or byte == '\r' or byte == '\n')) {
         self.escape = .none;
@@ -364,10 +401,7 @@ fn insert(self: *Editor, byte: u8, pasted_input: bool) Event {
         self.partial_length = 0;
         return .none;
     };
-    if ((codepoint < 32 and !(codepoint == '\t' or (pasted_input and codepoint == '\n'))) or
-        (codepoint >= 0x7f and codepoint < 0xa0) or
-        (utf8proc_category(@intCast(codepoint)) == 27 and codepoint != 0x200d))
-    {
+    if (!validScalar(codepoint, pasted_input)) {
         self.reject(.invalid);
         self.partial_length = 0;
         return .none;

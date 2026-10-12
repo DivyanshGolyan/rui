@@ -1,4 +1,5 @@
 const std = @import("std");
+const stderr = @import("stderr.zig");
 const Self = @This();
 
 pub const Mode = enum { line, multiline };
@@ -17,6 +18,57 @@ pub fn feed(self: *Self, out: *std.Io.Writer, bytes: []const u8) !void {
 pub fn finish(self: *Self, out: *std.Io.Writer) !void {
     for (self.utf8[0..self.utf8_len]) |byte| try self.escapeByte(out, byte);
     self.utf8_len = 0;
+}
+
+/// Bash ANSI-C quoting preserves NUL-free argv values without terminal controls.
+pub fn writeShellWord(out: *std.Io.Writer, value: []const u8) !void {
+    try out.writeAll("$'");
+    for (value) |byte| switch (byte) {
+        '\'' => try out.writeAll("\\'"),
+        '\\' => try out.writeAll("\\\\"),
+        32...38, 40...91, 93...126 => try out.writeByte(byte),
+        else => try out.print("\\{o:0>3}", .{byte}),
+    };
+    try out.writeByte('\'');
+}
+
+/// Opaque Sessions may contain NUL, which no shell can transmit in argv.
+pub fn writeShellSession(out: *std.Io.Writer, value: []const u8, comptime positional: bool) !void {
+    if (std.mem.indexOfScalar(u8, value, 0) != null) {
+        try out.print(" --session-hex {x}", .{value});
+    } else {
+        try out.writeAll(if (positional) " -- " else " --session ");
+        try writeShellWord(out, value);
+    }
+}
+
+test "opaque Session shell selectors preserve NUL position and maximum length" {
+    inline for (.{ true, false }) |positional| {
+        for ([_]struct { value: []const u8, hex: []const u8 }{
+            .{ .value = "\x00", .hex = "00" },
+            .{ .value = "\x00A", .hex = "0041" },
+            .{ .value = "A\x00Z", .hex = "41005a" },
+            .{ .value = "A\x00", .hex = "4100" },
+            .{ .value = "\x00" ** 128, .hex = "00" ** 128 },
+        }) |case| {
+            var storage: [288]u8 = undefined;
+            var out = std.Io.Writer.fixed(&storage);
+            try writeShellSession(&out, case.value, positional);
+            try std.testing.expectEqualStrings(" --session-hex ", out.buffered()[0..15]);
+            try std.testing.expectEqualStrings(case.hex, out.buffered()[15..]);
+        }
+        var storage: [64]u8 = undefined;
+        var out = std.Io.Writer.fixed(&storage);
+        try writeShellSession(&out, "--last", positional);
+        try std.testing.expectEqualStrings(if (positional) " -- $'--last'" else " --session $'--last'", out.buffered());
+    }
+}
+
+/// Optional fatal guidance cannot retain a restored caller on stderr credit.
+/// One bounded write is best-effort; its failure never replaces the real error.
+pub fn diagnostic(comptime format: []const u8, args: anytype) void {
+    // The preceding transcript may end mid-line, including a partial command.
+    stderr.print("\n" ++ format, args);
 }
 
 fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {

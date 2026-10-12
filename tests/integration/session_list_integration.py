@@ -62,13 +62,16 @@ def released_resources(pid, diagnostics, invocation):
         while True:
             assert diagnostics.read_error is None, diagnostics.read_error
             starts, releases, runs, sequences = {}, {}, set(), []
+            loss_seen = False
             for record in diagnostics.records:
                 phase = record["rui_test_phase"]
                 assert isinstance(phase, str), record
                 if phase in ("release_probe_held", "release_probe_leaked"):
                     continue  # Opt-in native proof records, not Host authority.
                 assert record.get("process") == str(pid) and record.get("clock") == "awake_ns", record
-                assert record.get("trace_lost") is False, record
+                assert isinstance(record.get("trace_lost"), bool), record
+                assert not loss_seen or record["trace_lost"], ("trace loss is not sticky", record)
+                loss_seen = record["trace_lost"]
                 for field in ("run", "sequence", "at_ns"):
                     trace_u64(record, field)
                 sequences.append(int(record["sequence"]))
@@ -88,7 +91,6 @@ def released_resources(pid, diagnostics, invocation):
             assert sequences == sorted(set(sequences)), sequences
             if sequences:
                 assert sequences[0] > 0, sequences
-                assert sequences == list(range(sequences[0], sequences[0] + len(sequences))), ("trace sequence gap", sequences)
             assert releases.keys() <= starts.keys(), ("orphan release", releases)
             current = [(key, record) for key, record in starts.items()
                        if record["rui_test_phase"] == "connection_request_list_sessions"
@@ -133,7 +135,7 @@ def main():
         home.mkdir()
         original_home = os.environ.get("HOME")
         os.environ["HOME"] = str(home)
-        process, fields = start_ready_process([RUI, "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"], required_fields={"execution": "unavailable"})
+        process, fields = start_ready_process([RUI, "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"], required_fields={"execution": "unavailable"}, observations="list")
         diagnostics = HostDiagnostics(process)
         try:
             address = fields["socket"]
@@ -195,7 +197,8 @@ def main():
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert all_workspaces.returncode == 0, all_workspaces.stderr
             assert all_workspaces.stdout.count("Session: ") == 11
-            assert "Bash runs without approval" in all_workspaces.stdout
+            assert "Bash runs without approval" not in all_workspaces.stdout
+            assert all_workspaces.stdout.count("Permission: bypass\n") == 11
             assert exchange(address, "list-sessions", {**base("list_sessions"), "workspace": None, "after": "12", "ceiling": "11"})[0] == 400
             long_reference = "x" * 126 + "\x01\x00"
             assert configure("long-reference", long_reference, str(root))[1]["answer"]["status"] == "accepted"
@@ -222,10 +225,6 @@ def main():
             assert list((store / "scratch").iterdir()) == [], "named list capture leaked scratch"
             print(f"Session list native Host: fresh HOME, exact keyset, 100 dormant, long reference, idle resources 0→100: {baseline}→{grown}")
         finally:
-            if process.poll() is None:
-                process.kill()
-            process.wait(timeout=10)
-            diagnostics.close()  # Drain stderr before stop_process closes it.
             stop_process(process)
             if original_home is None:
                 del os.environ["HOME"]

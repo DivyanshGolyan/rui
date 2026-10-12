@@ -122,12 +122,21 @@ jobs:
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
           CHECK_PART: ${{ matrix.part }}
+          RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
           echo "Tested SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           zig fmt --check --ast-check build.zig src
           python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART"
+      - name: Retain bounded failed-fixture diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: failure-linux-${{ matrix.part }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rui-failure-artifacts
+          retention-days: 3
+          if-no-files-found: ignore
       - name: Prove warm compilation does not cache test acceptance
         if: ${{ needs.plan.outputs.cache_execution == 'true' && matrix.part != 'execution' }}
         run: python3 -B tests/ci/cache_execution.py
@@ -174,11 +183,20 @@ jobs:
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
           CHECK_PART: ${{ matrix.part }}
+          RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
           echo "Tested SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART"
+      - name: Retain bounded failed-fixture diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: failure-macos-${{ matrix.part }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rui-failure-artifacts
+          retention-days: 3
+          if-no-files-found: ignore
       - name: Prove warm compilation does not cache test acceptance
         if: ${{ needs.plan.outputs.cache_execution == 'true' && matrix.part != 'execution' }}
         run: python3 -B tests/ci/cache_execution.py

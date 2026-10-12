@@ -31,7 +31,7 @@ def actor(*args, timeout=10):
 
 def exchange_phase(diagnostics, phase, began_ns, deadline, **fields):
     # This isolated Host has one fixture issuer. Earlier buffered milestones
-    # cannot satisfy this invocation; ambiguous or lost evidence is failure.
+    # cannot satisfy this invocation; ambiguous or missing evidence is failure.
     with diagnostics.condition:
         while True:
             assert diagnostics.read_error is None, diagnostics.read_error
@@ -43,7 +43,7 @@ def exchange_phase(diagnostics, phase, began_ns, deadline, **fields):
             if matches:
                 record = matches[0]
                 assert record.get("process") == str(diagnostics.process.pid), record
-                assert record.get("clock") == "awake_ns" and record.get("trace_lost") is False, record
+                assert record.get("clock") == "awake_ns" and isinstance(record.get("trace_lost"), bool), record
                 for field in ("run", "sequence", "at_ns"):
                     value = record.get(field, "")
                     assert isinstance(value, str) and value.isascii() and value.isdecimal(), record
@@ -60,7 +60,10 @@ def exchange_phase(diagnostics, phase, began_ns, deadline, **fields):
 def actor_after_classification(diagnostics, began_ns, deadline, pending_phase, store, target, *, invoke=actor):
     transferred_phase = exchange_phase(diagnostics, "ordinary_classification_released", began_ns, deadline,
                                        subject_kind="route", subject="observe")
+    assert transferred_phase["run"] == pending_phase["run"]
     assert int(transferred_phase["sequence"]) > int(pending_phase["sequence"])
+    assert int(transferred_phase["at_ns"]) >= int(pending_phase["at_ns"])
+    assert not pending_phase["trace_lost"] or transferred_phase["trace_lost"]
     assert time.monotonic() < deadline, "classification exceeded original stop budget"
     return invoke("stop", store, target, "after-commit", timeout=deadline - time.monotonic())
 
@@ -129,7 +132,7 @@ def mixed_effect_drain(provider_first):
                 "--test-response-capture-gate-path", gate.path,
                 "--test-response-capture-gate-min-written-bytes", "4096",
                 "--test-model-cleanup-gate-path", cleanup_gate,
-                "--test-phase-trace", active_capacity=3,
+                "--test-phase-trace", active_capacity=3, observations="stop",
             )
             diagnostics = HostDiagnostics(host)
             bash_fixture.configure(state, store, "configure-bash", "bash/session")
@@ -179,7 +182,7 @@ def mixed_effect_drain(provider_first):
             assert host.poll() is None and status(store) == "owned_unavailable"
             cleanup_gate.unlink()
             assert host.wait(timeout=10) != 0 and b"EffectAwareShutdown" in diagnostics.tail()
-            diagnostics.close()
+            stop_process(host)
             assert len(diagnostics.matching("cleanup_completed", action=action["action"])) == 1
             model_cleanups = [record for record in diagnostics.matching("cleanup_completed") if "action" not in record]
             assert len(model_cleanups) == 2 and len({record["operation"] for record in model_cleanups}) == 2
@@ -193,8 +196,17 @@ def mixed_effect_drain(provider_first):
             ]
             print(f"mixed Host stop passed: {order}, TERM and exactly-once Bash cleanup before capture release; retained model cleanup, lease held, scratch=0")
         finally:
-            gate.release()
-            cleanup_gate.unlink(missing_ok=True)
+            incoming_error = sys.exc_info()[1]
+            if diagnostics is not None:
+                diagnostics.snapshot_failure(lambda: {"case": "mixed_effect_drain", "order": order,
+                    "capture_gate_exists": gate.path.exists(), "capture_held": gate.fd is not None,
+                    "cleanup_gate_exists": cleanup_gate.exists()})
+            errors = []
+            for release in (gate.release, lambda: cleanup_gate.unlink(missing_ok=True)):
+                try:
+                    release()
+                except BaseException as error:
+                    errors.append(error)
             if host is not None:
                 if host.poll() is None:
                     # On the red path, let the original owner drain once the
@@ -202,14 +214,19 @@ def mixed_effect_drain(provider_first):
                     try:
                         host.wait(timeout=10)
                     except subprocess.TimeoutExpired:
-                        host.kill()
-                        host.wait(timeout=10)
-                if diagnostics is not None:
-                    diagnostics.close()
-                stop_process(host)
-            endpoint.shutdown()
-            endpoint.server_close()
-            thread.join(timeout=5)
+                        pass  # Shared disposal still owns mandatory kill/reap.
+            for dispose in (lambda: stop_process(host) if host is not None else None,
+                            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
+                try:
+                    dispose()
+                except BaseException as error:
+                    errors.append(error)
+            if thread.is_alive():
+                errors.append(AssertionError("Host-stop endpoint thread did not retire"))
+            if errors:
+                if incoming_error is None:
+                    raise errors[0]
+                incoming_error.add_note("Host-stop cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
 
 
 def main():
@@ -229,7 +246,7 @@ def main():
         pending = None
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
-                                      "--test-bash-cleanup-gate-path", gate, "--test-phase-trace")
+                                      "--test-bash-cleanup-gate-path", gate, "--test-phase-trace", observations="stop")
             diagnostics = HostDiagnostics(host)
             target = instance(store)
             sock = socket_path(store)
@@ -295,10 +312,8 @@ def main():
                 assert drained_fds < held_fds, (held_fds, drained_fds)
             transferred.close()
             assert host.wait(timeout=10) != 0  # existing graceful owner reports EffectAwareShutdown
-            diagnostics.close()
+            stop_process(host)
             diagnostics = None
-            host.stdout.close()
-            host.stderr.close()
             host = None
             assert status(store) == "unavailable"
             assert list((store / "scratch").iterdir()) == [], "shutdown retained scratch"
@@ -327,10 +342,7 @@ def main():
             gate.unlink(missing_ok=True)
             if pending is not None:
                 pending.close()
-            if diagnostics is not None and host is not None:
-                stop_process(host)
-                diagnostics.close()
-            elif host is not None:
+            if host is not None:
                 stop_process(host)
             if replacement is not None:
                 stop_process(replacement)
@@ -340,8 +352,9 @@ def main():
 
 
 if __name__ == "__main__":
-    from host_stop_integration_test import check_classification_oracle
+    from host_stop_integration_test import check_classification_oracle, check_missing_classification
     check_classification_oracle(actor_after_classification)
+    check_missing_classification(actor_after_classification)
     mixed_effect_drain(True)
     mixed_effect_drain(False)
     main()

@@ -76,6 +76,7 @@ def start(store, endpoint, *extra):
         [fixture.RUI, "serve", "--store", store, "--active-capacity", "2",
          "--test-codex-fixture-endpoint", endpoint, *extra],
         required_fields={"execution": "enabled", "curl": "8.22.0"},
+        observations="managed" if "--test-phase-trace" in extra else None,
     )
     return host
 
@@ -184,9 +185,8 @@ def run():
                    for path, bearer, account, _, originator in endpoint.header_observations)
         fixture.stop_host(host)
         host = None
-        diagnostics.close()
         assert b"rui: codex transfer" not in diagnostics.tail()
-        assert not diagnostics.matching("codex_transfer"), "ordinary Host emitted test-only transfer observations"
+        assert not any(row["rui_test_phase"] == "codex_transfer" for row in diagnostics.records), "ordinary Host emitted test-only transfer observations"
         diagnostics = None
 
         # Block the worker on the same stable file lock used by login while
@@ -215,7 +215,6 @@ def run():
         assert len(endpoint.requests) == 4, "stopped authentication launched a model request"
         fixture.stop_host(host)
         host = None
-        diagnostics.close()
 
         # The credential is already selected and the transfer prepared. A
         # committed stop before the final handoff must still suppress POST.
@@ -267,17 +266,24 @@ def run():
         print("codex synthetic managed journey passed: approved effect once, private continuation, fresh Host, post-restart dispatch, no authentication resend, stopped authentication/handoff and unsupported settings never launch")
         complete = True
     finally:
-        if host is not None:
-            fixture.stop_host(host)
-        if diagnostics is not None:
-            diagnostics.close()
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=5)
-        if complete:
+        incoming_error = sys.exc_info()[1]
+        errors = []
+        for dispose in (lambda: fixture.stop_host(host) if host is not None else None,
+                        endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
+            try:
+                dispose()
+            except BaseException as error:
+                errors.append(error)
+        if thread.is_alive():
+            errors.append(AssertionError("Codex endpoint thread did not retire"))
+        if complete and incoming_error is None and not errors:
             shutil.rmtree(state)
         else:
             print(f"retained Codex fixture failure state: {state}", file=sys.stderr)
+        if errors:
+            if incoming_error is None:
+                raise errors[0]
+            incoming_error.add_note("Codex cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
 
 
 if __name__ == "__main__":

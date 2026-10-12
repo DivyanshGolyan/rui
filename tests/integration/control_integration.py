@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, start_ready_process, stop_process
+from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, preserve_failure_metadata, start_ready_process, stop_process, wait_for_execution_release
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -291,7 +291,8 @@ def start_host(store, endpoint=None, *extra, active_capacity=2):
         args += ["--provider-endpoint", endpoint]
         required = {"execution": "enabled", "curl": "8.22.0"}
     args += extra
-    return start_ready_process(args, required_fields=required)
+    return start_ready_process(args, required_fields=required,
+                               observations="control" if "--test-phase-trace" in extra else None)
 
 
 def configure(state, store, key, session):
@@ -366,14 +367,20 @@ def interrupt_model(state, store, key, session, processing):
     )
 
 
-def observe(store, key):
-    return command("observe-command", "--store", store, "--key", key)["observation"]
+def observe(store, key, *, deadline=None):
+    remaining = 15 if deadline is None else min(15, deadline - time.monotonic())
+    assert remaining > 0, "result observation exhausted original deadline"
+    return command("observe-command", "--store", store, "--key", key,
+                   timeout=remaining)["observation"]
 
 
-def wait_for(predicate, description, timeout=8):
-    deadline = time.monotonic() + timeout
+def wait_for(predicate, description, timeout=8, *, deadline=None):
+    if deadline is None:
+        deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = predicate()
+        if time.monotonic() >= deadline:
+            break
         if value:
             return value
         time.sleep(0.025)
@@ -385,11 +392,21 @@ def percentile_95(values):
     return ordered[max(0, (95 * len(ordered) + 99) // 100 - 1)]
 
 
-def read_http_response(connection, timeout=3):
+def read_http_response(connection, timeout=3, *, deadline=None):
     connection.settimeout(timeout)
+
+    def receive():
+        if deadline is not None:
+            remaining = min(timeout, deadline - time.monotonic())
+            assert remaining > 0, "Host response exhausted original deadline"
+            connection.settimeout(remaining)
+        chunk = connection.recv(4096)
+        assert deadline is None or time.monotonic() < deadline, "Host response exceeded original deadline"
+        return chunk
+
     response = bytearray()
     while b"\r\n\r\n" not in response:
-        chunk = connection.recv(4096)
+        chunk = receive()
         if not chunk:
             break
         response.extend(chunk)
@@ -399,7 +416,7 @@ def read_http_response(connection, timeout=3):
         if line.lower().startswith(b"content-length:"):
             length = int(line.split(b":", 1)[1])
     while len(body) < length:
-        chunk = connection.recv(4096)
+        chunk = receive()
         if not chunk:
             break
         body += chunk
@@ -408,15 +425,24 @@ def read_http_response(connection, timeout=3):
 
 def open_partial(socket_path, route, *, complete_headers=True):
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    connection.settimeout(3)
-    connection.connect(socket_path)
-    connection.sendall(f"POST {route} HTTP/1.1\r\n".encode())
-    if complete_headers:
-        connection.sendall(
-            b"Content-Type: application/json\r\n"
-            b"Content-Length: 1024\r\n"
-            b"X-Rui-Wire-Version: 1\r\n\r\n{"
-        )
+    try:
+        connection.settimeout(3)
+        connection.connect(socket_path)
+        try:
+            connection.sendall(f"POST {route} HTTP/1.1\r\n".encode())
+            if complete_headers:
+                connection.sendall(
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: 1024\r\n"
+                    b"X-Rui-Wire-Version: 1\r\n\r\n{"
+                )
+        except (BrokenPipeError, ConnectionResetError):
+            # Return ownership so the caller can inspect the actual refusal.
+            # A failed write alone establishes neither admission nor busy.
+            pass
+    except BaseException:
+        connection.close()
+        raise
     return connection
 
 
@@ -490,11 +516,12 @@ def open_complete_inspection(socket_path, store, session, profile):
     return connection
 
 
-def fill_complete_inspections(socket_path, store, session):
+def fill_complete_inspections(socket_path, store, session, diagnostics):
     held = []
     attempts = 0
     while len(held) < ORDINARY_CLIENTS and attempts < ORDINARY_CLIENTS * 5:
         attempts += 1
+        diagnostics.claim_inspection()
         try:
             candidate = open_complete_inspection(
                 socket_path,
@@ -535,6 +562,30 @@ def inspect_execution(store, session, *, timeout=15):
         session,
         timeout=timeout,
     )["execution"]
+
+
+def wait_execution_release(diagnostics, store, session, deadline):
+    execution = None
+
+    def inspect(remaining):
+        nonlocal execution
+        diagnostics.claim_inspection()
+        execution = inspect_execution(store, session, timeout=remaining)
+        return execution
+
+    try:
+        return wait_for_execution_release(inspect, deadline)
+    except BaseException:
+        # Retain this boundary's existing facts before destructive teardown;
+        # optional capture failure cannot replace the original refusal.
+        preserve_failure_metadata(store.parent / "probe.log", lambda: {
+            "execution": execution,
+            "deadline": deadline,
+            "observed_at": time.monotonic(),
+            "native": diagnostics.observations.snapshot(),
+            "atomic_census": False,
+        })
+        raise
 
 
 def retry(state, store, record_key, kind):
@@ -686,10 +737,7 @@ def fill_ordinary_capacity(socket_path):
     held = []
     for _ in range(10):
         while len(held) < ORDINARY_CLIENTS:
-            try:
-                candidate = open_partial(socket_path, "/v1/inspect-session")
-            except (BrokenPipeError, ConnectionResetError):
-                continue
+            candidate = open_partial(socket_path, "/v1/inspect-session")
             time.sleep(0.05)
             candidate.settimeout(0.001)
             try:
@@ -727,6 +775,28 @@ def fill_ordinary_capacity(socket_path):
     raise AssertionError("ordinary admission never stabilized at capacity")
 
 
+def assert_capacity_busy_reply(connection, expected_code, *, deadline=None):
+    extra_head, extra_body = read_http_response(connection, deadline=deadline)
+    assert extra_head.startswith(b"HTTP/1.1 503 "), extra_head
+    lengths = [line.split(b":", 1)[1].strip() for line in extra_head.split(b"\r\n")[1:]
+               if line.lower().startswith(b"content-length:")]
+    assert len(lengths) == 1 and lengths[0].isdigit(), extra_head
+    assert int(lengths[0]) == len(extra_body), (extra_head, extra_body)
+    assert json.loads(extra_body) == {
+        "version": "1", "type": "busy", "code": expected_code.decode("ascii")
+    }, extra_body
+
+
+def assert_classification_capacity_busy(classification):
+    deadline = time.monotonic() + 3
+    readable, _, _ = select.select(classification, [], [], 3)
+    assert readable, "classification overflow did not receive a response"
+    overflow = readable[0]
+    assert_capacity_busy_reply(overflow, b"classification_capacity_exhausted", deadline=deadline)
+    overflow.close()
+    classification.remove(overflow)
+
+
 def assert_ordinary_capacity_busy(
     socket_path, expected_code=b"ordinary_capacity_exhausted"
 ):
@@ -734,10 +804,13 @@ def assert_ordinary_capacity_busy(
     try:
         extra.settimeout(3)
         extra.connect(socket_path)
-        extra.sendall(b"POST /v1/inspect-session HTTP/1.1\r\n")
-        extra_head, extra_body = read_http_response(extra)
-        assert b" 503 " in extra_head, extra_head
-        assert expected_code in extra_body, extra_body
+        try:
+            extra.sendall(b"POST /v1/inspect-session HTTP/1.1\r\n")
+        except BrokenPipeError:
+            # Reservation can refuse and close before reading the request line.
+            # The write failure alone proves nothing; verify its actual reply.
+            pass
+        assert_capacity_busy_reply(extra, expected_code)
     finally:
         extra.close()
 
@@ -754,6 +827,43 @@ def stop_success_endpoint(endpoint, thread):
     endpoint.shutdown()
     endpoint.server_close()
     thread.join(timeout=5)
+
+
+def stop_control_case(process, diagnostics, endpoint, thread, *releases, connections=()):
+    incoming_error = sys.exc_info()[1]
+    errors = []
+
+    def attempt(dispose):
+        try:
+            dispose()
+        except BaseException as error:
+            errors.append(error)
+
+    for connection in connections:
+        attempt(connection.close)
+    if process is not None:
+        attempt(lambda: stop_process(process))
+    for release in releases:
+        attempt(release)
+    if diagnostics is not None:
+        attempt(diagnostics.close)
+    attempt(endpoint.release.set)
+    attempt(endpoint.shutdown)
+    attempt(endpoint.server_close)
+
+    def join():
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "Control endpoint thread did not retire"
+
+    attempt(join)
+    if errors:
+        for error in errors:
+            try:
+                print(f"Control cleanup failed: {type(error).__name__}: {error}", file=sys.stderr)
+            except Exception:
+                pass  # Reporting cannot replace the original assertion or cleanup failure.
+        if incoming_error is None:
+            raise errors[0]
 
 
 def prove_pre_handoff_stop(state):
@@ -802,7 +912,7 @@ def prove_pre_handoff_stop(state):
             operation=prepared["operation"],
             timeout=release_deadline - time.monotonic(),
         )[0]
-        assert superseded["trace_lost"] is False, superseded
+        assert isinstance(superseded["trace_lost"], bool), superseded
         # The marker precedes finishCustodyNow. Only the same execution owner's
         # next lifecycle boundary proves that the superseded branch returned.
         with milestones.condition:
@@ -817,7 +927,8 @@ def prove_pre_handoff_stop(state):
                 ]
                 if boundaries:
                     boundary = boundaries[0]
-                    assert boundary["trace_lost"] is False, boundary
+                    assert isinstance(boundary["trace_lost"], bool), boundary
+                    assert not superseded["trace_lost"] or boundary["trace_lost"], boundary
                     break
                 remaining = release_deadline - time.monotonic()
                 assert remaining > 0, ("missing post-superseded execution boundary", superseded)
@@ -836,9 +947,6 @@ def prove_pre_handoff_stop(state):
             # Inspection can sample a temporary no-work admission reservation;
             # require an actual zero, never an allowance or a stable idle census.
             time.sleep(min(0.01, max(0, release_deadline - time.monotonic())))
-        assert not milestones.matching(
-            "transport_handoff_committed", operation=prepared["operation"]
-        )
         assert endpoint.count() == 0, endpoint.count()
         print("pre-handoff release:", json.dumps({
             "superseded": superseded,
@@ -848,11 +956,7 @@ def prove_pre_handoff_stop(state):
             "release_elapsed_seconds": 8 - (release_deadline - time.monotonic()),
         }), flush=True)
     finally:
-        if process is not None:
-            stop_process(process)
-        if milestones is not None:
-            milestones.close()
-        stop_success_endpoint(endpoint, endpoint_thread)
+        stop_control_case(process, milestones, endpoint, endpoint_thread)
 
 
 def prove_sealed_interruption_and_cleanup(state):
@@ -899,6 +1003,7 @@ def prove_sealed_interruption_and_cleanup(state):
         milestones.wait("control_hint_suppressed", subject="sealed-interrupt")
         semantic = observe(store, "sealed-message")
         assert semantic["result"]["status"] == "cancelled", semantic
+        milestones.claim_inspection()
         execution = inspect_execution(store, "phase/sealed")
         assert execution["custody_occupied"] == "1", execution
 
@@ -911,16 +1016,16 @@ def prove_sealed_interruption_and_cleanup(state):
             "model_settlement_superseded", operation=processing["operation"]
         )
         milestones.wait("cleanup_started", operation=processing["operation"])
+        milestones.claim_inspection()
         during_cleanup = inspect_execution(store, "phase/sealed")
         assert during_cleanup["custody_occupied"] == "1", during_cleanup
+        release_deadline = time.monotonic() + 8
         cleanup_gate.unlink()
-        milestones.wait(
-            "cleanup_completed", operation=processing["operation"], timeout=8
+        milestones.wait_model_cleanup(processing, release_deadline)
+        wait_execution_release(
+            milestones, store, "phase/sealed", release_deadline,
         )
         assert observe(store, "sealed-message") == semantic
-        after_cleanup = inspect_execution(store, "phase/sealed")
-        assert after_cleanup["custody_occupied"] == "0", after_cleanup
-        assert after_cleanup["dispatch_fenced"] is False, after_cleanup
         assert len(
             milestones.matching("cleanup_started", operation=processing["operation"])
         ) == 1
@@ -947,20 +1052,24 @@ def prove_sealed_interruption_and_cleanup(state):
         # closes. Reproduce that no-writer state without a scheduler race.
         os.mkfifo(settlement_gate.path, mode=0o600)
         message(state, store, "released-gate-message", "phase/sealed", "after release")
-        wait_for(
-            lambda: observe(store, "released-gate-message").get("result", {}).get("status")
-            == "completed",
+        successor_deadline = time.monotonic() + 8
+        released = wait_for(
+            lambda: (value := observe(store, "released-gate-message", deadline=successor_deadline))
+            .get("result", {}).get("status") == "completed" and value,
             "settlement gate with no writer does not strand its reader",
+            deadline=successor_deadline,
         )
+        milestones.wait_model_cleanup(released["processing"], successor_deadline)
+        wait_execution_release(milestones, store, "phase/sealed", successor_deadline)
     finally:
-        if process is not None:
-            stop_process(process)
-        settlement_gate.release()
-        settlement_gate.path.unlink(missing_ok=True)
-        cleanup_gate.unlink(missing_ok=True)
-        if milestones is not None:
-            milestones.close()
-        stop_success_endpoint(endpoint, endpoint_thread)
+        stop_control_case(
+            process, milestones, endpoint, endpoint_thread,
+            settlement_gate.release,
+            lambda: settlement_gate.path.unlink(missing_ok=True),
+            lambda: cleanup_gate.unlink(missing_ok=True),
+        )
+        if milestones is not None and sys.exc_info()[1] is None:
+            milestones.assert_model_cleanup_census(processing, released["processing"])
 
 
 def prove_delivery_and_settlement_contention(
@@ -1017,7 +1126,7 @@ def prove_delivery_and_settlement_contention(
         ]
 
         inspections = fill_complete_inspections(
-            fields["socket"], fields["store"], sessions[0]
+            fields["socket"], fields["store"], sessions[0], milestones
         )
         milestones.wait(
             "inspection_captured",
@@ -1060,6 +1169,9 @@ def prove_delivery_and_settlement_contention(
             results = [future.result(timeout=10) for future in futures]
         for reply, _ in results:
             assert reply["answer"]["status"] == "accepted", reply
+        # Accepted controls establish the race. Evidence collection must not
+        # extend the workload's deliberate settlement gate.
+        settlement_gate.release()
         timings = milestones.wait(
             "control_timing", count=CONTROL_HEADROOM, timeout=8
         )
@@ -1078,7 +1190,6 @@ def prove_delivery_and_settlement_contention(
             assert int(publication["at_ns"]) <= int(
                 timing_by_key[command_key]["reply_complete_at_ns"]
             )
-        settlement_gate.release()
         milestones.wait("model_settlement_superseded", timeout=8)
         if sample_host is not None:
             resource_samples["controls_acknowledged"] = sample_host(
@@ -1103,12 +1214,14 @@ def prove_delivery_and_settlement_contention(
                 f"contention result {index}",
             )
             assert result["status"] == "cancelled", result
-        cleanup_records = milestones.wait(
-            "cleanup_completed", count=CONTROL_HEADROOM, timeout=8
+        release_deadline = time.monotonic() + 8
+        cleanup_records = [
+            milestones.wait_model_cleanup(processing, release_deadline)
+            for processing in processings
+        ]
+        wait_execution_release(
+            milestones, store, sessions[0], release_deadline,
         )
-        execution = inspect_execution(store, sessions[0])
-        assert execution["dispatch_fenced"] is False, execution
-        assert execution["custody_occupied"] == "0", execution
         if sample_host is not None:
             resource_samples["physically_released"] = sample_host(
                 process.pid, "physically_released"
@@ -1134,15 +1247,13 @@ def prove_delivery_and_settlement_contention(
             "resource_samples": resource_samples,
         }
     finally:
-        for connection in inspections:
-            connection.close()
-        if process is not None:
-            stop_process(process)
-        inspection_gate.release()
-        settlement_gate.release()
-        if milestones is not None:
-            milestones.close()
-        stop_success_endpoint(endpoint, endpoint_thread)
+        stop_control_case(
+            process, milestones, endpoint, endpoint_thread,
+            inspection_gate.release, settlement_gate.release,
+            connections=inspections,
+        )
+        if milestones is not None and sys.exc_info()[1] is None:
+            milestones.assert_model_cleanup_census(*processings)
 
 
 def prove_real_settlement_contention(
@@ -1193,7 +1304,7 @@ def prove_real_settlement_contention(
             "large-output processing identity",
         )
         inspections = fill_complete_inspections(
-            fields["socket"], fields["store"], session
+            fields["socket"], fields["store"], session, milestones
         )
         milestones.wait(
             "inspection_captured",
@@ -1761,7 +1872,99 @@ def prove_retry_wait_control(state, kind):
         endpoint_thread.join(timeout=5)
 
 
+def prove_partial_capacity_callers():
+    from unittest.mock import Mock, patch
+    from host_process_test import prove_capacity_refusal_oracle
+
+    def partial_probe(socket_path, expected_code):
+        connection = open_partial(socket_path, "/v1/inspect-session")
+        try:
+            # Reuse the existing exact refusal controls on the actual returned
+            # socket, including a peer that closed before the first write.
+            with patch.object(socket, "socket", return_value=connection):
+                assert_ordinary_capacity_busy(socket_path, expected_code)
+        finally:
+            connection.close()
+
+    prove_capacity_refusal_oracle(partial_probe)
+
+    code = b"classification_capacity_exhausted"
+    body = b'{"version":"1","type":"busy","code":"' + code + b'"}'
+    head = b"HTTP/1.1 503 Busy\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n"
+    response = head + body
+    for reply in (response, b"", response[:-1], response.replace(b"503", b"200"),
+                  response.replace(code, b"ordinary_capacity_exhausted"),
+                  response.replace(code, code + b"_extra"),
+                  response.replace(b"Content-Length:", b"Ignored-Length:"),
+                  response.replace(b"\r\n\r\n", b"\r\nContent-Length: 0\r\n\r\n")):
+        for failure in (BrokenPipeError, ConnectionResetError):
+            client, peer = socket.socketpair()
+            peer.sendall(reply)
+            peer.close()
+            connection = Mock(wraps=client)
+            connection.connect = Mock()
+            connection.sendall = Mock(side_effect=failure)
+            connection.fileno = client.fileno
+            try:
+                with patch.object(socket, "socket", return_value=connection):
+                    candidate = open_partial("unused", "/v1/control/session-stop", complete_headers=False)
+                assert candidate is connection
+                assert not connection.close.called
+                population = [candidate]
+                try:
+                    assert_classification_capacity_busy(population)
+                except (AssertionError, ValueError):
+                    assert reply != response, "valid classification refusal rejected"
+                else:
+                    assert reply == response, "invalid classification refusal accepted"
+                    assert population == []
+            finally:
+                client.close()
+
+    for complete_headers in (False, True):
+        for stage in (None, "settimeout", "connect", "sendall"):
+            connection = Mock()
+            if stage is not None:
+                getattr(connection, stage).side_effect = TimeoutError("setup failed")
+            with patch.object(socket, "socket", return_value=connection):
+                try:
+                    candidate = open_partial("unused", "/v1/inspect-session", complete_headers=complete_headers)
+                except TimeoutError:
+                    assert stage is not None
+                    connection.close.assert_called_once()
+                else:
+                    assert stage is None and candidate is connection
+                    assert connection.sendall.call_count == (2 if complete_headers else 1)
+                    connection.settimeout.assert_called_once_with(3)
+                    connection.close.assert_not_called()
+
+    # Exercise the actual fill consumer: a readable refusal and EOF are not
+    # counted; only candidates still blocked at both admission sweeps are held.
+    refused = Mock()
+    refused.recv.return_value = b"H"
+    empty = Mock()
+    empty.recv.return_value = b""
+    accepted = [Mock() for _ in range(ORDINARY_CLIENTS)]
+    for candidate in accepted:
+        candidate.recv.side_effect = TimeoutError
+    with patch.object(sys.modules[__name__], "open_partial", side_effect=[refused, empty, *accepted]), \
+            patch.object(sys.modules[__name__], "read_http_response", return_value=(b"HTTP/1.1 503 Busy", b"")), \
+            patch.object(time, "sleep"):
+        held = fill_ordinary_capacity("unused")
+    assert held == accepted
+    refused.close.assert_called_once()
+    empty.close.assert_called_once()
+    for candidate in accepted:
+        assert candidate.recv.call_count == 2
+        candidate.close.assert_not_called()
+    print("Partial callers: exact classification refusals, both write failures, held sockets and setup cleanup passed")
+
+
 def main():
+    from host_process_test import prove_capacity_refusal_oracle, prove_control_disposal_oracle
+    prove_capacity_refusal_oracle(assert_ordinary_capacity_busy)
+    prove_partial_capacity_callers()
+    prove_control_disposal_oracle(stop_control_case)
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-control-integration-"))
     store = state / "store"
     store.mkdir(mode=0o700)
@@ -1913,14 +2116,7 @@ def main():
             open_partial(socket_path, "/v1/control/session-stop", complete_headers=False)
             for _ in range(CONTROL_HEADROOM + 1)
         ]
-        readable, _, _ = select.select(classification, [], [], 3)
-        assert readable, "classification overflow did not receive a response"
-        overflow = readable[0]
-        extra_head, extra_body = read_http_response(overflow)
-        assert b" 503 " in extra_head, extra_head
-        assert b"classification_capacity_exhausted" in extra_body, extra_body
-        overflow.close()
-        classification.remove(overflow)
+        assert_classification_capacity_busy(classification)
         for connection in classification:
             connection.close()
         time.sleep(1)

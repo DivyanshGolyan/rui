@@ -85,7 +85,7 @@ def check_classification_oracle(run_actor):
                 assert waited and not errors, ("oracle never entered condition wait", errors)
                 released.set()
                 publish(dict(pending, rui_test_phase="ordinary_classification_released", subject_kind="route",
-                             subject="observe", sequence="3", at_ns=str(time.monotonic_ns())))
+                             subject="observe", sequence="5", trace_lost=True, at_ns=str(time.monotonic_ns())))
             worker.join(max(0, deadline - time.monotonic()))
             assert not worker.is_alive(), "oracle did not finish within original stop budget"
             assert not errors, errors
@@ -99,6 +99,22 @@ def check_classification_oracle(run_actor):
         print("host-stop oracle passed: actual condition wait/no actor, correlated release then launch")
 
 
+def check_missing_classification(run_actor):
+    pending = dict(run="37", sequence="1", at_ns=str(time.monotonic_ns()), trace_lost=True)
+    diagnostics = SimpleNamespace(records=[], read_error=None, condition=threading.Condition())
+    def forbidden_actor(*args, **kwargs):
+        raise AssertionError("actor launched without required phase")
+    try:
+        run_actor(diagnostics, time.monotonic_ns(), time.monotonic(), pending,
+                  "fixture-store", "fixture-instance", invoke=forbidden_actor)
+    except AssertionError as error:
+        assert "missing exchange phase within original stop budget" in str(error), error
+    else:
+        raise AssertionError("missing classification was accepted")
+    print("host-stop oracle passed: missing required phase expires without actor")
+
+
 if __name__ == "__main__":
     import host_stop_integration as stop
     check_classification_oracle(stop.actor_after_classification)
+    check_missing_classification(stop.actor_after_classification)

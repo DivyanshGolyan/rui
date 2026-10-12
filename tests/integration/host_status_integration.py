@@ -79,6 +79,7 @@ def start(store, capacity, *options):
     return start_ready_process(
         [RUI, "serve", "--store", store, "--active-capacity", str(capacity), *options],
         required_fields={"active_capacity": str(capacity)},
+        observations="status" if "--test-phase-trace" in options else None,
     )
 
 
@@ -163,7 +164,7 @@ def correlated_phase(diagnostics, phase, began_ns, **fields):
     assert len(current) == 1, (phase, current)
     record = current[0]
     assert record["process"] == str(diagnostics.process.pid), record
-    assert record["clock"] == "awake_ns" and record["trace_lost"] is False, record
+    assert record["clock"] == "awake_ns" and isinstance(record["trace_lost"], bool), record
     assert record["run"] == records[0]["run"], record
     return record
 
@@ -173,6 +174,9 @@ def discovery_released(diagnostics, began_ns):
     released = correlated_phase(diagnostics, "connection_resources_released", began_ns,
                                 subject_kind="request_number", subject=started["subject"])
     assert int(released["sequence"]) > int(started["sequence"]), (started, released)
+    assert int(released["at_ns"]) >= int(started["at_ns"]), (started, released)
+    assert released["run"] == started["run"], (started, released)
+    assert not started["trace_lost"] or released["trace_lost"], (started, released)
 
 
 def protected_saturation(root):
@@ -200,10 +204,11 @@ def protected_saturation(root):
             records = diagnostics.wait("ordinary_classification_released", count=index + 1,
                                        timeout=2, subject_kind="route", subject="message")
             record = records[index]
-            assert int(record["at_ns"]) >= began_ns and record["trace_lost"] is False, record
+            assert int(record["at_ns"]) >= began_ns and isinstance(record["trace_lost"], bool), record
             assert record["process"] == str(host.pid) and record["clock"] == "awake_ns", record
             assert record["run"] == records[0]["run"], records
             assert index == 0 or int(record["sequence"]) > int(records[index - 1]["sequence"]), records
+            assert index == 0 or not records[index - 1]["trace_lost"] or record["trace_lost"], records
         began_ns = time.monotonic_ns()
         observed = status(store)
         assert observed == initial, ("status lost ordinary headroom", observed)
@@ -248,7 +253,7 @@ def protected_saturation(root):
             stream.close()
         held.clear()
         host.wait(timeout=5)
-        diagnostics.close()
+        stop_process(host)
         assert host.returncode != 0, diagnostics.tail()  # EffectAwareShutdown, not a forced kill.
         # Resource release is before the final drain unlock, not thread retirement.
         release = diagnostics.matching("connection_resources_released", subject=pending["subject"])
@@ -262,7 +267,6 @@ def protected_saturation(root):
         for stream in held:
             stream.close()
         stop_process(host)
-        diagnostics.close()
 
 
 def hostile_discovery(root):
@@ -271,30 +275,40 @@ def hostile_discovery(root):
     diagnostics = HostDiagnostics(host)
     try:
         diagnostics.wait("lifecycle_boundary")
+        began_ns = time.monotonic_ns()
         assert b'"type":"host_info"' in raw_info(socket_path(store), store)
+        discovery_released(diagnostics, began_ns)
         baseline = wait_for_descriptors(host.pid) if sys.platform == "linux" else None
         for kind, extra in (("message", {"key": "hostile", "session": "hostile/session", "text": {"state": "value", "value": "x" * 128}}),
                             ("configure", {"key": "hostile", "session": "hostile/session", "configuration": {
                                 "workspace": {"state": "omitted"}, "provider": {"state": "omitted"},
                                 "model": {"state": "omitted"}, "instructions": {"state": "value", "value": "x" * 128}}})):
             for route in ("host-info", "control/host-stop"):
+                began_ns = time.monotonic_ns()
                 response = raw_info(socket_path(store), store, route=route, kind=kind, extra=extra)
                 assert b"RouteKindMismatch" in response and b"InjectedContentAcquireFailure" not in response, response
+                if route == "host-info":
+                    discovery_released(diagnostics, began_ns)
             assert list((store / "scratch").iterdir()) == [], "hostile discovery created scratch"
             observed = raw_info(socket_path(store), store, kind="observe_command", route="observe-command", extra={"key": "hostile"})
             assert b'"status":"absent"' in observed, observed
+            began_ns = time.monotonic_ns()
             assert status(store).startswith("ready ")
+            discovery_released(diagnostics, began_ns)
+        began_ns = time.monotonic_ns()
         with held_request(store, "host-info", length=1000000) as stream:
             response = complete_response(stream)
         assert response.startswith(b"HTTP/1.1 400") and b"DiscoveryRequestTooLarge" in response, response
+        discovery_released(diagnostics, began_ns)
         assert list((store / "scratch").iterdir()) == []
+        began_ns = time.monotonic_ns()
         assert b'"type":"host_info"' in raw_info(socket_path(store), store)
+        discovery_released(diagnostics, began_ns)
         if baseline is not None:
             wait_for_descriptors(host.pid, baseline)
         print("hostile discovery passed: oversized before body, message/configure before scratch, no saved command, healthy reuse")
     finally:
         stop_process(host)
-        diagnostics.close()
 
 
 def discovery_body_deadline(root):
@@ -334,7 +348,6 @@ def discovery_body_deadline(root):
         print(f"discovery absolute deadline passed: header + trickling body closed in {elapsed:.3f}s, scratch=0")
     finally:
         stop_process(host)
-        diagnostics.close()
 
 
 def main():
@@ -516,46 +529,55 @@ def main():
         first = None
         diagnostics = None
         before_fd = after_fd = None
+        expected_routes = []
+        completed = False
+
+        def exchange(route, invoke, timeout=10):
+            expected_routes.append(route)
+            began_ns = time.monotonic_ns()
+            deadline = time.monotonic() + timeout
+            value = invoke()
+            released = diagnostics.borrower_census(deadline, expected_routes)
+            current = next(record for record in released if int(record["subject"]) == len(expected_routes) - 1)
+            assert began_ns <= int(current["at_ns"]) <= began_ns + int(timeout * 1e9), current
+            return value
+
         # start_ready_process inherits this test's environment.
         old = os.environ.get("RUI_CODEX_CREDENTIAL_FILE")
         os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
         try:
-            trace_options = ("--test-phase-trace",) if sys.platform == "linux" else ()
-            first, fields = start(store, 3, "--codex", *trace_options)
+            first, fields = start(store, 3, "--codex", "--test-phase-trace")
             assert fields["execution"] == "enabled"
+            diagnostics = HostDiagnostics(first)
             if sys.platform == "linux":
                 # Readiness precedes execution-thread initialization. Its first
                 # boundary proves reactor wake descriptors have been created.
-                diagnostics = HostDiagnostics(first)
                 diagnostics.wait("lifecycle_boundary")
-                # No other client has connected. EOF proves this warm-up socket
-                # closed, unlike framed response completion in hostStatus.
-                assert b'"type":"host_info"' in raw_info(stale, store.resolve())
+                assert b'"type":"host_info"' in exchange("host_info", lambda: raw_info(stale, store.resolve()), 5)
                 before = wait_for_descriptors(first.pid)
                 before_fd = len(before)
-            first_status = status(store)
+            first_status = exchange("host_info", lambda: status(store))
             match = re.fullmatch(r"ready ([0-9a-f]{32}) 3 true true true", first_status)
             assert match, first_status
             alias = store.parent / "alias"
             alias.symlink_to(store, target_is_directory=True)
-            assert status(alias) == first_status
-            setup = subprocess.run([RUI, "setup", "--store", str(alias)],
-                env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
+            assert exchange("host_info", lambda: status(alias)) == first_status
+            setup = exchange("host_info", lambda: subprocess.run([RUI, "setup", "--store", str(alias)],
+                env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10))
             assert setup.returncode == 0, setup.stderr
-            selected = cli_status(home)
+            selected = exchange("host_info", lambda: cli_status(home))
             assert selected.startswith(f"Host: ready\nStore: {store.resolve()}\nWire: 1\nActive capacity: 3\n"), selected
             assert "Bash: enabled\nModel: enabled\nManaged authentication: enabled\n" in selected, selected
             assert f"Instance: {match.group(1)}\n" in selected, selected
-            assert cli_status(home, "--store", alias) == selected
+            assert exchange("host_info", lambda: cli_status(home, "--store", alias)) == selected
             assert not credential.exists()
             for _ in range(40):
-                assert status(alias) == first_status
+                assert exchange("host_info", lambda: status(alias)) == first_status
             if before_fd is not None:
-                # The last framed reply may precede its owner's close. Require
-                # exact descriptor identities after drain, not an extra allowance.
+                # Independent FD readback is not admission-retirement authority.
                 after_fd = len(wait_for_descriptors(first.pid, before))
             assert list((store / "scratch").iterdir()) == []
-            head, body = raw_info(stale, store.resolve()).split(b"\r\n\r\n", 1)
+            head, body = exchange("host_info", lambda: raw_info(stale, store.resolve()), 5).split(b"\r\n\r\n", 1)
             assert head.startswith(b"HTTP/1.1 200 OK\r\n")
             assert f"Content-Length: {len(body)}".encode() in head.split(b"\r\n")
             assert json.loads(body) == {
@@ -563,38 +585,52 @@ def main():
                 "instance": match.group(1), "active_capacity": "3",
                 "capabilities": {"bash": True, "model": True, "managed_authentication": True},
             }
-            assert b'"type":"host_info"' in raw_info(stale, store.resolve(), match.group(1))
-            changed = raw_info(stale, store.resolve(), "0" * 32)
+            assert b'"type":"host_info"' in exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)
+            changed = exchange("host_info", lambda: raw_info(stale, store.resolve(), "0" * 32), 5)
             assert b"host_instance_changed" in changed and changed.startswith(b"HTTP/1.1 409")
-            guarded = raw_info(stale, store.resolve(), "0" * 32, kind="session_stop", route="control/session-stop", extra={"key": "guarded-stop", "session": "none"})
+            guarded = exchange("session_stop", lambda: raw_info(stale, store.resolve(), "0" * 32, kind="session_stop", route="control/session-stop", extra={"key": "guarded-stop", "session": "none"}), 5)
             assert b"host_instance_changed" in guarded and guarded.startswith(b"HTTP/1.1 409")
-            observation = raw_info(stale, store.resolve(), kind="observe_command", route="observe-command", extra={"key": "guarded-stop"})
+            observation = exchange("observe", lambda: raw_info(stale, store.resolve(), kind="observe_command", route="observe-command", extra={"key": "guarded-stop"}), 5)
             assert b'"status":"absent"' in observation, observation
-            wrong = raw_info(stale, store.parent)
+            wrong = exchange("host_info", lambda: raw_info(stale, store.parent), 5)
             assert b"wrong_store_identity" in wrong and wrong.startswith(b"HTTP/1.1 409")
+            completed = True
         finally:
-            if first is not None:
-                stop_process(first)
-            if diagnostics is not None:
-                diagnostics.close()
-            if old is None:
-                os.environ.pop("RUI_CODEX_CREDENTIAL_FILE", None)
-            else:
-                os.environ["RUI_CODEX_CREDENTIAL_FILE"] = old
+            try:
+                if first is not None:
+                    stop_process(first)
+            finally:
+                try:
+                    if diagnostics is not None:
+                        if completed:
+                            diagnostics.borrower_census(time.monotonic(), expected_routes)
+                finally:
+                    if old is None:
+                        os.environ.pop("RUI_CODEX_CREDENTIAL_FILE", None)
+                    else:
+                        os.environ["RUI_CODEX_CREDENTIAL_FILE"] = old
         assert status(store) == "unavailable"
-        second, _ = start(store, 7)
+        second, _ = start(store, 7, "--test-phase-trace")
+        diagnostics = HostDiagnostics(second)
+        expected_routes = []
+        completed = False
         try:
-            second_status = status(store)
+            second_status = exchange("host_info", lambda: status(store))
             match_second = re.fullmatch(r"ready ([0-9a-f]{32}) 7 true false false", second_status)
             assert match_second, second_status
-            selected = cli_status(home)
+            selected = exchange("host_info", lambda: cli_status(home))
             assert "Active capacity: 7\nBash: enabled\nModel: disabled\nManaged authentication: disabled\n" in selected, selected
             assert f"Instance: {match_second.group(1)}\n" in selected, selected
             assert match_second.group(1) != match.group(1), "replacement reused instance identity"
-            old_instance = raw_info(stale, store.resolve(), match.group(1))
+            old_instance = exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)
             assert b"host_instance_changed" in old_instance and old_instance.startswith(b"HTTP/1.1 409")
+            completed = True
         finally:
-            stop_process(second)
+            try:
+                stop_process(second)
+            finally:
+                if completed:
+                    diagnostics.borrower_census(time.monotonic(), expected_routes)
         assert status(store) == "unavailable"
         print(f"host-status passed: capacity=3/7 replacement identity, 40 reads, fd={before_fd}->{after_fd}, scratch=0")
 

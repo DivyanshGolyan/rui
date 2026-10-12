@@ -153,14 +153,6 @@ def process_exists(pid):
         return False
 
 
-def stop_traced_host(host, diagnostics):
-    if host is not None:
-        fixture.stop_host(host)
-    if diagnostics is not None:
-        diagnostics.close()
-    return None, None
-
-
 def resolution(store, session):
     report = fixture.command(
         "inspect-session", "--store", store, "--session", session, "--profile", "full"
@@ -597,8 +589,6 @@ def prove_reused_session(state):
                     raise
         if host is not None:
             fixture.stop_host(host)
-        if milestones is not None:
-            milestones.close()
         endpoint.shutdown()
         endpoint.server_close()
         endpoint_thread.join(timeout=5)
@@ -1055,6 +1045,7 @@ def main():
     observed_exit_gate_keeper = None
     stopped_pipes_stop = None
     settlement_gate = None
+    before_launch_gate = None
     settlement_cleanup_gate = state / "settlement-cleanup-gate"
     completed = False
     resource_samples = []
@@ -1233,7 +1224,6 @@ def main():
 
         fixture.stop_host(host)
         host = None
-        success_milestones.close()
         success_milestones = None
         host = fixture.start_host(store, endpoint_url, active_capacity=0)
         configure(state, store, "rollback-config", "direct/rollback")
@@ -1301,6 +1291,7 @@ def main():
             "--test-before-launch-delay-ms",
             "1000",
             "--test-phase-trace",
+            observations="recovery",
         )
         milestones = HostDiagnostics(host)
         allow(
@@ -1336,7 +1327,8 @@ def main():
         pending = fixture.wait_for(
             lambda: action_for(store, "direct/before-launch"), "pre-launch Bash Action"
         )
-        host, milestones = stop_traced_host(host, milestones)
+        fixture.stop_host(host)
+        host, milestones = None, None
         host = fixture.start_host(store, endpoint_url, active_capacity=0)
         allow(state, store, "before-launch-allow", "direct/before-launch", pending["action"])
         rejected_allow = fixture.command(
@@ -1367,15 +1359,23 @@ def main():
             "SELECT permission_state,attempt_ordinal FROM action_operation WHERE session_ref=?",
             ("direct/before-launch",),
         ) == [(1, 0)]
+        before_launch_gate = ReleaseGate(state / "before-launch-gate")
         host = fixture.start_host(
             store,
             endpoint_url,
-            "--test-before-launch-delay-ms",
-            "5000",
+            "--test-transition",
+            "prepared-before-handoff",
+            "--test-transition-gate-path",
+            before_launch_gate.path,
             "--test-phase-trace",
+            observations="recovery",
         )
         milestones = HostDiagnostics(host)
         milestones.wait("prepared_before_handoff", action=str(pending["action"]))
+        # The exact native receipt plus an unreleased, empty FIFO holds the
+        # handoff; marker absence alone cannot establish that launch is barred.
+        assert host.poll() is None
+        before_launch_gate.assert_held()
         named_first_acquisition = sorted((store / "scratch").glob("bash-*-*.tmp"))
         assert len(named_first_acquisition) >= 3, named_first_acquisition
         assert not before_launch_marker.exists()
@@ -1383,6 +1383,8 @@ def main():
         host = None
         milestones = None
         assert crash["returncode"] == -signal.SIGKILL
+        before_launch_gate.release()
+        before_launch_gate = None
         host = fixture.start_host(store, endpoint_url)
         assert not list((store / "scratch").glob("bash-*-*.tmp"))
         fixture.wait_for(
@@ -1528,7 +1530,8 @@ def main():
             == 0,
             "post-settlement Bash cleanup",
         )
-        host, milestones = stop_traced_host(host, milestones)
+        fixture.stop_host(host)
+        host, milestones = None, None
         host = fixture.start_host(store, endpoint_url)
 
         configure(state, store, "exited-pipes-config", "direct/exited-pipes")
@@ -1619,7 +1622,8 @@ def main():
         )
         fixture.wait_for(lambda: not process_exists(stopped_child), "stopped Bash descendant cleanup")
 
-        host, milestones = stop_traced_host(host, milestones)
+        fixture.stop_host(host)
+        host, milestones = None, None
         host = fixture.start_host(store, endpoint_url, "--bash-timeout-ms", "30000")
         configure(state, store, "timeout-config", "direct/timeout")
         fixture.message(state, store, "timeout-message", "direct/timeout", "execute")
@@ -2033,35 +2037,54 @@ def main():
         print(json.dumps({"bash_resource_samples": resource_samples}, sort_keys=True))
         completed = True
     finally:
+        incoming_error = sys.exc_info()[1]
+        cleanup_errors = []
+        cleanups = []
         if stopped_pipes_stop is not None and stopped_pipes_stop.poll() is None:
-            stopped_pipes_stop.kill()
-            stopped_pipes_stop.wait(timeout=10)
+            cleanups.extend((stopped_pipes_stop.kill, lambda: stopped_pipes_stop.wait(timeout=10)))
         if observed_exit_gate_keeper is not None:
-            try:
-                os.write(observed_exit_gate_keeper, b"x")
-            except OSError:
-                pass
-            os.close(observed_exit_gate_keeper)
+            cleanups.extend((lambda: os.write(observed_exit_gate_keeper, b"x"),
+                             lambda: os.close(observed_exit_gate_keeper)))
         if observed_exit_gate is not None:
-            observed_exit_gate.unlink(missing_ok=True)
+            cleanups.append(lambda: observed_exit_gate.unlink(missing_ok=True))
+        if before_launch_gate is not None:
+            cleanups.append(before_launch_gate.release)
         if settlement_gate is not None:
-            settlement_gate.release()
-        settlement_cleanup_gate.unlink(missing_ok=True)
+            cleanups.append(settlement_gate.release)
+        cleanups.append(lambda: settlement_cleanup_gate.unlink(missing_ok=True))
         if host is not None:
-            fixture.stop_host(host)
-        if milestones is not None:
-            milestones.close()
-        if success_milestones is not None:
-            success_milestones.close()
+            cleanups.append(lambda: fixture.stop_host(host))
         if detached_process is not None and process_exists(detached_process):
-            os.kill(detached_process, signal.SIGKILL)
-        endpoint.shutdown()
-        endpoint.server_close()
-        endpoint_thread.join(timeout=5)
-        if completed:
+            cleanups.append(lambda: os.kill(detached_process, signal.SIGKILL))
+
+        def join_endpoint():
+            endpoint_thread.join(timeout=5)
+            assert not endpoint_thread.is_alive(), "Bash endpoint thread did not retire"
+
+        cleanups.extend((endpoint.shutdown, endpoint.server_close, join_endpoint))
+        for cleanup in cleanups:
+            try:
+                cleanup()
+            except BaseException as error:
+                cleanup_errors.append(error)  # Attempt every owned resource.
+        if completed and incoming_error is None and not cleanup_errors:
             shutil.rmtree(state)
         else:
-            print(f"retained Bash integration failure state: {state}", file=sys.stderr)
+            try:
+                print(f"retained Bash integration failure state: {state}", file=sys.stderr)
+            except Exception:
+                pass  # Reporting cannot replace the original failure.
+        if cleanup_errors:
+            for error in cleanup_errors:
+                try:
+                    print(f"Bash cleanup failed: {type(error).__name__}: {error}", file=sys.stderr)
+                except Exception:
+                    pass
+            if incoming_error is None:
+                raise cleanup_errors[0]
+            incoming_error.add_note("Bash cleanup failed: " + ", ".join(
+                type(error).__name__ for error in cleanup_errors
+            ))
 
 
 if __name__ == "__main__":

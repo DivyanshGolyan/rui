@@ -12547,6 +12547,8 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
         .waits_ms = .{ 50, 1, 1 },
         // This valid integer cannot name a deadline at the settlement clock.
         .retry_after_ms = 9_223_372_036_854_775_000,
+        // Future eligibility must not assume a commit returns within 50 ms.
+        .retry_after_deadline_ms = std.math.maxInt(i64),
     };
     try storage.settleModelAttemptFailure(
         first,
@@ -12559,21 +12561,29 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     {
         const statement = try prepare(
             storage.database,
-            "SELECT uncertain,retry_due_at_ms-CAST(unixepoch('subsec')*1000 AS INTEGER),last_failure_code,resolution_code " ++
+            "SELECT uncertain,retry_due_at_ms,last_failure_code,resolution_code " ++
                 "FROM model_operation WHERE operation_id=?1",
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, first.operation_id);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
         try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_column_int(statement, 0));
-        try std.testing.expect(c.sqlite3_column_int64(statement, 1) > 0);
+        try std.testing.expectEqual(std.math.maxInt(i64), c.sqlite3_column_int64(statement, 1));
         var failure: protocol.Bounded(96) = .{};
         try readText(statement, 2, &failure);
         try std.testing.expectEqualStrings("provider_temporary_http_429", failure.slice());
         try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement, 3));
     }
 
-    try std.testing.io.sleep(.fromMilliseconds(60), .awake);
+    // Make this fixture's operation eligible explicitly; admission still uses
+    // the real Store transition and checks the allowance and stale binding.
+    {
+        const due = try prepare(storage.database, "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=?1");
+        defer _ = c.sqlite3_finalize(due);
+        try bindU64(due, 1, first.operation_id);
+        try expectDone(due);
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+    }
     const second = (try admitRetryForTesting(&storage)).?.permit.binding;
     try std.testing.expectEqual(first.operation_id, second.operation_id);
     try std.testing.expectEqual(@as(u64, 2), second.attempt_ordinal);

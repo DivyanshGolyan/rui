@@ -10,6 +10,7 @@ test {
     _ = @import("platform.zig");
     _ = @import("socket_fixture.zig");
     _ = @import("HostDiagnostics.zig");
+    _ = @import("TestObservation.zig");
     _ = @import("store.zig");
     _ = @import("server.zig");
     _ = @import("client.zig");
@@ -26,4 +27,9 @@ test {
     _ = @import("client.zig");
     _ = @import("cli.zig");
     _ = @import("TerminalText.zig");
+    _ = @import("SessionInput.zig");
+    _ = @import("SessionFrontend.zig");
+    _ = @import("session_history.zig");
+    _ = @import("session_view.zig");
+    _ = @import("ClientTask.zig");
 }

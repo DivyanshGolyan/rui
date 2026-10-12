@@ -431,7 +431,7 @@ def main():
             slave = None
             output = bytearray()
             until = time.monotonic() + COMMAND_TIMEOUT
-            while b"rui> " not in output:
+            while "› ".encode("utf-8") not in output:
                 remaining = until - time.monotonic()
                 assert remaining > 0 and select.select([master], [], [], remaining)[0], output
                 chunk = os.read(master, 65536)
@@ -439,9 +439,8 @@ def main():
                 output.extend(chunk)
             # Automatic success is quiet; readiness is established separately
             # through protected status and the accepted Session below.
-            assert b"Provider: codex" in output and b"Model: gpt-6-luna" in output, output
-            assert b"Permission: bypass\r\n" in output, output
-            assert b"Bash runs without approval" not in output, output
+            assert all(noise not in output for noise in (b"Provider:", b"Model:", b"Permission:", b"request:", b"Session:", b"Workspace:")), output
+            assert b"Bash runs without approval" in output, output
             assert b"Bash commands can run without asking you" not in output, output
             captures = list((bare_home / ".config/rui/requests").glob("*.json"))
             assert len(captures) == 1, captures
@@ -457,8 +456,7 @@ def main():
             assert configuration["tools"] == {"state": "value", "value": ["bash"]}, captured
             assert configuration["permission_mode"] == {"state": "value", "value": "bypass"}, captured
             assert captured["require_model"] is True, captured
-            assert ("request: " + key).encode() in output and ("Session: " + reference).encode() in output, output
-            assert ("Workspace (Bash cwd): " + str(root.resolve())).encode() in output, output
+            assert key.encode() not in output and reference.encode() not in output, output
             assert len(wait_for_processes(bare_store, 1)) == 1
             # Transfer this thread's reader from prompt to exit without
             # withholding output credit or discarding any transcript bytes.

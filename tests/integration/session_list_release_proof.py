@@ -57,12 +57,30 @@ def oracle_controls():
         diagnostics.records[-1]["scratch_used_bytes"] = "1"
         expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "retained scratch charge")
         diagnostics.records = copy.deepcopy(records)
-        diagnostics.records[1]["trace_lost"] = True
+        for item in diagnostics.records[1:]:
+            item["trace_lost"] = True
+        # An unrelated lost diagnostic does not remove required endpoints.
+        diagnostics.records[-1]["sequence"] = "6"
+        assert fixture.released_resources(1, diagnostics, invocation) == {"census": "observed"}
+        diagnostics.records[-1]["trace_lost"] = False
+        expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "not sticky")
+        diagnostics.records = copy.deepcopy(records)
+        diagnostics.records[1]["trace_lost"] = "true"
         expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "trace_lost")
         diagnostics.records = [records[0], records[2], records[3]]
-        expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "trace sequence gap")
+        expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "orphan release")
+        diagnostics.records = [records[1], records[2]]
+        expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "request_number")
+        diagnostics.records = [records[0], records[3]]
+        expect_failure(lambda: fixture.released_resources(1, diagnostics, (102, 102, time.monotonic())), "missing exchange release")
+        for missing in (2, 3):
+            diagnostics.records = records[:missing] + records[missing + 1:]
+            expect_failure(lambda: fixture.released_resources(1, diagnostics, (102, 102, time.monotonic())), "missing exchange release")
         diagnostics.records = records + [records[-1]]
         expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "duplicate exchange")
+        diagnostics.records = copy.deepcopy(records)
+        diagnostics.records[-1]["sequence"] = "3"
+        expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "[1, 2, 3, 3]")
         diagnostics.records = [record("connection_resources_released", 1, 0, "0")]
         expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "orphan release")
         diagnostics.records = []
@@ -86,7 +104,21 @@ def listing(store):
 
 
 def retained_report(process, diagnostics, store, request, mode, invocation):
-    receipts = diagnostics.wait(f"release_probe_{mode}", timeout=remaining(invocation))
+    # The interposed fixture's bounded FD receipt is not a Host milestone.
+    # Native cleanup evidence comes only from the private owner channel.
+    def receipts_now():
+        receipts = []
+        for line in diagnostics.tail().splitlines():
+            try:
+                record = json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if isinstance(record, dict) and record.get("rui_test_phase") == f"release_probe_{mode}":
+                receipts.append(record)
+        return receipts
+    while not (receipts := receipts_now()):
+        time.sleep(min(.025, remaining(invocation)))
+    remaining(invocation)
     assert len(receipts) == 1, receipts
     receipt = receipts[0]
     assert receipt["pid"] == process.pid and receipt["request"] == str(request), receipt
@@ -110,11 +142,12 @@ def case(binary, probe, mode):
         # Only Host launch gets interception and replaces its existing stdin.
         # Reuse readiness; do not add a second stderr reader or shared helper API.
         def popen(*args, **kwargs):
-            return original_popen(*args, env=env, stdin=subprocess.PIPE, **kwargs)
+            kwargs.update(env=env, stdin=subprocess.PIPE)
+            return original_popen(*args, **kwargs)
         with patch.object(host_process.subprocess, "Popen", popen):
             process, _ = fixture.start_ready_process(
                 [binary, "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"],
-                required_fields={"execution": "unavailable"})
+                required_fields={"execution": "unavailable"}, observations="list")
         diagnostics = host_process.HostDiagnostics(process)
         worker = None
         outcome = {}
@@ -171,7 +204,6 @@ def case(binary, probe, mode):
                     fixture.assert_resources(baseline, current)
                     failure = None
             assert process.poll() is None, "Host exited instead of completing proof"
-            assert len(diagnostics.matching("release_probe_leaked" if mode == "leak" else "release_probe_held")) == 1
             print(json.dumps(dict(case=mode, receipt=receipt, baseline=baseline, final=current,
                                   expected_failure=failure, milestones=diagnostics.records), sort_keys=True))
         finally:
@@ -180,12 +212,12 @@ def case(binary, probe, mode):
             process.wait(timeout=10)
             if worker is not None and worker.is_alive():
                 with diagnostics.condition:
-                    original_error = diagnostics.read_error
-                    diagnostics.read_error = "proof Host disposed"
+                    original_error = diagnostics._read_error
+                    diagnostics._read_error = "proof Host disposed"
                     diagnostics.condition.notify_all()
                 worker.join(timeout=10)
                 # The artificial wake is cleanup only, never a passing witness.
-                diagnostics.read_error = original_error
+                diagnostics._read_error = original_error
                 assert not worker.is_alive(), "proof census worker retained"
             diagnostics.close()
             process.stdin.close()
@@ -200,7 +232,7 @@ def charge_negative(binary):
         store.mkdir(mode=0o700)
         process, _ = fixture.start_ready_process(
             [binary, "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"],
-            required_fields={"execution": "unavailable"})
+            required_fields={"execution": "unavailable"}, observations="list")
         diagnostics = host_process.HostDiagnostics(process)
         try:
             invocation = listing(store)

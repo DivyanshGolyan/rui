@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const TestObservation = @import("TestObservation.zig");
 const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 const store = @import("store.zig");
@@ -282,6 +283,8 @@ pub const CaptureWriter = struct {
     stopping: bool = false,
     test_gate_path: ?[]const u8 = null,
     test_gate_min_written_bytes: usize = 0,
+    // Borrowed through capture-writer join, before Host closes the private fd.
+    test_observation: ?*TestObservation = null,
 
     pub fn run(self: *CaptureWriter) void {
         while (true) {
@@ -313,12 +316,18 @@ pub const CaptureWriter = struct {
         } else if (!failed) {
             if (self.test_gate_path) |path| if (capture.length >= self.test_gate_min_written_bytes) {
                 self.test_gate_path = null;
-                // Emit a complete small pipe record, not debug.print fragments
-                // that can interleave with the Host's independent trace writer.
-                var notice_buffer: [96]u8 = undefined;
-                const notice = std.fmt.bufPrint(&notice_buffer, "{{\"rui_test_phase\":\"capture_write_gate_entered\",\"written_bytes\":{d}}}\n", .{capture.length}) catch unreachable;
-                // Diagnostics are best effort and must not fail the capture.
-                std.Io.File.stderr().writeStreamingAll(self.io, notice) catch {};
+                if (self.test_observation) |writer| {
+                    if (writer.begin("capture_write_gate_entered", null)) |initial| {
+                        var publication = initial;
+                        defer publication.finish();
+                        var observation: protocol.FixedJsonBuffer(128) = .{};
+                        observation.appendFmt("{{\"rui_test_phase\":\"capture_write_gate_entered\",\"at_ns\":\"{d}\",\"written_bytes\":\"{d}\"}}", .{
+                            @as(u64, @intCast(std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds)),
+                            capture.length,
+                        }) catch unreachable;
+                        publication.record(observation.slice());
+                    }
+                }
                 if (std.Io.Dir.cwd().openFile(self.io, path, .{})) |gate| {
                     defer gate.close(self.io);
                     var release: [1]u8 = undefined;

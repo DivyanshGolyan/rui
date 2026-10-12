@@ -29,16 +29,20 @@ def retained(state, binary, label, repetition, failed_key):
         stdin=slave, stdout=slave, stderr=slave)
     os.close(slave)
     try:
-        cli.read_terminal(master, "rui> ")
+        prompt = "rui> " if label == "baseline" else "› "
+        cli.read_terminal(master, prompt)
         samples = [sample(process.pid)]
         for _ in range(4):
             for _ in range(25):
-                result = cli.terminal_step(master, f"/result {failed_key}")
-                assert "This saved Message failed" in result and "Code: provider_http_422" in result, result
+                result = cli.terminal_step(master, f"/result {failed_key}", prompt)
+                assert ("This saved Message failed" in result or "result: failed" in result) and "provider_http_422" in result, result
             samples.append(sample(process.pid))
         cli.terminal_step(master, "/exit", "Detached.")
         assert process.wait(timeout=5) == 0
-        assert all(value["fds"] == 3 for value in samples), samples
+        # Stdio plus the frontend's descriptor-owned render scratch; polling
+        # owns at most one transient socket, never another retained reader.
+        assert samples[0]["retained_fds"] in (3, 4), samples
+        assert all(value["retained_fds"] == samples[0]["retained_fds"] and value["sockets"] <= 1 for value in samples), samples
         return {"binary": label, "repetition": repetition, "result_reads": 100, "samples": samples}
     finally:
         if process.poll() is None:

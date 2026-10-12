@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, TestHTTPServer, start_ready_process, stop_process
+from host_process import HostDiagnostics, TestHTTPServer, preserve_failure_metadata, start_ready_process, stop_process, wait_for_execution_release
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -374,12 +374,12 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def command(*args, expect=0):
+def command(*args, expect=0, timeout=15):
     completed = subprocess.run(
         [str(RUI), *map(str, args)],
         text=True,
         capture_output=True,
-        timeout=15,
+        timeout=timeout,
     )
     if completed.returncode != expect:
         raise AssertionError(
@@ -424,7 +424,7 @@ def host_arguments(store, endpoint, *extra, accelerated_retries=True, active_cap
     return args
 
 
-def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacity=1):
+def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacity=1, observations=None):
     args = host_arguments(
         store,
         endpoint,
@@ -434,6 +434,7 @@ def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacit
     )
     process, _ = start_ready_process(
         args,
+        observations=observations,
         required_fields=(
             {"execution": "enabled", "curl": "8.22.0"}
             if endpoint is not None
@@ -450,21 +451,45 @@ def stop_host(process):
 
 def crash_host(process, state, label, diagnostics=None):
     assert process.poll() is None, process.returncode
-    process.kill()
-    process.wait(timeout=10)
-    stdout = process.stdout.read()
-    if diagnostics is None:
-        stderr = process.stderr.read()
-    else:
-        diagnostics.close()
-        stderr = diagnostics.tail()
-    (state / f"{label}.stdout").write_bytes(stdout)
-    (state / f"{label}.stderr").write_bytes(stderr)
-    return {
-        "returncode": process.returncode,
-        "stdout": stdout,
-        "stderr": stderr,
-    }
+    deadline = time.monotonic() + 10
+    errors = []
+    try:
+        observations = getattr(process, "rui_observations", None)
+        try:
+            if observations is not None:
+                # Frame receipt precedes native retirement. Keep this cut
+                # unsealed and reserve reap credit from the same allowance.
+                observations.wait_for_publication_retirement(deadline - 1)
+        except BaseException as error:
+            errors.append(error)
+        try:
+            process.kill()
+            process.wait(timeout=max(0, deadline - time.monotonic()))
+        except BaseException as error:
+            errors.append(error)
+        if errors:
+            for error in errors[1:]:
+                errors[0].add_note("Intentional crash cleanup failed: " + type(error).__name__)
+            raise errors[0]
+        stdout = process.stdout.read()
+        if diagnostics is None:
+            stderr = process.stderr.read()
+        else:
+            diagnostics.close()
+            stderr = diagnostics.tail()
+        (state / f"{label}.stdout").write_bytes(stdout)
+        (state / f"{label}.stderr").write_bytes(stderr)
+        return {
+            "returncode": process.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+        }
+    finally:
+        # Reap/observation validity and pipe closure retain an explicit owner,
+        # including when bounded diagnostic collection or persistence fails.
+        # A failed first kill/reap must not turn this cut into sealed disposal
+        # or renew its original crash allowance.
+        stop_process(process, timeout=max(0, deadline - time.monotonic()), seal_observations=False)
 
 
 def configure(state, store, key, session, model, schema=None, instructions=None):
@@ -596,21 +621,34 @@ def retry_message(state, store, key):
     )
 
 
-def observe(store, key):
-    return command("observe-command", "--store", store, "--key", key)["observation"]
+def observe(store, key, *, deadline=None):
+    if deadline is not None:
+        deadline = min(deadline, time.monotonic() + 15)
+    remaining = 15 if deadline is None else deadline - time.monotonic()
+    assert remaining > 0, "result observation exhausted original deadline"
+    result = command(
+        "observe-command", "--store", store, "--key", key, timeout=remaining,
+    )["observation"]
+    assert deadline is None or time.monotonic() < deadline, "result observation exceeded original deadline"
+    return result
 
 
-def read_result(store, key):
+def read_result(store, key, *, deadline=None):
+    if deadline is not None:
+        deadline = min(deadline, time.monotonic() + 15)
+    remaining = 15 if deadline is None else deadline - time.monotonic()
+    assert remaining > 0, "result read exhausted original deadline"
     completed = subprocess.run(
         [str(RUI), "read-result", "--store", str(store), "--key", key],
         capture_output=True,
-        timeout=15,
+        timeout=remaining,
     )
     if completed.returncode != 0:
         raise AssertionError(
             f"read-result failed for {key}: {completed.returncode}\n"
             f"stdout: {completed.stdout!r}\nstderr: {completed.stderr!r}"
         )
+    assert deadline is None or time.monotonic() < deadline, "result read exceeded original deadline"
     return completed.stdout
 
 
@@ -643,9 +681,43 @@ def wait_for(predicate, description, timeout=8, interval=0.025, *, deadline=None
     raise AssertionError(f"timed out waiting for {description}")
 
 
-def completed_observation(store, key):
-    value = observe(store, key)
+def completed_observation(store, key, *, deadline=None):
+    value = observe(store, key, deadline=deadline)
     return value if value.get("result", {}).get("status") == "completed" else None
+
+
+def wait_for_result_release(store, key, session, deadline, *, inspect=None):
+    """Read one terminal result and its release within the original budget."""
+    observation = wait_for(
+        lambda: (value if (value := observe(store, key, deadline=deadline)).get("result") else None),
+        f"{key} terminal result", deadline=deadline,
+    )
+    answer = read_result(store, key, deadline=deadline) if observation["result"]["status"] == "completed" else None
+    if inspect is None:
+        def inspect(remaining):
+            return command("inspect-session", "--store", store, "--session", session,
+                           timeout=remaining)["execution"]
+    execution = wait_for_execution_release(inspect, deadline)
+    return observation, answer, execution
+
+
+def wait_model_cleanup(diagnostics, store, session, observation, deadline):
+    # A saved result is semantic authority, not physical release. Match the
+    # admitted owner before checking its final accounting, with no fresh budget.
+    diagnostics.wait_model_cleanup(observation["processing"], deadline)
+
+    def inspect(remaining):
+        diagnostics.claim_inspection(limit=49)
+        return command(
+            "inspect-session", "--store", store, "--session", session,
+            timeout=remaining,
+        )["execution"]
+
+    return wait_for_execution_release(inspect, deadline)
+
+
+def assert_model_cleanup_census(diagnostics, *observations):
+    diagnostics.assert_model_cleanup_census(*(value["processing"] for value in observations))
 
 
 def main():
@@ -664,6 +736,7 @@ def main():
     proposal_milestones = None
     proposal_gate_keeper = None
     rollback_milestones = None
+    continuation_diagnostics = None
     completed = False
     try:
         forbidden_effect = state / "proposal-must-not-launch"
@@ -740,6 +813,7 @@ def main():
             "denial-first-deny,stop-first-stop",
             "--test-control-gate-path",
             control_gate,
+            observations="dispatch",
         )
         processes.append(proposal_host)
         proposal_milestones = HostDiagnostics(proposal_host)
@@ -861,7 +935,6 @@ def main():
 
         stop_host(proposal_host)
         processes.remove(proposal_host)
-        proposal_milestones.close()
         proposal_milestones = None
         os.close(proposal_gate_keeper)
         proposal_gate_keeper = None
@@ -949,13 +1022,14 @@ def main():
         assert complete_results["actions"]["unresolved"] == [], complete_results
         assert [item["call_ordinal"] for item in complete_results["actions"]["resolved"]] == ["0", "3"]
         assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
-        with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
-            assert database.execute("SELECT count(*) FROM model_operation").fetchone() == (1,)
+        continuation_first_processing = observe(continuation_store, "continuation-first")["processing"]
         continuation_before_admission_crash = crash_host(
             continuation_host, state, "continuation-before-admission-crash"
         )
         processes.remove(continuation_host)
         assert continuation_before_admission_crash["returncode"] == -signal.SIGKILL
+        with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
+            assert database.execute("SELECT count(*) FROM model_operation").fetchone() == (1,)
         continuation_host = start_host(
             continuation_store,
             f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
@@ -963,18 +1037,28 @@ def main():
             "5000",
         )
         processes.append(continuation_host)
+        continuation_diagnostics = HostDiagnostics(continuation_host)
+        continuation_deadline = time.monotonic() + 8
 
         def continuation_successor_admitted():
-            with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
-                return database.execute(
-                    "SELECT count(*) FROM model_operation"
-                ).fetchone() == (2,)
+            # Observe through the Store owner. An external SQLite reader can
+            # prevent admission COMMIT in DELETE-journal/zero-busy-timeout mode.
+            value = observe(continuation_store, "continuation-first", deadline=continuation_deadline)
+            return (
+                value
+                if value.get("queue", {}).get("status") == "processing"
+                and value.get("processing") == {
+                    "turn": continuation_first_processing["turn"], "operation": "2", "attempt": "1",
+                }
+                else None
+            )
 
-        wait_for(continuation_successor_admitted, "tool-result successor admission")
+        wait_for(continuation_successor_admitted, "tool-result successor admission", deadline=continuation_deadline)
         assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
         continuation_after_admission_crash = crash_host(
-            continuation_host, state, "continuation-after-admission-crash"
+            continuation_host, state, "continuation-after-admission-crash", diagnostics=continuation_diagnostics
         )
+        continuation_diagnostics = None
         processes.remove(continuation_host)
         assert continuation_after_admission_crash["returncode"] == -signal.SIGKILL
         with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
@@ -2306,24 +2390,29 @@ def main():
             f"http://127.0.0.1:{scratch_endpoint.server_port}/responses",
             "--test-request-scratch-limit",
             str(64 * 1024),
+            "--test-phase-trace",
+            observations="control",
         )
         processes.append(scratch_host)
+        scratch_diagnostics = HostDiagnostics(scratch_host)
         configure(state, scratch_store, "scratch-config", "direct/response-scratch", "model-a")
         message(state, scratch_store, "scratch-message", "direct/response-scratch", "scratch")
+        scratch_deadline = time.monotonic() + 8
         rejected = wait_for(
-            lambda: (value := observe(scratch_store, "scratch-message")).get("result", {}).get("code")
+            lambda: (value := observe(
+                scratch_store, "scratch-message", deadline=scratch_deadline,
+            )).get("result", {}).get("code")
             and value,
             "response scratch exhaustion",
+            deadline=scratch_deadline,
         )
         assert rejected["result"]["code"] == "response_scratch_exhausted", rejected
-        assert command(
-            "inspect-session",
-            "--store",
-            scratch_store,
-            "--session",
-            "direct/response-scratch",
-        )["execution"]["scratch_used_bytes"] == "0"
+        wait_model_cleanup(
+            scratch_diagnostics, scratch_store, "direct/response-scratch",
+            rejected, scratch_deadline,
+        )
         stop_host(scratch_host)
+        assert_model_cleanup_census(scratch_diagnostics, rejected)
         processes.remove(scratch_host)
         scratch_endpoint.shutdown()
         scratch_endpoint.server_close()
@@ -2339,20 +2428,34 @@ def main():
         growth_thread.start()
         growth_store = state / "growth-store"
         growth_host = start_host(
-            growth_store, f"http://127.0.0.1:{growth_endpoint.server_port}/responses"
+            growth_store, f"http://127.0.0.1:{growth_endpoint.server_port}/responses",
+            "--test-phase-trace", observations="control",
         )
         processes.append(growth_host)
+        growth_diagnostics = HostDiagnostics(growth_host)
         configure(state, growth_store, "growth-config-a", "direct/growth-a", "model-a")
         configure(state, growth_store, "growth-config-b", "direct/growth-b", "model-a")
         message(state, growth_store, "growth-count", "direct/growth-a", "count")
-        wait_for(lambda: completed_observation(growth_store, "growth-count"), "many item output")
-        message(state, growth_store, "growth-bytes", "direct/growth-b", "bytes")
-        wait_for(
-            lambda: completed_observation(growth_store, "growth-bytes"),
-            "large output import",
-            timeout=20,
+        count_deadline = time.monotonic() + 8
+        counted = wait_for(
+            lambda: completed_observation(growth_store, "growth-count", deadline=count_deadline),
+            "many item output", deadline=count_deadline,
         )
-        assert read_result(growth_store, "growth-count") == b"count answer"
+        assert read_result(growth_store, "growth-count", deadline=count_deadline) == b"count answer"
+        wait_model_cleanup(
+            growth_diagnostics, growth_store, "direct/growth-a", counted, count_deadline,
+        )
+        message(state, growth_store, "growth-bytes", "direct/growth-b", "bytes")
+        bytes_deadline = time.monotonic() + 20
+        imported = wait_for(
+            lambda: completed_observation(growth_store, "growth-bytes", deadline=bytes_deadline),
+            "large output import",
+            deadline=bytes_deadline,
+        )
+        assert read_result(growth_store, "growth-bytes", deadline=bytes_deadline) == large_answer.encode()
+        wait_model_cleanup(
+            growth_diagnostics, growth_store, "direct/growth-b", imported, bytes_deadline,
+        )
         # A failed caller destination may retain a prefix, but it cannot make
         # the read successful or consume the saved keyed answer. A fresh read
         # streams the complete bytes again without inventing a newline.
@@ -2407,6 +2510,7 @@ def main():
         )["execution"]
         assert resources["scratch_used_bytes"] == "0", resources
         stop_host(growth_host)
+        assert_model_cleanup_census(growth_diagnostics, counted, imported)
         processes.remove(growth_host)
         growth_endpoint.shutdown()
         growth_endpoint.server_close()
@@ -2932,14 +3036,16 @@ def main():
         )
         wait_for(lambda: len(sealed_endpoint.requests) == 1, "sealed response delivery")
         time.sleep(0.5)
+        sealed_observation = observe(sealed_store, "sealed-message")
+        assert sealed_observation["processing"]["attempt"] == "1" and "result" not in sealed_observation, sealed_observation
+        stop_host(sealed_host)
+        processes.remove(sealed_host)
         database = sqlite3.connect(sealed_store / "rui.sqlite3")
         assert database.execute(
             "SELECT attempt_ordinal,uncertain,resolution_code FROM model_operation"
         ).fetchone() == (1, 1, None)
         assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
         database.close()
-        stop_host(sealed_host)
-        processes.remove(sealed_host)
         sealed_host = start_host(
             sealed_store,
             f"http://127.0.0.1:{sealed_endpoint.server_port}/responses",
@@ -3076,12 +3182,8 @@ def main():
             "direct/capacity-wait-b",
         )["execution"]["scratch_used_bytes"]
         assert scratch_after == scratch_before
-        database = sqlite3.connect(durable_wait_store / "rui.sqlite3")
-        assert database.execute("SELECT count(*) FROM model_operation").fetchone()[0] == 1
-        assert database.execute(
-            "SELECT turn_id FROM message_admission WHERE command_key='capacity-wait-message-b'"
-        ).fetchone()[0] is None
-        database.close()
+        queued_observation = observe(durable_wait_store, "capacity-wait-message-b")
+        assert queued_observation["queue"]["status"] == "queued" and "processing" not in queued_observation, queued_observation
         assert len(capacity_endpoint.requests) == 1
         capacity_release_started = time.monotonic()
         capacity_release.set()
@@ -3805,6 +3907,7 @@ def main():
             "--fault",
             "attempt-before-commit",
             "--test-phase-trace",
+            observations="dispatch",
         )
         processes.append(host)
         rollback_milestones = HostDiagnostics(host)
@@ -3824,7 +3927,6 @@ def main():
         assert "processing" not in rollback_queued, rollback_queued
         stop_host(host)
         processes.remove(host)
-        rollback_milestones.close()
         rollback_milestones = None
         with sqlite3.connect(rollback_store / "rui.sqlite3") as database:
             assert database.execute(
@@ -3941,30 +4043,32 @@ def main():
             ("request-seal", "request_seal_failed"),
         ):
             fault_store = state / f"{fault}-store"
-            host = start_host(fault_store, url, "--fault", fault)
+            host = start_host(
+                fault_store, url, "--fault", fault,
+                "--test-phase-trace", observations="control",
+            )
             processes.append(host)
+            fault_diagnostics = HostDiagnostics(host)
             configure(state, fault_store, f"{fault}-config", f"direct/{fault}", "model-a")
             message(state, fault_store, f"{fault}-message", f"direct/{fault}", fault)
+            fault_deadline = time.monotonic() + 8
             failed = wait_for(
                 lambda key=f"{fault}-message", code=expected_code: (
-                    value := observe(fault_store, key)
+                    value := observe(fault_store, key, deadline=fault_deadline)
                 )["status"]
                 == "accepted"
                 and value.get("result", {}).get("code") == code
                 and value,
                 f"saved {fault} failure",
+                deadline=fault_deadline,
             )
             assert failed["processing"]["attempt"] == "1", failed
             assert endpoint.requests == []
-            resources = command(
-                "inspect-session",
-                "--store",
-                fault_store,
-                "--session",
-                f"direct/{fault}",
-            )["execution"]
-            assert resources["scratch_used_bytes"] == "0", resources
+            wait_model_cleanup(
+                fault_diagnostics, fault_store, f"direct/{fault}", failed, fault_deadline,
+            )
             stop_host(host)
+            assert_model_cleanup_census(fault_diagnostics, failed)
             processes.remove(host)
 
         # A canonical stop committed between resumable preparation advances
@@ -3983,6 +4087,7 @@ def main():
             "--test-phase-trace",
             "--test-request-preparation-advance-delay-ms",
             "1500",
+            observations="dispatch",
         )
         processes.append(preparation_stop_host)
         preparation_stop_trace = HostDiagnostics(preparation_stop_host)
@@ -4033,12 +4138,8 @@ def main():
             ).fetchall() == [(1, "interrupted")]
             assert database.execute("SELECT outcome_code FROM turn").fetchall() == [("cancelled",)]
         assert preparation_stop_endpoint.requests == []
-        preparation_stop_host.kill()
-        preparation_stop_host.wait(timeout=10)
+        stop_process(preparation_stop_host)
         processes.remove(preparation_stop_host)
-        preparation_stop_trace.close()
-        preparation_stop_host.stdout.close()
-        preparation_stop_host.stderr.close()
         preparation_stop_endpoint.shutdown()
         preparation_stop_endpoint.server_close()
         preparation_stop_thread.join(timeout=5)
@@ -4086,6 +4187,7 @@ def main():
             "--test-request-preparation-advance-delay-ms",
             "1500",
             accelerated_retries=False,
+            observations="dispatch",
         )
         processes.append(preparation_shutdown_host)
         preparation_shutdown_trace = HostDiagnostics(preparation_shutdown_host)
@@ -4106,10 +4208,8 @@ def main():
         # beginning shutdown; its reply does not determine Host lifecycle.
         assert shutdown_trigger.returncode in (0, 1), shutdown_trigger
         assert preparation_shutdown_host.wait(timeout=10) != 0
+        stop_process(preparation_shutdown_host)
         processes.remove(preparation_shutdown_host)
-        preparation_shutdown_trace.close()
-        preparation_shutdown_host.stdout.close()
-        preparation_shutdown_host.stderr.close()
         assert preparation_shutdown_endpoint.requests == []
         assert not list((preparation_shutdown_store / "scratch").glob("request-*.tmp"))
         preparation_shutdown_host = start_host(
@@ -4212,8 +4312,10 @@ def main():
             url,
             "--test-request-scratch-limit",
             str(actual_request_bytes),
+            "--test-phase-trace", observations="control",
         )
         processes.append(host)
+        exact_diagnostics = HostDiagnostics(host)
         wait_for(lambda: len(endpoint.requests) == 1, "exact request capacity")
         assert len(endpoint.requests[0]) == actual_request_bytes
         resources = command(
@@ -4227,7 +4329,7 @@ def main():
         exact_deadline = time.monotonic() + 8
         endpoint.release.set()
         exact_result = wait_for(
-            lambda: (value := observe(framing_exact_store, "exact-0"))
+            lambda: (value := observe(framing_exact_store, "exact-0", deadline=exact_deadline))
             .get("result", {})
             .get("code")
             and value,
@@ -4237,21 +4339,12 @@ def main():
         # The request itself fits exactly and reaches HTTP. Its held charge
         # intentionally leaves no shared scratch for the fixture response.
         assert exact_result["result"]["code"] == "response_scratch_exhausted", exact_result
-        # A committed result is not physical release. Observe that owner boundary
-        # within the same original result deadline, including custody and charge.
-        resources = wait_for(
-            lambda: (
-                value if (value := command(
-                    "inspect-session", "--store", framing_exact_store,
-                    "--session", "direct/framing-exact",
-                )["execution"])["custody_occupied"] == "0"
-                and value["scratch_used_bytes"] == "0" else None
-            ),
-            "exact-capacity physical cleanup",
-            deadline=exact_deadline,
+        wait_model_cleanup(
+            exact_diagnostics, framing_exact_store, "direct/framing-exact",
+            exact_result, exact_deadline,
         )
-        assert resources["scratch_used_bytes"] == "0", resources
         stop_host(host)
+        assert_model_cleanup_census(exact_diagnostics, exact_result)
         processes.remove(host)
 
         endpoint.requests.clear()
@@ -4269,25 +4362,28 @@ def main():
             url,
             "--test-request-scratch-limit",
             str(actual_request_bytes - 1),
+            "--test-phase-trace", observations="control",
         )
         processes.append(host)
+        limit_diagnostics = HostDiagnostics(host)
+        limit_deadline = time.monotonic() + 8
         limited = wait_for(
-            lambda: (value := observe(framing_limit_store, "limit-0")).get("result", {}).get("code")
+            lambda: (value := observe(
+                framing_limit_store, "limit-0", deadline=limit_deadline,
+            )).get("result", {}).get("code")
             == "request_scratch_exhausted"
             and value,
             "pre-dispatch framing capacity failure",
+            deadline=limit_deadline,
         )
         assert limited["processing"]["attempt"] == "1", limited
         assert endpoint.requests == []
-        resources = command(
-            "inspect-session",
-            "--store",
-            framing_limit_store,
-            "--session",
-            "direct/framing-limit",
-        )["execution"]
-        assert resources["scratch_used_bytes"] == "0", resources
+        wait_model_cleanup(
+            limit_diagnostics, framing_limit_store, "direct/framing-limit",
+            limited, limit_deadline,
+        )
         stop_host(host)
+        assert_model_cleanup_census(limit_diagnostics, limited)
         processes.remove(host)
 
         # URL authority is parsed before curl sees it. Userinfo that makes a
@@ -4396,10 +4492,16 @@ def main():
             else:
                 assert observation["queue"]["status"] == "processing" and "result" not in observation, observation
                 assert observation["processing"]["attempt"] == "1", observation
+                message(case_state, transient_store, "later", "direct/transient", "later")
+                assert observe(transient_store, "later")["queue"]["status"] == "queued"
+            retry_observed_at_ms = int(time.time() * 1000)
+            stop_host(host)
+            processes.remove(host)
+            if path != "/large-422":
                 with sqlite3.connect(transient_store / "rui.sqlite3") as database:
                     retry = database.execute(
                         "SELECT allowance_used,uncertain,resolution_code,last_failure_code,retry_due_at_ms>? FROM model_operation",
-                        (int(time.time() * 1000),),
+                        (retry_observed_at_ms,),
                     ).fetchall()
                     expected_code = (
                         "provider_transport_failure"
@@ -4407,10 +4509,6 @@ def main():
                         else f"provider_temporary_http_{path.rsplit('-', 1)[-1].lstrip('/')}"
                     )
                     assert retry == [(1, 0, None, expected_code, 1)], retry
-                message(case_state, transient_store, "later", "direct/transient", "later")
-                assert observe(transient_store, "later")["queue"]["status"] == "queued"
-            stop_host(host)
-            processes.remove(host)
             host = start_host(
                 transient_store,
                 f"http://127.0.0.1:{endpoint.server_port}{path}",
@@ -4654,6 +4752,20 @@ def main():
         processes.remove(offline)
         completed = True
     finally:
+        incoming_error = sys.exc_info()[1]
+        collector_error = None
+        if continuation_diagnostics is not None:
+            preserve_failure_metadata(state / "successor-pre-kill.json", lambda: {
+                "process": continuation_host.pid, "returncode": continuation_host.poll(),
+                "atomic_census": False, "stderr_tail": continuation_diagnostics.tail().decode(errors="replace")})
+            try:
+                if continuation_host.poll() is None:
+                    crash_host(continuation_host, state, "successor-failure", diagnostics=continuation_diagnostics)
+                else:
+                    continuation_diagnostics.close()
+                    (state / "successor-failure.stderr").write_bytes(continuation_diagnostics.tail())
+            except Exception as error:
+                collector_error = error  # Never skip unrelated mandatory teardown.
         for process in processes:
             stop_host(process)
         endpoint.shutdown()
@@ -4674,16 +4786,19 @@ def main():
             continuation_endpoint.server_close()
         if continuation_thread is not None:
             continuation_thread.join(timeout=5)
-        if proposal_milestones is not None:
-            proposal_milestones.close()
-        if rollback_milestones is not None:
-            rollback_milestones.close()
         if proposal_gate_keeper is not None:
             os.close(proposal_gate_keeper)
         if completed:
             shutil.rmtree(state)
         else:
             print(f"retained dispatch integration failure state: {state}", file=sys.stderr)
+        if collector_error is not None:
+            preserve_failure_metadata(state / "successor-collector-failure.json", lambda: {
+                "original_error": type(incoming_error).__name__ if incoming_error else None,
+                "collector_error": type(collector_error).__name__})
+            if incoming_error is None:
+                raise collector_error
+            print("Successor diagnostic collection failed; original failure retained", file=sys.stderr)
 
 
 if __name__ == "__main__":
