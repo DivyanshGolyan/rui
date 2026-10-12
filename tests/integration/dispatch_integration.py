@@ -15,7 +15,7 @@ import threading
 import time
 from collections import Counter
 
-from host_process import HostDiagnostics, TestHTTPServer, start_ready_process, stop_process
+from host_process import HostDiagnostics, TestHTTPServer, preserve_failure_metadata, start_ready_process, stop_process
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -452,21 +452,26 @@ def stop_host(process):
 
 def crash_host(process, state, label, diagnostics=None):
     assert process.poll() is None, process.returncode
-    process.kill()
-    process.wait(timeout=10)
-    stdout = process.stdout.read()
-    if diagnostics is None:
-        stderr = process.stderr.read()
-    else:
-        diagnostics.close()
-        stderr = diagnostics.tail()
-    (state / f"{label}.stdout").write_bytes(stdout)
-    (state / f"{label}.stderr").write_bytes(stderr)
-    return {
-        "returncode": process.returncode,
-        "stdout": stdout,
-        "stderr": stderr,
-    }
+    try:
+        process.kill()
+        process.wait(timeout=10)
+        stdout = process.stdout.read()
+        if diagnostics is None:
+            stderr = process.stderr.read()
+        else:
+            diagnostics.close()
+            stderr = diagnostics.tail()
+        (state / f"{label}.stdout").write_bytes(stdout)
+        (state / f"{label}.stderr").write_bytes(stderr)
+        return {
+            "returncode": process.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+        }
+    finally:
+        # Reap/observation validity and pipe closure retain an explicit owner,
+        # including when bounded diagnostic collection or persistence fails.
+        stop_host(process)
 
 
 def configure(state, store, key, session, model, schema=None, instructions=None):
@@ -709,6 +714,7 @@ def main():
     proposal_milestones = None
     proposal_gate_keeper = None
     rollback_milestones = None
+    continuation_diagnostics = None
     completed = False
     try:
         forbidden_effect = state / "proposal-must-not-launch"
@@ -995,13 +1001,14 @@ def main():
         assert complete_results["actions"]["unresolved"] == [], complete_results
         assert [item["call_ordinal"] for item in complete_results["actions"]["resolved"]] == ["0", "3"]
         assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
-        with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
-            assert database.execute("SELECT count(*) FROM model_operation").fetchone() == (1,)
+        continuation_first_processing = observe(continuation_store, "continuation-first")["processing"]
         continuation_before_admission_crash = crash_host(
             continuation_host, state, "continuation-before-admission-crash"
         )
         processes.remove(continuation_host)
         assert continuation_before_admission_crash["returncode"] == -signal.SIGKILL
+        with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
+            assert database.execute("SELECT count(*) FROM model_operation").fetchone() == (1,)
         continuation_host = start_host(
             continuation_store,
             f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
@@ -1009,18 +1016,28 @@ def main():
             "5000",
         )
         processes.append(continuation_host)
+        continuation_diagnostics = HostDiagnostics(continuation_host)
+        continuation_deadline = time.monotonic() + 8
 
         def continuation_successor_admitted():
-            with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
-                return database.execute(
-                    "SELECT count(*) FROM model_operation"
-                ).fetchone() == (2,)
+            # Observe through the Store owner. An external SQLite reader can
+            # prevent admission COMMIT in DELETE-journal/zero-busy-timeout mode.
+            value = observe(continuation_store, "continuation-first", deadline=continuation_deadline)
+            return (
+                value
+                if value.get("queue", {}).get("status") == "processing"
+                and value.get("processing") == {
+                    "turn": continuation_first_processing["turn"], "operation": "2", "attempt": "1",
+                }
+                else None
+            )
 
-        wait_for(continuation_successor_admitted, "tool-result successor admission")
+        wait_for(continuation_successor_admitted, "tool-result successor admission", deadline=continuation_deadline)
         assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
         continuation_after_admission_crash = crash_host(
-            continuation_host, state, "continuation-after-admission-crash"
+            continuation_host, state, "continuation-after-admission-crash", diagnostics=continuation_diagnostics
         )
+        continuation_diagnostics = None
         processes.remove(continuation_host)
         assert continuation_after_admission_crash["returncode"] == -signal.SIGKILL
         with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
@@ -2999,14 +3016,16 @@ def main():
         )
         wait_for(lambda: len(sealed_endpoint.requests) == 1, "sealed response delivery")
         time.sleep(0.5)
+        sealed_observation = observe(sealed_store, "sealed-message")
+        assert sealed_observation["processing"]["attempt"] == "1" and "result" not in sealed_observation, sealed_observation
+        stop_host(sealed_host)
+        processes.remove(sealed_host)
         database = sqlite3.connect(sealed_store / "rui.sqlite3")
         assert database.execute(
             "SELECT attempt_ordinal,uncertain,resolution_code FROM model_operation"
         ).fetchone() == (1, 1, None)
         assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
         database.close()
-        stop_host(sealed_host)
-        processes.remove(sealed_host)
         sealed_host = start_host(
             sealed_store,
             f"http://127.0.0.1:{sealed_endpoint.server_port}/responses",
@@ -3143,12 +3162,8 @@ def main():
             "direct/capacity-wait-b",
         )["execution"]["scratch_used_bytes"]
         assert scratch_after == scratch_before
-        database = sqlite3.connect(durable_wait_store / "rui.sqlite3")
-        assert database.execute("SELECT count(*) FROM model_operation").fetchone()[0] == 1
-        assert database.execute(
-            "SELECT turn_id FROM message_admission WHERE command_key='capacity-wait-message-b'"
-        ).fetchone()[0] is None
-        database.close()
+        queued_observation = observe(durable_wait_store, "capacity-wait-message-b")
+        assert queued_observation["queue"]["status"] == "queued" and "processing" not in queued_observation, queued_observation
         assert len(capacity_endpoint.requests) == 1
         capacity_release_started = time.monotonic()
         capacity_release.set()
@@ -4464,10 +4479,16 @@ def main():
             else:
                 assert observation["queue"]["status"] == "processing" and "result" not in observation, observation
                 assert observation["processing"]["attempt"] == "1", observation
+                message(case_state, transient_store, "later", "direct/transient", "later")
+                assert observe(transient_store, "later")["queue"]["status"] == "queued"
+            retry_observed_at_ms = int(time.time() * 1000)
+            stop_host(host)
+            processes.remove(host)
+            if path != "/large-422":
                 with sqlite3.connect(transient_store / "rui.sqlite3") as database:
                     retry = database.execute(
                         "SELECT allowance_used,uncertain,resolution_code,last_failure_code,retry_due_at_ms>? FROM model_operation",
-                        (int(time.time() * 1000),),
+                        (retry_observed_at_ms,),
                     ).fetchall()
                     expected_code = (
                         "provider_transport_failure"
@@ -4475,10 +4496,6 @@ def main():
                         else f"provider_temporary_http_{path.rsplit('-', 1)[-1].lstrip('/')}"
                     )
                     assert retry == [(1, 0, None, expected_code, 1)], retry
-                message(case_state, transient_store, "later", "direct/transient", "later")
-                assert observe(transient_store, "later")["queue"]["status"] == "queued"
-            stop_host(host)
-            processes.remove(host)
             host = start_host(
                 transient_store,
                 f"http://127.0.0.1:{endpoint.server_port}{path}",
@@ -4722,6 +4739,20 @@ def main():
         processes.remove(offline)
         completed = True
     finally:
+        incoming_error = sys.exc_info()[1]
+        collector_error = None
+        if continuation_diagnostics is not None:
+            preserve_failure_metadata(state / "successor-pre-kill.json", lambda: {
+                "process": continuation_host.pid, "returncode": continuation_host.poll(),
+                "atomic_census": False, "stderr_tail": continuation_diagnostics.tail().decode(errors="replace")})
+            try:
+                if continuation_host.poll() is None:
+                    crash_host(continuation_host, state, "successor-failure", diagnostics=continuation_diagnostics)
+                else:
+                    continuation_diagnostics.close()
+                    (state / "successor-failure.stderr").write_bytes(continuation_diagnostics.tail())
+            except Exception as error:
+                collector_error = error  # Never skip unrelated mandatory teardown.
         for process in processes:
             stop_host(process)
         endpoint.shutdown()
@@ -4752,6 +4783,13 @@ def main():
             shutil.rmtree(state)
         else:
             print(f"retained dispatch integration failure state: {state}", file=sys.stderr)
+        if collector_error is not None:
+            preserve_failure_metadata(state / "successor-collector-failure.json", lambda: {
+                "original_error": type(incoming_error).__name__ if incoming_error else None,
+                "collector_error": type(collector_error).__name__})
+            if incoming_error is None:
+                raise collector_error
+            print("Successor diagnostic collection failed; original failure retained", file=sys.stderr)
 
 
 if __name__ == "__main__":

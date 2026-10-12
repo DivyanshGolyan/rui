@@ -15,11 +15,12 @@ import tempfile
 import termios
 import threading
 import time
+from collections import Counter
 
 import canonical_failure_integration as canonical
 import dispatch_integration as fixture
 import human_cli_integration as human
-from host_process import HostStartError, canonical_fixture_root, preserve_failure_metadata, start_ready_process
+from host_process import HostStartError, canonical_fixture_root, preserve_failure_metadata, start_ready_process, stop_process
 
 
 def assert_file_flags(actual, expected):
@@ -140,14 +141,17 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     const char *fault = getenv("RUI_TERMINAL_FAULT");
     const char *diagnostic_arm = getenv("RUI_DIAGNOSTIC_ARM");
     if (fd == 2 && diagnostic_arm && !access(diagnostic_arm, F_OK)) {
-        const char phase[] = "{\"rui_test_phase\":\"inspection_captured\",";
+        const int lifecycle = !strcmp(fault, "diagnostic-contention-host");
+        const char *phase = lifecycle ? "{\"rui_test_phase\":\"lifecycle_boundary\"," :
+            "{\"rui_test_phase\":\"inspection_captured\",";
         const char subject[] = ",\"subject_kind\":\"session\",\"subject\":\"diagnostic/session\"";
         static atomic_int contention_claimed = 0;
         int selected = 0;
-        if (!strcmp(fault, "diagnostic-contention") && count >= sizeof(phase) - 1 &&
-            !memcmp(bytes, phase, sizeof(phase) - 1) && count >= 2 &&
+        if ((lifecycle || !strcmp(fault, "diagnostic-contention")) && count >= strlen(phase) &&
+            !memcmp(bytes, phase, strlen(phase)) && count >= 2 &&
             !memcmp((const char *)bytes + count - 2, "}\n", 2)) {
-            for (size_t i = 0; i + sizeof(subject) - 1 < count; ++i) {
+            selected = lifecycle;
+            for (size_t i = 0; !lifecycle && i + sizeof(subject) - 1 < count; ++i) {
                 if (!memcmp((const char *)bytes + i, subject, sizeof(subject) - 1) &&
                     (((const char *)bytes)[i + sizeof(subject) - 1] == ',' ||
                      ((const char *)bytes)[i + sizeof(subject) - 1] == '}')) selected = 1;
@@ -161,7 +165,7 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
             memcpy(correlation, bytes, count);
             correlation[count] = 0;
             record(correlation);
-            record("diagnostic-held-inspection\n");
+            record(lifecycle ? "diagnostic-held-lifecycle\n" : "diagnostic-held-inspection\n");
             while (access(getenv("RUI_DIAGNOSTIC_RELEASE"), F_OK)) usleep(1000);
         }
         record("diagnostic-write\n");
@@ -1637,7 +1641,7 @@ def host_diagnostic_cases(state, library):
         ("diagnostic-nonblock", "response-acquire"),
         ("diagnostic-restore", "response-acquire"),
         ("diagnostic-restore-startup", "response-acquire"),
-        ("diagnostic-contention", "response-acquire"),
+        ("diagnostic-contention-host", "response-acquire"),
         ("normal", "response-unlink"),
         ("filled", "success"), ("closed", "success"),
         ("diagnostic-restore", "success"),
@@ -1661,7 +1665,10 @@ def host_diagnostic_cases(state, library):
             # nonblocking flags before spawn, not through an external race.
             flags |= os.O_NONBLOCK
             fcntl.fcntl(write_fd, fcntl.F_SETFL, flags)
-        host = pending = None
+        host = None
+        inspectors = []
+        contention_complete = False
+        contention_inspections = ["diagnostic/session-extra", "diagnostic/session", "diagnostic/session"]
         env = {**os.environ,
             "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "diagnostic-restore" if credit == "diagnostic-restore-startup" else credit,
@@ -1677,11 +1684,12 @@ def host_diagnostic_cases(state, library):
             host, _ = start_ready_process(fixture.host_arguments(store,
                 f"http://127.0.0.1:{endpoint.server_port}/responses",
                 *(["--fault", fault] if fault != "success" else []),
-                *(["--test-phase-trace"] if fault == "success" or credit in ("diagnostic-contention", "diagnostic-partial") else [])), env=env, stderr_pipe=(reader, write_fd),
+                *(["--test-phase-trace"] if fault == "success" or credit in ("diagnostic-contention-host", "diagnostic-partial") else [])), env=env, stderr_pipe=(reader, write_fd),
+                observations="control" if credit == "diagnostic-contention-host" else None,
                 required_fields={"execution": "enabled", "curl": "8.22.0"})
             session = "diagnostic/session"
             fixture.configure(root, store, "config", session, "model-a")
-            if credit == "diagnostic-contention":
+            if credit == "diagnostic-contention-host":
                 fixture.configure(root, store, "config-other", "diagnostic/session-extra", "model-a")
             status = subprocess.run([str(fixture.RUI), "host", "status", "--store", str(store)],
                 capture_output=True, text=True, timeout=8)
@@ -1706,36 +1714,62 @@ def host_diagnostic_cases(state, library):
                 assert filled > 0
             if credit == "closed":
                 reader.close()
+            contention_deadline = time.monotonic() + 8 if credit == "diagnostic-contention-host" else None
             if credit.startswith("diagnostic-"):
                 arm.touch()
             if credit == "diagnostic-partial":
                 fixture.command("inspect-session", "--store", store, "--session", session)
                 assert "diagnostic-partial\n" in log.read_text()
                 arm.unlink()
-            if credit == "diagnostic-contention":
-                # Wrong phase and prefix-lookalike Session must not claim the
-                # hold. No target inspection is outstanding before pending.
-                status = subprocess.run([str(fixture.RUI), "host", "status", "--store", str(store)],
-                    capture_output=True, text=True, timeout=3)
-                assert status.returncode == 0 and "diagnostic-held" not in log.read_text(), status
-                unrelated = fixture.start_command("inspect-session", "--store", store, "--session", "diagnostic/session-extra")
-                out, err = unrelated.communicate(timeout=3)
-                assert unrelated.returncode == 0 and "diagnostic-held" not in log.read_text(), (out, err)
-                pending = fixture.start_command("inspect-session", "--store", store, "--session", session)
-                fixture.wait_for(lambda: log.exists() and "diagnostic-held-inspection\n" in log.read_text(), "native inspection fd2 held")
+            if credit == "diagnostic-contention-host":
+                # The forwarding driver proves the exact inspection matcher.
+                # Here unrelated optional custody cannot gate canonical reads.
+                def control_remaining():
+                    remaining = contention_deadline - time.monotonic()
+                    assert remaining > 0, "contention exceeded original 8s deadline"
+                    return min(3, remaining)
+
+                fixture.wait_for(lambda: log.exists() and "diagnostic-held-lifecycle\n" in log.read_text(),
+                    "native lifecycle fd2 held", deadline=contention_deadline)
                 captured = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
                 assert len(captured) == 1, captured
                 held = captured[0]
-                assert held["rui_test_phase"] == "inspection_captured" and held["subject_kind"] == "session" and held["subject"] == session, held
+                assert held["rui_test_phase"] == "lifecycle_boundary", held
                 assert held["process"] == str(host.pid) and int(held["run"]) > 0 and int(held["sequence"]) > 0 and held["clock"] == "awake_ns", held
-                assert pending.poll() is None, "first inspection escaped native gate"
+                status = subprocess.run([str(fixture.RUI), "host", "status", "--store", str(store)],
+                    capture_output=True, text=True, timeout=control_remaining())
+                assert status.returncode == 0, status
+                unrelated = fixture.start_command("inspect-session", "--store", store, "--session", "diagnostic/session-extra")
+                inspectors.append(unrelated)
+                out, err = unrelated.communicate(timeout=control_remaining())
+                assert unrelated.returncode == 0 and json.loads(out)["session"]["reference"] == "diagnostic/session-extra", (out, err)
+                pending = fixture.start_command("inspect-session", "--store", store, "--session", session)
+                inspectors.append(pending)
+                native = host.rui_observations
+                inspection = fixture.wait_for(lambda: next((record for record in native.snapshot()["records"]
+                    if record["rui_test_phase"] == "inspection_captured" and record.get("subject_kind") == "session" and record.get("subject") == session), None),
+                    "exact native capture under optional contention", deadline=contention_deadline)
+                assert inspection["process"] == held["process"] and inspection["run"] == held["run"], inspection
+                out, err = pending.communicate(timeout=control_remaining())
+                reply = json.loads(out)
+                assert pending.returncode == 0 and reply["type"] == "session_report" and reply["profile"] == "current" and reply["session"]["reference"] == session, (out, err)
                 concurrent = fixture.start_command("inspect-session", "--store", store, "--session", session)
-                out, err = concurrent.communicate(timeout=3)
-                assert concurrent.returncode == 0, (out, err)
-                assert pending.poll() is None, "first inspection escaped native gate"
+                inspectors.append(concurrent)
+                out, err = concurrent.communicate(timeout=control_remaining())
+                assert concurrent.returncode == 0 and json.loads(out)["session"]["reference"] == session, (out, err)
+                assert time.monotonic() < contention_deadline and not release.exists() and host.poll() is None
+                assert log.read_text().count("diagnostic-held-lifecycle\n") == 1 and "diagnostic-held-inspection\n" not in log.read_text()
+                prefix = fixture.wait_for(lambda: (value if len((value := native.snapshot())["records"]) >= 4 else None),
+                    "complete held inspection population", deadline=contention_deadline)["records"]
+                assert [(record["rui_test_phase"], record.get("subject")) for record in prefix] == [
+                    ("lifecycle_boundary", None),
+                    *[("inspection_captured", subject) for subject in contention_inspections]], prefix
+                preserve_failure_metadata(root / "contention-capture.json", lambda: {
+                    "held": held, "inspection": inspection, "reply": reply,
+                    "remaining_seconds": contention_deadline - time.monotonic(), "native": native.snapshot()})
                 release.touch()
-                fixture.finish_command(pending)
-                pending = None
+                fixture.wait_for(lambda: "diagnostic-restored\n" in log.read_text().split("diagnostic-held-lifecycle\n", 1)[1],
+                    "held native write restored flags", deadline=contention_deadline)
                 arm.unlink()
             for index in range(count):
                 key = f"message-{index}"
@@ -1797,10 +1831,26 @@ def host_diagnostic_cases(state, library):
                     observation = fixture.wait_for(lambda: (value if (value := fixture.observe(store, key)).get("result", {}).get("code") else None),
                         f"{credit} {fault} settles")
                     assert observation["result"]["code"] == expected, observation
-                resources = fixture.wait_for(lambda: (value if (value := fixture.command(
-                    "inspect-session", "--store", store, "--session", session)["execution"])["custody_occupied"] == "0" else None),
-                    "diagnostic custody retirement")
+                retirement_deadline = time.monotonic() + 8
+
+                def diagnostic_resources():
+                    if credit == "diagnostic-contention-host":
+                        contention_inspections.append(session)
+                    value = fixture.command("inspect-session", "--store", store, "--session", session,
+                        timeout=max(0, retirement_deadline - time.monotonic()))["execution"]
+                    return value if value["custody_occupied"] == "0" else None
+
+                resources = fixture.wait_for(diagnostic_resources, "diagnostic custody retirement", deadline=retirement_deadline)
                 assert resources["scratch_used_bytes"] == "0", resources
+                if credit == "diagnostic-contention-host":
+                    population = fixture.wait_for(lambda: (value if len((value := native.snapshot())["records"]) >= len(contention_inspections) + 2 else None),
+                        "complete contention owner population", deadline=retirement_deadline)["records"]
+                    assert Counter(record["rui_test_phase"] for record in population) == {
+                        "lifecycle_boundary": 1, "inspection_captured": len(contention_inspections), "cleanup_completed": 1}, population
+                    assert Counter(record.get("subject") for record in population if record["rui_test_phase"] == "inspection_captured") == Counter(contention_inspections), population
+                    cleanup = [record for record in population if record["rui_test_phase"] == "cleanup_completed"]
+                    assert [(record["turn"], record["operation"], record["attempt"]) for record in cleanup] == [("1", "1", "1")], cleanup
+                    contention_complete = True
                 if index == 0 and credit in ("diagnostic-enable", "diagnostic-enable-unmutated"):
                     arm.unlink()
             assert_file_flags(fcntl.fcntl(write_fd, fcntl.F_GETFL),
@@ -1845,7 +1895,7 @@ def host_diagnostic_cases(state, library):
                 assert guidance in errors and b"do not resubmit uncertain work." in errors, bytes(errors)
             if credit in ("diagnostic-enable", "diagnostic-enable-unmutated"):
                 assert errors.count(contexts["response-acquire"]) == 1, bytes(errors)
-            if credit in ("diagnostic-contention", "diagnostic-partial"):
+            if credit in ("diagnostic-contention-host", "diagnostic-partial"):
                 records = []
                 for line in errors.splitlines():
                     if not line.startswith(b'{'): continue
@@ -1857,33 +1907,59 @@ def host_diagnostic_cases(state, library):
                 lost = next(i for i, record in enumerate(records) if record.get("trace_lost") is True)
                 assert all(record.get("trace_lost") is True for record in records[lost:]), records
                 assert "diagnostic-restored\n" in log.read_text()
+                if credit == "diagnostic-contention-host":
+                    assert not any(record.get("at_ns") == inspection["at_ns"] and record.get("subject") == session for record in records), "dropped inspection was retried"
             warnings = [line for line in errors.splitlines() if line.startswith(b"rui:")]
             print(f"Host diagnostics: {credit}/{fault}: public outcome checked, flags checked; warnings={warnings!r}", flush=True)
         finally:
+            incoming_error = sys.exc_info()[1]
+            cleanup_errors = []
+            if host is not None and credit == "diagnostic-contention-host":
+                preserve_failure_metadata(root / "contention-pre-kill.json", host.rui_observations.snapshot)
             release.touch()
-            if pending is not None:
-                pending.communicate(timeout=5)
-            if host is not None:
-                if host.poll() is None:
-                    host.kill()
-                host.wait(timeout=8)
-                if not reader.closed:
-                    os.set_blocking(reader.fileno(), False)
-                    with (root / "stderr.log").open("ab") as retained:
-                        while True:
-                            try:
-                                chunk = os.read(reader.fileno(), 65536)
-                            except BlockingIOError:
-                                break
-                            if not chunk: break
-                            retained.write(chunk)
-                fixture.stop_host(host)
-            elif not reader.closed: reader.close()
-            os.close(write_fd)
-            endpoint.shutdown()
-            endpoint.server_close()
-            thread.join(timeout=5)
-            assert not thread.is_alive()
+            inspector_deadline = time.monotonic() + 5
+            for inspector in inspectors:
+                try:
+                    stop_process(inspector, timeout=max(0, inspector_deadline - time.monotonic()))
+                except Exception as error:
+                    cleanup_errors.append(error)
+            try:
+                if host is not None:
+                    if host.poll() is None:
+                        host.kill()
+                    host.wait(timeout=8)
+                    if not reader.closed:
+                        os.set_blocking(reader.fileno(), False)
+                        with (root / "stderr.log").open("ab") as retained:
+                            while True:
+                                try:
+                                    chunk = os.read(reader.fileno(), 65536)
+                                except BlockingIOError:
+                                    break
+                                if not chunk: break
+                                retained.write(chunk)
+                    fixture.stop_host(host)
+                    if credit == "diagnostic-contention-host":
+                        preserve_failure_metadata(root / "contention-final.json", lambda: {
+                            "returncode": host.returncode, "state": host.rui_observations.final_state,
+                            "records": host.rui_observations.records})
+                        if contention_complete:
+                            assert host.returncode == -signal.SIGKILL
+                            assert host.rui_observations.records == population, "native population changed after complete census"
+                elif not reader.closed: reader.close()
+            finally:
+                os.close(write_fd)
+                endpoint.shutdown()
+                endpoint.server_close()
+                thread.join(timeout=5)
+                assert not thread.is_alive()
+            if cleanup_errors:
+                preserve_failure_metadata(root / "contention-cleanup.json", lambda: {
+                    "original_error": type(incoming_error).__name__ if incoming_error else None,
+                    "cleanup_errors": [type(error).__name__ for error in cleanup_errors]})
+                if incoming_error is None:
+                    raise cleanup_errors[0]
+                print("Inspection cleanup failed; original failure retained", file=sys.stderr)
 
 
 def main(selected=None):
