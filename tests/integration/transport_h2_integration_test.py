@@ -280,6 +280,123 @@ class ManagedDescriptorTests(unittest.TestCase):
 
 
 class ObservationDeadlineTests(unittest.TestCase):
+    def test_caller_populations_and_final_release_keep_original_budget(self):
+        class Released(Exception):
+            pass
+
+        cases = (("round_trip", 45, 2), ("queued_h1", 40, 8),
+                 ("stalled_capture", 45, 100), ("paused_capture_inactivity", 20, 20),
+                 ("capture_failure_on_resume", 20, 20), ("isolated_bad_header", 20, 2),
+                 ("connection_failure", 20, 2), ("isolated_terminal_stream", 20, 2))
+        for name, budget, population in cases:
+            phases = ("release",) if name in ("isolated_bad_header", "connection_failure") else ("read", "release")
+            for late in (None, *phases):
+                for boundary in (0, 0.1) if late else (0,):
+                    with self.subTest(caller=name, late=late, boundary=boundary), tempfile.TemporaryDirectory() as temporary:
+                        clock = [100.0]  # Readiness/setup are outside the result budget.
+                        observations = [0]
+                        start = 100.0
+                        clean = {"custody_occupied": "0", "scratch_used_bytes": "0", "dispatch_fenced": False}
+                        endpoint = SimpleNamespace(server_address=("localhost", 1), observed_shape=False,
+                            ready=SimpleNamespace(wait=lambda timeout: True), connections=["connection"],
+                            streams=[("connection", 1, "isolation-target", b""), ("connection", 3, "isolation-sibling", b"")],
+                            resets=[1], stream_ids={"isolation-target": 1}, answers={})
+                        if name == "round_trip":
+                            endpoint.answers = {f"h2-2-0-{i}": b"answer" for i in range(2)}
+                        elif name in ("stalled_capture", "paused_capture_inactivity", "capture_failure_on_resume"):
+                            prefix = {"stalled_capture": "stalled", "paused_capture_inactivity": "paused",
+                                      "capture_failure_on_resume": "resume"}[name]
+                            endpoint.streams = [None] * population
+                            endpoint.answers = {f"{prefix}-{i}": b"answer" for i in range(population)}
+                            endpoint.answers["resume-after"] = b"answer"
+                        endpoint.server_port = 1
+                        endpoint.first_ready = endpoint.ready
+                        endpoint.release_first = SimpleNamespace(set=lambda: None)
+                        endpoint.lock = contextlib.nullcontext()
+                        endpoint.requests, endpoint.active = [("first", b"")], 1
+                        endpoint.serve_forever = endpoint.shutdown = endpoint.server_close = lambda: None
+
+                        def observe(store, key, *, deadline=None):
+                            if deadline is None:
+                                return {"processing": {"turn": "1", "operation": "1", "attempt": "1"}}
+                            observations[0] += 1
+                            if observations[0] == 1:
+                                clock[0] += budget * 0.6
+                            status, code = "completed", None
+                            if name == "stalled_capture" and observations[0] == 1:
+                                status = "cancelled"
+                            if name == "capture_failure_on_resume" and observations[0] == 1:
+                                status, code = "failed", "response_write_failed"
+                            if name == "isolated_bad_header":
+                                status, code = "failed", ("invalid_provider_headers" if observations[0] == 1 else "provider_http_422")
+                            if name == "connection_failure":
+                                status, code = "failed", "provider_http_422"
+                            if name == "isolated_terminal_stream" and observations[0] == 1:
+                                status, code = "failed", "response_scratch_exhausted"
+                            assert clock[0] < deadline, "observation exceeded original deadline"
+                            return {"result": {"status": status, "code": code}}
+
+                        def read(store, key, *, deadline):
+                            if late == "read" and observations[0] == population:
+                                clock[0] = start + budget + boundary
+                            assert clock[0] < deadline, "read exceeded original deadline"
+                            if name == "queued_h1":
+                                return f"answer-h1-0-{key.rsplit('-', 1)[1]}".encode()
+                            return b"unaffected sibling" if name == "isolated_terminal_stream" else b"answer"
+
+                        def command(kind, *args, **kwargs):
+                            if kind == "inspect-session":
+                                if "timeout" not in kwargs:
+                                    return {"execution": {**clean, "custody_occupied": "1"}}
+                                if late == "release":
+                                    clock[0] = start + budget + boundary
+                                return {"execution": clean}
+                            return {"answer": {"status": "accepted"}}
+
+                        def request(socket_path, store, kind, **fields):
+                            if kind == "observe_command":
+                                return {"observation": observe(store, fields["key"], deadline=fields["deadline"])}
+                            if kind == "read_result":
+                                return read(store, fields["key"], deadline=fields["deadline"])
+                            return command(kind.replace("_", "-"), timeout=fields.get("timeout"))
+
+                        real_drain = transport.wait_for_drain
+
+                        def drain(inspect, deadline):
+                            real_drain(inspect, deadline)
+                            raise Released()  # Stop before unrelated native Store/FD audits.
+
+                        diagnostics = SimpleNamespace(wait=lambda *args, **kwargs: [{"written_bytes": "0"}],
+                            matching=lambda *args: [{}], records=[], dispose_capture=lambda *args, **kwargs: None)
+                        if name == "connection_failure":
+                            endpoint.streams = [("connection", i, f"drop-{i % 2}", b"") for i in range(4)]
+                        with contextlib.ExitStack() as stack:
+                            for owner, attribute, value in (
+                                (transport.time, "monotonic", lambda: clock[0]), (transport.time, "sleep", lambda _: None),
+                                (transport.dispatch, "start_host", lambda *a, **k: SimpleNamespace(pid=1)),
+                                (transport.dispatch, "start_ready_process", lambda *a, **k: (SimpleNamespace(pid=1), {"socket": "socket"})),
+                                (transport.dispatch, "stop_host", lambda *a: None),
+                                (transport.dispatch, "configure", lambda *a: None), (transport.dispatch, "message", lambda *a: None),
+                                (transport.dispatch, "observe", observe), (transport.dispatch, "read_result", read),
+                                (transport.dispatch, "command", command), (transport, "closed_host_request", request),
+                                (transport, "wait_for_drain", drain), (transport, "HostDiagnostics", lambda *a: diagnostics),
+                                (transport, "ReleaseGate", lambda path: SimpleNamespace(path=path, release=lambda: None)),
+                                (transport, "H1Endpoint", lambda: endpoint), (transport, "open_descriptors", lambda *a: 10),
+                                (transport.subprocess, "check_output", lambda *a, **k: "0")):
+                                stack.enter_context(patch.object(owner, attribute, side_effect=value))
+                            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                            stack.enter_context(patch.object(transport.threading, "Thread"))
+                            with self.assertRaisesRegex(AssertionError, "original deadline") if late else self.assertRaises(Released):
+                                root = pathlib.Path(temporary)
+                                if name == "round_trip":
+                                    transport.round_trip(root, endpoint, 2, root / "ca", rounds=1)
+                                elif name == "queued_h1":
+                                    transport.queued_h1(root)
+                                elif name == "isolated_terminal_stream":
+                                    transport.isolated_terminal_stream(root, endpoint, "capture")
+                                else:
+                                    getattr(transport, name)(root, endpoint)
+
     def test_shared_terminal_result_read_and_release_use_one_deadline(self):
         clean = {"custody_occupied": "0", "scratch_used_bytes": "0", "dispatch_fenced": False}
         for status, durations, accepted in (

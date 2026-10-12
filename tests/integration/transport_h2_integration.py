@@ -463,9 +463,9 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
                 lambda: len(endpoint.streams) == expected,
                 f"{expected} H2 streams at capacity {capacity}", timeout=45,
             )
+            result_deadline = time.monotonic() + 45
             for index in range(capacity):
                 key = f"message-{capacity}-{round_number}-{index}"
-                result_deadline = time.monotonic() + 45
                 result = dispatch.wait_for(
                     lambda key=key: closed_host_request(
                         ready["socket"], store, "observe_command", key=key,
@@ -569,9 +569,9 @@ def queued_h1(root):
                                               "--session", "direct/h1-1")["execution"]
                 assert int(inspection["custody_occupied"]) > 0, inspection
                 endpoint.release_first.set()
+            result_deadline = time.monotonic() + 40
             for index in range(capacity):
                 key = f"h1-message-{round_number}-{index}"
-                result_deadline = time.monotonic() + 40
                 result = dispatch.wait_for(
                     lambda key=key: dispatch.observe(
                         store, key, deadline=result_deadline,
@@ -696,9 +696,9 @@ def stalled_capture(root, endpoint, after_progress=False):
         held_physical_peak = host_physical_peak(host.pid) if endpoint.observed_shape else None
         gate.release()
         released = True
+        result_deadline = time.monotonic() + 45
         for index in range(100):
             key = f"stalled-message-{index}"
-            result_deadline = time.monotonic() + 45
             result = dispatch.wait_for(
                 lambda key=key: dispatch.observe(
                     store, key, deadline=result_deadline,
@@ -758,9 +758,9 @@ def paused_capture_inactivity(root, endpoint):
         assert len(endpoint.streams) == 20, endpoint.streams
         gate.release()
         released = True
+        result_deadline = time.monotonic() + 20
         for index in range(20):
             key = f"paused-message-{index}"
-            result_deadline = time.monotonic() + 20
             result = dispatch.wait_for(
                 lambda key=key: dispatch.observe(
                     store, key, deadline=result_deadline,
@@ -813,18 +813,18 @@ def capture_failure_on_resume(root, endpoint):
         gate.release()
         released = True
         completed = 0
+        population_deadline = time.monotonic() + 20
         for index in range(20):
             key = f"resume-message-{index}"
-            result_deadline = time.monotonic() + 20
             result = dispatch.wait_for(
                 lambda key=key: dispatch.observe(
-                    store, key, deadline=result_deadline,
-                ).get("result"), f"resume result {index}", deadline=result_deadline,
+                    store, key, deadline=population_deadline,
+                ).get("result"), f"resume result {index}", deadline=population_deadline,
             )
             outcomes.append(result.get("code"))
             if result["status"] == "completed":
                 completed += 1
-                assert dispatch.read_result(store, key, deadline=result_deadline) == endpoint.answers[f"resume-{index}"]
+                assert dispatch.read_result(store, key, deadline=population_deadline) == endpoint.answers[f"resume-{index}"]
         assert outcomes.count("response_write_failed") == 1, outcomes
         assert len(diagnostics.matching("transport_resume_capture_failure")) == 1, diagnostics.records[-12:]
         assert completed == 19, outcomes
@@ -842,7 +842,7 @@ def capture_failure_on_resume(root, endpoint):
         wait_for_drain(
             lambda remaining: dispatch.command("inspect-session", "--store", store,
                                               "--session", "direct/resume-0", timeout=remaining)["execution"],
-            result_deadline,
+            min(population_deadline, result_deadline),
         )
         assert len(endpoint.connections) == 1, endpoint.connections
         print(json.dumps({"case": "capture_failure_on_resume", "capture_failures": outcomes.count("response_write_failed"),
@@ -935,8 +935,8 @@ def isolated_bad_header(root, endpoint):
             dispatch.configure(root, store, f"sibling-config-{index}", f"direct/sibling-{index}", "model-a")
             dispatch.message(root, store, f"sibling-message-{index}", f"direct/sibling-{index}", f"sibling-{index}")
         codes = []
+        result_deadline = time.monotonic() + 20
         for index in range(2):
-            result_deadline = time.monotonic() + 20
             result = dispatch.wait_for(
                 lambda index=index: dispatch.observe(
                     store, f"sibling-message-{index}", deadline=result_deadline,
@@ -985,7 +985,7 @@ def isolated_terminal_stream(root, endpoint, mode):
         assert (target["status"], target.get("code")) == (
             ("cancelled", "cancelled") if mode == "cancel" else ("failed", "response_scratch_exhausted")
         ), target
-        result_deadline = time.monotonic() + 20
+        result_deadline = target_deadline
         sibling = dispatch.wait_for(
             lambda: dispatch.observe(
                 store, f"{mode}-sibling-message", deadline=result_deadline,
@@ -1029,8 +1029,8 @@ def connection_failure(root, endpoint):
         for index in range(2):
             dispatch.configure(root, store, f"drop-config-{index}", f"direct/drop-{index}", "model-a")
             dispatch.message(root, store, f"drop-message-{index}", f"direct/drop-{index}", f"drop-{index}")
+        result_deadline = time.monotonic() + 20
         for index in range(2):
-            result_deadline = time.monotonic() + 20
             result = dispatch.wait_for(
                 lambda index=index: dispatch.observe(
                     store, f"drop-message-{index}", deadline=result_deadline,
