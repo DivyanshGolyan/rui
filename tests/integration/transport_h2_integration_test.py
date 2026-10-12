@@ -186,6 +186,55 @@ class ManagedDescriptorTests(unittest.TestCase):
 
 
 class ObservationDeadlineTests(unittest.TestCase):
+    def test_drainage_caller_keeps_original_cap_or_shorter_remaining_budget(self):
+        for budget, expected in ((45, 15), (1, 1)):
+            with self.subTest(budget=budget):
+                def inspect(remaining):
+                    self.assertEqual(remaining, expected)
+                    return {"custody_occupied": "0", "scratch_used_bytes": "0"}
+
+                with patch.object(transport.time, "monotonic", return_value=100):
+                    transport.wait_for_drain(inspect, 100 + budget)
+
+    def test_drainage_requires_both_release_facts_in_one_timely_observation(self):
+        cases = (
+            ([{"custody_occupied": "1", "scratch_used_bytes": "0"},
+              {"custody_occupied": "0", "scratch_used_bytes": "1"},
+              {"custody_occupied": "0", "scratch_used_bytes": "0"}], True),
+            ([{"custody_occupied": "1", "scratch_used_bytes": "0"}], False),
+            ([{"custody_occupied": "0", "scratch_used_bytes": "1"}], False),
+        )
+        for observations, accepted in cases:
+            with self.subTest(observations=observations):
+                clock = [0.0]
+                pending = iter(observations)
+
+                def inspect(remaining):
+                    self.assertGreater(remaining, 0)
+                    clock[0] += 0.1
+                    return next(pending, observations[-1])
+
+                with patch.object(transport.time, "monotonic", side_effect=lambda: clock[0]), \
+                     patch.object(transport.time, "sleep"):
+                    if accepted:
+                        self.assertEqual(transport.wait_for_drain(inspect, 0.5), observations[-1])
+                    else:
+                        with self.assertRaisesRegex(AssertionError, "custody drainage"):
+                            transport.wait_for_drain(inspect, 0.5)
+
+    def test_drainage_refuses_a_clean_reply_at_or_after_original_deadline(self):
+        for completed_at in (0.5, 0.6):
+            with self.subTest(completed_at=completed_at):
+                clock = [0.0]
+
+                def inspect(remaining):
+                    clock[0] = completed_at
+                    return {"custody_occupied": "0", "scratch_used_bytes": "0"}
+
+                with patch.object(transport.time, "monotonic", side_effect=lambda: clock[0]):
+                    with self.assertRaisesRegex(AssertionError, "custody drainage"):
+                        transport.wait_for_drain(inspect, 0.5)
+
     def test_blocking_predicate_cannot_publish_a_late_clean_observation(self):
         for completed_at in (7.999, 8.0, 15.0):
             with self.subTest(completed_at=completed_at):
