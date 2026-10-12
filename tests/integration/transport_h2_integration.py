@@ -526,6 +526,44 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
         dispatch.stop_host(host)
 
 
+def stop_h1_case(host, endpoint, thread, *, stop_before_release=False):
+    incoming_error = sys.exc_info()[1]
+    errors = []
+
+    def attempt(dispose):
+        try:
+            dispose()
+        except BaseException as error:
+            errors.append(error)
+
+    def stop():
+        if host is not None:
+            dispatch.stop_host(host)
+
+    if stop_before_release:
+        attempt(stop)
+        attempt(endpoint.release_first.set)
+    else:
+        attempt(endpoint.release_first.set)
+        attempt(stop)
+    attempt(endpoint.shutdown)
+    attempt(endpoint.server_close)
+
+    def join():
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "H1 endpoint thread did not retire"
+
+    attempt(join)
+    if errors:
+        for error in errors:
+            try:
+                print(f"H1 cleanup failed: {type(error).__name__}: {error}", file=sys.stderr)
+            except BaseException:
+                pass  # Optional reporting cannot replace the primary failure.
+        if incoming_error is None:
+            raise errors[0]
+
+
 def queued_h1(root):
     capacity = 8
     endpoint = H1Endpoint()
@@ -600,12 +638,7 @@ def queued_h1(root):
                           "held_host_cpu_seconds_in_3s": held_cpu, "held_fds": held_fds,
                           "completed_idle_fds": idle_fds}), flush=True)
     finally:
-        endpoint.release_first.set()
-        if host is not None:
-            dispatch.stop_host(host)
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=5)
+        stop_h1_case(host, endpoint, thread)
 
 
 def queued_h1_inactivity(root):
@@ -613,12 +646,13 @@ def queued_h1_inactivity(root):
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
     store = root / "bounded-h1-inactivity-store"
-    host = dispatch.start_host(
-        store, f"http://127.0.0.1:{endpoint.server_port}/responses",
-        "--test-provider-inactivity-seconds", "1", "--test-retry-waits-ms", "60000,60000,60000",
-        active_capacity=2,
-    )
+    host = None
     try:
+        host = dispatch.start_host(
+            store, f"http://127.0.0.1:{endpoint.server_port}/responses",
+            "--test-provider-inactivity-seconds", "1", "--test-retry-waits-ms", "60000,60000,60000",
+            active_capacity=2,
+        )
         for index in range(2):
             dispatch.configure(root, store, f"queued-config-{index}", f"direct/queued-{index}", "model-a")
             dispatch.message(root, store, f"queued-message-{index}", f"direct/queued-{index}", f"queued-{index}")
@@ -638,11 +672,7 @@ def queued_h1_inactivity(root):
         assert held_result["status"] == "completed", held_result
         assert dispatch.read_result(store, f"queued-message-{1 - queued}", deadline=result_deadline) == f"answer-{held}".encode()
     finally:
-        dispatch.stop_host(host)
-        endpoint.release_first.set()
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=5)
+        stop_h1_case(host, endpoint, thread, stop_before_release=True)
     with sqlite3.connect(store / "rui.sqlite3") as database:
         rows = database.execute(
             "SELECT attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code "

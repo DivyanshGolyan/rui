@@ -279,6 +279,113 @@ class ManagedDescriptorTests(unittest.TestCase):
                         codex_h2.assert_managed_descriptor_rejection(rejected, 77)
 
 
+class QueuedH1CleanupTests(unittest.TestCase):
+    def test_actual_caller_preserves_body_error_and_attempts_every_disposal(self):
+        for caller in ("queued_h1", "queued_h1_inactivity"):
+            with self.subTest(caller=caller):
+                self.run_caller(caller, fail_body=True)
+
+    def test_successful_body_reports_cleanup_failure_after_every_disposal(self):
+        for caller in ("queued_h1", "queued_h1_inactivity"):
+            with self.subTest(caller=caller):
+                self.run_caller(caller, fail_body=False)
+
+    def test_inactivity_startup_failure_still_disposes_endpoint(self):
+        self.run_caller("queued_h1_inactivity", fail_body=False, fail_start=True)
+
+    def run_caller(self, caller, *, fail_body, fail_start=False):
+        calls = []
+        primary = AssertionError("original queued H1 body failure")
+        secondary = RuntimeError("endpoint shutdown failure")
+        endpoint = SimpleNamespace(server_port=1, lock=contextlib.nullcontext(),
+            first_ready=SimpleNamespace(wait=lambda timeout: True), requests=[],
+            connections=[], active=1, maximum_active=1, serve_forever=lambda: None)
+        pending = []
+        released = [False]
+
+        def release():
+            calls.append("release")
+            released[0] = True
+            endpoint.requests.extend((text, b"") for text in pending)
+            endpoint.connections.extend(pending)
+            pending.clear()
+
+        endpoint.release_first = SimpleNamespace(set=release)
+
+        def shutdown():
+            calls.append("shutdown")
+            raise secondary
+
+        endpoint.shutdown = shutdown
+        endpoint.server_close = lambda: calls.append("close")
+        thread = SimpleNamespace(start=lambda: None,
+            join=lambda *, timeout: calls.append(("join", timeout)), is_alive=lambda: False)
+
+        def start(*args, **kwargs):
+            if fail_start:
+                raise primary
+            return SimpleNamespace(pid=1)
+
+        def message(root, store, key, session, text):
+            if fail_body:
+                raise primary
+            if not endpoint.requests or released[0]:
+                endpoint.requests.append((text, b""))
+                endpoint.connections.append(text)
+            else:
+                pending.append(text)
+
+        def observe(store, key, **kwargs):
+            if not kwargs:
+                return {"processing": {"attempt": "1"}}
+            return {"result": {"status": "completed"}}
+
+        def drain(*args):
+            endpoint.active = 0
+
+        reads = []
+
+        def read(store, key, **kwargs):
+            reads.append(key)
+            text = key.replace("h1-message-", "h1-").replace("queued-message-", "queued-")
+            return ("answer-" + text).encode()
+
+        with contextlib.ExitStack() as stack:
+            for owner, name, value in (
+                    (transport, "H1Endpoint", lambda **kwargs: endpoint),
+                    (transport.threading, "Thread", lambda **kwargs: thread),
+                    (transport.time, "sleep", lambda _: None),
+                    (transport.subprocess, "check_output", lambda *a, **k: "0"),
+                    (transport, "open_descriptors", lambda _: 10),
+                    (transport.dispatch, "start_host", start),
+                    (transport.dispatch, "configure", lambda *a: None),
+                    (transport.dispatch, "message", message),
+                    (transport.dispatch, "observe", observe),
+                    (transport.dispatch, "wait_for", lambda predicate, *a, **k: predicate()),
+                    (transport.dispatch, "read_result", read),
+                    (transport.dispatch, "command", lambda *a, **k:
+                     {"execution": {"custody_occupied": "1"}}),
+                    (transport, "wait_for_drain", drain),
+                    (transport.dispatch, "stop_host", lambda _: calls.append("stop"))):
+                stack.enter_context(patch.object(owner, name, side_effect=value))
+            output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            expected = primary if fail_body or fail_start else secondary
+            with self.assertRaises(type(expected)) as raised:
+                getattr(transport, caller)(pathlib.Path("/fixture"))
+            self.assertIs(raised.exception, expected)
+        order = ["release", "stop"] if caller == "queued_h1" else ["stop", "release"]
+        if fail_start:
+            order.remove("stop")
+        expected_disposals = [*order, "shutdown", "close", ("join", 5)]
+        self.assertEqual(calls[-len(expected_disposals):], expected_disposals)
+        if not fail_body and not fail_start and caller == "queued_h1":
+            self.assertEqual(len(endpoint.requests), 16)
+            self.assertEqual(json.loads(output.getvalue())["requests"], 16)
+        elif not fail_body and not fail_start:
+            self.assertEqual(reads, ["queued-message-0"])
+
+
 class ObservationDeadlineTests(unittest.TestCase):
     def test_caller_populations_and_final_release_keep_original_budget(self):
         class Released(Exception):
@@ -385,7 +492,8 @@ class ObservationDeadlineTests(unittest.TestCase):
                                 (transport.subprocess, "check_output", lambda *a, **k: "0")):
                                 stack.enter_context(patch.object(owner, attribute, side_effect=value))
                             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-                            stack.enter_context(patch.object(transport.threading, "Thread"))
+                            mocked_thread = stack.enter_context(patch.object(transport.threading, "Thread"))
+                            mocked_thread.return_value.is_alive.return_value = False
                             with self.assertRaisesRegex(AssertionError, "original deadline") if late else self.assertRaises(Released):
                                 root = pathlib.Path(temporary)
                                 if name == "round_trip":
