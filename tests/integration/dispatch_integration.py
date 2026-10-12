@@ -487,7 +487,9 @@ def crash_host(process, state, label, diagnostics=None):
     finally:
         # Reap/observation validity and pipe closure retain an explicit owner,
         # including when bounded diagnostic collection or persistence fails.
-        stop_host(process)
+        # A failed first kill/reap must not turn this cut into sealed disposal
+        # or renew its original crash allowance.
+        stop_process(process, timeout=max(0, deadline - time.monotonic()), seal_observations=False)
 
 
 def configure(state, store, key, session, model, schema=None, instructions=None):

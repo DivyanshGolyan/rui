@@ -584,15 +584,21 @@ def prove_intentional_crash_retirement():
 
     # Drive the real crash owner and native accessor. Synthetic state changes
     # discriminate receipt from retirement; actual native holds remain in Zig.
-    for case in ("retired", "held-final", "held-expired", "missing-tail", "loss", "sealed", "future-writer"):
+    for case in ("kill-refusal", "wait-timeout", "expired-wait", "kill-future-writer",
+                 "retired", "held-final", "held-expired", "missing-tail", "loss", "sealed", "future-writer"):
         clock = [100.0]
         waits = []
+        kills = []
+        diagnostics_closed = []
+        primary = (subprocess.TimeoutExpired("rui", 10) if case in ("wait-timeout", "expired-wait")
+                   else RuntimeError("first crash kill refused") if case.startswith("kill-") else None)
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as destination:
             root = pathlib.Path(directory)
             reader, writer = os.pipe()
             process = SimpleNamespace(pid=os.getpid(), returncode=None, stdout=io.BytesIO(b"out"),
                 stderr=io.BytesIO(b"err"), args=["rui", "serve", "--store", root / "store"])
             process.poll = lambda: process.returncode
+            process.rui_diagnostics = SimpleNamespace(close=lambda: diagnostics_closed.append(True))
             state = observation_state(process.pid, 4 if case == "missing-tail" else 3 if case == "loss" else 2,
                                       active=int(case.startswith("held")))
             if case == "sealed":
@@ -607,15 +613,23 @@ def prove_intentional_crash_retirement():
                     struct.pack_into("<Q", state, 32, 0)
 
             def kill():
-                if case == "future-writer":
-                    struct.pack_into("<Q", state, 32, 1)
+                kills.append(clock[0])
+                if len(kills) == 1 and primary is not None:
+                    if case.startswith("kill-"):
+                        clock[0] += .25
+                        raise primary
+                    return  # Sent termination has not yet produced an exit.
+                if case in ("future-writer", "kill-future-writer"):
+                    active = struct.unpack_from("<Q", state, 32)[0]
+                    struct.pack_into("<Q", state, 32, active + 1)
                 process.returncode = -9
                 os.close(writer)
 
             def wait(*, timeout):
-                if not waits:
-                    assert timeout == 110 - clock[0], "crash reap renewed its original allowance"
-                waits.append(timeout)
+                waits.append((clock[0], timeout))
+                if len(waits) == 1 and case in ("wait-timeout", "expired-wait"):
+                    clock[0] += 10 if case == "expired-wait" else 2
+                    raise primary
                 return process.returncode
 
             process.kill, process.wait = kill, wait
@@ -627,16 +641,23 @@ def prove_intentional_crash_retirement():
                     patch.dict(os.environ, RUI_FAILURE_ARTIFACTS=destination), contextlib.redirect_stderr(io.StringIO()):
                 try:
                     result = dispatch.crash_host(process, root, case)
-                except AssertionError as error:
-                    assert expected and expected in str(error), (case, error)
+                except BaseException as error:
+                    if primary is not None:
+                        assert error is primary, (case, error)
+                    else:
+                        assert expected and expected in str(error), (case, error)
                 else:
-                    assert expected is None and result == {"returncode": -9, "stdout": b"out", "stderr": b"err"}, case
+                    assert primary is None and expected is None and result == {"returncode": -9, "stdout": b"out", "stderr": b"err"}, case
             assert process.returncode == -9 and process.stdout.closed and process.stderr.closed
-            assert not observations.thread.is_alive() and state.closed
-            assert bool(observations.final_state[4] & host_process.OBSERVATION_SEALED) == (case == "sealed")
+            assert not observations.thread.is_alive() and state.closed and diagnostics_closed
+            assert bool(observations.final_state[4] & host_process.OBSERVATION_SEALED) == (case == "sealed"), f"{case}: intentional crash cleanup sealed admission"
+            assert all(timeout == max(0, 110 - at) for at, timeout in waits), f"{case}: crash reap renewed its original allowance"
             if case == "held-final":
-                assert clock[0] == 100.25 and waits[0] == 9.75, "receipt bypassed publication retirement"
-            if expected:
+                assert clock[0] == 100.25 and waits[0][1] == 9.75, "receipt bypassed publication retirement"
+            if case == "kill-future-writer":
+                assert observations.final_state[4] == 1, "future publication custody was hidden"
+                assert any("Host cleanup failed" in note for note in primary.__notes__), primary
+            if expected or primary is not None:
                 assert len(list(pathlib.Path(destination).rglob("observation-failure-*.json"))) == 1
     print("Intentional crash: receipt custody retires unsealed inside original budget; withheld/lost evidence and future writers fail with teardown/retention")
 

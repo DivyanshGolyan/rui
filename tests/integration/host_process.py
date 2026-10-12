@@ -573,13 +573,13 @@ class HostStartError(RuntimeError):
         self.pid = pid
 
 
-def stop_process(process, timeout=10):
+def stop_process(process, timeout=10, *, seal_observations=True):
     deadline = time.monotonic() + timeout
     errors = []
     incoming_error = sys.exc_info()[1]
     snapshot = None
     observations = getattr(process, "rui_observations", None)
-    if process.poll() is None and observations is not None:
+    if seal_observations and process.poll() is None and observations is not None:
         try:
             # Leave bounded reap credit even when publication retirement fails.
             observations.dispose(deadline - min(1, timeout / 2))
