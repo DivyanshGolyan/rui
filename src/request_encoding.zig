@@ -122,7 +122,10 @@ pub const JsonCursor = struct {
     buffer_start: u64 = 0,
     buffer_length: usize = 0,
     buffer: [window_bytes]u8 = undefined,
-    encoded: [6]u8 = undefined,
+    // Escape string contents twice when presenting a JSON literal inside
+    // another JSON string. Its enclosing quotes belong to the caller.
+    nested_string: bool = false,
+    encoded: [7]u8 = undefined,
     encoded_length: u3 = 0,
     encoded_offset: u3 = 0,
 
@@ -189,6 +192,7 @@ pub const JsonCursor = struct {
             const byte = available[0];
             self.offset += 1;
             bytes_left.* -= 1;
+            var single: [6]u8 = undefined;
             const encoded = switch (byte) {
                 '"' => "\\\"",
                 '\\' => "\\\\",
@@ -197,24 +201,27 @@ pub const JsonCursor = struct {
                 '\n' => "\\n",
                 '\r' => "\\r",
                 '\t' => "\\t",
-                0...0x07, 0x0b, 0x0e...0x1f => {
+                0...0x07, 0x0b, 0x0e...0x1f => blk: {
                     const hex = "0123456789abcdef";
-                    self.encoded = .{ '\\', 'u', '0', '0', hex[byte >> 4], hex[byte & 0xf] };
-                    self.encoded_length = 6;
-                    self.encoded_offset = 0;
-                    continue;
+                    single = .{ '\\', 'u', '0', '0', hex[byte >> 4], hex[byte & 0xf] };
+                    break :blk single[0..];
                 },
-                else => {
+                else => blk: {
                     // A one-byte allowance can consume a source byte now
                     // and emit it on the next advance, without overshoot.
-                    self.encoded[0] = byte;
-                    self.encoded_length = 1;
-                    self.encoded_offset = 0;
-                    continue;
+                    single[0] = byte;
+                    break :blk single[0..1];
                 },
             };
-            @memcpy(self.encoded[0..encoded.len], encoded);
-            self.encoded_length = @intCast(encoded.len);
+            if (self.nested_string) {
+                var escaped: std.Io.Writer = .fixed(&self.encoded);
+                // The longest twice-escaped byte is \\u00xx (seven bytes).
+                std.json.Stringify.encodeJsonStringChars(encoded, .{}, &escaped) catch unreachable;
+                self.encoded_length = @intCast(escaped.end);
+            } else {
+                @memcpy(self.encoded[0..encoded.len], encoded);
+                self.encoded_length = @intCast(encoded.len);
+            }
             self.encoded_offset = 0;
         }
         return false;

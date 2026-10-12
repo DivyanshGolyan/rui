@@ -35,7 +35,7 @@ def start_detached_shell(command, ready_path):
     return f"{detached_shell(command)} & while [ ! -s {ready} ]; do :; done"
 
 
-def configure(state, store, key, session, permission="ask"):
+def configure(state, store, key, session, permission="ask", workspace=fixture.ROOT):
     result = fixture.command(
         "configure",
         "--store",
@@ -47,7 +47,7 @@ def configure(state, store, key, session, permission="ask"):
         "--session",
         session,
         "--workspace",
-        fixture.ROOT,
+        workspace,
         "--provider",
         "codex",
         "--model",
