@@ -102,6 +102,7 @@ def main():
     prove_coalesced_phase_records()
     prove_observation_channel()
     prove_observation_disposal()
+    prove_intentional_crash_retirement()
     prove_short_optional_receipt()
     prove_gate_broadcast()
 
@@ -135,6 +136,7 @@ def prove_gate_broadcast():
         gate = ReleaseGate(pathlib.Path(directory) / "gate")
         readers = []
         try:
+            gate.assert_held()
             for _ in range(2):
                 reader = os.open(gate.path, os.O_RDONLY | os.O_NONBLOCK)
                 readers.append(reader)
@@ -153,6 +155,43 @@ def prove_gate_broadcast():
             gate.release()
             for reader in readers:
                 os.close(reader)
+
+    for case in ("released", "credited", "replaced", "unlink-failure"):
+        with tempfile.TemporaryDirectory(prefix="rui-gate-refusal-") as directory:
+            gate = ReleaseGate(pathlib.Path(directory) / "gate")
+            descriptor = gate.fd
+            try:
+                if case == "released":
+                    gate.release()
+                elif case == "credited":
+                    os.write(gate.fd, b"x")
+                elif case == "replaced":
+                    gate.path.unlink()
+                    gate.path.write_bytes(b"not the native gate")
+                else:
+                    failure = OSError("gate unlink refused")
+                    with patch.object(pathlib.Path, "unlink", side_effect=failure):
+                        try:
+                            gate.release()
+                        except OSError as error:
+                            assert error is failure
+                        else:
+                            raise AssertionError("unlink refusal was hidden")
+                    assert gate.fd is None
+                    try:
+                        os.fstat(descriptor)
+                    except OSError:
+                        pass
+                    else:
+                        raise AssertionError("unlink refusal leaked owned FIFO descriptor")
+                try:
+                    gate.assert_held()
+                except AssertionError:
+                    pass
+                else:
+                    raise AssertionError(f"accepted unheld {case} transition gate")
+            finally:
+                gate.release()
 
 
 def prove_coalesced_phase_records():
@@ -536,6 +575,70 @@ def prove_observation_disposal():
         assert snapshot["records"] == [] and snapshot["shared_state"] == [1, os.getpid(), 37, 0, 0]
     print("Host disposal: every plan drains held final custody, seals admission, refuses late loss/missing tail and missing endpoint; pre-teardown retention survives root removal")
     prove_retention_does_not_own_teardown()
+
+
+def prove_intentional_crash_retirement():
+    import host_process
+    with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
+        import dispatch_integration as dispatch
+
+    # Drive the real crash owner and native accessor. Synthetic state changes
+    # discriminate receipt from retirement; actual native holds remain in Zig.
+    for case in ("retired", "held-final", "held-expired", "missing-tail", "loss", "sealed", "future-writer"):
+        clock = [100.0]
+        waits = []
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as destination:
+            root = pathlib.Path(directory)
+            reader, writer = os.pipe()
+            process = SimpleNamespace(pid=os.getpid(), returncode=None, stdout=io.BytesIO(b"out"),
+                stderr=io.BytesIO(b"err"), args=["rui", "serve", "--store", root / "store"])
+            process.poll = lambda: process.returncode
+            state = observation_state(process.pid, 4 if case == "missing-tail" else 3 if case == "loss" else 2,
+                                      active=int(case.startswith("held")))
+            if case == "sealed":
+                struct.pack_into("<Q", state, 32, host_process.OBSERVATION_SEALED)
+            observations = _Observations(process, reader, "recovery", state)
+            observations._accept(observation_frame(1, phase="action_result_ready", action="1"))
+            process.rui_observations = observations
+
+            def sleep(_):
+                clock[0] += 4.5 if case in ("held-expired", "missing-tail") else .25
+                if case == "held-final":
+                    struct.pack_into("<Q", state, 32, 0)
+
+            def kill():
+                if case == "future-writer":
+                    struct.pack_into("<Q", state, 32, 1)
+                process.returncode = -9
+                os.close(writer)
+
+            def wait(*, timeout):
+                if not waits:
+                    assert timeout == 110 - clock[0], "crash reap renewed its original allowance"
+                waits.append(timeout)
+                return process.returncode
+
+            process.kill, process.wait = kill, wait
+            virtual_time = SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep)
+            expected = {"held-expired": "crash budget", "missing-tail": "crash budget",
+                        "loss": "native loss", "sealed": "admission was sealed",
+                        "future-writer": "during observation publication"}.get(case)
+            with patch.object(host_process, "time", virtual_time), patch.object(dispatch, "time", virtual_time), \
+                    patch.dict(os.environ, RUI_FAILURE_ARTIFACTS=destination), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    result = dispatch.crash_host(process, root, case)
+                except AssertionError as error:
+                    assert expected and expected in str(error), (case, error)
+                else:
+                    assert expected is None and result == {"returncode": -9, "stdout": b"out", "stderr": b"err"}, case
+            assert process.returncode == -9 and process.stdout.closed and process.stderr.closed
+            assert not observations.thread.is_alive() and state.closed
+            assert bool(observations.final_state[4] & host_process.OBSERVATION_SEALED) == (case == "sealed")
+            if case == "held-final":
+                assert clock[0] == 100.25 and waits[0] == 9.75, "receipt bypassed publication retirement"
+            if expected:
+                assert len(list(pathlib.Path(destination).rglob("observation-failure-*.json"))) == 1
+    print("Intentional crash: receipt custody retires unsealed inside original budget; withheld/lost evidence and future writers fail with teardown/retention")
 
 
 def prove_retention_does_not_own_teardown():

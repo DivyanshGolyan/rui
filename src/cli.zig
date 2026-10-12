@@ -1010,7 +1010,7 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
                 return error.InvalidTestObservationPlan;
         } else if (std.mem.eql(u8, arg, "--test-transition")) {
             const transition = try takeValue(args, &index);
-            if (std.mem.eql(u8, transition, "action-attempt-admitted")) faults.test_transition = .action_attempt_admitted else if (std.mem.eql(u8, transition, "action-result-ready")) faults.test_transition = .action_result_ready else if (std.mem.eql(u8, transition, "action-result-committed")) faults.test_transition = .action_result_committed else return error.UnknownTestTransition;
+            if (std.mem.eql(u8, transition, "action-attempt-admitted")) faults.test_transition = .action_attempt_admitted else if (std.mem.eql(u8, transition, "prepared-before-handoff")) faults.test_transition = .prepared_before_handoff else if (std.mem.eql(u8, transition, "action-result-ready")) faults.test_transition = .action_result_ready else if (std.mem.eql(u8, transition, "action-result-committed")) faults.test_transition = .action_result_committed else return error.UnknownTestTransition;
         } else if (std.mem.eql(u8, arg, "--test-transition-gate-path")) {
             faults.test_transition_gate_path = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--test-model-cleanup-gate-path")) {

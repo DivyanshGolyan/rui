@@ -451,9 +451,26 @@ def stop_host(process):
 
 def crash_host(process, state, label, diagnostics=None):
     assert process.poll() is None, process.returncode
+    deadline = time.monotonic() + 10
+    errors = []
     try:
-        process.kill()
-        process.wait(timeout=10)
+        observations = getattr(process, "rui_observations", None)
+        try:
+            if observations is not None:
+                # Frame receipt precedes native retirement. Keep this cut
+                # unsealed and reserve reap credit from the same allowance.
+                observations.wait_for_publication_retirement(deadline - 1)
+        except BaseException as error:
+            errors.append(error)
+        try:
+            process.kill()
+            process.wait(timeout=max(0, deadline - time.monotonic()))
+        except BaseException as error:
+            errors.append(error)
+        if errors:
+            for error in errors[1:]:
+                errors[0].add_note("Intentional crash cleanup failed: " + type(error).__name__)
+            raise errors[0]
         stdout = process.stdout.read()
         if diagnostics is None:
             stderr = process.stderr.read()

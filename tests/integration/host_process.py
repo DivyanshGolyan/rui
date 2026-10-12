@@ -9,6 +9,7 @@ import mmap
 import os
 import pathlib
 import selectors
+import stat
 import struct
 import subprocess
 import sys
@@ -167,6 +168,30 @@ class _Observations:
                 self.records.append(self.pending_records.pop(len(self.records) + 1))
             self.condition.notify_all()
 
+    def wait_for_publication_retirement(self, deadline):
+        """Drain received publication custody without sealing an intentional cut.
+
+        The caller's held workload gate supplies its semantic cut. This sample
+        does not exclude future publishers; immutable post-reap validity does.
+        """
+        version, process, run, _, _ = struct.unpack("<QQQQQ", self.state[:])
+        assert version == 1 and process == self.process.pid and run > 0, "missing/foreign crash observation state"
+        address = ctypes.addressof(ctypes.c_char.from_buffer(self.state))
+        native = _observation_atomics()
+        while True:
+            active = native.observation_load(address + 32)
+            count_loss = native.observation_load(address + 24)
+            with self.condition:
+                assert self.error is None, f"Host observation failed: {self.error}"
+                assert not active & OBSERVATION_SEALED, "intentional crash observation admission was sealed"
+                assert not count_loss & 1, "native loss before intentional crash"
+                assert all(item["run"] == str(run) for item in self.records), "mixed crash observation runs"
+                assert self.process.poll() is None, "Host exited before intentional crash"
+                assert time.monotonic() < deadline, "publication custody did not retire within crash budget"
+                if active == 0 and count_loss >> 1 == len(self.records):
+                    return
+            time.sleep(.001)
+
     def dispose(self, deadline):
         """Revoke new publications, then drain existing custody before SIGKILL.
 
@@ -316,13 +341,27 @@ class ReleaseGate:
             path.unlink()
             raise
 
+    def assert_held(self):
+        """Require the owned empty FIFO, not absence of a later effect."""
+        assert self.fd is not None, "transition gate was released"
+        descriptor, name = os.fstat(self.fd), self.path.lstat()
+        assert stat.S_ISFIFO(name.st_mode), "transition gate is not a FIFO"
+        assert (descriptor.st_dev, descriptor.st_ino) == (name.st_dev, name.st_ino), "transition gate was replaced"
+        try:
+            credit = os.read(self.fd, 1)
+        except BlockingIOError:
+            return
+        raise AssertionError(f"transition gate was not held: {credit!r}")
+
     def release(self):
         if self.fd is not None:
-            self.path.unlink()
-            # Native nonblocking readers observe persistent EOF on their next
-            # check; closing a FIFO does not wake every blocked read on macOS.
-            os.close(self.fd)
-            self.fd = None
+            try:
+                self.path.unlink()
+            finally:
+                # Native readers observe persistent EOF; unlink refusal must
+                # still retire the fixture's descriptor, never skip cleanup.
+                descriptor, self.fd = self.fd, None
+                os.close(descriptor)
 
 
 class HostDiagnostics:
@@ -604,7 +643,7 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
         if "--test-phase-trace" not in args:
             args.append("--test-phase-trace")
     if "--test-transition" in args and args[args.index("--test-transition") + 1] in (
-            "action-attempt-admitted", "action-result-ready", "action-result-committed"):
+            "action-attempt-admitted", "prepared-before-handoff", "action-result-ready", "action-result-committed"):
         transition = args[args.index("--test-transition") + 1]
         observations = observations or "recovery"
         plans = ("recovery", "status") if transition == "action-attempt-admitted" else ("recovery",)

@@ -2104,29 +2104,12 @@ def host_diagnostic_cases(state, library):
             try:
                 if host is not None:
                     try:
-                        if host.poll() is None:
-                            host.kill()
-                        host.wait(timeout=8)
-                        try:
-                            if not reader.closed:
-                                os.set_blocking(reader.fileno(), False)
-                                with (root / "stderr.log").open("ab") as retained:
-                                    while True:
-                                        try:
-                                            chunk = os.read(reader.fileno(), 65536)
-                                        except BlockingIOError:
-                                            break
-                                        if not chunk: break
-                                        retained.write(chunk)
-                        except Exception as error:
-                            cleanup_errors.append(error)
+                        # This is disposal, not a semantic crash cut. The
+                        # canonical owner seals/drains before kill within the
+                        # same eight seconds; stderr assertions ran above.
+                        stop_process(host, timeout=8)
                     except Exception as error:
                         cleanup_errors.append(error)
-                    finally:
-                        try:
-                            fixture.stop_host(host)
-                        except Exception as error:
-                            cleanup_errors.append(error)
                     if credit == "diagnostic-contention-host":
                         preserve_failure_metadata(root / "contention-final.json", lambda: {
                             "returncode": host.returncode, "state": host.rui_observations.final_state,

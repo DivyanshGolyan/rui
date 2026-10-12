@@ -114,6 +114,7 @@ pub const Faults = struct {
 
 const TestTransition = enum {
     action_attempt_admitted,
+    prepared_before_handoff,
     action_result_ready,
     action_result_committed,
 };
@@ -1422,6 +1423,7 @@ fn launchPreparedBash(
     action_binding: store_module.ActionAttemptBinding,
     prepared: *bash.Prepared,
 ) void {
+    testTransition(host, .prepared_before_handoff, action_binding);
     if (host.faults.before_launch_delay_ms != 0) {
         traceAction(host, "prepared_before_handoff", action_binding);
         _ = host.io.sleep(.fromMilliseconds(host.faults.before_launch_delay_ms), .awake) catch {};
