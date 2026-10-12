@@ -23,7 +23,7 @@ import h2.settings
 
 import control_integration as control
 import dispatch_integration as dispatch
-from host_process import HostDiagnostics
+from host_process import HostDiagnostics, wait_for_execution_release as wait_for_drain
 
 
 class Endpoint(socketserver.ThreadingTCPServer):
@@ -406,20 +406,6 @@ def closed_host_request(socket_path, store, kind, *, timeout=15, **fields):
         # content/report handles and socket before an idle FD sample.
         assert connection.recv(1) == b"", "Host must close after its response"
     return body if kind == "read_result" else json.loads(body)
-
-
-def wait_for_drain(inspect, deadline):
-    # Saved results do not return physical custody. Idle admission can also
-    # reserve an unused slot between inspections. Accept both release facts
-    # in one reply, under the original deadline, and never re-read after it.
-    def drained():
-        remaining = min(15, deadline - time.monotonic())
-        assert remaining > 0, "custody drainage exhausted original deadline"
-        observation = inspect(remaining)
-        return observation if (observation["custody_occupied"] == "0"
-                               and observation["scratch_used_bytes"] == "0") else None
-
-    return dispatch.wait_for(drained, "custody drainage", deadline=deadline)
 
 
 def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):

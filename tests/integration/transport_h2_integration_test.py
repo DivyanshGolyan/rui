@@ -135,7 +135,7 @@ class ShapedWorkTests(unittest.TestCase):
                 "message": {"answer": {"status": "accepted"}},
                 "observe_command": {"observation": {"result": {"status": "completed"}}},
                 "read_result": b"answer",
-                "inspect_session": {"execution": {"custody_occupied": "0", "scratch_used_bytes": "0"}},
+                "inspect_session": {"execution": {"dispatch_fenced": False, "custody_occupied": "0", "scratch_used_bytes": "0"}},
             }[kind]
 
         output = io.StringIO()
@@ -191,7 +191,7 @@ class ObservationDeadlineTests(unittest.TestCase):
             with self.subTest(budget=budget):
                 def inspect(remaining):
                     self.assertEqual(remaining, expected)
-                    return {"custody_occupied": "0", "scratch_used_bytes": "0"}
+                    return {"dispatch_fenced": False, "custody_occupied": "0", "scratch_used_bytes": "0"}
 
                 with patch.object(transport.time, "monotonic", return_value=100):
                     transport.wait_for_drain(inspect, 100 + budget)
@@ -206,6 +206,7 @@ class ObservationDeadlineTests(unittest.TestCase):
         )
         for observations, accepted in cases:
             with self.subTest(observations=observations):
+                observations = [dict(value, dispatch_fenced=False) for value in observations]
                 clock = [0.0]
                 pending = iter(observations)
 
@@ -229,7 +230,7 @@ class ObservationDeadlineTests(unittest.TestCase):
 
                 def inspect(remaining):
                     clock[0] = completed_at
-                    return {"custody_occupied": "0", "scratch_used_bytes": "0"}
+                    return {"dispatch_fenced": False, "custody_occupied": "0", "scratch_used_bytes": "0"}
 
                 with patch.object(transport.time, "monotonic", side_effect=lambda: clock[0]):
                     with self.assertRaisesRegex(AssertionError, "custody drainage"):

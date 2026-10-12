@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 
 
 READINESS_LIMIT = 16 * 1024
@@ -255,6 +256,20 @@ def canonical_fixture_root(path):
     return pathlib.Path(path).resolve(strict=True)
 
 
+def wait_for_execution_release(inspect, deadline):
+    """Observe both accounting totals in one timely reply, not permanent idleness."""
+    execution = None
+    while True:
+        remaining = min(15, deadline - time.monotonic())
+        assert remaining > 0, ("custody drainage exhausted original deadline", execution)
+        execution = inspect(remaining)
+        assert time.monotonic() < deadline, ("custody drainage exceeded original deadline", execution)
+        assert execution["dispatch_fenced"] is False, execution
+        if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0":
+            return execution
+        time.sleep(min(0.025, max(0, deadline - time.monotonic())))
+
+
 class TestHTTPServer(http.server.ThreadingHTTPServer):
     """Stop fixture accept loops promptly; response timing belongs to each case."""
 
@@ -289,6 +304,7 @@ class HostDiagnostics:
     def __init__(self, process):
         self.process = process
         self.observations = getattr(process, "rui_observations", None)
+        self.inspection_attempts = 0
         self.condition = self.observations.condition if self.observations else threading.Condition()
         self.records = self.observations.records if self.observations else []
         self.stderr_tail = bytearray()
@@ -334,6 +350,36 @@ class HostDiagnostics:
                 if record["rui_test_phase"] == phase
                 and all(record.get(name) == value for name, value in fields.items())
             ]
+
+    def claim_inspection(self, limit=50):
+        # Caller-issued attempts, not a native prefix that can still be in flight.
+        assert self.inspection_attempts < limit, "custody drainage exhausted inspection population"
+        self.inspection_attempts += 1
+
+    def wait_model_cleanup(self, processing, deadline):
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "result exhausted physical cleanup deadline"
+        records = self.wait(
+            "cleanup_completed", timeout=remaining,
+            turn=processing["turn"], operation=processing["operation"],
+            attempt=processing["attempt"], action=None,
+        )
+        assert len(records) == 1, records
+        assert time.monotonic() < deadline, "cleanup endpoint arrived after original deadline"
+        return records[0]
+
+    def assert_model_cleanup_census(self, *processings):
+        # After reap/drain, reject extra or duplicate owners. Final census
+        # cannot supply an endpoint missing within its original wait budget.
+        expected = Counter(
+            (value["turn"], value["operation"], value["attempt"], None)
+            for value in processings
+        )
+        actual = Counter(
+            (value.get("turn"), value.get("operation"), value.get("attempt"), value.get("action"))
+            for value in self.matching("cleanup_completed")
+        )
+        assert actual == expected, (actual, expected)
 
     def wait(self, phase, count=1, timeout=10, **fields):
         deadline = time.monotonic() + timeout

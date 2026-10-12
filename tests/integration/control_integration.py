@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, start_ready_process, stop_process
+from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, preserve_failure_metadata, start_ready_process, stop_process, wait_for_execution_release
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -367,14 +367,20 @@ def interrupt_model(state, store, key, session, processing):
     )
 
 
-def observe(store, key):
-    return command("observe-command", "--store", store, "--key", key)["observation"]
+def observe(store, key, *, deadline=None):
+    remaining = 15 if deadline is None else min(15, deadline - time.monotonic())
+    assert remaining > 0, "result observation exhausted original deadline"
+    return command("observe-command", "--store", store, "--key", key,
+                   timeout=remaining)["observation"]
 
 
-def wait_for(predicate, description, timeout=8):
-    deadline = time.monotonic() + timeout
+def wait_for(predicate, description, timeout=8, *, deadline=None):
+    if deadline is None:
+        deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = predicate()
+        if time.monotonic() >= deadline:
+            break
         if value:
             return value
         time.sleep(0.025)
@@ -491,11 +497,12 @@ def open_complete_inspection(socket_path, store, session, profile):
     return connection
 
 
-def fill_complete_inspections(socket_path, store, session):
+def fill_complete_inspections(socket_path, store, session, diagnostics):
     held = []
     attempts = 0
     while len(held) < ORDINARY_CLIENTS and attempts < ORDINARY_CLIENTS * 5:
         attempts += 1
+        diagnostics.claim_inspection()
         try:
             candidate = open_complete_inspection(
                 socket_path,
@@ -536,6 +543,30 @@ def inspect_execution(store, session, *, timeout=15):
         session,
         timeout=timeout,
     )["execution"]
+
+
+def wait_execution_release(diagnostics, store, session, deadline):
+    execution = None
+
+    def inspect(remaining):
+        nonlocal execution
+        diagnostics.claim_inspection()
+        execution = inspect_execution(store, session, timeout=remaining)
+        return execution
+
+    try:
+        return wait_for_execution_release(inspect, deadline)
+    except BaseException:
+        # Retain this boundary's existing facts before destructive teardown;
+        # optional capture failure cannot replace the original refusal.
+        preserve_failure_metadata(store.parent / "probe.log", lambda: {
+            "execution": execution,
+            "deadline": deadline,
+            "observed_at": time.monotonic(),
+            "native": diagnostics.observations.snapshot(),
+            "atomic_census": False,
+        })
+        raise
 
 
 def retry(state, store, record_key, kind):
@@ -757,6 +788,43 @@ def stop_success_endpoint(endpoint, thread):
     thread.join(timeout=5)
 
 
+def stop_control_case(process, diagnostics, endpoint, thread, *releases, connections=()):
+    incoming_error = sys.exc_info()[1]
+    errors = []
+
+    def attempt(dispose):
+        try:
+            dispose()
+        except BaseException as error:
+            errors.append(error)
+
+    for connection in connections:
+        attempt(connection.close)
+    if process is not None:
+        attempt(lambda: stop_process(process))
+    for release in releases:
+        attempt(release)
+    if diagnostics is not None:
+        attempt(diagnostics.close)
+    attempt(endpoint.release.set)
+    attempt(endpoint.shutdown)
+    attempt(endpoint.server_close)
+
+    def join():
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "Control endpoint thread did not retire"
+
+    attempt(join)
+    if errors:
+        for error in errors:
+            try:
+                print(f"Control cleanup failed: {type(error).__name__}: {error}", file=sys.stderr)
+            except Exception:
+                pass  # Reporting cannot replace the original assertion or cleanup failure.
+        if incoming_error is None:
+            raise errors[0]
+
+
 def prove_pre_handoff_stop(state):
     store = state / "pre-handoff-store"
     store.mkdir(mode=0o700)
@@ -847,11 +915,7 @@ def prove_pre_handoff_stop(state):
             "release_elapsed_seconds": 8 - (release_deadline - time.monotonic()),
         }), flush=True)
     finally:
-        if process is not None:
-            stop_process(process)
-        if milestones is not None:
-            milestones.close()
-        stop_success_endpoint(endpoint, endpoint_thread)
+        stop_control_case(process, milestones, endpoint, endpoint_thread)
 
 
 def prove_sealed_interruption_and_cleanup(state):
@@ -898,6 +962,7 @@ def prove_sealed_interruption_and_cleanup(state):
         milestones.wait("control_hint_suppressed", subject="sealed-interrupt")
         semantic = observe(store, "sealed-message")
         assert semantic["result"]["status"] == "cancelled", semantic
+        milestones.claim_inspection()
         execution = inspect_execution(store, "phase/sealed")
         assert execution["custody_occupied"] == "1", execution
 
@@ -910,16 +975,16 @@ def prove_sealed_interruption_and_cleanup(state):
             "model_settlement_superseded", operation=processing["operation"]
         )
         milestones.wait("cleanup_started", operation=processing["operation"])
+        milestones.claim_inspection()
         during_cleanup = inspect_execution(store, "phase/sealed")
         assert during_cleanup["custody_occupied"] == "1", during_cleanup
+        release_deadline = time.monotonic() + 8
         cleanup_gate.unlink()
-        milestones.wait(
-            "cleanup_completed", operation=processing["operation"], timeout=8
+        milestones.wait_model_cleanup(processing, release_deadline)
+        wait_execution_release(
+            milestones, store, "phase/sealed", release_deadline,
         )
         assert observe(store, "sealed-message") == semantic
-        after_cleanup = inspect_execution(store, "phase/sealed")
-        assert after_cleanup["custody_occupied"] == "0", after_cleanup
-        assert after_cleanup["dispatch_fenced"] is False, after_cleanup
         assert len(
             milestones.matching("cleanup_started", operation=processing["operation"])
         ) == 1
@@ -946,20 +1011,24 @@ def prove_sealed_interruption_and_cleanup(state):
         # closes. Reproduce that no-writer state without a scheduler race.
         os.mkfifo(settlement_gate.path, mode=0o600)
         message(state, store, "released-gate-message", "phase/sealed", "after release")
-        wait_for(
-            lambda: observe(store, "released-gate-message").get("result", {}).get("status")
-            == "completed",
+        successor_deadline = time.monotonic() + 8
+        released = wait_for(
+            lambda: (value := observe(store, "released-gate-message", deadline=successor_deadline))
+            .get("result", {}).get("status") == "completed" and value,
             "settlement gate with no writer does not strand its reader",
+            deadline=successor_deadline,
         )
+        milestones.wait_model_cleanup(released["processing"], successor_deadline)
+        wait_execution_release(milestones, store, "phase/sealed", successor_deadline)
     finally:
-        if process is not None:
-            stop_process(process)
-        settlement_gate.release()
-        settlement_gate.path.unlink(missing_ok=True)
-        cleanup_gate.unlink(missing_ok=True)
-        if milestones is not None:
-            milestones.close()
-        stop_success_endpoint(endpoint, endpoint_thread)
+        stop_control_case(
+            process, milestones, endpoint, endpoint_thread,
+            settlement_gate.release,
+            lambda: settlement_gate.path.unlink(missing_ok=True),
+            lambda: cleanup_gate.unlink(missing_ok=True),
+        )
+        if milestones is not None and sys.exc_info()[1] is None:
+            milestones.assert_model_cleanup_census(processing, released["processing"])
 
 
 def prove_delivery_and_settlement_contention(
@@ -1016,7 +1085,7 @@ def prove_delivery_and_settlement_contention(
         ]
 
         inspections = fill_complete_inspections(
-            fields["socket"], fields["store"], sessions[0]
+            fields["socket"], fields["store"], sessions[0], milestones
         )
         milestones.wait(
             "inspection_captured",
@@ -1104,12 +1173,14 @@ def prove_delivery_and_settlement_contention(
                 f"contention result {index}",
             )
             assert result["status"] == "cancelled", result
-        cleanup_records = milestones.wait(
-            "cleanup_completed", count=CONTROL_HEADROOM, timeout=8
+        release_deadline = time.monotonic() + 8
+        cleanup_records = [
+            milestones.wait_model_cleanup(processing, release_deadline)
+            for processing in processings
+        ]
+        wait_execution_release(
+            milestones, store, sessions[0], release_deadline,
         )
-        execution = inspect_execution(store, sessions[0])
-        assert execution["dispatch_fenced"] is False, execution
-        assert execution["custody_occupied"] == "0", execution
         if sample_host is not None:
             resource_samples["physically_released"] = sample_host(
                 process.pid, "physically_released"
@@ -1135,15 +1206,13 @@ def prove_delivery_and_settlement_contention(
             "resource_samples": resource_samples,
         }
     finally:
-        for connection in inspections:
-            connection.close()
-        if process is not None:
-            stop_process(process)
-        inspection_gate.release()
-        settlement_gate.release()
-        if milestones is not None:
-            milestones.close()
-        stop_success_endpoint(endpoint, endpoint_thread)
+        stop_control_case(
+            process, milestones, endpoint, endpoint_thread,
+            inspection_gate.release, settlement_gate.release,
+            connections=inspections,
+        )
+        if milestones is not None and sys.exc_info()[1] is None:
+            milestones.assert_model_cleanup_census(*processings)
 
 
 def prove_real_settlement_contention(
@@ -1194,7 +1263,7 @@ def prove_real_settlement_contention(
             "large-output processing identity",
         )
         inspections = fill_complete_inspections(
-            fields["socket"], fields["store"], session
+            fields["socket"], fields["store"], session, milestones
         )
         milestones.wait(
             "inspection_captured",
@@ -1763,6 +1832,8 @@ def prove_retry_wait_control(state, kind):
 
 
 def main():
+    from host_process_test import prove_control_disposal_oracle
+    prove_control_disposal_oracle(stop_control_case)
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-control-integration-"))
     store = state / "store"
     store.mkdir(mode=0o700)

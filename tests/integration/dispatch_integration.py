@@ -13,9 +13,8 @@ import sys
 import tempfile
 import threading
 import time
-from collections import Counter
 
-from host_process import HostDiagnostics, TestHTTPServer, preserve_failure_metadata, start_ready_process, stop_process
+from host_process import HostDiagnostics, TestHTTPServer, preserve_failure_metadata, start_ready_process, stop_process, wait_for_execution_release
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -662,40 +661,20 @@ def completed_observation(store, key, *, deadline=None):
 def wait_model_cleanup(diagnostics, store, session, observation, deadline):
     # A saved result is semantic authority, not physical release. Match the
     # admitted owner before checking its final accounting, with no fresh budget.
-    processing = observation["processing"]
-    remaining = deadline - time.monotonic()
-    assert remaining > 0, "result exhausted physical cleanup deadline"
-    records = diagnostics.wait(
-        "cleanup_completed", timeout=remaining,
-        turn=processing["turn"], operation=processing["operation"],
-        attempt=processing["attempt"], action=None,
-    )
-    assert len(records) == 1, records
-    remaining = deadline - time.monotonic()
-    assert remaining > 0, "cleanup endpoint arrived after original result deadline"
-    resources = command(
-        "inspect-session", "--store", store, "--session", session,
-        timeout=remaining,
-    )["execution"]
-    assert time.monotonic() < deadline, "cleanup inspection exceeded original result deadline"
-    assert resources["custody_occupied"] == "0", resources
-    assert resources["scratch_used_bytes"] == "0", resources
-    return resources
+    diagnostics.wait_model_cleanup(observation["processing"], deadline)
+
+    def inspect(remaining):
+        diagnostics.claim_inspection(limit=49)
+        return command(
+            "inspect-session", "--store", store, "--session", session,
+            timeout=remaining,
+        )["execution"]
+
+    return wait_for_execution_release(inspect, deadline)
 
 
 def assert_model_cleanup_census(diagnostics, *observations):
-    # After reap/drain, reject a duplicate published after the first match or
-    # an extra owner. This census never supplies a missing timely endpoint.
-    expected = Counter(
-        (value["processing"]["turn"], value["processing"]["operation"],
-         value["processing"]["attempt"], None)
-        for value in observations
-    )
-    actual = Counter(
-        (value.get("turn"), value.get("operation"), value.get("attempt"), value.get("action"))
-        for value in diagnostics.matching("cleanup_completed")
-    )
-    assert actual == expected, (actual, expected)
+    diagnostics.assert_model_cleanup_census(*(value["processing"] for value in observations))
 
 
 def main():

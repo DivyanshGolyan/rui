@@ -3,6 +3,7 @@
 
 import json
 import io
+import contextlib
 import mmap
 import os
 import pathlib
@@ -57,6 +58,7 @@ def assert_reaped(source, description, *, timeout=0.2, required_fields=None):
 
 
 def main():
+    prove_execution_release_oracles()
     assert_reaped("time.sleep(10)", "silent alive")
     assert_reaped("sys.stdout.write('rea'); sys.stdout.flush(); time.sleep(10)", "partial line")
     assert_reaped("print('not-ready'); time.sleep(10)", "malformed readiness")
@@ -493,6 +495,137 @@ def prove_retention_does_not_own_teardown():
                     process.kill()
                     process.wait(timeout=1)
     print("Host retention: sampling/write/copy refusal preserves original failure and actual SIGKILL/reap/closed custody; post-seal loss retains distinct pre/post states")
+
+
+def prove_execution_release_oracles():
+    import host_process
+
+    def refused(invoke, description):
+        try:
+            invoke()
+        except AssertionError as error:
+            assert description in str(error), error
+        else:
+            raise AssertionError(f"accepted {description}")
+
+    clean = dict(dispatch_fenced=False, custody_occupied="0", scratch_used_bytes="0")
+    # Independently authored accounting snapshots: separate zeros do not add
+    # up to a release, and a clean reply at the deadline is already too late.
+    for sequence, accepted, finished_at in (
+        ([dict(clean, custody_occupied="1"), clean], True, 0.1),
+        ([dict(clean, custody_occupied="1")], False, 0.1),
+        ([dict(clean, scratch_used_bytes="4096")], False, 0.1),
+        ([dict(clean, custody_occupied="1"), dict(clean, scratch_used_bytes="4096")], False, 0.1),
+        ([clean], False, 0.5),
+        ([clean], False, 0.6),
+    ):
+        now = [0.0]
+        replies = iter(sequence)
+        def inspect(remaining):
+            assert 0 < remaining <= 0.5 - now[0], remaining
+            now[0] += finished_at
+            return next(replies, sequence[-1])
+        clock = SimpleNamespace(monotonic=lambda: now[0], sleep=lambda delay: None)
+        with patch.object(host_process, "time", clock):
+            invoke = lambda: host_process.wait_for_execution_release(inspect, 0.5)
+            if accepted:
+                assert invoke() == clean
+            else:
+                refused(invoke, "custody drainage")
+    with patch.object(host_process.time, "monotonic", return_value=100):
+        for deadline, expected in ((145, 15), (101, 1)):
+            def inspect(remaining):
+                assert remaining == expected, remaining
+                return clean
+            assert host_process.wait_for_execution_release(inspect, deadline) == clean
+        refused(lambda: host_process.wait_for_execution_release(lambda _: dict(clean, dispatch_fenced=True), 101), "dispatch_fenced")
+
+    for limit in (49, 50):
+        diagnostics = HostDiagnostics(SimpleNamespace(stderr=io.BytesIO(), poll=lambda: 0))
+        diagnostics.close()
+        for _ in range(limit):
+            diagnostics.claim_inspection(limit)
+        assert diagnostics.records == [], "missing receipts must not refund issued inspections"
+        refused(lambda: diagnostics.claim_inspection(limit), "inspection population")
+
+    processing = dict(turn="7", operation="11", attempt="2")
+    endpoint = dict(processing, rui_test_phase="cleanup_completed", action=None)
+    # Drive the actual diagnostics reader and identity selector. Synthetic
+    # frames test the oracle; they do not qualify a native Host's reclamation.
+    for records, accepted in (
+        ([endpoint], True), ([], False), ([dict(endpoint, turn="8")], False),
+        ([dict(endpoint, operation="12")], False), ([dict(endpoint, attempt="3")], False),
+        ([dict(endpoint, action="19")], False), ([endpoint, endpoint], False),
+    ):
+        reader = io.BytesIO(b"".join(json.dumps(value).encode() + b"\n" for value in records))
+        diagnostics = HostDiagnostics(SimpleNamespace(stderr=reader, poll=lambda: 0))
+        diagnostics.close()
+        invoke = lambda: diagnostics.wait_model_cleanup(processing, time.monotonic() + 0.001)
+        if accepted:
+            assert invoke() == endpoint
+            diagnostics.assert_model_cleanup_census(processing)
+            with patch.object(host_process.time, "monotonic", return_value=10):
+                refused(lambda: diagnostics.wait_model_cleanup(processing, 10), "physical cleanup deadline")
+            original_wait = diagnostics.wait
+            for completed_at in (9.999, 10.0, 10.5):
+                now = [9.0]
+                def wait(*args, **kwargs):
+                    records = original_wait(*args, **kwargs)
+                    now[0] = completed_at
+                    return records
+                clock = SimpleNamespace(monotonic=lambda: now[0])
+                with patch.object(host_process, "time", clock), patch.object(diagnostics, "wait", wait):
+                    if completed_at < 10:
+                        assert diagnostics.wait_model_cleanup(processing, 10) == endpoint
+                    else:
+                        refused(lambda: diagnostics.wait_model_cleanup(processing, 10), "cleanup endpoint arrived")
+            # A duplicate or unrelated owner discovered after first success
+            # must still fail the complete post-reap population.
+            for late in (endpoint, dict(endpoint, operation="12")):
+                diagnostics.records.append(late)
+                refused(lambda: diagnostics.assert_model_cleanup_census(processing), "Counter")
+                diagnostics.records.pop()
+        elif records == [endpoint, endpoint]:
+            refused(invoke, "cleanup_completed")
+        else:
+            refused(invoke, "timed out")
+    print("Execution release oracle: simultaneous accounting, exact cleanup owners/final population, withheld custody/scratch, late replies, caller and inspection bounds")
+
+
+def prove_control_disposal_oracle(dispose):
+    module = sys.modules[dispose.__module__]
+    for broken in ((), ("connection",), ("stop",), ("gate",), ("diagnostics",),
+                   ("shutdown",), ("server",), ("join",), ("stop", "gate", "shutdown")):
+        for failing_body in (False, True):
+            closed = set()
+            failures = {name: RuntimeError(name) for name in broken}
+            primary = AssertionError("original Control assertion")
+
+            def close(name):
+                closed.add(name)
+                if name in failures:
+                    raise failures[name]
+
+            endpoint = SimpleNamespace(release=SimpleNamespace(set=lambda: close("release")),
+                                       shutdown=lambda: close("shutdown"), server_close=lambda: close("server"))
+            thread = SimpleNamespace(join=lambda timeout: close("join"), is_alive=lambda: "join" not in closed)
+            diagnostics = SimpleNamespace(close=lambda: close("diagnostics"))
+            connection = SimpleNamespace(close=lambda: close("connection"))
+            with patch.object(module, "stop_process", lambda process: close("stop")), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    try:
+                        if failing_body:
+                            raise primary
+                    finally:
+                        dispose(object(), diagnostics, endpoint, thread, lambda: close("gate"),
+                                connections=[connection])
+                except BaseException as error:
+                    assert error is (primary if failing_body else failures[broken[0]]), error
+                else:
+                    assert not failing_body and not broken
+            assert closed == {"connection", "stop", "gate", "diagnostics", "release", "shutdown", "server", "join"}, closed
+    print("Control disposal oracle: original assertion survives every cleanup failure; every owned resource still receives disposal")
 
 
 if __name__ == "__main__":
