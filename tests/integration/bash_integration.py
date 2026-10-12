@@ -153,14 +153,6 @@ def process_exists(pid):
         return False
 
 
-def stop_traced_host(host, diagnostics):
-    if host is not None:
-        fixture.stop_host(host)
-    if diagnostics is not None:
-        diagnostics.close()
-    return None, None
-
-
 def resolution(store, session):
     report = fixture.command(
         "inspect-session", "--store", store, "--session", session, "--profile", "full"
@@ -597,8 +589,6 @@ def prove_reused_session(state):
                     raise
         if host is not None:
             fixture.stop_host(host)
-        if milestones is not None:
-            milestones.close()
         endpoint.shutdown()
         endpoint.server_close()
         endpoint_thread.join(timeout=5)
@@ -1233,7 +1223,6 @@ def main():
 
         fixture.stop_host(host)
         host = None
-        success_milestones.close()
         success_milestones = None
         host = fixture.start_host(store, endpoint_url, active_capacity=0)
         configure(state, store, "rollback-config", "direct/rollback")
@@ -1301,6 +1290,7 @@ def main():
             "--test-before-launch-delay-ms",
             "1000",
             "--test-phase-trace",
+            observations="recovery",
         )
         milestones = HostDiagnostics(host)
         allow(
@@ -1336,7 +1326,8 @@ def main():
         pending = fixture.wait_for(
             lambda: action_for(store, "direct/before-launch"), "pre-launch Bash Action"
         )
-        host, milestones = stop_traced_host(host, milestones)
+        fixture.stop_host(host)
+        host, milestones = None, None
         host = fixture.start_host(store, endpoint_url, active_capacity=0)
         allow(state, store, "before-launch-allow", "direct/before-launch", pending["action"])
         rejected_allow = fixture.command(
@@ -1373,6 +1364,7 @@ def main():
             "--test-before-launch-delay-ms",
             "5000",
             "--test-phase-trace",
+            observations="recovery",
         )
         milestones = HostDiagnostics(host)
         milestones.wait("prepared_before_handoff", action=str(pending["action"]))
@@ -1528,7 +1520,8 @@ def main():
             == 0,
             "post-settlement Bash cleanup",
         )
-        host, milestones = stop_traced_host(host, milestones)
+        fixture.stop_host(host)
+        host, milestones = None, None
         host = fixture.start_host(store, endpoint_url)
 
         configure(state, store, "exited-pipes-config", "direct/exited-pipes")
@@ -1619,7 +1612,8 @@ def main():
         )
         fixture.wait_for(lambda: not process_exists(stopped_child), "stopped Bash descendant cleanup")
 
-        host, milestones = stop_traced_host(host, milestones)
+        fixture.stop_host(host)
+        host, milestones = None, None
         host = fixture.start_host(store, endpoint_url, "--bash-timeout-ms", "30000")
         configure(state, store, "timeout-config", "direct/timeout")
         fixture.message(state, store, "timeout-message", "direct/timeout", "execute")
@@ -2049,10 +2043,6 @@ def main():
         settlement_cleanup_gate.unlink(missing_ok=True)
         if host is not None:
             fixture.stop_host(host)
-        if milestones is not None:
-            milestones.close()
-        if success_milestones is not None:
-            success_milestones.close()
         if detached_process is not None and process_exists(detached_process):
             os.kill(detached_process, signal.SIGKILL)
         endpoint.shutdown()

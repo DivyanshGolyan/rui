@@ -1,5 +1,6 @@
 """Bounded startup and cleanup for Host processes used by integration evidence."""
 
+import atexit
 import http.server
 import ctypes
 import functools
@@ -22,7 +23,7 @@ STDERR_TAIL_LIMIT = 16 * 1024
 # Explicit finite native populations, not an execution-duration history.
 # list: 101 configuration + 37 list exchanges, two endpoints each.
 # status: 12 simultaneous clients + 40 repeated status calls + at most 20
-# setup/guard probes, three phases per connection, plus two boundaries.
+# setup/guard probes, three phases per connection, two boundaries and two Bash admissions.
 # stop: at most 321 Action probes (8 seconds / 25ms interval + final probe)
 # plus twenty non-poll numbered exchanges, each with a release; five stop
 # issuers, twelve observe classifications, three two-phase cleanup owners,
@@ -31,9 +32,14 @@ STDERR_TAIL_LIMIT = 16 * 1024
 # (ten selected phases), three controls (hint + timing), two boundaries.
 # dispatch: seven controls with queued/acquired/released endpoints; the first
 # rollback or preparation advance per separately observed Host, not retry history.
-OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2,
+# capture: one gate, one exact cancellation and one injected resume failure.
+# No cleanup or polling history; public drainage remains its separate oracle.
+# recovery: two Bash Attempts with handoff + three cuts, two model proposal handoffs.
+# managed: three preparations/transfers, at most three injected delayed handoffs.
+OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2 + 2,
                       "stop": 321 + 20 + 5 + 12 + 3 * 2 + 1 + 1,
-                      "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 3 + 1}
+                      "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 3 + 1,
+                      "capture": 3, "recovery": 2 * 4 + 2, "managed": 9}
 OBSERVATION_STATE_BYTES = 5 * 8  # version, pid, run, reserved count/loss, active writers.
 OBSERVATION_SEALED = 1 << 63
 OBSERVATION_FIELDS = (
@@ -42,7 +48,21 @@ OBSERVATION_FIELDS = (
     "store_queued_at_ns", "lock_acquired_at_ns", "store_complete_at_ns",
     "reply_complete_at_ns", "queue_wait_ns", "store_lock_wait_ns", "store_service_ns",
     "post_commit_reply_ns", "host_total_ns", "start_ns", "wait_ns", "custody_occupied",
+    "written_bytes", "http_version", "connection_id", "new_connections",
 )
+
+
+@functools.cache
+def _failure_destination(configured):
+    # One bounded allowlisted destination per interpreter, outside disposable
+    # fixture roots. Local runs need the same preservation as hosted runs.
+    destination = pathlib.Path(configured or tempfile.mkdtemp(prefix="rui-fixture-failures-"))
+    assert not destination.is_symlink(), "failure retention destination is a symlink"
+    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+    assert destination.is_dir(), "failure retention destination is not a directory"
+    if configured is None:
+        atexit.register(lambda: destination.rmdir() if destination.exists() and not any(destination.iterdir()) else None)
+    return destination.resolve()
 
 
 @functools.cache
@@ -84,9 +104,11 @@ class _Observations:
 
     def __init__(self, process, reader, plan, state):
         self.process, self.reader, self.limit = process, reader, OBSERVATION_LIMITS[plan]
+        self.plan = plan
         self.state = state
         self.final_state = None
         self.sealed = False
+        self.failure_preserved = False
         self.condition = threading.Condition()
         self.records = []
         self.pending_records = {}
@@ -202,6 +224,8 @@ class _Observations:
 
     def preserve_failure(self, snapshot):
         """Persist sampled facts after reap, before fixture-root deletion."""
+        if self.failure_preserved:
+            return
         arguments = list(map(str, getattr(self.process, "args", ())))
         if "--store" not in arguments or snapshot is None:
             return
@@ -211,17 +235,20 @@ class _Observations:
                         final_error=type(sys.exc_info()[1]).__name__ if sys.exc_info()[1] is not None else None)
         if not preserve_failure_metadata(path, lambda: snapshot):
             return
+        self.failure_preserved = True
         try:
-            destination = os.environ.get("RUI_FAILURE_ARTIFACTS")
-            if destination:
-                # Same existing job-wide helper/caps, while root still exists.
-                ci = str(pathlib.Path(__file__).resolve().parents[1] / "ci")
-                sys.path.insert(0, ci)
-                try:
-                    from run_selected import retain_failure_logs
-                    retain_failure_logs([root], pathlib.Path(destination))
-                finally:
-                    sys.path.remove(ci)
+            destination = getattr(self.process, "rui_failure_destination", None)
+            if destination is None:
+                destination = _failure_destination(os.environ.get("RUI_FAILURE_ARTIFACTS"))
+            # Same existing job-wide helper/caps, while root still exists.
+            ci = str(pathlib.Path(__file__).resolve().parents[1] / "ci")
+            sys.path.insert(0, ci)
+            try:
+                from run_selected import retain_failure_logs
+                retain_failure_logs([root], destination)
+            finally:
+                sys.path.remove(ci)
+            print(f"bounded fixture failure destination: {destination}", file=sys.stderr, flush=True)
         except Exception as error:
             try:
                 print(f"Native failure copy unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
@@ -311,6 +338,7 @@ class HostDiagnostics:
         self._read_error = None
         self.thread = threading.Thread(target=self._read, daemon=True)
         self.thread.start()
+        process.rui_diagnostics = self  # Process disposal owns its sole stderr collector.
 
     @property
     def read_error(self):
@@ -343,6 +371,7 @@ class HostDiagnostics:
                 self.condition.notify_all()
 
     def matching(self, phase, **fields):
+        self.require_native_receipt(phase)
         with self.condition:
             return [
                 record
@@ -382,6 +411,7 @@ class HostDiagnostics:
         assert actual == expected, (actual, expected)
 
     def wait(self, phase, count=1, timeout=10, **fields):
+        self.require_native_receipt(phase)
         deadline = time.monotonic() + timeout
         with self.condition:
             while True:
@@ -401,6 +431,60 @@ class HostDiagnostics:
                         f"{self.records[-12:]}"
                     )
                 self.condition.wait(remaining)
+
+    def require_native_receipt(self, phase):
+        plans = None
+        if phase in ("capture_write_gate_entered", "transport_resume_capture_failure", "effect_stop_requested"):
+            plans = ("capture", "stop") if phase == "capture_write_gate_entered" else ("capture",)
+        elif phase in ("action_attempt_admitted", "action_result_ready", "action_result_committed"):
+            plans = ("recovery", "status") if phase == "action_attempt_admitted" else ("recovery",)
+        elif phase in ("preparation_completed", "codex_transfer"):
+            plans = ("managed",)
+        elif phase == "prepared_before_handoff":
+            plans = ("managed", "control", "recovery")
+        if plans is not None:
+            assert self.observations is not None and self.observations.plan in plans, (
+                "required receipt needs native observation authority", phase)
+
+    def snapshot_failure(self, collect):
+        if sys.exc_info()[1] is None or hasattr(self.process, "rui_failure_snapshot"):
+            return
+        try:
+            self.process.rui_failure_snapshot = dict(self.observations.snapshot(), fixture=collect())
+        except Exception as error:
+            try:
+                print(f"Fixture boundary snapshot unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
+            except Exception:
+                pass  # Failure sampling cannot own release/reap or the primary error.
+
+    def dispose_capture(self, gate, collect, *, resume_failures=0, controls=()):
+        incoming_error = sys.exc_info()[1]
+        self.snapshot_failure(collect)  # Before emergency release, not a later reconstruction.
+        errors = []
+        for dispose in (gate.release, lambda: stop_process(self.process)):
+            try:
+                dispose()
+            except BaseException as error:
+                errors.append(error)
+        try:
+            if errors:
+                for error in errors:
+                    try:
+                        print(f"Capture fixture cleanup failed: {error}", file=sys.stderr)
+                    except Exception:
+                        pass
+                if incoming_error is not None:
+                    raise incoming_error from errors[0]
+                raise errors[0]
+            if incoming_error is None:
+                assert len(self.matching("capture_write_gate_entered")) == 1, self.records
+                assert len(self.matching("transport_resume_capture_failure", subject_kind="cause", subject="local_capture")) == resume_failures, self.records
+                assert Counter(record.get("control_key") for record in self.matching("effect_stop_requested")) == Counter(controls), self.records
+                assert len(self.records) == 1 + resume_failures + len(controls), self.records
+        except BaseException:
+            self.snapshot_failure(collect)
+            self.observations.preserve_failure(getattr(self.process, "rui_failure_snapshot", None))
+            raise
 
     def borrower_release(self, started, deadline):
         records = self.wait("connection_resources_released", subject_kind="request_number",
@@ -437,9 +521,7 @@ class HostDiagnostics:
         assert self.process.poll() is not None, "Host diagnostics closed before process exit"
         self.thread.join(timeout=3)
         assert not self.thread.is_alive(), "Host stderr reader did not drain within 3 seconds"
-        if self.observations:
-            self.observations.close()
-        assert self.read_error is None, f"Host stderr reader failed: {self.read_error}"
+        assert self._read_error is None, f"Host stderr reader failed: {self._read_error}"
 
     def tail(self):
         with self.condition:
@@ -454,7 +536,7 @@ class HostStartError(RuntimeError):
 
 def stop_process(process, timeout=10):
     deadline = time.monotonic() + timeout
-    disposal_error = None
+    errors = []
     incoming_error = sys.exc_info()[1]
     snapshot = None
     observations = getattr(process, "rui_observations", None)
@@ -463,34 +545,40 @@ def stop_process(process, timeout=10):
             # Leave bounded reap credit even when publication retirement fails.
             observations.dispose(deadline - min(1, timeout / 2))
         except BaseException as error:
-            disposal_error = error  # Still kill/reap; failed disposal never becomes acceptance.
+            errors.append(error)  # Still kill/reap; failed disposal never becomes acceptance.
     if observations is not None:
         try:
-            snapshot = observations.snapshot()
+            snapshot = getattr(process, "rui_failure_snapshot", None) or observations.snapshot()
         except Exception:
             pass  # Final native validity remains mandatory even if capture fails.
     try:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=max(0, deadline - time.monotonic()))
+    except BaseException as error:
+        errors.append(error)
+    diagnostics = getattr(process, "rui_diagnostics", None)
+    for close in (observations.close if observations else None, diagnostics.close if diagnostics else None,
+                  process.stdout.close if process.stdout else None, process.stderr.close if process.stderr else None):
+        if close is None:
+            continue
         try:
-            if process.poll() is None:
-                process.kill()
-            process.wait(timeout=max(0, deadline - time.monotonic()))
-        finally:
-            if observations is not None:
-                observations.close()
-        if disposal_error is not None:
-            raise disposal_error
+            close()
+        except BaseException as error:
+            errors.append(error)
+    try:
+        if errors:
+            for error in errors:
+                try:
+                    print(f"Host cleanup failed: {type(error).__name__}", file=sys.stderr)
+                except Exception:
+                    pass
+            if incoming_error is None:
+                raise errors[0]
+            incoming_error.add_note("Host cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
     finally:
-        failed = incoming_error is not None or disposal_error is not None or sys.exc_info()[1] is not None
-        try:
-            if process.stdout is not None:
-                process.stdout.close()
-        finally:
-            try:
-                if process.stderr is not None:
-                    process.stderr.close()
-            finally:
-                if failed and observations is not None:
-                    observations.preserve_failure(snapshot)
+        if (incoming_error is not None or errors) and observations is not None:
+            observations.preserve_failure(snapshot)
 
 
 def _tail(buffer, chunk, limit):
@@ -510,6 +598,21 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
     """Start a Host and transfer ownership only after one valid ready line."""
     # The caller retains the write descriptor; startup and reap own the reader.
     args = list(map(str, args))
+    if "--test-response-capture-gate-path" in args:
+        observations = observations or "capture"
+        assert observations in ("capture", "stop"), "capture gate requires a selecting native plan"
+        if "--test-phase-trace" not in args:
+            args.append("--test-phase-trace")
+    if "--test-transition" in args and args[args.index("--test-transition") + 1] in (
+            "action-attempt-admitted", "action-result-ready", "action-result-committed"):
+        transition = args[args.index("--test-transition") + 1]
+        observations = observations or "recovery"
+        plans = ("recovery", "status") if transition == "action-attempt-admitted" else ("recovery",)
+        assert observations in plans, "Bash crash cut requires a selecting native plan"
+    destination = _failure_destination((env if env is not None else os.environ).get("RUI_FAILURE_ARTIFACTS")) if observations is not None else None
+    if destination is not None and "--store" in args:
+        root = pathlib.Path(args[args.index("--store") + 1]).resolve().parent
+        assert not destination.is_relative_to(root), "failure retention must survive fixture-root deletion"
     reader = writer = None
     state_file = state = None
     try:
@@ -530,6 +633,7 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
             pass_fds=() if writer is None else (writer, state_file.fileno()),
         )
         if observations is not None:
+            process.rui_failure_destination = destination
             process.rui_observations = _Observations(process, reader, observations, state)
             reader = None  # Reader custody starts before readiness collection.
             state = None  # Mapping custody persists through reap, including SIGKILL.

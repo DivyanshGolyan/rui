@@ -253,7 +253,7 @@ def protected_saturation(root):
             stream.close()
         held.clear()
         host.wait(timeout=5)
-        diagnostics.close()
+        stop_process(host)
         assert host.returncode != 0, diagnostics.tail()  # EffectAwareShutdown, not a forced kill.
         # Resource release is before the final drain unlock, not thread retirement.
         release = diagnostics.matching("connection_resources_released", subject=pending["subject"])
@@ -267,7 +267,6 @@ def protected_saturation(root):
         for stream in held:
             stream.close()
         stop_process(host)
-        diagnostics.close()
 
 
 def hostile_discovery(root):
@@ -310,7 +309,6 @@ def hostile_discovery(root):
         print("hostile discovery passed: oversized before body, message/configure before scratch, no saved command, healthy reuse")
     finally:
         stop_process(host)
-        diagnostics.close()
 
 
 def discovery_body_deadline(root):
@@ -350,7 +348,6 @@ def discovery_body_deadline(root):
         print(f"discovery absolute deadline passed: header + trickling body closed in {elapsed:.3f}s, scratch=0")
     finally:
         stop_process(host)
-        diagnostics.close()
 
 
 def main():
@@ -605,7 +602,6 @@ def main():
             finally:
                 try:
                     if diagnostics is not None:
-                        diagnostics.close()
                         if completed:
                             diagnostics.borrower_census(time.monotonic(), expected_routes)
                 finally:
@@ -633,7 +629,6 @@ def main():
             try:
                 stop_process(second)
             finally:
-                diagnostics.close()
                 if completed:
                     diagnostics.borrower_census(time.monotonic(), expected_routes)
         assert status(store) == "unavailable"

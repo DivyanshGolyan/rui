@@ -23,7 +23,7 @@ import h2.settings
 
 import control_integration as control
 import dispatch_integration as dispatch
-from host_process import HostDiagnostics, wait_for_execution_release as wait_for_drain
+from host_process import HostDiagnostics, ReleaseGate, wait_for_execution_release as wait_for_drain
 
 
 class Endpoint(socketserver.ThreadingTCPServer):
@@ -647,13 +647,11 @@ def stalled_capture(root, endpoint, after_progress=False):
     records = root / phase
     records.mkdir(mode=0o700)
     store = root / f"stalled-capture-{phase}-store"
-    gate = root / f"capture-write-{phase}-gate"
-    os.mkfifo(gate)
-    keeper = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+    gate = ReleaseGate(root / f"capture-write-{phase}-gate")
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
         "--provider-ca-file", str(root / "cert.pem"),
-        "--test-response-capture-gate-path", str(gate),
+        "--test-response-capture-gate-path", str(gate.path),
         *(["--test-response-capture-gate-min-written-bytes", "10000"] if after_progress else []),
         "--test-phase-trace", active_capacity=100,
     )
@@ -666,7 +664,7 @@ def stalled_capture(root, endpoint, after_progress=False):
             dispatch.message(records, store, f"stalled-message-{index}", session, f"stalled-{index}")
         dispatch.wait_for(lambda: len(endpoint.streams) == 100, "100 live H2 streams", timeout=45)
         gate_event = diagnostics.wait("capture_write_gate_entered", timeout=30)[0]
-        assert (gate_event["written_bytes"] >= 10_000) == after_progress, gate_event
+        assert (int(gate_event["written_bytes"]) >= 10_000) == after_progress, gate_event
         processing = dispatch.observe(store, "stalled-message-0")["processing"]
         reply = dispatch.command(
             "interrupt-model", "--store", store, "--record", records / "stalled-interrupt.json",
@@ -674,14 +672,15 @@ def stalled_capture(root, endpoint, after_progress=False):
             "--turn", processing["turn"], "--operation", processing["operation"],
         )
         assert reply["answer"]["status"] == "accepted", reply
-        diagnostics.wait("effect_stop_requested", control_key="stalled-interrupt", timeout=15)
+        diagnostics.wait("effect_stop_requested", control_key="stalled-interrupt", timeout=15,
+                         turn=processing["turn"], operation=processing["operation"], attempt=processing["attempt"])
         held = dispatch.command("inspect-session", "--store", store,
                                 "--session", "direct/stalled-0")["execution"]
         assert int(held["custody_occupied"]) > 0, held
         assert dispatch.observe(store, "stalled-message-1").get("result") is None
         stalled_rss_kib = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(host.pid)]))
         held_physical_peak = host_physical_peak(host.pid) if endpoint.observed_shape else None
-        os.write(keeper, b"r")
+        gate.release()
         released = True
         for index in range(100):
             key = f"stalled-message-{index}"
@@ -708,31 +707,30 @@ def stalled_capture(root, endpoint, after_progress=False):
         print(json.dumps({"case": "stalled_observed_shape" if endpoint.observed_shape else "stalled_local_capture",
                           "phase": phase, "live_streams": 100,
                           "connections": 1, "control_before_release": True,
-                          "capture_written_before_gate": gate_event["written_bytes"],
+                          "capture_written_before_gate": int(gate_event["written_bytes"]),
                           "stalled_host_rss_kib": stalled_rss_kib,
                           "completed_idle_host_rss_kib": idle_rss_kib,
                           "held_physical_peak_bytes": held_physical_peak,
                           "completed_idle_physical_peak_bytes": idle_physical_peak}), flush=True)
     finally:
-        if not released:
-            os.write(keeper, b"r")
-        os.close(keeper)
-        dispatch.stop_host(host)
-        diagnostics.close()
+        diagnostics.dispose_capture(gate, lambda: {
+            "case": "stalled_capture", "after_progress": after_progress,
+            "capture_gate_exists": gate.path.exists(), "capture_released": released,
+            "provider_stream_count": len(endpoint.streams), "provider_connection_count": len(endpoint.connections),
+        }, controls=("stalled-interrupt",))
 
 
 def paused_capture_inactivity(root, endpoint):
     store = root / "paused-inactivity-store"
-    gate = root / "paused-inactivity-gate"
-    os.mkfifo(gate)
-    keeper = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+    gate = ReleaseGate(root / "paused-inactivity-gate")
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
         "--provider-ca-file", str(root / "cert.pem"),
-        "--test-response-capture-gate-path", str(gate),
+        "--test-response-capture-gate-path", str(gate.path),
         "--test-provider-inactivity-seconds", "3", "--test-phase-trace", active_capacity=20,
     )
     diagnostics = HostDiagnostics(host)
+    released = False
     try:
         for index in range(20):
             session = f"direct/paused-{index}"
@@ -744,7 +742,8 @@ def paused_capture_inactivity(root, endpoint):
         # provider inactivity interval while curl's receive queue fills.
         time.sleep(3.5)
         assert len(endpoint.streams) == 20, endpoint.streams
-        os.write(keeper, b"r")
+        gate.release()
+        released = True
         for index in range(20):
             key = f"paused-message-{index}"
             result_deadline = time.monotonic() + 20
@@ -762,29 +761,34 @@ def paused_capture_inactivity(root, endpoint):
             result_deadline,
         )
     finally:
-        os.write(keeper, b"r")
-        os.close(keeper)
-        dispatch.stop_host(host)
-        diagnostics.close()
-    with sqlite3.connect(store / "rui.sqlite3") as database:
-        attempts = database.execute("SELECT attempt_ordinal,allowance_used FROM model_operation").fetchall()
-        assert attempts == [(1, 1)] * 20, attempts
+        diagnostics.dispose_capture(gate, lambda: {
+            "case": "paused_capture_inactivity", "capture_gate_exists": gate.path.exists(), "capture_released": released,
+            "provider_stream_count": len(endpoint.streams), "provider_connection_count": len(endpoint.connections),
+        })
+    try:
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            attempts = database.execute("SELECT attempt_ordinal,allowance_used FROM model_operation").fetchall()
+            assert attempts == [(1, 1)] * 20, attempts
+    except BaseException:
+        diagnostics.snapshot_failure(lambda: {"case": "paused_capture_attempts", "capture_released": released})
+        diagnostics.observations.preserve_failure(getattr(host, "rui_failure_snapshot", None))
+        raise
     print(json.dumps({"case": "paused_capture_inactivity", "streams": len(endpoint.streams),
                       "attempts": 20, "hold_seconds": 3.5}), flush=True)
 
 
 def capture_failure_on_resume(root, endpoint):
     store = root / "resume-capture-failure-store"
-    gate = root / "resume-capture-failure-gate"
-    os.mkfifo(gate)
-    keeper = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+    gate = ReleaseGate(root / "resume-capture-failure-gate")
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
         "--provider-ca-file", str(root / "cert.pem"),
-        "--test-response-capture-gate-path", str(gate),
+        "--test-response-capture-gate-path", str(gate.path),
         "--fault", "response-write-on-resume", "--test-phase-trace", active_capacity=20,
     )
     diagnostics = HostDiagnostics(host)
+    released = False
+    outcomes = []
     try:
         for index in range(20):
             session = f"direct/resume-{index}"
@@ -792,13 +796,17 @@ def capture_failure_on_resume(root, endpoint):
             dispatch.message(root, store, f"resume-message-{index}", session, f"resume-{index}")
         assert endpoint.ready.wait(15), "20 H2 requests did not arrive"
         diagnostics.wait("capture_write_gate_entered", timeout=15)
-        os.write(keeper, b"r")
-        outcomes = []
+        gate.release()
+        released = True
         completed = 0
         for index in range(20):
             key = f"resume-message-{index}"
-            result = dispatch.wait_for(lambda key=key: dispatch.observe(store, key).get("result"),
-                                       f"resume result {index}", timeout=20)
+            result_deadline = time.monotonic() + 20
+            result = dispatch.wait_for(
+                lambda key=key: dispatch.observe(
+                    store, key, deadline=min(result_deadline, time.monotonic() + 15),
+                ).get("result"), f"resume result {index}", deadline=result_deadline,
+            )
             outcomes.append(result.get("code"))
             if result["status"] == "completed":
                 completed += 1
@@ -826,10 +834,11 @@ def capture_failure_on_resume(root, endpoint):
         print(json.dumps({"case": "capture_failure_on_resume", "capture_failures": outcomes.count("response_write_failed"),
                           "unaffected_siblings": completed, "new_admission": later["status"]}), flush=True)
     finally:
-        os.write(keeper, b"r")
-        os.close(keeper)
-        dispatch.stop_host(host)
-        diagnostics.close()
+        diagnostics.dispose_capture(gate, lambda: {
+            "case": "capture_failure_on_resume", "capture_gate_exists": gate.path.exists(), "capture_released": released,
+            "provider_stream_count": len(endpoint.streams), "provider_connection_count": len(endpoint.connections),
+            "result_codes": outcomes,
+        }, resume_failures=1)
 
 
 def refused_stream(root, endpoint, phase):
@@ -1116,15 +1125,37 @@ def observed_shape_cases(root, tls):
             thread.join(timeout=5)
 
 
+def capture_case(root, tls, case):
+    stalled = case in ("stalled-before", "stalled-progress")
+    endpoint = Endpoint(tls, 100 if stalled else 20, sse=True,
+                        after_progress=case == "stalled-progress", eager_sse=not stalled)
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    try:
+        if stalled:
+            stalled_capture(root, endpoint, case == "stalled-progress")
+        elif case == "paused-capture":
+            paused_capture_inactivity(root, endpoint)
+        else:
+            assert case == "resume-capture", case
+            capture_failure_on_resume(root, endpoint)
+    finally:
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+
+
 def main():
     observed_only = len(sys.argv) == 3 and sys.argv[2] == "--observed-shape-only"
     churn = len(sys.argv) == 3 and sys.argv[2] == "--observed-shape-churn"
-    assert len(sys.argv) == 2 or observed_only or churn
+    selected = sys.argv[2].removeprefix("--case=") if len(sys.argv) == 3 and sys.argv[2].startswith("--case=") else None
+    capture_cases = ("stalled-before", "stalled-progress", "paused-capture", "resume-capture")
+    assert len(sys.argv) == 2 or observed_only or churn or selected in capture_cases
     if churn and sys.platform != "darwin":
         raise RuntimeError("Observed-shape churn footprint qualification requires macOS")
     with tempfile.TemporaryDirectory(prefix="rui-h2-") as tmp:
         root = pathlib.Path(tmp)
-        if not observed_only and not churn:
+        if not observed_only and not churn and selected is None:
             queued_h1(root)
             queued_h1_inactivity(root)
         subprocess.run([
@@ -1135,6 +1166,9 @@ def main():
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(root / "cert.pem", root / "key.pem")
         tls.set_alpn_protocols(["h2"])
+        if selected is not None:
+            capture_case(root, tls, selected)
+            return
         if churn:
             endpoint = Endpoint(tls, 100, sse=True, observed_shape=True)
             thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
@@ -1161,34 +1195,8 @@ def main():
                 endpoint.server_close()
                 thread.join(timeout=5)
         observed_shape_cases(root, tls)
-        for after_progress in (False, True):
-            endpoint = Endpoint(tls, 100, sse=True, after_progress=after_progress)
-            thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-            thread.start()
-            try:
-                stalled_capture(root, endpoint, after_progress)
-            finally:
-                endpoint.shutdown()
-                endpoint.server_close()
-                thread.join(timeout=5)
-        endpoint = Endpoint(tls, 20, sse=True, eager_sse=True)
-        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-        thread.start()
-        try:
-            paused_capture_inactivity(root, endpoint)
-        finally:
-            endpoint.shutdown()
-            endpoint.server_close()
-            thread.join(timeout=5)
-        endpoint = Endpoint(tls, 20, sse=True, eager_sse=True)
-        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-        thread.start()
-        try:
-            capture_failure_on_resume(root, endpoint)
-        finally:
-            endpoint.shutdown()
-            endpoint.server_close()
-            thread.join(timeout=5)
+        for case in capture_cases:
+            capture_case(root, tls, case)
         for phase in ("headers", "upload"):
             endpoint = Endpoint(tls, 1, refuse_at=phase)
             thread = threading.Thread(target=endpoint.serve_forever, daemon=True)

@@ -20,7 +20,7 @@ from collections import Counter
 import canonical_failure_integration as canonical
 import dispatch_integration as fixture
 import human_cli_integration as human
-from host_process import HostStartError, canonical_fixture_root, preserve_failure_metadata, start_ready_process, stop_process
+from host_process import HostDiagnostics, HostStartError, ReleaseGate, canonical_fixture_root, preserve_failure_metadata, start_ready_process, stop_process, wait_for_execution_release
 
 
 def assert_file_flags(actual, expected):
@@ -642,6 +642,83 @@ def check_forwarding(state, library):
             caller.wait(timeout=5)
         caller.stdout.close()
         caller.stderr.close()
+
+
+def capture_receipt_case(state, library):
+    """Required writer entry survives real, unrelated optional stderr custody."""
+    root = state / "capture-receipt"
+    root.mkdir(mode=0o700)
+    store = root / "store"
+    arm, release, log = (root / name for name in ("arm", "release", "probe.log"))
+    answer = b"exact capture answer"
+    endpoint = fixture.SuccessEndpoint([fixture.sse_answer("capture", "reason", "message", answer.decode())[0]])
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    gate = ReleaseGate(root / "capture-gate")
+    host = diagnostics = inspector = None
+    try:
+        host, _ = start_ready_process(fixture.host_arguments(store,
+            f"http://127.0.0.1:{endpoint.server_port}/responses", "--test-phase-trace",
+            "--test-response-capture-gate-path", gate.path), env={**os.environ,
+            "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+            "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "diagnostic-contention",
+            "RUI_DIAGNOSTIC_ARM": str(arm), "RUI_DIAGNOSTIC_RELEASE": str(release)})
+        diagnostics = HostDiagnostics(host)
+        fixture.configure(root, store, "capture-config", "diagnostic/session", "model-a")
+        arm.touch()
+        inspector = fixture.start_command("inspect-session", "--store", store, "--session", "diagnostic/session")
+        fixture.wait_for(lambda: log.exists() and "diagnostic-held-inspection\n" in log.read_text(),
+                         "actual optional inspection custody", timeout=3)
+        held = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
+        assert len(held) == 1 and held[0]["process"] == str(host.pid) and held[0]["subject"] == "diagnostic/session", held
+        fixture.message(root, store, "capture-message", "diagnostic/session", "hello")
+        event = diagnostics.wait("capture_write_gate_entered", timeout=15)[0]
+        assert event["process"] == held[0]["process"] and event["run"] == held[0]["run"], (event, held)
+        assert event["written_bytes"] == "0" and gate.path.exists() and not release.exists(), event
+        assert b"capture_write_gate_entered" not in diagnostics.tail(), "optional output supplied required receipt"
+        release.touch()
+        out, err = inspector.communicate(timeout=3)
+        assert inspector.returncode == 0, (out, err)
+        gate.release()
+        deadline = time.monotonic() + 10
+        result = fixture.wait_for(lambda: fixture.observe(store, "capture-message", deadline=deadline).get("result"),
+                                  "exact released capture result", deadline=deadline)
+        assert result["status"] == "completed", result
+        assert fixture.read_result(store, "capture-message") == answer
+        wait_for_execution_release(lambda remaining: fixture.command("inspect-session", "--store", store,
+                                   "--session", "diagnostic/session", timeout=remaining)["execution"], deadline)
+        print("native capture receipt: writer entry under actual optional stderr contention; exact answer and simultaneous zero custody/scratch", flush=True)
+    finally:
+        incoming_error = sys.exc_info()[1]
+        if diagnostics is not None:
+            diagnostics.snapshot_failure(lambda: {"case": "capture-receipt",
+                "capture_gate_exists": gate.path.exists(), "optional_released": release.exists()})
+
+        def retire_inspector():
+            if inspector is not None and inspector.poll() is None:
+                try:
+                    inspector.communicate(timeout=3)
+                except subprocess.TimeoutExpired:
+                    inspector.kill()
+                    inspector.communicate(timeout=3)
+                    raise  # Mandatory reap does not accept the timed-out caller.
+
+        errors = []
+        for dispose in (release.touch, retire_inspector,
+                        lambda: diagnostics.dispose_capture(gate, lambda: {"case": "capture-receipt",
+                            "capture_gate_exists": gate.path.exists(), "optional_released": release.exists()})
+                            if diagnostics is not None else gate.release(),
+                        endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
+            try:
+                dispose()
+            except BaseException as error:
+                errors.append(error)
+        if thread.is_alive():
+            errors.append(AssertionError("Capture endpoint thread did not retire"))
+        if errors:
+            if incoming_error is None:
+                raise errors[0]
+            incoming_error.add_note("Capture cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
 
 
 def persistent_cases(state, library, home, store, host):
@@ -2117,6 +2194,11 @@ def main(selected=None):
             "-fPIC", str(source), *(["-ldl"] if sys.platform == "linux" else []), "-o", str(library)], check=True)
         check_forwarding(state, library)
         if selected == "forwarding":
+            completed = True
+            return
+        if selected in (None, "capture-receipt"):
+            capture_receipt_case(state, library)
+        if selected == "capture-receipt":
             completed = True
             return
         if selected in (None, "host-diagnostics"):

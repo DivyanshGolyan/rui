@@ -892,7 +892,6 @@ def main():
 
         stop_host(proposal_host)
         processes.remove(proposal_host)
-        proposal_milestones.close()
         proposal_milestones = None
         os.close(proposal_gate_keeper)
         proposal_gate_keeper = None
@@ -2370,7 +2369,6 @@ def main():
             rejected, scratch_deadline,
         )
         stop_host(scratch_host)
-        scratch_diagnostics.close()
         assert_model_cleanup_census(scratch_diagnostics, rejected)
         processes.remove(scratch_host)
         scratch_endpoint.shutdown()
@@ -2468,7 +2466,6 @@ def main():
         )["execution"]
         assert resources["scratch_used_bytes"] == "0", resources
         stop_host(growth_host)
-        growth_diagnostics.close()
         assert_model_cleanup_census(growth_diagnostics, counted, imported)
         processes.remove(growth_host)
         growth_endpoint.shutdown()
@@ -3886,7 +3883,6 @@ def main():
         assert "processing" not in rollback_queued, rollback_queued
         stop_host(host)
         processes.remove(host)
-        rollback_milestones.close()
         rollback_milestones = None
         with sqlite3.connect(rollback_store / "rui.sqlite3") as database:
             assert database.execute(
@@ -4028,7 +4024,6 @@ def main():
                 fault_diagnostics, fault_store, f"direct/{fault}", failed, fault_deadline,
             )
             stop_host(host)
-            fault_diagnostics.close()
             assert_model_cleanup_census(fault_diagnostics, failed)
             processes.remove(host)
 
@@ -4101,7 +4096,6 @@ def main():
         assert preparation_stop_endpoint.requests == []
         stop_process(preparation_stop_host)
         processes.remove(preparation_stop_host)
-        preparation_stop_trace.close()
         preparation_stop_endpoint.shutdown()
         preparation_stop_endpoint.server_close()
         preparation_stop_thread.join(timeout=5)
@@ -4170,10 +4164,8 @@ def main():
         # beginning shutdown; its reply does not determine Host lifecycle.
         assert shutdown_trigger.returncode in (0, 1), shutdown_trigger
         assert preparation_shutdown_host.wait(timeout=10) != 0
+        stop_process(preparation_shutdown_host)
         processes.remove(preparation_shutdown_host)
-        preparation_shutdown_trace.close()
-        preparation_shutdown_host.stdout.close()
-        preparation_shutdown_host.stderr.close()
         assert preparation_shutdown_endpoint.requests == []
         assert not list((preparation_shutdown_store / "scratch").glob("request-*.tmp"))
         preparation_shutdown_host = start_host(
@@ -4308,7 +4300,6 @@ def main():
             exact_result, exact_deadline,
         )
         stop_host(host)
-        exact_diagnostics.close()
         assert_model_cleanup_census(exact_diagnostics, exact_result)
         processes.remove(host)
 
@@ -4348,7 +4339,6 @@ def main():
             limited, limit_deadline,
         )
         stop_host(host)
-        limit_diagnostics.close()
         assert_model_cleanup_census(limit_diagnostics, limited)
         processes.remove(host)
 
@@ -4752,10 +4742,6 @@ def main():
             continuation_endpoint.server_close()
         if continuation_thread is not None:
             continuation_thread.join(timeout=5)
-        if proposal_milestones is not None:
-            proposal_milestones.close()
-        if rollback_milestones is not None:
-            rollback_milestones.close()
         if proposal_gate_keeper is not None:
             os.close(proposal_gate_keeper)
         if completed:

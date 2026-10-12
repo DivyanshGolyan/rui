@@ -38,13 +38,14 @@ def child(source):
     ]
 
 
-def assert_reaped(source, description, *, timeout=0.2, required_fields=None):
+def assert_reaped(source, description, *, timeout=0.2, required_fields=None, observations=None):
     started = time.monotonic()
     try:
         start_ready_process(
             child(source),
             timeout=timeout,
             required_fields=required_fields,
+            observations=observations,
         )
     except HostStartError as error:
         elapsed = time.monotonic() - started
@@ -60,6 +61,7 @@ def assert_reaped(source, description, *, timeout=0.2, required_fields=None):
 
 def main():
     prove_execution_release_oracles()
+    prove_required_capture_receipts()
     assert_reaped("time.sleep(10)", "silent alive")
     assert_reaped("sys.stdout.write('rea'); sys.stdout.flush(); time.sleep(10)", "partial line")
     assert_reaped("print('not-ready'); time.sleep(10)", "malformed readiness")
@@ -237,6 +239,112 @@ def observation_state(process, state, *, run=37, active=0, version=1):
     return mapping
 
 
+def prove_required_capture_receipts():
+    # Optional output cannot manufacture native authority, even when complete.
+    receipt = b'{"rui_test_phase":"capture_write_gate_entered","written_bytes":12345}\n'
+    process = SimpleNamespace(pid=os.getpid(), stderr=io.BytesIO(receipt), poll=lambda: 0)
+    diagnostics = HostDiagnostics(process)
+    diagnostics.thread.join(timeout=1)
+    for phase in ("capture_write_gate_entered", "transport_resume_capture_failure", "effect_stop_requested",
+                  "action_attempt_admitted", "action_result_ready", "action_result_committed",
+                  "preparation_completed", "prepared_before_handoff", "codex_transfer"):
+        for invoke in (lambda: diagnostics.wait(phase, timeout=.01), lambda: diagnostics.matching(phase)):
+            try:
+                invoke()
+            except AssertionError as error:
+                assert "native observation authority" in str(error), error
+            else:
+                raise AssertionError("optional stderr supplied required capture evidence")
+    diagnostics.close()
+    assert_reaped("print('not-ready'); time.sleep(30)", "native startup retains readiness error",
+                  observations="managed")
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory)
+        args = child("raise AssertionError('invalid setup launched a child')") + [
+            '--store', str(root / 'store'), '--test-response-capture-gate-path', str(root / 'gate')]
+        for options, expected in (({'observations': 'list'}, 'selecting native plan'),
+                                  ({'env': {'RUI_FAILURE_ARTIFACTS': str(root / 'retained')}}, 'survive fixture-root deletion')):
+            try:
+                start_ready_process(args, **options)
+            except AssertionError as error:
+                assert expected in str(error), error
+            else:
+                raise AssertionError('invalid required-evidence setup accepted')
+    source = r'''
+import os, mmap, struct
+def arg(name): return sys.argv[sys.argv.index(name) + 1]
+state = mmap.mmap(int(arg('--test-observation-state-fd')), 40)
+case = arg('--case')
+count = 2 if case == 'duplicate' else 1
+state[:] = struct.pack('<QQQQQ', 1, os.getpid(), 37, count * 2 + int(case == 'lost'), 0)
+phase = 'cleanup_started' if case == 'missing' else 'capture_write_gate_entered'
+fields = ((0, phase), (1, '1234567'), (24, '12345'))
+body = b''.join(struct.pack('<BH', index, len(value)) + value.encode() for index, value in fields)
+for sequence in range(1, count + 1):
+    os.write(int(arg('--test-observation-fd')), struct.pack('<HBBQQQ', 28 + len(body), 1, int(case == 'lost'), sequence, 37, os.getpid()) + body)
+print('ready execution=enabled curl=8.22.0', flush=True)
+time.sleep(30)
+'''
+    for case in ('received', 'missing', 'duplicate', 'lost'):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            gate = ReleaseGate(root / 'gate')
+            arguments = child(source) + ['--store', str(root / 'store'),
+                '--test-response-capture-gate-path', str(gate.path), '--case', case]
+            process, _ = start_ready_process(arguments, timeout=1)
+            assert process.rui_observations.plan == 'capture', "gate forgot its native collector"
+            destination = process.rui_failure_destination
+            assert destination.is_dir() and not destination.is_relative_to(root), destination
+            diagnostics = HostDiagnostics(process)
+            primary = None
+            try:
+                try:
+                    records = diagnostics.wait('capture_write_gate_entered', timeout=.02)
+                    assert records[0]['written_bytes'] == '12345', records
+                    if case == 'duplicate':
+                        diagnostics.wait('capture_write_gate_entered', count=2, timeout=.02)
+                finally:
+                    diagnostics.dispose_capture(gate, lambda: {'case': case, 'capture_released': gate.fd is None})
+            except AssertionError as error:
+                assert case != 'received', error
+                if case == 'missing':
+                    assert 'timed out waiting for 1 capture_write_gate_entered' in str(error), error
+                if case == 'lost':
+                    assert 'native observation loss' in str(error), error
+                primary = error
+            assert (primary is not None) == (case != 'received')
+            assert gate.fd is None and not gate.path.exists()
+            assert process.returncode is not None and process.stdout.closed and process.stderr.closed
+            assert not diagnostics.thread.is_alive() and not process.rui_observations.thread.is_alive()
+            pid = process.pid
+        assert not root.exists()
+        if case != 'received':
+            retained = list(destination.rglob(f'observation-failure-{pid}.json'))
+            assert len(retained) == 1, retained
+            facts = json.loads(retained[0].read_bytes())
+            assert facts['fixture'] == {'case': case, 'capture_released': case == 'duplicate'}, facts
+            assert facts['final_error'] == 'AssertionError', facts
+            assert (facts['returncode'] is None) == (case != 'duplicate'), facts
+            assert facts['post_reap_state'][0:3] == [1, pid, 37], facts
+            assert not list(destination.rglob('rui.sqlite3'))
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory)
+        process, _ = start_ready_process(child(source) + ['--store', str(root / 'store'), '--case', 'lost'],
+                                         observations='managed', timeout=1)
+        diagnostics = HostDiagnostics(process)
+        primary = AssertionError('original managed result assertion')
+        try:
+            try:
+                raise primary
+            finally:
+                stop_process(process)
+        except AssertionError as error:
+            assert error is primary and any('Host cleanup failed' in note for note in error.__notes__), error
+        assert process.returncode is not None and process.stdout.closed and process.stderr.closed
+        assert not diagnostics.thread.is_alive() and not process.rui_observations.thread.is_alive()
+    print('Required receipts: optional authority/wrong plan/disposable retention refused; missing/duplicate/lost native gate fails; original failure survives release/reap/root teardown')
+
+
 def prove_observation_channel():
     for case in ("reordered", "missing", "wrong-process", "loss", "duplicate", "overflow", "wrong-subject", "missing-final", "wrong-action", "missing-handoff"):
         reader, writer = os.pipe()
@@ -293,10 +401,10 @@ def prove_observation_channel():
             os.close(writer)
             writer = None
             if case in ("reordered", "wrong-subject", "missing-final", "wrong-action", "missing-handoff"):
-                diagnostics.close()
+                observations.close()
             else:
                 try:
-                    diagnostics.close()
+                    observations.close()
                 except AssertionError as error:
                     expected = {"missing": "missing observation sequence", "wrong-process": "foreign observation",
                                 "loss": "observation loss", "duplicate": "duplicate observation sequence",
@@ -398,7 +506,7 @@ def prove_observation_disposal():
             os.close(writer)
             process.poll = lambda: -9
             try:
-                diagnostics.close()
+                observations.close()
             except AssertionError as error:
                 assert case in ("late-loss", "missing-tail"), error
             else:

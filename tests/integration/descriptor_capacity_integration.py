@@ -191,21 +191,9 @@ def assert_connections_live(connections):
 
 
 def admitted_at_gate(diagnostics, ordinal):
-    # Gate setup retains its existing optional trace oracle. The status plan
-    # deliberately excludes effect traces; only the private channel below is
-    # authority for connection retirement. Tail storage is already bounded.
-    def admitted():
-        for line in diagnostics.tail().splitlines():
-            try:
-                record = json.loads(line)
-            except (ValueError, UnicodeDecodeError):
-                continue
-            if (record.get("rui_test_phase") == "action_attempt_admitted"
-                    and record.get("action") == str(ordinal + 1)
-                    and record.get("attempt") == "1"):
-                return record
-        return None
-    return wait_for(admitted, f"Action {ordinal + 1} admitted at Bash gate")
+    records = diagnostics.wait("action_attempt_admitted", action=str(ordinal + 1), attempt="1")
+    assert len(records) == 1, records
+    return records[0]
 
 
 def prove_borrower_oracle():
@@ -412,21 +400,34 @@ def prove_bash_spawn_with_full_client_population(state, required):
             print("descriptor failure stderr:", repr(diagnostics.tail()), flush=True)
         raise
     finally:
+        incoming_error = sys.exc_info()[1]
+        errors = []
         for connection in held:
             connection.close()
         for release in releases:
             release.touch(exist_ok=True)
-        if host is not None:
-            stop_process(host)
-        if diagnostics is not None:
-            diagnostics.close()
-            if completed:
+        for dispose in (lambda: stop_process(host) if host is not None else None,
+                        lambda: os.close(keeper), endpoint.shutdown, endpoint.server_close,
+                        lambda: endpoint_thread.join(timeout=3)):
+            try:
+                dispose()
+            except BaseException as error:
+                errors.append(error)
+        try:
+            if completed and diagnostics is not None:
                 diagnostics.borrower_census(time.monotonic(), expected_routes)
                 assert len(diagnostics.matching("connection_place_released")) == 2
-        os.close(keeper)
-        endpoint.shutdown()
-        endpoint.server_close()
-        endpoint_thread.join(timeout=3)
+                assert len(diagnostics.matching("action_attempt_admitted")) == 2
+        except BaseException as error:
+            diagnostics.snapshot_failure(lambda: {"case": "descriptor_final_population"})
+            diagnostics.observations.preserve_failure(getattr(host, "rui_failure_snapshot", None))
+            errors.append(error)
+        if endpoint_thread.is_alive():
+            errors.append(AssertionError("Descriptor endpoint thread did not retire"))
+        if errors:
+            if incoming_error is None:
+                raise errors[0]
+            incoming_error.add_note("Descriptor cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
 
 
 def main():
@@ -556,16 +557,25 @@ def main():
         documented = None
         prove_bash_spawn_with_full_client_population(state, required)
     finally:
-        if documented is not None:
-            stop_process(documented)
-        if host is not None:
-            stop_process(host)
-        if diagnostics is not None:
-            diagnostics.close()
-        endpoint.shutdown()
-        endpoint.server_close()
-        endpoint_thread.join(timeout=3)
-        shutil.rmtree(state)
+        incoming_error = sys.exc_info()[1]
+        errors = []
+        for dispose in (lambda: stop_process(documented) if documented is not None else None,
+                        lambda: stop_process(host) if host is not None else None,
+                        endpoint.shutdown, endpoint.server_close, lambda: endpoint_thread.join(timeout=3)):
+            try:
+                dispose()
+            except BaseException as error:
+                errors.append(error)
+        if endpoint_thread.is_alive():
+            errors.append(AssertionError("Descriptor endpoint thread did not retire"))
+        if incoming_error is None and not errors:
+            shutil.rmtree(state)
+        else:
+            print(f"retained descriptor fixture failure state: {state}", file=sys.stderr)
+        if errors:
+            if incoming_error is None:
+                raise errors[0]
+            incoming_error.add_note("Descriptor cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
 
 
 if __name__ == "__main__":

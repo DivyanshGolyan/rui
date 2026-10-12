@@ -226,7 +226,6 @@ def main():
             print(f"Session list native Host: fresh HOME, exact keyset, 100 dormant, long reference, idle resources 0→100: {baseline}→{grown}")
         finally:
             stop_process(process)
-            diagnostics.close()
             if original_home is None:
                 del os.environ["HOME"]
             else:

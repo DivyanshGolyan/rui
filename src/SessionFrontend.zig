@@ -19,7 +19,6 @@ const Submission = union(enum) {
 const ReadPhase = enum { activity, history, details, permission };
 const SettlementMode = enum { active, handoff, final_exit };
 const CaptureTruth = enum { not_sent, publication_unknown, published };
-const AdmissionOrigin = enum { initial, retry };
 const ReadEnd = union(enum) {
     absent,
     complete,
@@ -46,7 +45,7 @@ const AdmissionEnd = union(enum) {
     absent,
     accepted,
     rejected,
-    failed: struct { err: anyerror, state: Input.State, capture: CaptureTruth, origin: AdmissionOrigin },
+    failed: struct { err: anyerror },
 
     fn failure(self: AdmissionEnd) ?anyerror {
         return if (self == .failed) self.failed.err else null;
@@ -88,8 +87,7 @@ captured: ?client.CapturedRecord = null,
 reply_buffer: client.ReplyBuffer = .{},
 reply: ?client.MutationReply = null,
 admission_error: ?anyerror = null,
-// Provenance is set before launch; capture entry is worker-owned until join.
-admission_origin: AdmissionOrigin = .initial,
+// Capture entry is worker-owned until join.
 capture_truth: CaptureTruth = .not_sent,
 accepted: ?struct { kind: std.meta.Tag(Submission), key: [36]u8 } = null,
 current: client.Current = undefined,
@@ -249,7 +247,6 @@ fn startSubmission(self: *Self, submission: Submission) !void {
     const target: client.CaptureTarget = .{ .generated = self.directory };
     self.capture_target = .{ .explicit = try target.resolve(self.init.io, &self.capture_path, &self.capture_key) };
     self.reply = null;
-    self.admission_origin = .initial;
     self.capture_truth = .not_sent;
     try self.settleSubmission(.submitting);
     try self.admission.start(self.init.io, self, submit);
@@ -332,7 +329,7 @@ test "frontend initial cancellation before capture is definitely unsent for Mess
 }
 
 test "frontend settlement precedence and reader exit policies retain independent facts" {
-    const admission: AdmissionEnd = .{ .failed = .{ .err = error.CanonicalStoreFailure, .state = .unconfirmed, .capture = .published, .origin = .retry } };
+    const admission: AdmissionEnd = .{ .failed = .{ .err = error.CanonicalStoreFailure } };
     for ([_]SettlementMode{ .active, .handoff, .final_exit }) |mode| {
         const settled: Settled = .{ .restored = error.TerminalRestoreFailed, .reader = .absent, .admission = admission };
         try std.testing.expectEqual(error.TerminalRestoreFailed, settled.failure(mode, error.InteractiveInterrupted).?);
@@ -372,7 +369,7 @@ test "frontend failed and cancelled retries retain current original before older
     for ([_]Kind{ .message, .allow_once, .deny }) |kind| {
         for ([_]CaptureTruth{ .not_sent, .publication_unknown, .published }) |truth| {
             for ([_]bool{ false, true }) |cancelled| {
-                var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false, .accepted = .{ .kind = .message, .key = @splat('A') }, .capture_truth = truth, .admission_origin = .retry };
+                var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false, .accepted = .{ .kind = .message, .key = @splat('A') }, .capture_truth = truth };
                 self.init.io = std.testing.io;
                 self.input.init();
                 self.submission = if (kind == .message) .{ .message = self.input.submitText("original B café!") } else .{ .decision = .{ .action = 19, .decision = if (kind == .allow_once) .allow_once else .deny } };
@@ -382,8 +379,7 @@ test "frontend failed and cancelled retries retain current original before older
                 try self.admission.start(std.testing.io, &self, if (cancelled) Worker.cancelled else Worker.failed);
                 const end = self.joinAdmission();
                 try std.testing.expectEqual(if (cancelled) error.Cancelled else error.ConnectionResetByPeer, end.failed.err);
-                try std.testing.expectEqual(truth, end.failed.capture);
-                try std.testing.expectEqual(AdmissionOrigin.retry, end.failed.origin);
+                try std.testing.expectEqual(truth, self.capture_truth);
                 try std.testing.expectEqual(if (truth == .not_sent) Input.State.not_started else Input.State.unconfirmed, self.submissionState());
                 var buffer: [512]u8 = undefined;
                 var out = std.Io.Writer.fixed(&buffer);
@@ -456,7 +452,6 @@ fn driveActive(self: *Self) !void {
             self.retry = null;
             if (self.submission != null) {
                 if (std.mem.eql(u8, &requested, &self.capture_key) and self.submissionState() != .rejected) {
-                    self.admission_origin = .retry;
                     try self.admission.start(self.init.io, self, resend);
                 }
             }
@@ -686,7 +681,7 @@ fn joinAdmission(self: *Self) AdmissionEnd {
         self.admission_error = err;
         const state: Input.State = if (self.capture_truth == .not_sent) .not_started else .unconfirmed;
         self.settleSubmission(state) catch unreachable;
-        return .{ .failed = .{ .err = err, .state = state, .capture = self.capture_truth, .origin = self.admission_origin } };
+        return .{ .failed = .{ .err = err } };
     };
 }
 

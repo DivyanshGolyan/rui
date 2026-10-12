@@ -65,16 +65,23 @@ def assert_continuation(endpoint, name, result):
     assert [item["content"][0]["text"] for item in continuation["input"] if item.get("role") == "user"] == ["run"]
 
 
-def finish_case(original_host, recovered_host, original_diagnostics, keeper, endpoint, thread):
-    if original_host is not None and original_host.poll() is None:
-        fixture.stop_host(original_host)
-    if recovered_host is not None:
-        fixture.stop_host(recovered_host)
-    original_diagnostics.close()
-    os.close(keeper)
-    endpoint.shutdown()
-    endpoint.server_close()
-    thread.join(timeout=5)
+def finish_case(original_host, recovered_host, keeper, endpoint, thread):
+    incoming_error = sys.exc_info()[1]
+    errors = []
+    for dispose in (lambda: fixture.stop_host(original_host) if original_host is not None else None,
+                    lambda: fixture.stop_host(recovered_host) if recovered_host is not None else None,
+                    lambda: os.close(keeper), endpoint.shutdown, endpoint.server_close,
+                    lambda: thread.join(timeout=5)):
+        try:
+            dispose()
+        except BaseException as error:
+            errors.append(error)
+    if thread.is_alive():
+        errors.append(AssertionError("Bash recovery endpoint thread did not retire"))
+    if errors:
+        if incoming_error is None:
+            raise errors[0]
+        incoming_error.add_note("Bash recovery cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
 
 
 def prove_lost_bash_permit_becomes_indeterminate(state):
@@ -97,7 +104,7 @@ def prove_lost_bash_permit_becomes_indeterminate(state):
         assert not marker.exists()
         assert_continuation(endpoint, "attempt-before-launch", result)
     finally:
-        finish_case(original_host, recovered_host, original_diagnostics, keeper, endpoint, thread)
+        finish_case(original_host, recovered_host, keeper, endpoint, thread)
 
 
 def prove_effect_without_result_becomes_indeterminate(state):
@@ -139,7 +146,7 @@ def prove_effect_without_result_becomes_indeterminate(state):
         assert_continuation(endpoint, "effect-before-result", result)
     finally:
         continuation_release.set()
-        finish_case(original_host, recovered_host, original_diagnostics, keeper, endpoint, thread)
+        finish_case(original_host, recovered_host, keeper, endpoint, thread)
 
 
 def prove_committed_bash_result_survives_restart(state):
@@ -161,7 +168,7 @@ def prove_committed_bash_result_survives_restart(state):
         assert bash.resolution(store, session) == "succeeded" and marker.read_text() == "x"
         assert_continuation(endpoint, "result-after-commit", result)
     finally:
-        finish_case(original_host, recovered_host, original_diagnostics, keeper, endpoint, thread)
+        finish_case(original_host, recovered_host, keeper, endpoint, thread)
 
 
 def main():

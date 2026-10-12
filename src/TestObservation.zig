@@ -19,7 +19,7 @@ const TestHold = struct {
     var before_sealed_loss: ?*const fn () void = null;
 };
 
-pub const Plan = enum { control, status, stop, list, dispatch };
+pub const Plan = enum { control, status, stop, list, dispatch, capture, recovery, managed };
 pub const record_bytes = 512; // POSIX minimum atomic pipe-write size.
 const header_bytes = 28;
 // Fixture-owned unlinked backing. Fixture mutation is only atomic admission
@@ -61,6 +61,10 @@ const Record = struct {
     start_ns: ?[]const u8 = null,
     wait_ns: ?[]const u8 = null,
     custody_occupied: ?[]const u8 = null,
+    written_bytes: ?[]const u8 = null,
+    http_version: ?i64 = null,
+    connection_id: ?i64 = null,
+    new_connections: ?i64 = null,
 };
 
 fd: c_int,
@@ -136,6 +140,24 @@ pub const Publication = struct {
 };
 
 fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
+    if (self.plan == .capture) {
+        inline for (.{ "capture_write_gate_entered", "transport_resume_capture_failure", "effect_stop_requested" }) |name| {
+            if (std.mem.eql(u8, phase, name)) return true;
+        }
+        return false;
+    }
+    if (self.plan == .recovery) {
+        inline for (.{ "prepared_before_handoff", "action_attempt_admitted", "action_result_ready", "action_result_committed" }) |name| {
+            if (std.mem.eql(u8, phase, name)) return true;
+        }
+        return false;
+    }
+    if (self.plan == .managed) {
+        inline for (.{ "preparation_completed", "prepared_before_handoff", "codex_transfer" }) |name| {
+            if (std.mem.eql(u8, phase, name)) return true;
+        }
+        return false;
+    }
     if (self.plan == .dispatch) {
         if (std.mem.eql(u8, phase, "attempt_admission_rolled_back") or
             std.mem.eql(u8, phase, "preparation_advance_completed"))
@@ -151,6 +173,7 @@ fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
     if (std.mem.eql(u8, phase, "lifecycle_boundary"))
         return self.plan != .stop and self.lifecycle_due.swap(false, .acq_rel);
     if (self.plan == .status) return connection or
+        std.mem.eql(u8, phase, "action_attempt_admitted") or
         std.mem.eql(u8, phase, "ordinary_classification_released") or
         std.mem.eql(u8, phase, "connection_place_released");
     if (self.plan == .stop) {
@@ -190,7 +213,11 @@ fn record(self: *Self, json: []const u8) void {
     var bytes: [record_bytes]u8 = undefined;
     var length: usize = header_bytes;
     inline for (@typeInfo(Record).@"struct".fields, 0..) |field, index| {
-        const value: ?[]const u8 = @field(parsed.value, field.name);
+        var number_buffer: [20]u8 = undefined;
+        const value: ?[]const u8 = if (field.type == ?i64)
+            if (@field(parsed.value, field.name)) |number| std.fmt.bufPrint(&number_buffer, "{d}", .{number}) catch unreachable else null
+        else
+            @field(parsed.value, field.name);
         if (value) |text| {
             if (length + 3 + text.len > bytes.len) {
                 _ = self.shared.state.fetchOr(1, .acq_rel);
@@ -294,6 +321,9 @@ test "private owner observations preserve selected custody through SIGKILL" {
         const phase = switch (plan) {
             .control => "cleanup_completed",
             .dispatch => "control_store_queued",
+            .capture => "capture_write_gate_entered",
+            .recovery => "action_attempt_admitted",
+            .managed => "codex_transfer",
             .list, .status, .stop => "connection_resources_released",
         };
         for ([_]bool{ false, true }) |selected_kill| {
@@ -358,6 +388,9 @@ test "private owner observations seal admission without forgiving held or late p
         const phase = switch (plan) {
             .control => "cleanup_completed",
             .dispatch => "control_store_queued",
+            .capture => "capture_write_gate_entered",
+            .recovery => "action_attempt_admitted",
+            .managed => "codex_transfer",
             .list, .status, .stop => "connection_resources_released",
         };
         for (0..3) |kind| {

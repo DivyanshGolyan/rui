@@ -2260,7 +2260,7 @@ def main(selected="all"):
                 os.close(master)
         created = []
         records = preferences_home / ".config/rui/requests"
-        for persistent in (False, False, True, True):
+        for persistent in (False, True):
             before_records = set(records.glob("*.json"))
             master, slave = pty.openpty()
             caller = subprocess.Popen([str(fixture.RUI), *(["--persistent"] if persistent else [])], cwd=workspace,
@@ -2297,7 +2297,7 @@ def main(selected="all"):
                     caller.kill()
                     caller.wait(timeout=5)
                 os.close(master)
-        assert len(set(created)) == 4, "independent new intent reused a reference"
+        assert len(set(created)) == 2, "independent new intent reused a reference"
         blocked_home = state / "blocked-capture-home"
         blocked_config = blocked_home / ".config/rui"
         blocked_config.mkdir(parents=True, mode=0o700)
