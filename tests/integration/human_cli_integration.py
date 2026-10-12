@@ -250,6 +250,8 @@ def command_entry_cases():
         fixture.ResponseSpec(b'{"error":"denied"}', {}, 401),
         fixture.sse_answer("lost-answer", "lost-reason", "lost-message", "Lost reply recovered.")[0],
         (fixture.sse_tool_calls("exec-tools", [("bash", "exec-call", json.dumps({"cmd": "touch must-not-run", "timeout_ms": None}))]), permission_release),
+        fixture.sse_answer("dash-answer", "dash-reason", "dash-message", "Literal dash answered.")[0],
+        fixture.sse_answer("option-answer", "option-reason", "option-message", "Literal option answered.")[0],
     ])
     thread = threading.Thread(target=endpoint.serve_forever)
     thread.start()
@@ -402,8 +404,32 @@ def command_entry_cases():
         if sys.platform == "darwin":
             actual[3] &= ~mask
         assert actual == original
+        for index, (prompt, answer) in enumerate((("-", b"Literal dash answered.\n"),
+                ("--model", b"Literal option answered.\n")), start=7):
+            input_read, input_write = os.pipe()
+            try:
+                # Keep unrelated stdin open: literal operands must neither
+                # consume its bytes nor wait for EOF before making progress.
+                unrelated = b"unrelated held stdin\n"
+                os.write(input_write, unrelated)
+                executor = subprocess.Popen([str(fixture.RUI), "exec", "--", prompt],
+                    cwd=workspace, env=env, stdin=input_read,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                out, errors = executor.communicate(timeout=5)
+                assert executor.returncode == 0 and out == answer, (out, errors)
+                user = [item for item in json.loads(endpoint.requests[index])["input"]
+                    if item.get("role") == "user"]
+                assert user[-1]["content"][0]["text"] == prompt, user
+                assert select.select([input_read], [], [], 0)[0], "literal consumed stdin"
+                assert os.read(input_read, len(unrelated)) == unrelated
+            finally:
+                if executor is not None and executor.poll() is None:
+                    executor.kill()
+                    executor.communicate(timeout=5)
+                os.close(input_read)
+                os.close(input_write)
         completed = True
-        print("CLI entry/resume/exec: literal prompt, canonical scoped paginated last vs older activity, exact resume, colour/NO_COLOR, waited escaped answer, stdin, failure, exact lost-reply recovery, permission block, missing-login and accepted-entry recovery controls passed", flush=True)
+        print("CLI entry/resume/exec: literal prompt, canonical scoped paginated last vs older activity, exact resume, colour/NO_COLOR, waited escaped answer, stdin, escaped dash/option with untouched held stdin, failure, exact lost-reply recovery, permission block, missing-login and accepted-entry recovery controls passed", flush=True)
     finally:
         exec_release.set()
         permission_release.set()

@@ -559,6 +559,9 @@ fn step(self: *Self, wait: i32) !bool {
     const byte = (self.terminal.next(self.init.io, pending, wait) catch |err| switch (err) {
         error.InputDeadline => {
             if (self.choice_action != null) try self.choice.expire() else try self.input.expire();
+            // Successful expiry releases decoder custody. Revisit redraw and
+            // its drained-input readiness gate, just as after ordinary input.
+            self.dirty = true;
             return false;
         },
         else => return err,

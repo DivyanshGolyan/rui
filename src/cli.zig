@@ -759,7 +759,7 @@ const NewSessionOptions = struct {
     store: ?[]const u8 = null,
     provider: ?[]const u8 = null,
     model: ?[]const u8 = null,
-    prompt: ?[]const u8 = null,
+    prompt: ?union(enum) { literal: []const u8, stdin } = null,
 
     fn parse(args: []const []const u8, interactive: bool) !NewSessionOptions {
         var options: NewSessionOptions = .{};
@@ -768,13 +768,18 @@ const NewSessionOptions = struct {
         var index: usize = 0;
         while (index < args.len) : (index += 1) {
             const arg = args[index];
-            if (!literal and std.mem.eql(u8, arg, "--store") and options.store == null) options.store = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--provider") and options.provider == null) options.provider = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--model") and options.model == null) options.model = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--persistent") and interactive and !persistent) persistent = true else if (!literal and std.mem.eql(u8, arg, "--")) literal = true else if (options.prompt == null and (literal or !std.mem.startsWith(u8, arg, "-"))) options.prompt = arg else if (!interactive and options.prompt == null and std.mem.eql(u8, arg, "-")) options.prompt = arg else return usage();
+            if (!literal and std.mem.eql(u8, arg, "--store") and options.store == null) options.store = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--provider") and options.provider == null) options.provider = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--model") and options.model == null) options.model = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--persistent") and interactive and !persistent) persistent = true else if (!literal and std.mem.eql(u8, arg, "--")) literal = true else if (options.prompt == null and (literal or !std.mem.startsWith(u8, arg, "-"))) options.prompt = .{ .literal = arg } else if (!interactive and options.prompt == null and std.mem.eql(u8, arg, "-")) options.prompt = .stdin else return usage();
         }
-        if (options.prompt) |prompt| {
-            if (prompt.len == 0) return error.EmptyPrompt;
-            if (interactive) {
-                if (prompt.len > @import("SessionInput.zig").capacity) return error.StreamTooLong;
-                try TerminalEditor.validateText(prompt);
+        if (options.prompt) |source| {
+            switch (source) {
+                .literal => |prompt| {
+                    if (prompt.len == 0) return error.EmptyPrompt;
+                    if (interactive) {
+                        if (prompt.len > @import("SessionInput.zig").capacity) return error.StreamTooLong;
+                        try TerminalEditor.validateText(prompt);
+                    }
+                },
+                .stdin => std.debug.assert(!interactive),
             }
         } else if (!interactive) return usage();
         return options;
@@ -788,7 +793,11 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
         return error.InteractiveTerminalRequired;
     }
     const saved = (try createSession(init, options, true)) orelse return;
-    runSession(init, saved.store.slice(), saved.session.slice(), options.prompt) catch |err| {
+    const initial_text = if (options.prompt) |source| switch (source) {
+        .literal => |text| text,
+        .stdin => unreachable,
+    } else null;
+    runSession(init, saved.store.slice(), saved.session.slice(), initial_text) catch |err| {
         // Configuration acceptance and local entry are independent outcomes.
         // Four bytes per escaped selector byte, plus labels and two UUIDs.
         var bytes: [4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 256]u8 = undefined;
@@ -1187,8 +1196,14 @@ fn exec(init: std.process.Init, args: []const []const u8) !void {
     var captured = try client.captureMessage(init.io, .{
         .store = session.store.slice(),
         .session = session.session.slice(),
-        .text = if (std.mem.eql(u8, prompt, "-")) null else prompt,
-        .text_path = if (std.mem.eql(u8, prompt, "-")) "-" else "",
+        .text = switch (prompt) {
+            .literal => |text| text,
+            .stdin => null,
+        },
+        .text_path = switch (prompt) {
+            .literal => "",
+            .stdin => "-",
+        },
     }, .{ .generated = try requestDirectory(init, &directory_buffer) });
     const saved = captured.identity().*;
     errdefer TerminalText.diagnostic("rui: inspect the same Message with rui result {s}; rui recover {s} reuses its exact input. Do not resubmit uncertain work.\n", .{ saved.key.slice(), saved.key.slice() });

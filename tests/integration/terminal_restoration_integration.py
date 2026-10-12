@@ -869,7 +869,7 @@ def persistent_cases(state, library, home, store, host):
 
 def consent_boundary_cases(state, library):
     """Input arriving during final presentation cannot consent or lose Ctrl-C."""
-    for case in ("cancel", "paste"):
+    for case in ("cancel", "paste", "escape-allow", "escape-deny"):
         root = state / f"consent-{case}"
         root.mkdir()
         home, store = root / "home", root / "store"
@@ -877,7 +877,8 @@ def consent_boundary_cases(state, library):
         endpoint = fixture.SuccessEndpoint([
             fixture.sse_tool_calls("consent-call", [("bash", "consent-id",
                 json.dumps({"cmd": "printf forbidden > effect", "timeout_ms": None}))]),
-            fixture.sse_answer("consent-answer", "consent-reason", "consent-message", "Denied.")[0],
+            fixture.sse_answer("consent-answer", "consent-reason", "consent-message",
+                "Allowed." if case == "escape-allow" else "Denied.")[0],
         ])
         thread = threading.Thread(target=endpoint.serve_forever)
         thread.start()
@@ -904,13 +905,25 @@ def consent_boundary_cases(state, library):
             fixture.wait_for(lambda: log.exists() and "choice-output-complete" in log.read_text(), "final choice write")
             records = home / ".config/rui/requests"
             before = set(records.glob("*.json"))
-            os.write(master, b"\x03" if case == "cancel" else b"\x1b[200~")
+            stale = b"\x03" if case == "cancel" else (
+                b"a\n\x1b" if case.startswith("escape-") else b"\x1b[200~")
+            os.write(master, stale)
+            assert not select.select([read_ready], [], [], 0)[0], "held presentation opened consent"
             release.touch()
             if case == "cancel":
                 fixture.wait_for(lambda: termios.tcgetattr(slave)[3] & termios.ICANON,
                     "restoration without releasing consent drain", timeout=3)
                 assert not drain.exists(), "fixture released the drain"
                 assert not select.select([read_ready], [], [], 0)[0], "cancelled choice became ready"
+            elif case.startswith("escape-"):
+                assert set(records.glob("*.json")) == before, "stale input captured permission"
+                presentation += human.action_ready(read_ready, master)
+                assert set(records.glob("*.json")) == before, "expiry captured stale permission"
+                assert not (root / "effect").exists(), "stale input ran Bash"
+                os.write(master, b"a\n" if case == "escape-allow" else b"d\n")
+                human.read_terminal(master, "Allowed." if case == "escape-allow" else "Permission denied.")
+                assert len(set(records.glob("*.json")) - before) == 1, "first fresh choice was not captured"
+                os.write(master, b"\x03")
             else:
                 assert not select.select([read_ready], [], [], 0.2)[0], "paste prefix opened consent"
                 os.write(master, b"a\n")
@@ -929,7 +942,10 @@ def consent_boundary_cases(state, library):
                 actual[3] &= ~mask
                 original[3] &= ~mask
             assert actual == original
-            assert not (root / "effect").exists(), "pre-boundary input ran Bash"
+            if case == "escape-allow":
+                assert (root / "effect").read_bytes() == b"forbidden", "fresh Allow was swallowed"
+            else:
+                assert not (root / "effect").exists(), "pre-boundary or denied input ran Bash"
             if case == "cancel":
                 assert set(records.glob("*.json")) == before, "cancel captured permission"
             print(f"persistent consent boundary: {case} passed", flush=True)
