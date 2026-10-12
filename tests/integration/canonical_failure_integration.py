@@ -499,7 +499,12 @@ def interactive_cases(state, binding=False, null_code=False):
                     key = json.loads(original)["key"]
                     record = home / ".config/rui/requests" / f"{key}.json"
                     assert record.read_bytes() == original, "unconfirmed reply replaced captured authority"
-                    if route != "/v1/configure":
+                    if route == "/v1/configure":
+                        expect_mutation_error(subprocess.CompletedProcess(caller.args, None,
+                            stdout=output.replace("\r\n", "\n")), json.loads(original),
+                            human=True, status=200, reason=reason, diagnostic=None)
+                        assert len(proxy.exchanges) == 1, "unconfirmed Configure automatically retried"
+                    else:
                         # An unresolved Message intentionally suppresses consent
                         # until exact recovery. Its composer, not Action readiness,
                         # owns this diagnostic handoff.

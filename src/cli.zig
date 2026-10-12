@@ -1130,10 +1130,8 @@ fn configure(init: std.process.Init, requester: client.Requests, args: []const [
         }
         break :blk try requester.sendCaptured(&captured, drop_reply, &reply_buffer);
     };
-    if (human and interactive) {
-        _ = try reply.answer;
-        admitted = reply.isAccepted();
-    }
+    // Record framed admission before presentation; writeMutationReply owns errors.
+    if (human and interactive) admitted = if (reply.answer) |_| reply.isAccepted() else |_| null;
     const accepted = human and interactive and reply.isAccepted();
     if (!interactive or !accepted) try writeMutationReply(io, reply, if (human and json) saved.key.slice() else null, human);
     if (human and interactive and accepted) try std.Io.File.stdout().writeStreamingAll(io, "Rui: Configured.\n");
