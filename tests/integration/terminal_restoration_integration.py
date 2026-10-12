@@ -43,6 +43,7 @@ PROBE = r"""
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <termios.h>
@@ -82,6 +83,23 @@ static int probe_pthread_create(pthread_t *thread, const pthread_attr_t *attrs,
     return real_create(thread, attrs, run, arg);
 }
 
+static int command_return_signal(int fd, const void *bytes, size_t count) {
+    const char *fault = getenv("RUI_TERMINAL_FAULT");
+    const size_t start = count && ((const char *)bytes)[0] == '\n' ? 1 : 0;
+    static int signaled = 0;
+    if (!signaled && fault &&
+        ((fd == 1 && (!strcmp(fault, "configure-admitted") || !strcmp(fault, "configure-presentation")) &&
+          count == 17 && !memcmp(bytes, "Rui: Configured.\n", 17)) ||
+         (fd == 1 && !strcmp(fault, "configure-rejected") && count == 19 && !memcmp(bytes, "admitted: rejected\n", 19)) ||
+         (fd == 2 && !strcmp(fault, "configure-canonical") && count >= start + 19 && !memcmp((const char *)bytes + start, "rui: Configuration ", 19)))) {
+        signaled = 1;
+        record("command-return-signal\n");
+        raise(SIGINT);  /* Complete admission/error is already decoded by its owner. */
+        if (!strcmp(fault, "configure-presentation")) { errno = EIO; return -1; }
+    }
+    return 0;
+}
+
 static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
 #ifdef __APPLE__
     /* dyld exempts references from the tuple-owning image, not dlsym. */
@@ -93,6 +111,8 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
     if (!real_writev || real_writev == probe_writev) _exit(93);
     const char *fault = getenv("RUI_TERMINAL_FAULT");
     static int stopped = 0;
+    for (int i = 0; i < count; ++i)
+        if (command_return_signal(fd, iov[i].iov_base, iov[i].iov_len)) return -1;
     if (fd == 1 && count == 1 && iov[0].iov_len == 8 &&
         !memcmp(iov[0].iov_base, "\033[?2004l", 8)) {
         if (!strcmp(fault, "output") && !stopped) {
@@ -139,6 +159,7 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
 #endif
     if (!real_write || real_write == probe_write) _exit(96);
     const char *fault = getenv("RUI_TERMINAL_FAULT");
+    if (command_return_signal(fd, bytes, count)) return -1;
     if (fd == 1 && detach_phase == 3 && fault && !strncmp(fault, "detach-write-", 13)) {
         record("detach-write\n");
         if (!(fcntl(fd, F_GETFL) & O_NONBLOCK)) record("detach-write-blocking\n");
@@ -972,6 +993,156 @@ def consent_boundary_cases(state, library):
             termios.tcsetattr(slave, termios.TCSAFLUSH, original)
             for fd in (master, slave, read_ready, write_ready):
                 os.close(fd)
+
+
+def command_interruption_cases(state, library):
+    """Foreground signals cancel actual handoff sockets, not committed intent."""
+    root = state / "command-interruption"
+    root.mkdir()
+    home, store = root / "home", root / "store"
+    home.mkdir(mode=0o700)
+    endpoint = fixture.SuccessEndpoint([
+        fixture.sse_answer("command-answer", "command-reason", "command-message", "Saved answer.")[0],
+        fixture.sse_tool_calls("command-tool", [("bash", "command-id",
+            json.dumps({"cmd": "printf forbidden > effect", "timeout_ms": None}))]),
+    ])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = caller = proxy = None
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        human.run(home, "configure", "--store", store, "--session", "command/signals",
+            "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+        message = human.admit(home, "message", "--store", store, "--session", "command/signals", "saved answer")
+        fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "saved command result")
+        human.admit(home, "message", "--store", store, "--session", "command/signals", "propose tool")
+        records = home / ".config/rui/requests"
+        for case, command, route, signal_number in (
+                ("configure-before", "/configure --permission-mode ask", None, signal.SIGINT),
+                ("configure-inflight", "/configure --permission-mode ask", "/v1/configure", signal.SIGINT),
+                ("configure-commit-int", "/configure --permission-mode ask", "/v1/configure", signal.SIGINT),
+                ("configure-commit-term", "/configure --permission-mode ask", "/v1/configure", signal.SIGTERM),
+                ("configure-admitted", "/configure --permission-mode ask", "", signal.SIGINT),
+                ("configure-presentation", "/configure --permission-mode ask", "", signal.SIGINT),
+                ("configure-rejected", "/configure --model model-b", "", signal.SIGINT),
+                ("configure-canonical", "/configure --permission-mode ask", "", signal.SIGINT),
+                ("status", "/status", "/v1/inspect-session", signal.SIGINT),
+                ("result-observe", f"/result {message['request']}", "/v1/observe-command", signal.SIGINT),
+                ("result-content", f"/result {message['request']}", "/v1/read-result", signal.SIGINT),
+                ("inspect-current", "/inspect-action", "/v1/inspect-session", signal.SIGINT),
+                ("inspect-arguments", "/inspect-action", "/v1/read-action-arguments", signal.SIGINT)):
+            master, slave = pty.openpty()
+            original = termios.tcgetattr(slave)
+            ready_read, ready_write = os.pipe()
+            release = root / f"{case}.release"
+            log = root / f"{case}.log"
+            received, reply_release = threading.Event(), threading.Event()
+            transmitted = []
+            before = set(records.glob("*.json"))
+            try:
+                environment = {**os.environ, "HOME": str(home), "NO_COLOR": "1",
+                    "RUI_TEST_ACTION_READY_FD": str(ready_write)}
+                if not route:
+                    environment.update({"DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                        "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": case})
+                    if route is None:
+                        environment["RUI_CAPTURE_SYNC_RELEASE"] = str(release)
+                caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+                    "--session", "command/signals"], env=environment, stdin=slave, stdout=slave,
+                    stderr=subprocess.PIPE, pass_fds=(ready_write,),
+                    preexec_fn=lambda: (signal.signal(signal.SIGINT, signal.SIG_DFL),
+                        signal.signal(signal.SIGTERM, signal.SIG_DFL)))
+                human.action_ready(ready_read, master)
+                if route:
+                    def hold(response):
+                        received.set()
+                        assert reply_release.wait(15), "command reply never released"
+                        return None  # Cancellation must finish before peer release.
+                    def before_forward(body):
+                        transmitted.append(body)
+                        hold(body)
+                        return False
+                    proxy = canonical.ReplyProxy(host, route, hold,
+                        before_forward=before_forward if case == "configure-inflight" else None)
+                elif case == "configure-canonical":
+                    proxy = canonical.ReplyProxy(host, "/v1/configure")
+                os.write(master, command.encode() + b"\n")
+                if route is None:
+                    fixture.wait_for(lambda: log.exists() and "capture-sync-held" in log.read_text(), "Configure pre-send sync")
+                elif route:
+                    assert received.wait(10), (case, "command route not reached")
+                else:
+                    fixture.wait_for(lambda: log.exists() and "command-return-signal" in log.read_text(), "decoded command return signal")
+                assert termios.tcgetattr(slave)[3] & termios.ICANON, "command owns a raw terminal"
+                if route != "":
+                    caller.send_signal(signal_number)
+                if route is None:
+                    release.touch()  # File custody is nonpreemptible, transport is cancellable.
+                output, errors = human.terminal_exit(caller, master)
+                if case.startswith("inspect-") or case == "configure-canonical":
+                    primary = b"CanonicalStoreFailure" if case == "configure-canonical" else b"Cancelled"
+                    assert caller.returncode == 1 and b"error: " + primary in errors and b"Resume: " in errors, (case, output, errors)
+                else:
+                    assert caller.returncode == 0, (case, caller.returncode, output, errors)
+                assert not reply_release.is_set(), "command needed peer release to exit"
+                added = set(records.glob("*.json")) - before
+                if case.startswith("configure"):
+                    record, = added
+                    saved = record.read_bytes()
+                    identity = json.loads(saved)
+                    key = identity["key"]
+                    if case == "configure-inflight":
+                        assert transmitted == [saved], "in-flight send changed captured request bytes"
+                    assert identity["store"] == str(store) and identity["session"] == "command/signals"
+                    assert f"rui recover {key}".encode() in errors, errors
+                    if case in ("configure-admitted", "configure-presentation", "configure-rejected"):
+                        assert (b"rejected" if case == "configure-rejected" else b"accepted; do not resubmit it") in errors and b"not confirmed" not in errors, errors
+                        if case == "configure-presentation":
+                            assert b"InputOutput" in errors, errors
+                    else:
+                        assert b"not confirmed" in errors, errors
+                else:
+                    assert not added, "read command captured a mutation"
+                actual = termios.tcgetattr(slave)
+                if sys.platform == "darwin":
+                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                    actual[3] &= ~mask
+                    original[3] &= ~mask
+                assert actual == original and not (root / "effect").exists()
+                reply_release.set()
+                if proxy is not None:
+                    proxy.close()
+                    proxy = None
+                if case.startswith("configure"):
+                    observed = fixture.command("observe-command", "--store", store, "--key", key)
+                    expected = "rejected" if case == "configure-rejected" else "accepted"
+                    not_admitted = route is None or case == "configure-inflight"
+                    assert observed["observation"]["status"] == ("absent" if not_admitted else expected), observed
+                    recovered = json.loads(human.run(home, "recover", key, "--json"))
+                    assert recovered["answer"]["status"] == expected
+                    assert recovered["answer"]["replayed"] is (not not_admitted)
+                    assert record.read_bytes() == saved and set(records.glob("*.json")) - before == {record}
+                assert len(endpoint.requests) == 2, "command signal replaced provider work"
+                print(f"synchronous command interruption: {case} passed", flush=True)
+            finally:
+                release.touch()
+                reply_release.set()
+                if caller is not None and caller.poll() is None:
+                    caller.kill()
+                    caller.wait(timeout=5)
+                if caller is not None:
+                    caller.stderr.close()
+                if proxy is not None:
+                    proxy.close()
+                    proxy = None
+                for fd in (master, slave, ready_read, ready_write):
+                    os.close(fd)
+    finally:
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
 
 
 def fatal_reporting_cases(state):
@@ -2216,6 +2387,11 @@ def main(selected=None):
         if selected in (None, "consent"):
             consent_boundary_cases(state, library)
         if selected == "consent":
+            completed = True
+            return
+        if selected in (None, "commands"):
+            command_interruption_cases(state, library)
+        if selected == "commands":
             completed = True
             return
         if selected in (None, "fatal"):

@@ -425,15 +425,24 @@ def read_http_response(connection, timeout=3, *, deadline=None):
 
 def open_partial(socket_path, route, *, complete_headers=True):
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    connection.settimeout(3)
-    connection.connect(socket_path)
-    connection.sendall(f"POST {route} HTTP/1.1\r\n".encode())
-    if complete_headers:
-        connection.sendall(
-            b"Content-Type: application/json\r\n"
-            b"Content-Length: 1024\r\n"
-            b"X-Rui-Wire-Version: 1\r\n\r\n{"
-        )
+    try:
+        connection.settimeout(3)
+        connection.connect(socket_path)
+        try:
+            connection.sendall(f"POST {route} HTTP/1.1\r\n".encode())
+            if complete_headers:
+                connection.sendall(
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: 1024\r\n"
+                    b"X-Rui-Wire-Version: 1\r\n\r\n{"
+                )
+        except (BrokenPipeError, ConnectionResetError):
+            # Return ownership so the caller can inspect the actual refusal.
+            # A failed write alone establishes neither admission nor busy.
+            pass
+    except BaseException:
+        connection.close()
+        raise
     return connection
 
 
@@ -728,10 +737,7 @@ def fill_ordinary_capacity(socket_path):
     held = []
     for _ in range(10):
         while len(held) < ORDINARY_CLIENTS:
-            try:
-                candidate = open_partial(socket_path, "/v1/inspect-session")
-            except (BrokenPipeError, ConnectionResetError):
-                continue
+            candidate = open_partial(socket_path, "/v1/inspect-session")
             time.sleep(0.05)
             candidate.settimeout(0.001)
             try:
@@ -769,6 +775,28 @@ def fill_ordinary_capacity(socket_path):
     raise AssertionError("ordinary admission never stabilized at capacity")
 
 
+def assert_capacity_busy_reply(connection, expected_code, *, deadline=None):
+    extra_head, extra_body = read_http_response(connection, deadline=deadline)
+    assert extra_head.startswith(b"HTTP/1.1 503 "), extra_head
+    lengths = [line.split(b":", 1)[1].strip() for line in extra_head.split(b"\r\n")[1:]
+               if line.lower().startswith(b"content-length:")]
+    assert len(lengths) == 1 and lengths[0].isdigit(), extra_head
+    assert int(lengths[0]) == len(extra_body), (extra_head, extra_body)
+    assert json.loads(extra_body) == {
+        "version": "1", "type": "busy", "code": expected_code.decode("ascii")
+    }, extra_body
+
+
+def assert_classification_capacity_busy(classification):
+    deadline = time.monotonic() + 3
+    readable, _, _ = select.select(classification, [], [], 3)
+    assert readable, "classification overflow did not receive a response"
+    overflow = readable[0]
+    assert_capacity_busy_reply(overflow, b"classification_capacity_exhausted", deadline=deadline)
+    overflow.close()
+    classification.remove(overflow)
+
+
 def assert_ordinary_capacity_busy(
     socket_path, expected_code=b"ordinary_capacity_exhausted"
 ):
@@ -782,15 +810,7 @@ def assert_ordinary_capacity_busy(
             # Reservation can refuse and close before reading the request line.
             # The write failure alone proves nothing; verify its actual reply.
             pass
-        extra_head, extra_body = read_http_response(extra)
-        assert extra_head.startswith(b"HTTP/1.1 503 "), extra_head
-        lengths = [line.split(b":", 1)[1].strip() for line in extra_head.split(b"\r\n")[1:]
-                   if line.lower().startswith(b"content-length:")]
-        assert len(lengths) == 1 and lengths[0].isdigit(), extra_head
-        assert int(lengths[0]) == len(extra_body), (extra_head, extra_body)
-        assert json.loads(extra_body) == {
-            "version": "1", "type": "busy", "code": expected_code.decode("ascii")
-        }, extra_body
+        assert_capacity_busy_reply(extra, expected_code)
     finally:
         extra.close()
 
@@ -1852,9 +1872,98 @@ def prove_retry_wait_control(state, kind):
         endpoint_thread.join(timeout=5)
 
 
+def prove_partial_capacity_callers():
+    from unittest.mock import Mock, patch
+    from host_process_test import prove_capacity_refusal_oracle
+
+    def partial_probe(socket_path, expected_code):
+        connection = open_partial(socket_path, "/v1/inspect-session")
+        try:
+            # Reuse the existing exact refusal controls on the actual returned
+            # socket, including a peer that closed before the first write.
+            with patch.object(socket, "socket", return_value=connection):
+                assert_ordinary_capacity_busy(socket_path, expected_code)
+        finally:
+            connection.close()
+
+    prove_capacity_refusal_oracle(partial_probe)
+
+    code = b"classification_capacity_exhausted"
+    body = b'{"version":"1","type":"busy","code":"' + code + b'"}'
+    head = b"HTTP/1.1 503 Busy\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n"
+    response = head + body
+    for reply in (response, b"", response[:-1], response.replace(b"503", b"200"),
+                  response.replace(code, b"ordinary_capacity_exhausted"),
+                  response.replace(code, code + b"_extra"),
+                  response.replace(b"Content-Length:", b"Ignored-Length:"),
+                  response.replace(b"\r\n\r\n", b"\r\nContent-Length: 0\r\n\r\n")):
+        for failure in (BrokenPipeError, ConnectionResetError):
+            client, peer = socket.socketpair()
+            peer.sendall(reply)
+            peer.close()
+            connection = Mock(wraps=client)
+            connection.connect = Mock()
+            connection.sendall = Mock(side_effect=failure)
+            connection.fileno = client.fileno
+            try:
+                with patch.object(socket, "socket", return_value=connection):
+                    candidate = open_partial("unused", "/v1/control/session-stop", complete_headers=False)
+                assert candidate is connection
+                assert not connection.close.called
+                population = [candidate]
+                try:
+                    assert_classification_capacity_busy(population)
+                except (AssertionError, ValueError):
+                    assert reply != response, "valid classification refusal rejected"
+                else:
+                    assert reply == response, "invalid classification refusal accepted"
+                    assert population == []
+            finally:
+                client.close()
+
+    for complete_headers in (False, True):
+        for stage in (None, "settimeout", "connect", "sendall"):
+            connection = Mock()
+            if stage is not None:
+                getattr(connection, stage).side_effect = TimeoutError("setup failed")
+            with patch.object(socket, "socket", return_value=connection):
+                try:
+                    candidate = open_partial("unused", "/v1/inspect-session", complete_headers=complete_headers)
+                except TimeoutError:
+                    assert stage is not None
+                    connection.close.assert_called_once()
+                else:
+                    assert stage is None and candidate is connection
+                    assert connection.sendall.call_count == (2 if complete_headers else 1)
+                    connection.settimeout.assert_called_once_with(3)
+                    connection.close.assert_not_called()
+
+    # Exercise the actual fill consumer: a readable refusal and EOF are not
+    # counted; only candidates still blocked at both admission sweeps are held.
+    refused = Mock()
+    refused.recv.return_value = b"H"
+    empty = Mock()
+    empty.recv.return_value = b""
+    accepted = [Mock() for _ in range(ORDINARY_CLIENTS)]
+    for candidate in accepted:
+        candidate.recv.side_effect = TimeoutError
+    with patch.object(sys.modules[__name__], "open_partial", side_effect=[refused, empty, *accepted]), \
+            patch.object(sys.modules[__name__], "read_http_response", return_value=(b"HTTP/1.1 503 Busy", b"")), \
+            patch.object(time, "sleep"):
+        held = fill_ordinary_capacity("unused")
+    assert held == accepted
+    refused.close.assert_called_once()
+    empty.close.assert_called_once()
+    for candidate in accepted:
+        assert candidate.recv.call_count == 2
+        candidate.close.assert_not_called()
+    print("Partial callers: exact classification refusals, both write failures, held sockets and setup cleanup passed")
+
+
 def main():
     from host_process_test import prove_capacity_refusal_oracle, prove_control_disposal_oracle
     prove_capacity_refusal_oracle(assert_ordinary_capacity_busy)
+    prove_partial_capacity_callers()
     prove_control_disposal_oracle(stop_control_case)
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-control-integration-"))
     store = state / "store"
@@ -2007,14 +2116,7 @@ def main():
             open_partial(socket_path, "/v1/control/session-stop", complete_headers=False)
             for _ in range(CONTROL_HEADROOM + 1)
         ]
-        readable, _, _ = select.select(classification, [], [], 3)
-        assert readable, "classification overflow did not receive a response"
-        overflow = readable[0]
-        extra_head, extra_body = read_http_response(overflow)
-        assert b" 503 " in extra_head, extra_head
-        assert b"classification_capacity_exhausted" in extra_body, extra_body
-        overflow.close()
-        classification.remove(overflow)
+        assert_classification_capacity_busy(classification)
         for connection in classification:
             connection.close()
         time.sleep(1)

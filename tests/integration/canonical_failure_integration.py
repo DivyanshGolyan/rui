@@ -133,12 +133,13 @@ def producer_cases(state):
 
 class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     """Forward the real request, drain its reply, replace only the selected route."""
-    def __init__(self, host, route, rewrite=None):
+    def __init__(self, host, route, rewrite=None, *, before_forward=None):
         self.path = pathlib.Path(host.rui_ready_fields["socket"])
         self.backend = self.path.with_suffix(".canonical-backend")
         self.path.rename(self.backend)
         self.route = route
         self.rewrite = rewrite
+        self.before_forward = before_forward
         self.exchanges = []
         self.mutations = []
         super().__init__(str(self.path), Exchange)
@@ -173,6 +174,9 @@ class Exchange(socketserver.BaseRequestHandler):
         route = head.split(b" ")[1].decode()
         if route in ("/v1/message", "/v1/control/permission-decision"):
             self.server.mutations.append((route, body))
+        if route == self.server.route and self.server.before_forward is not None:
+            if not self.server.before_forward(body):
+                return  # Held full request was cancelled before Host admission.
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as backend:
             backend.settimeout(15)
             backend.connect(str(self.server.backend))
@@ -191,7 +195,8 @@ class Exchange(socketserver.BaseRequestHandler):
                 response = (b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n"
                     b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
                     + str(len(ERROR_BYTES)).encode() + b"\r\n\r\n" + ERROR_BYTES)
-        self.request.sendall(response)
+        if response is not None:  # An explicitly held cancellation peer sends nothing.
+            self.request.sendall(response)
 
 
 def wrong_target(response, null_code=False):

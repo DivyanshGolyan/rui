@@ -255,7 +255,7 @@ def command_entry_cases():
     ])
     thread = threading.Thread(target=endpoint.serve_forever)
     thread.start()
-    host = caller = executor = proxy = None
+    host = caller = executor = proxy = lookalike_host = None
     master = slave = None
     completed = False
     try:
@@ -428,6 +428,69 @@ def command_entry_cases():
                     executor.communicate(timeout=5)
                 os.close(input_read)
                 os.close(input_write)
+        lookalike_store = state / "lookalike-store"
+        lookalike_host = fixture.start_host(lookalike_store, None)
+        pages = [json.loads(line) for line in run(home, "sessions", "--all", "--json").splitlines()]
+        newest = [row["reference"] for page in pages for row in page["sessions"]
+            if row["workspace"] == str(workspace)][-1]
+        for index, (entry, chosen) in enumerate((("last", newest),
+                ("exact", "last/8"), ("legacy", "last/8"))):
+            run(home, "setup", "--store", store)
+            before_failure = set(records.glob("*.json"))
+            proxy = canonical.ReplyProxy(host, "/v1/inspect-session")
+            arguments = ["resume", "--last"] if entry == "last" else (
+                ["resume", chosen] if entry == "exact" else ["session", "--session", chosen])
+            caller = subprocess.Popen([str(fixture.RUI), *arguments], cwd=workspace,
+                env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            output, errors = terminal_exit(caller, master)
+            assert caller.returncode == 1 and b"CanonicalStoreFailure" in errors, (output, errors)
+            assert b"Resume: rui resume --store " in errors, errors
+            exact_resume = errors.decode().split("Resume: ", 1)[1].splitlines()[0]
+            assert set(records.glob("*.json")) == before_failure and not proxy.mutations
+            proxy.close()
+            proxy = None
+            caller.stderr.close()
+            # Both selectors now have a plausible different destination.
+            run(home, "configure", "--store", store, "--session", f"newer/{index}",
+                "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+            run(home, "configure", "--store", lookalike_store, "--session", chosen,
+                "--workspace", other, "--provider", "codex", "--model", "lookalike-model")
+            run(home, "setup", "--store", lookalike_store)
+            before_resume = set(records.glob("*.json"))
+            caller = subprocess.Popen(["bash", "-c", exact_resume], cwd=workspace,
+                env={**env, "PATH": str(public_bin) + os.pathsep + os.environ["PATH"]},
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            read_terminal(master, "› ")
+            status = terminal_step(master, "/status")
+            assert f"Session: {chosen}\n" in status and f"Store: {store}\n" in status, status
+            assert "lookalike-model" not in status, status
+            terminal_step(master, "/exit", "Resume: ")
+            _, errors = terminal_exit(caller, master)
+            assert caller.returncode == 0 and not errors, errors
+            caller.stderr.close()
+            assert set(records.glob("*.json")) == before_resume
+            assert len(endpoint.requests) == 9, "entry recovery submitted provider work"
+        run(home, "setup", "--store", store)
+        before_failure = set(records.glob("*.json"))
+        page_count = 0
+        def fail_later_page(response):
+            nonlocal page_count
+            page_count += 1
+            if page_count == 1:
+                return response
+            return (b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n"
+                b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
+                + str(len(canonical.ERROR_BYTES)).encode() + b"\r\n\r\n" + canonical.ERROR_BYTES)
+        proxy = canonical.ReplyProxy(host, "/v1/list-sessions", fail_later_page)
+        caller = subprocess.Popen([str(fixture.RUI), "resume", "--last"], cwd=workspace,
+            env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        output, errors = terminal_exit(caller, master)
+        assert caller.returncode == 1 and page_count == 2, (output, errors, page_count)
+        assert b"Resume:" not in errors, "partial last selection escaped as final identity"
+        assert set(records.glob("*.json")) == before_failure and not proxy.mutations
+        caller.stderr.close()
+        proxy.close()
+        proxy = None
         completed = True
         print("CLI entry/resume/exec: literal prompt, canonical scoped paginated last vs older activity, exact resume, colour/NO_COLOR, waited escaped answer, stdin, escaped dash/option with untouched held stdin, failure, exact lost-reply recovery, permission block, missing-login and accepted-entry recovery controls passed", flush=True)
     finally:
@@ -444,6 +507,8 @@ def command_entry_cases():
         if master is not None:
             os.close(master)
             os.close(slave)
+        if lookalike_host is not None:
+            fixture.stop_host(lookalike_host)
         if host is not None:
             fixture.stop_host(host)
         endpoint.shutdown()

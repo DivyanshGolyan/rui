@@ -49,7 +49,7 @@ fn run(init: std.process.Init) !void {
     if (std.mem.eql(u8, command, "read-conversation")) return readConversation(init, args[2..]);
     if (std.mem.eql(u8, command, "resume")) return resumeSession(init, args[2..]);
     if (std.mem.eql(u8, command, "exec")) return exec(init, args[2..]);
-    if (std.mem.eql(u8, command, "setup")) try setup(init, args[2..]) else if (std.mem.eql(u8, command, "sessions")) try sessions(init, args[2..]) else if (std.mem.eql(u8, command, "session")) try enterSession(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, args[2..], false) else return newSession(init, args[1..]);
+    if (std.mem.eql(u8, command, "setup")) try setup(init, args[2..]) else if (std.mem.eql(u8, command, "sessions")) try sessions(init, args[2..]) else if (std.mem.eql(u8, command, "session")) try enterSession(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, .{ .io = init.io }, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, .{ .io = init.io }, args[2..], false) else return newSession(init, args[1..]);
     try postCommandHold(init);
 }
 
@@ -799,16 +799,9 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     } else null;
     runSession(init, saved.store.slice(), saved.session.slice(), initial_text) catch |err| {
         // Configuration acceptance and local entry are independent outcomes.
-        // Four bytes per escaped selector byte, plus labels and two UUIDs.
-        var bytes: [4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 256]u8 = undefined;
+        var bytes: [256]u8 = undefined;
         var notice = std.Io.Writer.fixed(&bytes);
         notice.print("\nrui: Session configuration accepted.\nConfiguration request: {s} (rui recover {s})\n", .{ saved.key.slice(), saved.key.slice() }) catch return err;
-        if (err == error.InvalidTemporaryDirectory)
-            notice.writeAll("rui: Fix or unset TMPDIR before resuming.\n") catch return err;
-        notice.writeAll("Resume: rui resume --store ") catch return err;
-        TerminalText.writeShellWord(&notice, saved.store.slice()) catch return err;
-        TerminalText.writeShellSession(&notice, saved.session.slice(), true) catch return err;
-        notice.writeByte('\n') catch return err;
         _ = @import("stderr.zig").write(notice.buffered());
         return err;
     };
@@ -1094,7 +1087,7 @@ fn parseRetryWaits(value: []const u8) ![3]u64 {
     return waits;
 }
 
-fn configure(init: std.process.Init, args: []const []const u8, interactive: bool) !void {
+fn configure(init: std.process.Init, requester: client.Requests, args: []const []const u8, interactive: bool) !void {
     const io = init.io;
     var json = false;
     var input = client.ConfigureInput{
@@ -1124,14 +1117,23 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
     const target: client.CaptureTarget = if (human) .{ .generated = try requestDirectory(init, &directory_buffer) } else .{ .explicit = location };
     var captured = try client.captureConfigure(io, input, target);
     const saved = captured.identity().*;
+    var admitted: ?bool = null;
+    errdefer |err| if (human and interactive) {
+        const status = if (admitted) |accepted| if (accepted) "accepted; do not resubmit it" else "rejected" else "not confirmed; do not replace uncertain work";
+        TerminalText.diagnostic("rui: Configuration {s} ({s}). Use rui recover {s} to inspect the same saved request.\n", .{ status, @errorName(err), saved.key.slice() });
+    };
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(io);
         if (human and !interactive) {
             if (json) try announceCaptureJson(io, saved.key.slice()) else try announceCapture(io, saved.key.slice());
         }
-        break :blk try client.sendCaptured(io, &captured, drop_reply, &reply_buffer);
+        break :blk try requester.sendCaptured(&captured, drop_reply, &reply_buffer);
     };
+    if (human and interactive) {
+        _ = try reply.answer;
+        admitted = reply.isAccepted();
+    }
     const accepted = human and interactive and reply.isAccepted();
     if (!interactive or !accepted) try writeMutationReply(io, reply, if (human and json) saved.key.slice() else null, human);
     if (human and interactive and accepted) try std.Io.File.stdout().writeStreamingAll(io, "Rui: Configured.\n");
@@ -1140,6 +1142,9 @@ fn configure(init: std.process.Init, args: []const []const u8, interactive: bool
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "configuration: {s} in {s}\n", .{ saved.session.slice(), saved.store.slice() }));
         if (reply.isAccepted()) try std.Io.File.stdout().writeStreamingAll(io, "next: rui session (same Store and Session)\n");
     }
+    if (human and interactive) if (requester.cancellation) |token| if (token.stopped.load(.acquire)) {
+        TerminalText.diagnostic("rui: Configuration {s}; use rui recover {s} to inspect the same saved admission.\n", .{ if (admitted.?) "accepted; do not resubmit it" else "rejected", saved.key.slice() });
+    };
 }
 
 fn message(init: std.process.Init, args: []const []const u8) !void {
@@ -1277,7 +1282,7 @@ fn waitSession(init: std.process.Init, args: []const []const u8) !void {
 
 fn waitForSession(init: std.process.Init, store: []const u8, session_ref: []const u8, presentation: Presentation, terminal_only: bool) !void {
     const saved = blk: {
-        const report = try inspectWork(init, store, session_ref);
+        const report = try inspectWork(init, .{ .io = init.io }, store, session_ref);
         defer report.file.close(init.io);
         const work = report.current;
         const selected = if (work.selected_message) |key| key.slice() else {
@@ -1303,11 +1308,11 @@ fn waitForSession(init: std.process.Init, store: []const u8, session_ref: []cons
     };
     if (try followMessage(init, &saved, presentation, if (terminal_only) .terminal_only else .session_blocked) != null)
         return;
-    if (presentation != .json) try showResult(init, &saved, presentation);
+    if (presentation != .json) try showResult(init, .{ .io = init.io }, &saved, presentation);
 }
 
-fn showSessionStatus(init: std.process.Init, store: []const u8, session_ref: []const u8, view: enum { opening, full }) !void {
-    const report = try inspectWork(init, store, session_ref);
+fn showSessionStatus(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8, view: enum { opening, full }) !void {
+    const report = try inspectWork(init, requester, store, session_ref);
     defer report.file.close(init.io);
     const work = &report.current;
     if (view == .opening) {
@@ -1369,25 +1374,37 @@ fn enterSession(init: std.process.Init, args: []const []const u8) !void {
         if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session")) session_ref = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--persistent") and !persistent) persistent = true else return error.UnknownArgument;
     }
     const reference = session_ref orelse return usage();
-    var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    return runSession(init, try selectedStore(init, store, &fallback_buffer), reference, null);
-}
-
-fn runSession(init: std.process.Init, store: []const u8, reference: []const u8, initial_text: ?[]const u8) !void {
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
         TerminalText.diagnostic("rui session needs terminal input and output; use one-shot commands for scripts\n", .{});
         return error.InteractiveTerminalRequired;
     }
     // Resolve aliases and enforce the Store's existing private/canonical selector
     // before any Session request. Explicit --store does not read preferences.
-    const paths = platform.resolveClientPaths(init.io, store) catch |err| {
+    var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const paths = platform.resolveClientPaths(init.io, try selectedStore(init, store, &fallback_buffer)) catch |err| {
         TerminalText.diagnostic("rui: selected Store unavailable ({s}); check --store or rui setup; no alternate Store selected.\n", .{@errorName(err)});
         return err;
     };
-    const destination = paths.store.slice();
-    showSessionStatus(init, destination, reference, .opening) catch |err| {
+    return runSession(init, paths.store.slice(), reference, null);
+}
+
+fn runSession(init: std.process.Init, destination: []const u8, reference: []const u8, initial_text: ?[]const u8) anyerror!void {
+    // Callers own canonical Store resolution and complete Session selection.
+    errdefer |err| notice: {
+        // Four bytes per escaped selector byte, plus labels and hex syntax.
+        var bytes: [4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 256]u8 = undefined;
+        var notice = std.Io.Writer.fixed(&bytes);
+        if (err == error.InvalidTemporaryDirectory)
+            notice.writeAll("rui: Fix or unset TMPDIR before resuming.\n") catch break :notice;
+        notice.writeAll("\nResume: rui resume --store ") catch break :notice;
+        TerminalText.writeShellWord(&notice, destination) catch break :notice;
+        TerminalText.writeShellSession(&notice, reference, true) catch break :notice;
+        notice.writeByte('\n') catch break :notice;
+        _ = @import("stderr.zig").write(notice.buffered());
+    }
+    showSessionStatus(init, .{ .io = init.io }, destination, reference, .opening) catch |err| {
         if (err == error.SessionNotConfigured) TerminalText.diagnostic("rui: configure this Session before entering it\n", .{});
-        return err;
+        return @as(anyerror!void, err);
     };
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory = try requestDirectory(init, &directory_buffer);
@@ -1446,16 +1463,16 @@ fn resumeSession(init: std.process.Init, args: []const []const u8) !void {
     return runSession(init, destination, selected.slice(), null);
 }
 
-fn sessionCommand(init: std.process.Init, destination: []const u8, reference: []const u8, input_buffer: []u8) !void {
+fn sessionCommand(init: std.process.Init, requests_context: client.Requests, destination: []const u8, reference: []const u8, input_buffer: []u8) !void {
     const text = input_buffer;
     if (std.mem.eql(u8, text, "/inspect-action")) {
-        const report = try inspectWork(init, destination, reference);
+        const report = try inspectWork(init, requests_context, destination, reference);
         defer report.file.close(init.io);
         if (report.current.first_action) |action| {
             var buffer: [20]u8 = undefined;
             const id = try std.fmt.bufPrint(&buffer, "{d}", .{action});
             try writeSafeField(init.io, "Workspace: ", report.current.settings.workspace.slice());
-            try inspectAction(init, &.{ "--store", destination, "--session", reference, "--action", id }, true);
+            try inspectAction(init, requests_context, &.{ "--store", destination, "--session", reference, "--action", id }, true);
             try std.Io.File.stdout().writeStreamingAll(init.io, "Inspection only; no decision sent.\n");
             inline for (.{ "allow-action", "deny-action" }, .{ "Allow once: ", "Deny: " }) |decision, label| {
                 try std.Io.File.stdout().writeStreamingAll(init.io, label ++ "rui " ++ decision ++ " --store ");
@@ -1479,7 +1496,7 @@ fn sessionCommand(init: std.process.Init, destination: []const u8, reference: []
         };
         setup(init, setup_args[0..count]) catch |err| TerminalText.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
     } else if (std.mem.eql(u8, text, "/status")) {
-        showSessionStatus(init, destination, reference, .full) catch |err| {
+        showSessionStatus(init, requests_context, destination, reference, .full) catch |err| {
             if (err == error.CanonicalStoreFailure) return err;
             TerminalText.diagnostic("rui: status: {s}\n", .{@errorName(err)});
         };
@@ -1490,7 +1507,7 @@ fn sessionCommand(init: std.process.Init, destination: []const u8, reference: []
             TerminalText.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
             return;
         };
-        showResult(init, &saved, .human) catch |err| {
+        showResult(init, requests_context, &saved, .human) catch |err| {
             if (err == error.CanonicalStoreFailure) return err;
             TerminalText.diagnostic("rui: result: {s}\n", .{@errorName(err)});
         };
@@ -1536,7 +1553,7 @@ fn sessionCommand(init: std.process.Init, destination: []const u8, reference: []
             }
         }
         if (valid and count > 4) {
-            configure(init, config_args[0..count], true) catch |err| {
+            configure(init, requests_context, config_args[0..count], true) catch |err| {
                 TerminalText.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
                 if (err == error.CanonicalStoreFailure) return err;
             };
@@ -2250,12 +2267,12 @@ fn result(init: std.process.Init, args: []const []const u8) !void {
     const saved = try savedRequest(init, args[0]);
     if (!saved.kind.eql("message")) return error.NotMessageRequest;
     const address = try client.MessageAddress.init(saved.store.slice(), saved.session.slice(), saved.key.slice());
-    try showResult(init, &address, if (json) .json else .human);
+    try showResult(init, .{ .io = init.io }, &address, if (json) .json else .human);
 }
 
-fn showResult(init: std.process.Init, saved: *const client.MessageAddress, presentation: Presentation) !void {
+fn showResult(init: std.process.Init, requester: client.Requests, saved: *const client.MessageAddress, presentation: Presentation) !void {
     const json = presentation == .json;
-    const observed = try checkedObservation(init.io, try client.observeMessage(init.io, saved), saved.key.slice());
+    const observed = try checkedObservation(init.io, try requester.observeMessage(saved), saved.key.slice());
     const state = observed.state();
     if (!json) {
         var line: [256]u8 = undefined;
@@ -2278,7 +2295,7 @@ fn showResult(init: std.process.Init, saved: *const client.MessageAddress, prese
         const file = try renderScratch(init);
         defer file.close(init.io);
         var read_buffer: client.ReplyBuffer = .{};
-        const answer = try client.readResult(init.io, saved.store.slice(), saved.key.slice(), file, &read_buffer);
+        const answer = try requester.readResult(saved.store.slice(), saved.key.slice(), file, &read_buffer);
         if (answer == .failure) {
             try writeReadFailure(init.io, answer.failure, saved.key.slice());
             return answer.failure.err();
@@ -2301,7 +2318,7 @@ fn showResult(init: std.process.Init, saved: *const client.MessageAddress, prese
         // transition may be buffered, so tracked style cannot prove terminal state.
         // Reset alone, before diagnostics; failed cleanup retains the original error.
         errdefer _ = std.c.write(1, "\x1b[0m", 4);
-        const answer = try client.readResultStream(init.io, saved.store.slice(), saved.key.slice(), &renderer, &read_buffer);
+        const answer = try requester.readResultStream(saved.store.slice(), saved.key.slice(), &renderer, &read_buffer);
         if (answer == .answer) {
             try renderer.finish();
             try output.flush();
@@ -2360,11 +2377,11 @@ const SessionObservation = struct {
     file: std.Io.File,
 };
 
-fn inspectWork(init: std.process.Init, store: []const u8, session_ref: []const u8) !SessionObservation {
+fn inspectWork(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8) !SessionObservation {
     const file = try renderScratch(init);
     errdefer file.close(init.io);
     var response: client.ReplyBuffer = .{};
-    const reply = try client.inspectSession(init.io, store, session_ref, .current, file, &response);
+    const reply = try requester.inspectSession(store, session_ref, .current, file, &response);
     switch (try client.CurrentReply.decode(init.io, file, session_ref, reply)) {
         .current => |current| return .{ .current = current, .file = file },
         .unconfigured => return error.SessionNotConfigured,
@@ -2470,7 +2487,7 @@ fn waitMessage(init: std.process.Init, saved: *const client.MessageAddress, poli
     }
 }
 
-fn inspectAction(init: std.process.Init, args: []const []const u8, interactive: bool) !void {
+fn inspectAction(init: std.process.Init, requester: client.Requests, args: []const []const u8, interactive: bool) !void {
     const io = init.io;
     var store: ?[]const u8 = null;
     var session: ?[]const u8 = null;
@@ -2489,14 +2506,14 @@ fn inspectAction(init: std.process.Init, args: []const []const u8, interactive: 
     var buffer: client.ReplyBuffer = .{};
     var call_bytes: u64 = 0;
     if (!interactive) {
-        const call = try client.readActionCallId(io, selected, reference, target, file, &buffer);
+        const call = try requester.readActionCallId(selected, reference, target, file, &buffer);
         if (call == .command) {
             try writeCommandReply(io, call.command);
             return error.ActionReadFailed;
         }
         call_bytes = call.answer.bytes;
     }
-    const arguments = try client.readActionArguments(io, selected, reference, target, file, &buffer);
+    const arguments = try requester.readActionArguments(selected, reference, target, file, &buffer);
     if (arguments == .command) {
         try writeCommandReply(io, arguments.command);
         return error.ActionReadFailed;

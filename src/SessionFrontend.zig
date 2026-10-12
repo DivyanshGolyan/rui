@@ -11,7 +11,7 @@ const View = @import("session_view.zig");
 const History = @import("session_history.zig");
 const Self = @This();
 
-pub const Command = *const fn (std.process.Init, []const u8, []const u8, []u8) anyerror!void;
+pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
 const Submission = union(enum) {
     message: Input.Ticket,
     decision: struct { action: u64, decision: protocol.PermissionDecision, state: Input.State = .not_started },
@@ -116,9 +116,9 @@ notice: ?[]const u8 = null,
 notice_buffer: [512]u8 = undefined,
 previous_signals: [2]std.posix.Sigaction = undefined,
 
-var interrupted = std.atomic.Value(bool).init(false);
+var interrupted: client.Cancellation = .{};
 fn interrupt(_: std.posix.SIG) callconv(.c) void {
-    interrupted.store(true, .release);
+    interrupted.requestStop();
 }
 
 fn signals(self: *Self, install: bool) void {
@@ -133,7 +133,7 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
     const colour = no_colour.len == 0 and !std.mem.eql(u8, init.environ_map.get("TERM") orelse "", "dumb");
     var self: Self = .{ .init = init, .store = store, .session = session, .directory = directory, .scratch = scratch, .command = command, .terminal = undefined, .colour = colour };
     self.input.init();
-    interrupted.store(false, .release);
+    interrupted.stopped.store(false, .release);
     self.signals(true);
     defer self.signals(false);
     self.terminal = try Terminal.begin(colour);
@@ -192,7 +192,7 @@ fn drive(self: *Self, initial_text: ?[]const u8) !void {
     if (initial_text) |text| try self.startSubmission(.{ .message = self.input.submitText(text) });
     while (!self.detached) {
         self.driveActive() catch |err| {
-            const failure = driveFailure(err, interrupted.load(.acquire));
+            const failure = driveFailure(err, interrupted.stopped.load(.acquire));
             if (failure != error.CommandHandoff) return failure;
             try self.handoff();
         };
@@ -432,7 +432,7 @@ test "frontend cleanup joins both borrowers and retires output before reporting 
 
 fn driveActive(self: *Self) !void {
     while (!self.detached) {
-        if (interrupted.load(.acquire)) return error.InteractiveInterrupted;
+        if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
         if (self.pendingHandoff()) return error.CommandHandoff;
         if (self.admission.thread != null and self.admission.completed()) {
             self.settleAdmission() catch |err| {
@@ -532,7 +532,7 @@ fn driveActive(self: *Self) !void {
                     }
                     if (self.detached) break;
                 }
-                if (interrupted.load(.acquire)) return error.InteractiveInterrupted;
+                if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
                 if (self.detached) break;
                 if (empty and self.choice.pending() == .none) {
                     self.choice_ready = true;
@@ -547,7 +547,7 @@ fn driveActive(self: *Self) !void {
 fn pump(raw: *anyopaque) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     _ = try self.step(16);
-    if (self.detached or interrupted.load(.acquire)) return error.InteractiveInterrupted;
+    if (self.detached or interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
     // Unwind the terminal write and its window loan before handing off.
     if (self.pendingHandoff()) return error.CommandHandoff;
 }
@@ -754,45 +754,42 @@ fn handoff(self: *Self) !void {
     const settled = self.quiesce();
     self.applyReader(settled.reader);
     if (settled.failure(.handoff, null)) |err| return err;
-    if (interrupted.load(.acquire)) return error.InteractiveInterrupted;
+    if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
     try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
     {
-        self.signals(false);
-        defer self.signals(true);
-        {
-            const text = self.input.command_buffer[0..self.input.command_length.?];
-            defer self.input.command_length = null;
-            if (std.mem.eql(u8, text, "/discard")) {
-                if (self.submission != null) {
-                    if (self.submissionState() == .rejected) {
-                        try self.settleSubmission(null);
-                    } else self.notice = "! Cannot discard an unresolved submission; Ctrl-R recovers the original.";
-                }
-            } else if (std.mem.startsWith(u8, text, "/recover ") and self.submission != null) {
-                if (std.mem.eql(u8, text[9..], &self.capture_key)) self.requestRetry() else self.notice = "! Recovery key does not match this original submission; nothing sent.";
-            } else if (std.mem.eql(u8, text, "/wait")) {
-                self.notice = "Work continues while you compose.";
-            } else if (std.mem.eql(u8, text, "/login")) {
-                self.notice = "Login uses rui login codex in your shell.";
-            } else if (std.mem.eql(u8, text, "/help")) {
-                try std.Io.File.stdout().writeStreamingAll(self.init.io, "Actions show their command here. Type a + Enter to allow once, d + Enter to deny.\n/status settings and work · /inspect-action exact diagnostics\n/details recent conversation with full saved tool output\n/history older conversation\nCtrl-R: retry the same unconfirmed input or decision, keeping the draft\n/requests recovery records · /result KEY saved answer\n/setup future defaults · /configure Session settings\n/recover KEY original intent · /discard rejected intent\n/exit detach (Host work continues; unsent draft is lost)\nLogin: rui login codex in your shell.\n");
-            } else {
-                try self.command(self.init, self.store, self.session, text);
-                if (self.submission != null and (std.mem.eql(u8, text, "/status") or std.mem.eql(u8, text, "/requests"))) {
-                    // A reserved key is diagnostic identity, not proof that a
-                    // capture exists. Ctrl-R also repairs prepublication failure.
-                    try std.Io.File.stdout().writeStreamingAll(self.init.io, "Original reserved request: ");
-                    try std.Io.File.stdout().writeStreamingAll(self.init.io, &self.capture_key);
-                    try std.Io.File.stdout().writeStreamingAll(self.init.io, if (self.submissionState() == .rejected) "\nSubmission rejected; /discard releases only this original, retaining the next draft.\n" else "\nPublication/admission may be incomplete; Ctrl-R retries this exact original.\n");
-                    if (self.admission_error) |err| {
-                        try std.Io.File.stdout().writeStreamingAll(self.init.io, "Last submission error: ");
-                        try std.Io.File.stdout().writeStreamingAll(self.init.io, @errorName(err));
-                        try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
-                    }
+        const text = self.input.command_buffer[0..self.input.command_length.?];
+        defer self.input.command_length = null;
+        if (std.mem.eql(u8, text, "/discard")) {
+            if (self.submission != null) {
+                if (self.submissionState() == .rejected) {
+                    try self.settleSubmission(null);
+                } else self.notice = "! Cannot discard an unresolved submission; Ctrl-R recovers the original.";
+            }
+        } else if (std.mem.startsWith(u8, text, "/recover ") and self.submission != null) {
+            if (std.mem.eql(u8, text[9..], &self.capture_key)) self.requestRetry() else self.notice = "! Recovery key does not match this original submission; nothing sent.";
+        } else if (std.mem.eql(u8, text, "/wait")) {
+            self.notice = "Work continues while you compose.";
+        } else if (std.mem.eql(u8, text, "/login")) {
+            self.notice = "Login uses rui login codex in your shell.";
+        } else if (std.mem.eql(u8, text, "/help")) {
+            try std.Io.File.stdout().writeStreamingAll(self.init.io, "Actions show their command here. Type a + Enter to allow once, d + Enter to deny.\n/status settings and work · /inspect-action exact diagnostics\n/details recent conversation with full saved tool output\n/history older conversation\nCtrl-R: retry the same unconfirmed input or decision, keeping the draft\n/requests recovery records · /result KEY saved answer\n/setup future defaults · /configure Session settings\n/recover KEY original intent · /discard rejected intent\n/exit detach (Host work continues; unsent draft is lost)\nLogin: rui login codex in your shell.\n");
+        } else {
+            try self.command(self.init, .{ .io = self.init.io, .cancellation = &interrupted }, self.store, self.session, text);
+            if (self.submission != null and (std.mem.eql(u8, text, "/status") or std.mem.eql(u8, text, "/requests"))) {
+                // A reserved key is diagnostic identity, not proof that a
+                // capture exists. Ctrl-R also repairs prepublication failure.
+                try std.Io.File.stdout().writeStreamingAll(self.init.io, "Original reserved request: ");
+                try std.Io.File.stdout().writeStreamingAll(self.init.io, &self.capture_key);
+                try std.Io.File.stdout().writeStreamingAll(self.init.io, if (self.submissionState() == .rejected) "\nSubmission rejected; /discard releases only this original, retaining the next draft.\n" else "\nPublication/admission may be incomplete; Ctrl-R retries this exact original.\n");
+                if (self.admission_error) |err| {
+                    try std.Io.File.stdout().writeStreamingAll(self.init.io, "Last submission error: ");
+                    try std.Io.File.stdout().writeStreamingAll(self.init.io, @errorName(err));
+                    try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
                 }
             }
         }
     }
+    if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
     self.terminal = try Terminal.begin(self.colour);
     self.terminal.pump = .{ .context = self, .step = pump };
     self.choice_ready = false;
