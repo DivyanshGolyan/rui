@@ -41,6 +41,26 @@ def admit(home, *args):
     return admission
 
 
+def help_case():
+    with tempfile.TemporaryDirectory(prefix="rui-help.") as directory:
+        home = pathlib.Path(directory)
+        for flag in ("--help", "-h"):
+            result = subprocess.run(
+                [str(fixture.RUI), flag], env={**os.environ, "HOME": str(home)},
+                capture_output=True, text=True, timeout=10,
+            )
+            assert result.returncode == 0, (flag, result.stdout, result.stderr)
+            assert "rui [PROMPT]" in result.stdout, result.stdout
+            assert not result.stderr, result.stderr
+            assert list(home.iterdir()) == [], "help created runtime state"
+        result = subprocess.run(
+            [str(fixture.RUI), "--not-an-option"], env={**os.environ, "HOME": str(home)},
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode != 0 and "InvalidArguments" in result.stderr, result
+        assert list(home.iterdir()) == [], "invalid arguments created runtime state"
+
+
 def preference_edits(home, store):
     """Exact saved intent, independent of prospective recommendation output."""
     run(home, "setup", "--store", store, "--provider", "codex", "--model", "gpt-6-luna")
@@ -1832,6 +1852,8 @@ def main(selected="all"):
     import canonical_failure_integration
     import terminal_restoration_integration
     assert selected in ("all", "long-input", "terminal-waits"), selected
+    if selected == "all":
+        help_case()
     if selected in ("all", "terminal-waits"):
         terminal_wait_oracles()
     if selected == "terminal-waits":

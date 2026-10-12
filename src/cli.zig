@@ -38,6 +38,9 @@ pub fn main(init: std.process.Init) !void {
 fn run(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const args = try init.minimal.args.toSlice(allocator);
+    if (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h"))) {
+        return std.Io.File.stdout().writeStreamingAll(init.io, usage_text);
+    }
     if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return newSession(init, args[1..]);
     const command = args[1];
     if (std.mem.eql(u8, command, "serve")) {
@@ -2577,68 +2580,72 @@ fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
     return args[index.*];
 }
 
+const usage_text =
+    \\usage:
+    \\  rui --help | -h
+    \\    Print help without starting a Host or creating a Session.
+    \\  rui [PROMPT] [--store PATH] [--provider codex] [--model gpt-6-luna]
+    \\    On a terminal, attach/start a Host and create a fresh Session in the current Workspace.
+    \\    Bash runs without approval by default. --persistent is a compatibility alias for the same UI.
+    \\    Non-TTY calls must use explicit one-shot commands; use rui requests/recover after a lost reply.
+    \\  rui resume [--store PATH] REF|--last
+    \\    Re-enter an exact Session, or the newest created Session in the current Workspace.
+    \\  rui exec [--store PATH] [--provider codex] [--model gpt-6-luna] PROMPT|-
+    \\    Create a fresh Session, wait for its answer, print only answer text to stdout.
+    \\    Recovery receipts go to stderr; failures, unconfirmed work and approval blocks exit nonzero.
+    \\  rui login codex
+    \\  rui host status [--store PATH]
+    \\    Read the selected Store's protected Host readiness, capacity and capabilities without starting it.
+    \\  rui host start [--store PATH]
+    \\    Attach or detach a capacity-8 managed Host; existing Host settings win.
+    \\  rui host stop [--store PATH] [--instance HEX]
+    \\    Stop the observed Host, affecting all Store work; retry a lost reply only with the same instance.
+    \\  rui setup [--store PATH] [--provider codex] [--model gpt-6-luna | --clear-model]
+    \\    Inspect prospective selection, local credential and Host status; save defaults only with flags.
+    \\    --clear-model removes only the saved model; prospective recommendation is unchanged.
+    \\    Selected Store must exist and pass canonical/private checks.
+    \\  rui sessions [--store PATH] [--all] [--json]
+    \\    List configured Sessions here or in all Workspaces; --json emits one bounded page per line.
+    \\  rui serve [--store PATH] [--active-capacity N] [--codex | --provider-endpoint URL] [--provider-ca-file PATH] [--fault NAME]
+    \\  rui configure [--store PATH] --session REF [settings] [--json]
+    \\    First configuration requires --workspace PATH --provider codex --model MODEL.
+    \\  rui session [--store PATH] --session REF [--persistent]
+    \\    All new commands use --store, then saved Store, then HOME/.local/share/rui/store.
+    \\    Type /help for in-Session commands (including /setup).
+    \\    Continuous drafting and in-session Allow once / Deny use the same frontend for every Session.
+    \\  One-shot commands (never prompt or change meaning on redirection):
+    \\  rui message [--store PATH] --session REF TEXT|- [--json]
+    \\    --text FILE|- also captures a file or stdin before sending.
+    \\  rui wait-session [--store PATH] --session REF [--terminal] [--json]
+    \\    Select active/oldest queued work once; return idle if neither exists.
+    \\  rui inspect-action --store PATH --session REF --action ID [--json]
+    \\  rui allow-action --store PATH --session REF --action ID [--json]
+    \\  rui deny-action --store PATH --session REF --action ID [--json]
+    \\  rui requests [--json]
+    \\  rui recover HANDLE [--json]
+    \\  rui follow HANDLE [--json]
+    \\    Follow this saved Message, not whatever the Session does next.
+    \\  rui result HANDLE [--json]
+    \\    Handles are saved under HOME/.config/rui/requests; scripted Host startup is explicit.
+    \\  Low-level explicit-key commands:
+    \\  rui configure --store PATH --record FILE --key KEY --session REF [settings]
+    \\  rui message --store PATH --record FILE --key KEY --session REF --text FILE|-
+    \\  rui stop-session --store PATH --record FILE --key KEY --session REF
+    \\  rui interrupt-model --store PATH --record FILE --key KEY --session REF --turn ID --operation ID
+    \\  rui allow-action --store PATH --record FILE --key KEY --session REF --action ID
+    \\  rui deny-action --store PATH --record FILE --key KEY --session REF --action ID
+    \\  rui retry --store PATH --record FILE --kind configure|message|session-stop|model-interruption|permission-decision
+    \\  rui observe-command --store PATH --key KEY
+    \\  rui read-result --store PATH --key KEY
+    \\  rui read-conversation [--store PATH|--store-hex HEX] --session REF|--session-hex HEX --position POSITION --ordinal ORDINAL
+    \\  rui read-action-call-id --store PATH --session REF --action ID
+    \\  rui read-action-arguments --store PATH --session REF --action ID
+    \\  rui inspect-session --store PATH --session REF [--profile current|full]
+    \\
+;
+
 fn usage() error{InvalidArguments} {
-    std.debug.print(
-        \\usage:
-        \\  rui [PROMPT] [--store PATH] [--provider codex] [--model gpt-6-luna]
-        \\    On a terminal, attach/start a Host and create a fresh Session in the current Workspace.
-        \\    Bash runs without approval by default. --persistent is a compatibility alias for the same UI.
-        \\    Non-TTY calls must use explicit one-shot commands; use rui requests/recover after a lost reply.
-        \\  rui resume [--store PATH] REF|--last
-        \\    Re-enter an exact Session, or the newest created Session in the current Workspace.
-        \\  rui exec [--store PATH] [--provider codex] [--model gpt-6-luna] PROMPT|-
-        \\    Create a fresh Session, wait for its answer, print only answer text to stdout.
-        \\    Recovery receipts go to stderr; failures, unconfirmed work and approval blocks exit nonzero.
-        \\  rui login codex
-        \\  rui host status [--store PATH]
-        \\    Read the selected Store's protected Host readiness, capacity and capabilities without starting it.
-        \\  rui host start [--store PATH]
-        \\    Attach or detach a capacity-8 managed Host; existing Host settings win.
-        \\  rui host stop [--store PATH] [--instance HEX]
-        \\    Stop the observed Host, affecting all Store work; retry a lost reply only with the same instance.
-        \\  rui setup [--store PATH] [--provider codex] [--model gpt-6-luna | --clear-model]
-        \\    Inspect prospective selection, local credential and Host status; save defaults only with flags.
-        \\    --clear-model removes only the saved model; prospective recommendation is unchanged.
-        \\    Selected Store must exist and pass canonical/private checks.
-        \\  rui sessions [--store PATH] [--all] [--json]
-        \\    List configured Sessions here or in all Workspaces; --json emits one bounded page per line.
-        \\  rui serve [--store PATH] [--active-capacity N] [--codex | --provider-endpoint URL] [--provider-ca-file PATH] [--fault NAME]
-        \\  rui configure [--store PATH] --session REF [settings] [--json]
-        \\    First configuration requires --workspace PATH --provider codex --model MODEL.
-        \\  rui session [--store PATH] --session REF [--persistent]
-        \\    All new commands use --store, then saved Store, then HOME/.local/share/rui/store.
-        \\    Type /help for in-Session commands (including /setup).
-        \\    Continuous drafting and in-session Allow once / Deny use the same frontend for every Session.
-        \\  One-shot commands (never prompt or change meaning on redirection):
-        \\  rui message [--store PATH] --session REF TEXT|- [--json]
-        \\    --text FILE|- also captures a file or stdin before sending.
-        \\  rui wait-session [--store PATH] --session REF [--terminal] [--json]
-        \\    Select active/oldest queued work once; return idle if neither exists.
-        \\  rui inspect-action --store PATH --session REF --action ID [--json]
-        \\  rui allow-action --store PATH --session REF --action ID [--json]
-        \\  rui deny-action --store PATH --session REF --action ID [--json]
-        \\  rui requests [--json]
-        \\  rui recover HANDLE [--json]
-        \\  rui follow HANDLE [--json]
-        \\    Follow this saved Message, not whatever the Session does next.
-        \\  rui result HANDLE [--json]
-        \\    Handles are saved under HOME/.config/rui/requests; scripted Host startup is explicit.
-        \\  Low-level explicit-key commands:
-        \\  rui configure --store PATH --record FILE --key KEY --session REF [settings]
-        \\  rui message --store PATH --record FILE --key KEY --session REF --text FILE|-
-        \\  rui stop-session --store PATH --record FILE --key KEY --session REF
-        \\  rui interrupt-model --store PATH --record FILE --key KEY --session REF --turn ID --operation ID
-        \\  rui allow-action --store PATH --record FILE --key KEY --session REF --action ID
-        \\  rui deny-action --store PATH --record FILE --key KEY --session REF --action ID
-        \\  rui retry --store PATH --record FILE --kind configure|message|session-stop|model-interruption|permission-decision
-        \\  rui observe-command --store PATH --key KEY
-        \\  rui read-result --store PATH --key KEY
-        \\  rui read-conversation [--store PATH|--store-hex HEX] --session REF|--session-hex HEX --position POSITION --ordinal ORDINAL
-        \\  rui read-action-call-id --store PATH --session REF --action ID
-        \\  rui read-action-arguments --store PATH --session REF --action ID
-        \\  rui inspect-session --store PATH --session REF [--profile current|full]
-        \\
-    , .{});
+    std.debug.print("{s}", .{usage_text});
     return error.InvalidArguments;
 }
 
