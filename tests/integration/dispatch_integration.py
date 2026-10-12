@@ -21,14 +21,6 @@ RUI = pathlib.Path(sys.argv[1]).resolve()
 ROOT = pathlib.Path.cwd()
 
 
-def model_instructions(workspace, baseline=""):
-    return (
-        "You are Rui, a local coding agent. Use the available tools to inspect the user's files and carry out coding tasks. "
-        "Ground claims about the local environment in tool results.\n"
-        f"Workspace: {workspace}\n\nSession instructions:\n{baseline}"
-    )
-
-
 class FailureEndpoint(TestHTTPServer):
     allow_reuse_address = True
 
@@ -1370,7 +1362,7 @@ def main():
         wait_for(lambda: len(success_endpoint.requests) == 2, "two successful requests")
         first_request = json.loads(success_endpoint.requests[0])
         second_request = json.loads(success_endpoint.requests[1])
-        assert first_request["instructions"] == second_request["instructions"] == model_instructions(ROOT)
+        assert first_request["instructions"] == second_request["instructions"] == ""
         assert first_request["input"] == [
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
         ]
@@ -2099,7 +2091,7 @@ def main():
         pending_request = json.loads(pending_endpoint.requests[1])
         expected_pending_reasoning = dict(pending_reasoning)
         expected_pending_reasoning.pop("created_by")
-        assert pending_request["instructions"] == model_instructions(ROOT)
+        assert pending_request["instructions"] == ""
         assert pending_request["input"] == [
             {"role": "user", "content": [{"type": "input_text", "text": "before cutoff"}]},
             expected_pending_reasoning,
@@ -2670,7 +2662,7 @@ def main():
             "store": False,
             "stream": True,
             "include": ["reasoning.encrypted_content"],
-            "instructions": model_instructions(ROOT, "A"),
+            "instructions": "A",
             "input": [
                 {
                     "role": "user",
@@ -2684,7 +2676,7 @@ def main():
                 {
                     "type": "function",
                     "name": "bash",
-                    "description": "Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed.",
+                    "description": "Run Bash",
                     "strict": True,
                     "parameters": {
                         "type": "object",
@@ -2692,7 +2684,6 @@ def main():
                             "cmd": {"type": "string"},
                             "timeout_ms": {
                                 "type": ["integer", "null"],
-                                "description": "Use null for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.",
                                 "minimum": 1,
                                 "maximum": 9223372036854775807,
                             },
@@ -2735,7 +2726,7 @@ def main():
         assert successor["input"] == expected["input"] + [
             {"role": "user", "content": [{"type": "input_text", "text": "later message"}]}
         ], successor
-        assert successor["instructions"] == model_instructions(ROOT, "A"), successor
+        assert successor["instructions"] == "A", successor
         assert successor["model"] == "model-a", successor
         assert successor["tools"] == [], successor
         assert "text" not in successor, successor

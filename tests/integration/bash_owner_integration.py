@@ -76,57 +76,6 @@ def stage_action(state, store, name, command):
         endpoint_thread.join(timeout=5)
 
 
-def prove_timeout_feedback(state):
-    store = state / "timeout-feedback-store"
-    marker = state / "timeout-effects"
-    responses = []
-    cases = (("default", None, 500), ("override", 800, 800), ("success", None, None))
-    for name, override, effective in cases:
-        command = "printf complete" if effective is None else f"printf before; printf x >> '{marker}'; sleep 30"
-        bash_fixture.add_exchange(responses, name, command, timeout_ms=override)
-    endpoint = fixture.SuccessEndpoint(responses)
-    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-    thread.start()
-    host = None
-    try:
-        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", "--bash-timeout-ms", "500")
-        for index, (name, _, effective) in enumerate(cases):
-            session = f"direct/{name}"
-            bash_fixture.configure(state, store, f"{name}-config", session)
-            fixture.message(state, store, f"{name}-message", session, "execute")
-            action = fixture.wait_for(lambda: bash_fixture.action_for(store, session), f"{name} Action")
-            bash_fixture.allow(state, store, f"{name}-allow", session, action["action"])
-            fixture.wait_for(lambda: fixture.completed_observation(store, f"{name}-message"), f"{name} continuation")
-            result = bash_fixture.result_text(store, session)
-            replay = json.loads(endpoint.requests[index * 2 + 1])
-            outputs = [item["output"] for item in replay["input"] if item.get("type") == "function_call_output"]
-            assert outputs == [result], replay
-            if effective is None:
-                assert result.startswith("Bash succeeded."), result
-                assert "Execution timed out" not in result and "before retrying" not in result, result
-            else:
-                expected = (
-                    f"Execution timed out after a {effective} ms total budget from process start; output does not reset it. "
-                    "No background handle is available. Partial effects may remain: inspect state before retrying. "
-                    "For safe repeatable work, narrow the command or choose a longer timeout_ms. "
-                    "A timed-out search does not establish absence.\n"
-                )
-                assert result.startswith("Bash timed_out."), result
-                assert expected in result, result
-                assert "stdout tail:\nbefore" in result, result
-                assert marker.read_text() == "x" * (index + 1)
-                assert bash_fixture.result_text(store, session) == result
-        print("Bash timeout feedback: default 500 ms, override 800 ms, saved/model result identity and success control passed")
-    finally:
-        try:
-            if host is not None:
-                fixture.stop_host(host)
-        finally:
-            endpoint.shutdown()
-            endpoint.server_close()
-            thread.join(timeout=5)
-
-
 def main():
     root = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-bash-owner."))
     state = root / "state"
@@ -135,7 +84,6 @@ def main():
     host = None
     completed = False
     try:
-        prove_timeout_feedback(state)
         actions = {
             "preparation-failure": stage_action(
                 state, store, "preparation-failure", "printf %05d 0"

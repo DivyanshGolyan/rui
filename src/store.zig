@@ -430,7 +430,6 @@ fn containsNoActiveOperation(_: *const anyopaque, _: u64) bool {
 pub const HistoricalSettings = struct {
     provider: protocol.Provider,
     model: protocol.Bounded(protocol.max_model_bytes),
-    workspace: protocol.Bounded(protocol.max_workspace_bytes),
     session_affinity: [16]u8,
     baseline_instructions: HistoricalContent,
     output_schema: ?HistoricalContent,
@@ -4736,7 +4735,7 @@ pub const Store = struct {
         try self.validateCurrentAttempt(view.binding);
         const statement = try prepare(
             self.database,
-            "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref,r.workspace " ++
+            "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref " ++
                 "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref " ++
                 "AND r.revision=o.settings_revision JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
         );
@@ -4756,8 +4755,6 @@ pub const Store = struct {
         } else null;
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(statement, 5, &session_ref);
-        var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
-        try readText(statement, 6, &workspace);
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
         hash.update("rui/session-affinity/v1");
         var length: [8]u8 = undefined;
@@ -4771,7 +4768,6 @@ pub const Store = struct {
         return .{
             .model = model,
             .provider = try readProvider(statement, 4),
-            .workspace = workspace,
             .session_affinity = digest[0..16].*,
             .baseline_instructions = .{ .view = view, .length = instructions.length, .digest = instructions.digest },
             .output_schema = output_schema,
