@@ -906,7 +906,7 @@ fn createSession(init: std.process.Init, options: NewSessionOptions, interactive
         };
     };
     if (!reply.isAccepted()) {
-        if (interactive_login) try writeMutationReply(init.io, reply, null, true) else {
+        if (interactive_login) try writeMutationReply(init.io, reply, .human) else {
             _ = reply.answer catch |err| return err;
             TerminalText.diagnostic("rui: Session configuration rejected; inspect rui recover {s}.\n", .{saved.key.slice()});
         }
@@ -1132,9 +1132,7 @@ fn configure(init: std.process.Init, requester: client.Requests, args: []const [
     };
     // Record framed admission before presentation; writeMutationReply owns errors.
     if (human and interactive) admitted = if (reply.answer) |_| reply.isAccepted() else |_| null;
-    const accepted = human and interactive and reply.isAccepted();
-    if (!interactive or !accepted) try writeMutationReply(io, reply, if (human and json) saved.key.slice() else null, human);
-    if (human and interactive and accepted) try std.Io.File.stdout().writeStreamingAll(io, "Rui: Configured.\n");
+    try writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else if (human and !json) .human else .{ .json = if (human) saved.key.slice() else null });
     if (human and !json and !interactive) {
         var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "configuration: {s} in {s}\n", .{ saved.session.slice(), saved.store.slice() }));
@@ -1183,7 +1181,7 @@ fn message(init: std.process.Init, args: []const []const u8) !void {
         }
         break :blk try client.sendCaptured(io, &captured, drop_reply, &reply_buffer);
     };
-    try writeMutationReply(io, reply, if (human and json) saved.key.slice() else null, human);
+    try writeMutationReply(io, reply, if (human and !json) .human else .{ .json = if (human) saved.key.slice() else null });
     if (human and !json) {
         var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "message: {s} in {s}\n", .{ input.session, input.store }));
@@ -1637,7 +1635,7 @@ fn stopSession(init: std.process.Init, args: []const []const u8) !void {
     input.store = try selectedStore(init, explicit_store, &selected_buffer);
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.stopSession(io, input, &reply_buffer);
-    try writeMutationReply(io, reply, null, false);
+    try writeMutationReply(io, reply, .{ .json = null });
 }
 
 fn interruptModel(init: std.process.Init, args: []const []const u8) !void {
@@ -1675,7 +1673,7 @@ fn interruptModel(init: std.process.Init, args: []const []const u8) !void {
     input.store = try selectedStore(init, explicit_store, &selected_buffer);
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.interruptModel(io, input, &reply_buffer);
-    try writeMutationReply(io, reply, null, false);
+    try writeMutationReply(io, reply, .{ .json = null });
 }
 
 fn decideAction(init: std.process.Init, args: []const []const u8, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
@@ -1728,7 +1726,7 @@ fn decideAction(init: std.process.Init, args: []const []const u8, decision: @Fie
         }
         break :blk try client.sendCaptured(io, &captured, drop_reply, &reply_buffer);
     };
-    try writeMutationReply(io, reply, if (human and json) saved.key.slice() else null, human);
+    try writeMutationReply(io, reply, if (human and !json) .human else .{ .json = if (human) saved.key.slice() else null });
 }
 
 fn retry(io: std.Io, args: []const []const u8) !void {
@@ -1743,7 +1741,7 @@ fn retry(io: std.Io, args: []const []const u8) !void {
     }
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.retry(io, store_path orelse return usage(), record orelse return usage(), kind orelse return usage(), &reply_buffer);
-    try writeMutationReply(io, reply, null, false);
+    try writeMutationReply(io, reply, .{ .json = null });
 }
 
 fn observe(init: std.process.Init, args: []const []const u8) !void {
@@ -1997,8 +1995,17 @@ fn testGate(io: std.Io, name: [*:0]const u8) !void {
     }
 }
 
-fn writeMutationReply(io: std.Io, reply: client.MutationReply, json_handle: ?[]const u8, human: bool) !void {
-    if (json_handle != null or !human) {
+const MutationPresentation = union(enum) {
+    json: ?[]const u8,
+    human,
+    interactive_configuration,
+};
+
+fn writeMutationReply(io: std.Io, reply: client.MutationReply, presentation: MutationPresentation) !void {
+    if (presentation == .interactive_configuration and reply.isAccepted())
+        return std.Io.File.stdout().writeStreamingAll(io, "Rui: Configured.\n");
+    if (presentation == .json) {
+        const json_handle = presentation.json;
         var buffer: [protocol.content_window_bytes]u8 = undefined;
         var output = std.Io.File.stdout().writerStreaming(io, &buffer);
         const writer = &output.interface;
@@ -2256,7 +2263,7 @@ fn recover(init: std.process.Init, args: []const []const u8) !void {
         defer captured.close(init.io);
         break :blk try client.sendCaptured(init.io, &captured, null, &buffer);
     };
-    try writeMutationReply(init.io, reply, null, !json);
+    try writeMutationReply(init.io, reply, if (json) .{ .json = null } else .human);
 }
 
 fn result(init: std.process.Init, args: []const []const u8) !void {
