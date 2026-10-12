@@ -20,7 +20,7 @@ from collections import Counter
 import canonical_failure_integration as canonical
 import dispatch_integration as fixture
 import human_cli_integration as human
-from host_process import HostDiagnostics, HostStartError, ReleaseGate, canonical_fixture_root, preserve_failure_metadata, start_ready_process, stop_process, wait_for_execution_release
+from host_process import HostDiagnostics, HostStartError, ReleaseGate, canonical_fixture_root, preserve_failure_metadata, start_ready_process, stop_process
 
 
 def assert_file_flags(actual, expected):
@@ -681,12 +681,10 @@ def capture_receipt_case(state, library):
         assert inspector.returncode == 0, (out, err)
         gate.release()
         deadline = time.monotonic() + 10
-        result = fixture.wait_for(lambda: fixture.observe(store, "capture-message", deadline=deadline).get("result"),
-                                  "exact released capture result", deadline=deadline)
-        assert result["status"] == "completed", result
-        assert fixture.read_result(store, "capture-message") == answer
-        wait_for_execution_release(lambda remaining: fixture.command("inspect-session", "--store", store,
-                                   "--session", "diagnostic/session", timeout=remaining)["execution"], deadline)
+        observation, saved_answer, _ = fixture.wait_for_result_release(
+            store, "capture-message", "diagnostic/session", deadline)
+        assert observation["result"]["status"] == "completed", observation
+        assert saved_answer == answer
         print("native capture receipt: writer entry under actual optional stderr contention; exact answer and simultaneous zero custody/scratch", flush=True)
     finally:
         incoming_error = sys.exc_info()[1]
@@ -1959,6 +1957,7 @@ def host_diagnostic_cases(state, library):
                 text = 'é中🙂\n\\"/' * 12000
                 assert len(text.encode()) == 156000
                 fixture.message(root, store, key, session, text)
+                retirement_deadline = time.monotonic() + 8
                 if fault == "response-commit":
                     fixture.wait_for(lambda: host.poll() is not None, "canonical fence exits")
                     assert host.returncode != 0
@@ -2003,27 +2002,21 @@ def host_diagnostic_cases(state, library):
                     finally:
                         fixture.stop_host(fresh)
                     break
+                def diagnostic_resources(remaining):
+                    if credit == "diagnostic-contention-host":
+                        contention_inspections.append(session)
+                    return fixture.command("inspect-session", "--store", store, "--session", session,
+                        timeout=remaining)["execution"]
+
+                observation, saved_answer, resources = fixture.wait_for_result_release(
+                    store, key, session, retirement_deadline, inspect=diagnostic_resources)
                 if fault == "success":
-                    observation = fixture.wait_for(lambda: fixture.completed_observation(store, key), f"{credit} answer settles")
                     assert observation["result"]["status"] == "completed", observation
-                    assert fixture.read_result(store, key) == b"ANSWER"
+                    assert saved_answer == b"ANSWER"
                 else:
                     expected = {"response-acquire": "response_capture_failed", "response-metadata": "response_metadata_failed",
                         "response-write": "response_write_failed"}[fault]
-                    observation = fixture.wait_for(lambda: (value if (value := fixture.observe(store, key)).get("result", {}).get("code") else None),
-                        f"{credit} {fault} settles")
                     assert observation["result"]["code"] == expected, observation
-                retirement_deadline = time.monotonic() + 8
-
-                def diagnostic_resources():
-                    if credit == "diagnostic-contention-host":
-                        contention_inspections.append(session)
-                    value = fixture.command("inspect-session", "--store", store, "--session", session,
-                        timeout=max(0, retirement_deadline - time.monotonic()))["execution"]
-                    return value if value["custody_occupied"] == "0" else None
-
-                resources = fixture.wait_for(diagnostic_resources, "diagnostic custody retirement", deadline=retirement_deadline)
-                assert resources["scratch_used_bytes"] == "0", resources
                 if credit == "diagnostic-contention-host":
                     population = fixture.wait_for(lambda: (value if len((value := native.snapshot())["records"]) >= len(contention_inspections) + 2 else None),
                         "complete contention owner population", deadline=retirement_deadline)["records"]

@@ -6,6 +6,7 @@ import io
 import json
 import pathlib
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -166,6 +167,95 @@ class ShapedWorkTests(unittest.TestCase):
 
 
 class ManagedDescriptorTests(unittest.TestCase):
+    def test_managed_transfer_cannot_renew_result_read_or_release_budget(self):
+        for observed in (False, True):
+            for late in (None, "read", "release", "preparation_completed", "codex_transfer",
+                         "preparation_completed_at_deadline", "codex_transfer_at_deadline"):
+                with self.subTest(observed=observed, late=late), tempfile.TemporaryDirectory() as temporary:
+                    root = pathlib.Path(temporary) / "managed"
+                    root.mkdir()
+                    clock = [0.0]
+                    headers = {b":path": b"/responses", b"authorization": ("Bearer " + codex_h2.codex.ACCESS).encode(),
+                               b"chatgpt-account-id": codex_h2.codex.ACCOUNT.encode(), b"originator": b"rui", b"session-id": b"a" * 32}
+                    endpoint = SimpleNamespace(server_address=("localhost", 1), serve_forever=lambda: None,
+                        shutdown=lambda: None, server_close=lambda: None,
+                        streams=[("connection", index, None, b"") for index in (1, 3, 5)], connections=["connection"],
+                        request_headers=[headers, headers, {**headers, b"x-openai-fedramp": b"true"}])
+                    identities = [dict(turn=str(7 + index), operation=str(11 + index), attempt="2") for index in range(3)]
+                    transfers = [{"rui_test_phase": "codex_transfer", "operation": identities[index]["operation"],
+                                  "http_version": "3", "connection_id": "1", "new_connections": str(index == 0 and 1 or 0)}
+                                 for index in range(3)]
+                    preparations = [dict(identity, rui_test_phase="preparation_completed") for identity in identities]
+                    observation_index = [0]
+                    forwarded = []
+
+                    def matching(phase, **fields):
+                        if fields:
+                            forwarded.append((phase, fields))
+                            if late == phase + "_at_deadline":
+                                clock[0] = 20.0
+                            elif phase == late:
+                                clock[0] = 20.1
+                        return [row for row in [*transfers, *preparations]
+                                if row["rui_test_phase"] == phase and all(row.get(name) == value for name, value in fields.items())]
+
+                    diagnostics = SimpleNamespace(records=[*transfers, *preparations], wait=lambda *args, **kwargs: transfers,
+                        matching=matching)
+
+                    def command(kind, *args, **kwargs):
+                        if kind == "configure":
+                            return {"answer": {"status": "accepted"}}
+                        if kind == "observe-command":
+                            # Observation has its own 15-second command cap;
+                            # leave the cumulative crossing to read or release.
+                            clock[0] += 14.9
+                            identity = identities[observation_index[0]]
+                            observation_index[0] += 1
+                            return {"observation": {"result": {"status": "completed"}, "processing": identity}}
+                        clock[0] += 0.2 if late == "release" else 0.01
+                        return {"execution": {"custody_occupied": "0", "scratch_used_bytes": "0", "dispatch_fenced": False}}
+
+                    def process(args, **kwargs):
+                        if args[0] == "openssl":
+                            return SimpleNamespace(returncode=0)
+                        if args[0] == "sh":
+                            fixed, authentication = (11, 10) if codex_h2.sys.platform == "darwin" else (9, 8)
+                            required = 3 + fixed + 42 + 10 + authentication + 1
+                            return SimpleNamespace(returncode=1, stdout="", stderr=(
+                                "descriptor capacity insufficient: active_capacity=1 "
+                                f"required={required} soft_limit={required - 1} inherited=3 fixed_host={fixed} "
+                                f"clients=42 execution=10 authentication={authentication} self_wake=1"))
+                        clock[0] += 5.2 if late == "read" else 4.95
+                        key = args[-1]
+                        text = "managed-federal" if key == "federal" else f"managed-{key[-1]}"
+                        answer = "L" * 8192 + text if key == "message-1" else f"answer-{text}"
+                        return SimpleNamespace(returncode=0, stdout=answer.encode(), stderr=b"")
+
+                    with contextlib.ExitStack() as stack:
+                        stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                        stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                        stack.enter_context(patch.dict(codex_h2.os.environ))
+                        stack.enter_context(patch.object(transport.time, "monotonic", side_effect=lambda: clock[0]))
+                        stack.enter_context(patch.object(codex_h2.tempfile, "mkdtemp", return_value=str(root)))
+                        stack.enter_context(patch.object(codex_h2.ssl, "SSLContext"))
+                        stack.enter_context(patch.object(codex_h2.h2_fixture, "Endpoint", return_value=endpoint))
+                        thread = stack.enter_context(patch.object(codex_h2.threading, "Thread"))
+                        thread.return_value.is_alive.return_value = False
+                        stack.enter_context(patch.object(codex_h2, "start_ready_process", return_value=(SimpleNamespace(pid=1), {})))
+                        stack.enter_context(patch.object(codex_h2, "HostDiagnostics", return_value=diagnostics))
+                        stack.enter_context(patch.object(codex_h2.fixture, "command", side_effect=command))
+                        stack.enter_context(patch.object(codex_h2.fixture, "message"))
+                        stack.enter_context(patch.object(codex_h2.fixture, "stop_host"))
+                        stack.enter_context(patch.object(codex_h2.subprocess, "run", side_effect=process))
+                        if late is None or (not observed and late not in ("read", "release")):
+                            codex_h2.run(observed=observed)
+                            if observed:
+                                self.assertEqual(forwarded, [entry for identity in identities for entry in (
+                                    ("preparation_completed", identity), ("codex_transfer", {"operation": identity["operation"]}))])
+                        else:
+                            with self.assertRaisesRegex(AssertionError, "original deadline|preparation_completed|codex_transfer"):
+                                codex_h2.run(observed=observed)
+
     def test_inherited_allocator_descriptor_preserves_exact_managed_boundary(self):
         for inherited, required in ((3, 77), (4, 78)):
             with self.subTest(inherited=inherited):
@@ -190,9 +280,60 @@ class ManagedDescriptorTests(unittest.TestCase):
 
 
 class ObservationDeadlineTests(unittest.TestCase):
+    def test_shared_terminal_result_read_and_release_use_one_deadline(self):
+        clean = {"custody_occupied": "0", "scratch_used_bytes": "0", "dispatch_fenced": False}
+        for status, durations, accepted in (
+                ("failed", (0.1, 0, 0.1), True),
+                ("cancelled", (0.1, 0, 0.1), True),
+                ("completed", (0.4, 0.3, 0.2), True),
+                ("completed", (1, 0, 0), False),
+                ("completed", (0.4, 0.6, 0), False),
+                ("completed", (0.4, 0.3, 0.3), False)):
+            with self.subTest(status=status, durations=durations):
+                clock = [0.0]
+                observation = {"result": {"status": status}}
+
+                def command(kind, *args, timeout, **kwargs):
+                    clock[0] += durations[0] if kind == "observe-command" else durations[2]
+                    return {"observation": observation} if kind == "observe-command" else {"execution": clean}
+
+                def read(*args, timeout, **kwargs):
+                    self.assertEqual(status, "completed", "terminal failure must not request answer bytes")
+                    clock[0] += durations[1]
+                    return SimpleNamespace(returncode=0, stdout=b"exact answer", stderr=b"")
+
+                with patch.object(transport.dispatch.time, "monotonic", side_effect=lambda: clock[0]), \
+                        patch.object(transport.dispatch, "command", side_effect=command), \
+                        patch.object(transport.dispatch.subprocess, "run", side_effect=read):
+                    if accepted:
+                        result = transport.dispatch.wait_for_result_release(pathlib.Path("/fixture"), "key", "session", 1)
+                        self.assertEqual(result, (observation, b"exact answer" if status == "completed" else None, clean))
+                        self.assertAlmostEqual(clock[0], sum(durations))
+                    else:
+                        with self.assertRaises(AssertionError):
+                            transport.dispatch.wait_for_result_release(pathlib.Path("/fixture"), "key", "session", 1)
+
+    def test_native_final_population_cannot_arrive_after_original_deadline(self):
+        # Host diagnostics uses this same wait after result/read/release. A
+        # complete population is not a replacement for timely observation.
+        for arrival in (0.9, 1.0, 1.2):
+            with self.subTest(arrival=arrival):
+                clock = [0.7]
+
+                def population():
+                    clock[0] = arrival
+                    return [{"phase": "inspection_captured"}, {"phase": "cleanup_completed"}]
+
+                with patch.object(transport.dispatch.time, "monotonic", side_effect=lambda: clock[0]):
+                    if arrival < 1:
+                        self.assertEqual(len(transport.dispatch.wait_for(population, "native final population", deadline=1)), 2)
+                    else:
+                        with self.assertRaisesRegex(AssertionError, "native final population"):
+                            transport.dispatch.wait_for(population, "native final population", deadline=1)
+
     def test_result_exchanges_keep_caps_and_reject_late_or_exhausted_evidence(self):
         for kind in ("observe", "read_result"):
-            for remaining, elapsed in ((0, 0), (0.25, 0.1), (0.25, 0.25), (0.25, 1), (20, 0.1), (20, 16)):
+            for remaining, elapsed in ((None, 0.1), (0, 0), (0.25, 0.1), (0.25, 0.25), (0.25, 1), (20, 0.1), (20, 16)):
                 with self.subTest(kind=kind, remaining=remaining, elapsed=elapsed):
                     clock = [10.0]
                     budgets = []
@@ -207,13 +348,13 @@ class ObservationDeadlineTests(unittest.TestCase):
                             patch.object(transport.dispatch, "command", side_effect=exchange), \
                             patch.object(transport.dispatch.subprocess, "run", side_effect=exchange):
                         operation = getattr(transport.dispatch, kind)
-                        if min(15, remaining) <= elapsed:
+                        if remaining is not None and min(15, remaining) <= elapsed:
                             with self.assertRaisesRegex(AssertionError, "original deadline"):
                                 operation(pathlib.Path("/fixture"), "key", deadline=10 + remaining)
                         else:
-                            result = operation(pathlib.Path("/fixture"), "key", deadline=10 + remaining)
+                            result = operation(pathlib.Path("/fixture"), "key", deadline=None if remaining is None else 10 + remaining)
                             self.assertEqual(result, {"result": {"status": "completed"}} if kind == "observe" else b"exact answer")
-                    self.assertEqual(budgets, [] if remaining == 0 else [min(15, remaining)])
+                    self.assertEqual(budgets, [] if remaining == 0 else [15 if remaining is None else min(15, remaining)])
 
     def test_fragmented_result_and_eof_share_one_exchange_budget(self):
         class TimedReply(HostReply):

@@ -667,6 +667,21 @@ def completed_observation(store, key, *, deadline=None):
     return value if value.get("result", {}).get("status") == "completed" else None
 
 
+def wait_for_result_release(store, key, session, deadline, *, inspect=None):
+    """Read one terminal result and its release within the original budget."""
+    observation = wait_for(
+        lambda: (value if (value := observe(store, key, deadline=deadline)).get("result") else None),
+        f"{key} terminal result", deadline=deadline,
+    )
+    answer = read_result(store, key, deadline=deadline) if observation["result"]["status"] == "completed" else None
+    if inspect is None:
+        def inspect(remaining):
+            return command("inspect-session", "--store", store, "--session", session,
+                           timeout=remaining)["execution"]
+    execution = wait_for_execution_release(inspect, deadline)
+    return observation, answer, execution
+
+
 def wait_model_cleanup(diagnostics, store, session, observation, deadline):
     # A saved result is semantic authority, not physical release. Match the
     # admitted owner before checking its final accounting, with no fresh budget.
@@ -2407,6 +2422,7 @@ def main():
             lambda: completed_observation(growth_store, "growth-count", deadline=count_deadline),
             "many item output", deadline=count_deadline,
         )
+        assert read_result(growth_store, "growth-count", deadline=count_deadline) == b"count answer"
         wait_model_cleanup(
             growth_diagnostics, growth_store, "direct/growth-a", counted, count_deadline,
         )
@@ -2417,10 +2433,10 @@ def main():
             "large output import",
             deadline=bytes_deadline,
         )
+        assert read_result(growth_store, "growth-bytes", deadline=bytes_deadline) == large_answer.encode()
         wait_model_cleanup(
             growth_diagnostics, growth_store, "direct/growth-b", imported, bytes_deadline,
         )
-        assert read_result(growth_store, "growth-count") == b"count answer"
         # A failed caller destination may retain a prefix, but it cannot make
         # the read successful or consume the saved keyed answer. A fresh read
         # streams the complete bytes again without inventing a newline.

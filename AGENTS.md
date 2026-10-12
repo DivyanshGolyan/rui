@@ -17,6 +17,14 @@ Load applicable guidance before acting; routes combine:
 - **Issue work:** read the live issue, discussion and dependencies, then [issue guidance](docs/agents/issue-tracker.md) and [triage labels](docs/agents/triage-labels.md). Follow the latest accepted decision.
 - **PR descriptions:** use `pr`.
 
+## Fixture enforcement
+
+| Contract | Owning enforcement | Existing local and CI checks |
+| --- | --- | --- |
+| [Original result and release deadlines](VERIFICATION.md#transport) | `dispatch_integration.wait_for_result_release` requires a deadline. Standalone reads and native cleanup observers forward the same deadline where their witness is cumulative. | `transport_h2_integration_test.py` drives shared and managed caller clocks; `host_process_test.py` drives the capture caller. Both run through existing build targets. |
+| [Required native receipts](ARCHITECTURE.md#shared-optional-stderr) | `start_ready_process` selects native capture and crash-cut plans and external failure retention before launch. `HostDiagnostics` rejects optional authority for named required phases. | `host_process_test.py` rejects missing, duplicate, lost and optional-only receipts and verifies retention after root teardown; `check` runs it. |
+| [Primary failure and mandatory disposal](CODING_STANDARDS.md#evidence) | Shared process, capture and Control disposal owners attempt every cleanup and keep the original failure primary. | `host_process_test.py` injects disposal and retention failures; `check` runs it. |
+
 ## Authority
 
 User instructions outrank skill guidelines; Rui's owning documentation governs repository policy over generic skills. Skills supply techniques, not authorization or contract homes. Resolve conflicts on that basis before asking; cite the exact skill instruction if it would pause or divert work.

@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from host_process import (
     READINESS_LIMIT,
@@ -60,6 +60,7 @@ def assert_reaped(source, description, *, timeout=0.2, required_fields=None, obs
 
 
 def main():
+    prove_terminal_capture_budget()
     prove_execution_release_oracles()
     prove_required_capture_receipts()
     assert_reaped("time.sleep(10)", "silent alive")
@@ -805,6 +806,76 @@ def prove_control_disposal_oracle(dispose):
                     assert not failing_body and not broken
             assert closed == {"connection", "stop", "gate", "diagnostics", "release", "shutdown", "server", "join"}, closed
     print("Control disposal oracle: original assertion survives every cleanup failure; every owned resource still receives disposal")
+
+
+def prove_terminal_capture_budget():
+    """Drive the actual capture caller; only external work uses a virtual clock."""
+    with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
+        import terminal_restoration_integration as terminal
+
+    for late_stage in (None, "read", "release"):
+        clock = [100.0]
+        reached = []
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as patches:
+            root = pathlib.Path(directory)
+            held = {"process": "123", "run": "1", "subject": "diagnostic/session"}
+            inspector = MagicMock(returncode=0)
+            inspector.communicate.return_value = (b"", b"")
+            inspector.poll.return_value = 0
+            diagnostics = MagicMock()
+            diagnostics.wait.return_value = [{**held, "written_bytes": "0"}]
+            diagnostics.tail.return_value = b""
+            gate = MagicMock()
+            gate.path = root / "gate"
+            gate.path.touch()
+
+            def start_inspector(*args):
+                (root / "capture-receipt" / "probe.log").write_text(
+                    "diagnostic-held-inspection\n" + json.dumps(held) + "\n")
+                return inspector
+
+            def observe(*args, **kwargs):
+                clock[0] += 6
+                return {"result": {"status": "completed"}}
+
+            def read(*args, **kwargs):
+                reached.append("read")
+                clock[0] += 5 if late_stage == "read" else 1
+                return SimpleNamespace(returncode=0, stdout=b"exact capture answer", stderr=b"")
+
+            def inspect(*args, **kwargs):
+                reached.append("release")
+                clock[0] += 4 if late_stage == "release" else 1
+                return {"execution": {"dispatch_fenced": False,
+                    "custody_occupied": "0", "scratch_used_bytes": "0"}}
+
+            replacements = {
+                "start_ready_process": lambda *args, **kwargs: (SimpleNamespace(pid=123), None),
+                "HostDiagnostics": lambda *args: diagnostics,
+                "ReleaseGate": lambda *args: gate,
+            }
+            for name, replacement in replacements.items():
+                patches.enter_context(patch.object(terminal, name, replacement))
+            for name, replacement in {
+                "SuccessEndpoint": MagicMock(), "configure": MagicMock(), "message": MagicMock(),
+                "start_command": start_inspector, "observe": observe, "command": inspect,
+            }.items():
+                patches.enter_context(patch.object(terminal.fixture, name, replacement))
+            patches.enter_context(patch.object(terminal.threading, "Thread", MagicMock()))
+            terminal.threading.Thread.return_value.is_alive.return_value = False
+            patches.enter_context(patch.object(time, "monotonic", lambda: clock[0]))
+            patches.enter_context(patch.object(terminal.fixture.subprocess, "run", read))
+            patches.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            try:
+                terminal.capture_receipt_case(root, root / "unused.so")
+            except AssertionError as error:
+                assert late_stage is not None, error
+                assert "exceeded original deadline" in str(error), error
+                assert reached[-1] == late_stage, reached
+            else:
+                assert late_stage is None, f"accepted late {late_stage} at {clock[0]}"
+                assert reached == ["read", "release"], reached
+    print("Terminal capture caller clock: timely exact read/release accepted; late exact read and release rejected")
 
 
 if __name__ == "__main__":

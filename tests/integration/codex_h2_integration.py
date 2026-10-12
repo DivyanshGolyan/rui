@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 import codex_integration as codex
 import dispatch_integration as fixture
@@ -91,6 +92,7 @@ def run(*, observed=False):
             "--model", "model-a", "--tools", "none",
         )
         assert configuration["answer"]["status"] == "accepted"
+        observations = []
         for index in range(3):
             if index == 2:
                 # Replace only after the previous lease/custody retired.
@@ -98,15 +100,26 @@ def run(*, observed=False):
             key = "federal" if index == 2 else f"message-{index}"
             text = "managed-federal" if index == 2 else f"managed-{index}"
             fixture.message(root, store, key, "managed/h2", text)
-            fixture.wait_for(lambda key=key: fixture.completed_observation(store, key),
-                             f"managed H2 answer {index}", timeout=20)
-            expected = "L" * 8192 + text if index == 1 else f"answer-{text}"
-            assert fixture.read_result(store, key) == expected.encode()
-            fixture.wait_for(
-                lambda: (execution := fixture.command("inspect-session", "--store", store, "--session", "managed/h2")["execution"])["custody_occupied"] == "0"
-                and execution["scratch_used_bytes"] == "0" and execution["dispatch_fenced"] is False,
-                "managed transfer teardown", timeout=20,
+            deadline = time.monotonic() + 20
+            observation, answer, _ = fixture.wait_for_result_release(
+                store, key, "managed/h2", deadline,
             )
+            if observed:
+                processing = observation["processing"]
+                preparations = fixture.wait_for(
+                    lambda: diagnostics.matching("preparation_completed", **processing),
+                    "preparation_completed", deadline=deadline,
+                )
+                assert len(preparations) == 1, preparations
+                transfers = fixture.wait_for(
+                    lambda: diagnostics.matching("codex_transfer", operation=processing["operation"]),
+                    "codex_transfer", deadline=deadline,
+                )
+                assert len(transfers) == 1, transfers
+                observations.append(transfers[0])
+            assert observation["result"]["status"] == "completed", observation
+            expected = "L" * 8192 + text if index == 1 else f"answer-{text}"
+            assert answer == expected.encode(), answer
         assert len(endpoint.streams) == 3 and len(endpoint.connections) == 1
         assert len({stream for _, stream, _, _ in endpoint.streams}) == 3
         session_ids = {headers[b"session-id"] for headers in endpoint.request_headers}
@@ -121,7 +134,6 @@ def run(*, observed=False):
         assert endpoint.request_headers[2][b"authorization"] == ("Bearer " + codex.ACCESS).encode()
         assert endpoint.request_headers[2][b"originator"] == b"rui"
         if observed:
-            observations = diagnostics.wait("codex_transfer", count=3)
             assert len(observations) == 3, observations
             assert [row["http_version"] for row in observations] == ["3", "3", "3"], observations
             assert int(observations[0]["connection_id"]) >= 0 and len({row["connection_id"] for row in observations}) == 1, observations
