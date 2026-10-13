@@ -1114,6 +1114,8 @@ def prove_dispose_all():
             assert len(error.__notes__) == 2, error.__notes__
             assert "disposal 1" in error.__notes__[0] and "first cleanup failure" in error.__notes__[0], error.__notes__
             assert "disposal 3" in error.__notes__[1] and "release gate manually" in error.__notes__[1], error.__notes__
+            assert "[truncated]" not in error.__notes__[0], error.__notes__
+            assert error.__notes__[1].endswith("[truncated]"), "cleanup detail was silently truncated"
             assert all(len(note) < 1024 for note in error.__notes__), "unbounded cleanup diagnostic"
             assert process.poll() is not None, "later child disposal skipped"
             for fd in (reader, writer):

@@ -590,7 +590,10 @@ class HostStartError(RuntimeError):
 def cleanup_failure(error):
     """Bound secondary diagnostics while retaining the failing owner and action."""
     try:
-        detail = str(error)[:512]
+        detail = str(error)
+        if len(detail) > 512:
+            marker = " [truncated]"
+            detail = detail[:512 - len(marker)] + marker
     except BaseException:
         detail = "<message unavailable>"
     trace = error.__traceback__
