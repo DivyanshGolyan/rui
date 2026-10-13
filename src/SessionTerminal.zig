@@ -306,7 +306,11 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
                 // previews, but never at the cost of the exact overflow count.
                 heading = if (approval) status_view.rows else if (status.len == 0) 0 else @min(full_status.rows, size.row -| (overflow_view.rows + spacer + 1));
                 const required = rows + spacer + 1 + heading;
-                if (complete and overflow_view.rows == overflow_view.total_rows and required <= size.row) {
+                // Try removing optional spacing and shortening overflow before
+                // accepting an ordinary status prefix under genuine row pressure.
+                if (complete and overflow_view.rows == overflow_view.total_rows and required <= size.row and
+                    (approval or status.len == 0 or heading == full_status.rows or variant == 2))
+                {
                     visible = count;
                     activity_rows = rows;
                     if (!approval and heading != 0) status_view = try viewport(status_writer.buffered(), 0, size.col - 1, heading, &status_snapshot);

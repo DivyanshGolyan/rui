@@ -104,7 +104,8 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
         if marker != "› ":
             if marker.encode() not in shown: return False
             if not composer: return True
-            shown = shown.split(marker.encode(), 1)[1]
+            offset = shown.index(marker.encode())
+            shown = shown[offset if marker.startswith("› ") else offset + len(marker.encode()):]
         return re.search("› [^\\r\\n]*(?:\\r\\n> [^\\r\\n]*)*(?:\\x1b\\[[0-9]+A)?\\r\\x1b\\[[0-9]+C".encode(), shown) is not None
     try:
         assert len(output) < limit, "unexpected unbounded terminal output"
@@ -138,6 +139,16 @@ def permanent_tool_count(output, heading):
     # These short headings fit one row. Permanent results have a blank
     # separator or hanging-indented summary; live snapshots have neither.
     return len(re.findall(r"(?m)^" + re.escape(heading) + r"\n(?=\n|  )", output))
+
+
+def terminal_redraw(output, composer):
+    # A completed cursor placement ends each redraw. Erasure belongs to the
+    # following frame, whose heading and edited draft must be checked together.
+    for frame in reversed(re.split(r"\r\x1b\[[0-9]+C", output)[:-1]):
+        frame = frame.rsplit("\x1b[2K", 1)[-1]
+        if composer in frame:
+            return frame
+    raise AssertionError(("no complete edited redraw", composer, output))
 
 
 def terminal_wait_oracles():
@@ -198,6 +209,20 @@ def terminal_wait_oracles():
     collect([diagnostic.encode()], diagnostic, composer=True, error="deadline")
     output = collect([diagnostic.encode(), b"\n\xe2\x80\xba \r", b"\x1b[2C"], diagnostic, composer=True)
     assert diagnostic in output and "› \r\x1b[2C" in output
+    # A marker naming the composer waits for that composer's own cursor,
+    # not another redraw. A partial marked composer is still not ready.
+    edited = "› fresh café"
+    collect([], edited, composer=True, initial=edited.encode(), close_output=True, error="closed")
+    marked_ready = (edited + "\r\x1b[11C").encode()
+    assert edited in collect([], edited, composer=True, initial=marked_ready)
+    for status in ("! Not confirmed · Ctrl-R retries original", "Working…\n+4 · /status"):
+        earlier = f"{status}\n› old\r\x1b[5C"
+        fresh = "\r\x1b[2K\n" + marked_ready.decode()
+        output = collect([], edited, composer=True, initial=(earlier + fresh).encode())
+        assert status not in terminal_redraw(output, edited), "earlier status became current-frame evidence"
+        complete = "\r\x1b[2K\n" + status + "\n" + marked_ready.decode()
+        output = collect([], edited, composer=True, initial=(earlier + complete).encode())
+        assert status in terminal_redraw(output, edited), "current heading was detached from edited composer"
     # A retained draft before the answer is not post-answer input readiness,
     # including when a previous diagnostic read already consumed that prefix.
     prior = "› retained café\r\x1b[15C\nafter decision".encode()
@@ -976,6 +1001,21 @@ def persistent_input_cases():
         assert len(proxy.exchanges) == 1
         saved = proxy.exchanges[0][0]
         assert json.loads(saved)["text"]["value"] == "original éZ"
+        # Cosmetic spacing must yield before actionable recovery guidance.
+        # Fresh edits identify each resized frame, not an earlier status line.
+        for rows, columns, edit in ((2, 80, "Z"), (4, 20, "Q")):
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+            os.write(master, edit.encode())
+            marker = f"› next cafX{edit}é!"
+            narrow = terminal_redraw(read_terminal(master, marker, composer=True), marker)
+            shown = " ".join(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", narrow).split())
+            assert "! Not confirmed · Ctrl-R retries original" in shown, (
+                "optional spacer hid actionable recovery", rows, columns, narrow)
+            assert len(proxy.exchanges) == 1 and set(records.glob("*.json")) == before
+            os.write(master, b"\x7f")
+            read_terminal(master, "› next cafXé!", composer=True)
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        read_terminal(master, "› next cafXé!", composer=True)
         first_release.set()
         read_terminal(master, "first exact answer")
         assert len(proxy.exchanges) == 1, "idle Ctrl-R retried unrelated uncertain intent"
@@ -1361,12 +1401,20 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 short = read_terminal(master, "+3 more calls · /status", composer=True)
                 assert "› live cafXé!" in short, short
                 assert "Inspect application" not in short, ("a clipped call hid its failure", short)
-                for rows, columns in ((2, 80), (3, 20), (3, 8), (4, 20), (8, 8)):
+                for index, (rows, columns) in enumerate(((2, 80), (3, 20), (3, 8), (4, 20), (8, 8))):
                     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
-                    narrow = read_terminal(master, "+4", composer=True)
+                    edit = chr(ord("A") + index)
+                    os.write(master, b"\x01" + edit.encode())
+                    marker = f"› {edit}live"
+                    narrow = terminal_redraw(read_terminal(master, marker, composer=True), marker)
                     shown = narrow.replace("\r", "").replace("\n", "")
                     assert any(label in shown for label in ("+4 more calls · /status", "+4 · /status")), narrow
+                    if (rows, columns) in ((3, 20), (4, 20)):
+                        assert "Working…" in shown, ("optional spacing or wording hid status", narrow)
                     assert caller.poll() is None, ("wrapped overflow displaced the composer", narrow)
+                    os.write(master, b"\x7f")
+                    read_terminal(master, "› live", composer=True)
+                os.write(master, b"\x05\x1b[D\x1b[D")
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 32, 0, 0))
                 wrapped = read_terminal(master, "— Failed", composer=True)
                 assert "! Inspect application settings" in wrapped and "+1 more calls · /status" in wrapped, wrapped
