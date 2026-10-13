@@ -2422,36 +2422,28 @@ def main(selected="all"):
         sessions_before = run(preferences_home, "sessions", "--store", store, "--all", "--json")
         master, slave = pty.openpty()
         original_mode = termios.tcgetattr(master)
-        blocked = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
-            env={**os.environ, "HOME": str(blocked_home)}, stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
+        blocked = None
         try:
+            blocked = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+                env={**os.environ, "HOME": str(blocked_home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             # Capture fails before the send/uncertain-admission diagnostic.
-            output = read_terminal(master, "error: NotDir")
-            assert blocked.wait(timeout=5) == 1
-            # The reaped caller has closed its PTY. Include any final output
-            # before checking that no intent, handle or prompt escaped.
-            while True:
-                assert select.select([master], [], [], 0)[0], "failed caller retained its terminal"
-                try:
-                    tail = os.read(master, 65536)
-                except OSError as error:
-                    if error.errno != errno.EIO:
-                        raise
-                    break
-                if not tail:
-                    break
-                output += tail.decode(errors="replace")
-                assert len(output.encode()) < 1024 * 1024
+            # Keep the slave alive until all output is collected: Darwin can
+            # discard unread PTY bytes when the last slave closes.
+            output, errors = terminal_exit(blocked, master, timeout=20)
+            assert blocked.returncode == 1 and b"error: NotDir" in errors, (output, errors)
+            output = (output + errors).decode(errors="replace")
             assert "New Session intent" not in output and "request: " not in output and "› " not in output, output
             assert termios.tcgetattr(master) == original_mode
             assert (blocked_config / "requests").read_text() == "not a directory"
             assert run(preferences_home, "sessions", "--store", store, "--all", "--json") == sessions_before
         finally:
-            if blocked.poll() is None:
-                blocked.kill()
-                blocked.wait(timeout=5)
+            if blocked is not None:
+                if blocked.poll() is None:
+                    blocked.kill()
+                    blocked.wait(timeout=5)
+                blocked.stderr.close()
             os.close(master)
+            os.close(slave)
         before = set(run(preferences_home, "requests").splitlines())
         gate = state / "new-session-capture"
         master, slave = pty.openpty()
@@ -3374,36 +3366,28 @@ def main(selected="all"):
                 entered.stderr.close()
                 os.close(master)
                 os.close(slave)
-        # Independent read-only callers can wait for the same production
-        # deadline together; keep every input class and restoration assertion.
-        incomplete_callers = []
+        # These are decoder witnesses, not Host admission load. Polling
+        # callers sharing this Host can exhaust its classification places.
         before = len(endpoint.requests)
-        try:
-            for incomplete in (b"\xc3", b"\x1b[200~unfinished", b"\x1b[", b"\x1bO"):
-                master, slave = pty.openpty()
-                try:
-                    entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-                        "--session", empty_session], env={**os.environ, "HOME": str(fresh_home)},
-                        stdin=slave, stdout=slave, stderr=slave)
-                except BaseException:
-                    os.close(master)
-                    raise
-                finally:
-                    os.close(slave)
-                incomplete_callers.append((master, entered))
+        for incomplete in (b"\xc3", b"\x1b[200~unfinished", b"\x1b[", b"\x1bO"):
+            master, slave = pty.openpty()
+            entered = None
+            try:
+                entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+                    "--session", empty_session], env={**os.environ, "HOME": str(fresh_home)},
+                    stdin=slave, stdout=slave, stderr=slave)
                 read_terminal(master, "› ")
                 os.write(master, incomplete)
-            for master, entered in incomplete_callers:
                 assert "IncompleteTerminalInput" in read_terminal(master, "IncompleteTerminalInput", timeout=7)
                 assert entered.wait(timeout=5) != 0
                 assert termios.tcgetattr(master)[3] & termios.ICANON
-            assert len(endpoint.requests) == before, "incomplete terminal input reached Host"
-        finally:
-            for master, entered in incomplete_callers:
-                if entered.poll() is None:
+            finally:
+                if entered is not None and entered.poll() is None:
                     entered.kill()
                     entered.wait(timeout=5)
                 os.close(master)
+                os.close(slave)
+        assert len(endpoint.requests) == before, "incomplete terminal input reached Host"
         observation_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("observed-later", "observed-later-reason",
             "observed-later-message", "observed later")[0], observation_release))
