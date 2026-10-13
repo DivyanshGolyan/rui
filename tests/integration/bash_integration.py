@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-import dispatch_integration as fixture
+import model_fixture as fixture
 from host_process import HostDiagnostics, ReleaseGate
 
 

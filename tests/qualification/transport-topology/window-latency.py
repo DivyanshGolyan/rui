@@ -16,7 +16,7 @@ import h2.config
 import h2.connection
 import h2.events
 
-import dispatch_integration as dispatch
+import model_fixture as dispatch
 from host_process import HostDiagnostics
 
 

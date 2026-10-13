@@ -17,7 +17,7 @@ import threading
 import time
 
 import control_integration as control
-import dispatch_integration as model
+import model_fixture as model
 from host_process import canonical_fixture_root, stop_process
 
 

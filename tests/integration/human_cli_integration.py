@@ -20,7 +20,7 @@ import threading
 import time
 
 from host_process import canonical_fixture_root, preserve_failure_metadata, stop_process
-import dispatch_integration as fixture
+import model_fixture as fixture
 import codex_integration as codex_fixture
 
 

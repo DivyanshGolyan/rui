@@ -12,7 +12,7 @@ import tempfile
 import threading
 
 import bash_integration as bash
-import dispatch_integration as fixture
+import model_fixture as fixture
 import human_cli_integration as human
 from host_process import HostDiagnostics
 

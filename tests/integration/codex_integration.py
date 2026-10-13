@@ -14,7 +14,7 @@ import threading
 import time
 
 import bash_integration as bash
-import dispatch_integration as fixture
+import model_fixture as fixture
 from host_process import HostDiagnostics, start_ready_process
 
 

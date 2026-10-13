@@ -1,5 +1,6 @@
-/* Test-side scheduling of the real parent implementation. Native child exit,
- * output, signaling and reap remain real; only clocks and thread order change. */
+/* One native bridge witness: park a watchdog with a running snapshot until
+ * acceptance commits. The resumed watchdog must not signal or replace success.
+ * All other terminal orderings are checked directly through the value owner. */
 #include <sys/wait.h>
 
 static struct {
@@ -9,8 +10,7 @@ static struct {
     pid_t child;
     atomic_int watchdog_parked;
     atomic_int release_watchdog;
-    atomic_int watchdog_locking;
-    atomic_int watchdog_signalled;
+    atomic_int signals;
 } race;
 
 static void race_wait(atomic_int *flag) {
@@ -20,16 +20,9 @@ static void race_wait(atomic_int *flag) {
     }
 }
 
-static int race_mutex_lock(pthread_mutex_t *mutex) {
-    if (!pthread_equal(pthread_self(), race.caller) &&
-        atomic_load(&race.release_watchdog))
-        atomic_store(&race.watchdog_locking, 1);
-    return pthread_mutex_lock(mutex);
-}
-
 static int race_mutex_unlock(pthread_mutex_t *mutex) {
     int result = pthread_mutex_unlock(mutex);
-    if (!pthread_equal(pthread_self(), race.caller)) {
+    if (race.mode && !pthread_equal(pthread_self(), race.caller)) {
         atomic_store(&race.watchdog_parked, 1);
         race_wait(&race.release_watchdog);
     }
@@ -41,17 +34,10 @@ static int race_clock_gettime(clockid_t clock, struct timespec *now) {
     now->tv_sec = 100;
     now->tv_nsec = 0;
     if (!pthread_equal(pthread_self(), race.caller)) {
-        now->tv_sec = race.mode >= 5 ? 100 : 105;
+        now->tv_sec = 105;
     } else if (race.observed) {
-        if (race.mode == 2) {
-            /* Pause at the timely exit clock observation until the watchdog
-             * attempts its competing terminal transition. */
-            atomic_store(&race.release_watchdog, 1);
-            race_wait(&race.watchdog_locking);
-        }
-        if (race.mode == 4) { errno = EIO; return -1; }
-        now->tv_sec = race.mode == 3 ? 105 : 104;
-        now->tv_nsec = race.mode == 3 ? 0 : 999000000;
+        now->tv_sec = 104;
+        now->tv_nsec = 999000000;
     }
     return 0;
 }
@@ -74,21 +60,11 @@ static int race_pthread_join(pthread_t thread, void **value) {
 }
 
 static int race_kill(pid_t pid, int signal) {
-    if (race.mode == 5 && pthread_equal(pthread_self(), race.caller)) {
-        race.child = pid;
-        race_wait(&race.watchdog_parked);
-        atomic_store(&race.release_watchdog, 1);
-    }
-    int result = kill(pid, signal);
-    if (race.mode == 6 && !pthread_equal(pthread_self(), race.caller)) {
-        race.child = pid;
-        atomic_store(&race.watchdog_signalled, 1);
-    }
-    return result;
+    atomic_fetch_add(&race.signals, 1);
+    return kill(pid, signal);
 }
 
 #define rui_evaluate race_evaluate
-#define pthread_mutex_lock race_mutex_lock
 #define pthread_mutex_unlock race_mutex_unlock
 #define clock_gettime race_clock_gettime
 #define waitid race_waitid
@@ -96,9 +72,72 @@ static int race_kill(pid_t pid, int signal) {
 #define kill race_kill
 #include "../../src/evaluator_parent.c"
 #undef rui_evaluate
-#undef pthread_mutex_lock
 #undef pthread_mutex_unlock
 #undef clock_gettime
 #undef waitid
 #undef pthread_join
 #undef kill
+
+static int check_terminal_decisions(void) {
+    const struct {
+        enum terminal_observation observation;
+        int64_t now;
+        int cancelled;
+        enum watchdog_outcome expected;
+    } cases[] = {
+        {terminal_poll, 4999, 0, watchdog_running},
+        {terminal_poll, 4999, 1, watchdog_cancelled},
+        {terminal_poll, 5000, 0, watchdog_deadline},
+        {terminal_poll, 5000, 1, watchdog_deadline},
+        {terminal_poll, 5001, 0, watchdog_deadline},
+        {terminal_poll, -1, 0, watchdog_clock_failed},
+        {terminal_poll, -1, 1, watchdog_clock_failed},
+        {terminal_success, 4999, 0, watchdog_stopped},
+        {terminal_success, 5000, 0, watchdog_deadline},
+        {terminal_success, 5001, 0, watchdog_deadline},
+        {terminal_success, -1, 0, watchdog_clock_failed},
+        {terminal_success, 4999, 1, watchdog_cancelled},
+        {terminal_success, 5000, 1, watchdog_deadline},
+        {terminal_success, -1, 1, watchdog_clock_failed},
+        {terminal_child_failure, 4999, 0, watchdog_failed},
+        {terminal_child_failure, 5000, 0, watchdog_deadline},
+        {terminal_child_failure, -1, 0, watchdog_clock_failed},
+        {terminal_failure, 4999, 0, watchdog_failed},
+        {terminal_failure, 4999, 1, watchdog_failed},
+        {terminal_failure, 5000, 1, watchdog_failed},
+        {terminal_failure, -1, 1, watchdog_failed},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        enum watchdog_outcome result = terminal_decision(watchdog_running,
+            cases[i].observation, cases[i].now, 5000, cases[i].cancelled);
+        if (result != cases[i].expected) {
+            fprintf(stderr, "terminal case %zu: got %d expected %d\n",
+                i, result, cases[i].expected);
+            return 12;
+        }
+        /* Check the parent-failure adapter as well as the value policy. A
+         * missed commit here would let a later watchdog cancellation win. */
+        struct watchdog watchdog = {.deadline = 5000, .outcome = result};
+        if (pthread_mutex_init(&watchdog.mutex, NULL)) return 12;
+        int failed = fail_evaluation(&watchdog);
+        enum watchdog_outcome after_failure = watchdog.outcome;
+        pthread_mutex_destroy(&watchdog.mutex);
+        enum watchdog_outcome expected_failure = result == watchdog_running
+            ? watchdog_failed : result;
+        if (!failed || after_failure != expected_failure) {
+            fprintf(stderr, "parent failure adapter after case %zu\n", i);
+            return 12;
+        }
+        /* Every committed terminal outcome is immutable under every later
+         * observation, including failure-after-cancel and cancel-after-failure. */
+        if (result == watchdog_running) continue;
+        for (size_t j = 0; j < sizeof(cases) / sizeof(cases[0]); j++) {
+            if (terminal_decision(result, cases[j].observation,
+                    cases[j].now, 5000, cases[j].cancelled) != result) {
+                fprintf(stderr, "terminal immutability %zu after %zu\n", i, j);
+                return 12;
+            }
+        }
+    }
+    return 0;
+}

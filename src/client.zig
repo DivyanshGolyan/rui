@@ -17,6 +17,23 @@ pub const Cancellation = struct {
 pub const Requests = struct {
     io: std.Io,
     cancellation: ?*const Cancellation = null,
+    /// One borrower writes; the caller reads/resets only after return or join.
+    read_failure: ?*?ReadFailure = null,
+
+    pub fn failRead(self: Requests, failure: ReadFailure) error{ CanonicalStoreFailure, HostInvocationFailed } {
+        if (self.read_failure) |slot| if (slot.* == null) {
+            slot.* = failure;
+        };
+        return failure.err();
+    }
+
+    pub fn captureReadFailure(self: Requests, reply: CommandReply) !ReadFailure {
+        const failure = try decodeReadFailure(reply, false);
+        if (self.read_failure) |slot| if (slot.* == null) {
+            slot.* = failure;
+        };
+        return failure;
+    }
 
     fn check(self: Requests) error{Cancelled}!void {
         if (self.cancellation) |token| if (token.stopped.load(.acquire)) return error.Cancelled;
@@ -820,6 +837,17 @@ pub const ResultReadReply = union(enum) {
 pub const ReadFailure = struct {
     status: u16,
     diagnostic: InvocationDiagnostic,
+
+    pub fn writeDiagnostic(self: ReadFailure, out: *std.Io.Writer) !void {
+        const Text = @import("TerminalText.zig");
+        try out.print("HTTP {d}; type: ", .{self.status});
+        var text: Text = .{ .mode = .line };
+        try text.feed(out, self.diagnostic.type.slice());
+        try text.finish(out);
+        try out.writeAll("; code: ");
+        try text.feed(out, self.diagnostic.code.slice());
+        try text.finish(out);
+    }
 
     pub fn err(self: ReadFailure) error{ CanonicalStoreFailure, HostInvocationFailed } {
         return if (self.diagnostic.code.eql("canonical_store_failure")) error.CanonicalStoreFailure else error.HostInvocationFailed;
