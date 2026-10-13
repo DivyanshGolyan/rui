@@ -2650,6 +2650,8 @@ def main(selected="all"):
             assert f"Session: {session}" in terminal_step(master, "/status")
             configured = terminal_step(master, '/configure --model "model-a"')
             assert "Configured." in configured and "request:" not in configured, configured
+            for receipt in ("Store:", "Session:", "key:", "admitted:", "replayed:"):
+                assert receipt not in configured, configured
             assert f"Session: {session}" in terminal_step(master, "/status")
             assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
