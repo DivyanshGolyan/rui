@@ -285,6 +285,26 @@ fn validateOwner(handle: anytype) !void {
     if (stat.st_uid != c.geteuid()) return error.UnownedPreferences;
 }
 
+test "native directory sync forwards descriptor failures" {
+    const native: NativeDirectorySync = .{};
+    // A pipe is a live descriptor that cannot be synced on either supported
+    // platform. Unlike publication readback, this rejects a successful no-op
+    // or replacement with an unrelated successful descriptor operation.
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+    try std.testing.expectEqual(@as(c_int, -1), native.sync(fds[0]));
+    try std.testing.expectEqual(@as(c_int, -1), native.sync(-1));
+    try std.testing.expectEqual(std.posix.E.BADF, std.posix.errno(-1));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const directory = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer directory.close(io);
+    try std.testing.expectEqual(@as(c_int, 0), native.sync(directory.handle));
+}
+
 test "directory sync failures preserve complete preference publication" {
     const Cut = struct {
         at: usize,
@@ -300,7 +320,7 @@ test "directory sync failures preserve complete preference publication" {
             self.correct_directories = self.correct_directories and matches;
             self.calls += 1;
             // Only the selected returned error is synthetic; all other I/O is real.
-            return if (self.calls == self.at) -1 else std.c.fsync(fd);
+            return if (self.calls == self.at) -1 else NativeDirectorySync.sync(.{}, fd);
         }
     };
     const old = "version=1\nstore=\nprovider=codex\nmodel=deliberate-pin\n";
