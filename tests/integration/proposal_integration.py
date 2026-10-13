@@ -211,9 +211,9 @@ def main():
                     process, fields = start_host(store, provider)
                     if mode == "field":
                         data = caller(store, "field", items[1]["position"], "arguments", ok=False)
-                        assert len(data) < len(LARGE.encode()), (index, len(data))
-                        if index == 3:
-                            assert data == LARGE.encode()[:((len(LARGE.encode()) - 1) // 4096) * 4096]
+                        # Accepted-item authentication rejects contradictory
+                        # provenance before delivering any argument bytes.
+                        assert data == b"", ("corrupt proposal delivered a prefix", index, len(data))
                     else:
                         caller(store, "page", first["end"], items[1]["position"] if mode == "cursor" else 0, ok=False)
                     assert process.wait(timeout=5) == 1, "canonical corruption did not fence Host"

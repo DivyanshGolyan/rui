@@ -479,7 +479,23 @@ pub const ActivityPage = struct {
                 return result;
             }
         };
-        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool };
+        const CallEntry = struct { operation: JsonString(20), ordinal: JsonString(20), presentation: JsonToolPresentation };
+        const Calls = struct {
+            values: [3]CallEntry = undefined,
+            count: usize = 0,
+            pub fn jsonParse(a: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+                if (try source.next() != .array_begin) return error.UnexpectedToken;
+                var result: @This() = .{};
+                while (try source.peekNextTokenType() != .array_end) {
+                    if (result.count == result.values.len) return error.LengthMismatch;
+                    result.values[result.count] = try std.json.innerParse(CallEntry, a, source, options);
+                    result.count += 1;
+                }
+                _ = try source.next();
+                return result;
+            }
+        };
+        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls } };
         var storage: [2 * protocol.max_activity_page_response_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{}) catch return error.InvalidActivityPage;
@@ -526,6 +542,22 @@ pub const ActivityPage = struct {
             }
             position = fact.position;
             ordinal = fact.ordinal;
+        }
+        page.facts.call_activity.total = try id(wire.call_activity.total, true);
+        page.facts.call_activity.count = wire.call_activity.entries.count;
+        if (page.facts.call_activity.count != @min(3, page.facts.call_activity.total)) return error.InvalidActivityPage;
+        const last = if (page.facts.direction == .forward and page.facts.more) page.facts.items[page.facts.count - 1] else null;
+        const boundary_position = if (last) |item| item.position else page.facts.end;
+        const boundary_ordinal: ?u64 = if (last) |item| item.ordinal else null;
+        var previous: ?protocol.CallActivity.Entry = null;
+        for (wire.call_activity.entries.values[0..page.facts.call_activity.count], page.facts.call_activity.entries[0..page.facts.call_activity.count]) |entry, *fact| {
+            fact.* = .{ .operation = try id(entry.operation, false), .ordinal = try id(entry.ordinal, true), .presentation = entry.presentation.value };
+            if (fact.ordinal == std.math.maxInt(i64)) return error.InvalidActivityPage;
+            if (previous) |prior| if (fact.operation < prior.operation or
+                fact.operation == prior.operation and fact.ordinal <= prior.ordinal) return error.InvalidActivityPage;
+            if (fact.presentation.publication_position) |p| if (p < boundary_position or
+                p == boundary_position and (boundary_ordinal == null or fact.ordinal + 1 <= boundary_ordinal.?)) return error.InvalidActivityPage;
+            previous = fact.*;
         }
         return page;
     }
@@ -2021,11 +2053,18 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         .ordinal = 1,
         .value = .{ .tool_result = .{ .content = .{ .length = 0, .digest = protocol.contentDigest("") }, .presentation = .{ .description = maximum.value.value.description, .code = .succeeded, .publication_position = index + 1 } } },
     };
+    facts.call_activity = .{ .total = std.math.maxInt(i64), .count = 3 };
+    for (&facts.call_activity.entries, 0..) |*entry, index| entry.* = .{
+        .operation = std.math.maxInt(i64) - 2 + index,
+        .ordinal = std.math.maxInt(i64) - 1,
+        .presentation = .{ .description = maximum.value.value.description, .code = .infrastructure_shutdown, .publication_position = std.math.maxInt(i64) },
+    };
     var page_buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
     var page_writer = std.Io.Writer.fixed(&page_buffer);
     try facts.writeJson(&page_writer);
     const page = try ActivityPage.parse(page_writer.buffered(), .{});
     try std.testing.expectEqual(@as(usize, 16), page.facts.count);
+    try std.testing.expectEqualDeep(facts.call_activity, page.facts.call_activity);
     for (page.facts.items) |item| {
         try std.testing.expectEqual(@as(usize, 100), item.value.tool_result.presentation.description.?.slice().len);
         try std.testing.expectEqual(item.position, item.value.tool_result.presentation.publication_position.?);

@@ -516,6 +516,7 @@ fn applyReader(self: *Self, end: ReadEnd) void {
     } else if (self.read_phase == .permission) {
         self.current = self.observed;
         self.live = self.observed_live;
+        self.cursor = self.next_cursor;
         if (self.prepared_action == null) self.read_phase = .activity;
     } else {
         self.current = self.observed;
@@ -577,8 +578,7 @@ fn handoff(self: *Self) !void {
 
 fn permission(raw: *anyopaque, task: *Task) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    self.observed = try View.current(task.requests(), self.store, self.session, self.scratch);
-    self.observed_live = try View.Live.read(&self.observed, task.io, self.scratch, self.cursor);
+    try scan(raw, task);
     if (self.observed.first_action) |action| {
         try View.permission(task.requests(), self.store, self.session, action, self.observed.settings.workspace.slice(), self.scratch, task, self.read_columns, self.colour);
         self.prepared_action = action;
@@ -615,7 +615,7 @@ fn scan(raw: *anyopaque, task: *Task) !void {
     }
     // The worker publishes this bounded snapshot only after every result window
     // was acknowledged; applyReader commits it alongside that successful cursor.
-    self.observed_live = try View.Live.read(&self.observed, task.io, self.scratch, self.next_cursor);
+    self.observed_live = View.Live.init(page.facts.call_activity);
 }
 
 fn history(raw: *anyopaque, task: *Task) !void {

@@ -131,6 +131,10 @@ def main():
             calls = [r for r in pending if kind(r) == "call"]
             assert calls[0]["value"]["call"]["action"] is not None
             assert all(r["value"]["call"]["rejection"] == "unknown_tool" for r in calls[1:])
+            live = page(store)["page"]["call_activity"]
+            assert live["total"] == "18" and [int(e["ordinal"]) for e in live["entries"]] == [0, 1, 2], live
+            assert live["entries"][0]["presentation"]["code"] == "pending_permission", live
+            assert live["entries"][0]["presentation"]["description"] == "Exit with success", live
             assert history(store, calls[1]["position"])[1][-1] == calls[1], "interior end changed immutable rejection classification"
             for i, row in enumerate(calls):
                 for field, reference, expected in zip(("item_id", "name", "call_id", "arguments"), row["value"]["call"]["fields"], (f"activity-item-{i}", *CALLS[i])):
@@ -153,6 +157,19 @@ def main():
             results = [r for r in complete if kind(r) == "tool_result"]
             assert len(results) == 18 and len({r["position"] for r in results}) == 1
             assert [int(r["ordinal"]) for r in results] == list(range(1, 19))
+            projected = page(store)
+            assert projected["page"]["call_activity"]["total"] == "18", projected
+            while True:
+                facts = projected["page"]
+                boundary = (int(facts["items"][-1]["position"]), int(facts["items"][-1]["ordinal"])) if facts["more"] else (int(facts["end"]), 2**63-1)
+                remaining = [r for r in results if (int(r["position"]), int(r["ordinal"])) > boundary]
+                live = facts["call_activity"]
+                assert int(live["total"]) == len(remaining), (boundary, live)
+                assert [int(e["ordinal"]) for e in live["entries"]] == [int(r["ordinal"])-1 for r in remaining[:3]], live
+                if projected["next"] is None: break
+                cursor = projected["next"]
+                projected = page(store, cursor["end"], cursor["position"], cursor["ordinal"], cursor["direction"])
+            assert page(store, direction="backward")["page"]["call_activity"]["total"] == "0"
             assert caller(store, "content", results[0]["position"], results[0]["ordinal"]) == b"Permission denied."
             assert history(store, complete_end, direction="backward")[1] == list(reversed(complete))
             assert history(store, position=queued_end)[1] == [r for r in complete if int(r["position"]) > int(queued_end)], "catch-up replayed old group ties"
@@ -212,6 +229,8 @@ def main():
             for corrupt in (
                     "UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0",
                     "UPDATE model_tool_call SET item_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=1) WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0",
+                    "UPDATE model_tool_call SET call_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=1) WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0",
+                    "UPDATE model_tool_call SET arguments_content_id=(SELECT arguments_content_id FROM model_tool_call WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0) WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=1",
                     "UPDATE content SET private=1 WHERE content_id=(SELECT resolution_content_id FROM action_operation WHERE parent_operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0)",
                     "DELETE FROM content WHERE content_id=(SELECT resolution_content_id FROM action_operation WHERE parent_operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0)"):
                 for mode in ("page", "cursor", "content"):
@@ -235,9 +254,26 @@ def main():
                     process = None
             saved.close()
             valid = {"version": "1", "type": "activity_page", "end": str(2**63-1), "direction": "forward", "more": False,
+                "call_activity": {"total": "0", "entries": []},
                 "items": [{"position": str(i+1), "ordinal": "0", "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
                     "turn": None, "state": "queued", "content": {"bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
             mock_reply(fields["socket"], store, "page", json.dumps(valid).encode(), ok=True)
+            for fault in ("missing", "count", "duplicate", "order", "retired", "overflow"):
+                wire = copy.deepcopy(valid)
+                if fault == "missing": del wire["call_activity"]
+                else:
+                    entry = {"operation": "1", "ordinal": "0", "presentation": {"description": "Inspect local files", "code": "unresolved", "publication_position": None}}
+                    entries = [entry]
+                    if fault == "count": wire["call_activity"]["total"] = "2"
+                    else:
+                        if fault in ("duplicate", "order", "overflow"):
+                            entries += [copy.deepcopy(entry)]
+                            if fault == "order": entries[0]["ordinal"] = "1"
+                            if fault == "overflow": entries += [copy.deepcopy(entry), copy.deepcopy(entry)]
+                        wire["call_activity"]["total"] = str(len(entries))
+                        if fault == "retired": entry["presentation"].update(code="succeeded", publication_position="1")
+                    wire["call_activity"]["entries"] = entries
+                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             for turn, completion, ok in ((None, "completed", True), ("1", "pending", True), (None, "pending", False)):
                 wire = copy.deepcopy(valid)
                 wire["items"] = [{"position": "1", "ordinal": "0", "value": {"stop": {"key": "stop", "turn": turn, "cutoff": "0", "completion": completion}}}]

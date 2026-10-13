@@ -65,46 +65,15 @@ pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colum
     try sink.feed("\n");
 }
 
-/// A bounded view of the immutable Current capture, never a call-history map.
-/// Settled rows retire only past the successfully presented Activity cursor.
+/// Presentation of the Store-owned, cursor-relative Activity capture.
 pub const Live = struct {
-    pub const Entry = struct { operation: u64, ordinal: u64, presentation: protocol.ToolPresentation };
+    pub const Entry = protocol.CallActivity.Entry;
     entries: [3]Entry = undefined,
     count: usize = 0,
     total: u64 = 0,
 
-    pub fn read(current_facts: *const client.Current, io: std.Io, scratch: std.Io.File, presented: client.ActivityCursor) !Live {
-        const Capture = struct {
-            live: Live = .{},
-            presented: client.ActivityCursor,
-            pub fn visit(self: *@This(), attention: client.Current.Attention) !void {
-                switch (attention) {
-                    .actionable => {},
-                    inline else => |row| self.live.include(.{ .operation = row.parent_operation.value, .ordinal = row.call_ordinal.value, .presentation = row.presentation.value }, self.presented),
-                }
-            }
-        };
-        var capture: Capture = .{ .presented = presented };
-        try current_facts.traverse(io, scratch, &capture);
-        return capture.live;
-    }
-
-    fn include(self: *Live, entry: Entry, presented: client.ActivityCursor) void {
-        if (entry.presentation.publication_position) |position| {
-            if (position < presented.position or position == presented.position and
-                (presented.ordinal == null or entry.ordinal + 1 <= presented.ordinal.?)) return;
-        }
-        self.total += 1;
-        var index: usize = 0;
-        while (index < self.count) : (index += 1) {
-            const prior = self.entries[index];
-            if (entry.operation < prior.operation or entry.operation == prior.operation and entry.ordinal < prior.ordinal) break;
-        }
-        if (index == self.entries.len) return;
-        self.count = @min(self.count + 1, self.entries.len);
-        var move = self.count - 1;
-        while (move > index) : (move -= 1) self.entries[move] = self.entries[move - 1];
-        self.entries[index] = entry;
+    pub fn init(facts: protocol.CallActivity) Live {
+        return .{ .entries = facts.entries, .count = facts.count, .total = facts.total };
     }
 
     // Worst terminal escaping is four bytes per input byte; allow glyph/suffix.

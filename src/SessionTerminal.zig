@@ -264,32 +264,47 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
         try status_writer.writeAll(word);
         column += width;
     }
+    var overflow_buffer: [80]u8 = undefined;
+    var overflow_snapshot: [overflow_buffer.len]u8 = undefined;
+    var overflow_suffix: []const u8 = " more calls ·";
+    var overflow_rows = if (live.total != 0) (try viewport(try std.fmt.bufPrint(&overflow_buffer, "+{d}{s} /status", .{ live.total, overflow_suffix }), 0, size.col - 1, 5, &overflow_snapshot)).total_rows else 0;
     var status_snapshot: [status_buffer.len]u8 = undefined;
-    const status_limit = @min(5, size.row - 2 - @as(usize, if (live.total != 0 and size.row > 2) 1 else 0));
-    const status_view = if (status_limit != 0) try viewport(status_writer.buffered(), 0, size.col - 1, status_limit, &status_snapshot) else Viewport{ .rows = 0, .first = 0, .caret = .{} };
+    const approval = std.mem.eql(u8, prompt, "> ");
+    const status_limit = if (approval) 5 else @min(5, size.row - 2 - @min(size.row - 2, overflow_rows));
+    var status_view = if (status_limit != 0) try viewport(status_writer.buffered(), 0, size.col - 1, status_limit, &status_snapshot) else Viewport{ .rows = 0, .first = 0, .caret = .{} };
+    var spacer: usize = 1;
+    if (approval) {
+        // Choices are required content, unlike ordinary transient status.
+        // Compact them and overflow before sacrificing any decision label.
+        if (status_view.total_rows != status_view.rows or status_view.rows + overflow_rows + 2 > size.row) {
+            status_view = try viewport("a Allow/d Deny\nEnter", 0, size.col - 1, 5, &status_snapshot);
+            overflow_suffix = " ·";
+            overflow_rows = if (live.total != 0) (try viewport(try std.fmt.bufPrint(&overflow_buffer, "+{d}{s} /status", .{ live.total, overflow_suffix }), 0, size.col - 1, 5, &overflow_snapshot)).total_rows else 0;
+        }
+        if (status_view.rows + overflow_rows + 2 > size.row) spacer = 0;
+        if (status_view.total_rows != status_view.rows or status_view.rows + overflow_rows + spacer + 1 > size.row) return error.UncertainTerminalCursor;
+    }
     const heading: usize = if (status.len == 0) 0 else status_view.rows;
-    const available = size.row - heading - 2;
+    const available = size.row - heading - spacer - 1;
     var visible: usize = 0;
     var activity_rows: usize = 0;
     var activity_buffer: [3][View.Live.line_bytes]u8 = undefined;
     var activity: [3]Viewport = undefined;
     var line_buffer: [View.Live.line_bytes]u8 = undefined;
-    var overflow_buffer: [80]u8 = undefined;
-    var overflow_snapshot: [overflow_buffer.len]u8 = undefined;
     // Fit complete call descriptions and outcome explanations, not clipped
     // one-line prefixes that can make denial or uncertainty look unresolved.
     for (0..live.count) |index| {
         const line = try live.line(index, &line_buffer);
         const wrapped = try viewport(line, 0, size.col - 1, 5, &activity_buffer[index]);
         const remaining = live.total - index - 1;
-        const extra = if (remaining != 0) try viewport(try std.fmt.bufPrint(&overflow_buffer, "+{d} more calls · /status", .{remaining}), 0, size.col - 1, 5, &overflow_snapshot) else Viewport{ .rows = 0, .first = 0, .caret = .{} };
+        const extra = if (remaining != 0) try viewport(try std.fmt.bufPrint(&overflow_buffer, "+{d}{s} /status", .{ remaining, overflow_suffix }), 0, size.col - 1, 5, &overflow_snapshot) else Viewport{ .rows = 0, .first = 0, .caret = .{} };
         if (wrapped.total_rows != wrapped.rows or activity_rows + wrapped.rows + extra.total_rows > available) break;
         activity[index] = wrapped;
         activity_rows += wrapped.rows;
         visible += 1;
     }
     const overflow = live.total > visible and available != 0;
-    const overflow_line = if (overflow) try std.fmt.bufPrint(&overflow_buffer, "+{d} more calls · /status", .{live.total - visible}) else "";
+    const overflow_line = if (overflow) try std.fmt.bufPrint(&overflow_buffer, "+{d}{s} /status", .{ live.total - visible, overflow_suffix }) else "";
     const overflow_view = if (overflow) try viewport(overflow_line, 0, size.col - 1, 5, &overflow_snapshot) else Viewport{ .rows = 0, .first = 0, .caret = .{} };
     if (overflow_view.total_rows > available - activity_rows or overflow_view.total_rows != overflow_view.rows) return error.UncertainTerminalCursor;
     activity_rows += overflow_view.rows;
@@ -298,11 +313,11 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
     // only during emission, without consuming a second semantic-byte budget.
     var snapshot: [@import("SessionInput.zig").capacity]u8 = undefined;
     const columns = size.col - prompt_columns - 1;
-    const view = try viewport(bytes, cursor, columns, @min(5, size.row - heading - activity_rows - 1), &snapshot);
+    const view = try viewport(bytes, cursor, columns, @min(5, size.row - heading - activity_rows - spacer), &snapshot);
     try self.clear();
     // Own the spacer along with the composer, so repeated redraws erase it
     // rather than growing scrollback or moving transcript rows.
-    try self.write("\r\n");
+    if (spacer != 0) try self.write("\r\n");
     const status_style: Style = if (std.mem.eql(u8, prompt, "> ")) .attention else if (std.mem.startsWith(u8, status, "!") or std.mem.startsWith(u8, status, "Rejected") or std.mem.startsWith(u8, status, "Work failed")) .failure else .quiet;
     try self.write(status_style.code(self.colour));
     for (0..heading) |row| {
@@ -337,8 +352,8 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
     const up = view.rows - 1 - view.caret.row;
     if (up != 0) try self.write(try std.fmt.bufPrint(&control, "\x1b[{d}A", .{up}));
     try self.write(try std.fmt.bufPrint(&control, "\r\x1b[{d}C", .{view.caret.col + @as(usize, if (view.caret.row == 0) prompt_columns else 2)}));
-    self.rows = view.rows + heading + activity_rows + 1;
-    self.caret_row = view.caret.row + heading + activity_rows + 1;
+    self.rows = view.rows + heading + activity_rows + spacer;
+    self.caret_row = view.caret.row + heading + activity_rows + spacer;
     self.size = size;
 }
 

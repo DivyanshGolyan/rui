@@ -1111,6 +1111,19 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert all(noise not in transcript for noise in ("You:", "Assistant:", "Rui:", "persistent-call-id")), transcript
         assert set(records.glob("*.json")) == before_choice, "queued chat created a record"
         assert not (state / "effect-count").exists(), "queued chat authorized an effect"
+        if decision == "allow-action" and not any((exit_code, signal_failure, lost_reply, fragmented_paste, stale_target)):
+            for rows, columns in ((4, 20), (8, 8)):
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+                os.write(master, b"\x01")  # Redraw an empty choice without granting authority.
+                narrow = read_terminal(master, "> \r\x1b[2C")
+                shown = narrow.replace("\r", "").replace("\n", "")
+                assert all(label in shown for label in ("a Allow", "d Deny", "Enter")), narrow
+                if description not in shown:
+                    assert "+1 · /status" in shown, narrow
+                assert caller.poll() is None and not (state / "effect-count").exists(), narrow
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
+            os.write(master, b"\x01")
+            read_terminal(master, "a: Allow once / d: Deny (Enter)")
         for invalid in (b"Y\n", b"\x1b[200~a\x1b[201~\n"):
             os.write(master, invalid)
             rejected = read_terminal(master, "a: Allow once / d: Deny (Enter)")
@@ -1274,6 +1287,11 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 short = read_terminal(master, "+3 more calls · /status", composer=True)
                 assert "› live cafXé!" in short, short
                 assert "Inspect application" not in short, ("a clipped call hid its failure", short)
+                for rows, columns in ((4, 20), (8, 8)):
+                    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+                    narrow = read_terminal(master, "+4 more", composer=True)
+                    assert "/status" in narrow.replace("\r", "").replace("\n", ""), narrow
+                    assert caller.poll() is None, ("wrapped overflow displaced the composer", narrow)
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 32, 0, 0))
                 wrapped = read_terminal(master, "— Failed", composer=True)
                 assert "! Inspect application settings" in wrapped and "+1 more calls · /status" in wrapped, wrapped

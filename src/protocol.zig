@@ -430,12 +430,31 @@ pub const ActivityItem = struct {
 };
 pub const ReadActivityContent = struct { store: Bounded(max_store_bytes) = .{}, session: Bounded(max_session_bytes) = .{}, position: u64 = 0, ordinal: u64 = 0 };
 
+pub const CallActivity = struct {
+    pub const Entry = struct { operation: u64, ordinal: u64, presentation: ToolPresentation };
+    entries: [3]Entry = undefined,
+    count: usize = 0,
+    total: u64 = 0,
+
+    pub fn writeJson(self: *const CallActivity, out: *std.Io.Writer) !void {
+        try out.print("{{\"total\":\"{d}\",\"entries\":[", .{self.total});
+        for (self.entries[0..self.count], 0..) |entry, index| {
+            if (index != 0) try out.writeByte(',');
+            try out.print("{{\"operation\":\"{d}\",\"ordinal\":\"{d}\",\"presentation\":", .{ entry.operation, entry.ordinal });
+            try entry.presentation.writeJson(out);
+            try out.writeByte('}');
+        }
+        try out.writeAll("]}");
+    }
+};
+
 pub const ActivityFacts = struct {
     end: u64,
     direction: @FieldType(ActivityPage, "direction") = .forward,
     items: [16]ActivityItem = undefined,
     count: usize = 0,
     more: bool = false,
+    call_activity: CallActivity = .{},
 
     pub fn writeJson(self: *const ActivityFacts, out: *std.Io.Writer) !void {
         try out.print("{{\"version\":\"1\",\"type\":\"activity_page\",\"end\":\"{d}\",\"direction\":\"{s}\",\"items\":[", .{ self.end, @tagName(self.direction) });
@@ -443,7 +462,9 @@ pub const ActivityFacts = struct {
             if (index != 0) try out.writeByte(',');
             try item.writeJson(out);
         }
-        try out.print("],\"more\":{}}}", .{self.more});
+        try out.print("],\"more\":{},\"call_activity\":", .{self.more});
+        try self.call_activity.writeJson(out);
+        try out.writeByte('}');
     }
 };
 
@@ -1431,7 +1452,8 @@ pub const max_client_request_bytes = @max(
 // maximum (two shorter cursor keys or one position and a closed field).
 pub const max_proposal_page_response_bytes = 160 + proposal_page_items * (240 + 4 * 144);
 // Worst row: four complete field references, identities, or escaped key/code.
-pub const max_activity_page_response_bytes = 256 + 16 * (400 + @max(4 * 144, 6 * max_key_bytes) + max_tool_presentation_json_bytes);
+pub const max_activity_page_response_bytes = 256 + 16 * (400 + @max(4 * 144, 6 * max_key_bytes) + max_tool_presentation_json_bytes) +
+    64 + 3 * (100 + max_tool_presentation_json_bytes);
 
 const max_session_stop_rejection_code_bytes = "invalid_session_reference".len;
 const max_model_interruption_rejection_code_bytes = "invalid_session_reference".len;
