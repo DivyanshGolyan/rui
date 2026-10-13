@@ -12,6 +12,65 @@ import (
 	"testing"
 )
 
+func TestBashSSEPreservesValidArguments(t *testing.T) {
+	timeout := 1250
+	for _, timeoutMS := range []*int{nil, &timeout} {
+		const command = "printf '%s\\n' \"quoted target\"\nexit 7"
+		var items []json.RawMessage
+		for _, line := range bytes.Split(bashSSE("fixture", command, timeoutMS), []byte("\n")) {
+			if !bytes.HasPrefix(line, []byte("data: {")) {
+				continue
+			}
+			var event struct {
+				Type     string          `json:"type"`
+				Item     json.RawMessage `json:"item"`
+				Response struct {
+					Output []json.RawMessage `json:"output"`
+				} `json:"response"`
+			}
+			if err := json.Unmarshal(line[len("data: "):], &event); err != nil {
+				t.Fatal(err)
+			}
+			switch event.Type {
+			case "response.output_item.done":
+				items = append(items, event.Item)
+			case "response.completed":
+				items = append(items, event.Response.Output...)
+			}
+		}
+		if len(items) != 2 {
+			t.Fatalf("expected the completed item and final response item, got %d", len(items))
+		}
+		for _, item := range items {
+			var call struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}
+			if err := json.Unmarshal(item, &call); err != nil {
+				t.Fatal(err)
+			}
+			var descriptor struct {
+				Description string `json:"description"`
+				Cmd         string `json:"cmd"`
+				TimeoutMS   *int   `json:"timeout_ms"`
+			}
+			if err := json.Unmarshal([]byte(call.Arguments), &descriptor); err != nil {
+				t.Fatal(err)
+			}
+			if call.Name != "bash" || descriptor.Description != "Run the execution-service Bash workload" || descriptor.Cmd != command {
+				t.Fatalf("invalid Bash workload descriptor: %+v", descriptor)
+			}
+			if timeoutMS == nil {
+				if descriptor.TimeoutMS != nil || !bytes.Contains([]byte(call.Arguments), []byte(`"timeout_ms":null`)) {
+					t.Fatalf("missing required null timeout: %s", call.Arguments)
+				}
+			} else if descriptor.TimeoutMS == nil || *descriptor.TimeoutMS != timeout {
+				t.Fatalf("explicit timeout changed: %s", call.Arguments)
+			}
+		}
+	}
+}
+
 func event(phase string, at int, extra ...string) map[string]any {
 	m := map[string]any{"rui_test_phase": phase, "at_ns": fmt.Sprint(at), "process": "7", "run": "1000", "clock": "awake_ns", "turn": "1", "operation": "1", "attempt": "1"}
 	for i := 0; i < len(extra); i += 2 {

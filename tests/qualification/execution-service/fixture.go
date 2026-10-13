@@ -279,7 +279,7 @@ func bashSSE(name, cmd string, timeoutMs *int) []byte {
 	}
 	item := map[string]any{
 		"type": "function_call", "id": name + "-item", "status": "completed", "name": "bash",
-		"call_id": name + "-call", "arguments": `{"cmd":` + string(marshal(cmd)) + `,"timeout_ms":` + timeout + `}`,
+		"call_id": name + "-call", "arguments": `{"description":"Run the execution-service Bash workload","cmd":` + string(marshal(cmd)) + `,"timeout_ms":` + timeout + `}`,
 	}
 	var out bytes.Buffer
 	fmt.Fprintf(&out, "data: %s\n\n", marshal(map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item}))
