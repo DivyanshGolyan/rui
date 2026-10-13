@@ -318,6 +318,7 @@ def discovery_body_deadline(root):
     response = bytearray()
     try:
         accepted = time.monotonic()
+        began_ns = time.monotonic_ns()
         with held_request(store, "host-info", complete_headers=False) as stream:
             # Header time is charged to the same original acceptance budget.
             time.sleep(2)
@@ -343,7 +344,13 @@ def discovery_body_deadline(root):
                     break
             elapsed = time.monotonic() - accepted
             assert closed and 9 <= elapsed < 11.5, ("body deadline not acceptance-derived 10s", elapsed, bytes(response), diagnostics.tail())
-        assert status(store).startswith("ready ")
+        # Peer EOF precedes admission retirement; require the owned endpoint
+        # before probing the single discovery place again.
+        discovery_released(diagnostics, began_ns)
+        began_ns = time.monotonic_ns()
+        observed = status(store)
+        assert observed.startswith("ready "), (observed, diagnostics.tail())
+        discovery_released(diagnostics, began_ns)
         assert list((store / "scratch").iterdir()) == []
         print(f"discovery absolute deadline passed: header + trickling body closed in {elapsed:.3f}s, scratch=0")
     finally:
