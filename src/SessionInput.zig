@@ -4,7 +4,6 @@ const Editor = @import("TerminalEditor.zig");
 const Self = @This();
 
 pub const capacity = 65_536;
-pub const State = enum { not_started, submitting, unconfirmed, rejected };
 pub const Ticket = struct { owner: *const Self, serial: u64 };
 pub const Event = union(enum) { editor: Editor.Event, message: Ticket, command, busy };
 pub const View = struct { bytes: []const u8, cursor: usize };
@@ -14,7 +13,7 @@ editors: [2]Editor = undefined,
 command_buffer: [capacity]u8 = undefined,
 command_length: ?usize = null,
 active: u1 = 0,
-submitted: ?struct { bank: u1, state: State, literal: bool } = null,
+submitted: ?struct { bank: u1, literal: bool } = null,
 serial: u64 = 0,
 
 pub fn init(self: *Self) void {
@@ -70,7 +69,7 @@ pub fn submitText(self: *Self, text: []const u8) Ticket {
 
 fn seal(self: *Self, literal: bool) Ticket {
     self.serial += 1;
-    self.submitted = .{ .bank = self.active, .state = .not_started, .literal = literal };
+    self.submitted = .{ .bank = self.active, .literal = literal };
     self.active ^= 1;
     self.clear();
     return .{ .owner = self, .serial = self.serial };
@@ -80,7 +79,7 @@ pub fn clear(self: *Self) void {
     self.editors[self.active] = .{ .buffer = &self.banks[self.active] };
 }
 
-/// The frontend retains this immutable loan through capture return and join.
+/// The submission owner retains this immutable loan through capture and join.
 pub fn message(self: *const Self, ticket: Ticket) ![]const u8 {
     const submitted = try self.checked(ticket);
     const editor = &self.editors[submitted.bank];
@@ -88,25 +87,11 @@ pub fn message(self: *const Self, ticket: Ticket) ![]const u8 {
     return if (!submitted.literal and std.mem.startsWith(u8, bytes, "//")) bytes[1..] else bytes;
 }
 
-pub fn submissionState(self: *const Self, ticket: Ticket) !State {
-    return (try self.checked(ticket)).state;
-}
-
-/// The frontend changes startup state before launch, then only after join.
-/// Acceptance is a Host fact, not capture, completion or a local timeout.
-pub fn settle(self: *Self, ticket: Ticket, state: ?State) !void {
+/// The loan owner decides when borrowers have retired and release is allowed.
+pub fn release(self: *Self, ticket: Ticket) !void {
     const submitted = try self.checked(ticket);
-    if (state) |value| {
-        self.submitted.?.state = value;
-    } else {
-        self.editors[submitted.bank] = .{ .buffer = &self.banks[submitted.bank] };
-        self.submitted = null;
-    }
-}
-
-pub fn discard(self: *Self, ticket: Ticket) !void {
-    if ((try self.checked(ticket)).state != .rejected) return error.SubmissionUnresolved;
-    try self.settle(ticket, null);
+    self.editors[submitted.bank] = .{ .buffer = &self.banks[submitted.bank] };
+    self.submitted = null;
 }
 
 fn checked(self: *const Self, ticket: Ticket) !@TypeOf(self.submitted.?) {
@@ -114,14 +99,14 @@ fn checked(self: *const Self, ticket: Ticket) !@TypeOf(self.submitted.?) {
     return self.submitted orelse error.NoSubmission;
 }
 
-test "SessionInput acceptance preserves next Unicode draft and cursor" {
+test "SessionInput loan release preserves next Unicode draft and cursor" {
     var input: Self = undefined;
     input.init();
     for ("aéZ\x1b[D") |byte| _ = input.feed(byte);
     const ticket = input.feed('\r').message;
     for ("next!\x1b[D\x1b[D") |byte| _ = input.feed(byte);
     try std.testing.expectEqualStrings("aéZ", try input.message(ticket));
-    try input.settle(ticket, null);
+    try input.release(ticket);
     try std.testing.expectEqualStrings("next!", input.composition().bytes);
     try std.testing.expectEqual(@as(usize, 3), input.composition().cursor);
     try std.testing.expectError(error.NoSubmission, input.message(ticket));
@@ -139,20 +124,17 @@ test "SessionInput malformed rejection resets only the active composition" {
     try std.testing.expectEqualStrings("original", try input.message(ticket));
 }
 
-test "SessionInput retained rejection and stale tickets cannot consume next composition" {
+test "SessionInput retained loan and stale tickets cannot consume next composition" {
     var input: Self = undefined;
     input.init();
     for ("old") |byte| _ = input.feed(byte);
     const ticket = input.feed('\r').message;
     for ("new\x1b[D") |byte| _ = input.feed(byte);
-    try input.settle(ticket, .unconfirmed);
     try std.testing.expectEqual(.busy, std.meta.activeTag(input.feed('\r')));
-    try std.testing.expectError(error.SubmissionUnresolved, input.discard(ticket));
-    try input.settle(ticket, .rejected);
-    try input.discard(ticket);
+    try input.release(ticket);
     try std.testing.expectEqualStrings("new", input.composition().bytes);
     try std.testing.expectEqual(@as(usize, 2), input.composition().cursor);
     const next = input.feed('\r').message;
-    try std.testing.expectError(error.SubmissionChanged, input.settle(ticket, null));
+    try std.testing.expectError(error.SubmissionChanged, input.release(ticket));
     try std.testing.expectEqualStrings("new", try input.message(next));
 }

@@ -28,6 +28,7 @@ test {
     _ = @import("cli.zig");
     _ = @import("TerminalText.zig");
     _ = @import("SessionInput.zig");
+    _ = @import("SessionSubmission.zig");
     _ = @import("SessionFrontend.zig");
     _ = @import("session_history.zig");
     _ = @import("session_view.zig");
