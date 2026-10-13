@@ -1,0 +1,71 @@
+name: Maintain shared build caches
+on:
+  push:
+    branches: [main]
+    # Refresh immediately when compatibility inputs change. Ordinary source edits
+    # use the daily baseline, avoiding two extra production builds per merge.
+    paths:
+      - 'build.zig*'
+      - 'src/build_*'
+      - 'src/*.patch'
+      - '.github/actions/setup/**'
+      - '.github/workflows/cache-maintenance.yml'
+      - '.github/scripts/prune-caches.cjs'
+  schedule:
+    - cron: '43 5 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-maintenance
+  # Finish cache saves; only superseded pending refreshes may be replaced.
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    if: ${{ !github.event.repository.private && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Remove obsolete Rui cache snapshots
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            await require('./.github/scripts/prune-caches.cjs')({github, context, core});
+  baseline:
+    needs: prune
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: macos-15
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          check-part: baseline
+      - name: Warm production compilation, not test acceptance
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          zig build -Doptimize=ReleaseSafe --summary all
+          echo "Compilation cache baseline for $(git rev-parse HEAD) on $(uname -s)/$(uname -m). No test acceptance or release qualification." >> "$GITHUB_STEP_SUMMARY"

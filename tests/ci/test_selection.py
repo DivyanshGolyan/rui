@@ -148,6 +148,7 @@ class SelectionTest(unittest.TestCase):
 
     def test_ci_policy_does_not_make_build_qualification_universal(self):
         for path in (".github/workflows/check.yml",
+                     ".github/workflows/cache-maintenance.yml", ".github/scripts/prune-caches.cjs",
                      "tests/ci/select_tests.py", "tests/ci/run_selected.py"):
             result = select([path], "review", AVAILABLE)
             self.assertEqual(result["targets"], ["test-logic"])
@@ -233,9 +234,15 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(execution_batches([]), [])
 
     def test_cache_proof_tracks_cache_policy_not_every_runtime_edit(self):
-        for path in ("build.zig", ".github/actions/setup/action.yml", "tests/ci/cache_execution.py"):
+        for path in ("build.zig", ".github/actions/setup/action.yml", "tests/ci/cache_execution.py",
+                     ".github/workflows/cache-maintenance.yml", ".github/scripts/prune-caches.cjs"):
             self.assertTrue(select([path], "review", AVAILABLE)["cache_execution_checks"])
         self.assertFalse(select(["src/store.zig"], "review", AVAILABLE)["cache_execution_checks"])
+
+    def test_cache_maintenance_preserves_unowned_and_current_caches(self):
+        result = subprocess.run(["node", "--test", "tests/ci/cache_maintenance.test.cjs"],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_isolated_full_check_parts_keep_other_selected_work_once(self):
         targets = ["admission-debug-integration", "check-full", "evaluator-churn", "test-full"]
