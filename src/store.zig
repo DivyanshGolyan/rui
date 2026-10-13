@@ -8790,6 +8790,65 @@ test "production turn preserves skipped continuation preference through actual S
     // fresh-input-first Store selector, admits fresh work here instead.
     try std.testing.expectEqual(peer.turn_id, context.model.?.turn_id);
     try std.testing.expect((try storage.observeCommand("fresh-message")).message.?.queue.?.state == .queued);
+
+    // Keep fresh Messages available while actual retries, Bash and tool-only
+    // continuations repeatedly commit. The fixture makes retry clocks due;
+    // the production turn and Store still own eligibility and admission.
+    var sustained_tmp = std.testing.tmpDir(.{});
+    defer sustained_tmp.cleanup();
+    var sustained = try testingStore(&sustained_tmp, std.testing.io);
+    defer sustained.close() catch unreachable;
+    var bindings: [3]AttemptBinding = undefined;
+    for ([_][]const u8{ "continuing", "retrying", "sending" }, 0..) |reference, index| {
+        var config_key_buffer: [64]u8 = undefined;
+        const config_key = try std.fmt.bufPrint(&config_key_buffer, "{s}-config", .{reference});
+        try configureTestSession(&sustained, config_key, reference);
+        try submitTestMessage(&sustained, &sustained_tmp, reference, reference, reference, "start");
+        bindings[index] = (try sustained.admitModelAttempt(.message, .{})).?.permit.binding;
+    }
+    try settleCallsForTesting(&sustained, &sustained_tmp, bindings[0], "continued-result", &unknown);
+    try sustained.settleModelAttemptFailure(bindings[1], "temporary", .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+    try settleCallsForTesting(&sustained, &sustained_tmp, bindings[2], "sending-result", &bash_calls);
+    try configureTestSession(&sustained, "fresh-loop-config", "fresh-loop");
+    var progress = [_]usize{ 0, 0, 0, 0 }; // Bash, retry, fresh Message, continuation.
+    var sustained_state: turn.State = .{};
+    var sustained_context = Context{ .storage = &sustained };
+    var fresh_number: usize = 0;
+    for (0..32) |iteration| {
+        // Replenish independently before every selection, never only after
+        // the competing candidate has won.
+        var key_buffer: [64]u8 = undefined;
+        const key = try std.fmt.bufPrint(&key_buffer, "fresh-loop-{d}", .{fresh_number});
+        fresh_number += 1;
+        try submitTestMessage(&sustained, &sustained_tmp, key, key, "fresh-loop", "more input");
+        try exec(sustained.database, "UPDATE model_operation SET retry_due_at_ms=1 WHERE retry_due_at_ms>0 AND resolution_code IS NULL");
+        sustained_context.model = null;
+        sustained_context.action = null;
+        // The timer edge is fixture-owned; it grants no Attempt authority.
+        sustained_state.last_retry_poll = null;
+        _ = turn.run(&sustained_state, &sustained_context);
+        try std.testing.expectEqual(@as(?anyerror, null), sustained_context.failure);
+        if (sustained_context.action) |action| {
+            progress[0] += 1;
+            _ = try sustained.settleActionAttempt(action, .succeeded, "sent", .{});
+        } else if (sustained_context.model) |model| {
+            if (model.operation_id == bindings[1].operation_id) {
+                progress[1] += 1;
+                try std.testing.expect(model.attempt_ordinal > 1);
+                try sustained.settleModelAttemptFailure(model, "temporary", .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+            } else if (model.turn_id == bindings[0].turn_id or model.turn_id == bindings[2].turn_id) {
+                progress[3] += 1;
+                var name_buffer: [64]u8 = undefined;
+                const name = try std.fmt.bufPrint(&name_buffer, "continuation-{d}", .{iteration});
+                try settleCallsForTesting(&sustained, &sustained_tmp, model, name, if (model.turn_id == bindings[0].turn_id) &unknown else &bash_calls);
+            } else {
+                progress[2] += 1;
+                try sustained.settleModelAttemptFailure(model, "completed-fixture", .terminal, .{});
+            }
+        } else return error.NoProgressUnderSustainedInput;
+    }
+    try std.testing.expect(progress[0] >= 2 and progress[2] >= 2 and progress[3] >= 2);
+    try std.testing.expectEqual(@as(usize, 3), progress[1]);
 }
 
 test "terminal call-result import and read failures preserve canonical authority" {

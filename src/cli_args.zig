@@ -47,7 +47,7 @@ pub const Command = enum {
             .session_stop => .{ .resource = .session, .name = "stop", .description = "Admit a stop for selected Session work. The address remains reusable by later input; acknowledgment is not physical retirement.", .options = destination ++ session ++ capture, .mutation = true },
             .session_interrupt_model => .{ .resource = .session, .name = "interrupt-model", .description = "Interrupt the exact model Operation after inspecting its Session and Turn.", .options = destination ++ session ++ capture ++ &[_]Option{ value("turn", "ID"), value("operation", "ID") }, .mutation = true },
             .session_read_conversation => .{ .resource = .session, .name = "read-conversation", .description = "Stream the exact saved public Conversation content at position and ordinal.", .options = destination ++ session ++ &[_]Option{ value("position", "POSITION"), value("ordinal", "ORDINAL") } },
-            .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. --last selects the newest Session created in this Workspace.", .options = destination ++ session ++ &[_]Option{flag("last")}, .positional = "REF" },
+            .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. Requires terminal input/output; starts or attaches to a managed Host. --last selects the newest Session created in this Workspace.", .options = destination ++ session ++ &[_]Option{flag("last")}, .positional = "REF" },
             .request_inspect => .{ .resource = .request, .name = "inspect", .description = "Observe the original submitted command once. HANDLE loads its saved identity; --store and --key address it explicitly. Never transmits captured intent.", .options = destination ++ key, .positional = "HANDLE" },
             .request_recover => .{ .resource = .request, .name = "recover", .description = "Retransmit the original saved command and inputs. This may first admit work if the original never committed. Use HANDLE, or --store PATH --record FILE --kind KIND.", .options = destination ++ &[_]Option{ value("record", "FILE"), value("kind", "configure|message|session-stop|model-interruption|permission-decision") }, .positional = "HANDLE", .mutation = true },
             .request_read_result => .{ .resource = .request, .name = "read-result", .description = "Stream only the originally bound saved answer, without waiting or substituting newer Session work. Use HANDLE or --store and --key.", .options = destination ++ key, .positional = "HANDLE" },
@@ -99,7 +99,7 @@ pub const Definition = struct {
         }
         if (self.positional) |positional| try writer.print(" [{s}]", .{positional});
         try writer.print("\n{s}\n", .{self.description});
-        try writer.writeAll("--help or -h prints this help without accessing runtime state. Metadata is JSON; explicit content reads stream bytes.\n");
+        try writer.writeAll("--help or -h prints this help without accessing runtime state. Non-interactive metadata is JSON; explicit content reads stream bytes.\n");
         if (self.mutation) try writer.writeAll("Keep the pre-send recovery identity. Recover with rui request recover HANDLE, or --store PATH --record FILE --kind KIND. Nonzero exit can follow acceptance: inspect the original key; never infer permission to resubmit with a fresh key.\n");
     }
 

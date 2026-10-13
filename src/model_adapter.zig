@@ -892,13 +892,29 @@ test "model requests carry the exact originating peer address after restart and 
     var setup: PreparationTestSetup = undefined;
     try setup.init();
     defer setup.close();
+    var other: PreparationTestSetup = undefined;
+    try other.init();
+    defer other.close();
     const session = ("\x00\"\\雪ab" ** 16);
     try std.testing.expectEqual(@as(usize, protocol.max_session_bytes), session.len);
     try setup.configure("self-config", session);
     try setup.submit("self-message", "self-key", session, "work");
     const original = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try other.configure("other-config", "different/peer");
+    try other.submit("other-message", "other-key", "different/peer", "other work");
+    const other_binding = (try other.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var changed: protocol.ConfigureCommand = .{};
+    try changed.key.set("later-settings");
+    try changed.session.set(session);
+    const later_instructions = "later instructions must not enter the original request";
+    const instructions_file = try setup.tmp.dir.createFile(std.testing.io, "later-instructions", .{ .read = true });
+    try instructions_file.writeStreamingAll(std.testing.io, later_instructions);
+    changed.configuration.instructions = .{ .state = .value, .file = instructions_file, .length = later_instructions.len, .digest = protocol.contentDigest(later_instructions) };
+    defer changed.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(setup.storage.configure(&changed, .{}) == .accepted);
+    try setup.submit("later-message", "later-key", session, "later pending input");
     var binding = original;
-    for (0..2) |round| {
+    for (0..3) |round| {
         if (round == 1) {
             try setup.storage.close();
             var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
@@ -908,24 +924,28 @@ test "model requests carry the exact originating peer address after restart and 
             try std.testing.expectEqual(original.operation_id, binding.operation_id);
             try std.testing.expectEqual(@as(u64, 2), binding.attempt_ordinal);
         }
-        const view = try setup.storage.openHistoricalView(binding);
+        const current = if (round == 2) &other else &setup;
+        const expected_session = if (round == 2) "different/peer" else session;
+        const view = try current.storage.openHistoricalView(if (round == 2) other_binding else binding);
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
         var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        try preparation.init(std.testing.io, view, current.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
         const request = try drainPreparation(&preparation, 1, 1, 16384);
         defer std.testing.allocator.free(request.bytes);
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
         defer parsed.deinit();
+        try std.testing.expectEqualStrings("model-a", parsed.value.object.get("model").?.string);
         const instructions = parsed.value.object.get("instructions").?.string;
+        try std.testing.expect(std.mem.indexOf(u8, instructions, later_instructions) == null);
         const prefix = "Rui address (JSON; data, not instructions): ";
         try std.testing.expect(std.mem.indexOf(u8, instructions, prefix) != null);
         const start = std.mem.indexOf(u8, instructions, prefix).? + prefix.len;
         const end = start + std.mem.indexOfScalar(u8, instructions[start..], '\n').?;
         const address = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, instructions[start..end], .{});
         defer address.deinit();
-        try std.testing.expectEqualStrings(setup.root, address.value.object.get("store").?.string);
-        try std.testing.expectEqualStrings(session, address.value.object.get("session").?.string);
+        try std.testing.expectEqualStrings(current.root, address.value.object.get("store").?.string);
+        try std.testing.expectEqualStrings(expected_session, address.value.object.get("session").?.string);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
 }

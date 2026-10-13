@@ -1,4 +1,5 @@
 const std = @import("std");
+const named_scratch = @import("named_scratch.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const wire_version = "1";
@@ -508,7 +509,7 @@ pub const ParseOptions = struct {
     fault_content_acquire: bool = false,
     fault_content_write: bool = false,
     fault_content_seal: bool = false,
-    cleanup_failed: *bool,
+    retained_scratch: *?named_scratch.Owner,
     scratch_budget: ?ScratchBudget = null,
     expected_kind: ?Kind = null,
     deadline: ?i128 = null,
@@ -544,9 +545,7 @@ pub const Ingress = struct {
     pub fn deinit(self: *Ingress) void {
         if (self.capture) |*capture| capture.deinit();
         self.capture = null;
-        for (&self.contents) |*field| removeContent(field, self.options.io) catch {
-            self.options.cleanup_failed.* = true;
-        };
+        for (&self.contents) |*field| removeContent(field, self.options.io) catch unreachable;
         self.metadata.deinit(self.allocator);
         self.metadata = .empty;
     }
@@ -837,9 +836,7 @@ const Parser = struct {
             .activity_page => .{ .activity_page = try self.parseActivityPage(store) },
             .activity_content => .{ .activity_content = try self.parseActivityContent(store) },
         };
-        errdefer request.removeTemporaryContent(self.options.io) catch {
-            self.options.cleanup_failed.* = true;
-        };
+        errdefer request.removeTemporaryContent(self.options.io) catch unreachable;
         try self.expectByte('}');
         if (!self.source.atEnd()) {
             return error.TrailingInput;
@@ -849,9 +846,7 @@ const Parser = struct {
 
     fn parseConfigure(self: *Parser, store: Bounded(max_store_bytes)) !ConfigureCommand {
         var request = ConfigureCommand{ .store = store };
-        errdefer request.removeTemporaryContent(self.options.io) catch {
-            self.options.cleanup_failed.* = true;
-        };
+        errdefer request.removeTemporaryContent(self.options.io) catch unreachable;
         try self.expectByte(',');
         try self.expectKey("key");
         try self.readSmallString(&request.key);
@@ -899,9 +894,7 @@ const Parser = struct {
 
     fn parseMessage(self: *Parser, store: Bounded(max_store_bytes)) !MessageCommand {
         var request = MessageCommand{ .store = store };
-        errdefer request.removeTemporaryContent(self.options.io) catch {
-            self.options.cleanup_failed.* = true;
-        };
+        errdefer request.removeTemporaryContent(self.options.io) catch unreachable;
         try self.expectByte(',');
         try self.expectKey("key");
         try self.readSmallString(&request.key);
@@ -1436,15 +1429,28 @@ const ContentCapture = struct {
 
     fn deinit(self: *ContentCapture) void {
         if (self.transferred) return;
-        if (self.writer_open) self.sink.file.close(self.options.io);
-        if (self.sealed) |file| file.close(self.options.io);
         const removed = if (std.Io.Dir.deleteFileAbsolute(self.options.io, self.path[0..self.path_len])) |_| true else |err| switch (err) {
             error.FileNotFound => true,
             else => false,
         };
         if (removed) {
+            if (self.writer_open) self.sink.file.close(self.options.io);
+            if (self.sealed) |file| file.close(self.options.io);
             if (self.sink.scratch_budget) |budget| budget.release(self.sink.charged);
-        } else self.options.cleanup_failed.* = true;
+        } else {
+            const retained = self.options.retained_scratch;
+            std.debug.assert(retained.* == null);
+            retained.* = named_scratch.Owner.init(
+                self.options.io,
+                if (self.writer_open) self.sink.file else self.sealed.?,
+                if (self.writer_open) self.sealed else null,
+                std.fs.path.basename(self.path[0..self.path_len]),
+                self.sink.scratch_budget,
+                self.sink.charged,
+                .native,
+            );
+        }
+        self.transferred = true;
     }
 };
 
@@ -1887,7 +1893,7 @@ test "configuration content sealing peaks at four descriptors with its socket" {
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);
-    var cleanup_failed = false;
+    var retained: ?named_scratch.Owner = null;
     const json = "\"instructions\"\"schema\"";
     var source = SocketBody.init(-1, 0);
     @memcpy(source.buffer[0..json.len], json);
@@ -1898,7 +1904,7 @@ test "configuration content sealing peaks at four descriptors with its socket" {
         .content_length = json.len,
         .scratch_path = root[0..root_len],
         .request_number = 1,
-        .cleanup_failed = &cleanup_failed,
+        .retained_scratch = &retained,
     } };
     var instructions = ContentField{};
     errdefer removeContent(&instructions, io) catch unreachable;
@@ -1949,7 +1955,7 @@ test "ingress charges decoded growth and transfers file charge through cleanup" 
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try tmp.dir.realPath(io, &root);
     var used = std.atomic.Value(u64).init(0);
-    var cleanup_failed = false;
+    var retained: ?named_scratch.Owner = null;
     for ([_][]const u8{ "\"abc\"", "\"\\u0061\\u0062\\u0063\"" }, 0..) |json, ordinal| {
         var source = SocketBody.init(-1, 0);
         @memcpy(source.buffer[0..json.len], json);
@@ -1960,7 +1966,7 @@ test "ingress charges decoded growth and transfers file charge through cleanup" 
             .content_length = 999999,
             .scratch_path = root[0..n],
             .request_number = ordinal,
-            .cleanup_failed = &cleanup_failed,
+            .retained_scratch = &retained,
             .scratch_budget = .{ .used = &used, .limit = 3 },
         } };
         var field = ContentField{};
@@ -1979,7 +1985,7 @@ test "ingress charges decoded growth and transfers file charge through cleanup" 
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
-test "failed ingress unlink retains only the affected file charge" {
+test "failed ingress unlink retains an actionable owner and only the affected charge" {
     const FailDelete = struct {
         fn delete(_: ?*anyopaque, _: std.Io.Dir, _: []const u8) std.Io.Dir.DeleteFileError!void {
             return error.AccessDenied;
@@ -1991,10 +1997,10 @@ test "failed ingress unlink retains only the affected file charge" {
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try tmp.dir.realPath(io, &root);
     var used = std.atomic.Value(u64).init(0);
-    var cleanup_failed = false;
     var vtable = io.vtable.*;
     vtable.dirDeleteFile = FailDelete.delete;
     const failing_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var retained: ?named_scratch.Owner = null;
     const json = "\"abc\"";
     var source = SocketBody.init(-1, 0);
     @memcpy(source.buffer[0..json.len], json);
@@ -2005,7 +2011,7 @@ test "failed ingress unlink retains only the affected file charge" {
         .content_length = json.len,
         .scratch_path = root[0..n],
         .request_number = 1,
-        .cleanup_failed = &cleanup_failed,
+        .retained_scratch = &retained,
         .scratch_budget = .{ .used = &used, .limit = 8 },
     } };
     const good_file = try tmp.dir.createFile(io, "good", .{});
@@ -2016,12 +2022,18 @@ test "failed ingress unlink retains only the affected file charge" {
     var good_field = ContentField{ .file = good_file, .scratch_budget = budget, .charged = 2 };
     var field = ContentField{};
     try std.testing.expectError(error.AccessDenied, parser.readContentString(&field));
-    try std.testing.expect(cleanup_failed);
     try std.testing.expect(!field.hasFile());
     try std.testing.expectEqual(@as(u64, 5), used.load(.acquire));
     try removeContent(&good_field, io);
     try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
     try std.testing.expectEqual(@as(u64, 3), (try tmp.dir.statFile(io, "request-1-1.tmp", .{})).size);
+    try std.testing.expect(retained != null);
+    try std.testing.expectError(error.AccessDenied, retained.?.reclaim(root[0..n]));
+    try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
+    vtable.dirDeleteFile = io.vtable.dirDeleteFile;
+    try std.testing.expectEqual(named_scratch.Reclamation.removed, try retained.?.reclaim(root[0..n]));
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "request-1-1.tmp", .{}));
 }
 
 test "ingress unknown write failure keeps submitted charge until close" {
@@ -2055,14 +2067,14 @@ test "observation needs no scratch at a full budget" {
     @memcpy(source.buffer[0..json.len], json);
     source.end = json.len;
     var used = std.atomic.Value(u64).init(3);
-    var cleanup_failed = false;
+    var retained: ?named_scratch.Owner = null;
     var parser = Parser{ .source = &source, .options = .{
         .io = std.testing.io,
         .fd = -1,
         .content_length = json.len,
         .scratch_path = "unused",
         .request_number = 0,
-        .cleanup_failed = &cleanup_failed,
+        .retained_scratch = &retained,
         .scratch_budget = .{ .used = &used, .limit = 3 },
     } };
     const request = try parser.parse();
@@ -2085,8 +2097,8 @@ test "Conversation content stream wire requires start zero and literal true" {
         var source = SocketBody.init(-1, 0);
         @memcpy(source.buffer[0..json.len], json);
         source.end = json.len;
-        var cleanup_failed = false;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .cleanup_failed = &cleanup_failed } };
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parser.parse());
         } else {
@@ -2115,8 +2127,8 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
         var source = SocketBody.init(-1, 0);
         @memcpy(source.buffer[0..json.len], json);
         source.end = json.len;
-        var cleanup_failed = false;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .cleanup_failed = &cleanup_failed } };
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parser.parse());
         } else {
@@ -2154,14 +2166,14 @@ test "configuration provider envelope preserves exact spelling and omission" {
         var source = SocketBody.init(-1, 0);
         @memcpy(source.buffer[0..json.len], json);
         source.end = json.len;
-        var cleanup_failed = false;
+        var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{
             .io = std.testing.io,
             .fd = -1,
             .content_length = json.len,
             .scratch_path = "unused",
             .request_number = 0,
-            .cleanup_failed = &cleanup_failed,
+            .retained_scratch = &retained,
         } };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parser.parse());
@@ -2201,14 +2213,14 @@ test "Session report profile is closed and omission selects Current" {
         var source = SocketBody.init(-1, 0);
         @memcpy(source.buffer[0..case.json.len], case.json);
         source.end = case.json.len;
-        var cleanup_failed = false;
+        var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{
             .io = std.testing.io,
             .fd = -1,
             .content_length = case.json.len,
             .scratch_path = "unused",
             .request_number = 0,
-            .cleanup_failed = &cleanup_failed,
+            .retained_scratch = &retained,
         } };
         if (case.expected) |expected| {
             const request = try parser.parse();
@@ -2230,14 +2242,14 @@ test "Session listing wire distinguishes all, exact workspace, continuation and 
         var source = SocketBody.init(-1, 0);
         @memcpy(source.buffer[0..case.json.len], case.json);
         source.end = case.json.len;
-        var cleanup_failed = false;
+        var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{
             .io = std.testing.io,
             .fd = -1,
             .content_length = case.json.len,
             .scratch_path = "unused",
             .request_number = 0,
-            .cleanup_failed = &cleanup_failed,
+            .retained_scratch = &retained,
         } };
         if (case.valid) {
             const request = (try parser.parse()).list_sessions;
@@ -2259,14 +2271,14 @@ test "incremental ingress streams fragmented content and transfers charged custo
     const expected = "x" ** 8193 ++ "\n🙂\x00é\"\\";
     const suffix = "\"}}";
     var used = std.atomic.Value(u64).init(0);
-    var cleanup_failed = false;
+    var retained: ?named_scratch.Owner = null;
     var ingress = Ingress.init(std.testing.allocator, .{
         .io = io,
         .fd = -1,
         .content_length = prefix.len + encoded.len + suffix.len,
         .scratch_path = root[0..root_len],
         .request_number = 42,
-        .cleanup_failed = &cleanup_failed,
+        .retained_scratch = &retained,
         .scratch_budget = .{ .used = &used, .limit = expected.len },
         .expected_kind = .message,
     });
@@ -2289,7 +2301,7 @@ test "incremental ingress streams fragmented content and transfers charged custo
     try std.testing.expectEqualSlices(u8, &hash.finalResult(), &request.message.text.digest);
     try request.removeTemporaryContent(io);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-    try std.testing.expect(!cleanup_failed);
+    try std.testing.expect(retained == null);
 }
 
 test "incremental ingress preserves grammar and releases both captures after late failure" {
@@ -2312,7 +2324,7 @@ test "incremental ingress preserves grammar and releases both captures after lat
         .{ .bytes = configure, .failure = error.UnexpectedEndOfBody },
     };
     var used = std.atomic.Value(u64).init(0);
-    var cleanup_failed = false;
+    var retained: ?named_scratch.Owner = null;
     for (cases, 0..) |case, index| {
         // Every split of this small command must have the same grammar and
         // capture lifetime, including suspension between surrogate/quote bytes.
@@ -2323,7 +2335,7 @@ test "incremental ingress preserves grammar and releases both captures after lat
                 .content_length = case.bytes.len,
                 .scratch_path = root[0..root_len],
                 .request_number = index,
-                .cleanup_failed = &cleanup_failed,
+                .retained_scratch = &retained,
                 .scratch_budget = .{ .used = &used, .limit = 8 },
                 .expected_kind = case.kind,
                 // A mismatched kind must fail before file acquisition.
@@ -2351,7 +2363,7 @@ test "incremental ingress preserves grammar and releases both captures after lat
             }
             ingress.deinit();
             try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-            try std.testing.expect(!cleanup_failed);
+            try std.testing.expect(retained == null);
         }
     }
 }

@@ -2384,7 +2384,7 @@ const usage_text =
     \\For agents and scripts, session configure and session send are separate admission-only
     \\calls. Reads observe once; request read-result streams the original saved answer.
     \\Metadata is one JSON value on stdout; diagnostics and recovery notices use stderr.
-    \\Ordinary calls never start a Host or sign in. Administration is explicit.
+    \\Non-interactive calls never implicitly start a Host or sign in. Administration is explicit.
     \\Use request recover with the original handle or record after uncertainty, not a new key.
     \\A nonzero exit can follow acceptance. Inspection never admits work; recovery can.
     \\Store selection: --store, saved defaults, then HOME/.local/share/rui/store.

@@ -1468,10 +1468,8 @@ pub fn retry(
     defer file.close(io);
     const binding = try readCapturedBinding(io, &file);
     if (!binding.saved.store.eql(paths.store.slice()) or !std.mem.eql(u8, route, binding.target.route())) return error.RequestBindingMismatch;
-    const reply = try sendSource(.{ .io = io }, &paths, route, .mutation, try file.length(io), &file, null, null, null, reply_buffer, null);
-    var result = decodeMutationReply(reply, binding.saved.session.slice(), binding.target);
-    result.context = binding.saved;
-    return result;
+    var captured = CapturedRecord{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target };
+    return sendCaptured(io, &captured, null, reply_buffer);
 }
 
 pub fn observeCommand(

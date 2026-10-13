@@ -217,34 +217,44 @@ const Intake = struct {
         ingress: ?*protocol.Ingress = null,
         request: ?*protocol.Request = null,
         reply: ?*Reply = null,
-        cleanup_failed: bool = false,
+        retained_scratch: ?named_scratch.Owner = null,
+        cleanup_retry_at: i128 = 0,
 
-        fn destroy(self: *Exchange) void {
+        fn destroy(self: *Exchange) bool {
             const host = self.host;
             std.debug.assert(self.state != .working);
             if (self.reply) |reply| {
                 reply.deinit();
                 host.allocator.destroy(reply);
+                self.reply = null;
             }
             if (self.request) |request| {
-                request.removeTemporaryContent(host.io) catch |err| {
-                    self.cleanup_failed = true;
-                    stderr.print("rui: retained ingress charge after cleanup failure: {s}\n", .{@errorName(err)});
-                };
+                request.removeTemporaryContent(host.io) catch unreachable;
                 host.allocator.destroy(request);
+                self.request = null;
             }
             if (self.ingress) |ingress| {
                 ingress.deinit();
                 host.allocator.destroy(ingress);
+                self.ingress = null;
+            }
+            if (self.retained_scratch) |*retained| {
+                const now: i128 = nowNs(host);
+                if (now < self.cleanup_retry_at) return false;
+                _ = retained.reclaim(host.lease.paths.scratch.slice()) catch {
+                    self.cleanup_retry_at = now + execution_turn.retained_cleanup_retry_ms * std.time.ns_per_ms;
+                    return false;
+                };
+                self.retained_scratch = null;
             }
             self.header_bytes.deinit(host.allocator);
             _ = std.c.close(self.fd);
-            if (self.cleanup_failed) stderr.print("rui: retained ingress file and charge after cleanup failure\n", .{});
             if (self.number) |number|
                 traceRequest(host, "connection_resources_released", number, host.scratch_used.load(.acquire))
             else
                 traceSubject(host, "connection_place_released", "place", "classification");
             host.allocator.destroy(self);
+            return true;
         }
 
         fn ensureReply(self: *Exchange) !*Reply {
@@ -331,7 +341,7 @@ const Intake = struct {
                         .fault_content_acquire = self.host.faults.content_acquire,
                         .fault_content_write = self.host.faults.content_write,
                         .fault_content_seal = self.host.faults.content_seal,
-                        .cleanup_failed = &self.cleanup_failed,
+                        .retained_scratch = &self.retained_scratch,
                         .scratch_budget = self.host.retention.sharedBudget(),
                         .expected_kind = self.route.?.kind(),
                     });
@@ -404,7 +414,8 @@ const Intake = struct {
         for (self.exchanges.items) |exchange| {
             // Joining workers, not response delivery, ends their borrowing.
             exchange.state = .retired;
-            exchange.destroy();
+            while (!exchange.destroy())
+                self.host.io.sleep(.fromMilliseconds(execution_turn.retained_cleanup_retry_ms), .awake) catch {};
         }
         self.exchanges.deinit(self.host.allocator);
         self.polls.deinit(self.host.allocator);
@@ -534,8 +545,9 @@ const Intake = struct {
                     index += 1;
                     continue;
                 }
-                const exchange = self.exchanges.orderedRemove(index);
-                exchange.destroy();
+                if (self.exchanges.items[index].destroy()) {
+                    _ = self.exchanges.orderedRemove(index);
+                } else index += 1;
             }
             if (!listener_open.* and self.exchanges.items.len == 0) return failure orelse error.EffectAwareShutdown;
             if (!listener_open.* or self.polls.items[0].revents == 0) continue;
@@ -4550,7 +4562,7 @@ test "discovery identity exhaustion cannot start a new error delivery budget" {
     host.request_counter.store(std.math.maxInt(u64), .release);
     const exchange = try host.allocator.create(Intake.Exchange);
     exchange.* = .{ .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 10 * std.time.ns_per_s };
-    defer exchange.destroy();
+    defer std.debug.assert(exchange.destroy());
     try std.testing.expectError(error.RequestIdentityExhausted, exchange.read());
     exchange.fail(error.RequestIdentityExhausted);
     try std.testing.expectError(error.ExchangeDeadlineExceeded, exchange.reply.?.advance(sockets[0]));
@@ -5947,6 +5959,77 @@ test "intake accepts and physically retires a hundred incomplete exchanges" {
     for (sockets) |pair| {
         try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(pair[0], std.c.F.GETFL));
         try std.testing.expectEqual(std.posix.E.BADF, std.posix.errno(@as(c_int, -1)));
+    }
+}
+
+test "exchange retirement retains failed ingress cleanup through retry" {
+    const FailDelete = struct {
+        fn delete(_: ?*anyopaque, _: std.Io.Dir, _: []const u8) std.Io.Dir.DeleteFileError!void {
+            return error.AccessDenied;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var paths: platform.Paths = .{};
+    try paths.scratch.set(root);
+    var lease: platform.StoreLease = undefined;
+    lease.paths = paths;
+    var host = Host{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .lease = &lease,
+        .store = undefined, // Failed/incomplete captures never reach admission.
+        .faults = .{},
+    };
+    const prefix = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"";
+    const payload = "x" ** 8192;
+    const suffix = "\"}}";
+    for ([_]bool{ false, true }) |seal| {
+        var vtable = std.testing.io.vtable.*;
+        vtable.dirDeleteFile = FailDelete.delete;
+        const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+        var sockets: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+        defer _ = std.c.close(sockets[1]);
+        const exchange = try std.testing.allocator.create(Intake.Exchange);
+        exchange.* = .{ .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 0, .state = .retired };
+        const ingress = try std.testing.allocator.create(protocol.Ingress);
+        ingress.* = protocol.Ingress.init(std.testing.allocator, .{
+            .io = io,
+            .fd = sockets[0],
+            .content_length = prefix.len + payload.len + suffix.len,
+            .scratch_path = root,
+            .request_number = 7,
+            .retained_scratch = &exchange.retained_scratch,
+            .scratch_budget = .{ .used = &host.scratch_used, .limit = 9000 },
+            .expected_kind = .message,
+        });
+        exchange.ingress = ingress;
+        var destroyed = false;
+        defer if (!destroyed) {
+            vtable.dirDeleteFile = std.testing.io.vtable.dirDeleteFile;
+            exchange.cleanup_retry_at = 0;
+            std.debug.assert(exchange.destroy());
+        };
+        host.scratch_used.store(23, .release);
+        try ingress.feed(prefix ++ payload);
+        if (seal) try std.testing.expectError(error.AccessDenied, ingress.feed(suffix));
+        try std.testing.expect(!exchange.destroy());
+        try std.testing.expect(!exchange.destroy());
+        try std.testing.expectEqual(@as(u64, 8215), host.scratch_used.load(.acquire));
+        try std.testing.expect(std.c.fcntl(sockets[0], std.c.F.GETFL) >= 0);
+        const retained_fd = exchange.retained_scratch.?.resources.?.primary.handle;
+        try std.testing.expect(std.c.fcntl(retained_fd, std.c.F.GETFL) >= 0);
+        vtable.dirDeleteFile = std.testing.io.vtable.dirDeleteFile;
+        exchange.cleanup_retry_at = 0;
+        try std.testing.expect(exchange.destroy());
+        destroyed = true;
+        try std.testing.expectEqual(@as(u64, 23), host.scratch_used.load(.acquire));
+        try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(sockets[0], std.c.F.GETFL));
+        try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(retained_fd, std.c.F.GETFL));
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "request-7-1.tmp", .{}));
     }
 }
 

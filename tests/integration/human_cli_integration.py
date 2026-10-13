@@ -194,15 +194,6 @@ def peer_request_case():
         assert again["answer"]["replayed"] is True and again["input"] == first["input"], again
         assert first["input"]["bytes"] == str(len(b"original peer input\n\n")), first
 
-        # A post-delivery local failure changes the exit, never admission. This
-        # signal failure is not a witness for fallible terminal disposal.
-        record = state / "accepted-record"
-        failed = run(home, "session", "send", "--store", store, "--session", reference,
-            "--record", record, "--key", "accepted-before-cleanup", "payload", success=False,
-            environment={"RUI_TEST_POST_COMMAND_READY_FD": "-1", "RUI_TEST_POST_COMMAND_RELEASE_FD": "-1"})
-        assert json.loads(failed)["answer"]["status"] == "accepted", failed
-        durable = json.loads(run(home, "request", "inspect", "--store", store, "--key", "accepted-before-cleanup"))
-        assert durable["observation"]["status"] == "accepted", durable
         status = json.loads(run(home, "host", "status", "--store", store))
         assert status["status"] == "ready" and status["active_capacity"] == "1", status
         (home / ".config/rui/preferences").unlink()

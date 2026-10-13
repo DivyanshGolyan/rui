@@ -1555,7 +1555,17 @@ def detach_reporting_cases(state, library):
                 assert proxy.mutations == [("/v1/message", messages[0])] + ([] if kind == "message" else [("/v1/control/permission-decision", before[record])])
                 proxy.close()
                 proxy = None
-                assert json.loads(human.run(home, "request", "recover", request["key"]))["answer"]["replayed"] is True
+                observed = json.loads(human.run(home, "request", "inspect", request["key"]))
+                assert observed["key"] == request["key"], observed
+                assert observed["observation"]["status"] == "accepted", observed
+                assert observed["observation"]["kind"] == intent_kind, observed
+                assert observed["observation"]["target"] == session, observed
+                replayed = json.loads(human.run(home, "request", "recover", request["key"]))
+                assert replayed["answer"]["status"] == "accepted" and replayed["answer"]["replayed"] is True, replayed
+                assert all(replayed["context"][field] == request[field] for field in ("store", "session", "key")), replayed
+                if kind == "message":
+                    assert replayed["input"] == observed["observation"]["input"], replayed
+                    assert replayed["answer"]["admission"] == observed["observation"]["queue"]["admission"], replayed
                 effect = root / f"effect-{name}"
                 assert (effect.read_bytes() if effect.exists() else b"") == (b"once" if kind == "allow_once" else b"")
                 print(f"detach reporting: {name} exact accepted guide, restored termios and saved replay passed", flush=True)
