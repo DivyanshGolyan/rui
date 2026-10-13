@@ -1878,22 +1878,22 @@ test "Bash descriptor decoding preserves authorized command bytes" {
             if (try self.take() != byte) return error.InvalidDescriptorJson;
         }
     };
-    var source = Source{ .bytes = "{\"cmd\":\"false && \\u0074ouch marker\",\"timeout_ms\":null}" };
+    var source = Source{ .bytes = "{\"cmd\":\"false && \\u0074ouch marker\",\"description\":\"Check conditional marker creation\",\"timeout_ms\":null}" };
     var output_buffer: [64]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output_buffer);
     try std.testing.expect(try tools.writeBashCommand(&source, &writer));
     try std.testing.expectEqualStrings("false && touch marker", writer.buffered());
 
-    var override = Source{ .bytes = "{\"timeout_ms\":17,\"cmd\":\"echo ok\"}" };
+    var override = Source{ .bytes = "{\"timeout_ms\":17,\"description\":\"Print confirmation\",\"cmd\":\"echo ok\"}" };
     const inspected = (try tools.inspectBashArguments(&override)).?;
     try std.testing.expectEqual(@as(?u64, 17), inspected.timeout_ms);
     inline for (.{
-        "{\"cmd\":\"echo\\u0000bad\",\"timeout_ms\":null}",
-        "{\"cmd\":\"echo\"}",
-        "{\"cmd\":\"echo\",\"timeout_ms\":0}",
-        "{\"cmd\":\"echo\",\"timeout_ms\":9223372036854775808}",
-        "{\"cmd\":\"echo\",\"timeout_ms\":1.5}",
-        "{\"cmd\":\"echo\",}",
+        "{\"description\":\"Print output\",\"cmd\":\"echo\\u0000bad\",\"timeout_ms\":null}",
+        "{\"description\":\"Print output\",\"cmd\":\"echo\"}",
+        "{\"description\":\"Print output\",\"cmd\":\"echo\",\"timeout_ms\":0}",
+        "{\"description\":\"Print output\",\"cmd\":\"echo\",\"timeout_ms\":9223372036854775808}",
+        "{\"description\":\"Print output\",\"cmd\":\"echo\",\"timeout_ms\":1.5}",
+        "{\"description\":\"Print output\",\"cmd\":\"echo\",}",
     }) |invalid| {
         var invalid_source = Source{ .bytes = invalid };
         try std.testing.expect(!try tools.validBashArguments(&invalid_source));

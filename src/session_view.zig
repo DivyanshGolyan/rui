@@ -30,6 +30,102 @@ pub const Style = enum {
     }
 };
 
+fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, suffix: []const u8, style: Style } {
+    return switch (code) {
+        .unresolved => .{ .glyph = "•", .suffix = "", .style = .quiet },
+        .pending_permission => .{ .glyph = "?", .suffix = "", .style = .attention },
+        .succeeded => .{ .glyph = "✓", .suffix = "", .style = .normal },
+        .denied => .{ .glyph = "•", .suffix = " — Denied", .style = .normal },
+        .unknown_tool => .{ .glyph = "•", .suffix = " — Rejected: unknown tool", .style = .normal },
+        .invalid_arguments => .{ .glyph = "•", .suffix = " — Rejected: invalid arguments", .style = .normal },
+        .tool_unavailable => .{ .glyph = "•", .suffix = " — Rejected: tool unavailable", .style = .normal },
+        .failed => .{ .glyph = "!", .suffix = " — Failed", .style = .failure },
+        .timed_out => .{ .glyph = "!", .suffix = " — Timed out", .style = .failure },
+        .indeterminate => .{ .glyph = "!", .suffix = " — Outcome unknown; may have run", .style = .failure },
+        .storage_failed => .{ .glyph = "!", .suffix = " — Output capture failed", .style = .failure },
+        .spawn_failed => .{ .glyph = "!", .suffix = " — Could not start", .style = .failure },
+        .cancelled => .{ .glyph = "!", .suffix = " — Cancelled", .style = .failure },
+        .infrastructure_shutdown => .{ .glyph = "!", .suffix = " — Host stopped; outcome unknown", .style = .failure },
+    };
+}
+
+pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, columns: usize, colour: bool) !void {
+    const state = toolState(presentation.code);
+    try sink.feed("\n");
+    try sink.feed(state.style.code(colour));
+    try sink.feed(state.glyph);
+    try sink.feed(Style.normal.code(colour));
+    try sink.feed(" ");
+    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };
+    var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .line } };
+    try escaped.feed(if (presentation.description) |label| label.slice() else "Tool call");
+    try escaped.finish();
+    try indented.feed(state.suffix);
+    try indented.finish();
+    try sink.feed("\n");
+}
+
+/// A bounded view of the immutable Current capture, never a call-history map.
+/// Settled rows retire only past the successfully presented Activity cursor.
+pub const Live = struct {
+    pub const Entry = struct { operation: u64, ordinal: u64, presentation: protocol.ToolPresentation };
+    entries: [3]Entry = undefined,
+    count: usize = 0,
+    total: u64 = 0,
+
+    pub fn read(current_facts: *const client.Current, io: std.Io, scratch: std.Io.File, presented: client.ActivityCursor) !Live {
+        const Capture = struct {
+            live: Live = .{},
+            presented: client.ActivityCursor,
+            pub fn visit(self: *@This(), attention: client.Current.Attention) !void {
+                switch (attention) {
+                    .actionable => {},
+                    inline else => |row| self.live.include(.{ .operation = row.parent_operation.value, .ordinal = row.call_ordinal.value, .presentation = row.presentation.value }, self.presented),
+                }
+            }
+        };
+        var capture: Capture = .{ .presented = presented };
+        try current_facts.traverse(io, scratch, &capture);
+        return capture.live;
+    }
+
+    fn include(self: *Live, entry: Entry, presented: client.ActivityCursor) void {
+        if (entry.presentation.publication_position) |position| {
+            if (position < presented.position or position == presented.position and
+                (presented.ordinal == null or entry.ordinal + 1 <= presented.ordinal.?)) return;
+        }
+        self.total += 1;
+        var index: usize = 0;
+        while (index < self.count) : (index += 1) {
+            const prior = self.entries[index];
+            if (entry.operation < prior.operation or entry.operation == prior.operation and entry.ordinal < prior.ordinal) break;
+        }
+        if (index == self.entries.len) return;
+        self.count = @min(self.count + 1, self.entries.len);
+        var move = self.count - 1;
+        while (move > index) : (move -= 1) self.entries[move] = self.entries[move - 1];
+        self.entries[index] = entry;
+    }
+
+    // Worst terminal escaping is four bytes per input byte; allow glyph/suffix.
+    pub const line_bytes = 4 * protocol.max_tool_description_bytes + 96;
+    pub fn line(self: *const Live, index: usize, buffer: *[line_bytes]u8) ![]const u8 {
+        const entry = self.entries[index];
+        const state = toolState(entry.presentation.code);
+        var writer = std.Io.Writer.fixed(buffer);
+        try writer.print("{s} ", .{state.glyph});
+        var text: Text = .{ .mode = .line };
+        try text.feed(&writer, if (entry.presentation.description) |label| label.slice() else "Tool call");
+        try text.finish(&writer);
+        try writer.writeAll(state.suffix);
+        return writer.buffered();
+    }
+
+    pub fn style(self: *const Live, index: usize) Style {
+        return toolState(self.entries[index].presentation.code).style;
+    }
+};
+
 /// Live conversation and inspection share hanging indentation. Input is already
 /// escaped or rendered; only trusted renderer SGR has zero display width.
 pub fn Indented(comptime Sink: type) type {
@@ -386,20 +482,20 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 try sink.feed("\n  ");
                 try content(requests, store, session, item, reference, sink, columns);
             },
-            .tool_result => |reference| {
+            .tool_result => |result| {
                 // Keep outcomes and warnings, not routine zero exit codes or
                 // output tails. This affects presentation only, never execution,
                 // permission or outcome classification; /details stays exact.
+                try toolHeading(result.presentation, sink, columns, colour);
+                const failed = toolState(result.presentation.code).style == .failure;
                 const Summary = struct {
                     escaped: Escaped(@TypeOf(sink)),
-                    colour: bool,
                     line: [256]u8 = undefined,
                     length: usize = 0,
                     remaining: usize = 256,
                     emitted: bool = false,
                     ended: bool = false,
                     omitted: bool = false,
-                    failed: bool = false,
                     pub fn feed(self: *@This(), bytes: []const u8) !void {
                         for (bytes) |byte| {
                             if (self.ended) return;
@@ -422,13 +518,9 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                         const line = self.line[0..self.length];
                         if (std.mem.eql(u8, line, "stdout tail:") or std.mem.eql(u8, line, "stderr tail:")) {
                             self.ended = true;
-                        } else {
-                            if (self.emitted) try self.escaped.feed("\n  ") else {
-                                self.failed = !std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.") and !std.mem.eql(u8, line, "Permission denied.");
-                                try self.escaped.sink.feed((if (self.failed) Style.failure else Style.normal).code(self.colour));
-                                try self.escaped.feed(if (self.failed) "\n! " else "  • ");
-                            }
-                            try self.escaped.feed(if (std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.")) "Bash succeeded." else line);
+                        } else if (line.len != 0 and !std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.")) {
+                            try self.escaped.feed(if (self.emitted) "\n  " else "  ");
+                            try self.escaped.feed(line);
                             self.emitted = true;
                         }
                         self.length = 0;
@@ -436,15 +528,21 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                     fn finish(self: *@This()) !void {
                         if (self.length != 0) try self.emit();
                         try self.escaped.finish();
-                        try self.escaped.sink.feed(Style.normal.code(self.colour));
                     }
                 };
-                var summary: Summary = .{ .escaped = .{ .sink = sink, .text = .{ .mode = .multiline } }, .colour = colour };
+                var summary: Summary = .{
+                    .escaped = .{ .sink = sink, .text = .{ .mode = .multiline } },
+                    .ended = switch (result.presentation.code) {
+                        .denied, .unknown_tool, .invalid_arguments, .tool_unavailable => true,
+                        else => false,
+                    },
+                };
+                const reference = result.content;
                 if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &summary)) |failure| return failure.err();
                 try summary.finish();
                 if (summary.omitted) try sink.feed(" [summary shortened; /details]");
-                if (summary.failed) try sink.feed("\n  /details for output.");
-                try sink.feed("\n");
+                if (failed) try sink.feed("\n  /details for output.");
+                if (summary.emitted or failed) try sink.feed("\n");
             },
             .call => |call| {
                 // Proposal bookkeeping is inspection-only. Even hidden fields

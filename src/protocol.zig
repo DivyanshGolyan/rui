@@ -10,6 +10,7 @@ pub const max_session_bytes = 128;
 pub const max_store_bytes = 492;
 pub const max_workspace_bytes = 4096;
 pub const max_model_bytes = 256;
+pub const max_tool_description_bytes = 100;
 pub const Provider = enum { codex };
 // Like permission-mode selectors, retain bounded unsupported names so admission
 // can save their rejection. This is an ingress bound, not a provider registry.
@@ -342,10 +343,29 @@ pub const ActivityPage = struct {
         if (self.end) |end| if (end > std.math.maxInt(i64) or self.position > end) return error.InvalidCursor;
     }
 };
+pub const ToolPresentation = struct {
+    description: ?Bounded(max_tool_description_bytes),
+    code: Code,
+    publication_position: ?u64,
+    pub const Code = enum { unresolved, pending_permission, succeeded, failed, timed_out, indeterminate, storage_failed, spawn_failed, cancelled, infrastructure_shutdown, denied, unknown_tool, invalid_arguments, tool_unavailable };
+
+    pub fn writeJson(self: ToolPresentation, out: *std.Io.Writer) !void {
+        try out.writeAll("{\"description\":");
+        if (self.description) |description| try std.json.Stringify.value(description.slice(), .{}, out) else try out.writeAll("null");
+        try out.print(",\"code\":\"{s}\",\"publication_position\":", .{@tagName(self.code)});
+        if (self.publication_position) |position| try out.print("\"{d}\"", .{position}) else try out.writeAll("null");
+        try out.writeByte('}');
+    }
+};
+
+pub const max_tool_presentation_json_bytes =
+    "{\"description\":".len + maximumJsonStringBytes(max_tool_description_bytes) +
+    ",\"code\":\"infrastructure_shutdown\",\"publication_position\":\"".len + 20 + "\"}".len;
+
 pub const ActivityItem = struct {
     position: u64,
     ordinal: u64 = 0,
-    value: union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: Content, outcome: Outcome, stop: Stop },
+    value: union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, outcome: Outcome, stop: Stop },
     pub const Content = struct {
         length: u64,
         digest: [32]u8,
@@ -370,7 +390,14 @@ pub const ActivityItem = struct {
                 try message.content.writeJson(out);
                 try out.writeByte('}');
             },
-            .assistant, .tool_result => |content| try content.writeJson(out),
+            .assistant => |content| try content.writeJson(out),
+            .tool_result => |result| {
+                try out.writeAll("{\"content\":");
+                try result.content.writeJson(out);
+                try out.writeAll(",\"presentation\":");
+                try result.presentation.writeJson(out);
+                try out.writeByte('}');
+            },
             .call => |call| {
                 try out.print("{{\"operation\":\"{d}\",\"turn\":\"{d}\",\"call_ordinal\":\"{d}\",\"action\":", .{ call.operation, call.turn, call.call_ordinal });
                 if (call.action) |action| try out.print("\"{d}\"", .{action}) else try out.writeAll("null");
@@ -1404,7 +1431,7 @@ pub const max_client_request_bytes = @max(
 // maximum (two shorter cursor keys or one position and a closed field).
 pub const max_proposal_page_response_bytes = 160 + proposal_page_items * (240 + 4 * 144);
 // Worst row: four complete field references, identities, or escaped key/code.
-pub const max_activity_page_response_bytes = 256 + 16 * (400 + @max(4 * 144, 6 * max_key_bytes));
+pub const max_activity_page_response_bytes = 256 + 16 * (400 + @max(4 * 144, 6 * max_key_bytes) + max_tool_presentation_json_bytes);
 
 const max_session_stop_rejection_code_bytes = "invalid_session_reference".len;
 const max_model_interruption_rejection_code_bytes = "invalid_session_reference".len;
@@ -1525,7 +1552,7 @@ pub const max_conversation_page_response_bytes =
     "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"".len + 20 +
     "\",\"items\":[".len + public_conversation_page_items * ("{\"position\":\"".len + 20 + "\",\"ordinal\":\"".len + 20 +
         "\",\"kind\":\"tool_result\",\"content\":{\"bytes\":\"".len + 20 +
-        "\",\"sha256\":\"".len + 64 + "\",\"display\":\"omitted\"}},".len) +
+        "\",\"sha256\":\"".len + 64 + "\",\"display\":\"omitted\"}},".len + 16 + max_tool_presentation_json_bytes) +
     "],\"more\":true,\"before_position\":\"".len + 20 +
     "\",\"before_ordinal\":\"".len + 20 + "\"}".len;
 

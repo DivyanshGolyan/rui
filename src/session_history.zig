@@ -33,7 +33,12 @@ pub const Prepared = struct {
                 try sink.feed("›");
                 try sink.feed(View.Style.normal.code(colour));
                 try sink.feed(" ");
-            } else try sink.feed(if (item.kind == .assistant) "\n  " else "\n  Tool result:\n  ");
+            } else if (item.kind == .assistant) {
+                try sink.feed("\n  ");
+            } else {
+                try View.toolHeading(item.presentation.?, sink, columns, colour);
+                try sink.feed("  ");
+            }
             var indented: View.Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };
             var answer: View.Answer(@TypeOf(&indented)) = undefined;
             answer.init(&indented);

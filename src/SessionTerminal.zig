@@ -2,7 +2,8 @@
 const std = @import("std");
 const Editor = @import("TerminalEditor.zig");
 const Text = @import("TerminalText.zig");
-const Style = @import("session_view.zig").Style;
+const View = @import("session_view.zig");
+const Style = View.Style;
 const protocol = @import("protocol.zig");
 const termios = @cImport(@cInclude("termios.h"));
 const Self = @This();
@@ -53,6 +54,12 @@ pub fn begin(colour: bool) !Self {
 pub fn finish(self: *Self) !void {
     if (!self.active) return self.result;
     self.active = false;
+    // Disposal must not leave a transient call or draft in the transcript.
+    // One nonblocking attempt cannot hold restoration on output credit.
+    var control: [6 * (1 + 5 + 3 * 5 + 5 + 5) + 32]u8 = undefined;
+    const erase = self.clearSequence(geometry(), &control);
+    const erased = erase.len == 0 or std.c.write(1, erase.ptr, erase.len) == @as(isize, @intCast(erase.len));
+    self.rows = 0;
     // The UI owns emitted style, even if a renderer's next window was cancelled.
     // Attempt controls independently; neither may hold restoration on output credit.
     const reset = std.c.write(1, "\x1b[0m", 4) == 4;
@@ -65,7 +72,7 @@ pub fn finish(self: *Self) !void {
     for (self.flags, 0..) |flags, fd| {
         if (std.c.fcntl(@intCast(fd), std.c.F.SETFL, flags) < 0) flags_ok = false;
     }
-    self.result = if (restored) |_| if (flags_ok and reset and disabled and flushed) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
+    self.result = if (restored) |_| if (erased and flags_ok and reset and disabled and flushed) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
     return self.result;
 }
 
@@ -203,25 +210,33 @@ pub fn geometry() std.posix.winsize {
     return size;
 }
 
-fn clear(self: *Self) !void {
-    const size = geometry();
-    var control: [32]u8 = undefined;
+// Spacer, five status rows, three five-row calls, five overflow rows and five
+// draft rows bound the erase controls independently of history/population.
+fn clearSequence(self: *const Self, size: std.posix.winsize, buffer: *[6 * (1 + 5 + 3 * 5 + 5 + 5) + 32]u8) []const u8 {
+    var control = std.Io.Writer.fixed(buffer);
     if (self.rows != 0) {
         if (size.row != self.size.row or size.col != self.size.col) {
             // Old physical rows cannot be erased reliably after reflow. Start
             // the retained composer on a fresh line without transcript chatter.
-            try self.write("\r\n");
+            control.writeAll("\r\n") catch unreachable;
         } else {
-            if (self.caret_row != 0) try self.write(try std.fmt.bufPrint(&control, "\x1b[{d}A", .{self.caret_row}));
-            try self.write("\r");
+            if (self.caret_row != 0) control.print("\x1b[{d}A", .{self.caret_row}) catch unreachable;
+            control.writeAll("\r") catch unreachable;
             for (0..self.rows) |row| {
-                try self.write("\x1b[2K");
-                if (row + 1 < self.rows) try self.write("\r\n");
+                control.writeAll("\x1b[2K") catch unreachable;
+                if (row + 1 < self.rows) control.writeAll("\r\n") catch unreachable;
             }
-            if (self.rows > 1) try self.write(try std.fmt.bufPrint(&control, "\x1b[{d}A", .{self.rows - 1}));
-            try self.write("\r");
+            if (self.rows > 1) control.print("\x1b[{d}A", .{self.rows - 1}) catch unreachable;
+            control.writeAll("\r") catch unreachable;
         }
     }
+    return control.buffered();
+}
+
+fn clear(self: *Self) !void {
+    const size = geometry();
+    var control: [6 * (1 + 5 + 3 * 5 + 5 + 5) + 32]u8 = undefined;
+    try self.write(self.clearSequence(size, &control));
     self.rows = 0;
     self.size = size;
 }
@@ -231,7 +246,7 @@ pub fn permanent(self: *Self, bytes: []const u8) !void {
     try self.write(bytes);
 }
 
-pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8, prompt: []const u8) !void {
+pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8, prompt: []const u8, live: *const View.Live) !void {
     const size = geometry();
     if (size.row < 2 or size.col < 8) return error.UncertainTerminalCursor;
     // Stage the bounded view before output can pump and mutate the draft.
@@ -250,15 +265,40 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
         column += width;
     }
     var status_snapshot: [status_buffer.len]u8 = undefined;
-    const status_view = try viewport(status_writer.buffered(), 0, size.col - 1, 5, &status_snapshot);
+    const status_limit = @min(5, size.row - 2 - @as(usize, if (live.total != 0 and size.row > 2) 1 else 0));
+    const status_view = if (status_limit != 0) try viewport(status_writer.buffered(), 0, size.col - 1, status_limit, &status_snapshot) else Viewport{ .rows = 0, .first = 0, .caret = .{} };
     const heading: usize = if (status.len == 0) 0 else status_view.rows;
+    const available = size.row - heading - 2;
+    var visible: usize = 0;
+    var activity_rows: usize = 0;
+    var activity_buffer: [3][View.Live.line_bytes]u8 = undefined;
+    var activity: [3]Viewport = undefined;
+    var line_buffer: [View.Live.line_bytes]u8 = undefined;
+    var overflow_buffer: [80]u8 = undefined;
+    var overflow_snapshot: [overflow_buffer.len]u8 = undefined;
+    // Fit complete call descriptions and outcome explanations, not clipped
+    // one-line prefixes that can make denial or uncertainty look unresolved.
+    for (0..live.count) |index| {
+        const line = try live.line(index, &line_buffer);
+        const wrapped = try viewport(line, 0, size.col - 1, 5, &activity_buffer[index]);
+        const remaining = live.total - index - 1;
+        const extra = if (remaining != 0) try viewport(try std.fmt.bufPrint(&overflow_buffer, "+{d} more calls · /status", .{remaining}), 0, size.col - 1, 5, &overflow_snapshot) else Viewport{ .rows = 0, .first = 0, .caret = .{} };
+        if (wrapped.total_rows != wrapped.rows or activity_rows + wrapped.rows + extra.total_rows > available) break;
+        activity[index] = wrapped;
+        activity_rows += wrapped.rows;
+        visible += 1;
+    }
+    const overflow = live.total > visible and available != 0;
+    const overflow_line = if (overflow) try std.fmt.bufPrint(&overflow_buffer, "+{d} more calls · /status", .{live.total - visible}) else "";
+    const overflow_view = if (overflow) try viewport(overflow_line, 0, size.col - 1, 5, &overflow_snapshot) else Viewport{ .rows = 0, .first = 0, .caret = .{} };
+    if (overflow_view.total_rows > available - activity_rows or overflow_view.total_rows != overflow_view.rows) return error.UncertainTerminalCursor;
+    activity_rows += overflow_view.rows;
     const prompt_columns = try std.unicode.utf8CountCodepoints(prompt);
-    if (heading + 1 >= size.row) return error.UncertainTerminalCursor;
     // Visible raw bytes cannot exceed the complete semantic draft. Tabs expand
     // only during emission, without consuming a second semantic-byte budget.
     var snapshot: [@import("SessionInput.zig").capacity]u8 = undefined;
     const columns = size.col - prompt_columns - 1;
-    const view = try viewport(bytes, cursor, columns, @min(5, size.row - heading - 1), &snapshot);
+    const view = try viewport(bytes, cursor, columns, @min(5, size.row - heading - activity_rows - 1), &snapshot);
     try self.clear();
     // Own the spacer along with the composer, so repeated redraws erase it
     // rather than growing scrollback or moving transcript rows.
@@ -269,9 +309,25 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
         if (row != 0) try self.write("\r\n");
         try self.writeRow(status_view.data[row], size.col - 1);
     }
+    for (activity[0..visible], 0..) |wrapped, index| {
+        if (heading != 0 or index != 0) try self.write("\r\n");
+        try self.write(live.style(index).code(self.colour));
+        for (0..wrapped.rows) |row| {
+            if (row != 0) try self.write("\r\n");
+            try self.writeRow(wrapped.data[row], size.col - 1);
+        }
+    }
+    if (overflow) {
+        if (heading + visible != 0) try self.write("\r\n");
+        try self.write(Style.quiet.code(self.colour));
+        for (0..overflow_view.rows) |row| {
+            if (row != 0) try self.write("\r\n");
+            try self.writeRow(overflow_view.data[row], size.col - 1);
+        }
+    }
     try self.write(Style.normal.code(self.colour));
     for (0..view.rows) |row| {
-        if (row != 0 or heading != 0) try self.write("\r\n");
+        if (row != 0 or heading + activity_rows != 0) try self.write("\r\n");
         try self.write((if (std.mem.eql(u8, prompt, "> ")) Style.attention else Style.user).code(self.colour));
         try self.write(if (row == 0) prompt else "> ");
         try self.write(Style.normal.code(self.colour));
@@ -281,8 +337,8 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
     const up = view.rows - 1 - view.caret.row;
     if (up != 0) try self.write(try std.fmt.bufPrint(&control, "\x1b[{d}A", .{up}));
     try self.write(try std.fmt.bufPrint(&control, "\r\x1b[{d}C", .{view.caret.col + @as(usize, if (view.caret.row == 0) prompt_columns else 2)}));
-    self.rows = view.rows + heading + 1;
-    self.caret_row = view.caret.row + heading + 1;
+    self.rows = view.rows + heading + activity_rows + 1;
+    self.caret_row = view.caret.row + heading + activity_rows + 1;
     self.size = size;
 }
 
@@ -307,6 +363,7 @@ const Position = struct { row: usize = 0, col: usize = 0 };
 const Viewport = struct {
     data: [5][]const u8 = @splat(""),
     rows: usize,
+    total_rows: usize = 0,
     first: usize,
     caret: Position,
 };
@@ -381,7 +438,7 @@ fn viewport(bytes: []const u8, cursor: usize, columns: usize, limit: usize, stor
         if (pass == 0) {
             const first = if (caret.row >= limit) caret.row - limit + 1 else 0;
             const rows = @min(limit, pos.row - first + 1);
-            result = .{ .rows = rows, .first = first, .caret = .{ .row = caret.row - first, .col = caret.col } };
+            result = .{ .rows = rows, .total_rows = pos.row + 1, .first = first, .caret = .{ .row = caret.row - first, .col = caret.col } };
         }
     }
     return result;

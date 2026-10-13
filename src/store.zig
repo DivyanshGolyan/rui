@@ -10,7 +10,7 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 19;
+pub const schema_version: u32 = 20;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 const public_tool_groups_sql = "WITH groups AS (SELECT op.operation_id,max(coalesce(call.acceptance_position,action.acceptance_position)) AS position " ++
@@ -314,6 +314,7 @@ pub const PublicConversationItem = struct {
     ordinal: u64, // Zero for User/Assistant; one-based call ordinal in a completed Tool Result group.
     kind: enum { user, assistant, tool_result },
     content: ContentReference,
+    presentation: ?protocol.ToolPresentation = null,
 };
 
 pub const PublicConversationPage = struct {
@@ -2616,7 +2617,7 @@ pub const Store = struct {
                 3 => .assistant,
                 4 => .tool_result,
                 else => unreachable,
-            }, .content = .{ .length = metadata.length, .digest = metadata.digest } };
+            }, .content = .{ .length = metadata.length, .digest = metadata.digest }, .presentation = if (resolved.tool_operation) |operation| try self.toolPresentationLocked(operation, @intCast(ordinal - 1), @intCast(position)) else null };
             page.count += 1;
         }
         return page;
@@ -2645,7 +2646,7 @@ pub const Store = struct {
 
     // A cursor and a byte reader resolve the same public identity and exposed
     // metadata. Neither may accept a private or absent canonical result.
-    fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !struct { id: i64, metadata: ContentMetadata } {
+    fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !struct { id: i64, metadata: ContentMetadata, tool_operation: ?u64 } {
         // One indexed ordinary identity owns provenance for pages, cursors and
         // bytes. LEFT JOIN retains damage instead of hiding dependencies.
         const statement = try prepare(self.database, if (ordinal == 0)
@@ -2665,7 +2666,7 @@ pub const Store = struct {
                 "LEFT JOIN content result ON result.content_id=a.resolution_content_id " ++
                 "WHERE linked.operation_id=op.operation_id AND CASE WHEN item.item_kind=3 AND item.session_ref=op.session_ref AND t.session_ref=op.session_ref " ++
                 "AND item.attempt_ordinal=op.attempt_ordinal AND source.private=1 AND id.private=0 AND id.digest=item.item_id_digest AND " ++
-                "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref AND result.private=0)) THEN 0 ELSE 1 END=1) FROM model_operation op " ++
+                "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref AND result.private=0)) THEN 0 ELSE 1 END=1),op.operation_id,call.call_ordinal FROM model_operation op " ++
                 "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
                 "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
                 "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' AND call.call_ordinal+1=?3 " ++
@@ -2688,7 +2689,83 @@ pub const Store = struct {
         if (c.sqlite3_column_int(statement, 1) != 1) return error.CorruptStore;
         const content_id = c.sqlite3_column_int64(statement, 0);
         if (content_id <= 0) return error.CorruptStore;
-        return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id) };
+        return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id), .tool_operation = if (ordinal == 0) null else @intCast(try readNullablePositiveI64(statement, 2) orelse return error.CorruptStore) };
+    }
+
+    fn toolPresentationLocked(self: *Store, operation: u64, ordinal: u64, publication_position: ?u64) !protocol.ToolPresentation {
+        const statement = try prepare(self.database, "SELECT call.name_content_id,call.arguments_content_id,coalesce(call.rejection_code,a.resolution_code),a.permission_state FROM model_tool_call call LEFT JOIN action_operation a ON a.parent_operation_id=call.operation_id AND a.call_ordinal=call.call_ordinal WHERE call.operation_id=?1 AND call.call_ordinal=?2");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, operation);
+        try bindU64(statement, 2, ordinal);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        var result: protocol.ToolPresentation = .{ .description = null, .code = .unresolved, .publication_position = publication_position };
+        if (c.sqlite3_column_type(statement, 2) != c.SQLITE_NULL) {
+            var code: protocol.Bounded(32) = .{};
+            try readText(statement, 2, &code);
+            result.code = std.meta.stringToEnum(protocol.ToolPresentation.Code, code.slice()) orelse return error.CorruptStore;
+        } else if (c.sqlite3_column_int(statement, 3) == 0) result.code = .pending_permission;
+        const Source = struct {
+            store: *Store,
+            reader: ContentReader,
+            offset: u64 = 0,
+            window: [4096]u8 = undefined,
+            used: usize = 0,
+            count: usize = 0,
+            pub fn peek(source: *@This()) !?u8 {
+                if (source.used == source.count) {
+                    const wanted: usize = @intCast(@min(source.window.len, source.reader.reference.length - source.offset));
+                    source.count = try source.store.readOwnedContentLocked(&source.reader, source.offset, source.window[0..wanted]);
+                    source.used = 0;
+                    source.offset += source.count;
+                    if (source.count == 0) return null;
+                }
+                return source.window[source.used];
+            }
+            pub fn take(source: *@This()) !u8 {
+                const byte = try source.peek() orelse return error.UnexpectedEof;
+                source.used += 1;
+                return byte;
+            }
+            pub fn next(source: *@This()) !?u8 {
+                return if (try source.peek() != null) try source.take() else null;
+            }
+        };
+        const name_id = c.sqlite3_column_int64(statement, 0);
+        const name = try self.readPublicContentMetadata(name_id);
+        var name_source = Source{ .store = self, .reader = try self.openContentIdentityLocked(.{ .length = name.length, .digest = name.digest }, false) };
+        defer name_source.reader.close();
+        var is_bash = true;
+        var index: usize = 0;
+        while (try name_source.next()) |byte| : (index += 1) {
+            if (index >= "bash".len or byte != "bash"[@min(index, "bash".len - 1)]) is_bash = false;
+        }
+        if (!is_bash or index != "bash".len) return switch (result.code) {
+            .unknown_tool, .invalid_arguments, .tool_unavailable => result,
+            else => error.CorruptStore,
+        };
+        const arguments = try self.readPublicContentMetadata(c.sqlite3_column_int64(statement, 1));
+        var source = Source{ .store = self, .reader = try self.openContentIdentityLocked(.{ .length = arguments.length, .digest = arguments.digest }, false) };
+        defer source.reader.close();
+        const parsed = try tool_catalog.inspectBashArguments(&source);
+        // Invalid syntax can stop the descriptor parser early; canonical
+        // projection integrity still requires the actual complete stream.
+        while (try source.next() != null) {}
+        if (parsed) |args| {
+            result.description = args.description;
+        } else switch (result.code) {
+            .unknown_tool, .invalid_arguments, .tool_unavailable => {},
+            else => return error.CorruptStore,
+        }
+        return result;
+    }
+
+    fn appendToolPresentation(self: *Store, operation: u64, ordinal: u64, publication_position: ?u64, capture: *SessionReportCapture) !void {
+        const presentation = try self.toolPresentationLocked(operation, ordinal, publication_position);
+        var buffer: [protocol.max_tool_presentation_json_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try presentation.writeJson(&writer);
+        try capture.append(",\"presentation\":");
+        try capture.append(writer.buffered());
     }
 
     pub fn activityPage(self: *Store, request: protocol.ActivityPage) !protocol.ActivityFacts {
@@ -2801,7 +2878,7 @@ pub const Store = struct {
             },
             3, 5 => |kind| {
                 const content = try self.publicConversationContentLocked(session, position, ordinal);
-                result.item.value = if (kind == 3) .{ .assistant = .{ .length = content.metadata.length, .digest = content.metadata.digest } } else .{ .tool_result = .{ .length = content.metadata.length, .digest = content.metadata.digest } };
+                result.item.value = if (kind == 3) .{ .assistant = .{ .length = content.metadata.length, .digest = content.metadata.digest } } else .{ .tool_result = .{ .content = .{ .length = content.metadata.length, .digest = content.metadata.digest }, .presentation = try self.toolPresentationLocked(content.tool_operation orelse return error.CorruptStore, ordinal - 1, position) } };
                 result.content_id = content.id;
             },
             4 => result.item.value = .{ .call = (try self.proposalLocked(session, position)).metadata },
@@ -2849,11 +2926,21 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.validateActivitySequence(request.session.slice()) catch |err| return self.fenceReadFailure(err);
-        const identity = self.activityItemLocked(request.session.slice(), std.math.maxInt(i64), request.position, request.ordinal) catch |err| switch (err) {
-            error.ContentNotFound => return err,
-            else => return self.fenceReadFailure(err),
+        // Only Tool Results have nonzero ordinals. Byte readers need their
+        // canonical identity, not a second scan of the original arguments.
+        const id = if (request.ordinal != 0) id: {
+            const content = self.publicConversationContentLocked(request.session.slice(), request.position, request.ordinal) catch |err| switch (err) {
+                error.ContentNotFound => return err,
+                else => return self.fenceReadFailure(err),
+            };
+            break :id content.id;
+        } else id: {
+            const identity = self.activityItemLocked(request.session.slice(), std.math.maxInt(i64), request.position, request.ordinal) catch |err| switch (err) {
+                error.ContentNotFound => return err,
+                else => return self.fenceReadFailure(err),
+            };
+            break :id identity.content_id orelse return error.ContentNotFound;
         };
-        const id = identity.content_id orelse return error.ContentNotFound;
         const content = self.readPublicContentMetadata(id) catch |err| return self.fenceReadFailure(err);
         const raw = self.contentIsRaw(id, content.length) catch |err| return self.fenceReadFailure(err);
         return .{ .store = self, .content_id = id, .reference = .{ .length = content.length, .digest = content.digest }, .representation = if (raw) .raw else .{ .projection = .{} } };
@@ -3365,6 +3452,7 @@ pub const Store = struct {
                 .length = @intCast(arguments_length),
                 .digest = try readDigest(statement, 8),
             });
+            try self.appendToolPresentation(@intCast(parent), @intCast(ordinal), null, capture);
             try capture.append("}");
         }
     }
@@ -3388,6 +3476,8 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         var first = true;
+        var last_parent: i64 = 0;
+        var publication: ?u64 = null;
         while (true) {
             const result = c.sqlite3_step(statement);
             if (result == c.SQLITE_DONE) return;
@@ -3398,6 +3488,10 @@ pub const Store = struct {
             const position = c.sqlite3_column_int64(statement, 4);
             const length = c.sqlite3_column_int64(statement, 5);
             if (action_id <= 0 or parent <= 0 or ordinal < 0 or position <= 0 or length < 0) return error.CorruptStore;
+            if (parent != last_parent) {
+                publication = (try self.readToolOutcomeFacts(@intCast(parent), false)).position;
+                last_parent = parent;
+            }
             var code: protocol.Bounded(32) = .{};
             try readText(statement, 3, &code);
             if (!first) try capture.append(",");
@@ -3413,6 +3507,7 @@ pub const Store = struct {
                 .length = @intCast(length),
                 .digest = try readDigest(statement, 6),
             });
+            try self.appendToolPresentation(@intCast(parent), @intCast(ordinal), publication, capture);
             try capture.append("}");
         }
     }
@@ -3443,6 +3538,8 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         var first = true;
+        var last_parent: i64 = 0;
+        var publication: ?u64 = null;
         while (true) {
             const result = c.sqlite3_step(statement);
             if (result == c.SQLITE_DONE) return;
@@ -3452,6 +3549,10 @@ pub const Store = struct {
             const acceptance_position = c.sqlite3_column_int64(statement, 3);
             const rejection_length = c.sqlite3_column_int64(statement, 4);
             if (operation_id <= 0 or call_ordinal < 0 or acceptance_position <= 0 or rejection_length < 0) return error.CorruptStore;
+            if (operation_id != last_parent) {
+                publication = (try self.readToolOutcomeFacts(@intCast(operation_id), false)).position;
+                last_parent = operation_id;
+            }
             var code: protocol.Bounded(32) = .{};
             try readText(statement, 2, &code);
             if (!first) try capture.append(",");
@@ -3482,6 +3583,7 @@ pub const Store = struct {
                     .digest = try readDigest(statement, field[2]),
                 });
             }
+            try self.appendToolPresentation(@intCast(operation_id), @intCast(call_ordinal), publication, capture);
             try capture.append("}");
         }
     }
@@ -4034,7 +4136,7 @@ pub const Store = struct {
         const position = try readNullablePositiveI64(statement, 4);
         if (require_terminal and position == null) return error.CorruptStore;
         return .{
-            .position = if (position) |value| @intCast(value) else null,
+            .position = if (terminal == expected) (if (position) |value| @intCast(value) else null) else null,
             .call_count = @intCast(calls),
         };
     }
@@ -7343,16 +7445,16 @@ fn settleTwoActionsForTesting(
             .name = "bash",
             .encoded_call_id = "call\\nA",
             .decoded_call_id = "call\nA",
-            .encoded_arguments = "{\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}",
-            .decoded_arguments = "{\"cmd\":\"one\",\"timeout_ms\":null}",
+            .encoded_arguments = "{\\\"description\\\":\\\"Run first command\\\",\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run first command\",\"cmd\":\"one\",\"timeout_ms\":null}",
         },
         .{
             .item_id = "item-2",
             .name = "bash",
             .encoded_call_id = "call-B",
             .decoded_call_id = "call-B",
-            .encoded_arguments = "{\\\"cmd\\\":\\\"two\\\",\\\"timeout_ms\\\":null}",
-            .decoded_arguments = "{\"cmd\":\"two\",\"timeout_ms\":null}",
+            .encoded_arguments = "{\\\"description\\\":\\\"Run second command\\\",\\\"cmd\\\":\\\"two\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run second command\",\"cmd\":\"two\",\"timeout_ms\":null}",
         },
     };
     try settleCallsForTesting(storage, tmp, binding, file_prefix, &calls);
@@ -7944,6 +8046,12 @@ test "Bash proposals retain exact order permission provenance denial and stop te
         defer parsed.deinit();
         try std.testing.expectEqualStrings("2", parsed.value.actions.count);
         try std.testing.expectEqual(@as(usize, 2), parsed.value.actions.unresolved.len);
+        const wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report_bytes, .{});
+        defer wire.deinit();
+        const presentation = wire.value.object.get("actions").?.object.get("unresolved").?.array.items[0].object.get("presentation").?.object;
+        try std.testing.expectEqualStrings("Run first command", presentation.get("description").?.string);
+        try std.testing.expectEqualStrings("pending_permission", presentation.get("code").?.string);
+        try std.testing.expect(presentation.get("publication_position").? == .null);
         const first = parsed.value.actions.unresolved[0];
         try std.testing.expectEqualStrings("0", first.call_ordinal);
         try std.testing.expectEqualStrings("1", first.permission_revision);
@@ -7953,7 +8061,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     try std.testing.expectError(error.ActionNotFound, storage.actionArguments("direct/actions", std.math.maxInt(u64)));
     try std.testing.expect(!storage.isFenced());
     try expectContent(&storage, try storage.actionCallId("direct/actions", first_action_id), "call\nA");
-    try expectContent(&storage, try storage.actionArguments("direct/actions", first_action_id), "{\"cmd\":\"one\",\"timeout_ms\":null}");
+    try expectContent(&storage, try storage.actionArguments("direct/actions", first_action_id), "{\"description\":\"Run first command\",\"cmd\":\"one\",\"timeout_ms\":null}");
 
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
     try deny.key.set("deny-first");
@@ -7977,13 +8085,22 @@ test "Bash proposals retain exact order permission provenance denial and stop te
         const parsed = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, report_bytes, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
         try std.testing.expectEqual(@as(usize, 1), parsed.value.actions.unresolved.len);
+        const wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report_bytes, .{});
+        defer wire.deinit();
+        const resolved = wire.value.object.get("actions").?.object.get("resolved").?.array.items[0].object;
+        try std.testing.expectEqualStrings("0", resolved.get("call_ordinal").?.string);
+        const presentation = resolved.get("presentation").?.object;
+        try std.testing.expectEqualStrings("Run first command", presentation.get("description").?.string);
+        try std.testing.expectEqualStrings("denied", presentation.get("code").?.string);
+        // A terminal sibling is not a published complete group.
+        try std.testing.expectEqual(std.json.Value.null, std.meta.activeTag(presentation.get("publication_position").?));
         const second = parsed.value.actions.unresolved[0];
         try std.testing.expectEqualStrings("1", second.call_ordinal);
         try std.testing.expectEqualStrings("1", second.permission_revision);
         break :second try std.fmt.parseInt(u64, second.action, 10);
     };
     try expectContent(&storage, try storage.actionCallId("direct/actions", second_action_id), "call-B");
-    try expectContent(&storage, try storage.actionArguments("direct/actions", second_action_id), "{\"cmd\":\"two\",\"timeout_ms\":null}");
+    try expectContent(&storage, try storage.actionArguments("direct/actions", second_action_id), "{\"description\":\"Run second command\",\"cmd\":\"two\",\"timeout_ms\":null}");
 
     var stop = try completeSessionStop("action-stop", "direct/actions");
     const action_stop = storage.stopSession(&stop, .{});
@@ -7995,6 +8112,19 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     try std.testing.expectEqual(settled_page.items[0].position, settled_page.items[1].position);
     try std.testing.expectEqual(@as(u64, 2), settled_page.items[0].ordinal);
     try std.testing.expectEqual(@as(u64, 1), settled_page.items[1].ordinal);
+    try std.testing.expectEqualStrings("Run second command", settled_page.items[0].presentation.?.description.?.slice());
+    try std.testing.expectEqualStrings("Run first command", settled_page.items[1].presentation.?.description.?.slice());
+    try std.testing.expectEqual(protocol.ToolPresentation.Code.denied, settled_page.items[1].presentation.?.code);
+    for (settled_page.items[0..2]) |item| try std.testing.expectEqual(item.position, item.presentation.?.publication_position.?);
+    const activity = try storage.activityPage(.{ .session = public_request.session, .direction = .backward });
+    var results: usize = 0;
+    for (activity.items[0..activity.count]) |item| if (item.value == .tool_result) {
+        const p = item.value.tool_result.presentation;
+        try std.testing.expectEqual(item.position, p.publication_position.?);
+        try std.testing.expectEqualStrings(if (item.ordinal == 1) "Run first command" else "Run second command", p.description.?.slice());
+        results += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), results);
     var result_reader = try storage.openPublicConversationContent(.{
         .session = public_request.session,
         .position = settled_page.items[0].position,
@@ -8101,8 +8231,8 @@ test "Action settlement atomically yields to an earlier Session stop" {
         .name = "bash",
         .encoded_call_id = "settlement-stop-call",
         .decoded_call_id = "settlement-stop-call",
-        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
-        .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+        .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
     }};
     try settleCallsForTesting(&storage, &tmp, model_binding, "settlement-stop-metadata", &calls);
     const action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation");
@@ -8173,8 +8303,8 @@ test "earlier Action settlement remains authoritative after Session stop" {
         .name = "bash",
         .encoded_call_id = "settlement-first-call",
         .decoded_call_id = "settlement-first-call",
-        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
-        .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+        .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
     }};
     try settleCallsForTesting(&storage, &tmp, model_binding, "settlement-first-metadata", &calls);
     const action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation");
@@ -8263,8 +8393,8 @@ test "Full reports every closed Action resolution without fencing" {
         .name = "bash",
         .encoded_call_id = "shutdown-report-call",
         .decoded_call_id = "shutdown-report-call",
-        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":1234}",
-        .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":1234}",
+        .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":1234}",
+        .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":1234}",
     }};
     try settleCallsForTesting(&storage, &tmp, model_binding, "shutdown-report-metadata", &calls);
     const action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation");
@@ -8371,6 +8501,26 @@ test "canonical report and Action read failures fence later commands" {
     try std.testing.expectError(error.CorruptStore, action_store.actionCallId("direct/action-corrupt", action_id));
     try std.testing.expect(action_store.isFenced());
     try std.testing.expectError(error.StoreFenced, action_store.actionArguments("direct/action-corrupt", action_id));
+
+    // Existing public content is not necessarily a valid accepted descriptor.
+    // A changed name must fence just like changed arguments, before dispatch.
+    for ([_][:0]const u8{
+        "UPDATE model_tool_call SET arguments_content_id=name_content_id",
+        "UPDATE model_tool_call SET name_content_id=call_id_content_id",
+    }) |damage| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try configureTestSession(&storage, "descriptor-config", "direct/descriptor-corrupt");
+        try submitTestMessage(&storage, &tmp, "descriptor-input", "descriptor-message", "direct/descriptor-corrupt", "propose");
+        const source = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try settleTwoActionsForTesting(&storage, &tmp, source, "descriptor-metadata");
+        try exec(storage.database, damage);
+        try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, "direct/descriptor-corrupt", 1024 * 1024));
+        try std.testing.expect(storage.isFenced());
+        try std.testing.expectError(error.StoreFenced, storage.admitNextActionAttempt(300_000, .{}));
+    }
 }
 
 test "Core classifies trustworthy calls atomically without Action-shaped rejections" {
@@ -8384,13 +8534,13 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     try submitTestMessage(&storage, &tmp, "mixed-message", "mixed-message", "direct/mixed-calls", "classify");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
-        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"one\",\"timeout_ms\":null}" },
+        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run first command\\\",\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run first command\",\"cmd\":\"one\",\"timeout_ms\":null}" },
         .{ .item_id = "item-2", .name = "other", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{}", .decoded_arguments = "{}" },
         .{ .item_id = "item-3", .name = "bash", .encoded_call_id = "call-3", .decoded_call_id = "call-3", .encoded_arguments = "{", .decoded_arguments = "{" },
         .{ .item_id = "item-4", .name = "bash", .encoded_call_id = "call-4", .decoded_call_id = "call-4", .encoded_arguments = "{\\\"command\\\":\\\"wrong\\\"}", .decoded_arguments = "{\"command\":\"wrong\"}" },
         .{ .item_id = "item-5", .name = "edit", .encoded_call_id = "call-5", .decoded_call_id = "call-5", .encoded_arguments = "{}", .decoded_arguments = "{}" },
         .{ .item_id = "item-6", .name = "x" ** 300, .encoded_call_id = "call-6", .decoded_call_id = "call-6", .encoded_arguments = "{}", .decoded_arguments = "{}" },
-        .{ .item_id = "item-7", .name = "bash", .encoded_call_id = "call-7", .decoded_call_id = "call-7", .encoded_arguments = "{\\\"cmd\\\":\\\"seven\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"seven\",\"timeout_ms\":null}" },
+        .{ .item_id = "item-7", .name = "bash", .encoded_call_id = "call-7", .decoded_call_id = "call-7", .encoded_arguments = "{\\\"description\\\":\\\"Run seventh command\\\",\\\"cmd\\\":\\\"seven\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run seventh command\",\"cmd\":\"seven\",\"timeout_ms\":null}" },
     };
     try settleCallsForTesting(&storage, &tmp, binding, "mixed-metadata", &calls);
 
@@ -8447,6 +8597,13 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
         }
         var full = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report_bytes, .{});
         defer full.deinit();
+        const rejected_rows = full.value.object.get("rejected_calls").?.object.get("items").?.array.items;
+        for (rejected_rows) |row| {
+            const p = row.object.get("presentation").?.object;
+            try std.testing.expect(p.get("description").? == .null);
+            try std.testing.expect(p.get("publication_position").? == .null);
+            try std.testing.expectEqualStrings(row.object.get("code").?.string, p.get("code").?.string);
+        }
         const full_rejected = full.value.object.get("full").?.object.get("tool_calls").?.array.items[1].object;
         try std.testing.expectEqualStrings("other", full_rejected.get("name").?.object.get("text").?.string);
         try std.testing.expectEqualStrings("{}", full_rejected.get("arguments").?.object.get("text").?.string);
@@ -8517,7 +8674,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
             "AND action_id=CAST((SELECT min(action_id) FROM action_operation) AS TEXT)",
     ));
     try expectContent(&reopened, try reopened.actionCallId("direct/mixed-calls", first_action_id), "call-1");
-    try expectContent(&reopened, try reopened.actionArguments("direct/mixed-calls", first_action_id), "{\"cmd\":\"one\",\"timeout_ms\":null}");
+    try expectContent(&reopened, try reopened.actionArguments("direct/mixed-calls", first_action_id), "{\"description\":\"Run first command\",\"cmd\":\"one\",\"timeout_ms\":null}");
     const recovered_bytes = try testingSessionReport(&reopened, &tmp, "direct/mixed-calls", 1024 * 1024);
     defer std.testing.allocator.free(recovered_bytes);
     const recovered_report = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, recovered_bytes, .{ .ignore_unknown_fields = true });
@@ -8537,10 +8694,10 @@ test "complete call outcomes continue once in call order ahead of pending input"
     try submitTestMessage(&storage, &tmp, "result-first", "result-first", "direct/tool-results", "first");
     const first_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
-        .{ .item_id = "result-item-0", .name = "bash", .encoded_call_id = "result-call-0", .decoded_call_id = "result-call-0", .encoded_arguments = "{\\\"cmd\\\":\\\"zero\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"zero\",\"timeout_ms\":null}" },
+        .{ .item_id = "result-item-0", .name = "bash", .encoded_call_id = "result-call-0", .decoded_call_id = "result-call-0", .encoded_arguments = "{\\\"description\\\":\\\"Run zeroth command\\\",\\\"cmd\\\":\\\"zero\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run zeroth command\",\"cmd\":\"zero\",\"timeout_ms\":null}" },
         .{ .item_id = "result-item-1", .name = "unknown", .encoded_call_id = "result-call-1", .decoded_call_id = "result-call-1", .encoded_arguments = "{}", .decoded_arguments = "{}" },
         .{ .item_id = "result-item-2", .name = "bash", .encoded_call_id = "result-call-2", .decoded_call_id = "result-call-2", .encoded_arguments = "{", .decoded_arguments = "{" },
-        .{ .item_id = "result-item-3", .name = "bash", .encoded_call_id = "result-call-3", .decoded_call_id = "result-call-3", .encoded_arguments = "{\\\"cmd\\\":\\\"three\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"three\",\"timeout_ms\":null}" },
+        .{ .item_id = "result-item-3", .name = "bash", .encoded_call_id = "result-call-3", .decoded_call_id = "result-call-3", .encoded_arguments = "{\\\"description\\\":\\\"Run third command\\\",\\\"cmd\\\":\\\"three\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run third command\",\"cmd\":\"three\",\"timeout_ms\":null}" },
     };
     try settleCallsForTesting(&storage, &tmp, first_binding, "result-metadata", &calls);
     try submitTestMessage(&storage, &tmp, "result-second", "result-second", "direct/tool-results", "second");
@@ -8624,7 +8781,7 @@ test "terminal call-result import and read failures preserve canonical authority
     try configureTestSessionAsk(&import_store, "result-import-config", "direct/result-import", false);
     try submitTestMessage(&import_store, &import_tmp, "result-import-message", "result-import-message", "direct/result-import", "call");
     const import_binding = (try import_store.admitNextModelAttempt(.{})).?.permit.binding;
-    const valid_call = [_]TestingCall{.{ .item_id = "import-item", .name = "bash", .encoded_call_id = "import-call", .decoded_call_id = "import-call", .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}" }};
+    const valid_call = [_]TestingCall{.{ .item_id = "import-item", .name = "bash", .encoded_call_id = "import-call", .decoded_call_id = "import-call", .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}" }};
     try settleCallsForTesting(&import_store, &import_tmp, import_binding, "result-import-metadata", &valid_call);
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = try queryU64(import_store.database, "SELECT action_id FROM action_operation") };
     try deny.key.set("result-import-deny");
@@ -8681,8 +8838,8 @@ test "runnable discovery fences structurally incomplete current tool calls" {
             .name = "bash",
             .encoded_call_id = "discovery-call",
             .decoded_call_id = "discovery-call",
-            .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
-            .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+            .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
         }};
         try settleCallsForTesting(&storage, &tmp, source, metadata[index], &calls);
         try exec(storage.database, "PRAGMA foreign_keys=OFF");
@@ -8727,8 +8884,8 @@ test "missing canonical call outcome rows fence history and inspection" {
             .name = "bash",
             .encoded_call_id = "missing-call",
             .decoded_call_id = "missing-call",
-            .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
-            .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+            .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
         }};
         try settleCallsForTesting(
             &storage,
@@ -9128,8 +9285,8 @@ test "call classification uses the proposing Operation frozen catalog" {
         .name = "bash",
         .encoded_call_id = "frozen-call",
         .decoded_call_id = "frozen-call",
-        .encoded_arguments = "{\\\"cmd\\\":\\\"echo frozen\\\",\\\"timeout_ms\\\":null}",
-        .decoded_arguments = "{\"cmd\":\"echo frozen\",\"timeout_ms\":null}",
+        .encoded_arguments = "{\\\"description\\\":\\\"Print frozen marker\\\",\\\"cmd\\\":\\\"echo frozen\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"description\":\"Print frozen marker\",\"cmd\":\"echo frozen\",\"timeout_ms\":null}",
     }};
     try settleCallsForTesting(&storage, &tmp, binding, "frozen-call-metadata", &calls);
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation"));
@@ -9146,8 +9303,8 @@ test "duplicate trustworthy call identity rolls back every imported consequence"
     try submitTestMessage(&storage, &tmp, "duplicate-call-message", "duplicate-call-message", "direct/duplicate-call", "duplicate");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
-        .{ .item_id = "duplicate-item-1", .name = "bash", .encoded_call_id = "same-call", .decoded_call_id = "same-call", .encoded_arguments = "{\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"one\",\"timeout_ms\":null}" },
-        .{ .item_id = "duplicate-item-2", .name = "bash", .encoded_call_id = "same-call", .decoded_call_id = "same-call", .encoded_arguments = "{\\\"cmd\\\":\\\"two\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"two\",\"timeout_ms\":null}" },
+        .{ .item_id = "duplicate-item-1", .name = "bash", .encoded_call_id = "same-call", .decoded_call_id = "same-call", .encoded_arguments = "{\\\"description\\\":\\\"Run first command\\\",\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run first command\",\"cmd\":\"one\",\"timeout_ms\":null}" },
+        .{ .item_id = "duplicate-item-2", .name = "bash", .encoded_call_id = "same-call", .decoded_call_id = "same-call", .encoded_arguments = "{\\\"description\\\":\\\"Run second command\\\",\\\"cmd\\\":\\\"two\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run second command\",\"cmd\":\"two\",\"timeout_ms\":null}" },
     };
     try std.testing.expectError(
         error.InvalidProviderEnvelope,
@@ -9180,8 +9337,8 @@ test "valid and rejected call populations grow independently" {
             .name = "bash",
             .encoded_call_id = valid_call,
             .decoded_call_id = valid_call,
-            .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
-            .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+            .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
         };
         const rejected_item = try std.fmt.bufPrint(&rejected_item_storage[index], "rejected-item-{d}", .{index});
         const rejected_call = try std.fmt.bufPrint(&rejected_call_storage[index], "rejected-call-{d}", .{index});
@@ -9457,8 +9614,8 @@ test "controls wait behind an active model settlement transaction" {
         .name = "bash",
         .encoded_call_id = "transaction-race-call",
         .decoded_call_id = "transaction-race-call",
-        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
-        .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+        .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
     }};
 
     const SettlementCheckpoint = enum(u8) { waiting, transaction_active, worker_finished };
@@ -9673,7 +9830,7 @@ test "controls wait behind an active model settlement transaction" {
     try expectContent(
         &storage,
         try storage.actionArguments("direct/transaction-race", action_id),
-        "{\"cmd\":\"true\",\"timeout_ms\":null}",
+        "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
     );
 }
 

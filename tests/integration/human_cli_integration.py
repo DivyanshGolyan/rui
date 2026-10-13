@@ -269,7 +269,7 @@ def command_entry_cases():
         fixture.sse_answer("stdin-answer", "stdin-reason", "stdin-message", "Stdin answered.")[0],
         fixture.ResponseSpec(b'{"error":"denied"}', {}, 401),
         fixture.sse_answer("lost-answer", "lost-reason", "lost-message", "Lost reply recovered.")[0],
-        (fixture.sse_tool_calls("exec-tools", [("bash", "exec-call", json.dumps({"cmd": "touch must-not-run", "timeout_ms": None}))]), permission_release),
+        (fixture.sse_tool_calls("exec-tools", [("bash", "exec-call", json.dumps({"cmd": "touch must-not-run", "description": "Create forbidden marker", "timeout_ms": None}))]), permission_release),
         fixture.sse_answer("dash-answer", "dash-reason", "dash-message", "Literal dash answered.")[0],
         fixture.sse_answer("option-answer", "option-reason", "option-message", "Literal option answered.")[0],
     ])
@@ -1042,11 +1042,12 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
     store = state / "store'$(false)"
     reference = "persistent/permission'$(false) é\n"
     answer = "after explicit denial" if decision == "deny-action" else "after explicit approval"
-    arguments = json.dumps({"cmd": f"printf inspection-only-output; printf unsafe >> effect-count; exit {exit_code}", "timeout_ms": 30000})
+    description = "Inspect café output"
+    arguments = json.dumps({"cmd": f"printf inspection-only-output; printf unsafe >> effect-count; exit {exit_code}", "description": description, "timeout_ms": 30000})
     calls = [("bash", "persistent-call-id", arguments)]
     second_command = "printf distinct >> second-effect"
     if stale_target:
-        calls.append(("bash", "persistent-second-id", json.dumps({"cmd": second_command, "timeout_ms": None})))
+        calls.append(("bash", "persistent-second-id", json.dumps({"cmd": second_command, "description": "Write sibling effect", "timeout_ms": None})))
     endpoint = fixture.SuccessEndpoint([
         fixture.sse_tool_calls("persistent-call", calls),
         fixture.sse_answer("persistent-answer", "persistent-reason", "persistent-message", answer)[0],
@@ -1062,7 +1063,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
     completed = False
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
-            *(("--fault", "bash-signal") if signal_failure else ()))
+            *(("--fault", "bash-signal") if signal_failure else ()), active_capacity=4)
         run(home, "configure", "--store", store, "--session", reference,
             "--workspace", state, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
         master, slave = pty.openpty()
@@ -1103,6 +1104,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert "item_id:" not in transcript and "call_id:" not in transcript and "arguments:" not in transcript, transcript
         assert transcript.count("Workspace:") == 1 and transcript.count("Run Bash:") == 1, transcript
         assert f"\n? Run Bash:\n  {json.loads(arguments)['cmd']}\n" in transcript, transcript
+        assert f"? {description}" in transcript, ("approval live row lost its description", transcript)
         assert_permission_workspace(transcript, state, 100)
         assert transcript.count("Time limit: 30000 ms") == 1, transcript
         assert transcript.count(json.loads(arguments)["cmd"]) == 1, transcript
@@ -1160,6 +1162,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             if "a: Allow once / d: Deny (Enter)" not in shown:
                 shown += read_terminal(master, "a: Allow once / d: Deny (Enter)")
             assert f"\n? Run Bash:\n  {second_command}\n" in shown, shown
+            assert "? Write sibling effect" in shown, ("sibling identity reused the first label", shown)
             os.write(master, b"/details\n")
             details = read_terminal(master, "Details complete")
             assert "\n› requires permission" in details, details
@@ -1191,14 +1194,16 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert sum(row["kind"] == "permission_decision" for row in saved) == 1, saved
         assert len(endpoint.requests) == 2
         if exit_code:
-            assert f"! Bash failed. Exit code: {exit_code}." in settled, ("quiet view hid tool failure", settled)
+            assert f"! {description} — Failed" in settled, ("quiet view hid tool failure", settled)
+            assert f"Exit code: {exit_code}." in settled, settled
             assert "/details for output." in settled, settled
         elif decision == "allow-action":
-            assert "  • Bash succeeded." in settled, ("quiet view hid tool outcome", settled)
+            assert f"✓ {description}" in settled, ("quiet view hid tool outcome", settled)
             assert "Exit code: 0." not in settled, ("routine zero exit code leaked", settled)
         else:
-            assert "  • Permission denied." in settled, ("intentional denial was not a settled outcome", settled)
-            assert "! Permission denied." not in settled and "/details for output." not in settled, settled
+            assert f"• {description} — Denied" in settled, ("intentional denial was not a settled outcome", settled)
+            assert f"! {description}" not in settled and "/details for output." not in settled, settled
+        assert "Bash succeeded." not in settled and "Tool result:" not in settled, settled
         if signal_failure:
             assert "Process-group signaling reported a failure." in settled, ("quiet view hid cleanup warning", settled)
         assert f"\n  {answer}" in settled, settled
@@ -1212,19 +1217,93 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         proxy.exchanges.clear()
         proxy.rewrite = lambda response: response
         os.write(master, b"Y\n")
-        submitted_draft = read_terminal(master, "\n› next cafXaYé!")
+        # An answer prefix is not the joined reader boundary. Wait for its
+        # final composer before a command handoff may cancel that borrower.
+        submitted_draft = read_terminal(master, "retained draft complete", composer=True)
+        assert "\n› next cafXaYé!" in submitted_draft, submitted_draft
         fixture.wait_for(lambda: proxy.exchanges, "retained draft queued Message")
         assert json.loads(proxy.exchanges[0][0])["text"]["value"] == "next cafXaYé!"
-        if "retained draft complete" not in submitted_draft:
-            read_terminal(master, "retained draft complete")
+        quiet_status = terminal_step(master, "/status")
+        assert f"✓ {description}" not in quiet_status and "Bash succeeded." not in quiet_status, (
+            "already presented outcome repeated on refresh", quiet_status)
         os.write(master, b"/details\n")
         details = read_terminal(master, "Details complete")
-        assert "Recent conversation — tool details" in details and "  Tool result:\n" in details, details
+        assert "Recent conversation — tool details" in details and description in details, details
         assert "\n› requires permission" in details and f"\n  {answer}" in details, details
         assert all(noise not in details for noise in ("You:", "Assistant:", "Rui:", "Tool Result:")), details
         if decision == "allow-action":
             assert "inspection-only-output" in details, ("saved tool output unavailable on inspection", details)
             assert f"Exit code: {exit_code}." in details, ("exact exit code unavailable on inspection", details)
+        if decision == "allow-action" and not any((exit_code, signal_failure, lost_reply)):
+            # Four real held effects exceed the display bound. Repeated labels
+            # must not merge identities. A later, long-labelled failure must
+            # stay truthful while an earlier sibling remains unresolved.
+            bypass_description = "Wait for bypass café"
+            long_description = "Inspect application settings and report configuration errors before applying changes to local assets"
+            assert len(long_description.encode()) == 100
+            bypass_descriptions = [bypass_description, long_description, bypass_description, "Check final sibling"]
+            bypass_releases = [state / f"bypass-release-{index}" for index in range(4)]
+            endpoint.responses.extend([
+                fixture.sse_tool_calls("bypass-call", [("bash", f"bypass-distinct-id-{index}", json.dumps({
+                    "cmd": f"touch bypass-started-{index}; while [ ! -e bypass-release-{index} ]; do sleep 0.05; done; printf bypass-output-{index}; exit {7 if index == 1 else 0}",
+                    "description": label, "timeout_ms": 30000}))
+                    for index, label in enumerate(bypass_descriptions)]),
+                fixture.sse_answer("bypass-answer", "bypass-reason", "bypass-message", "bypass complete")[0],
+            ])
+            run(home, "configure", "--store", store, "--session", reference,
+                "--workspace", state, "--provider", "codex", "--model", "model-a", "--permission-mode", "bypass")
+            try:
+                os.write(master, b"run without approval\n")
+                live = read_terminal(master, "+1 more calls · /status", composer=True)
+                fixture.wait_for(lambda: all((state / f"bypass-started-{index}").exists() for index in range(4)), "held bypass effects")
+                assert live.index(f"• {bypass_description}") < live.index("• Inspect application settings"), live
+                assert "Check final sibling" not in live, live
+                assert "Run Bash:" not in live and "Allow once" not in live, live
+                os.write(master, "live café!\x1b[D\x1b[DX".encode())
+                live += read_terminal(master, "› live cafXé!")
+                assert f"• {bypass_description}" in live and f"✓ {bypass_description}" not in live, live
+                bypass_releases[1].touch()
+                reverse = read_terminal(master, "— Failed", composer=True)
+                assert "! Inspect application settings" in reverse and f"• {bypass_description}" in reverse, reverse
+                assert "+1 more calls · /status" in reverse and len(endpoint.requests) == 4, reverse
+                bypass_releases[0].touch()
+                partial = read_terminal(master, f"✓ {bypass_description}", composer=True)
+                assert f"• {bypass_description}" in partial and "+1 more calls · /status" in partial, partial
+                assert len(endpoint.requests) == 4, "a partial tool group continued model work"
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 6, 32, 0, 0))
+                short = read_terminal(master, "+3 more calls · /status", composer=True)
+                assert "› live cafXé!" in short, short
+                assert "Inspect application" not in short, ("a clipped call hid its failure", short)
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 32, 0, 0))
+                wrapped = read_terminal(master, "— Failed", composer=True)
+                assert "! Inspect application settings" in wrapped and "+1 more calls · /status" in wrapped, wrapped
+                assert "› live cafXé!" in wrapped, wrapped
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
+                read_terminal(master, "+1 more calls · /status", composer=True)
+                terminal_step(master, "\x01\x0b/exit", "Detached.")
+                assert caller.wait(timeout=5) == 0, caller.stderr.read()
+                caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+                    "--session", reference], env={**os.environ, "HOME": str(home), "TERM": "xterm-256color", "NO_COLOR": ""},
+                    stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                reopened = read_terminal(master, "+1 more calls · /status", composer=True)
+                assert f"✓ {bypass_description}" in reopened and f"• {bypass_description}" in reopened, reopened
+                assert "bypass complete" not in reopened and len(endpoint.requests) == 4, reopened
+                os.write(master, "live café!\x1b[D\x1b[DX".encode())
+                read_terminal(master, "› live cafXé!")
+                for release in bypass_releases:
+                    release.touch()
+                outcome = read_terminal(master, "bypass complete", composer=True)
+                assert outcome.count(f"✓ {bypass_description}") == 2, outcome
+                assert "! Inspect application settings" in outcome and "— Failed" in outcome and "Exit code: 7." in outcome, outcome
+                assert "✓ Check final sibling" in outcome, outcome
+                assert "Bash succeeded." not in outcome and "Tool result:" not in outcome, outcome
+                assert "› live cafXé!" in outcome, outcome
+                refreshed = terminal_step(master, "\x01\x0b/status")
+                assert f"✓ {bypass_description}" not in refreshed, ("presented bypass result repeated", refreshed)
+                assert len(endpoint.requests) == 5, "bypass refresh repeated provider work"
+            finally:
+                for release in bypass_releases:
+                    release.touch()
         # A resize must retain the exact non-tail Unicode cursor without prose.
         os.write(master, "next café!\x1b[D\x1b[DX".encode())
         read_terminal(master, "› next cafXé!")
@@ -1243,7 +1322,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert actual == original, "signal after inspection handoff did not restore terminal"
         # Quiet proposal fields must still be consumed and validated on opening.
         proxy.route = "/v1/proposal-field"
-        proxy.rewrite = lambda response: response[:-1] if b"effect-count" in response else response
+        proxy.rewrite = lambda response: response[:-1] if b'"cmd":' in response else response
         caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", reference], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
@@ -1607,8 +1686,8 @@ def opaque_session_commands_case():
     store = state / "store"
     reference = "human/nul\x00' é\n--last"
     endpoint = fixture.SuccessEndpoint([
-        fixture.sse_tool_calls("opaque-actions", [("bash", "opaque-deny", json.dumps({"cmd": "touch must-not-run", "timeout_ms": None})),
-                                                   ("bash", "opaque-allow", json.dumps({"cmd": "touch allowed-once", "timeout_ms": None}))]),
+        fixture.sse_tool_calls("opaque-actions", [("bash", "opaque-deny", json.dumps({"cmd": "touch must-not-run", "description": "Create forbidden marker", "timeout_ms": None})),
+                                                   ("bash", "opaque-allow", json.dumps({"cmd": "touch allowed-once", "description": "Create approved marker", "timeout_ms": None}))]),
         fixture.sse_answer("opaque-answer", "opaque-r", "opaque-m", "Opaque decisions complete.")[0],
     ])
     thread = threading.Thread(target=endpoint.serve_forever)
@@ -1851,7 +1930,7 @@ def long_input_case(home, store, workspace, endpoint, host):
 def main(selected="all"):
     import canonical_failure_integration
     import terminal_restoration_integration
-    assert selected in ("all", "long-input", "terminal-waits"), selected
+    assert selected in ("all", "long-input", "terminal-waits", "persistent-permission"), selected
     if selected == "all":
         help_case()
     if selected in ("all", "terminal-waits"):
@@ -1865,6 +1944,7 @@ def main(selected="all"):
         persistent_opening_case()
         persistent_pending_case()
         persistent_input_cases()
+    if selected in ("all", "persistent-permission"):
         persistent_permission_case()
         persistent_permission_case("allow-action")
         persistent_permission_case("allow-action", exit_code=7)
@@ -1872,6 +1952,9 @@ def main(selected="all"):
         persistent_permission_case("allow-action", lost_reply=True)
         persistent_permission_case(fragmented_paste=True)
         persistent_permission_case(stale_target=True)
+    if selected == "persistent-permission":
+        return
+    if selected == "all":
         terminal_restoration_integration.main()
         canonical_failure_integration.main()
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-human-cli."))
@@ -1882,7 +1965,7 @@ def main(selected="all"):
     workspace.mkdir()
     session = "human/bash"
     counter = workspace / "effect-count"
-    arguments = json.dumps({"cmd": "printf x >> effect-count", "timeout_ms": None}, separators=(",", ":"))
+    arguments = json.dumps({"cmd": "printf x >> effect-count", "description": "Write first effect", "timeout_ms": None}, separators=(",", ":"))
     control_call = "human-call\x1b[1Ghidden\u202e"
     control_arguments = arguments + "\r  "
     sibling_started = state / "sibling-started"
@@ -1890,7 +1973,7 @@ def main(selected="all"):
     sibling_effect = workspace / "sibling-effect"
     sibling_arguments = json.dumps({"cmd": f"touch {shlex.quote(str(sibling_started))}; "
         f"while [ ! -e {shlex.quote(str(sibling_release))} ]; do sleep 0.05; done; "
-        "printf y >> sibling-effect", "timeout_ms": None}, separators=(",", ":"))
+        "printf y >> sibling-effect", "description": "Write delayed sibling effect", "timeout_ms": None}, separators=(",", ":"))
     endpoint = fixture.SuccessEndpoint([
         fixture.sse_tool_calls("human-calls", [("bash", control_call, control_arguments)]),
         fixture.sse_answer("human-answer", "human-reason", "human-message", "first answer")[0],
@@ -2978,7 +3061,7 @@ def main(selected="all"):
         control_call = "interactive-bash\x1b[1Ghidden\u202e"
         argument_prefix = '{"cmd":"printf x >> effect-count # '
         padded_arguments = json.dumps({"cmd": "printf x >> effect-count # " +
-            "A" * (4095 - len(argument_prefix)) + "é", "timeout_ms": None},
+            "A" * (4095 - len(argument_prefix)) + "é", "description": "Write interactive effect", "timeout_ms": None},
             ensure_ascii=False, separators=(",", ":")) + "\r  "
         assert padded_arguments.encode()[4095:4097] == "é".encode()
         endpoint.responses.extend([
@@ -3011,7 +3094,7 @@ def main(selected="all"):
             proposal += action_ready(ready_read, master)
             assert counter.read_text() == "x", "pasted typeahead approved an unseen Action"
             assert "\n› interactive request" in proposal, proposal
-            shown_command = proposal.split("\n? Run Bash:\n", 1)[1].split("\n  Workspace:", 1)[0]
+            shown_command = proposal.split("\n? Run Bash:\n", 1)[1].split("\n  Description:", 1)[0].split("\n  Workspace:", 1)[0]
             assert "".join(line.removeprefix("  ") for line in shown_command.splitlines()) == json.loads(padded_arguments)["cmd"], proposal
             assert_permission_workspace(proposal, workspace.resolve())
             assert "call ID:" not in proposal and "request:" not in proposal and "return:" not in proposal, proposal

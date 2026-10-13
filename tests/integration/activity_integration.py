@@ -22,7 +22,7 @@ from proposal_integration import digest
 CALLER = pathlib.Path(sys.argv[2]).resolve()
 SESSION = "direct/activity"
 TEXT = "é中🙂\n\\\"/" * 12000
-CALLS = [("bash", "exact-call", '{"cmd":"exit 0","timeout_ms":null}')]
+CALLS = [("bash", "exact-call", '{"cmd":"exit 0","timeout_ms":null,"description":"Exit with success"}')]
 CALLS += [("unknown", f"rejected-{i}", TEXT if i == 1 else "{}") for i in range(1, 18)]
 
 

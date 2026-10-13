@@ -3332,9 +3332,17 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
             try response.appendFmt("{{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"{d}\",\"items\":[", .{page.end});
             for (page.items[0..page.count], 0..) |item, index| {
                 if (index != 0) try response.append(",");
-                try response.appendFmt("{{\"position\":\"{d}\",\"ordinal\":\"{d}\",\"kind\":\"{s}\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\",\"display\":\"omitted\"}}}}", .{
+                try response.appendFmt("{{\"position\":\"{d}\",\"ordinal\":\"{d}\",\"kind\":\"{s}\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\",\"display\":\"omitted\"}}", .{
                     item.position, item.ordinal, @tagName(item.kind), item.content.length, std.fmt.bytesToHex(item.content.digest, .lower),
                 });
+                if (item.presentation) |presentation| {
+                    var buffer: [protocol.max_tool_presentation_json_bytes]u8 = undefined;
+                    var writer = std.Io.Writer.fixed(&buffer);
+                    try presentation.writeJson(&writer);
+                    try response.append(",\"presentation\":");
+                    try response.append(writer.buffered());
+                }
+                try response.append("}");
             }
             try response.appendFmt("],\"more\":{s}", .{if (page.more) "true" else "false"});
             if (page.more) {
@@ -4811,9 +4819,9 @@ test "cleanup publication follows complete execution retirement" {
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root});
     var storage = try store_module.Store.open(std.testing.io, database, root);
     defer storage.close() catch unreachable;
-    const arguments = "{\"cmd\":\"printf x\",\"timeout_ms\":1000}";
+    const arguments = "{\"description\":\"Print test marker\",\"cmd\":\"printf x\",\"timeout_ms\":1000}";
     const content = try store_module.testingPublicProjection(&storage, &tmp, &.{.{
-        .encoded = "{\\\"cmd\\\":\\\"printf x\\\",\\\"timeout_ms\\\":1000}",
+        .encoded = "{\\\"description\\\":\\\"Print test marker\\\",\\\"cmd\\\":\\\"printf x\\\",\\\"timeout_ms\\\":1000}",
         .decoded = arguments,
     }});
     const reader = try storage.openPublicConversationContent(content);

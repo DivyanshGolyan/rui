@@ -171,7 +171,7 @@ def result_text(store, session):
 
 
 def add_exchange(responses, name, command, answer="continued", timeout_ms=None):
-    arguments = {"cmd": command, "timeout_ms": timeout_ms}
+    arguments = {"cmd": command, "timeout_ms": timeout_ms, "description": f"Run {name} command"}
     responses.append(
         fixture.sse_tool_calls(
             f"{name}-calls",
@@ -205,13 +205,13 @@ def prove_reused_session(state):
                 (
                     "bash",
                     "reuse-slow-call",
-                    json.dumps({"cmd": slow_command, "timeout_ms": None}, separators=(",", ":")),
+                    json.dumps({"cmd": slow_command, "timeout_ms": None, "description": "Append slow settlement"}, separators=(",", ":")),
                 ),
                 ("missing-tool", "reuse-unknown-call", "{}"),
                 (
                     "bash",
                     "reuse-fast-call",
-                    json.dumps({"cmd": fast_command, "timeout_ms": None}, separators=(",", ":")),
+                    json.dumps({"cmd": fast_command, "timeout_ms": None, "description": "Append fast settlement"}, separators=(",", ":")),
                 ),
                 ("bash", "reuse-invalid-call", '{"cmd":7}'),
             ],
@@ -626,7 +626,7 @@ def walkthrough():
     message_record = state / f"{message_key}.json"
     counter = workspace / "effect-count"
     arguments = json.dumps(
-        {"cmd": "printf x >> effect-count", "timeout_ms": None}, separators=(",", ":")
+        {"cmd": "printf x >> effect-count", "timeout_ms": None, "description": "Append effect counter"}, separators=(",", ":")
     )
     responses = [
         fixture.sse_tool_calls(
@@ -854,7 +854,7 @@ def main():
         "head -c 12000 /dev/zero | tr '\\0' z; printf '\\377'; printf stderr-marker >&2"
     )
     success_arguments = json.dumps(
-        {"cmd": large_command, "timeout_ms": None}, separators=(",", ":")
+        {"cmd": large_command, "timeout_ms": None, "description": "Write large captured output"}, separators=(",", ":")
     )
     responses.append(
         fixture.sse_tool_calls(
@@ -880,14 +880,14 @@ def main():
     responses.append(
         fixture.sse_tool_calls(
             "unattempted-calls",
-            [("bash", "unattempted-call", json.dumps({"cmd": f"printf x >> {unattempted_marker}", "timeout_ms": None}))],
+            [("bash", "unattempted-call", json.dumps({"cmd": f"printf x >> {unattempted_marker}", "timeout_ms": None, "description": "Append unattempted marker"}))],
         )
     )
     prelaunch_stop_marker = state / "prelaunch-stop-marker"
     responses.append(
         fixture.sse_tool_calls(
             "prelaunch-stop-calls",
-            [("bash", "prelaunch-stop-call", json.dumps({"cmd": f"printf x >> {prelaunch_stop_marker}", "timeout_ms": None}))],
+            [("bash", "prelaunch-stop-call", json.dumps({"cmd": f"printf x >> {prelaunch_stop_marker}", "timeout_ms": None, "description": "Append prelaunch stop marker"}))],
         )
     )
     before_launch_marker = state / "before-launch-marker"
@@ -897,13 +897,13 @@ def main():
     responses.append(
         fixture.sse_tool_calls(
             "stop-calls",
-            [("bash", "stop-call", json.dumps({"cmd": "trap '' TERM; sleep 30", "timeout_ms": None}, separators=(",", ":")))],
+            [("bash", "stop-call", json.dumps({"cmd": "trap '' TERM; sleep 30", "timeout_ms": None, "description": "Wait through termination signal"}, separators=(",", ":")))],
         )
     )
     responses.append(
         fixture.sse_tool_calls(
             "settlement-stop-calls",
-            [("bash", "settlement-stop-call", json.dumps({"cmd": "printf sealed", "timeout_ms": None}))],
+            [("bash", "settlement-stop-call", json.dumps({"cmd": "printf sealed", "timeout_ms": None, "description": "Print sealed output"}))],
         )
     )
     exited_child_pid = state / "exited-child-pid"
@@ -917,6 +917,7 @@ def main():
                     {
                         "cmd": f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & printf $! > {exited_child_pid}",
                         "timeout_ms": None,
+                        "description": "Start detached pipe-free child",
                     },
                     separators=(",", ":"),
                 ),
@@ -948,6 +949,7 @@ def main():
                             f"while [ ! -e {stopped_pipes_leader_release} ]; do sleep 0.01; done"
                         ),
                         "timeout_ms": None,
+                        "description": "Hold stopped child output pipes",
                     },
                     separators=(",", ":"),
                 ),
@@ -997,7 +999,7 @@ def main():
     responses.append(
         fixture.sse_tool_calls(
             "post-resolution-calls",
-            [("bash", "post-resolution-call", json.dumps({"cmd": "printf complete", "timeout_ms": None}))],
+            [("bash", "post-resolution-call", json.dumps({"cmd": "printf complete", "timeout_ms": None, "description": "Print completed output"}))],
         )
     )
     sibling_marker = state / "sibling-marker"
@@ -1009,7 +1011,7 @@ def main():
                     "bash",
                     "sibling-call-0",
                     json.dumps(
-                        {"cmd": f"sleep 0.2; printf a >> {sibling_marker}", "timeout_ms": None},
+                        {"cmd": f"sleep 0.2; printf a >> {sibling_marker}", "timeout_ms": None, "description": "Append first sibling marker"},
                         separators=(",", ":"),
                     ),
                 ),
@@ -1017,7 +1019,7 @@ def main():
                     "bash",
                     "sibling-call-1",
                     json.dumps(
-                        {"cmd": f"printf b >> {sibling_marker}", "timeout_ms": None},
+                        {"cmd": f"printf b >> {sibling_marker}", "timeout_ms": None, "description": "Append second sibling marker"},
                         separators=(",", ":"),
                     ),
                 ),

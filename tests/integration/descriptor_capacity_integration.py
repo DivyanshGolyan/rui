@@ -254,7 +254,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
                 (
                     "bash",
                     f"descriptor-bash-{ordinal}-call",
-                    json.dumps({"cmd": commands[ordinal], "timeout_ms": None}, separators=(",", ":")),
+                    json.dumps({"cmd": commands[ordinal], "timeout_ms": None, "description": f"Write descriptor marker {ordinal}"}, separators=(",", ":")),
                 )
             ],
         )
