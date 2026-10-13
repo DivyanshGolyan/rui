@@ -2774,6 +2774,7 @@ pub const Store = struct {
         if (c.sqlite3_column_type(statement, 0) != c.SQLITE_NULL) {
             var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
             try readText(statement, 0, &description);
+            if (!tool_catalog.validDescription(description.slice())) return error.CorruptStore;
             result.description = description;
         }
         if (c.sqlite3_column_type(statement, 1) != c.SQLITE_NULL) {
@@ -13721,6 +13722,56 @@ test "activity fixed admission prefix survives later application and stop" {
     try std.testing.expect(frozen.items[0].value.admission.state == .queued and frozen.items[0].value.admission.turn == null);
     request.end = empty.end;
     try std.testing.expectEqual(@as(usize, 0), (try storage.activityPage(request)).count);
+}
+
+test "persisted tool label corruption fences every publication route" {
+    const invalid = [_]struct { sql: []const u8, failure: anyerror = error.CorruptStore }{
+        .{ .sql = "' '" },
+        .{ .sql = "'Read' || char(10) || 'files'" },
+        .{ .sql = "char(160)" },
+        .{ .sql = "'Read' || char(8232) || 'files'" },
+        // Bounded text rejects malformed UTF-8 before semantic validation.
+        .{ .sql = "CAST(X'80' AS TEXT)", .failure = error.InvalidUtf8 },
+    };
+    for (invalid) |description| {
+        for ([_]enum { current, full, live_activity, settled_activity, conversation }{ .current, .full, .live_activity, .settled_activity, .conversation }) |route| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSessionAsk(&storage, "label-config", "direct/label", true);
+            try submitTestMessage(&storage, &tmp, "label-input", "label-input", "direct/label", "propose");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, binding, "label-calls");
+            var request: protocol.ActivityPage = .{};
+            try request.session.set("direct/label");
+            request.direction = .backward;
+            const healthy = try storage.activityPage(request);
+            try std.testing.expectEqual(@as(u64, 2), healthy.call_activity.total);
+            try std.testing.expectEqualStrings("Run first command", healthy.call_activity.entries[0].presentation.description.?.slice());
+            if (route == .settled_activity or route == .conversation) {
+                var stop = try completeSessionStop("label-stop", "direct/label");
+                try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                try std.testing.expectEqual(@as(usize, 3), (try storage.publicConversationPage(.{ .session = request.session })).count);
+            }
+            var sql: [256]u8 = undefined;
+            try exec(storage.database, try std.fmt.bufPrintZ(&sql, "UPDATE model_tool_call SET description={s} WHERE call_ordinal=0", .{description.sql}));
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+            const result: anyerror!void = switch (route) {
+                .current, .full => if (testingSessionReportWithProfile(&storage, &tmp, "direct/label", 1024 * 1024, if (route == .full) .full else .current)) |bytes| blk: {
+                    std.testing.allocator.free(bytes);
+                    break :blk {};
+                } else |err| err,
+                .live_activity, .settled_activity => if (storage.activityPage(request)) |_| {} else |err| err,
+                .conversation => if (storage.publicConversationPage(.{ .session = request.session })) |_| {} else |err| err,
+            };
+            try std.testing.expectError(description.failure, result);
+            try std.testing.expect(storage.isFenced());
+            try std.testing.expectError(error.StoreFenced, storage.activityPage(request));
+            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+        }
+    }
 }
 
 test "tool label observation trusts admission but exact inspection authenticates payload" {
