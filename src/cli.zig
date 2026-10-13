@@ -347,7 +347,14 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
     };
     const launched = rui_launch_detached(argv[0].?, &argv, argv.len);
     if (launched != 0) {
-        TerminalText.diagnostic("rui: detached Host could not execute (OS error {d}); Store ownership was not inferred.\n", .{launched});
+        notice: {
+            var bytes: [4 * protocol.max_store_bytes + 256]u8 = undefined;
+            var notice = std.Io.Writer.fixed(&bytes);
+            notice.print("\nrui: detached Host launch reported OS error {d}. Execution and readiness are unconfirmed.\nCheck this Store: rui host status --store ", .{launched}) catch break :notice;
+            TerminalText.writeShellWord(&notice, paths.store.slice()) catch break :notice;
+            notice.writeByte('\n') catch break :notice;
+            _ = @import("stderr.zig").write(notice.buffered());
+        }
         return error.HostLaunchFailed;
     }
     const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 10 * std.time.ns_per_s;
