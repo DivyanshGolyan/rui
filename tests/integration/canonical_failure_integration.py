@@ -361,7 +361,7 @@ def interactive_cases(state, binding=False, null_code=False):
     home.mkdir()
     store = home / "store"
     endpoint = fixture.SuccessEndpoint([fixture.sse_tool_calls("canonical-tool", [("bash", "canonical-call",
-        '{"cmd":"true","timeout_ms":null}')]),
+        '{"cmd":"true","timeout_ms":null,"description":"Check successful shell exit"}')]),
         fixture.sse_answer("canonical-answer", "canonical-reason", "canonical-message", "denied tool saved")[0],
         fixture.sse_answer("confirmed-answer", "confirmed-reason", "confirmed-message", "accepted work remains accepted")[0]])
     endpoint_thread = threading.Thread(target=endpoint.serve_forever)
@@ -574,7 +574,7 @@ def permission_read_cases(state):
     home.mkdir()
     store = home / "store"
     endpoint = fixture.SuccessEndpoint([fixture.sse_tool_calls("permission-read", [("bash", "permission-call",
-        '{"cmd":"true","timeout_ms":null}')])])
+        '{"cmd":"true","timeout_ms":null,"description":"Check successful shell exit"}')])])
     thread = threading.Thread(target=endpoint.serve_forever)
     thread.start()
     host = None

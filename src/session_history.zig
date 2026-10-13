@@ -18,6 +18,7 @@ pub const Prepared = struct {
         for (0..self.page.count) |reverse| {
             const index = self.page.count - 1 - reverse;
             const item = self.page.items[index];
+            if (item.kind == .tool_result) try View.toolHeading(item.presentation.?, sink, columns, colour);
             if (item.content.bytes > item_bytes) {
                 var buffer: [192]u8 = undefined;
                 try sink.feed(try std.fmt.bufPrint(&buffer, "Rui: Historical item omitted: position {d}, ordinal {d}, {d} raw bytes.\nRaw export: rui read-conversation --store-hex ", .{ item.position, item.ordinal, item.content.bytes }));
@@ -33,7 +34,11 @@ pub const Prepared = struct {
                 try sink.feed("›");
                 try sink.feed(View.Style.normal.code(colour));
                 try sink.feed(" ");
-            } else try sink.feed(if (item.kind == .assistant) "\n  " else "\n  Tool result:\n  ");
+            } else if (item.kind == .assistant) {
+                try sink.feed("\n  ");
+            } else {
+                try sink.feed("  ");
+            }
             var indented: View.Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };
             var answer: View.Answer(@TypeOf(&indented)) = undefined;
             answer.init(&indented);
@@ -135,6 +140,53 @@ test "historical export preserves opaque identities without terminal or shell in
     try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)", "team\x1b[2J\n\x00é\u{202e}", &sink, 0, false);
     // Independent UTF-8 byte-to-hex oracle, including NUL and directional text.
     try std.testing.expectEqualStrings("Rui: Historical item omitted: position 2, ordinal 0, 8193 raw bytes.\nRaw export: rui read-conversation --store-hex 2f746d702f6127242866616c736529 --session-hex 7465616d1b5b324a0a00c3a9e280ae --position 2 --ordinal 0\n", sink.bytes[0..sink.length]);
+}
+
+test "history body limit preserves contextual tool outcomes" {
+    const Sink = struct {
+        bytes: [16 * 1024]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(io, "history", .{ .read = true });
+    defer scratch.close(io);
+    const body = "x" ** 8192;
+    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    try description.set("Compile package");
+    const Case = struct { code: protocol.ToolPresentation.Code, heading: []const u8, fallback: bool = false };
+    for ([_]Case{
+        .{ .code = .failed, .heading = "\n! Compile package — Failed\n" },
+        .{ .code = .succeeded, .heading = "\n✓ Compile package\n" },
+        .{ .code = .indeterminate, .heading = "\n! Compile package — Outcome unknown; may have run\n" },
+        .{ .code = .denied, .heading = "\n• Compile package — Denied\n" },
+        .{ .code = .invalid_arguments, .heading = "\n• Tool call — Rejected: invalid arguments\n", .fallback = true },
+    }) |case| {
+        for ([_]u64{ 8192, 8193 }) |size| {
+            var prepared: Prepared = .{ .page = .{ .end = 7, .count = 1, .more = false } };
+            prepared.page.items[0] = .{ .position = 7, .ordinal = 2, .kind = .tool_result, .content = .{ .bytes = size, .digest = @splat(0) }, .presentation = .{ .description = if (case.fallback) null else description, .code = case.code, .publication_position = 7 } };
+            // Oversized bodies have no staged bytes or valid scratch offset.
+            try scratch.setLength(io, 0);
+            if (size == 8192) try scratch.writePositionalAll(io, body, 0);
+            prepared.offsets[0] = if (size == 8192) 0 else std.math.maxInt(u64);
+            var sink: Sink = .{};
+            try prepared.render(io, scratch, "store", "session", &sink, 0, false);
+            const output = sink.bytes[0..sink.length];
+            try std.testing.expect(std.mem.startsWith(u8, output, case.heading));
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, case.heading));
+            if (size == 8192) {
+                try std.testing.expect(std.mem.endsWith(u8, output, body ++ "\n"));
+                try std.testing.expect(std.mem.indexOf(u8, output, "Historical item omitted") == null);
+            } else {
+                try std.testing.expectEqualStrings("Rui: Historical item omitted: position 7, ordinal 2, 8193 raw bytes.\nRaw export: rui read-conversation --store-hex 73746f7265 --session-hex 73657373696f6e --position 7 --ordinal 2\n", output[case.heading.len..]);
+            }
+        }
+    }
 }
 
 test "history preparation binds wire and staged bytes before exposure" {

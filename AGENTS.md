@@ -36,4 +36,6 @@ Resolve reversible choices within the accepted contract. For unresolved conseque
 
 Own one implementation outcome through its applicable checks and authorized publication. Advance without routine grants, candidate ledgers, evidence-adoption ceremonies, or frozen fixture policies. Serialize actual shared-file, target-branch, or interfering native operations; independent work continues. Historical failed attempts remain failures.
 
-Implementation approval does not authorize pushing, issue/PR mutations, closing, merging, deploying or other shared/irreversible effects. Obtain specific authorization.
+Implementation approval alone does not authorize publication. A request to create or update a PR authorizes pushing its relevant branch and maintaining that PR within the approved scope, including follow-up pushes for requested fixes, review findings and CI failures. Carry that authorization across agent handoffs without asking again for each commit or correction.
+
+Ask before publishing to a different destination, expanding scope, force-pushing or acting outside the approved outcome. Merging, deploying and closing issues still require explicit authorization. Honor narrower user limits.

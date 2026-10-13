@@ -45,10 +45,10 @@ def main():
     try:
         forbidden_effect = state / "proposal-must-not-launch"
         calls = [
-            ("bash", "call\nA", json.dumps({"cmd": f"touch {forbidden_effect}", "timeout_ms": None}, separators=(",", ":"))),
+            ("bash", "call\nA", json.dumps({"cmd": f"touch {forbidden_effect}", "timeout_ms": None, "description": "Create forbidden effect marker"}, separators=(",", ":"))),
             ("other", "call-unknown", "{}"),
             ("bash", "call-invalid", "{"),
-            ("bash", "call-B", json.dumps({"cmd": "printf second", "timeout_ms": None}, separators=(",", ":"))),
+            ("bash", "call-B", json.dumps({"cmd": "printf second", "timeout_ms": None, "description": "Print second output"}, separators=(",", ":"))),
         ]
         race_calls = []
         race_responses = []
@@ -56,8 +56,8 @@ def main():
             first_effect = state / f"{order}-first-must-not-launch"
             second_effect = state / f"{order}-second-must-not-launch"
             order_calls = [
-                ("bash", f"{order}-call-0", json.dumps({"cmd": f"touch {first_effect}", "timeout_ms": None}, separators=(",", ":"))),
-                ("bash", f"{order}-call-1", json.dumps({"cmd": f"touch {second_effect}", "timeout_ms": None}, separators=(",", ":"))),
+                ("bash", f"{order}-call-0", json.dumps({"cmd": f"touch {first_effect}", "timeout_ms": None, "description": "Create first effect marker"}, separators=(",", ":"))),
+                ("bash", f"{order}-call-1", json.dumps({"cmd": f"touch {second_effect}", "timeout_ms": None, "description": "Create second effect marker"}, separators=(",", ":"))),
             ]
             race_calls.append((order_calls, first_effect, second_effect))
             race_responses.append(sse_tool_calls(f"{order}-response", order_calls))
@@ -252,17 +252,17 @@ def main():
         proposal_gate_keeper = None
 
         continuation_calls = [
-            ("bash", "continuation-call-0", json.dumps({"cmd": "printf zero", "timeout_ms": None}, separators=(",", ":"))),
+            ("bash", "continuation-call-0", json.dumps({"cmd": "printf zero", "timeout_ms": None, "description": "Print zero output"}, separators=(",", ":"))),
             ("missing-tool", "continuation-call-1", "{}"),
             ("bash", "continuation-call-2", "{"),
-            ("bash", "continuation-call-3", json.dumps({"cmd": "printf three", "timeout_ms": None}, separators=(",", ":"))),
+            ("bash", "continuation-call-3", json.dumps({"cmd": "printf three", "timeout_ms": None, "description": "Print three output"}, separators=(",", ":"))),
         ]
         continuation_answer = b"continued after complete tool results"
         continuation_sse, _, _ = sse_answer(
             "continuation-answer", "continuation-reasoning", "continuation-message", continuation_answer.decode()
         )
         queued_calls = [
-            ("bash", "queued-call-0", json.dumps({"cmd": "printf queued", "timeout_ms": None}, separators=(",", ":"))),
+            ("bash", "queued-call-0", json.dumps({"cmd": "printf queued", "timeout_ms": None, "description": "Print queued output"}, separators=(",", ":"))),
             ("missing-tool", "queued-call-1", "{}"),
         ]
         queued_answer = b"continued with queued input"
@@ -1994,6 +1994,10 @@ def main():
                         "type": "object",
                         "properties": {
                             "cmd": {"type": "string"},
+                            "description": {
+                                "type": "string",
+                                "description": "A short human-facing activity label: base verb + concrete target + useful scope, in sentence case with no trailing punctuation. Describe the intended work, not its status, success or safety. Required, nonblank, single-line valid UTF-8, at most 100 decoded UTF-8 bytes. Aim for 40–60 characters; use more only for useful scope. Example: Run parser regression tests",
+                            },
                             "timeout_ms": {
                                 "type": ["integer", "null"],
                                 "description": "Use null for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.",
@@ -2001,7 +2005,7 @@ def main():
                                 "maximum": 9223372036854775807,
                             },
                         },
-                        "required": ["cmd", "timeout_ms"],
+                        "required": ["cmd", "description", "timeout_ms"],
                         "additionalProperties": False,
                     },
                 },

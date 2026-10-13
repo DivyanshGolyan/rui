@@ -37,10 +37,16 @@ STDERR_TAIL_LIMIT = 16 * 1024
 # No cleanup or polling history; public drainage remains its separate oracle.
 # recovery: two Bash Attempts with handoff + three cuts, two model proposal handoffs.
 # managed: three preparations/transfers, at most three injected delayed handoffs.
+# bash_cleanup: reuse has four model attempts and two Bash owners, three
+# endpoints each. Inspections: three 8s polls, one 15s drain, one 5s
+# emergency drain (25ms intervals, including final probes), six fixed reads.
+# bash_pipes: one held leader observation, one permission and one Session stop.
 OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2 + 2,
                       "stop": 321 + 20 + 5 + 12 + 3 * 2 + 1 + 1,
                       "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 3 + 1,
-                      "capture": 3, "recovery": 2 * 4 + 2, "managed": 9}
+                      "capture": 3, "recovery": 2 * 4 + 2, "managed": 9,
+                      "bash_cleanup": 6 * 3 + 3 * 321 + 601 + 201 + 6,
+                      "bash_pipes": 1 + 2}
 OBSERVATION_STATE_BYTES = 5 * 8  # version, pid, run, reserved count/loss, active writers.
 OBSERVATION_SEALED = 1 << 63
 OBSERVATION_FIELDS = (
@@ -481,6 +487,14 @@ class HostDiagnostics:
             plans = ("managed",)
         elif phase == "prepared_before_handoff":
             plans = ("managed", "control", "recovery")
+        elif phase in ("cleanup_started", "cleanup_completed"):
+            plans = ("control", "stop", "bash_cleanup")
+        elif phase == "cleanup_release_observed":
+            plans = ("bash_cleanup",)
+        elif phase == "inspection_captured":
+            plans = ("control", "bash_cleanup")
+        elif phase in ("bash_leader_observed_with_open_pipes", "control_store_complete"):
+            plans = ("bash_pipes",)
         if plans is not None:
             assert self.observations is not None and self.observations.plan in plans, (
                 "required receipt needs native observation authority", phase)

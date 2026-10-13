@@ -271,7 +271,7 @@ def classification_population(prefix, forbidden_effect, count=32):
                     "bash",
                     f"{prefix}-valid-{index}",
                     json.dumps(
-                        {"cmd": f"touch {forbidden_effect}"}, separators=(",", ":")
+                        {"cmd": f"touch {forbidden_effect}", "timeout_ms": None, "description": "Create forbidden effect marker"}, separators=(",", ":")
                     ),
                 )
             )
