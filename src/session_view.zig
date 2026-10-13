@@ -461,25 +461,21 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                     escaped: Escaped(@TypeOf(sink)),
                     line: [256]u8 = undefined,
                     length: usize = 0,
-                    remaining: usize = 256,
                     emitted: bool = false,
                     ended: bool = false,
                     omitted: bool = false,
                     pub fn feed(self: *@This(), bytes: []const u8) !void {
                         for (bytes) |byte| {
                             if (self.ended) return;
-                            if (self.remaining == 0) {
-                                try self.emit();
-                                self.omitted = true;
-                                self.ended = true;
-                                return;
-                            }
-                            self.remaining -= 1;
                             if (byte == '\n') {
                                 try self.emit();
-                            } else {
+                            } else if (self.length < self.line.len) {
                                 self.line[self.length] = byte;
                                 self.length += 1;
+                            } else {
+                                // Shorten only this line; later capture/cleanup
+                                // warnings remain visible before output tails.
+                                self.omitted = true;
                             }
                         }
                     }
@@ -490,9 +486,11 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                         } else if (line.len != 0 and !std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.")) {
                             try self.escaped.feed(if (self.emitted) "\n  " else "  ");
                             try self.escaped.feed(line);
+                            if (self.omitted) try self.escaped.feed(" [summary shortened; /details]");
                             self.emitted = true;
                         }
                         self.length = 0;
+                        self.omitted = false;
                     }
                     fn finish(self: *@This()) !void {
                         if (self.length != 0) try self.emit();
@@ -509,7 +507,6 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 const reference = result.content;
                 if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &summary)) |failure| return failure.err();
                 try summary.finish();
-                if (summary.omitted) try sink.feed(" [summary shortened; /details]");
                 if (failed) try sink.feed("\n  /details for output.");
                 if (summary.emitted or failed) try sink.feed("\n");
             },

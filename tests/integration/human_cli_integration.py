@@ -1087,7 +1087,7 @@ def persistent_input_cases():
 
 
 def persistent_permission_case(decision="deny-action", exit_code=0, signal_failure=False,
-                               lost_reply=False, fragmented_paste=False, stale_target=False):
+                               lost_reply=False, fragmented_paste=False, stale_target=False, timed_out=False):
     """Fresh inline choices retain draft custody and exact canonical targets."""
     import canonical_failure_integration as canonical
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-permission."))
@@ -1097,7 +1097,13 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
     reference = "persistent/permission'$(false) é\n"
     answer = "after explicit denial" if decision == "deny-action" else "after explicit approval"
     description = "Inspect café output"
-    arguments = json.dumps({"cmd": f"printf inspection-only-output; printf unsafe >> effect-count; exit {exit_code}", "description": description, "timeout_ms": 30000})
+    command = f"printf inspection-only-output; printf unsafe >> effect-count; exit {exit_code}"
+    if exit_code:
+        command = f"printf '%9000s' inspection-only-output; printf unsafe >> effect-count; exit {exit_code}"
+    if timed_out:
+        command = "printf inspection-only-output; printf unsafe >> effect-count; sleep 1"
+    timeout_ms = 100 if timed_out else 30000
+    arguments = json.dumps({"cmd": command, "description": description, "timeout_ms": timeout_ms})
     calls = [("bash", "persistent-call-id", arguments)]
     second_command = "printf distinct >> second-effect"
     if stale_target:
@@ -1160,7 +1166,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert f"\n? Run Bash:\n  {json.loads(arguments)['cmd']}\n" in transcript, transcript
         assert f"? {description}" in transcript, ("approval live row lost its description", transcript)
         assert_permission_workspace(transcript, state, 100)
-        assert transcript.count("Time limit: 30000 ms") == 1, transcript
+        assert transcript.count(f"Time limit: {timeout_ms} ms") == 1, transcript
         assert transcript.count(json.loads(arguments)["cmd"]) == 1, transcript
         assert all(noise not in transcript for noise in ("You:", "Assistant:", "Rui:", "persistent-call-id")), transcript
         assert set(records.glob("*.json")) == before_choice, "queued chat created a record"
@@ -1260,7 +1266,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         saved = [json.loads(path.read_text()) for path in records.glob("*.json")]
         assert sum(row["kind"] == "permission_decision" for row in saved) == 1, saved
         assert len(endpoint.requests) == 2
-        if exit_code:
+        if timed_out:
+            assert f"! {description} — Timed out" in settled, settled
+            assert "/details for output." in settled, settled
+        elif exit_code:
             assert f"! {description} — Failed" in settled, ("quiet view hid tool failure", settled)
             assert f"Exit code: {exit_code}." in settled, settled
             assert "/details for output." in settled, settled
@@ -1273,6 +1282,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert "Bash succeeded." not in settled and "Tool result:" not in settled, settled
         if signal_failure:
             assert "Process-group signaling reported a failure." in settled, ("quiet view hid cleanup warning", settled)
+            if timed_out:
+                assert "[summary shortened; /details]\n  Process-group signaling reported a failure.\n" in settled, settled
         assert f"\n  {answer}" in settled, settled
         assert all(noise not in settled for noise in ("You:", "Assistant:", "Rui:", "item_id:", "call_id:", "Capturing original", "Original reserved request")), settled
         assert "inspection-only-output" not in settled, ("routine tool output leaked", settled)
@@ -1297,11 +1308,20 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         details = read_terminal(master, "Details complete")
         assert "Recent conversation — tool details" in details and description in details, details
         assert "\n› requires permission" in details and f"\n  {answer}" in details, details
-        assert all(noise not in details for noise in ("You:", "Assistant:", "Rui:", "Tool Result:")), details
-        if decision == "allow-action":
-            assert "inspection-only-output" in details, ("saved tool output unavailable on inspection", details)
-            assert f"Exit code: {exit_code}." in details, ("exact exit code unavailable on inspection", details)
-        if decision == "allow-action" and not any((exit_code, signal_failure, lost_reply)):
+        assert all(noise not in details for noise in ("You:", "Assistant:", "Tool Result:")), details
+        if exit_code:
+            assert f"! {description} — Failed\nRui: Historical item omitted:" in details, details
+            assert "inspection-only-output" not in details and "Exit code:" not in details, details
+            export = next(line.removeprefix("Raw export: ") for line in details.splitlines() if line.startswith("Raw export: "))
+            exported = run(home, *shlex.split(export)[1:])
+            assert len(exported.encode()) > 8192 and exported.startswith(f"Bash failed. Exit code: {exit_code}.\n"), exported[:200]
+            assert "inspection-only-output" in exported
+        else:
+            assert "Rui:" not in details, details
+            if decision == "allow-action":
+                assert "inspection-only-output" in details, ("saved tool output unavailable on inspection", details)
+                assert f"Exit code: {exit_code}." in details, ("exact exit code unavailable on inspection", details)
+        if decision == "allow-action" and not any((exit_code, signal_failure, lost_reply, timed_out)):
             # Four real held effects exceed the display bound. Repeated labels
             # must not merge identities. A later, long-labelled failure must
             # stay truthful while an earlier sibling remains unresolved.
@@ -1406,6 +1426,32 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
             actual[3] &= ~mask
         assert actual == original, "hidden proposal failure left terminal configuration changed"
+        if exit_code:
+            # Age the same saved result out of opening, then reconstruct it
+            # through /history. Neither navigation nor export may rerun Bash.
+            proxy.close()
+            proxy = None
+            for index in range(9):
+                endpoint.responses.append(fixture.sse_answer(f"aging-{index}", f"aging-r-{index}",
+                    f"aging-m-{index}", f"later answer {index}")[0])
+                key = f"aging-{index}"
+                fixture.message(state, store, key, reference, f"later input {index}")
+                fixture.wait_for(lambda: fixture.completed_observation(store, key), "age saved Tool Result")
+            calls_before_history = len(endpoint.requests)
+            caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+                "--session", reference], env={**os.environ, "HOME": str(home)},
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            read_terminal(master, "› ")
+            os.write(master, b"/history\n")
+            history = read_terminal(master, "History page complete", composer=True)
+            assert f"! {description} — Failed\nRui: Historical item omitted:" in history, history
+            assert "inspection-only-output" not in history
+            history_export = next(line.removeprefix("Raw export: ") for line in history.splitlines() if line.startswith("Raw export: "))
+            assert history_export == export and run(home, *shlex.split(history_export)[1:]) == exported
+            assert len(endpoint.requests) == calls_before_history and effect.read_text() == "unsafe"
+            os.write(master, b"/exit\n")
+            _, errors = terminal_exit(caller, master)
+            assert caller.returncode == 0, errors
         completed = True
         print(f"persistent permission: inline {decision}, lost={lost_reply}, fragmented={fragmented_paste}, quiet outcome, retained cursor, hidden-field validation and TERM cleanup passed", flush=True)
     finally:
@@ -2080,6 +2126,7 @@ def main(selected="all"):
         persistent_permission_case("allow-action")
         persistent_permission_case("allow-action", exit_code=7)
         persistent_permission_case("allow-action", signal_failure=True)
+        persistent_permission_case("allow-action", signal_failure=True, timed_out=True)
         persistent_permission_case("allow-action", lost_reply=True)
         persistent_permission_case(fragmented_paste=True)
         persistent_permission_case(stale_target=True)
