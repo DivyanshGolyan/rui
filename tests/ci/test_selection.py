@@ -80,11 +80,12 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn("codex-h2-integration", result[family])
 
     def test_bootstrap_action_is_not_cheap_ci_policy(self):
-        result = select([".github/actions/setup/action.yml"], "review", AVAILABLE)
-        for family in ("targets", "native_targets"):
-            self.assertTrue({"check-full", "admission-debug-integration", "test-full",
-                             "evaluator-churn", "transport-h2-integration",
-                             "codex-h2-integration"} <= set(result[family]))
+        for path in (".github/actions/setup/action.yml", "install.sh"):
+            result = select([path], "review", AVAILABLE)
+            for family in ("targets", "native_targets"):
+                self.assertTrue({"check-full", "admission-debug-integration", "test-full",
+                                 "evaluator-churn", "transport-h2-integration",
+                                 "codex-h2-integration"} <= set(result[family]))
 
     def test_shared_driver_keeps_parallel_and_full_modes(self):
         for paths in (["tests/integration/check.sh"],

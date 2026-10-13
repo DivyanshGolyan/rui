@@ -919,13 +919,21 @@ def main():
                 assert denial["answer"]["status"] == "rejected", denial
                 assert denial["answer"]["code"] == "action_not_pending", denial
                 expected_rows = [(0, 0, "cancelled"), (1, 0, "cancelled")]
-            after = command("inspect-session", "--store", proposal_store, "--session", session)
+            release_deadline = time.monotonic() + 8
+            after = command("inspect-session", "--store", proposal_store, "--session", session,
+                            timeout=release_deadline - time.monotonic())
             assert after["actions"]["count"] == "0", after
             assert after["actions"]["unresolved"] == [], after
             assert after["actions"]["resolved"] == [], after
             assert after["rejected_calls"] == {"count": "0", "items": []}, after
-            assert after["execution"]["custody_occupied"] == "0", after
             assert "bash_execution" not in after["execution"]["unavailable"], after
+            wait_for_execution_release(
+                lambda remaining: command(
+                    "inspect-session", "--store", proposal_store, "--session", session,
+                    timeout=remaining,
+                )["execution"],
+                release_deadline,
+            )
             with sqlite3.connect(proposal_store / "rui.sqlite3") as database:
                 rows = database.execute(
                     "SELECT call_ordinal,permission_state,resolution_code FROM action_operation "

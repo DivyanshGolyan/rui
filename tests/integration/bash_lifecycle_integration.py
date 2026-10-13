@@ -265,6 +265,37 @@ else:
         thread.join(timeout=5)
 
 
+def natural_exit_signaling(root):
+    state = root / "natural-exit-signaling"
+    state.mkdir(mode=0o700)
+    store = state / "store"
+    endpoint, thread, endpoint_url = endpoint_for("natural-exit-signaling", "printf finished")
+    host = None
+    try:
+        host, session = admit(state, store, endpoint_url, "natural-exit-signaling")
+        fixture.wait_for(
+            lambda: fixture.completed_observation(store, "natural-exit-signaling-message"),
+            "natural exit continuation",
+        )
+        result = bash_fixture.result_text(store, session)
+        assert "Bash succeeded. Exit code: 0." in result, result
+        assert "stdout tail:\nfinished" in result, result
+        assert "Process-group signaling reported a failure." not in result, result
+        if sys.platform == "darwin":
+            assert "macOS group signaling returned EPERM" in result, result
+            assert "original process group was observed absent" in result, result
+        request = json.loads(endpoint.requests[-1])
+        outputs = [item["output"] for item in request["input"] if item.get("type") == "function_call_output"]
+        assert outputs == [result], outputs
+        fixture.wait_for(lambda: bash_fixture.execution_custody_idle(store, session), "natural exit retirement")
+    finally:
+        if host is not None:
+            fixture.stop_host(host)
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+
+
 def main():
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-bash-lifecycle."))
     completed = False
@@ -273,6 +304,7 @@ def main():
         if sys.argv[2:] == ["--pid-publication-only"]:
             completed = True
             return
+        natural_exit_signaling(root)
         name = "lifecycle-observe"
         state = root / name
         state.mkdir(mode=0o700)

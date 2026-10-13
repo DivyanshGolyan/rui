@@ -403,6 +403,7 @@ pub const Execution = struct {
     stop_reason: StopReason = .none,
     capture_failure: CaptureFailure = .none,
     signal_failure: bool = false,
+    group_permission_denied: bool = false,
     read_fault_used: bool = false,
     service_fault_used: bool = false,
     output_reservation: ?output_retention.Pair = null,
@@ -420,7 +421,7 @@ pub const Execution = struct {
     pub fn requestStop(self: *Execution, now: std.Io.Clock.Timestamp) TerminationAttempt {
         const attempted = self.process == .running;
         self.requestTerminationAt(.stopped, now);
-        return .{ .attempted = attempted, .signal_failed = self.signal_failure };
+        return .{ .attempted = attempted, .signal_failed = self.signal_failure or self.group_permission_denied };
     }
 
     pub fn requestInfrastructureShutdown(self: *Execution, now: std.Io.Clock.Timestamp) void {
@@ -432,7 +433,7 @@ pub const Execution = struct {
         const deadline_ns: u64 = @intCast(self.process.running.deadline.raw.nanoseconds);
         if (self.stop_reason == .none) self.stop_reason = .timed_out;
         self.beginGrace(now);
-        return .{ .deadline_ns = deadline_ns, .signal_failed = self.signal_failure };
+        return .{ .deadline_ns = deadline_ns, .signal_failed = self.signal_failure or self.group_permission_denied };
     }
 
     pub const ServiceResult = struct {
@@ -685,6 +686,11 @@ pub const Execution = struct {
         }
         std.posix.kill(-anchor.pgid, signal_value) catch |err| switch (err) {
             error.ProcessNotFound => {},
+            error.PermissionDenied => if (@import("builtin").os.tag == .macos) {
+                self.group_permission_denied = true;
+            } else {
+                self.signal_failure = true;
+            },
             else => self.signal_failure = true,
         };
     }
@@ -966,6 +972,9 @@ pub const Execution = struct {
             try writer.writeAll("Capture may be incomplete because writers outlived process-group termination.\n");
         }
         if (self.signal_failure) try writer.writeAll("Process-group signaling reported a failure.\n");
+        if (self.group_permission_denied) {
+            try writer.writeAll("Process retirement confirmed: the child was reaped and the original process group was observed absent. macOS group signaling returned EPERM, which can mean no live targets or permission denial.\n");
+        }
         var tail: [excerpt_bytes]u8 = undefined;
         const stdout_length = try self.stdout_capture.file.?.length(self.io);
         const stderr_length = try self.stderr_capture.file.?.length(self.io);
@@ -1496,6 +1505,14 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
     const gone_repeated = gone.serviceAt(&window, after, .none);
     try std.testing.expect(!gone_repeated.made_progress);
     try std.testing.expect(gone_repeated.retired);
+
+    gone.signal_failure = true;
+    gone.group_permission_denied = true;
+    const result = try gone.outcome(false);
+    const text = result.content[0..result.content_len];
+    try std.testing.expect(std.mem.indexOf(u8, text, "Process-group signaling reported a failure.\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "macOS group signaling returned EPERM") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "original process group was observed absent") != null);
 }
 
 test "cleanup ownership transfers consume their source" {
