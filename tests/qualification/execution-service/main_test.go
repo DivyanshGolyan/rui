@@ -12,6 +12,14 @@ import (
 	"testing"
 )
 
+func TestWireRequestPreservesUTF8AndSeparatesInstructions(t *testing.T) {
+	got := wireRequest("<&>\u2028\u2029\n", [][]byte{userItem(`literal\u2028`)})
+	want := `{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":"<&>` + "\u2028\u2029" + `\n","input":[{"role":"user","content":[{"type":"input_text","text":"literal\\u2028"}]}],"tools":[]}`
+	if string(got) != want {
+		t.Fatalf("wire request differs:\ngot %s\nwant %s", got, want)
+	}
+}
+
 func event(phase string, at int, extra ...string) map[string]any {
 	m := map[string]any{"rui_test_phase": phase, "at_ns": fmt.Sprint(at), "process": "7", "run": "1000", "clock": "awake_ns", "turn": "1", "operation": "1", "attempt": "1"}
 	for i := 0; i < len(extra); i += 2 {

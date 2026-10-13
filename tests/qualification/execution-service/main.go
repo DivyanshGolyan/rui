@@ -177,6 +177,15 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	c := measurement.Client{Binary: binary, Artifacts: dir, Store: store, Deadline: d}
 	row = map[string]any{"parameters": s, "trace_path": tracePath, "status": "failed"}
 
+	workspace, err := measurement.RepositoryRoot()
+	if err != nil {
+		return row, err
+	}
+	workspace, err = filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return row, err
+	}
+	instructions := measurement.ModelInstructions(workspace, host.Ready["store"], "execution/target")
 	targetInputs := [][]byte{}
 	if err = c.Configure("target-config", "execution/target", "--tools", "none"); err != nil {
 		return row, err
@@ -185,7 +194,7 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 		text := fmt.Sprintf("history-%d:", i) + strings.Repeat("h", s.HistoryBytes/max(1, s.HistoryTurns))
 		targetInputs = append(targetInputs, userItem(text))
 		response, replay := answerSSE(fmt.Sprintf("history-%d", i), "history-ok", 64, 64)
-		ep.add(text, &requestPlan{Expected: wireRequest(targetInputs), Response: response})
+		ep.add(text, &requestPlan{Expected: wireRequest(instructions, targetInputs), Response: response})
 		key := fmt.Sprintf("history-%d", i)
 		if err = c.Message(key, "execution/target", text); err != nil {
 			return row, err
@@ -198,7 +207,7 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	work := "work-0"
 	input := append(append([][]byte{}, targetInputs...), userItem(work))
 	payload, _ := answerSSE(work, "answer-"+work, 64, 64)
-	ep.add(work, &requestPlan{Expected: wireRequest(input), Response: payload})
+	ep.add(work, &requestPlan{Expected: wireRequest(instructions, input), Response: payload})
 	if err = c.Message(work, "execution/target", work); err != nil {
 		return row, err
 	}

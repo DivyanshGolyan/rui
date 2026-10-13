@@ -20,6 +20,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"rui.local/qualification/measurement"
 )
 
 const (
@@ -58,6 +60,8 @@ type fixture struct {
 	totalWork        workExpectation
 	artifactDir      string
 	historyAware     bool
+	workspace        string
+	store            string
 	round            int
 	facts            *os.File
 	streams          map[string]*stream
@@ -87,6 +91,8 @@ type Config struct {
 	Rounds          int
 	TLS             bool
 	HistoryAware    bool
+	Workspace       string
+	Store           string
 }
 
 type Server struct {
@@ -498,7 +504,7 @@ func requestID(body []byte) (string, error) {
 	return result, nil
 }
 
-func requestHistoryValid(body []byte, current string) bool {
+func requestHistoryValid(body []byte, current, workspace, store string) bool {
 	var capacity, round, index int
 	if _, err := fmt.Sscanf(current, "capacity-%d-round-%d-%d", &capacity, &round, &index); err != nil || capacity < 1 || round < 1 || index < 0 || index >= capacity {
 		return false
@@ -522,8 +528,9 @@ func requestHistoryValid(body []byte, current string) bool {
 	}
 	expected := map[string]any{
 		"model": "model-a", "store": false, "stream": true,
-		"include": []any{"reasoning.encrypted_content"}, "instructions": "", "tools": []any{},
-		"input": expectedInput,
+		"include": []any{"reasoning.encrypted_content"}, "tools": []any{},
+		"instructions": measurement.ModelInstructions(workspace, store, fmt.Sprintf("measure/repeat-%d/%d", capacity, index)),
+		"input":        expectedInput,
 	}
 	var observed any
 	return json.Unmarshal(body, &observed) == nil && reflect.DeepEqual(observed, expected)
@@ -666,7 +673,7 @@ func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	digest := sha256.Sum256(body)
-	current := &stream{id: id, requestBytes: len(body), requestSHA256: hex.EncodeToString(digest[:]), historyValid: !f.historyAware || requestRoundIdentityValid(id, f.expected, f.round) && requestHistoryValid(body, id)}
+	current := &stream{id: id, requestBytes: len(body), requestSHA256: hex.EncodeToString(digest[:]), historyValid: !f.historyAware || requestRoundIdentityValid(id, f.expected, f.round) && requestHistoryValid(body, id, f.workspace, f.store)}
 	f.mu.Lock()
 	if f.started || len(f.streams) >= f.expected || f.streams[id] != nil {
 		f.mu.Unlock()
@@ -1079,6 +1086,7 @@ func (s *Server) Reset() error {
 		facts.Close()
 		return err
 	}
+	prepared.workspace, prepared.store = s.config.Workspace, s.config.Store
 	prepared.round = nextRound
 	s.fixtureMu.Lock()
 	defer s.fixtureMu.Unlock()
@@ -1101,6 +1109,9 @@ func Start(config Config) (*Server, error) {
 	if config.Streams <= 0 || config.Duration <= 0 || config.Duration%time.Second != 0 || config.EventsPerSecond <= 0 || config.ArtifactDir == "" || config.Rounds <= 0 {
 		return nil, errors.New("invalid fixture configuration")
 	}
+	if config.HistoryAware && (config.Workspace == "" || config.Store == "") {
+		return nil, errors.New("history validation requires expected Workspace and Store")
+	}
 	if err := os.MkdirAll(config.ArtifactDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -1120,6 +1131,7 @@ func Start(config Config) (*Server, error) {
 		facts.Close()
 		return nil, err
 	}
+	fixture.workspace, fixture.store = config.Workspace, config.Store
 	fixture.round = 1
 	mux := http.NewServeMux()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

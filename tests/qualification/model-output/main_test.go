@@ -52,9 +52,13 @@ func TestMissingPhysicalFootprintCannotQualifyPortableSample(t *testing.T) {
 }
 
 func TestExpectedCapacityRequestDigest(t *testing.T) {
-	bytes, digest := expectedCapacityRequests([]string{"capacity-1-0"})
-	if bytes != 200 || digest != "3ba8f89953b1f1cbc2a36d18c3dd7cb8f5a4a4bd6860d23bcb24e79c2069c8d8" {
+	bytes, digest := expectedCapacityRequests("/workspace", "/store", []string{"capacity-1-0"}, []string{"peer/other"})
+	if bytes != 707 || digest != "8e364f6e64201c93fee72a52c9c25f22140dc1766026bdab3e3a823b4ecb761b" {
 		t.Fatalf("unexpected independent request oracle: %d %s", bytes, digest)
+	}
+	bytes, digest = expectedCapacityRequests("/work<&>\u2028", "/s\u2029", []string{`literal\u2028`}, []string{"p/λ\x00"})
+	if bytes != 710 || digest != "2fc56d286add97e3b0d01ff08923adf15b0a3b8c20663237a11f7e3bb15a9a22" {
+		t.Fatalf("escaping changed exact wire bytes: %d %s", bytes, digest)
 	}
 }
 

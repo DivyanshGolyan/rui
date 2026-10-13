@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"rui.local/qualification/measurement"
 )
 
 const maxFixtureRequestBytes = 128 * 1024 * 1024
@@ -249,12 +251,14 @@ func marshal(v any) []byte {
 	return b
 }
 func userItem(text string) []byte {
-	return []byte(`{"role":"user","content":[{"type":"input_text","text":` + string(marshal(text)) + `}]}`)
+	return []byte(`{"role":"user","content":[{"type":"input_text","text":` + measurement.JSONString(text) + `}]}`)
 }
-func wireRequest(input [][]byte) []byte {
-	prefix := []byte(`{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"input":[{"role":"system","content":[{"type":"input_text","text":""}]}`)
-	for _, item := range input {
-		prefix = append(prefix, ',')
+func wireRequest(instructions string, input [][]byte) []byte {
+	prefix := []byte(`{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":` + measurement.JSONString(instructions) + `,"input":[`)
+	for index, item := range input {
+		if index != 0 {
+			prefix = append(prefix, ',')
+		}
 		prefix = append(prefix, item...)
 	}
 	return append(prefix, []byte(`],"tools":[]}`)...)

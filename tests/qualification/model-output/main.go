@@ -68,7 +68,7 @@ type fixtureStartup struct {
 	PID         int    `json:"pid"`
 }
 
-func startChildFixture(deadline measurement.Deadline, streams, eventsPerSecond int, duration time.Duration, rounds int, historyAware bool, artifactDir string) (*childFixture, error) {
+func startChildFixture(deadline measurement.Deadline, streams, eventsPerSecond int, duration time.Duration, rounds int, historyAware bool, artifactDir, workspace, store string) (*childFixture, error) {
 	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -87,6 +87,8 @@ func startChildFixture(deadline measurement.Deadline, streams, eventsPerSecond i
 		"--provider-duration", duration.String(),
 		"--provider-rounds", strconv.Itoa(rounds),
 		"--provider-artifacts", artifactDir,
+		"--provider-workspace", workspace,
+		"--provider-store", store,
 	)
 	if historyAware {
 		cmd.Args = append(cmd.Args, "--provider-history-aware")
@@ -873,15 +875,16 @@ func spillComparisonStatus(on, off any) string {
 	return reduceStatuses(normalized)
 }
 
-func expectedCapacityRequests(keys []string) (int, string) {
+func expectedCapacityRequests(workspace, store string, keys, sessions []string) (int, string) {
 	type keyedDigest struct {
 		key    string
 		digest string
 	}
 	rows := make([]keyedDigest, 0, len(keys))
 	totalBytes := 0
-	for _, key := range keys {
-		body := []byte(`{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":"","input":[{"role":"user","content":[{"type":"input_text","text":` + strconv.Quote(key) + `}]}],"tools":[]}`)
+	for index, key := range keys {
+		instructions := measurement.JSONString(measurement.ModelInstructions(workspace, store, sessions[index]))
+		body := []byte(`{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":` + instructions + `,"input":[{"role":"user","content":[{"type":"input_text","text":` + measurement.JSONString(key) + `}]}],"tools":[]}`)
 		digest := sha256.Sum256(body)
 		rows = append(rows, keyedDigest{key: key, digest: hex.EncodeToString(digest[:])})
 		totalBytes += len(body)
@@ -1412,7 +1415,15 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 	if err != nil {
 		return nil, err
 	}
-	expectedRequestBytes, expectedRequestDigest := expectedCapacityRequests(keys)
+	workspace, err := measurement.RepositoryRoot()
+	if err != nil {
+		return nil, err
+	}
+	workspace, err = filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return nil, err
+	}
+	expectedRequestBytes, expectedRequestDigest := expectedCapacityRequests(workspace, host.Ready["store"], keys, sessions)
 	requestComplete := offer.RequestBytes == expectedRequestBytes && offer.RequestSetSHA256 == expectedRequestDigest
 	requestOracle := "independent exact-byte set"
 	if sameSessions {
@@ -1543,6 +1554,19 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		return nil, err
 	}
+	directory, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		return nil, err
+	}
+	store := filepath.Join(directory, "store")
+	workspace, err := measurement.RepositoryRoot()
+	if err != nil {
+		return nil, err
+	}
+	workspace, err = filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return nil, err
+	}
 	facts, err := measurement.NewFactLog(filepath.Join(directory, "controller-facts.jsonl"))
 	if err != nil {
 		return nil, err
@@ -1550,7 +1574,7 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 	defer func() {
 		measurement.JoinCleanup(&resultError, facts.Close)
 	}()
-	fixture, err := startChildFixture(measurement.NewDeadline(time.Minute), capacity, scenario.EventsPerSecond, duration, roundCount, sameSessions, filepath.Join(directory, "provider"))
+	fixture, err := startChildFixture(measurement.NewDeadline(time.Minute), capacity, scenario.EventsPerSecond, duration, roundCount, sameSessions, filepath.Join(directory, "provider"), workspace, store)
 	if err != nil {
 		return nil, err
 	}
@@ -1558,7 +1582,6 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 		measurement.JoinCleanup(&resultError, fixture.Close)
 	}()
 	deadline := measurement.NewDeadline(2*duration + 8*time.Minute)
-	store := filepath.Join(directory, "store")
 	var hostOptions []string
 	if capacity > 1 {
 		if fixture.providerCA == "" || !strings.HasPrefix(fixture.ProviderURL(), "https://") {
@@ -1722,8 +1745,8 @@ func finalizeQualification(result map[string]any, runError error, cleanup ...fun
 	return result, runError
 }
 
-func runProviderChild(streams, eventsPerSecond int, duration time.Duration, rounds int, historyAware bool, artifacts string) error {
-	server, err := provider.Start(provider.Config{Streams: streams, EventsPerSecond: eventsPerSecond, Duration: duration, Rounds: rounds, HistoryAware: historyAware, ArtifactDir: artifacts, TLS: streams > 1})
+func runProviderChild(streams, eventsPerSecond int, duration time.Duration, rounds int, historyAware bool, artifacts, workspace, store string) error {
+	server, err := provider.Start(provider.Config{Streams: streams, EventsPerSecond: eventsPerSecond, Duration: duration, Rounds: rounds, HistoryAware: historyAware, ArtifactDir: artifacts, TLS: streams > 1, Workspace: workspace, Store: store})
 	if err != nil {
 		return err
 	}
@@ -1774,13 +1797,15 @@ func main() {
 	providerRounds := flag.Int("provider-rounds", 1, "provider child round count")
 	providerHistoryAware := flag.Bool("provider-history-aware", false, "validate complete repeated-session history")
 	providerArtifacts := flag.String("provider-artifacts", "", "provider child artifact directory")
+	providerWorkspace := flag.String("provider-workspace", "", "expected canonical request Workspace")
+	providerStore := flag.String("provider-store", "", "expected canonical request Store")
 	flag.Parse()
 	if *providerChild {
 		if err := measurement.RequireProcessRuntime(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		if err := runProviderChild(*providerStreams, *providerEventsPerSecond, *providerDuration, *providerRounds, *providerHistoryAware, *providerArtifacts); err != nil {
+		if err := runProviderChild(*providerStreams, *providerEventsPerSecond, *providerDuration, *providerRounds, *providerHistoryAware, *providerArtifacts, *providerWorkspace, *providerStore); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

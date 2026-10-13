@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"rui.local/qualification/measurement"
 )
 
 func TestRequestIDSelectsLatestUserTurnFromGrowingHistory(t *testing.T) {
@@ -22,12 +24,23 @@ func TestRequestIDSelectsLatestUserTurnFromGrowingHistory(t *testing.T) {
 }
 
 func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *testing.T) {
-	const envelope = `{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":"","tools":[],`
+	instructions, err := json.Marshal(measurement.ModelInstructions("/workspace", "/store", "measure/repeat-2/0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := `{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":` + string(instructions) + `,"tools":[],`
 	valid := []byte(envelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-0"}]},{"type":"message","id":"capacity-response-capacity-2-round-1-0-message","role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-0","annotations":[]}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
-	if !requestHistoryValid(valid, "capacity-2-round-2-0") {
+	if !requestHistoryValid(valid, "capacity-2-round-2-0", "/workspace", "/store") {
 		t.Fatal("valid asymmetric stream-zero history was rejected")
 	}
 	for name, mutate := range map[string]func(map[string]any){
+		"missing self context": func(body map[string]any) { body["instructions"] = "" },
+		"wrong self address": func(body map[string]any) {
+			body["instructions"] = measurement.ModelInstructions("/workspace", "/other-store", "measure/repeat-2/0")
+		},
+		"wrong Session": func(body map[string]any) {
+			body["instructions"] = measurement.ModelInstructions("/workspace", "/store", "measure/repeat-2/1")
+		},
 		"missing assistant type": func(body map[string]any) { delete(body["input"].([]any)[1].(map[string]any), "type") },
 		"missing assistant id":   func(body map[string]any) { delete(body["input"].([]any)[1].(map[string]any), "id") },
 		"wrong assistant id": func(body map[string]any) {
@@ -53,7 +66,7 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			if requestHistoryValid(body, "capacity-2-round-2-0") {
+			if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace", "/store") {
 				t.Fatal("corrupt history was accepted")
 			}
 		})
@@ -68,7 +81,7 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 		if err != nil {
 			t.Fatal(err)
 		}
-		if requestHistoryValid(body, "capacity-2-round-2-0") {
+		if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace", "/store") {
 			t.Fatalf("invalid %s accepted", field)
 		}
 		delete(mutated, field)
@@ -76,16 +89,16 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 		if err != nil {
 			t.Fatal(err)
 		}
-		if requestHistoryValid(body, "capacity-2-round-2-0") {
+		if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace", "/store") {
 			t.Fatalf("missing %s accepted", field)
 		}
 	}
 	missingPrior := []byte(envelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
-	if requestHistoryValid(missingPrior, "capacity-2-round-2-0") {
+	if requestHistoryValid(missingPrior, "capacity-2-round-2-0", "/workspace", "/store") {
 		t.Fatal("request without its prior user and assistant turn was accepted")
 	}
 	wrongCurrent := []byte(envelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-1"}]},{"role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-1"}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
-	if requestHistoryValid(wrongCurrent, "capacity-2-round-2-1") {
+	if requestHistoryValid(wrongCurrent, "capacity-2-round-2-1", "/workspace", "/store") {
 		t.Fatal("stream-one expectation accepted stream-zero current input")
 	}
 }
