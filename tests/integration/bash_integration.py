@@ -35,7 +35,7 @@ def start_detached_shell(command, ready_path):
     return f"{detached_shell(command)} & while [ ! -s {ready} ]; do :; done"
 
 
-def configure(state, store, key, session, permission="ask"):
+def configure(state, store, key, session, permission="ask", workspace=fixture.ROOT):
     result = fixture.command(
         "configure",
         "--store",
@@ -47,7 +47,7 @@ def configure(state, store, key, session, permission="ask"):
         "--session",
         session,
         "--workspace",
-        fixture.ROOT,
+        workspace,
         "--provider",
         "codex",
         "--model",
@@ -479,7 +479,7 @@ def prove_reused_session(state):
         assert fixture.read_result(store, "reuse-second") == b"second-turn-answer"
         assert len(endpoint.requests) == 4, endpoint.requests
         initial_request = json.loads(endpoint.requests[0])
-        assert initial_request["instructions"] == "", initial_request
+        assert initial_request["instructions"] == fixture.model_instructions(fixture.ROOT), initial_request
         assert initial_request["input"] == [
             {"role": "user", "content": [{"type": "input_text", "text": "first work"}]},
         ], initial_request
