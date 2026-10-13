@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 from control_integration import command, configure, inspect_execution, message, observe, start_host, stop_session, successful_sse, wait_for
 from conversation_page_integration import host_resources, idle_resources, request
@@ -307,4 +308,191 @@ def main():
             print(f"retained activity failure state: {root}", file=sys.stderr)
 
 
-if __name__ == "__main__": main()
+def performance_case(item_bytes):
+    """Opt-in real admission witness; stream both copies of the provider item."""
+    from dispatch_integration import read_result
+    root = tempfile.mkdtemp(prefix="rui-activity-performance-")
+    completed = False
+    process = None
+    endpoint = None
+    worker = None
+    polling = None
+    done = threading.Event()
+    try:
+        state = canonical_fixture_root(root)
+        store = state / "store"
+        store.mkdir(mode=0o700)
+        marker = state / "must-not-execute"
+        label = "Create forbidden effect marker"
+        command_prefix = f"touch {marker};#"
+        arguments = json.dumps({"cmd": command_prefix + "PADDING", "timeout_ms": None,
+            "description": label}, separators=(",", ":"))
+        item = json.dumps({"type": "function_call", "id": "performance-item-0", "status": "completed",
+            "name": "bash", "call_id": "performance-call", "arguments": arguments}, separators=(",", ":")).encode()
+        prefix, suffix = item.split(b"PADDING")
+        padding = item_bytes - len(prefix) - len(suffix)
+        assert padding >= 0
+        argument_bytes = len(arguments.encode()) - len("PADDING") + padding
+        command_bytes = len(command_prefix.encode()) + padding
+        fixture = state / "provider.sse"
+        generation_start = time.monotonic()
+        with fixture.open("wb") as out:
+            for envelope, tail in (
+                    (b'data: {"type":"response.output_item.done","output_index":0,"item":', b'}\n\n'),
+                    (b'data: {"type":"response.completed","response":{"id":"performance","status":"completed","output":[', b']}}\n\n')):
+                out.write(envelope)
+                out.write(prefix)
+                remaining = padding
+                chunk = b" " * (1024 * 1024)
+                while remaining:
+                    count = min(remaining, len(chunk))
+                    out.write(chunk[:count])
+                    remaining -= count
+                out.write(suffix)
+                out.write(tail)
+        print(json.dumps({"item_bytes": item_bytes, "arguments_bytes": argument_bytes,
+            "command_bytes": command_bytes, "provider_bytes": fixture.stat().st_size,
+            "generation_seconds": time.monotonic() - generation_start}), flush=True)
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                is_second = b"independent question" in json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Connection", "close")
+                self.send_header("Content-Length", str(len(successful_sse(2, "independent answer 42"))) if is_second else str(fixture.stat().st_size))
+                self.end_headers()
+                if is_second:
+                    self.wfile.write(successful_sse(2, "independent answer 42"))
+                else:
+                    with fixture.open("rb") as source:
+                        shutil.copyfileobj(source, self.wfile, 1024 * 1024)
+                self.close_connection = True
+            def log_message(self, *_args): pass
+        endpoint = TestHTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=endpoint.serve_forever)
+        worker.start()
+        process, fields = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        command("configure", "--store", store, "--record", state / "config", "--key", "config", "--session", SESSION,
+            "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "model-a", "--tools", "bash", "--permission-mode", "ask")
+        configure(state, store, "second-config", "direct/independent")
+        admitted_start = time.monotonic()
+        message(state, store, "large", SESSION, "propose command")
+        # A live, read-only commit observer avoids sending a bounded Client
+        # exchange into the nonpreemptible import. This is not admission proof:
+        # the native page below must independently report the admitted Action.
+        def committed():
+            try:
+                with sqlite3.connect(f"file:{store / 'rui.sqlite3'}?mode=ro", uri=True, timeout=0) as db:
+                    return db.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 1
+            except sqlite3.OperationalError as error:
+                if error.sqlite_errorcode == sqlite3.SQLITE_BUSY: return False
+                raise
+        wait_for(committed, "live provider import commit", timeout=300)
+        first = page(store)
+        calls = [r for r in first["page"]["items"] if kind(r) == "call"]
+        assert len(calls) == 1 and calls[0]["value"]["call"]["action"] is not None, first
+        assert calls[0]["value"]["call"]["rejection"] is None, first
+        assert calls[0]["value"]["call"]["fields"][3]["bytes"] == str(argument_bytes), first
+        for reference, identity in zip(calls[0]["value"]["call"]["fields"][:3],
+                (b"performance-item-0", b"bash", b"performance-call")):
+            assert reference == {"bytes": str(len(identity)), "sha256": digest(identity).hex()}, reference
+        expected = first["page"]["call_activity"]
+        assert expected["total"] == "1" and expected["entries"][0]["presentation"]["description"] == label, expected
+        assert expected["entries"][0]["presentation"]["code"] == "pending_permission", expected
+        print(json.dumps({"admission_seconds": time.monotonic() - admitted_start, "call": calls[0], "activity": expected}), flush=True)
+        errors = []
+        timings = []
+        def poll():
+            try:
+                for index in range(30):
+                    if done.is_set(): return
+                    tick = time.monotonic()
+                    current = command("inspect-session", "--store", store, "--session", SESSION)
+                    current_end = time.monotonic()
+                    if done.is_set(): return
+                    observed = page(store)["page"]["call_activity"]
+                    end = time.monotonic()
+                    assert observed == expected, observed
+                    unresolved = current["actions"]["unresolved"]
+                    assert current["profile"] == "current" and len(unresolved) == 1, current
+                    assert unresolved[0]["action"] == calls[0]["value"]["call"]["action"], current
+                    assert unresolved[0]["presentation"] == expected["entries"][0]["presentation"], current
+                    assert unresolved[0]["parent_operation"] == expected["entries"][0]["operation"], current
+                    assert unresolved[0]["call_ordinal"] == expected["entries"][0]["ordinal"], current
+                    assert not marker.exists()
+                    timings.append({"index": index, "current_seconds": current_end - tick,
+                        "activity_seconds": end - current_end, "current": current,
+                        "start_seconds": tick - admitted_start, "end_seconds": end - admitted_start})
+                    # Pace the workload, never a correctness/acceptance delay.
+                    done.wait(max(0, 0.25 - (time.monotonic() - tick)))
+            except BaseException as error:
+                errors.append(error)
+        polling = threading.Thread(target=poll)
+        polling.start()
+        second_start = time.monotonic()
+        try:
+            message(state, store, "independent", "direct/independent", "independent question")
+            second_admitted = time.monotonic()
+            deadline = second_start + 15
+            result = wait_for(lambda: observe(store, "independent").get("result", {}).get("status") == "completed",
+                "independent result while polling", deadline=deadline)
+            answer = read_result(store, "independent", deadline=deadline)
+            assert answer == b"independent answer 42", answer
+            second_end = time.monotonic()
+            print(json.dumps({"second_admission_seconds": second_admitted - second_start,
+                "second_result_seconds": second_end - second_start, "answer": answer.decode(), "completed": result,
+                "second_start_seconds": second_start - admitted_start, "second_end_seconds": second_end - admitted_start}), flush=True)
+        finally:
+            incoming_error = sys.exc_info()[1]
+            if incoming_error is not None: done.set()
+            polling.join(timeout=15)
+            if polling.is_alive():
+                error = AssertionError("performance polling thread did not retire")
+                if incoming_error is None: raise error
+                incoming_error.add_note(str(error))
+            print(json.dumps({"polls": timings}), flush=True)
+        if errors: raise errors[0]
+        assert len(timings) == 30 and not marker.exists()
+        assert any(sample["start_seconds"] < second_end - admitted_start and
+            sample["end_seconds"] > second_start - admitted_start for sample in timings), "no polling exchange overlapped independent Session progress"
+        stop_session(state, store, "stop-large", SESSION)
+        wait_for(lambda: observe(store, "large").get("result", {}).get("status") == "cancelled", "large cancellation")
+        wait_for(lambda: inspect_execution(store, SESSION)["custody_occupied"] == "0", "all disposal")
+        assert not marker.exists()
+        completed = True
+    finally:
+        incoming_error = sys.exc_info()[1]
+        done.set()
+        disposal_errors = []
+        for dispose in (lambda: stop_process(process) if process is not None else None,
+                        lambda: polling.join(timeout=15) if polling is not None else None,
+                        endpoint.shutdown if endpoint is not None else None,
+                        endpoint.server_close if endpoint is not None else None,
+                        lambda: worker.join(timeout=5) if worker is not None else None):
+            if dispose is None: continue
+            try:
+                dispose()
+            except BaseException as error:
+                disposal_errors.append(error)
+        if polling is not None and polling.is_alive():
+            disposal_errors.append(AssertionError("performance polling thread did not retire after Host disposal"))
+        if worker is not None and worker.is_alive():
+            disposal_errors.append(AssertionError("performance provider thread did not retire"))
+        if completed and not disposal_errors:
+            shutil.rmtree(root)
+            print("performance native receipts, cancellation, disposal and fixture removal complete", flush=True)
+        else:
+            print(f"retained performance failure state: {root}", file=sys.stderr)
+        if disposal_errors:
+            primary = incoming_error if incoming_error is not None else disposal_errors[0]
+            primary.add_note("Performance fixture disposal failed: " + ", ".join(str(error) for error in disposal_errors))
+            if incoming_error is None: raise primary
+
+
+if __name__ == "__main__":
+    if "RUI_ACTIVITY_ITEM_BYTES" in os.environ:
+        performance_case(int(os.environ["RUI_ACTIVITY_ITEM_BYTES"]))
+    else:
+        main()
