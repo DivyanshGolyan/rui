@@ -304,7 +304,7 @@ def peer_collaboration_case():
     installation.mkdir()
     executable = installation / "rui"
     shutil.copy2(fixture.RUI, executable)
-    gate = ReleaseGate(state / "sender-held")
+    gate = endpoint = thread = None
     marker = state / "send-returned"
     receipt = state / "peer-receipt"
     reply_receipt = state / "reply-receipt"
@@ -352,10 +352,11 @@ def peer_collaboration_case():
             answer = "Peer result delivered."
         return fixture.sse_answer(f"peer-{ordinal}", f"reason-{ordinal}", f"answer-{ordinal}", answer)[0]
 
-    endpoint = fixture.SuccessEndpoint([], response_for_request=response)
-    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-    thread.start()
     try:
+        gate = ReleaseGate(state / "sender-held")
+        endpoint = fixture.SuccessEndpoint([], response_for_request=response)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        thread.start()
         host, _ = start_ready_process([str(executable), "host", "serve", "--store", str(store),
             "--active-capacity", "1", "--provider-endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses"],
             env={**os.environ, "HOME": str(home), "PATH": "/no-host-path", "RUI_PRIVATE_TEST_SECRET": "not-inherited"})
@@ -395,8 +396,11 @@ def peer_collaboration_case():
     finally:
         incoming = sys.exception()
         errors = []
-        for dispose in (gate.release, lambda: stop_process(host) if host is not None else None,
-                        endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
+        for dispose in (lambda: gate.release() if gate is not None else None,
+                        lambda: stop_process(host) if host is not None else None,
+                        lambda: endpoint.shutdown() if thread is not None and thread.ident is not None else None,
+                        lambda: endpoint.server_close() if endpoint is not None else None,
+                        lambda: thread.join(timeout=5) if thread is not None and thread.ident is not None else None):
             try:
                 dispose()
             except BaseException as error:
@@ -418,8 +422,10 @@ def peer_occupied_capacity_case():
     home.mkdir(mode=0o700)
     executable = state / "rui"
     shutil.copy2(fixture.RUI, executable)
-    send_gate, exit_gate = ReleaseGate(state / "send-held"), ReleaseGate(state / "exit-held")
-    host = None
+    # Darwin does not wake every already-blocked FIFO reader on writer close.
+    # Each shell owns a gate; release all only after all four hold custody.
+    send_gates, exit_gates = [], []
+    host = endpoint = thread = None
     passed = False
     requests = []
 
@@ -430,19 +436,22 @@ def peer_occupied_capacity_case():
                 item.get("type") == "function_call_output" for item in request["input"]):
             index = int(address["session"].split("/")[1])
             command = "set -e; printf ready > " + shlex.quote(str(state / f"ready-{index}"))
-            command += "; IFS= read -r ignored < " + shlex.quote(str(send_gate.path)) + " || :; "
+            command += "; IFS= read -r ignored < " + shlex.quote(str(send_gates[index].path)) + " || :; "
             command += shlex.join(["rui", "session", "send", "--store", address["store"], "--session", f"recipient/{index}",
                 "--key", f"occupied-{index}", "--record", str(state / f"request-{index}.json"), f"work {index}"])
             command += " > " + shlex.quote(str(state / f"receipt-{index}"))
             command += "; printf returned > " + shlex.quote(str(state / f"returned-{index}"))
-            command += "; IFS= read -r ignored < " + shlex.quote(str(exit_gate.path)) + " || :"
+            command += "; IFS= read -r ignored < " + shlex.quote(str(exit_gates[index].path)) + " || :"
             return fixture.sse_tool_calls(f"sender-{index}", [("bash", f"send-{index}", json.dumps({"cmd": command, "timeout_ms": None}))])
         return fixture.sse_answer("settled", "reason", "answer", "done")[0]
 
-    endpoint = fixture.SuccessEndpoint([], response_for_request=response)
-    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-    thread.start()
     try:
+        for index in range(4):
+            send_gates.append(ReleaseGate(state / f"send-held-{index}"))
+            exit_gates.append(ReleaseGate(state / f"exit-held-{index}"))
+        endpoint = fixture.SuccessEndpoint([], response_for_request=response)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        thread.start()
         host, _ = start_ready_process([str(executable), "host", "serve", "--store", str(store),
             "--active-capacity", "4", "--provider-endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses"],
             env={**os.environ, "HOME": str(home)})
@@ -454,9 +463,12 @@ def peer_occupied_capacity_case():
         fixture.wait_for(lambda: all((state / f"ready-{index}").exists() for index in range(4)), "all four Bash senders hold execution")
         occupied = json.loads(run(home, "session", "inspect", "--store", store, "--session", "sender/0"))
         assert occupied["execution"]["custody_occupied"] == "4", occupied
-        send_gate.release()
+        for gate in send_gates:
+            gate.assert_held()
+            gate.release()
         fixture.wait_for(lambda: all((state / f"returned-{index}").exists() for index in range(4)), "all CLI receipts while every execution credit remains occupied")
-        exit_gate.assert_held()
+        for gate in exit_gates:
+            gate.assert_held()
         for index in range(4):
             receipt = json.loads((state / f"receipt-{index}").read_bytes())
             assert receipt["answer"]["status"] == "accepted", receipt
@@ -465,7 +477,8 @@ def peer_occupied_capacity_case():
         assert {address["session"] for address in requests} == {f"sender/{index}" for index in range(4)}, requests
         occupied = json.loads(run(home, "session", "inspect", "--store", store, "--session", "sender/0"))
         assert occupied["execution"]["custody_occupied"] == "4", occupied
-        exit_gate.release()
+        for gate in exit_gates:
+            gate.release()
         for index in range(4):
             fixture.wait_for(lambda index=index: fixture.completed_observation(store, f"occupied-{index}"), "recipient executes after sender retirement")
         passed = True
@@ -473,8 +486,10 @@ def peer_occupied_capacity_case():
     finally:
         incoming = sys.exception()
         errors = []
-        for dispose in (send_gate.release, exit_gate.release, lambda: stop_process(host) if host is not None else None,
-                        endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
+        for dispose in (*(gate.release for gate in (*send_gates, *exit_gates)), lambda: stop_process(host) if host is not None else None,
+                        lambda: endpoint.shutdown() if thread is not None and thread.ident is not None else None,
+                        lambda: endpoint.server_close() if endpoint is not None else None,
+                        lambda: thread.join(timeout=5) if thread is not None and thread.ident is not None else None):
             try:
                 dispose()
             except BaseException as error:
@@ -506,7 +521,7 @@ def peer_population_case(*, qualify_latency=True):
     installation.mkdir()
     executable = installation / "rui"
     shutil.copy2(fixture.RUI, executable)
-    host = None
+    host = endpoint = thread = None
     passed = False
     observed_addresses = set()
     calls = {}
@@ -561,10 +576,10 @@ def peer_population_case(*, qualify_latency=True):
                 answer = "Partial delivered; no reply waiter retained."
         return fixture.sse_answer(f"answer-{seed}-{index}", f"reason-{seed}-{index}", f"text-{seed}-{index}", answer)[0]
 
-    endpoint = fixture.SuccessEndpoint([], response_for_request=response)
-    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-    thread.start()
     try:
+        endpoint = fixture.SuccessEndpoint([], response_for_request=response)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        thread.start()
         host, _ = start_ready_process([str(executable), "host", "serve", "--store", str(store),
             "--active-capacity", "100", "--provider-endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses"],
             env={**os.environ, "HOME": str(home)})
@@ -619,7 +634,9 @@ def peer_population_case(*, qualify_latency=True):
         incoming = sys.exception()
         errors = []
         for dispose in (lambda: stop_process(host) if host is not None else None,
-                        endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
+                        lambda: endpoint.shutdown() if thread is not None and thread.ident is not None else None,
+                        lambda: endpoint.server_close() if endpoint is not None else None,
+                        lambda: thread.join(timeout=5) if thread is not None and thread.ident is not None else None):
             try:
                 dispose()
             except BaseException as error:

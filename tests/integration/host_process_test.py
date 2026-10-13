@@ -24,6 +24,7 @@ from host_process import (
     HostStartError,
     ReleaseGate,
     _Observations,
+    _observation_atomics,
     start_ready_process,
     stop_process,
 )
@@ -39,6 +40,10 @@ def child(source):
 
 
 def assert_reaped(source, description, *, timeout=0.2, required_fields=None, observations=None):
+    if observations is not None:
+        # Native observer compilation is setup, outside the same readiness
+        # and reap interval that start_ready_process measures.
+        _observation_atomics()
     started = time.monotonic()
     try:
         start_ready_process(
@@ -63,6 +68,7 @@ def main():
     prove_terminal_capture_budget()
     prove_execution_release_oracles()
     prove_required_capture_receipts()
+    prove_peer_setup_disposal()
     assert_reaped("time.sleep(10)", "silent alive")
     assert_reaped("sys.stdout.write('rea'); sys.stdout.flush(); time.sleep(10)", "partial line")
     assert_reaped("print('not-ready'); time.sleep(10)", "malformed readiness")
@@ -729,6 +735,62 @@ def prove_retention_does_not_own_teardown():
                     process.kill()
                     process.wait(timeout=1)
     print("Host retention: sampling/write/copy refusal preserves original failure and actual SIGKILL/reap/closed custody; post-seal loss retains distinct pre/post states")
+
+
+def prove_peer_setup_disposal():
+    """Partial peer fixture setup must dispose every already-owned resource."""
+    with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
+        import human_cli_integration as peer
+    endpoint_type = peer.fixture.SuccessEndpoint
+    for scenario, failure_at in (
+        (peer.peer_occupied_capacity_case, 2),
+        (peer.peer_occupied_capacity_case, 5),
+        (peer.peer_occupied_capacity_case, "endpoint"),
+        (peer.peer_occupied_capacity_case, "thread"),
+        (peer.peer_collaboration_case, "endpoint"),
+        (peer.peer_collaboration_case, "thread"),
+        (peer.peer_population_case, "thread"),
+    ):
+        gates, endpoints = [], []
+        original = OSError("injected peer setup failure")
+
+        def gate(path):
+            if len(gates) == failure_at:
+                raise original
+            owned = ReleaseGate(path)
+            gates.append(owned)
+            return owned
+
+        def endpoint(*args, **kwargs):
+            if failure_at == "endpoint":
+                raise original
+            owned = endpoint_type(*args, **kwargs)
+            endpoints.append(owned)
+            return owned
+
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                with patch.object(peer.tempfile, "mkdtemp", return_value=directory), \
+                        patch.object(peer.fixture, "RUI", pathlib.Path(sys.executable)), \
+                        patch.object(peer, "ReleaseGate", gate), \
+                        patch.object(peer.fixture, "SuccessEndpoint", endpoint), \
+                        patch.object(peer.threading.Thread, "start", side_effect=original), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    try:
+                        scenario()
+                    except OSError as error:
+                        assert error is original, "disposal replaced setup failure"
+                    else:
+                        raise AssertionError("setup injection did not fail")
+                assert all(owned.fd is None and not owned.path.exists() for owned in gates), "partial peer setup leaked FIFO custody"
+                assert all(owned.socket.fileno() == -1 for owned in endpoints), "partial peer setup leaked endpoint"
+            finally:
+                # Dispose even on a failing oracle, without leaking test resources.
+                for owned in gates:
+                    owned.release()
+                for owned in endpoints:
+                    owned.server_close()
+    print("Peer setup: later FIFO, endpoint and thread failures preserve the original error and dispose all earlier custody")
 
 
 def prove_execution_release_oracles():

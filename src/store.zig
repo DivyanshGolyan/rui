@@ -9304,7 +9304,7 @@ test "Full Message projection work does not multiply Messages by stops" {
                 const insert = try std.fmt.allocPrintSentinel(
                     std.testing.allocator,
                     "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created) " ++
-                        "VALUES('stop-{0}',3,'direct/full-scale',zeroblob(32),NULL,NULL,1,'accepted',0,0);" ++
+                        "VALUES('stop-{0}',3,'direct/full-scale',zeroblob(32),NULL,NULL,1,'',0,0);" ++
                         "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff) " ++
                         "VALUES('stop-{0}','direct/full-scale',NULL,{1})",
                     .{ index, message_count },

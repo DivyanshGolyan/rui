@@ -343,11 +343,18 @@ def main():
         # A descriptor opened before lowering the soft limit is still owned
         # by the launcher; the detached Host must not hold its pipe open.
         inherited_store = root / "inherited-fd"
+        # Observe this binary's requirement with the same managed settings.
+        # The fixture tests descriptor inheritance, not a second copy of the
+        # Host's budget or a guess about native-library startup descriptors.
+        probe, fields = start_ready_process(
+            [RUI, "host", "serve", "--store", inherited_store, "--active-capacity", "8", "--codex"],
+            env=env,
+        )
+        try:
+            managed_limit = int(fields["descriptor_requirement"])
+        finally:
+            stop_process(probe)
         read_fd, write_fd = os.pipe()
-        # Managed capacity 8: inherited stdio, fixed Host/transport, 100
-        # ordinary exchanges and three controls/discovery, execution spawn
-        # peak, authentication, and both intake wake descriptors.
-        managed_limit = 3 + (11 if sys.platform == "darwin" else 9) + 100 * 4 + 3 + (8 * 5 + 5) + (10 if sys.platform == "darwin" else 8) + 2
         inherited_fd = fcntl.fcntl(write_fd, fcntl.F_DUPFD, managed_limit + 1)
         try:
             def inherited_above_limit():
