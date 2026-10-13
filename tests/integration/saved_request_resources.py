@@ -6,6 +6,7 @@ Both executables should be uninstrumented ReleaseSafe builds. The unchanged
 baseline Host serves the same Store to both PTYs; no provider work is submitted.
 """
 import hashlib
+import functools
 import json
 import os
 import pathlib
@@ -16,6 +17,14 @@ import tempfile
 
 import human_cli_integration as cli
 from host_process import start_ready_process, stop_process
+
+
+@functools.cache
+def resource_first(binary):
+    # Measurement adapters support historical executables; the product does
+    # not retain old aliases. Help probing happens outside measured calls.
+    help_result = subprocess.run([str(binary), "--help"], capture_output=True, text=True, check=True, timeout=5)
+    return "request read-result" in help_result.stdout
 
 
 def sample(pid):
@@ -41,8 +50,10 @@ def capture(state, binary, label, size, repetition):
         for offset in range(0, size, 4096):
             output.write(b"x" * min(4096, size - offset))
     gate = home / "gate"
-    process = subprocess.Popen([str(binary), "message", "--store", str(state / "offline-store"),
-        "--session", "resources/original", "--text", str(source), "--json"],
+    current = resource_first(binary)
+    route = ["session", "send"] if current else ["message"]
+    process = subprocess.Popen([str(binary), *route, "--store", str(state / "offline-store"),
+        "--session", "resources/original", "--text", str(source), *([] if current else ["--json"])],
         env={**os.environ, "HOME": str(home), "RUI_TEST_CAPTURE_GATE": str(gate)},
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
@@ -51,7 +62,7 @@ def capture(state, binary, label, size, repetition):
         pathlib.Path(f"{gate}.release").touch()
         output, errors = process.communicate(timeout=20)
         assert process.returncode != 0 and "FileNotFound" in errors, (output, errors)
-        handle = json.loads(output)["request"]
+        handle = errors.split("request: ", 1)[1].split(" (rui request recover", 1)[0] if current else json.loads(output)["request"]
         record = home / ".config/rui/requests" / f"{handle}.json"
         expected = hashlib.sha256()
         prefix = ('{"version":"1","kind":"message","store":' + json.dumps(str((state / "offline-store").resolve()))
@@ -80,12 +91,13 @@ def retained(state, binary, label):
     for number in range(100):
         (records / f"01234567-89ab-4cde-8012-{number:012x}.json").write_text("invalid but enumerable")
     master, slave = pty.openpty()
-    process = subprocess.Popen([str(binary), "session", "--store", str(state / "live-store"),
+    current = resource_first(binary)
+    process = subprocess.Popen([str(binary), "session", *(["resume"] if current else []), "--store", str(state / "live-store"),
         "--session", "resources/original"], env={**os.environ, "HOME": str(home)},
         stdin=slave, stdout=slave, stderr=slave)
     os.close(slave)
     try:
-        prompt = "rui> " if label == "baseline" else "› "
+        prompt = "› " if current else os.environ.get("RUI_BASELINE_PROMPT", "rui> ")
         cli.read_terminal(master, prompt)
         samples = [sample(process.pid)]
         for _ in range(3):
@@ -120,10 +132,11 @@ def main():
             for repetition in range(3):
                 for label, binary in (("baseline", baseline), ("candidate", candidate)):
                     print(json.dumps(capture(state, binary, label, size, repetition)), flush=True)
-        host, _ = start_ready_process([baseline, "serve", "--store", state / "live-store", "--active-capacity", "1"])
+        host, _ = start_ready_process([baseline, *(["host"] if resource_first(baseline) else []), "serve",
+            "--store", state / "live-store", "--active-capacity", "1"])
         try:
-            cli.fixture.RUI = baseline
-            cli.fixture.command("configure", "--store", state / "live-store", "--session", "resources/original",
+            cli.fixture.RUI = candidate
+            cli.fixture.command("session", "configure", "--store", state / "live-store", "--session", "resources/original",
                 "--record", state / "configure-record", "--key", "resources-configure",
                 "--workspace", state, "--provider", "codex", "--model", "model-a")
             for label, binary in (("baseline", baseline), ("candidate", candidate)):

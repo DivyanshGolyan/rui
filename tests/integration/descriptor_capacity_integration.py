@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import bash_integration as bash
 import control_integration as control
 import dispatch_integration as fixture
-from host_process import HostDiagnostics, TestHTTPServer, start_ready_process, stop_process
+from host_process import HostDiagnostics, TestHTTPServer, canonical_fixture_root, start_ready_process, stop_process
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -98,7 +98,7 @@ def configure(state, store, ordinal):
     session = f"direct/descriptors-{ordinal}"
     result = command(
         state,
-        "configure",
+        "session", "configure",
         "--store",
         store,
         "--record",
@@ -123,7 +123,7 @@ def message(state, store, session, ordinal):
     text.write_text(f"descriptor fill {ordinal}")
     result = command(
         state,
-        "message",
+        "session", "send",
         "--store",
         store,
         "--record",
@@ -141,7 +141,7 @@ def message(state, store, session, ordinal):
 def observe(state, store, ordinal):
     return command(
         state,
-        "observe-command",
+        "request", "inspect",
         "--store",
         store,
         "--key",
@@ -165,7 +165,7 @@ def failed_result(state, store, ordinal):
 
 
 def execution_idle(state, store, session):
-    report = command(state, "inspect-session", "--store", store, "--session", session)
+    report = command(state, "session", "inspect", "--store", store, "--session", session)
     execution = report["execution"]
     return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0" else None
 
@@ -286,7 +286,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
         host, ready = start_ready_process(
             limited_host(
                 witness_limit,
-                "serve",
+                "host", "serve",
                 "--store",
                 store,
                 "--active-capacity",
@@ -334,7 +334,8 @@ def prove_bash_spawn_with_full_client_population(state, required):
             connection.sendall(b"POST /v1/")
             held.append(connection)
         assert len(held) == 12
-        control.assert_ordinary_capacity_busy(socket_path, b"connection_capacity_exhausted")
+        expected_routes.extend(("observe", "host_info"))
+        control.assert_intake_progress(socket_path, store)
         assert_connections_live(held)
         for started in starts:
             assert not diagnostics.matching("connection_resources_released", subject=started["subject"]), started
@@ -432,8 +433,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
 
 def main():
     prove_borrower_oracle()
-    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-descriptor-capacity-"))
-    state.chmod(0o700)
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-descriptor-capacity-"))
     endpoint = HeldEndpoint()
     endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     endpoint_thread.start()
@@ -453,13 +453,17 @@ def main():
         # one steady population(5) plus the serial Bash spawn peak(10).
         fixed_host = 2 + 4 + 1 + (4 if sys.platform == "darwin" else 2)
         execution = 5 + 10
-        fixed = fixed_host + 42 + execution + 0 + 1
+        # The supported burst is 100 ordinary exchanges (socket + up to
+        # three content aliases each), two controls and one discovery.
+        # This preflight is a resource estimate, not a runtime admission cap.
+        clients = 100 * 4 + 3
+        fixed = fixed_host + clients + execution + 0 + 2
         minimum_required = fixed + 3
         rejected_store = state / "rejected-store"
         rejected = subprocess.run(
             limited_host(
                 minimum_required - 1,
-                "serve",
+                "host", "serve",
                 "--store",
                 rejected_store,
                 "--active-capacity",
@@ -479,13 +483,13 @@ def main():
         assert fields["inherited"] in ({3, 4} if sys.platform == "darwin" else {3}), fields
         required = fixed + fields["inherited"]
         expected = dict(active_capacity=2, required=required, soft_limit=minimum_required - 1,
-            inherited=fields["inherited"], fixed_host=fixed_host, clients=42, execution=execution,
-            authentication=0, self_wake=1)
+            inherited=fields["inherited"], fixed_host=fixed_host, clients=clients, execution=execution,
+            authentication=0, self_wake=2)
         assert fields == expected, (fields, expected)
         assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
         if required != minimum_required:
             rejected = subprocess.run(
-                limited_host(required - 1, "serve", "--store", rejected_store,
+                limited_host(required - 1, "host", "serve", "--store", rejected_store,
                     "--active-capacity", "2", "--provider-endpoint",
                     f"http://127.0.0.1:{endpoint.server_port}/responses"),
                 text=True, capture_output=True, timeout=10)
@@ -499,7 +503,7 @@ def main():
         host, ready = start_ready_process(
             limited_host(
                 required,
-                "serve",
+                "host", "serve",
                 "--store",
                 store,
                 "--active-capacity",
@@ -544,14 +548,14 @@ def main():
         documented_store = state / "documented-store"
         documented, _ = start_ready_process(
             limited_host(
-                256,
-                "serve",
+                1024,
+                "host", "serve",
                 "--store",
                 documented_store,
                 "--active-capacity",
                 "8",
             ),
-            required_fields={"active_capacity": "8", "descriptor_limit": "256"},
+            required_fields={"active_capacity": "8", "descriptor_limit": "1024"},
         )
         stop_process(documented)
         documented = None

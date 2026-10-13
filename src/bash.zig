@@ -14,6 +14,24 @@ const cleanup_observation_ms: u64 = 5_000;
 const fault_observation_delay_ms: u64 = 500;
 pub const fault_gate_name = "bash-fault-gate";
 
+/// One Host-owned environment, borrowed only through child creation. Do not
+/// inherit PATH, shell startup hooks, provider overrides or credentials.
+pub fn environment(io: std.Io, allocator: std.mem.Allocator, home: ?[]const u8) !std.process.Environ.Map {
+    var result = std.process.Environ.Map.init(allocator);
+    errdefer result.deinit();
+    var executable_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const executable = executable_buffer[0..try std.process.executablePath(io, &executable_buffer)];
+    const directory = std.fs.path.dirname(executable).?;
+    if (std.mem.indexOfScalar(u8, directory, ':') != null) return error.UnrepresentableExecutablePath;
+    var path_buffer: [std.fs.max_path_bytes + 64]u8 = undefined;
+    try result.put("PATH", try std.fmt.bufPrint(&path_buffer, "{s}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", .{directory}));
+    if (home) |value| {
+        if (!std.fs.path.isAbsolute(value)) return error.InvalidHome;
+        try result.put("HOME", value);
+    }
+    return result;
+}
+
 const BashObservation = extern struct {
     kind: c_int,
     value: c_int,
@@ -266,7 +284,7 @@ pub const Prepared = struct {
         return resources;
     }
 
-    pub fn launch(self: *Prepared) !Execution {
+    pub fn launch(self: *Prepared, child_environment: *const std.process.Environ.Map) !Execution {
         if (self.faults.spawn) return error.BashSpawnFailed;
         var script_path_buffer: [platform.max_scratch_path_bytes + 1 + 96]u8 = undefined;
         const script_path = try std.fmt.bufPrint(
@@ -274,13 +292,11 @@ pub const Prepared = struct {
             "{s}/{s}",
             .{ self.scratch_path, self.script.?.name.slice() },
         );
-        var empty_environment = std.process.Environ.Map.init(self.allocator);
-        defer empty_environment.deinit();
         const started = std.Io.Clock.Timestamp.now(self.io, .awake);
         var child = std.process.spawn(self.io, .{
             .argv = &.{ self.bash_path, script_path },
             .cwd = .{ .path = self.workspace.slice() },
-            .environ_map = &empty_environment,
+            .environ_map = child_environment,
             .stdin = .ignore,
             .stdout = .pipe,
             .stderr = .pipe,

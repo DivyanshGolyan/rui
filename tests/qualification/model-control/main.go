@@ -137,7 +137,7 @@ func (e *streamEndpoint) Close() error {
 
 func stopSession(client measurement.Client, key, session string) (map[string]any, error) {
 	var reply map[string]any
-	err := measurement.RunJSON(client.Deadline, &reply, client.Binary, "stop-session", "--store", client.Store, "--record", filepath.Join(client.Artifacts, key+".json"), "--key", key, "--session", session)
+	err := measurement.RunJSON(client.Deadline, &reply, client.Binary, "session", "stop", "--store", client.Store, "--record", filepath.Join(client.Artifacts, key+".json"), "--key", key, "--session", session)
 	return reply, err
 }
 func interrupt(client measurement.Client, key, session string, processing map[string]any) (map[string]any, error) {
@@ -147,7 +147,7 @@ func interrupt(client measurement.Client, key, session string, processing map[st
 		return nil, fmt.Errorf("processing identity incomplete: %v", processing)
 	}
 	var reply map[string]any
-	err := measurement.RunJSON(client.Deadline, &reply, client.Binary, "interrupt-model", "--store", client.Store, "--record", filepath.Join(client.Artifacts, key+".json"), "--key", key, "--session", session, "--turn", turn, "--operation", operation)
+	err := measurement.RunJSON(client.Deadline, &reply, client.Binary, "session", "interrupt-model", "--store", client.Store, "--record", filepath.Join(client.Artifacts, key+".json"), "--key", key, "--session", session, "--turn", turn, "--operation", operation)
 	return reply, err
 }
 func accepted(reply map[string]any) bool {
@@ -381,9 +381,9 @@ func openPartial(socket string) (net.Conn, error) {
 	_ = connection.SetDeadline(time.Time{})
 	return connection, nil
 }
-func fillOrdinary(socket string) ([]net.Conn, error) {
+func openHeldPopulation(socket string) ([]net.Conn, error) {
 	held := make([]net.Conn, 0, ordinaryClients)
-	for len(held) < ordinaryClients {
+	for range ordinaryClients {
 		connection, err := openPartial(socket)
 		if err != nil {
 			for _, value := range held {
@@ -395,6 +395,19 @@ func fillOrdinary(socket string) ([]net.Conn, error) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	time.Sleep(time.Second)
+	for _, connection := range held {
+		response, early, err := earlyResponse(connection, time.Millisecond)
+		if err != nil || early {
+			if response != nil {
+				response.Body.Close()
+			}
+			closeAll(held)
+			if err != nil {
+				return nil, fmt.Errorf("held upload closed or failed early: %w", err)
+			}
+			return nil, fmt.Errorf("held upload replied early: %s", response.Status)
+		}
+	}
 	return held, nil
 }
 func closeAll(values []net.Conn) {
@@ -434,12 +447,12 @@ func headroom(binary, root, url string) (result map[string]any, resultError erro
 	if err != nil {
 		return nil, err
 	}
-	held, err := fillOrdinary(socket)
+	held, err := openHeldPopulation(socket)
 	if err != nil {
 		return nil, err
 	}
 	defer closeAll(held)
-	if err := ordinaryBusy(socket); err != nil {
+	if err := assertIntakeProgress(socket, store); err != nil {
 		return nil, err
 	}
 	before, err := sample(host, directory, "before-controls")
@@ -472,11 +485,12 @@ func headroom(binary, root, url string) (result map[string]any, resultError erro
 	if drainedFirst.OpenDescriptors != idle.OpenDescriptors {
 		return nil, fmt.Errorf("first drain retained %d descriptors over idle", drainedFirst.OpenDescriptors-idle.OpenDescriptors)
 	}
-	held, err = fillOrdinary(socket)
+	held, err = openHeldPopulation(socket)
 	if err != nil {
 		return nil, err
 	}
-	if err := ordinaryBusy(socket); err != nil {
+	defer closeAll(held)
+	if err := assertIntakeProgress(socket, store); err != nil {
 		return nil, err
 	}
 	secondSaturation, err := sample(host, directory, "second-saturation")
@@ -920,7 +934,7 @@ func openInspections(socketPath, store, session string) ([]net.Conn, error) {
 		return nil, err
 	}
 	connections := make([]net.Conn, 0, ordinaryClients)
-	for attempts := 0; len(connections) < ordinaryClients && attempts < ordinaryClients*5; attempts++ {
+	for range ordinaryClients {
 		connection, err := rawUnixRequest(socketPath, "/v1/inspect-session", body, 0)
 		if err != nil {
 			closeAll(connections)
@@ -940,34 +954,23 @@ func openInspections(socketPath, store, session string) ([]net.Conn, error) {
 		responseBody, _ := io.ReadAll(response.Body)
 		response.Body.Close()
 		connection.Close()
-		if response.StatusCode != http.StatusServiceUnavailable {
-			closeAll(connections)
-			return nil, fmt.Errorf("inspection admission returned %s: %s", response.Status, responseBody)
-		}
-	}
-	if len(connections) != ordinaryClients {
 		closeAll(connections)
-		return nil, fmt.Errorf("inspection admission stopped at %d", len(connections))
+		return nil, fmt.Errorf("held inspection returned %s: %s", response.Status, responseBody)
 	}
-	stable := make([]net.Conn, 0, len(connections))
 	for _, connection := range connections {
 		response, early, probeError := earlyResponse(connection, time.Millisecond)
 		if probeError != nil {
-			connection.Close()
-			closeAll(stable)
+			closeAll(connections)
 			return nil, probeError
 		}
 		if !early {
-			stable = append(stable, connection)
 			continue
 		}
 		responseBody, _ := io.ReadAll(response.Body)
 		response.Body.Close()
-		connection.Close()
-		closeAll(stable)
-		return nil, fmt.Errorf("inspection completed before the final saturation sweep: %s: %s", response.Status, responseBody)
+		closeAll(connections)
+		return nil, fmt.Errorf("inspection completed before the final held-population sweep: %s: %s", response.Status, responseBody)
 	}
-	connections = stable
 	return connections, nil
 }
 
@@ -1154,25 +1157,71 @@ func repeatedDigest(value byte, count int) string {
 	return hex.EncodeToString(digest.Sum(nil))
 }
 
-func ordinaryBusy(socketPath string) error {
-	connection, err := net.DialTimeout("unix", socketPath, 3*time.Second)
-	if err != nil {
-		return err
-	}
-	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(3 * time.Second))
-	if _, err := io.WriteString(connection, "POST /v1/inspect-session HTTP/1.1\r\n"); err != nil {
-		return err
-	}
-	request, _ := http.NewRequest(http.MethodPost, "http://local", nil)
-	response, err := http.ReadResponse(bufio.NewReader(connection), request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	body, _ := io.ReadAll(response.Body)
-	if response.StatusCode != http.StatusServiceUnavailable || !bytes.Contains(body, []byte("ordinary_capacity_exhausted")) {
-		return fmt.Errorf("11th ordinary request returned %s: %s", response.Status, body)
+func assertIntakeProgress(socketPath, store string) error {
+	for _, probe := range []struct{ kind, route string }{
+		{"observe_command", "/v1/observe-command"},
+		{"host_info", "/v1/host-info"},
+	} {
+		deadline := time.Now().Add(3 * time.Second)
+		value := map[string]string{"version": "1", "kind": probe.kind, "store": store}
+		if probe.kind == "observe_command" {
+			value["key"] = "intake-progress-absent"
+		}
+		body, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		connection, err := net.DialTimeout("unix", socketPath, time.Until(deadline))
+		if err != nil {
+			return err
+		}
+		err = func() error {
+			defer connection.Close()
+			if err := connection.SetDeadline(deadline); err != nil {
+				return err
+			}
+			request, err := http.NewRequest(http.MethodPost, "http://local"+probe.route, bytes.NewReader(body))
+			if err != nil {
+				return err
+			}
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Rui-Wire-Version", "1")
+			if err := request.Write(connection); err != nil {
+				return err
+			}
+			response, err := http.ReadResponse(bufio.NewReader(connection), request)
+			if err != nil {
+				return err
+			}
+			defer response.Body.Close()
+			body, err := io.ReadAll(response.Body)
+			if err != nil {
+				return err
+			}
+			if response.StatusCode != http.StatusOK {
+				return fmt.Errorf("%s progress returned %s: %s", probe.kind, response.Status, body)
+			}
+			var reply map[string]any
+			if err := json.Unmarshal(body, &reply); err != nil {
+				return err
+			}
+			if probe.kind == "observe_command" {
+				status, ok := measurement.StringField(reply, "observation", "status")
+				if !ok || status != "absent" {
+					return fmt.Errorf("unexpected observation: %s", body)
+				}
+			} else {
+				selected, _ := measurement.StringField(reply, "store")
+				instance, _ := measurement.StringField(reply, "instance")
+				if selected != store || len(instance) != 32 {
+					return fmt.Errorf("unexpected discovery: %s", body)
+				}
+			}
+			return nil
+		}()
+		if err != nil {
+			return fmt.Errorf("%s progress: %w", probe.kind, err)
+		}
 	}
 	return nil
 }
@@ -1183,7 +1232,7 @@ func openBlockedResults(socketPath, store, key string) ([]net.Conn, error) {
 		return nil, err
 	}
 	connections := make([]net.Conn, 0, ordinaryClients)
-	for attempts := 0; len(connections) < ordinaryClients && attempts < ordinaryClients*5; attempts++ {
+	for range ordinaryClients {
 		connection, err := rawUnixRequest(socketPath, "/v1/read-result", body, 4096)
 		if err != nil {
 			closeAll(connections)
@@ -1205,16 +1254,12 @@ func openBlockedResults(socketPath, store, key string) ([]net.Conn, error) {
 		closeAll(connections)
 		return nil, fmt.Errorf("read-result admission returned %q", prefix)
 	}
-	if len(connections) != ordinaryClients {
-		closeAll(connections)
-		return nil, fmt.Errorf("read-result admission stopped at %d", len(connections))
-	}
-	if err := ordinaryBusy(socketPath); err != nil {
+	if err := assertIntakeProgress(socketPath, store); err != nil {
 		closeAll(connections)
 		return nil, err
 	}
-	// Every response has started, yet the rejected 11th ordinary request proves
-	// all ten handlers remain occupied until these readers resume or disconnect.
+	// Every held response has started; complete independent observation and
+	// discovery still progress before these readers resume or disconnect.
 	return connections, nil
 }
 
@@ -1404,7 +1449,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	idleStopSelectionTurns["blocked-result-stop"] = nil
 	closeAll(blocked)
 	destination := filepath.Join(directory, "large-answer.bin")
-	output, err := measurement.Run(deadline, binary, "read-result", "--store", store, "--key", "real-settlement-message")
+	output, err := measurement.Run(deadline, binary, "request", "read-result", "--store", store, "--key", "real-settlement-message")
 	if err != nil {
 		return nil, err
 	}

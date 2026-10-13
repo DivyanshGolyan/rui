@@ -23,9 +23,9 @@ from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, preserve_
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
 ROOT = pathlib.Path.cwd()
-MAX_CLIENTS = 12
+# Independent fixture populations, not Host connection limits.
 ORDINARY_CLIENTS = 10
-CONTROL_HEADROOM = MAX_CLIENTS - ORDINARY_CLIENTS
+CONTROL_HEADROOM = 2
 MAX_STORE_BYTES = 492
 MAX_KEY_BYTES = 128
 MAX_SESSION_BYTES = 128
@@ -280,6 +280,7 @@ def command(*args, expect=0, timeout=15):
 def start_host(store, endpoint=None, *extra, active_capacity=2):
     args = [
         str(RUI),
+        "host",
         "serve",
         "--store",
         str(store),
@@ -297,6 +298,7 @@ def start_host(store, endpoint=None, *extra, active_capacity=2):
 
 def configure(state, store, key, session):
     result = command(
+        "session",
         "configure",
         "--store",
         store,
@@ -320,7 +322,7 @@ def message(state, store, key, session, text):
     text_path = state / f"{key}.txt"
     text_path.write_text(text)
     result = command(
-        "message",
+        "session", "send",
         "--store",
         store,
         "--record",
@@ -337,7 +339,7 @@ def message(state, store, key, session, text):
 
 def stop_session(state, store, key, session):
     return command(
-        "stop-session",
+        "session", "stop",
         "--store",
         store,
         "--record",
@@ -351,6 +353,7 @@ def stop_session(state, store, key, session):
 
 def interrupt_model(state, store, key, session, processing):
     return command(
+        "session",
         "interrupt-model",
         "--store",
         store,
@@ -370,7 +373,7 @@ def interrupt_model(state, store, key, session, processing):
 def observe(store, key, *, deadline=None):
     remaining = 15 if deadline is None else min(15, deadline - time.monotonic())
     assert remaining > 0, "result observation exhausted original deadline"
-    return command("observe-command", "--store", store, "--key", key,
+    return command("request", "inspect", "--store", store, "--key", key,
                    timeout=remaining)["observation"]
 
 
@@ -428,18 +431,13 @@ def open_partial(socket_path, route, *, complete_headers=True):
     try:
         connection.settimeout(3)
         connection.connect(socket_path)
-        try:
-            connection.sendall(f"POST {route} HTTP/1.1\r\n".encode())
-            if complete_headers:
-                connection.sendall(
-                    b"Content-Type: application/json\r\n"
-                    b"Content-Length: 1024\r\n"
-                    b"X-Rui-Wire-Version: 1\r\n\r\n{"
-                )
-        except (BrokenPipeError, ConnectionResetError):
-            # Return ownership so the caller can inspect the actual refusal.
-            # A failed write alone establishes neither admission nor busy.
-            pass
+        connection.sendall(f"POST {route} HTTP/1.1\r\n".encode())
+        if complete_headers:
+            connection.sendall(
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 1024\r\n"
+                b"X-Rui-Wire-Version: 1\r\n\r\n{"
+            )
     except BaseException:
         connection.close()
         raise
@@ -504,58 +502,49 @@ def open_complete_inspection(socket_path, store, session, profile):
         request["profile"] = "full"
     body = json.dumps(request, separators=(",", ":")).encode()
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    connection.settimeout(15)
-    connection.connect(socket_path)
-    connection.sendall(
-        b"POST /v1/inspect-session HTTP/1.1\r\n"
-        b"Content-Type: application/json\r\n"
-        + f"Content-Length: {len(body)}\r\n".encode()
-        + b"X-Rui-Wire-Version: 1\r\n\r\n"
-        + body
-    )
+    try:
+        connection.settimeout(15)
+        connection.connect(socket_path)
+        connection.sendall(
+            b"POST /v1/inspect-session HTTP/1.1\r\n"
+            b"Content-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\n".encode()
+            + b"X-Rui-Wire-Version: 1\r\n\r\n"
+            + body
+        )
+    except BaseException:
+        connection.close()
+        raise
     return connection
 
 
 def fill_complete_inspections(socket_path, store, session, diagnostics):
     held = []
-    attempts = 0
-    while len(held) < ORDINARY_CLIENTS and attempts < ORDINARY_CLIENTS * 5:
-        attempts += 1
-        diagnostics.claim_inspection()
-        try:
+    try:
+        for index in range(ORDINARY_CLIENTS):
+            diagnostics.claim_inspection()
             candidate = open_complete_inspection(
-                socket_path,
-                store,
-                session,
-                "current" if attempts % 2 else "full",
+                socket_path, store, session, "current" if index % 2 == 0 else "full"
             )
-        except (BrokenPipeError, ConnectionResetError):
-            time.sleep(0.01)
-            continue
-        time.sleep(0.01)
-        candidate.settimeout(0.001)
-        try:
-            early = candidate.recv(1, socket.MSG_PEEK)
-        except TimeoutError:
-            candidate.settimeout(15)
             held.append(candidate)
-            continue
-        if early:
-            head, body = read_http_response(candidate)
-            assert b" 503 " in head, (head, body)
-        candidate.close()
-    if len(held) != ORDINARY_CLIENTS:
+            time.sleep(0.01)
+            candidate.settimeout(0.001)
+            try:
+                early = candidate.recv(1, socket.MSG_PEEK)
+            except TimeoutError:
+                candidate.settimeout(15)
+            else:
+                raise AssertionError(f"held inspection replied or closed early: {early!r}")
+    except BaseException:
         for connection in held:
             connection.close()
-        raise AssertionError(
-            f"complete inspection admission stopped at {len(held)} after {attempts} attempts"
-        )
+        raise
     return held
 
 
 def inspect_execution(store, session, *, timeout=15):
     return command(
-        "inspect-session",
+        "session", "inspect",
         "--store",
         store,
         "--session",
@@ -590,7 +579,7 @@ def wait_execution_release(diagnostics, store, session, deadline):
 
 def retry(state, store, record_key, kind):
     return command(
-        "retry",
+        "request", "recover",
         "--store",
         store,
         "--record",
@@ -605,6 +594,7 @@ def result_digest(store, key, destination):
         completed = subprocess.run(
             [
                 str(RUI),
+                "request",
                 "read-result",
                 "--store",
                 str(store),
@@ -733,86 +723,42 @@ def check_schema(database_path):
         database.close()
 
 
-def fill_ordinary_capacity(socket_path):
+def open_held_population(socket_path):
+    """Open each member of the finite held-upload fixture exactly once."""
     held = []
-    for _ in range(10):
-        while len(held) < ORDINARY_CLIENTS:
-            candidate = open_partial(socket_path, "/v1/inspect-session")
-            time.sleep(0.05)
-            candidate.settimeout(0.001)
-            try:
-                early = candidate.recv(1, socket.MSG_PEEK)
-            except TimeoutError:
-                candidate.settimeout(3)
-                held.append(candidate)
-            else:
-                if early:
-                    head, body = read_http_response(candidate)
-                    assert b" 503 " in head, (head, body)
-                candidate.close()
-                time.sleep(0.05)
-        # A final pause lets the last accepted request line transfer before
-        # the sweep distinguishes blocked bodies from early busy replies.
-        time.sleep(1)
-        live = []
-        for candidate in held:
-            candidate.settimeout(0.001)
-            try:
-                early = candidate.recv(1, socket.MSG_PEEK)
-            except TimeoutError:
-                candidate.settimeout(3)
-                live.append(candidate)
-                continue
-            if early:
-                head, body = read_http_response(candidate)
-                assert b" 503 " in head, (head, body)
-            candidate.close()
-        held = live
-        if len(held) == ORDINARY_CLIENTS:
-            return held
-    for connection in held:
-        connection.close()
-    raise AssertionError("ordinary admission never stabilized at capacity")
-
-
-def assert_capacity_busy_reply(connection, expected_code, *, deadline=None):
-    extra_head, extra_body = read_http_response(connection, deadline=deadline)
-    assert extra_head.startswith(b"HTTP/1.1 503 "), extra_head
-    lengths = [line.split(b":", 1)[1].strip() for line in extra_head.split(b"\r\n")[1:]
-               if line.lower().startswith(b"content-length:")]
-    assert len(lengths) == 1 and lengths[0].isdigit(), extra_head
-    assert int(lengths[0]) == len(extra_body), (extra_head, extra_body)
-    assert json.loads(extra_body) == {
-        "version": "1", "type": "busy", "code": expected_code.decode("ascii")
-    }, extra_body
-
-
-def assert_classification_capacity_busy(classification):
-    deadline = time.monotonic() + 3
-    readable, _, _ = select.select(classification, [], [], 3)
-    assert readable, "classification overflow did not receive a response"
-    overflow = readable[0]
-    assert_capacity_busy_reply(overflow, b"classification_capacity_exhausted", deadline=deadline)
-    overflow.close()
-    classification.remove(overflow)
-
-
-def assert_ordinary_capacity_busy(
-    socket_path, expected_code=b"ordinary_capacity_exhausted"
-):
-    extra = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        extra.settimeout(3)
-        extra.connect(socket_path)
-        try:
-            extra.sendall(b"POST /v1/inspect-session HTTP/1.1\r\n")
-        except BrokenPipeError:
-            # Reservation can refuse and close before reading the request line.
-            # The write failure alone proves nothing; verify its actual reply.
-            pass
-        assert_capacity_busy_reply(extra, expected_code)
-    finally:
-        extra.close()
+        for _ in range(ORDINARY_CLIENTS):
+            held.append(open_partial(socket_path, "/v1/inspect-session"))
+        time.sleep(1)
+        for connection in held:
+            connection.settimeout(0.001)
+            try:
+                early = connection.recv(1, socket.MSG_PEEK)
+            except TimeoutError:
+                connection.settimeout(3)
+            else:
+                raise AssertionError(f"held upload replied or closed early: {early!r}")
+        return held
+    except BaseException:
+        for connection in held:
+            connection.close()
+        raise
+
+
+def assert_intake_progress(socket_path, store):
+    """Both Store observation and protected discovery progress beside borrowers."""
+    for kind, route in (("observe_command", "/v1/observe-command"),
+                        ("host_info", "/v1/host-info")):
+        request = {"version": "1", "kind": kind, "store": str(store)}
+        if kind == "observe_command":
+            request["key"] = "intake-progress-absent"
+        head, body = raw_request(socket_path, route, json.dumps(request).encode())
+        assert head.startswith(b"HTTP/1.1 200 "), (head, body)
+        value = json.loads(body)
+        if kind == "observe_command":
+            assert value["observation"]["status"] == "absent", value
+        else:
+            assert value["store"] == str(store) and len(value["instance"]) == 32, value
 
 
 def start_success_endpoint(*, large_answer_bytes=0):
@@ -1037,6 +983,7 @@ def prove_sealed_interruption_and_cleanup(state):
         unavailable = subprocess.run(
             [
                 str(RUI),
+                "request",
                 "read-result",
                 "--store",
                 str(store),
@@ -1138,7 +1085,7 @@ def prove_delivery_and_settlement_contention(
             "test_gate_waiting", count=ORDINARY_CLIENTS, timeout=10,
             subject=str(inspection_gate.path),
         )
-        assert_ordinary_capacity_busy(fields["socket"])
+        assert_intake_progress(fields["socket"], store)
         if sample_host is not None:
             resource_samples["reports_captured_and_responses_held"] = sample_host(
                 process.pid, "reports_captured_and_responses_held"
@@ -1353,9 +1300,7 @@ def prove_real_settlement_contention(
             prepared_controls.append(
                 prepare_raw_request(fields["socket"], route, body)
             )
-        assert_ordinary_capacity_busy(
-            fields["socket"], b"connection_capacity_exhausted"
-        )
+        assert_intake_progress(fields["socket"], store)
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=CONTROL_HEADROOM
@@ -1445,7 +1390,7 @@ def prove_real_settlement_contention(
                         "real-settlement-message",
                     )
                 )
-            assert_ordinary_capacity_busy(fields["socket"])
+            assert_intake_progress(fields["socket"], store)
             time.sleep(0.1)
             if sample_host is not None:
                 resource_samples["blocked_result_delivery"] = sample_host(
@@ -1469,8 +1414,8 @@ def prove_real_settlement_contention(
             for blocked_result in blocked_results:
                 blocked_result.close()
             blocked_results.clear()
-        replacement_ordinary = fill_ordinary_capacity(fields["socket"])
-        assert_ordinary_capacity_busy(fields["socket"])
+        replacement_ordinary = open_held_population(fields["socket"])
+        assert_intake_progress(fields["socket"], store)
         for connection in replacement_ordinary:
             connection.close()
         replacement_ordinary.clear()
@@ -1585,7 +1530,7 @@ def prove_queued_stop_reuse_after_newer_work(state):
         dropped = subprocess.run(
             [
                 str(RUI),
-                "stop-session",
+                "session", "stop",
                 "--store",
                 str(store),
                 "--record",
@@ -1638,7 +1583,7 @@ def prove_queued_stop_reuse_after_newer_work(state):
         wait_for(lambda: endpoint.counts()[0] == 2, "newer provider request")
 
         replayed = command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -1677,7 +1622,7 @@ def prove_queued_stop_reuse_after_newer_work(state):
         process = None
         process, _ = start_host(store)
         restarted = command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -1725,7 +1670,7 @@ def prove_retry_wait_control(state, kind):
         def retry_wait_observation():
             observation = observe(store, f"retry-wait-{kind}-message")
             execution = command(
-                "inspect-session", "--store", store, "--session", session
+                "session", "inspect", "--store", store, "--session", session
             )["execution"]
             if (
                 observation.get("processing", {}).get("attempt") == "1"
@@ -1744,7 +1689,7 @@ def prove_retry_wait_control(state, kind):
         record = state / f"{control_key}.json"
         args = [
             str(RUI),
-            "stop-session" if kind == "stop" else "interrupt-model",
+            "session", "stop" if kind == "stop" else "interrupt-model",
             "--store",
             str(store),
             "--record",
@@ -1779,7 +1724,7 @@ def prove_retry_wait_control(state, kind):
             active_capacity=1,
         )
         replayed = command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -1803,6 +1748,7 @@ def prove_retry_wait_control(state, kind):
         unreadable = subprocess.run(
             [
                 str(RUI),
+                "request",
                 "read-result",
                 "--store",
                 str(store),
@@ -1836,7 +1782,7 @@ def prove_retry_wait_control(state, kind):
             f"{kind} newer result",
         )
         replayed_after_newer = command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -1872,64 +1818,21 @@ def prove_retry_wait_control(state, kind):
         endpoint_thread.join(timeout=5)
 
 
-def prove_partial_capacity_callers():
+def prove_partial_setup_cleanup():
     from unittest.mock import Mock, patch
-    from host_process_test import prove_capacity_refusal_oracle
-
-    def partial_probe(socket_path, expected_code):
-        connection = open_partial(socket_path, "/v1/inspect-session")
-        try:
-            # Reuse the existing exact refusal controls on the actual returned
-            # socket, including a peer that closed before the first write.
-            with patch.object(socket, "socket", return_value=connection):
-                assert_ordinary_capacity_busy(socket_path, expected_code)
-        finally:
-            connection.close()
-
-    prove_capacity_refusal_oracle(partial_probe)
-
-    code = b"classification_capacity_exhausted"
-    body = b'{"version":"1","type":"busy","code":"' + code + b'"}'
-    head = b"HTTP/1.1 503 Busy\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n"
-    response = head + body
-    for reply in (response, b"", response[:-1], response.replace(b"503", b"200"),
-                  response.replace(code, b"ordinary_capacity_exhausted"),
-                  response.replace(code, code + b"_extra"),
-                  response.replace(b"Content-Length:", b"Ignored-Length:"),
-                  response.replace(b"\r\n\r\n", b"\r\nContent-Length: 0\r\n\r\n")):
-        for failure in (BrokenPipeError, ConnectionResetError):
-            client, peer = socket.socketpair()
-            peer.sendall(reply)
-            peer.close()
-            connection = Mock(wraps=client)
-            connection.connect = Mock()
-            connection.sendall = Mock(side_effect=failure)
-            connection.fileno = client.fileno
-            try:
-                with patch.object(socket, "socket", return_value=connection):
-                    candidate = open_partial("unused", "/v1/control/session-stop", complete_headers=False)
-                assert candidate is connection
-                assert not connection.close.called
-                population = [candidate]
-                try:
-                    assert_classification_capacity_busy(population)
-                except (AssertionError, ValueError):
-                    assert reply != response, "valid classification refusal rejected"
-                else:
-                    assert reply == response, "invalid classification refusal accepted"
-                    assert population == []
-            finally:
-                client.close()
 
     for complete_headers in (False, True):
-        for stage in (None, "settimeout", "connect", "sendall"):
+        for stage in (None, "settimeout", "connect", "sendall", "broken-pipe", "reset"):
             connection = Mock()
             if stage is not None:
-                getattr(connection, stage).side_effect = TimeoutError("setup failed")
+                getattr(connection, "sendall" if stage in ("broken-pipe", "reset") else stage).side_effect = (
+                    BrokenPipeError("setup failed") if stage == "broken-pipe" else
+                    ConnectionResetError("setup failed") if stage == "reset" else TimeoutError("setup failed")
+                )
             with patch.object(socket, "socket", return_value=connection):
                 try:
                     candidate = open_partial("unused", "/v1/inspect-session", complete_headers=complete_headers)
-                except TimeoutError:
+                except (TimeoutError, BrokenPipeError, ConnectionResetError):
                     assert stage is not None
                     connection.close.assert_called_once()
                 else:
@@ -1938,32 +1841,47 @@ def prove_partial_capacity_callers():
                     connection.settimeout.assert_called_once_with(3)
                     connection.close.assert_not_called()
 
-    # Exercise the actual fill consumer: a readable refusal and EOF are not
-    # counted; only candidates still blocked at both admission sweeps are held.
-    refused = Mock()
-    refused.recv.return_value = b"H"
-    empty = Mock()
-    empty.recv.return_value = b""
     accepted = [Mock() for _ in range(ORDINARY_CLIENTS)]
     for candidate in accepted:
         candidate.recv.side_effect = TimeoutError
-    with patch.object(sys.modules[__name__], "open_partial", side_effect=[refused, empty, *accepted]), \
-            patch.object(sys.modules[__name__], "read_http_response", return_value=(b"HTTP/1.1 503 Busy", b"")), \
+    with patch.object(sys.modules[__name__], "open_partial", side_effect=accepted) as opened, \
             patch.object(time, "sleep"):
-        held = fill_ordinary_capacity("unused")
-    assert held == accepted
-    refused.close.assert_called_once()
-    empty.close.assert_called_once()
+        held = open_held_population("unused")
+    assert held == accepted and opened.call_count == ORDINARY_CLIENTS
     for candidate in accepted:
-        assert candidate.recv.call_count == 2
         candidate.close.assert_not_called()
-    print("Partial callers: exact classification refusals, both write failures, held sockets and setup cleanup passed")
+
+    setup_failure = TimeoutError("population setup failed")
+    with patch.object(sys.modules[__name__], "open_partial", side_effect=[accepted[0], setup_failure]) as opened:
+        try:
+            open_held_population("unused")
+        except TimeoutError as error:
+            assert error is setup_failure
+        else:
+            raise AssertionError("population setup failure was hidden")
+    assert opened.call_count == 2
+    accepted[0].close.assert_called_once()
+
+    for early in (b"H", b""):
+        candidates = [Mock() for _ in range(ORDINARY_CLIENTS)]
+        candidates[0].recv.return_value = early
+        with patch.object(sys.modules[__name__], "open_partial", side_effect=candidates) as opened, \
+                patch.object(time, "sleep"):
+            try:
+                open_held_population("unused")
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError("accepted early reply/closure as held upload")
+        assert opened.call_count == ORDINARY_CLIENTS
+        for candidate in candidates:
+            candidate.close.assert_called_once()
+    print("Partial fixtures: single-attempt population, early reply/closure rejection and setup cleanup passed")
 
 
 def main():
-    from host_process_test import prove_capacity_refusal_oracle, prove_control_disposal_oracle
-    prove_capacity_refusal_oracle(assert_ordinary_capacity_busy)
-    prove_partial_capacity_callers()
+    from host_process_test import prove_control_disposal_oracle
+    prove_partial_setup_cleanup()
     prove_control_disposal_oracle(stop_control_case)
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-control-integration-"))
     store = state / "store"
@@ -1990,6 +1908,7 @@ def main():
         dropped_exact = subprocess.run(
             [
                 str(RUI),
+                "session",
                 "interrupt-model",
                 "--store",
                 str(store),
@@ -2019,7 +1938,7 @@ def main():
         assert exact_message["result"]["status"] == "cancelled", exact_message
         started = time.monotonic()
         exact = command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -2061,7 +1980,7 @@ def main():
         dropped_stop = subprocess.run(
             [
                 str(RUI),
-                "stop-session",
+                "session", "stop",
                 "--store",
                 str(store),
                 "--record",
@@ -2079,7 +1998,7 @@ def main():
         )
         assert dropped_stop.returncode != 0, dropped_stop
         recovered_stop = command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -2090,8 +2009,8 @@ def main():
         assert recovered_stop["answer"]["status"] == "accepted", recovered_stop
         assert recovered_stop["answer"]["replayed"] is True, recovered_stop
         assert recovered_stop["answer"]["selection"]["turn"] is None, recovered_stop
-        held = fill_ordinary_capacity(socket_path)
-        assert_ordinary_capacity_busy(socket_path)
+        held = open_held_population(socket_path)
+        assert_intake_progress(socket_path, store)
 
         latencies = []
         for index in range(25):
@@ -2116,7 +2035,8 @@ def main():
             open_partial(socket_path, "/v1/control/session-stop", complete_headers=False)
             for _ in range(CONTROL_HEADROOM + 1)
         ]
-        assert_classification_capacity_busy(classification)
+        assert_intake_progress(socket_path, store)
+        assert not select.select(classification, [], [], 0)[0], "incomplete headers were refused"
         for connection in classification:
             connection.close()
         time.sleep(1)
@@ -2148,7 +2068,7 @@ def main():
 
         process, _ = start_host(store)
         replay_stop = command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -2159,7 +2079,7 @@ def main():
         assert replay_stop["answer"]["status"] == "accepted", replay_stop
         assert replay_stop["answer"]["replayed"] is True, replay_stop
         replay_interrupt = command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",

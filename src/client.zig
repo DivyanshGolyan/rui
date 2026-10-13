@@ -26,7 +26,7 @@ pub const Requests = struct {
         reply_buffer.len = 0;
         try self.check();
         const paths = try platform.resolveClientPaths(self.io, captured.saved.store.slice());
-        const reply = try sendSource(self, &paths, captured.target.route(), captured.length, &captured.file, null, drop_reply, null, reply_buffer, null);
+        const reply = try sendSource(self, &paths, captured.target.route(), .mutation, captured.length, &captured.file, null, drop_reply, null, reply_buffer, null);
         var result = decodeMutationReply(reply, captured.saved.session.slice(), captured.target);
         result.context = captured.saved;
         return result;
@@ -39,7 +39,7 @@ pub const Requests = struct {
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
         try renderReadRequest(&body, "observe_command", paths.store.slice(), "key", key, null, null);
-        const reply = try sendSource(self, &paths, "/v1/observe-command", body.len, null, body.slice(), null, null, reply_buffer, null);
+        const reply = try sendSource(self, &paths, "/v1/observe-command", .observation, body.len, null, body.slice(), null, null, reply_buffer, null);
         if (reply.status != 200) return .{ .failure = try decodeReadFailure(reply, false) };
         return .{ .observation = try CommandObservation.parse(reply, key) };
     }
@@ -232,11 +232,11 @@ pub const Requests = struct {
 };
 
 fn readPublicContentResponse(requests: Requests, fd: std.posix.fd_t, expected: ?CommandObservation.ContentReference, sink: anytype) !?ReadFailure {
-    const head = try readResponseHeadUntil(requests, fd, 60_000, null);
+    const head = try readResponseHeadUntil(requests, fd, .{}, null);
     if (head.status != 200) {
         if (head.kind != .command_json) return error.InvalidResponse;
         var reply_buffer: ReplyBuffer = .{};
-        return try decodeReadFailure(try readCommandBodyUntil(requests, fd, head, &reply_buffer, null), false);
+        return try decodeReadFailure(try readCommandBodyUntil(requests, fd, head, &reply_buffer, .{}, null), false);
     }
     if (head.kind != .content_bytes or head.total != head.content_length or head.next != head.content_length) return error.InvalidResponse;
     if (expected) |reference| if (head.content_length != reference.bytes) return error.ContentBindingMismatch;
@@ -568,20 +568,14 @@ pub const MessageInput = struct {
 
 pub const SessionStopInput = struct {
     store: []const u8,
-    record: []const u8,
-    key: []const u8,
     session: []const u8,
-    drop_reply: ?[]const u8 = null,
 };
 
 pub const ModelInterruptionInput = struct {
     store: []const u8,
-    record: []const u8,
-    key: []const u8,
     session: []const u8,
     turn_id: u64,
     operation_id: u64,
-    drop_reply: ?[]const u8 = null,
 };
 
 pub const PermissionDecisionInput = struct {
@@ -624,7 +618,7 @@ pub fn stopHost(io: std.Io, input: HostStopInput, reply_buffer: *ReplyBuffer) !H
     try body.append("{\"version\":\"1\",\"kind\":\"host_stop\",\"store\":");
     try body.appendJsonString(paths.store.slice());
     try body.append("}");
-    const reply = sendSource(.{ .io = io }, &paths, "/v1/control/host-stop", body.len, null, body.slice(), input.drop_reply, &input.instance, reply_buffer, null);
+    const reply = sendSource(.{ .io = io }, &paths, "/v1/control/host-stop", .mutation, body.len, null, body.slice(), input.drop_reply, &input.instance, reply_buffer, null);
     const result = reply catch |err| return if (err == error.FileNotFound or err == error.ConnectionRefused)
         .unavailable
     else
@@ -686,7 +680,7 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) HostS
     var reply_buffer: ReplyBuffer = .{};
     const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
     const until = @min(probe_end, deadline orelse probe_end);
-    const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", body.len, null, body.slice(), null, null, &reply_buffer, until) catch |err| return switch (err) {
+    const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", .observation, body.len, null, body.slice(), null, null, &reply_buffer, until) catch |err| return switch (err) {
         error.AccessDenied, error.PermissionDenied => .access_failure,
         error.WrongWireVersion, error.InvalidResponse, error.ResponseHeaderTooLarge, error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,
         else => .owned_unavailable,
@@ -1375,6 +1369,13 @@ pub const SessionListPage = struct {
 
     pub fn writeJson(self: *const SessionListPage, writer: *std.Io.Writer) !void {
         try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
+        try self.writeRowsJson(writer);
+        if (self.next) |next| try writer.print("],\"next\":{{\"after\":\"{d}\",\"ceiling\":\"{d}\"}}}}", .{ next.after, next.ceiling }) else try writer.writeAll("],\"next\":null}");
+    }
+
+    /// Rows borrow this validated page. A caller may stream many bounded pages
+    /// into one list without retaining the Session population or raw wire text.
+    pub fn writeRowsJson(self: *const SessionListPage, writer: *std.Io.Writer) !void {
         for (self.rows[0..self.count], 0..) |*row, index| {
             if (index != 0) try writer.writeAll(",");
             try writer.writeAll("{\"reference\":");
@@ -1388,7 +1389,6 @@ pub const SessionListPage = struct {
             if (row.tools.edit) try writer.writeAll(if (row.tools.bash) ",\"edit\"" else "\"edit\"");
             try writer.print("],\"permission_mode\":\"{s}\"}}", .{@tagName(row.permission_mode)});
         }
-        if (self.next) |next| try writer.print("],\"next\":{{\"after\":\"{d}\",\"ceiling\":\"{d}\"}}}}", .{ next.after, next.ceiling }) else try writer.writeAll("],\"next\":null}");
     }
 };
 
@@ -1424,23 +1424,23 @@ fn renderReadRequest(
     try body.append("}");
 }
 
-pub fn stopSession(io: std.Io, input: SessionStopInput, reply_buffer: *ReplyBuffer) !MutationReply {
-    reply_buffer.len = 0;
+pub fn captureSessionStop(io: std.Io, input: SessionStopInput, target: CaptureTarget) !CapturedRecord {
     const paths = try platform.resolveClientPaths(io, input.store);
-    try validateIdentityInputs(input.key, input.session);
-    var captured = try captureSessionStop(io, &paths, input);
-    defer captured.close(io);
-    return sendCaptured(io, &captured, input.drop_reply, reply_buffer);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try validateIdentityInputs(location.key, input.session);
+    return writeSessionStopCapture(io, &paths, input, location);
 }
 
-pub fn interruptModel(io: std.Io, input: ModelInterruptionInput, reply_buffer: *ReplyBuffer) !MutationReply {
-    reply_buffer.len = 0;
+pub fn captureModelInterruption(io: std.Io, input: ModelInterruptionInput, target: CaptureTarget) !CapturedRecord {
     const paths = try platform.resolveClientPaths(io, input.store);
-    try validateIdentityInputs(input.key, input.session);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try validateIdentityInputs(location.key, input.session);
     if (input.turn_id == 0 or input.operation_id == 0) return error.InvalidTarget;
-    var captured = try captureModelInterruption(io, &paths, input);
-    defer captured.close(io);
-    return sendCaptured(io, &captured, input.drop_reply, reply_buffer);
+    return writeModelInterruptionCapture(io, &paths, input, location);
 }
 
 pub fn retry(
@@ -1468,7 +1468,7 @@ pub fn retry(
     defer file.close(io);
     const binding = try readCapturedBinding(io, &file);
     if (!binding.saved.store.eql(paths.store.slice()) or !std.mem.eql(u8, route, binding.target.route())) return error.RequestBindingMismatch;
-    const reply = try sendSource(.{ .io = io }, &paths, route, try file.length(io), &file, null, null, null, reply_buffer, null);
+    const reply = try sendSource(.{ .io = io }, &paths, route, .mutation, try file.length(io), &file, null, null, null, reply_buffer, null);
     var result = decodeMutationReply(reply, binding.saved.session.slice(), binding.target);
     result.context = binding.saved;
     return result;
@@ -2286,8 +2286,6 @@ fn requestPath(directory: []const u8, handle: []const u8, buffer: []u8) ![]const
     return std.fmt.bufPrint(buffer, "{s}/{s}.json", .{ directory, handle });
 }
 
-// Generated recovery still supports configure/message/permission decisions;
-// controls retain the explicit retry route.
 pub fn openCaptured(io: std.Io, directory: []const u8, handle: []const u8) !CapturedRecord {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try requestPath(directory, handle, &path_buffer);
@@ -2299,7 +2297,7 @@ pub fn openCaptured(io: std.Io, directory: []const u8, handle: []const u8) !Capt
     return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target };
 }
 
-/// Metadata-only projection for listing/following; cannot authorize a send or
+/// Metadata-only projection for listing/inspection; cannot authorize a send or
 /// an admission. Historical payloads are not traversed by these callers.
 pub fn inspectCaptured(io: std.Io, directory: []const u8, handle: []const u8) !CapturedIdentity {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2313,6 +2311,8 @@ pub fn inspectCaptured(io: std.Io, directory: []const u8, handle: []const u8) !C
 fn capturedRoute(saved: *const CapturedIdentity) ![]const u8 {
     if (saved.kind.eql("configure")) return "/v1/configure";
     if (saved.kind.eql("message")) return "/v1/message";
+    if (saved.kind.eql("session_stop")) return "/v1/control/session-stop";
+    if (saved.kind.eql("model_interruption")) return "/v1/control/model-interruption";
     if (saved.kind.eql("permission_decision")) return "/v1/control/permission-decision";
     return error.InvalidRequestRecord;
 }
@@ -2428,7 +2428,9 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !Cap
     const kind_marker = std.mem.indexOf(u8, prefix, ",\"configuration\"") orelse
         std.mem.indexOf(u8, prefix, ",\"text\"") orelse
         std.mem.indexOf(u8, prefix, ",\"decision\"") orelse
-        return error.InvalidRequestRecord;
+        // Stop/interruption records contain only bounded identities. There is
+        // no variable payload to exclude from their complete metadata object.
+        if (count > 0 and prefix[count - 1] == '}') count - 1 else return error.InvalidRequestRecord;
     var head: [header_bytes]u8 = undefined;
     if (kind_marker + 1 > head.len) return error.InvalidRequestRecord;
     @memcpy(head[0..kind_marker], prefix[0..kind_marker]);
@@ -2438,7 +2440,8 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !Cap
         kind: []const u8,
         store: []const u8,
         key: []const u8,
-        session: []const u8,
+        session: ?[]const u8 = null,
+        target: ?struct { session: []const u8 } = null,
     };
     const parsed = try std.json.parseFromSlice(Fields, std.heap.c_allocator, head[0 .. kind_marker + 1], .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
@@ -2446,7 +2449,8 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !Cap
     var identity: CapturedIdentity = .{};
     try identity.store.set(parsed.value.store);
     try identity.key.set(parsed.value.key);
-    try identity.session.set(parsed.value.session);
+    const session = parsed.value.session orelse if (parsed.value.target) |target| target.session else return error.InvalidRequestRecord;
+    try identity.session.set(session);
     try identity.kind.set(parsed.value.kind);
     return identity;
 }
@@ -2513,32 +2517,33 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
     return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, "message");
 }
 
-fn captureSessionStop(io: std.Io, paths: *const platform.Paths, input: SessionStopInput) !CapturedRecord {
+fn writeSessionStopCapture(io: std.Io, paths: *const platform.Paths, input: SessionStopInput, location: @FieldType(CaptureTarget, "explicit")) !CapturedRecord {
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, input.record, &output_buffer);
+    var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
     try capture.write("{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":");
     try capture.writeJsonString(paths.store.slice());
     try capture.write(",\"key\":");
-    try capture.writeJsonString(input.key);
+    try capture.writeJsonString(location.key);
     try capture.write(",\"session\":");
     try capture.writeJsonString(input.session);
     try capture.write("}");
-    return finishCapture(io, &capture, paths.store.slice(), input.key, input.session, "session_stop");
+    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, "session_stop");
 }
 
-fn captureModelInterruption(
+fn writeModelInterruptionCapture(
     io: std.Io,
     paths: *const platform.Paths,
     input: ModelInterruptionInput,
+    location: @FieldType(CaptureTarget, "explicit"),
 ) !CapturedRecord {
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, input.record, &output_buffer);
+    var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
     try capture.write("{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":");
     try capture.writeJsonString(paths.store.slice());
     try capture.write(",\"key\":");
-    try capture.writeJsonString(input.key);
+    try capture.writeJsonString(location.key);
     try capture.write(",\"target\":{\"session\":");
     try capture.writeJsonString(input.session);
     var ids: [96]u8 = undefined;
@@ -2547,7 +2552,7 @@ fn captureModelInterruption(
         input.operation_id,
     });
     try capture.write(suffix);
-    return finishCapture(io, &capture, paths.store.slice(), input.key, input.session, "model_interruption");
+    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, "model_interruption");
 }
 
 pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, target: CaptureTarget) !CapturedRecord {
@@ -2821,6 +2826,7 @@ fn sendSource(
     requests: Requests,
     paths: *const platform.Paths,
     route: []const u8,
+    exchange: enum { mutation, observation },
     length: u64,
     file: ?*std.Io.File,
     bytes: ?[]const u8,
@@ -2855,7 +2861,10 @@ fn sendSource(
             sent += count;
         }
     } else try writeAllRequest(requests, fd, bytes.?, until);
-    return readCommandResponseRequest(requests, fd, reply_buffer, until);
+    return switch (exchange) {
+        .mutation => readMutationResponse(requests, fd, reply_buffer),
+        .observation => readCommandResponseRequest(requests, fd, reply_buffer, until),
+    };
 }
 
 fn connectRequest(requests: Requests, address: std.Io.net.UnixAddress, until: ?i128) !std.posix.fd_t {
@@ -2953,19 +2962,29 @@ fn readResponseHead(fd: std.posix.fd_t) !ResponseHead {
 }
 
 fn readResponseHeadWithInactivity(fd: std.posix.fd_t, inactivity_ms: i32) !ResponseHead {
-    return readResponseHeadUntil(.{ .io = std.Io.Threaded.global_single_threaded.io() }, fd, inactivity_ms, null);
+    return readResponseHeadUntil(.{ .io = std.Io.Threaded.global_single_threaded.io() }, fd, .{ .inactivity_ms = inactivity_ms }, null);
 }
 
-fn readResponseHeadUntil(requests: Requests, fd: std.posix.fd_t, inactivity_ms: i32, until: ?i128) !ResponseHead {
+const ResponseTiming = struct {
+    inactivity_ms: i32 = 60_000,
+    wait_for_first_byte: bool = true,
+
+    fn deadline(self: ResponseTiming, io: std.Io) i128 {
+        return std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + @as(i128, self.inactivity_ms) * std.time.ns_per_ms;
+    }
+};
+
+const mutation_response_timing: ResponseTiming = .{ .inactivity_ms = 5_000, .wait_for_first_byte = false };
+
+fn readResponseHeadUntil(requests: Requests, fd: std.posix.fd_t, timing: ResponseTiming, until: ?i128) !ResponseHead {
     var header_buffer: [protocol.max_header_bytes]u8 = undefined;
-    // Ordinary requests start their inactivity window after the first byte;
-    // Host readiness alone has an absolute deadline that includes this wait.
-    const first_count = try readRequest(requests, fd, header_buffer[0..1], until);
+    const first_deadline: ?i128 = until orelse if (timing.wait_for_first_byte) null else timing.deadline(requests.io);
+    const first_count = try readRequest(requests, fd, header_buffer[0..1], first_deadline);
     if (first_count == 0) return error.TruncatedResponse;
     var used: usize = first_count;
     while (used < header_buffer.len) {
         if (used >= 4 and std.mem.eql(u8, header_buffer[used - 4 .. used], "\r\n\r\n")) break;
-        const deadline = until orelse (std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds + @as(i128, inactivity_ms) * std.time.ns_per_ms);
+        const deadline = until orelse timing.deadline(requests.io);
         const count = try readRequest(requests, fd, header_buffer[used .. used + 1], deadline);
         if (count == 0) return error.TruncatedResponse;
         used += count;
@@ -3047,11 +3066,18 @@ fn readCommandResponse(fd: std.posix.fd_t, reply_buffer: *ReplyBuffer) !CommandR
     return readCommandResponseRequest(.{ .io = std.Io.Threaded.global_single_threaded.io() }, fd, reply_buffer, null);
 }
 
+fn readMutationResponse(requests: Requests, fd: std.posix.fd_t, reply_buffer: *ReplyBuffer) !CommandReply {
+    reply_buffer.len = 0;
+    const head = try readResponseHeadUntil(requests, fd, mutation_response_timing, null);
+    if (head.kind != .command_json) return error.InvalidResponse;
+    return readCommandBodyUntil(requests, fd, head, reply_buffer, mutation_response_timing, null);
+}
+
 fn readCommandResponseRequest(requests: Requests, fd: std.posix.fd_t, reply_buffer: *ReplyBuffer, until: ?i128) !CommandReply {
     reply_buffer.len = 0;
-    const head = try readResponseHeadUntil(requests, fd, 60_000, until);
+    const head = try readResponseHeadUntil(requests, fd, .{}, until);
     if (head.kind != .command_json) return error.InvalidResponse;
-    return readCommandBodyUntil(requests, fd, head, reply_buffer, until);
+    return readCommandBodyUntil(requests, fd, head, reply_buffer, .{}, until);
 }
 
 fn readResultResponse(
@@ -3070,10 +3096,10 @@ fn readResultResponseSink(
     reply_buffer: *ReplyBuffer,
 ) !ResultReply {
     reply_buffer.len = 0;
-    const head = try readResponseHeadUntil(requests, fd, 60_000, null);
+    const head = try readResponseHeadUntil(requests, fd, .{}, null);
     if (head.status != 200) {
         if (head.kind != .command_json) return error.InvalidResponse;
-        return .{ .command = try readCommandBodyUntil(requests, fd, head, reply_buffer, null) };
+        return .{ .command = try readCommandBodyUntil(requests, fd, head, reply_buffer, .{}, null) };
     }
     if (head.kind != .result_text) return error.InvalidResponse;
     try readResponseBody(requests, fd, head.content_length, sink);
@@ -3087,10 +3113,10 @@ fn readReportResponse(
     reply_buffer: *ReplyBuffer,
 ) !ReportReply {
     reply_buffer.len = 0;
-    const head = try readResponseHeadUntil(requests, fd, 60_000, null);
+    const head = try readResponseHeadUntil(requests, fd, .{}, null);
     if (head.status != 200) {
         if (head.kind != .command_json) return error.InvalidResponse;
-        return .{ .command = try readCommandBodyUntil(requests, fd, head, reply_buffer, null) };
+        return .{ .command = try readCommandBodyUntil(requests, fd, head, reply_buffer, .{}, null) };
     }
     if (head.kind != .command_json) return error.InvalidResponse;
     try readResponseBody(requests, fd, head.content_length, sink);
@@ -3115,14 +3141,14 @@ fn readResponseBody(requests: Requests, fd: std.posix.fd_t, length: u64, sink: a
     }
 }
 
-fn readCommandBodyUntil(requests: Requests, fd: std.posix.fd_t, head: ResponseHead, reply_buffer: *ReplyBuffer, until: ?i128) !CommandReply {
+fn readCommandBodyUntil(requests: Requests, fd: std.posix.fd_t, head: ResponseHead, reply_buffer: *ReplyBuffer, timing: ResponseTiming, until: ?i128) !CommandReply {
     reply_buffer.len = 0;
     errdefer reply_buffer.len = 0;
     if (head.content_length > protocol.max_response_bytes) return error.ResponseTooLarge;
     const body_length: usize = @intCast(head.content_length);
     var offset: usize = 0;
     while (offset < body_length) {
-        const deadline = until orelse (std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s);
+        const deadline = until orelse timing.deadline(requests.io);
         const count = try readRequest(requests, fd, reply_buffer.bytes[offset..body_length], deadline);
         if (count == 0) return error.TruncatedResponse;
         offset += count;
@@ -3399,6 +3425,45 @@ fn delayedResponse(io: std.Io, fd: std.posix.fd_t, delay: std.Io.Duration, respo
     defer closeTestDescriptor(fd);
     std.Io.sleep(io, delay, .awake) catch return;
     writeAll(fd, response) catch {};
+}
+
+test "mutation response expires after five seconds before first byte and within body" {
+    const response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}";
+    for ([_]usize{ 0, response.len - 1 }) |prefix| {
+        const sockets = try socketPair();
+        defer closeTestDescriptor(sockets[0]);
+        if (prefix != 0) try writeAll(sockets[1], response[0..prefix]);
+        const writer = try std.Thread.spawn(.{}, delayedResponse, .{
+            std.testing.io,
+            sockets[1],
+            std.Io.Duration.fromSeconds(6),
+            response[prefix..],
+        });
+        defer writer.join();
+        var buffer: ReplyBuffer = .{};
+        try std.testing.expectError(error.ResponseInactive, readMutationResponse(.{ .io = std.testing.io }, sockets[0], &buffer));
+        try std.testing.expectEqual(@as(usize, 0), buffer.len);
+    }
+}
+
+test "mutation positive response progress renews inactivity without a total deadline" {
+    const sockets = try socketPair();
+    defer closeTestDescriptor(sockets[0]);
+    const Producer = struct {
+        fn run(fd: std.posix.fd_t) void {
+            defer closeTestDescriptor(fd);
+            std.Io.sleep(std.testing.io, .fromMilliseconds(4_500), .awake) catch unreachable;
+            writeAll(fd, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{") catch return;
+            std.Io.sleep(std.testing.io, .fromMilliseconds(4_500), .awake) catch unreachable;
+            writeAll(fd, "}") catch return;
+        }
+    };
+    const writer = try std.Thread.spawn(.{}, Producer.run, .{sockets[1]});
+    defer writer.join();
+    var buffer: ReplyBuffer = .{};
+    const reply = try readMutationResponse(.{ .io = std.testing.io }, sockets[0], &buffer);
+    try std.testing.expectEqual(@as(u16, 200), reply.status);
+    try std.testing.expectEqualStrings("{}", reply.body);
 }
 
 test "Host processing wait starts inactivity only after the first response byte" {
@@ -3826,8 +3891,8 @@ test "capture recovery closes rejected records and retains only its reader lifet
     Probe.closed = 0;
     for ([_][]const u8{
         "not json",
-        "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\"}",
-        "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"target\":{\"session\":\"original\",\"turn\":\"1\",\"operation\":\"2\"}}",
+        "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\"}",
+        "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"target\":{\"session\":\"original\",\"turn\":\"invalid\",\"operation\":\"2\"}}",
         "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"other\",\"session\":\"original\",\"text\":{}}",
         "{\"version\":\"1\",\"kind\":\"unknown\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{}}",
         "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{\"state\":\"value\",\"value\":\"a\",\"val\\u0075e\":\"b\"}}",
@@ -4359,12 +4424,10 @@ test "control captures attain their exact worst-case request bounds" {
         "{s}/records/stop-record",
         .{root_buffer[0..root_length]},
     );
-    var stop_capture = try captureSessionStop(std.testing.io, &paths, .{
+    var stop_capture = try writeSessionStopCapture(std.testing.io, &paths, .{
         .store = "unused",
-        .record = stop_path,
-        .key = &escaped_key,
         .session = &escaped_session,
-    });
+    }, .{ .record = stop_path, .key = &escaped_key });
     defer stop_capture.close(std.testing.io);
     const stop_file = try std.Io.Dir.cwd().openFile(std.testing.io, stop_path, .{});
     defer stop_file.close(std.testing.io);
@@ -4379,14 +4442,12 @@ test "control captures attain their exact worst-case request bounds" {
         "{s}/records/interruption-record",
         .{root_buffer[0..root_length]},
     );
-    var interruption_capture = try captureModelInterruption(std.testing.io, &paths, .{
+    var interruption_capture = try writeModelInterruptionCapture(std.testing.io, &paths, .{
         .store = "unused",
-        .record = interruption_path,
-        .key = &escaped_key,
         .session = &escaped_session,
         .turn_id = std.math.maxInt(u64),
         .operation_id = std.math.maxInt(u64),
-    });
+    }, .{ .record = interruption_path, .key = &escaped_key });
     defer interruption_capture.close(std.testing.io);
     const interruption_file = try std.Io.Dir.cwd().openFile(std.testing.io, interruption_path, .{});
     defer interruption_file.close(std.testing.io);

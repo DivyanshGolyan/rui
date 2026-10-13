@@ -143,7 +143,7 @@ func configure(deadline measurement.Deadline, binary, parent, store, key, sessio
 	}
 	var answer map[string]any
 	err = runJSON(deadline, binary, &answer,
-		"configure", "--store", store, "--record", filepath.Join(parent, key+".json"),
+		"session", "configure", "--store", store, "--record", filepath.Join(parent, key+".json"),
 		"--key", key, "--session", session, "--workspace", workspace, "--provider", "codex", "--model", "model-a")
 	if err != nil {
 		return err
@@ -174,7 +174,7 @@ func message(deadline measurement.Deadline, binary, parent, store, key, session 
 	}
 	var answer map[string]any
 	err = runJSON(deadline, binary, &answer,
-		"message", "--store", store, "--record", filepath.Join(parent, key+".json"),
+		"session", "send", "--store", store, "--record", filepath.Join(parent, key+".json"),
 		"--key", key, "--session", session, "--text", path)
 	if err != nil {
 		return err
@@ -199,7 +199,7 @@ func nested(value map[string]any, names ...string) any {
 
 func execution(deadline measurement.Deadline, binary, store, session string) (any, error) {
 	var result map[string]any
-	if err := runJSON(deadline, binary, &result, "inspect-session", "--store", store, "--session", session); err != nil {
+	if err := runJSON(deadline, binary, &result, "session", "inspect", "--store", store, "--session", session); err != nil {
 		return nil, err
 	}
 	return result["execution"], nil

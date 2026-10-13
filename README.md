@@ -51,7 +51,7 @@ Sign in once, unless you already signed in with Rui:
 
 ```sh
 RUI="$HOME/.local/bin/rui"
-"$RUI" login codex
+"$RUI" auth login codex
 ```
 
 Follow the device-code instructions. Your account must have Codex access. Rui stores its credentials privately under `~/.config/rui/codex.json`.
@@ -80,58 +80,52 @@ Type a request at `›`, such as `Investigate the failing test`. In approval mod
 | `/requests` | Lists saved requests for recovery. |
 | `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
 
-You can edit and paste multiline text at the prompt. There is no input history or completion. For input longer than 64 KiB, use `message --text FILE`. If a submission is uncertain, Ctrl-R retries that same request rather than creating a new one.
+You can edit and paste multiline text at the prompt. There is no input history or completion. For input longer than 64 KiB, use `session send --text FILE`. If a submission is uncertain, Ctrl-R retries that same request rather than creating a new one.
 
 ## Return to your work
 
 Rui calls a saved conversation a **Session**. To return to the newest Session created in your current project:
 
 ```sh
-"$RUI" resume --last
+"$RUI" session resume --last
 ```
 
-Use `"$RUI" sessions` to list this project's Sessions, or `sessions --all` to include other projects. `"$RUI" resume SESSION_REF` opens an exact Session. Rui also prints an exact resume command when you leave.
+Use `"$RUI" session list` to list this project's Sessions, or `session list --all` to include other projects. `"$RUI" session resume SESSION_REF` opens an exact Session. Rui also prints an exact resume command when you leave.
 
 Bare `rui` always creates a new Session. Existing Sessions keep their saved settings, including approval mode. `/setup` changes defaults for future Sessions, not the current one.
 
 ## Use Rui from scripts
 
-For a fresh conversation that waits for an answer:
-
-```sh
-"$RUI" exec "Explain the build"
-printf '%s' 'Explain the build' | "$RUI" exec -
-```
-
-`exec` writes answer text to stdout and recovery handles to stderr. It returns nonzero on failure, uncertainty or a permission block. It uses the same new-Session defaults, including Bash without approval. Use `--` before flag-like prompts or text equal to a command name.
-
-For repeated work in an explicitly named Session with approval enabled:
+Start the Host explicitly, configure a Session, then send work. These commands return after admission, without waiting for an answer:
 
 ```sh
 STORE="$HOME/.local/share/rui/store"
 "$RUI" host start --store "$STORE"
-"$RUI" configure --store "$STORE" --session my/project --workspace "$PWD" \
+"$RUI" session configure --store "$STORE" --session my/project --workspace "$PWD" \
   --provider codex --model gpt-6-luna --permission-mode ask
-"$RUI" message --store "$STORE" --session my/project "Investigate the failing test"
-"$RUI" follow SAVED_MESSAGE_HANDLE
-"$RUI" result SAVED_MESSAGE_HANDLE
+"$RUI" session send --store "$STORE" --session my/project "Investigate the failing test"
+"$RUI" request inspect SAVED_MESSAGE_HANDLE
 ```
 
-Replace `SAVED_MESSAGE_HANDLE` with the handle printed by `message`. Unlike `exec`, `message` returns after acceptance, not completion. `follow` and `result` stay attached to that message even after the Session does newer work. Add `--json` for machine-readable output where supported.
+Replace `SAVED_MESSAGE_HANDLE` with the handle announced on stderr by `session send`. Receipts and metadata reads write one JSON value to stdout. `request inspect` reads the original request once and never submits work. After that request completes, `request read-result SAVED_MESSAGE_HANDLE` streams its saved answer, even if the Session has done newer work. An unavailable answer fails immediately.
+
+Omit `--session` from `session configure` to capture a generated address and today's defaults once. Addressed configuration preserves omitted settings. Sending remains a separate command. Use `--text FILE`, `--text -` for stdin, or `--` before flag-like literal text. Installed `rui --help` and scoped help such as `rui request recover --help` describe the available commands.
 
 If approval is needed, inspect the reported Action ID before allowing it:
 
 ```sh
-"$RUI" inspect-action --store "$STORE" --session my/project --action ACTION_ID
+"$RUI" action inspect --store "$STORE" --session my/project --action ACTION_ID
 ```
 
 After reviewing the command, approve it once:
 
 ```sh
-"$RUI" allow-action --store "$STORE" --session my/project --action ACTION_ID
+"$RUI" action allow --store "$STORE" --session my/project --action ACTION_ID
 ```
 
-Use `deny-action` instead to reject it, then `follow` the original message again. If a command loses its reply, use `requests` and `recover HANDLE` to retry the saved request. Do not submit a new message to guess whether the first arrived.
+Use `action deny` instead to reject it. Inspect the original request again when you need its progress. If admission is uncertain, use `request recover HANDLE` to retransmit the original captured intent. Recovery can first admit work that never arrived. `request list` enumerates local captures, but cannot reliably identify one invocation when concurrent calls lose all output. For that case, choose `--key KEY --record FILE` before submission and keep the exact record.
+
+Nonzero exit does not prove rejection or noncommit. A confirmed acceptance remains valid if later output or cleanup fails. Recover uncertain admission with the original identity. Inspect confirmed admission rather than sending new work. Completion-waiting `exec`, `follow`, and `wait-session` are no longer CLI commands; the live human conversation remains available.
 
 ## Manage the background process
 
@@ -151,7 +145,7 @@ To shut down the Host and interrupt **all work in the selected Store**:
 
 If the reply is lost, use the printed retry command. It targets the same Host instance so it cannot stop a replacement. An acknowledgment means shutdown was requested, not that cleanup has finished.
 
-For foreground operation and explicit capacity, use `serve --store PATH --active-capacity 8 --codex`. Without `--codex` or a development endpoint, `serve` makes no model requests. See the [Host reference](ARCHITECTURE.md#platforms-and-server-lifetime) for startup and shutdown guarantees.
+For foreground operation and explicit capacity, use `host serve --store PATH --active-capacity 8 --codex`. Without `--codex` or a development endpoint, `host serve` makes no model requests. See the [Host reference](ARCHITECTURE.md#platforms-and-server-lifetime) for startup and shutdown guarantees.
 
 <a id="try-the-implemented-development-path"></a>
 

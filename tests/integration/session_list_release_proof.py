@@ -146,7 +146,7 @@ def case(binary, probe, mode):
             return original_popen(*args, **kwargs)
         with patch.object(host_process.subprocess, "Popen", popen):
             process, _ = fixture.start_ready_process(
-                [binary, "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"],
+                [binary, "host", "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"],
                 required_fields={"execution": "unavailable"}, observations="list")
         diagnostics = host_process.HostDiagnostics(process)
         worker = None
@@ -231,7 +231,7 @@ def charge_negative(binary):
         store = pathlib.Path(directory) / "store"
         store.mkdir(mode=0o700)
         process, _ = fixture.start_ready_process(
-            [binary, "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"],
+            [binary, "host", "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"],
             required_fields={"execution": "unavailable"}, observations="list")
         diagnostics = host_process.HostDiagnostics(process)
         try:

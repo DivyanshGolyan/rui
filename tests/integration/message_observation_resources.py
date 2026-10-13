@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import pty
+import select
 import subprocess
 import sys
 import tempfile
@@ -17,19 +18,20 @@ import threading
 
 import human_cli_integration as cli
 from host_process import start_ready_process, stop_process
-from saved_request_resources import sample
+from saved_request_resources import resource_first, sample
 
 
 def retained(state, binary, label, repetition, failed_key):
     home = state / f"{label}-{repetition}"
     home.mkdir()
     master, slave = pty.openpty()
-    process = subprocess.Popen([str(binary), "session", "--store", str(state / "store"),
+    current = resource_first(binary)
+    process = subprocess.Popen([str(binary), "session", *(["resume"] if current else []), "--store", str(state / "store"),
         "--session", "resources/message"], env={**os.environ, "HOME": str(home)},
         stdin=slave, stdout=slave, stderr=slave)
     os.close(slave)
     try:
-        prompt = "rui> " if label == "baseline" else "› "
+        prompt = "› " if current else os.environ.get("RUI_BASELINE_PROMPT", "rui> ")
         cli.read_terminal(master, prompt)
         samples = [sample(process.pid)]
         for _ in range(4):
@@ -52,6 +54,34 @@ def retained(state, binary, label, repetition, failed_key):
 
 
 def held(state, binary, label, handle):
+    if resource_first(binary):
+        # The removed follow snapshot has no current equivalent. Measure the
+        # completed one-shot owner explicitly, not a fabricated reply waiter.
+        ready_read, ready_write = os.pipe()
+        release_read, release_write = os.pipe()
+        process = None
+        try:
+            process = subprocess.Popen([str(binary), "request", "inspect", handle],
+                env={**os.environ, "HOME": str(state / "capture-home"),
+                    "RUI_TEST_POST_COMMAND_READY_FD": str(ready_write),
+                    "RUI_TEST_POST_COMMAND_RELEASE_FD": str(release_read)},
+                pass_fds=(ready_write, release_read), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            assert select.select([ready_read], [], [], 5)[0], "one-shot inspection did not finish"
+            assert os.read(ready_read, 1) == b"\x01"
+            measured = sample(process.pid)
+            assert measured["fds"] == 5, measured  # stdio plus two diagnostic hold descriptors.
+            os.write(release_write, b"\x01")
+            output, errors = process.communicate(timeout=5)
+            assert process.returncode == 0 and not errors, (output, errors)
+            observation = json.loads(output)["observation"]
+            assert observation["status"] == "accepted" and observation.get("result") is None, observation
+            return {"binary": label, "completed_one_shot": measured, "diagnostic_hold_fds": 2}
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+            for fd in (ready_read, ready_write, release_read, release_write):
+                os.close(fd)
     gate = state / f"{label}-gate"
     process = subprocess.Popen([str(binary), "follow", handle, "--json"],
         env={**os.environ, "HOME": str(state / "capture-home"), "RUI_TEST_FOLLOW_GATE": str(gate)},
@@ -73,7 +103,7 @@ def main():
     for label, binary in (("baseline", baseline), ("candidate", candidate)):
         with binary.open("rb") as executable:
             print(json.dumps({"binary": label, "sha256": hashlib.file_digest(executable, "sha256").hexdigest()}), flush=True)
-    cli.fixture.RUI = baseline
+    cli.fixture.RUI = candidate
     release = threading.Event()
     endpoint = cli.fixture.SuccessEndpoint([
         cli.fixture.ResponseSpec(b"permanent failure", {}, 422),
@@ -85,18 +115,18 @@ def main():
             state = pathlib.Path(temporary)
             home = state / "capture-home"
             home.mkdir()
-            host, _ = start_ready_process([baseline, "serve", "--store", state / "store",
+            host, _ = start_ready_process([baseline, *(["host"] if resource_first(baseline) else []), "serve", "--store", state / "store",
                 "--active-capacity", "1", "--provider-endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses"])
             try:
-                cli.run(home, "configure", "--store", state / "store", "--session", "resources/message",
+                cli.run(home, "session", "configure", "--store", state / "store", "--session", "resources/message",
                     "--workspace", state, "--provider", "codex", "--model", "model-a")
-                failed = cli.admit(home, "message", "--store", state / "store", "--session", "resources/message", "fail")["request"]
-                cli.fixture.wait_for(lambda: cli.fixture.command("observe-command", "--store", state / "store",
+                failed = cli.admit(home, "session", "send", "--store", state / "store", "--session", "resources/message", "fail")["context"]["key"]
+                cli.fixture.wait_for(lambda: cli.fixture.command("request", "inspect", "--store", state / "store",
                     "--key", failed)["observation"].get("result"), "saved failure")
                 for repetition in range(3):
                     for label, binary in (("baseline", baseline), ("candidate", candidate)):
                         print(json.dumps(retained(state, binary, label, repetition, failed)), flush=True)
-                pending = cli.admit(home, "message", "--store", state / "store", "--session", "resources/message", "hold")["request"]
+                pending = cli.admit(home, "session", "send", "--store", state / "store", "--session", "resources/message", "hold")["context"]["key"]
                 cli.fixture.wait_for(lambda: len(endpoint.requests) == 2, "held provider request")
                 for label, binary in (("baseline", baseline), ("candidate", candidate)):
                     print(json.dumps(held(state, binary, label, pending)), flush=True)

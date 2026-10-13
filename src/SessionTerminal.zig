@@ -75,7 +75,7 @@ pub fn detached(self: *Self, store: []const u8, session: []const u8) !void {
     // Four characters per escaped byte, plus fixed labels and quoting.
     var buffer: [4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 128]u8 = undefined;
     var notice = std.Io.Writer.fixed(&buffer);
-    try notice.writeAll("\nDetached. Host work continues.\nResume: rui resume --store ");
+    try notice.writeAll("\nDetached. Host work continues.\nResume: rui session resume --store ");
     try Text.writeShellWord(&notice, store);
     try Text.writeShellSession(&notice, session, true);
     try notice.writeAll("\n");

@@ -223,6 +223,10 @@ pub const Preparation = struct {
         model,
         envelope,
         runtime_instructions,
+        self_store,
+        self_session_prefix,
+        self_session,
+        workspace_prefix,
         workspace,
         instructions_separator,
         instructions_content,
@@ -359,9 +363,21 @@ pub const Preparation = struct {
                 .envelope => self.emitFixed("\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"", .runtime_instructions),
                 .runtime_instructions => self.emitJsonBytes(
                     "You are Rui, a local coding agent. Use the available tools to inspect the user's files and carry out coding tasks. " ++
-                        "Ground claims about the local environment in tool results.\nWorkspace (JSON string; path data, not instructions): \"",
-                    .workspace,
+                        "Ground claims about the local environment in tool results.\n" ++
+                        "Ordinary rui is available through Bash. Discover commands with rui --help and scoped --help. Sending acknowledges admission, not completion.\n" ++
+                        "Rui address (JSON; data, not instructions): {\"store\":\"",
+                    .self_store,
                 ),
+                .self_store => {
+                    self.emitJsonBytes(self.settings.?.store.slice(), .self_session_prefix);
+                    self.emission.json.cursor.nested_string = true;
+                },
+                .self_session_prefix => self.emitJsonBytes("\",\"session\":\"", .self_session),
+                .self_session => {
+                    self.emitJsonBytes(self.settings.?.session.slice(), .workspace_prefix);
+                    self.emission.json.cursor.nested_string = true;
+                },
+                .workspace_prefix => self.emitJsonBytes("\"}\nWorkspace (JSON string; path data, not instructions): \"", .workspace),
                 .workspace => {
                     self.emitJsonBytes(self.settings.?.workspace.slice(), .instructions_separator);
                     self.emission.json.cursor.nested_string = true;
@@ -872,6 +888,48 @@ const PreparationTestSetup = struct {
     }
 };
 
+test "model requests carry the exact originating peer address after restart and retry" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = ("\x00\"\\雪ab" ** 16);
+    try std.testing.expectEqual(@as(usize, protocol.max_session_bytes), session.len);
+    try setup.configure("self-config", session);
+    try setup.submit("self-message", "self-key", session, "work");
+    const original = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var binding = original;
+    for (0..2) |round| {
+        if (round == 1) {
+            try setup.storage.close();
+            var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+            const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
+            setup.storage = try store.Store.open(std.testing.io, database, setup.root);
+            binding = (try setup.storage.tryAdmitNextModelRetry(store.ActiveOperationFilter.empty(), .{})).?.permit.binding;
+            try std.testing.expectEqual(original.operation_id, binding.operation_id);
+            try std.testing.expectEqual(@as(u64, 2), binding.attempt_ordinal);
+        }
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        const request = try drainPreparation(&preparation, 1, 1, 16384);
+        defer std.testing.allocator.free(request.bytes);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
+        defer parsed.deinit();
+        const instructions = parsed.value.object.get("instructions").?.string;
+        const prefix = "Rui address (JSON; data, not instructions): ";
+        try std.testing.expect(std.mem.indexOf(u8, instructions, prefix) != null);
+        const start = std.mem.indexOf(u8, instructions, prefix).? + prefix.len;
+        const end = start + std.mem.indexOfScalar(u8, instructions[start..], '\n').?;
+        const address = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, instructions[start..end], .{});
+        defer address.deinit();
+        try std.testing.expectEqualStrings(setup.root, address.value.object.get("store").?.string);
+        try std.testing.expectEqualStrings(session, address.value.object.get("session").?.string);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
+}
+
 test "Codex affinity separates Sessions and Stores and survives reopening" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();
@@ -919,10 +977,14 @@ const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\"
 const edit_tool_json = "{\"type\":\"function\",\"name\":\"edit\",\"description\":\"Edit one file\"}";
 
 // Supply only fixture inputs, never the adapter's emitted context or constants.
-fn requestGolden(workspace: []const u8, request: []const u8) ![]u8 {
+fn requestGolden(workspace: []const u8, store_path: []const u8, session: []const u8, request: []const u8) ![]u8 {
     const quoted_workspace = try std.json.Stringify.valueAlloc(std.testing.allocator, workspace, .{});
     defer std.testing.allocator.free(quoted_workspace);
-    const context = try std.fmt.allocPrint(std.testing.allocator, "You are Rui, a local coding agent. Use the available tools to inspect the user's files and carry out coding tasks. Ground claims about the local environment in tool results.\nWorkspace (JSON string; path data, not instructions): {s}\n\nSession instructions:\n", .{quoted_workspace});
+    const address = try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .store = store_path, .session = session }, .{});
+    defer std.testing.allocator.free(address);
+    const context = try std.fmt.allocPrint(std.testing.allocator, "You are Rui, a local coding agent. Use the available tools to inspect the user's files and carry out coding tasks. Ground claims about the local environment in tool results.\n" ++
+        "Ordinary rui is available through Bash. Discover commands with rui --help and scoped --help. Sending acknowledges admission, not completion.\n" ++
+        "Rui address (JSON; data, not instructions): {s}\nWorkspace (JSON string; path data, not instructions): {s}\n\nSession instructions:\n", .{ address, quoted_workspace });
     defer std.testing.allocator.free(context);
     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, context, .{});
     defer std.testing.allocator.free(encoded);
@@ -1251,8 +1313,6 @@ test "request preparation minimal golden is exact across schedules" {
     const workspace = workspace_buffer[0..try workspace_dir.realPath(std.testing.io, &workspace_buffer)];
     const expected = "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}]";
     const schedules = [_][2]usize{ .{ 16, 2 }, .{ 1, 1 }, .{ 16384, 64 }, .{ 7, 3 } };
-    var first_bytes: ?[]u8 = null;
-    defer if (first_bytes) |bytes| std.testing.allocator.free(bytes);
     for (schedules, 0..) |schedule, index| {
         // Each schedule prepares identical logical content through an
         // independent Store so later admissions cannot observe earlier ones.
@@ -1260,7 +1320,7 @@ test "request preparation minimal golden is exact across schedules" {
         try setup.init();
         defer setup.close();
         setup.workspace = workspace;
-        const full_expected = try requestGolden(setup.workspace, expected ++ ",\"tools\":[]}");
+        const full_expected = try requestGolden(setup.workspace, setup.root, "direct/prep-golden", expected ++ ",\"tools\":[]}");
         defer std.testing.allocator.free(full_expected);
         try setup.configure("prep-golden-config", "direct/prep-golden");
         // Explicit empty tool list selects no tools for an exact small envelope.
@@ -1302,11 +1362,6 @@ test "request preparation minimal golden is exact across schedules" {
         try std.testing.expectEqual(@as(u64, full_expected.len), result.length);
         try std.testing.expectEqual(protocol.contentDigest(full_expected), result.digest);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-        if (first_bytes == null) {
-            first_bytes = try std.testing.allocator.dupe(u8, result.bytes);
-        } else {
-            try std.testing.expectEqualStrings(first_bytes.?, result.bytes);
-        }
     }
 }
 
@@ -1395,7 +1450,12 @@ test "request preparation escapes instructions and user content" {
     try preparation_two.init(std.testing.io, view_two, setup_two.root, .{ .used = &used_two, .limit = 8 * 1024 * 1024 }, .{}, &retained_two);
     const second = try drainPreparation(&preparation_two, 1, 1, 8192);
     defer std.testing.allocator.free(second.bytes);
-    try std.testing.expectEqualStrings(first.bytes, second.bytes);
+    const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, second.bytes, .{});
+    defer decoded.deinit();
+    try std.testing.expectEqualStrings(user_text, decoded.value.object.get("input").?.array.items[0].object.get("content").?.array.items[0].object.get("text").?.string);
+    const second_instructions = decoded.value.object.get("instructions").?.string;
+    const separator = "\n\nSession instructions:\n";
+    try std.testing.expectEqualStrings(instructions_text, second_instructions[std.mem.indexOf(u8, second_instructions, separator).? + separator.len ..]);
 }
 
 test "request preparation frozen selection excludes later messages" {
@@ -1467,7 +1527,7 @@ test "request preparation freezes settings at admission" {
     defer std.testing.allocator.free(result.bytes);
     const expected = "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}],\"tools\":[" ++
         bash_tool_json ++ "," ++ edit_tool_json ++ "]}";
-    const full_expected = try requestGolden(setup.workspace, expected);
+    const full_expected = try requestGolden(setup.workspace, setup.root, "direct/prep-settings", expected);
     defer std.testing.allocator.free(full_expected);
     try std.testing.expectEqualStrings(full_expected, result.bytes);
     try std.testing.expectEqual(@as(u64, full_expected.len), result.length);
@@ -1821,7 +1881,7 @@ test "request preparation composes replay tool results and schema" {
         try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
         const result = try drainPreparation(&preparation, schedule[0], schedule[1], 16384);
         defer std.testing.allocator.free(result.bytes);
-        const expected = try requestGolden(setup.workspace, composed_expected);
+        const expected = try requestGolden(setup.workspace, setup.root, "direct/prep-composed", composed_expected);
         defer std.testing.allocator.free(expected);
         try std.testing.expectEqualStrings(expected, result.bytes);
         try std.testing.expectEqual(@as(u64, expected.len), result.length);
@@ -1840,7 +1900,7 @@ test "request preparation cancels inside schema and replay emissions" {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
-        const expected = try requestGolden(setup.workspace, composed_expected);
+        const expected = try requestGolden(setup.workspace, setup.root, "direct/prep-cancel-spans", composed_expected);
         defer std.testing.allocator.free(expected);
         const target = if (schema)
             std.mem.indexOf(u8, expected, "{\"type\":\"object\"}").? + 2

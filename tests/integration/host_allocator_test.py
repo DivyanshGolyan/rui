@@ -64,7 +64,7 @@ def main():
             relative_store = os.path.relpath(store)
             with patch.dict(os.environ, env, clear=True):
                 process, _ = start_ready_process(
-                    [binary, "serve", "--store", relative_store, "--active-capacity", "1"]
+                    [binary, "host", "serve", "--store", relative_store, "--active-capacity", "1"]
                 )
             try:
                 rows = [line.split("\t") for line in log.read_text().splitlines()]
@@ -94,7 +94,7 @@ def main():
             env = dict(base, RUI_ALLOCATOR_PROBE=str(log), RUI_ALLOCATOR_STORE=str(store),
                        RUI_ALLOCATOR_REMOVE_EXECUTABLE=str(removed))
             result = subprocess.run(
-                [removed, "serve", "--store", store, "--active-capacity", "1"],
+                [removed, "host", "serve", "--store", store, "--active-capacity", "1"],
                 env=env, capture_output=True, timeout=10,
             )
             assert result.returncode != 0 and b"ready" not in result.stdout, result

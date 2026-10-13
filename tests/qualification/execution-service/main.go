@@ -123,7 +123,7 @@ func expectAnswer(c measurement.Client, key, answer string) error {
 	if !ok || state != "completed" {
 		return fmt.Errorf("%s did not complete: %v", key, v)
 	}
-	actual, e := measurement.Run(c.Deadline, c.Binary, "read-result", "--store", c.Store, "--key", key)
+	actual, e := measurement.Run(c.Deadline, c.Binary, "request", "read-result", "--store", c.Store, "--key", key)
 	if e != nil {
 		return e
 	}

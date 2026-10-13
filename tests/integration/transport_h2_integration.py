@@ -603,7 +603,7 @@ def queued_h1(root):
                     pending = dispatch.observe(store, f"h1-message-0-{index}")
                     assert (pending.get("processing") or {}).get("attempt") == "1", pending
                     assert pending.get("result") is None, pending
-                inspection = dispatch.command("inspect-session", "--store", store,
+                inspection = dispatch.command("session", "inspect", "--store", store,
                                               "--session", "direct/h1-1")["execution"]
                 assert int(inspection["custody_occupied"]) > 0, inspection
                 endpoint.release_first.set()
@@ -619,7 +619,7 @@ def queued_h1(root):
                 assert result["status"] == "completed", result
                 assert dispatch.read_result(store, key, deadline=result_deadline) == f"answer-h1-{round_number}-{index}".encode()
             wait_for_drain(
-                lambda remaining: dispatch.command("inspect-session", "--store", store,
+                lambda remaining: dispatch.command("session", "inspect", "--store", store,
                                                   "--session", "direct/h1-0", timeout=remaining)["execution"],
                 result_deadline,
             )
@@ -711,14 +711,14 @@ def stalled_capture(root, endpoint, after_progress=False):
         assert (int(gate_event["written_bytes"]) >= 10_000) == after_progress, gate_event
         processing = dispatch.observe(store, "stalled-message-0")["processing"]
         reply = dispatch.command(
-            "interrupt-model", "--store", store, "--record", records / "stalled-interrupt.json",
+            "session", "interrupt-model", "--store", store, "--record", records / "stalled-interrupt.json",
             "--key", "stalled-interrupt", "--session", "direct/stalled-0",
             "--turn", processing["turn"], "--operation", processing["operation"],
         )
         assert reply["answer"]["status"] == "accepted", reply
         diagnostics.wait("effect_stop_requested", control_key="stalled-interrupt", timeout=15,
                          turn=processing["turn"], operation=processing["operation"], attempt=processing["attempt"])
-        held = dispatch.command("inspect-session", "--store", store,
+        held = dispatch.command("session", "inspect", "--store", store,
                                 "--session", "direct/stalled-0")["execution"]
         assert int(held["custody_occupied"]) > 0, held
         assert dispatch.observe(store, "stalled-message-1").get("result") is None
@@ -741,7 +741,7 @@ def stalled_capture(root, endpoint, after_progress=False):
                 assert result["status"] == "completed", result
                 assert dispatch.read_result(store, key, deadline=result_deadline) == endpoint.answers[f"stalled-{index}"]
         wait_for_drain(
-            lambda remaining: dispatch.command("inspect-session", "--store", store,
+            lambda remaining: dispatch.command("session", "inspect", "--store", store,
                                               "--session", "direct/stalled-0", timeout=remaining)["execution"],
             result_deadline,
         )
@@ -800,7 +800,7 @@ def paused_capture_inactivity(root, endpoint):
             assert result["status"] == "completed", result
             assert dispatch.read_result(store, key, deadline=result_deadline) == endpoint.answers[f"paused-{index}"]
         wait_for_drain(
-            lambda remaining: dispatch.command("inspect-session", "--store", store,
+            lambda remaining: dispatch.command("session", "inspect", "--store", store,
                                               "--session", "direct/paused-0", timeout=remaining)["execution"],
             result_deadline,
         )
@@ -870,7 +870,7 @@ def capture_failure_on_resume(root, endpoint):
         assert later["status"] == "completed", later
         assert dispatch.read_result(store, "resume-after-message", deadline=result_deadline) == endpoint.answers["resume-after"]
         wait_for_drain(
-            lambda remaining: dispatch.command("inspect-session", "--store", store,
+            lambda remaining: dispatch.command("session", "inspect", "--store", store,
                                               "--session", "direct/resume-0", timeout=remaining)["execution"],
             min(population_deadline, result_deadline),
         )
@@ -978,7 +978,7 @@ def isolated_bad_header(root, endpoint):
         assert len(endpoint.streams) == 2
         assert len(endpoint.connections) == 1
         wait_for_drain(
-            lambda remaining: dispatch.command("inspect-session", "--store", store,
+            lambda remaining: dispatch.command("session", "inspect", "--store", store,
                                               "--session", "direct/sibling-0", timeout=remaining)["execution"],
             result_deadline,
         )
@@ -1002,7 +1002,7 @@ def isolated_terminal_stream(root, endpoint, mode):
         if mode == "cancel":
             processing = dispatch.observe(store, "cancel-target-message")["processing"]
             reply = dispatch.command(
-                "interrupt-model", "--store", store, "--record", root / "cancel-interrupt.json",
+                "session", "interrupt-model", "--store", store, "--record", root / "cancel-interrupt.json",
                 "--key", "cancel-interrupt", "--session", "direct/target",
                 "--turn", processing["turn"], "--operation", processing["operation"],
             )
@@ -1029,7 +1029,7 @@ def isolated_terminal_stream(root, endpoint, mode):
         assert len(endpoint.connections) == 1 and len(endpoint.streams) == 2
         assert {text for _, _, text, _ in endpoint.streams} == {"isolation-target", "isolation-sibling"}
         wait_for_drain(
-            lambda remaining: dispatch.command("inspect-session", "--store", store,
+            lambda remaining: dispatch.command("session", "inspect", "--store", store,
                                               "--session", "direct/target", timeout=remaining)["execution"],
             result_deadline,
         )
@@ -1071,7 +1071,7 @@ def connection_failure(root, endpoint):
         assert len(endpoint.streams) == 4, endpoint.streams
         assert sorted(text for _, _, text, _ in endpoint.streams) == ["drop-0", "drop-0", "drop-1", "drop-1"]
         wait_for_drain(
-            lambda remaining: dispatch.command("inspect-session", "--store", store,
+            lambda remaining: dispatch.command("session", "inspect", "--store", store,
                                               "--session", "direct/drop-0", timeout=remaining)["execution"],
             result_deadline,
         )

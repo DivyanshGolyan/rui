@@ -35,7 +35,7 @@ func (c Client) Configure(key, session string, extra ...string) error {
 		return err
 	}
 	arguments := []string{
-		"configure", "--store", c.Store, "--record", filepath.Join(c.Artifacts, key+"-configure.json"),
+		"session", "configure", "--store", c.Store, "--record", filepath.Join(c.Artifacts, key+"-configure.json"),
 		"--key", key + "-configure", "--session", session, "--workspace", workspace, "--provider", "codex", "--model", "model-a",
 	}
 	arguments = append(arguments, extra...)
@@ -56,7 +56,7 @@ func (c Client) Message(key, session, text string) error {
 	}
 	var answer map[string]any
 	if err := RunJSON(c.Deadline, &answer, c.Binary,
-		"message", "--store", c.Store, "--record", filepath.Join(c.Artifacts, key+".json"),
+		"session", "send", "--store", c.Store, "--record", filepath.Join(c.Artifacts, key+".json"),
 		"--key", key, "--session", session, "--text", source); err != nil {
 		return err
 	}
@@ -69,7 +69,7 @@ func (c Client) Message(key, session, text string) error {
 func (c Client) StopSession(key, session string) error {
 	var answer map[string]any
 	if err := RunJSON(c.Deadline, &answer, c.Binary,
-		"stop-session", "--store", c.Store, "--record", filepath.Join(c.Artifacts, key+".json"),
+		"session", "stop", "--store", c.Store, "--record", filepath.Join(c.Artifacts, key+".json"),
 		"--key", key, "--session", session); err != nil {
 		return err
 	}
@@ -103,7 +103,7 @@ func (c Client) WaitAction(session string) (string, error) {
 func (c Client) AllowAction(key, session, action string) error {
 	var answer map[string]any
 	if err := RunJSON(c.Deadline, &answer, c.Binary,
-		"allow-action", "--store", c.Store, "--record", filepath.Join(c.Artifacts, key+".json"),
+		"action", "allow", "--store", c.Store, "--record", filepath.Join(c.Artifacts, key+".json"),
 		"--key", key, "--session", session, "--action", action); err != nil {
 		return err
 	}
@@ -117,7 +117,7 @@ func (c Client) Observe(key string) (map[string]any, error) {
 	var result struct {
 		Observation map[string]any `json:"observation"`
 	}
-	if err := RunJSON(c.Deadline, &result, c.Binary, "observe-command", "--store", c.Store, "--key", key); err != nil {
+	if err := RunJSON(c.Deadline, &result, c.Binary, "request", "inspect", "--store", c.Store, "--key", key); err != nil {
 		return nil, err
 	}
 	return result.Observation, nil
@@ -125,18 +125,18 @@ func (c Client) Observe(key string) (map[string]any, error) {
 
 func (c Client) Inspect(session string) (map[string]any, error) {
 	var result map[string]any
-	if err := RunJSON(c.Deadline, &result, c.Binary, "inspect-session", "--store", c.Store, "--session", session); err != nil {
+	if err := RunJSON(c.Deadline, &result, c.Binary, "session", "inspect", "--store", c.Store, "--session", session); err != nil {
 		return nil, err
 	}
 	return result, nil
 }
 
 func (c Client) ReadAction(session, action, field string) ([]byte, error) {
-	command := "read-action-" + field
+	command := "read-" + field
 	if field != "call-id" && field != "arguments" {
 		return nil, fmt.Errorf("unsupported Action field %q", field)
 	}
-	return Run(c.Deadline, c.Binary, command, "--store", c.Store, "--session", session, "--action", action)
+	return Run(c.Deadline, c.Binary, "action", command, "--store", c.Store, "--session", session, "--action", action)
 }
 
 func (c Client) WaitResult(key string) (map[string]any, error) {

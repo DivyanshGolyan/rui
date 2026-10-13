@@ -146,13 +146,11 @@ def status(store, env):
 
 
 def instance(output, capacity):
-    match = re.search(
-        rf"^Active capacity: {capacity}$.*^Instance: ([0-9a-f]{{32}})$",
-        output,
-        re.MULTILINE | re.DOTALL,
-    )
-    assert match, output
-    return match.group(1)
+    value = json.loads(output)
+    assert value["type"] == "host_status" and value["status"] == "ready", value
+    assert value["active_capacity"] == str(capacity), value
+    assert re.fullmatch(r"[0-9a-f]{32}", value["instance"]), value
+    return value["instance"]
 
 
 def matching_processes(store):
@@ -180,9 +178,9 @@ def matching_processes(store):
             except (ValueError, IndexError):
                 continue
     for pid, text in candidates:
-        if len(text) >= 4 and pathlib.Path(text[0]).resolve() == RUI and text[1:3] == ["serve", "--store"]:
+        if len(text) >= 5 and pathlib.Path(text[0]).resolve() == RUI and text[1:4] == ["host", "serve", "--store"]:
             try:
-                selected = str(pathlib.Path(text[3]).resolve())
+                selected = str(pathlib.Path(text[4]).resolve())
             except OSError:
                 continue
             if selected == expected:
@@ -272,15 +270,15 @@ def main():
         # A held lease is attached, not replaced or reconfigured.
         held_store = root / "held-store"
         held, _ = start_ready_process(
-            [RUI, "serve", "--store", held_store, "--active-capacity", "3"],
+            [RUI, "host", "serve", "--store", held_store, "--active-capacity", "3"],
             required_fields={"active_capacity": "3"},
         )
         try:
             before = instance(status(held_store, env), 3)
             attached = run_start(held_store, env)
             assert attached.returncode == 0, attached.stderr
-            assert "Attached to the ready Host" in attached.stdout, attached.stdout
-            assert f"Diagnostics: {held_store.resolve()}/diagnostics\n" in attached.stdout
+            assert instance(attached.stdout, 3) == before
+            assert json.loads(attached.stdout)["diagnostics"] == f"{held_store.resolve()}/diagnostics"
             assert instance(status(held_store, env), 3) == before
             assert wait_for_processes(held_store, 1) == [held.pid]
         finally:
@@ -322,12 +320,7 @@ def main():
                 assert os.readlink(f"/proc/{pids[0]}/cwd") == "/", "detached Host retained launcher cwd"
                 assert os.getsid(pids[0]) not in launcher_pids
             assert not credential.exists(), "Host startup opened or created credentials"
-            diagnostic_lines = [
-                line.removeprefix("Diagnostics: ")
-                for _, stdout, _ in results
-                for line in stdout.splitlines()
-                if line.startswith("Diagnostics: ")
-            ]
+            diagnostic_lines = [json.loads(stdout)["diagnostics"] for _, stdout, _ in results]
             assert diagnostic_lines, results
             for location in diagnostic_lines:
                 assert_diagnostics(store, credential, pathlib.Path(location))
@@ -351,11 +344,15 @@ def main():
         # by the launcher; the detached Host must not hold its pipe open.
         inherited_store = root / "inherited-fd"
         read_fd, write_fd = os.pipe()
-        inherited_fd = fcntl.fcntl(write_fd, fcntl.F_DUPFD, 200)
+        # Managed capacity 8: inherited stdio, fixed Host/transport, 100
+        # ordinary exchanges and three controls/discovery, execution spawn
+        # peak, authentication, and both intake wake descriptors.
+        managed_limit = 3 + (11 if sys.platform == "darwin" else 9) + 100 * 4 + 3 + (8 * 5 + 5) + (10 if sys.platform == "darwin" else 8) + 2
+        inherited_fd = fcntl.fcntl(write_fd, fcntl.F_DUPFD, managed_limit + 1)
         try:
             def inherited_above_limit():
                 soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-                resource.setrlimit(resource.RLIMIT_NOFILE, (128, hard))
+                resource.setrlimit(resource.RLIMIT_NOFILE, (managed_limit, hard))
 
             inherited = run_start(inherited_store, env, pass_fds=(inherited_fd,),
                 preexec_fn=inherited_above_limit)
@@ -365,7 +362,7 @@ def main():
             os.close(write_fd)
             try:
                 ready, _, _ = select.select([read_fd], [], [], 1)
-                assert ready and os.read(read_fd, 1) == b"", "detached Host inherited fd 200"
+                assert ready and os.read(read_fd, 1) == b"", f"detached Host inherited fd {inherited_fd}"
             finally:
                 os.close(read_fd)
                 forced_crash_cleanup(inherited_store)
@@ -377,7 +374,7 @@ def main():
         # The production default remains 1000. Its descriptor admission runs
         # before the lease/diagnostic writer, so rejection creates no Store.
         rejected_store = root / "default-capacity-rejected"
-        rejected = subprocess.run([RUI, "serve", "--store", rejected_store],
+        rejected = subprocess.run([RUI, "host", "serve", "--store", rejected_store],
             env=clean_env, preexec_fn=lower_descriptor_limit,
             capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
         assert rejected.returncode != 0, rejected
@@ -390,7 +387,7 @@ def main():
         # Capacity 8 is the existing desktop profile. Admit this child so the
         # disconnected pipe exercises readiness output, not pre-lease refusal.
         disconnected_store = root / "disconnected-stdout"
-        disconnected = subprocess.Popen([RUI, "serve", "--store", disconnected_store, "--active-capacity", "8"],
+        disconnected = subprocess.Popen([RUI, "host", "serve", "--store", disconnected_store, "--active-capacity", "8"],
             env=clean_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             disconnected.stdout.close()
@@ -467,7 +464,7 @@ def main():
             assert termios.tcgetattr(master) == original_terminal, output
             assert b"Host ready" not in output and b"Attached to the ready Host" not in output and b"Diagnostics:" not in output, output
             assert instance(status(bare_store, bare_env), 8)
-            inspected = subprocess.run([RUI, "inspect-session", "--store", bare_store, "--session", reference],
+            inspected = subprocess.run([RUI, "session", "inspect", "--store", bare_store, "--session", reference],
                 env=bare_env, capture_output=True, text=True, timeout=5)
             assert inspected.returncode == 0, inspected.stderr
             current = json.loads(inspected.stdout)["session"]
@@ -475,14 +472,14 @@ def main():
                 "reference": reference, "workspace": str(root.resolve()), "provider": "codex",
                 "model": "gpt-6-luna", "tools": ["bash"], "permission_mode": "bypass",
             }, current
-            recovered = subprocess.run([RUI, "recover", key, "--json"],
+            recovered = subprocess.run([RUI, "request", "recover", key],
                 env=bare_env, capture_output=True, text=True, timeout=5)
             assert recovered.returncode == 0, recovered.stderr
             answer = json.loads(recovered.stdout)["answer"]
             assert answer["status"] == "accepted" and answer["replayed"] is True, answer
             stopped = subprocess.run([RUI, "host", "stop", "--store", bare_store],
                 env=bare_env, capture_output=True, text=True, timeout=5)
-            assert stopped.returncode == 0 and "Stop acknowledged" in stopped.stdout, stopped
+            assert stopped.returncode == 0 and json.loads(stopped.stdout)["status"] == "acknowledged", stopped
         finally:
             try:
                 if caller is not None and caller.poll() is None:
@@ -509,7 +506,7 @@ def main():
             assert 9 <= elapsed < COMMAND_TIMEOUT, elapsed
             assert "readiness unconfirmed after 10 seconds" in failed.stderr, failed.stderr
             assert "diagnostics/ startup records" in failed.stderr, failed.stderr
-            assert status(failure_store, env).startswith("Host: unavailable")
+            assert json.loads(status(failure_store, env))["status"] == "unavailable"
             assert not credential.exists()
         finally:
             forced_crash_cleanup(failure_store)

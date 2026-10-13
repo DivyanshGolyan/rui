@@ -175,16 +175,16 @@ fn writeRecoveryGuide(self: *const Self, out: *std.Io.Writer) !void {
         if (self.submissionState() == .not_started) {
             try out.print("rui: {s} was not sent: capture did not begin. You may submit it again; no recovery record was published for this attempt.\n", .{if (self.submission.? == .decision) "Decision" else "Message"});
         } else if (self.capture_truth != .published) {
-            try out.print("rui: Capture not confirmed. Inspect rui requests for reserved key {s}; reservation does not prove publication. Recover only that original, never replacement input.\n", .{self.capture_key});
+            try out.print("rui: Capture not confirmed. Inspect rui request list for reserved key {s}; reservation does not prove publication. Recover only that original, never replacement input.\n", .{self.capture_key});
         } else if (self.submissionState() == .rejected) {
-            try out.print("rui: Original request rejected. Use rui recover {s} to inspect its saved outcome.\n", .{self.capture_key});
+            try out.print("rui: Original request rejected. Use rui request inspect {s} to inspect its saved outcome.\n", .{self.capture_key});
         } else {
-            try out.print("rui: {s} not confirmed. Use rui recover {s} to retry the exact original; do not resubmit it.\n", .{ if (self.submission.? == .decision) "Decision" else "Message", self.capture_key });
+            try out.print("rui: {s} not confirmed. Use rui request recover {s} to retry the exact original; do not resubmit it.\n", .{ if (self.submission.? == .decision) "Decision" else "Message", self.capture_key });
         }
     } else if (self.accepted) |accepted| {
         if (accepted.kind == .message) {
-            try out.print("rui: Message accepted; do not resubmit it. Use rui result {s} to inspect the same Message.\n", .{accepted.key});
-        } else try out.print("rui: Decision accepted; do not repeat it. Use rui recover {s} to inspect the same saved admission.\n", .{accepted.key});
+            try out.print("rui: Message accepted; do not resubmit it. Use rui request inspect {s} to inspect the same Message.\n", .{accepted.key});
+        } else try out.print("rui: Decision accepted; do not repeat it. Use rui request inspect {s} to inspect the same saved admission.\n", .{accepted.key});
     }
 }
 
@@ -770,9 +770,9 @@ fn handoff(self: *Self) !void {
         } else if (std.mem.eql(u8, text, "/wait")) {
             self.notice = "Work continues while you compose.";
         } else if (std.mem.eql(u8, text, "/login")) {
-            self.notice = "Login uses rui login codex in your shell.";
+            self.notice = "Login uses rui auth login codex in your shell.";
         } else if (std.mem.eql(u8, text, "/help")) {
-            try std.Io.File.stdout().writeStreamingAll(self.init.io, "Actions show their command here. Type a + Enter to allow once, d + Enter to deny.\n/status settings and work · /inspect-action exact diagnostics\n/details recent conversation with full saved tool output\n/history older conversation\nCtrl-R: retry the same unconfirmed input or decision, keeping the draft\n/requests recovery records · /result KEY saved answer\n/setup future defaults · /configure Session settings\n/recover KEY original intent · /discard rejected intent\n/exit detach (Host work continues; unsent draft is lost)\nLogin: rui login codex in your shell.\n");
+            try std.Io.File.stdout().writeStreamingAll(self.init.io, "Actions show their command here. Type a + Enter to allow once, d + Enter to deny.\n/status settings and work · /inspect-action exact diagnostics\n/details recent conversation with full saved tool output\n/history older conversation\nCtrl-R: retry the same unconfirmed input or decision, keeping the draft\n/requests recovery records · /result KEY saved answer\n/setup future defaults · /configure Session settings\n/recover KEY original intent · /discard rejected intent\n/exit detach (Host work continues; unsent draft is lost)\nLogin: rui auth login codex in your shell.\n");
         } else {
             try self.command(self.init, .{ .io = self.init.io, .cancellation = &interrupted }, self.store, self.session, text);
             if (self.submission != null and (std.mem.eql(u8, text, "/status") or std.mem.eql(u8, text, "/requests"))) {

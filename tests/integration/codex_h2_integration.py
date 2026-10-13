@@ -28,10 +28,11 @@ def assert_managed_descriptor_rejection(rejected, limit):
     assert inherited in ({3, 4} if sys.platform == "darwin" else {3}), fields
     fixed_host = 11 if sys.platform == "darwin" else 9
     authentication = 10 if sys.platform == "darwin" else 8
-    required = inherited + fixed_host + 42 + 10 + authentication + 1
+    clients = 100 * 4 + 3
+    required = inherited + fixed_host + clients + 10 + authentication + 2
     expected = dict(active_capacity=1, required=required, soft_limit=limit,
-                    inherited=inherited, fixed_host=fixed_host, clients=42,
-                    execution=10, authentication=authentication, self_wake=1)
+                    inherited=inherited, fixed_host=fixed_host, clients=clients,
+                    execution=10, authentication=authentication, self_wake=2)
     assert fields == expected, (fields, expected)
     print(f"managed descriptor rejection passed: {expected}", flush=True)
     return required
@@ -62,8 +63,8 @@ def run(*, observed=False):
     try:
         # Probe below the minimum inherited population, then test the exact
         # adjacent boundary observed before any Host-owned descriptors open.
-        minimum_required = {"linux": 73, "darwin": 77}[sys.platform]
-        serve = [fixture.RUI, "serve", "--store", store, "--active-capacity", "1",
+        minimum_required = 3 + (11 if sys.platform == "darwin" else 9) + 100 * 4 + 3 + 10 + (10 if sys.platform == "darwin" else 8) + 2
+        serve = [fixture.RUI, "host", "serve", "--store", store, "--active-capacity", "1",
                  "--test-codex-fixture-endpoint", f"https://localhost:{endpoint.server_address[1]}/responses",
                  "--provider-ca-file", root / "cert.pem", "--test-phase-trace"]
         def limited(limit):
@@ -87,7 +88,7 @@ def run(*, observed=False):
         )
         diagnostics = HostDiagnostics(host)
         configuration = fixture.command(
-            "configure", "--store", store, "--record", root / "config.json", "--key", "config",
+            "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
             "--session", "managed/h2", "--workspace", fixture.ROOT, "--provider", "codex",
             "--model", "model-a", "--tools", "none",
         )

@@ -37,7 +37,7 @@ def start_detached_shell(command, ready_path):
 
 def configure(state, store, key, session, permission="ask", workspace=fixture.ROOT):
     result = fixture.command(
-        "configure",
+        "session", "configure",
         "--store",
         store,
         "--record",
@@ -61,7 +61,7 @@ def configure(state, store, key, session, permission="ask", workspace=fixture.RO
 
 
 def actions_for(store, session, count):
-    report = fixture.command("inspect-session", "--store", store, "--session", session)
+    report = fixture.command("session", "inspect", "--store", store, "--session", session)
     unresolved = report["actions"]["unresolved"]
     return unresolved if len(unresolved) == count else None
 
@@ -75,7 +75,7 @@ def action_rows_by_id(store, session):
     return {
         action["action"]: action
         for action in fixture.command(
-            "inspect-session",
+            "session", "inspect",
             "--store",
             store,
             "--session",
@@ -88,7 +88,7 @@ def action_rows_by_id(store, session):
 
 def allow(state, store, key, session, action):
     result = fixture.command(
-        "allow-action",
+        "action", "allow",
         "--store",
         store,
         "--record",
@@ -135,13 +135,13 @@ def scratch_resources(store):
 
 
 def execution_idle(store, session):
-    report = fixture.command("inspect-session", "--store", store, "--session", session)
+    report = fixture.command("session", "inspect", "--store", store, "--session", session)
     execution = report["execution"]
     return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0" else None
 
 
 def execution_custody_idle(store, session):
-    report = fixture.command("inspect-session", "--store", store, "--session", session)
+    report = fixture.command("session", "inspect", "--store", store, "--session", session)
     return report if report["execution"]["custody_occupied"] == "0" else None
 
 
@@ -155,7 +155,7 @@ def process_exists(pid):
 
 def resolution(store, session):
     report = fixture.command(
-        "inspect-session", "--store", store, "--session", session, "--profile", "full"
+        "session", "inspect", "--store", store, "--session", session, "--profile", "full"
     )
     actions = report["full"]["actions"]
     return actions[0]["resolution"] if len(actions) == 1 else None
@@ -163,7 +163,7 @@ def resolution(store, session):
 
 def result_text(store, session):
     report = fixture.command(
-        "inspect-session", "--store", store, "--session", session, "--profile", "full"
+        "session", "inspect", "--store", store, "--session", session, "--profile", "full"
     )
     actions = report["full"]["actions"]
     assert len(actions) == 1 and actions[0]["resolution"] is not None, report
@@ -278,7 +278,7 @@ def prove_reused_session(state):
         assert queued["queue"]["status"] == "queued", queued
         first_processing = fixture.observe(store, "reuse-first")["processing"]
         report = fixture.command(
-            "inspect-session",
+            "session", "inspect",
             "--store",
             store,
             "--session",
@@ -304,7 +304,7 @@ def prove_reused_session(state):
         fixture.wait_for(
             lambda: int(
                 fixture.command(
-                    "inspect-session", "--store", store, "--session", "direct/reuse"
+                    "session", "inspect", "--store", store, "--session", "direct/reuse"
                 )["execution"]["custody_occupied"]
             )
             >= 1,
@@ -408,7 +408,7 @@ def prove_reused_session(state):
                 action=str(action["action"]),
             ) == [], milestones.records
         delayed = fixture.command(
-            "inspect-session", "--store", store, "--session", "direct/reuse"
+            "session", "inspect", "--store", store, "--session", "direct/reuse"
         )["execution"]
         assert int(delayed["custody_occupied"]) >= len(actions_by_ordinal), delayed
         assert int(delayed["scratch_used_bytes"]) > 0, delayed
@@ -425,7 +425,7 @@ def prove_reused_session(state):
             "second Turn provider request during delayed cleanup",
         )
         second_live = fixture.command(
-            "inspect-session", "--store", store, "--session", "direct/reuse"
+            "session", "inspect", "--store", store, "--session", "direct/reuse"
         )["execution"]
         second_live_custody = int(second_live["custody_occupied"])
         assert second_live_custody >= 2, second_live
@@ -439,7 +439,7 @@ def prove_reused_session(state):
         time.sleep(retry_wait_ms / 1000 + 0.25)
         retry_wait = fixture.observe(store, "reuse-second")
         retry_execution = fixture.command(
-            "inspect-session", "--store", store, "--session", "direct/reuse"
+            "session", "inspect", "--store", store, "--session", "direct/reuse"
         )["execution"]
         assert retry_wait["processing"] == second_processing, retry_wait
         assert retry_wait["processing"]["attempt"] == "1", retry_wait
@@ -479,7 +479,7 @@ def prove_reused_session(state):
         assert fixture.read_result(store, "reuse-second") == b"second-turn-answer"
         assert len(endpoint.requests) == 4, endpoint.requests
         initial_request = json.loads(endpoint.requests[0])
-        assert initial_request["instructions"] == fixture.model_instructions(fixture.ROOT), initial_request
+        assert initial_request["instructions"] == fixture.model_instructions(fixture.ROOT, store, "direct/reuse"), initial_request
         assert initial_request["input"] == [
             {"role": "user", "content": [{"type": "input_text", "text": "first work"}]},
         ], initial_request
@@ -503,7 +503,7 @@ def prove_reused_session(state):
         assert endpoint.requests[2] == endpoint.requests[3]
 
         replayed_message = fixture.command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -516,7 +516,7 @@ def prove_reused_session(state):
         assert replayed_message["answer"] == expected_first_answer, replayed_message
         assert fixture.observe(store, "reuse-first") == first_completed
         replayed_queued = fixture.command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -528,7 +528,7 @@ def prove_reused_session(state):
         expected_queued_answer["replayed"] = True
         assert replayed_queued["answer"] == expected_queued_answer, replayed_queued
         replayed_permission = fixture.command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -660,7 +660,7 @@ def walkthrough():
         show_observation("Host started with the deterministic local provider fixture")
 
         configure_args = (
-            "configure",
+            "session", "configure",
             "--store",
             store,
             "--record",
@@ -688,7 +688,7 @@ def walkthrough():
         text_path = state / "walkthrough-message.txt"
         text_path.write_text("make one independently counted file effect")
         message_args = (
-            "message",
+            "session", "send",
             "--store",
             store,
             "--record",
@@ -714,7 +714,7 @@ def walkthrough():
         show_observation(f"message accepted and exact retry record retained at {message_record}")
 
         action = fixture.wait_for(lambda: action_for(store, session), "walkthrough Bash Action")
-        inspect_args = ("inspect-session", "--store", store, "--session", session, "--profile", "full")
+        inspect_args = ("session", "inspect", "--store", store, "--session", session, "--profile", "full")
         show_command(*inspect_args)
         report = fixture.command(*inspect_args)
         assert report["actions"]["unresolved"] == [action], report
@@ -724,7 +724,7 @@ def walkthrough():
         )
 
         call_id_args = (
-            "read-action-call-id",
+            "action", "read-call-id",
             "--store",
             store,
             "--session",
@@ -733,7 +733,7 @@ def walkthrough():
             action["action"],
         )
         arguments_args = (
-            "read-action-arguments",
+            "action", "read-arguments",
             "--store",
             store,
             "--session",
@@ -752,7 +752,7 @@ def walkthrough():
         show_observation("zero file effects and no continuation request before approval")
 
         allow_args = (
-            "allow-action",
+            "action", "allow",
             "--store",
             store,
             "--record",
@@ -777,7 +777,7 @@ def walkthrough():
         fixture.wait_for(lambda: execution_idle(store, session), "walkthrough owned cleanup")
         assert counter.read_text() == "x"
         assert len(endpoint.requests) == 2, endpoint.requests
-        result_args = ("read-result", "--store", store, "--key", message_key)
+        result_args = ("request", "read-result", "--store", store, "--key", message_key)
         show_command(*result_args)
         assert fixture.read_result(store, message_key) == b"walkthrough complete"
         show_observation("saved answer: walkthrough complete; independent effect count: 1")
@@ -796,7 +796,7 @@ def walkthrough():
         show_observation("fresh Host reopened the same Store")
 
         retry_args = (
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -1072,7 +1072,7 @@ def main():
             permission="ask",
         )
         recovered_configuration = fixture.command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -1086,7 +1086,7 @@ def main():
             state, store, "success-message", "direct/success", "execute"
         )
         recovered_message = fixture.command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -1100,7 +1100,7 @@ def main():
             lambda: action_for(store, "direct/success"), "successful Bash Action"
         )
         proposal = fixture.command(
-            "inspect-session",
+            "session", "inspect",
             "--store",
             store,
             "--session",
@@ -1131,7 +1131,7 @@ def main():
         decision = allow(state, store, "success-allow", "direct/success", success_action["action"])
         assert decision["answer"]["replayed"] is False, decision
         replay = fixture.command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -1141,7 +1141,7 @@ def main():
         )
         assert replay["answer"]["replayed"] is True, replay
         conflict = fixture.command(
-            "deny-action",
+            "action", "deny",
             "--store",
             store,
             "--record",
@@ -1152,6 +1152,7 @@ def main():
             "direct/success",
             "--action",
             success_action["action"],
+            expect=1,
         )
         assert conflict["answer"]["status"] == "conflict", conflict
         bash_cleanup_started = success_milestones.wait(
@@ -1165,7 +1166,7 @@ def main():
         assert counter.read_text() == "x"
         assert fixture.read_result(store, "success-message") == b"continued"
         recovered_completed_message = fixture.command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -1190,7 +1191,7 @@ def main():
         assert "�" in output and "[earlier output omitted]" in output, output
         assert "Full stdout:" in output and "Full stderr:" in output, output
         answer_report = fixture.command(
-            "inspect-session",
+            "session", "inspect",
             "--store",
             store,
             "--session",
@@ -1265,7 +1266,7 @@ def main():
             lambda: action_for(store, "direct/unattempted"), "unattempted stoppable Action"
         )
         stopped = fixture.command(
-            "stop-session",
+            "session", "stop",
             "--store",
             store,
             "--record",
@@ -1306,7 +1307,7 @@ def main():
             action=str(prelaunch_stop_action["action"]),
         )
         fixture.command(
-            "stop-session",
+            "session", "stop",
             "--store",
             store,
             "--record",
@@ -1332,7 +1333,7 @@ def main():
         host = fixture.start_host(store, endpoint_url, active_capacity=0)
         allow(state, store, "before-launch-allow", "direct/before-launch", pending["action"])
         rejected_allow = fixture.command(
-            "allow-action",
+            "action", "allow",
             "--store",
             store,
             "--record",
@@ -1343,13 +1344,14 @@ def main():
             "direct/before-launch",
             "--action",
             pending["action"],
+            expect=1,
         )
         assert rejected_allow["answer"]["status"] == "rejected", rejected_allow
         assert rejected_allow["answer"]["code"] == "action_not_pending", rejected_allow
         assert rejected_allow["answer"]["replayed"] is False, rejected_allow
         configure(state, store, "before-launch-mode-change", "direct/before-launch", "bypass")
         report = fixture.command(
-            "inspect-session", "--store", store, "--session", "direct/before-launch"
+            "session", "inspect", "--store", store, "--session", "direct/before-launch"
         )
         assert len(report["actions"]["unresolved"]) == 1, report
         assert report["actions"]["unresolved"][0]["authorization"] == "allow_once", report
@@ -1425,14 +1427,14 @@ def main():
         fixture.wait_for(
             lambda: int(
                 fixture.command(
-                    "inspect-session", "--store", store, "--session", "direct/stop"
+                    "session", "inspect", "--store", store, "--session", "direct/stop"
                 )["execution"]["custody_occupied"]
             )
             > 0,
             "launched stoppable Bash",
         )
         active_resources = fixture.command(
-            "inspect-session", "--store", store, "--session", "direct/stop"
+            "session", "inspect", "--store", store, "--session", "direct/stop"
         )["execution"]
         resource_samples.append(
             {
@@ -1443,7 +1445,7 @@ def main():
             }
         )
         stopped = fixture.command(
-            "stop-session",
+            "session", "stop",
             "--store",
             store,
             "--record",
@@ -1499,7 +1501,7 @@ def main():
             action=str(settlement_stop_action["action"]),
         )
         fixture.command(
-            "stop-session",
+            "session", "stop",
             "--store",
             store,
             "--record",
@@ -1517,14 +1519,14 @@ def main():
         assert result_text(store, "direct/settlement-stop") == "Cancelled by Session stop."
         assert int(
             fixture.command(
-                "inspect-session", "--store", store, "--session", "direct/settlement-stop"
+                "session", "inspect", "--store", store, "--session", "direct/settlement-stop"
             )["execution"]["custody_occupied"]
         ) > 0
         settlement_cleanup_gate.unlink()
         fixture.wait_for(
             lambda: int(
                 fixture.command(
-                    "inspect-session", "--store", store, "--session", "direct/settlement-stop"
+                    "session", "inspect", "--store", store, "--session", "direct/settlement-stop"
                 )["execution"]["custody_occupied"]
             )
             == 0,
@@ -1593,7 +1595,7 @@ def main():
             action=str(stopped_pipes_action["action"]),
         )
         stopped_pipes_stop = fixture.start_command(
-            "stop-session",
+            "session", "stop",
             "--store",
             store,
             "--record", state / "stopped-pipes-stop.json",
@@ -1676,7 +1678,7 @@ def main():
         fixture.wait_for(
             lambda: int(
                 fixture.command(
-                    "inspect-session",
+                    "session", "inspect",
                     "--store",
                     store,
                     "--session",
@@ -1763,7 +1765,7 @@ def main():
             "known result before cleanup failure",
         )
         cleanup_report = fixture.command(
-            "inspect-session", "--store", store, "--session", "direct/cleanup"
+            "session", "inspect", "--store", store, "--session", "direct/cleanup"
         )
         assert cleanup_report["execution"]["dispatch_fenced"] is True, cleanup_report
         assert int(cleanup_report["execution"]["custody_occupied"]) > 0, cleanup_report
@@ -1771,7 +1773,7 @@ def main():
         cleanup_gate.unlink()
         fixture.wait_for(
             lambda: fixture.command(
-                "inspect-session", "--store", store, "--session", "direct/cleanup"
+                "session", "inspect", "--store", store, "--session", "direct/cleanup"
             )["execution"]["custody_occupied"]
             == "0",
             "cleanup-failure original owner reclamation",
@@ -1846,7 +1848,7 @@ def main():
         )
         assert int(
             fixture.command(
-                "inspect-session", "--store", store, "--session", "direct/preparation-cleanup"
+                "session", "inspect", "--store", store, "--session", "direct/preparation-cleanup"
             )["execution"]["custody_occupied"]
         ) > 0
         assert list((store / "scratch").glob("bash-input-*-1.tmp"))
@@ -1858,7 +1860,7 @@ def main():
         fixture.wait_for(
             lambda: int(
                 fixture.command(
-                    "inspect-session",
+                    "session", "inspect",
                     "--store",
                     store,
                     "--session",
@@ -1953,11 +1955,11 @@ def main():
             "post-Resolution Bash result",
         )
         delayed = fixture.command(
-            "inspect-session", "--store", store, "--session", "direct/post-resolution"
+            "session", "inspect", "--store", store, "--session", "direct/post-resolution"
         )
         assert delayed["execution"]["custody_occupied"] == "1", delayed
         fixture.command(
-            "stop-session",
+            "session", "stop",
             "--store",
             store,
             "--record",
@@ -1969,7 +1971,7 @@ def main():
         )
         fixture.wait_for(
             lambda: fixture.command(
-                "inspect-session", "--store", store, "--session", "direct/post-resolution"
+                "session", "inspect", "--store", store, "--session", "direct/post-resolution"
             )["execution"]["custody_occupied"]
             == "0",
             "post-Resolution physical cleanup",
@@ -1986,7 +1988,7 @@ def main():
             "independent sibling continuation",
         )
         sibling_rows = fixture.command(
-            "inspect-session",
+            "session", "inspect",
             "--store",
             store,
             "--session",
@@ -2011,7 +2013,7 @@ def main():
             "sibling-call-1",
         ], sibling_outputs
         sibling_resources = fixture.command(
-            "inspect-session", "--store", store, "--session", "direct/sibling"
+            "session", "inspect", "--store", store, "--session", "direct/sibling"
         )["execution"]
         resource_samples.append(
             {

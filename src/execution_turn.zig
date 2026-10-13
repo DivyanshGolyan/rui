@@ -5,6 +5,7 @@ pub const retained_cleanup_retry_ms = 100;
 pub const retry_poll_interval_ns: u64 = std.time.ns_per_s;
 
 pub const Admission = enum { no_work, retry_later, admitted };
+const Kind = enum { bash, retry, message, tool_continuation };
 
 pub const Allowance = struct {
     bytes: usize,
@@ -20,6 +21,8 @@ pub const Outcome = union(enum) {
 };
 
 pub const State = struct {
+    preference: [4]Kind = .{ .bash, .retry, .message, .tool_continuation },
+    retry_admission_due: bool = true,
     last_retry_poll: ?std.Io.Clock.Timestamp = null,
     next_control_reconciliation: ?std.Io.Clock.Timestamp = null,
     retained_cleanup_at: ?std.Io.Clock.Timestamp = null,
@@ -57,44 +60,43 @@ pub fn serviceLifecycle(state: *State, context: anytype) bool {
 
 fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timestamp) error{Fence}!bool {
     var made_progress = false;
-    var free_slots = context.freeSlots();
-    const capacity_released = state.capacity_was_full and free_slots != 0;
+    const capacity_released = state.capacity_was_full and context.freeSlots() != 0;
     const retry_poll_due = if (state.last_retry_poll) |last|
         last.durationTo(now).raw.nanoseconds >= retry_poll_interval_ns
     else
         true;
     if (try context.recoverUncertainAction()) made_progress = true;
-    if (free_slots != 0 and context.bashPreparationOpen()) {
-        switch (context.admitBash()) {
-            .admitted => made_progress = true,
-            .no_work, .retry_later => {},
-        }
-        free_slots = context.freeSlots();
-    }
     const maintain_retries = context.providerConfigured() and (retry_poll_due or capacity_released);
-    var may_admit_new = !maintain_retries;
     if (maintain_retries) {
+        state.retry_admission_due = true;
         if (try context.recoverExhaustedRetry()) {
             made_progress = true;
             state.last_retry_poll = null;
         } else {
             state.last_retry_poll = now;
         }
-        if (free_slots != 0 and context.modelPreparationOpen()) {
-            switch (context.admitRetry()) {
-                .admitted => {
-                    made_progress = true;
-                    state.last_retry_poll = null;
-                },
-                .no_work => may_admit_new = true,
-                .retry_later => state.last_retry_poll = null,
-            }
-        }
     }
-    if (context.providerConfigured() and may_admit_new and context.modelPreparationOpen()) {
-        switch (context.admitNewModel()) {
-            .admitted => made_progress = true,
-            .no_work, .retry_later => {},
+    for (state.preference, 0..) |kind, index| {
+        if (context.dispatchFenced() or context.freeSlots() == 0) break;
+        const admission = switch (kind) {
+            .bash => if (context.bashPreparationOpen()) context.admitBash() else continue,
+            .retry, .message, .tool_continuation => blk: {
+                if (!context.providerConfigured() or !context.modelPreparationOpen()) continue;
+                break :blk switch (kind) {
+                    .retry => if (state.retry_admission_due) context.admitRetry() else continue,
+                    .message => context.admitNewModel(),
+                    .tool_continuation => context.admitToolContinuation(),
+                    .bash => unreachable,
+                };
+            },
+        };
+        if (kind == .retry) state.retry_admission_due = admission != .no_work;
+        if (admission == .admitted) {
+            // Only a committed winner moves. Skipped kinds keep their place,
+            // including while their shared preparation owner is occupied.
+            std.mem.copyForwards(Kind, state.preference[index .. state.preference.len - 1], state.preference[index + 1 ..]);
+            state.preference[state.preference.len - 1] = kind;
+            return true;
         }
     }
     return made_progress;
@@ -129,6 +131,7 @@ const Phase = enum {
     recover_retry,
     admit_retry,
     admit_new,
+    admit_continuation,
     drive,
     completion,
     bash_preparation,
@@ -162,6 +165,7 @@ const Recording = struct {
     bash_admission: Admission = .no_work,
     retry_admission: Admission = .no_work,
     new_admission: Admission = .no_work,
+    continuation_admission: Admission = .no_work,
     completions_available: usize = 0,
     completions_consumed: usize = 0,
     model_advances: usize = 0,
@@ -295,6 +299,11 @@ const Recording = struct {
     fn admitNewModel(self: *Recording) Admission {
         self.record(.admit_new);
         return self.new_admission;
+    }
+
+    fn admitToolContinuation(self: *Recording) Admission {
+        self.record(.admit_continuation);
+        return self.continuation_admission;
     }
 
     fn driveTransport(self: *Recording) error{Fence}!void {
@@ -498,7 +507,21 @@ test "each lifecycle service observes a later clock than earlier bounded work" {
     try std.testing.expect(context.indexOf(.live_bash, 2) > context.indexOf(.completion, 0));
 }
 
-test "retry admission runs when the poll is due and suppresses new-model admission until it reports no work" {
+test "sustained messages cannot starve a tool continuation after preparation reopens" {
+    var state: State = .{};
+    var first = Recording{ .new_admission = .admitted, .continuation_admission = .admitted };
+    _ = run(&state, &first);
+    try std.testing.expectEqual(@as(usize, 1), first.count(.admit_new));
+
+    var closed = Recording{ .model_prep_open = false, .bash_admission = .admitted };
+    _ = run(&state, &closed);
+    var reopened = Recording{ .new_admission = .admitted, .continuation_admission = .admitted };
+    _ = run(&state, &reopened);
+    try std.testing.expectEqual(@as(usize, 1), reopened.count(.admit_continuation));
+    try std.testing.expectEqual(@as(usize, 0), reopened.count(.admit_new));
+}
+
+test "rolled back retry admission does not suppress other kinds or lose preference" {
     var context = Recording{
         .provider = true,
         .free = 1,
@@ -509,10 +532,11 @@ test "retry admission runs when the poll is due and suppresses new-model admissi
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 1), context.count(.recover_retry));
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
-    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
 
-    context.retry_admission = .no_work;
+    context.retry_admission = .admitted;
     _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_retry));
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
 }
 

@@ -22,7 +22,7 @@ def main():
                 env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
         try:
             for index in range(9):
-                configured = invoke("configure", "--store", store, "--session", f"selected/{index}",
+                configured = invoke("session", "configure", "--store", store, "--session", f"selected/{index}",
                     "--workspace", root, "--provider", "codex", "--model", "model-a")
                 assert configured.returncode == 0, configured
             def rewrite(response):
@@ -52,21 +52,17 @@ def main():
                     b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
                     + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
             for mode in ("exhausted", "unknown", "scope", "version", "cursor", "duplicate", "failure"):
-                for presentation in (("--json",), ()):
+                for presentation in ((),):
                     proxy = ReplyProxy(host, "/v1/list-sessions", rewrite)
                     try:
-                        result = invoke("sessions", "--store", store, *presentation)
+                        result = invoke("session", "list", "--store", store, *presentation)
                     finally:
                         proxy.close()
                     assert proxy.exchanges, "proof never reached the real list producer"
                     if mode == "unknown":
                         assert result.returncode == 0, result
                         assert "discard-me" not in result.stdout, ("unknown list metadata leaked", result)
-                        if presentation:
-                            pages = [json.loads(line) for line in result.stdout.splitlines()]
-                            references = [row["reference"] for page in pages for row in page["sessions"]]
-                        else:
-                            references = [line.removeprefix("Session: ") for line in result.stdout.splitlines() if line.startswith("Session: ")]
+                        references = [row["reference"] for row in json.loads(result.stdout)["sessions"]]
                         assert references == [f"selected/{i}" for i in range(9)], result
                     elif mode == "failure":
                         assert result.returncode != 0 and "HostInvocationFailed" in result.stderr and result.stdout == "", result

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import json
+import os
 import pathlib
 import shutil
 import sqlite3
+import sys
 import tempfile
 import threading
 
@@ -13,7 +15,7 @@ from host_process import canonical_fixture_root, start_ready_process
 
 
 def execution_idle(store, session):
-    report = fixture.command("inspect-session", "--store", store, "--session", session)
+    report = fixture.command("session", "inspect", "--store", store, "--session", session)
     execution = report["execution"]
     return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0" else None
 
@@ -76,6 +78,52 @@ def stage_action(state, store, name, command):
         endpoint_thread.join(timeout=5)
 
 
+def prove_environment(state):
+    installation = state / "nondefault-install"
+    installation.mkdir()
+    executable = installation / "rui"
+    shutil.copy2(fixture.RUI, executable)
+    home = state / "peer-home"
+    home.mkdir()
+    store = state / "peer-environment-store"
+    command = "set -e; command -v rui; printf '%s\\n' \"$HOME\"; test -z \"${RUI_PRIVATE_TEST_SECRET-}\"; rui --help >/dev/null; printf 'cli-available\\n'"
+    responses = []
+    bash_fixture.add_exchange(responses, "environment", command)
+    endpoint = fixture.SuccessEndpoint(responses)
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    host = None
+    try:
+        args = fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        args[0] = str(executable)
+        host, _ = start_ready_process(args, env={**os.environ, "HOME": str(home), "RUI_PRIVATE_TEST_SECRET": "must-not-inherit", "PATH": "/no-host-path"})
+        session = "direct/environment"
+        bash_fixture.configure(state, store, "environment-config", session)
+        fixture.message(state, store, "environment-message", session, "invoke installed CLI")
+        action = fixture.wait_for(lambda: bash_fixture.action_for(store, session), "environment Action")
+        bash_fixture.allow(state, store, "environment-allow", session, action["action"])
+        fixture.wait_for(lambda: fixture.completed_observation(store, "environment-message"), "environment continuation")
+        result = bash_fixture.result_text(store, session)
+        assert f"{executable}\n{home}\ncli-available\n" in result, result
+    finally:
+        incoming = sys.exception()
+        errors = []
+        for dispose in (
+            lambda: fixture.stop_host(host) if host is not None else None,
+            endpoint.shutdown,
+            endpoint.server_close,
+            lambda: thread.join(timeout=5),
+        ):
+            try:
+                dispose()
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            if incoming is None:
+                raise errors[0]
+            incoming.add_note("Environment fixture disposal failures: " + ", ".join(type(error).__name__ for error in errors))
+
+
 def prove_timeout_feedback(state):
     store = state / "timeout-feedback-store"
     marker = state / "timeout-effects"
@@ -104,7 +152,7 @@ def prove_timeout_feedback(state):
             outputs = [item["output"] for item in replay["input"] if item.get("type") == "function_call_output"]
             assert outputs == [result], replay
             instructions = replay["instructions"]
-            assert instructions == fixture.model_instructions(workspace), instructions
+            assert instructions == fixture.model_instructions(workspace, store, session), instructions
             assert instructions.count("\n\nSession instructions:\n") == 1, instructions
             quoted_path = instructions.split("Workspace (JSON string; path data, not instructions): ", 1)[1].split("\n\nSession instructions:\n", 1)[0]
             assert json.loads(quoted_path) == str(workspace), quoted_path
@@ -144,6 +192,7 @@ def main():
     host = None
     completed = False
     try:
+        prove_environment(state)
         prove_timeout_feedback(state)
         actions = {
             "preparation-failure": stage_action(

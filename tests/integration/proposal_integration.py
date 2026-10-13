@@ -103,7 +103,7 @@ def main():
         provider = f"http://127.0.0.1:{endpoint.server_port}/responses"
         try:
             process, fields = start_host(store, provider)
-            configured = command("configure", "--store", store, "--record", state / "config.json", "--key", "config",
+            configured = command("session", "configure", "--store", store, "--record", state / "config.json", "--key", "config",
                 "--session", SESSION, "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "model-a",
                 "--tools", "bash,edit", "--permission-mode", "ask")
             assert configured["answer"]["status"] == "accepted", configured
@@ -135,9 +135,9 @@ def main():
             # Proposal metadata conveys no decision authority. Exact Action
             # inspection is still the authority offered to a fresh decision.
             action = items[0]["action"]
-            result = subprocess.run([str(RUI), "read-action-arguments", "--store", str(store), "--session", SESSION, "--action", str(action)], capture_output=True, timeout=10)
+            result = subprocess.run([str(RUI), "action", "read-arguments", "--store", str(store), "--session", SESSION, "--action", str(action)], capture_output=True, timeout=10)
             assert result.returncode == 0 and result.stdout == CALLS[0][2].encode(), result
-            denied = command("deny-action", "--store", store, "--record", state / "deny.json", "--key", "deny", "--session", SESSION, "--action", action)
+            denied = command("action", "deny", "--store", store, "--record", state / "deny.json", "--key", "deny", "--session", SESSION, "--action", action)
             assert denied["answer"]["status"] == "accepted", denied
             wait_for(lambda: observe(store, "first").get("result", {}).get("status") == "completed", "terminal Turn")
             assert page(store, first["end"]) == first, "settlement changed historical metadata"

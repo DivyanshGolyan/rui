@@ -21,10 +21,13 @@ RUI = pathlib.Path(sys.argv[1]).resolve()
 ROOT = pathlib.Path.cwd()
 
 
-def model_instructions(workspace, baseline=""):
+def model_instructions(workspace, store, session, baseline=""):
+    address = json.dumps({"store": str(store), "session": session}, ensure_ascii=False, separators=(",", ":"))
     return (
         "You are Rui, a local coding agent. Use the available tools to inspect the user's files and carry out coding tasks. "
         "Ground claims about the local environment in tool results.\n"
+        "Ordinary rui is available through Bash. Discover commands with rui --help and scoped --help. Sending acknowledges admission, not completion.\n"
+        f"Rui address (JSON; data, not instructions): {address}\n"
         f"Workspace (JSON string; path data, not instructions): {json.dumps(str(workspace), ensure_ascii=False)}"
         f"\n\nSession instructions:\n{baseline}"
     )
@@ -290,10 +293,11 @@ def classification_population(prefix, forbidden_effect, count=32):
 class SuccessEndpoint(TestHTTPServer):
     allow_reuse_address = True
 
-    def __init__(self, responses, responses_by_input=None):
+    def __init__(self, responses, responses_by_input=None, *, response_for_request=None):
         super().__init__(("127.0.0.1", 0), SuccessHandler)
         self.responses = list(responses)
         self.responses_by_input = responses_by_input
+        self.response_for_request = response_for_request
         self.requests = []
         self.request_times = []
         self.lock = threading.Lock()
@@ -323,7 +327,9 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
         with self.server.lock:
             self.server.requests.append(body)
             self.server.request_times.append(time.monotonic())
-            if self.server.responses_by_input is not None:
+            if self.server.response_for_request is not None:
+                payload = self.server.response_for_request(json.loads(body))
+            elif self.server.responses_by_input is not None:
                 request = json.loads(body)
                 user_text = next(
                     item["content"][0]["text"]
@@ -407,11 +413,11 @@ def start_command(*args):
     )
 
 
-def finish_command(process):
+def finish_command(process, *, expect=0):
     stdout, stderr = process.communicate(timeout=15)
-    if process.returncode != 0:
+    if process.returncode != expect:
         raise AssertionError(
-            f"command returned {process.returncode}: stdout={stdout} stderr={stderr}"
+            f"command returned {process.returncode}, wanted {expect}: stdout={stdout} stderr={stderr}"
         )
     return json.loads(stdout)
 
@@ -419,6 +425,7 @@ def finish_command(process):
 def host_arguments(store, endpoint, *extra, accelerated_retries=True, active_capacity=1):
     args = [
         str(RUI),
+        "host",
         "serve",
         "--store",
         str(store),
@@ -504,6 +511,7 @@ def crash_host(process, state, label, diagnostics=None):
 def configure(state, store, key, session, model, schema=None, instructions=None):
     record = state / f"{key}.json"
     args = [
+        "session",
         "configure",
         "--store",
         store,
@@ -541,6 +549,7 @@ def configure_lost_reply(
 ):
     arguments = [
         str(RUI),
+        "session",
         "configure",
         "--store",
         str(store),
@@ -575,7 +584,7 @@ def message(state, store, key, session, text):
     text_path = state / f"{key}.txt"
     text_path.write_text(text)
     result = command(
-        "message",
+        "session", "send",
         "--store",
         store,
         "--record",
@@ -597,7 +606,7 @@ def message_lost_reply(state, store, key, session, text):
     completed = subprocess.run(
         [
             str(RUI),
-            "message",
+            "session", "send",
             "--store",
             str(store),
             "--record",
@@ -620,7 +629,7 @@ def message_lost_reply(state, store, key, session, text):
 
 def retry_message(state, store, key):
     return command(
-        "retry",
+        "request", "recover",
         "--store",
         store,
         "--record",
@@ -636,7 +645,7 @@ def observe(store, key, *, deadline=None):
     remaining = 15 if deadline is None else deadline - time.monotonic()
     assert remaining > 0, "result observation exhausted original deadline"
     result = command(
-        "observe-command", "--store", store, "--key", key, timeout=remaining,
+        "request", "inspect", "--store", store, "--key", key, timeout=remaining,
     )["observation"]
     assert deadline is None or time.monotonic() < deadline, "result observation exceeded original deadline"
     return result
@@ -648,7 +657,7 @@ def read_result(store, key, *, deadline=None):
     remaining = 15 if deadline is None else deadline - time.monotonic()
     assert remaining > 0, "result read exhausted original deadline"
     completed = subprocess.run(
-        [str(RUI), "read-result", "--store", str(store), "--key", key],
+        [str(RUI), "request", "read-result", "--store", str(store), "--key", key],
         capture_output=True,
         timeout=remaining,
     )
@@ -663,7 +672,7 @@ def read_result(store, key, *, deadline=None):
 
 def read_action(store, session, action, field):
     completed = subprocess.run(
-        [str(RUI), f"read-action-{field}", "--store", str(store), "--session", session, "--action", action],
+        [str(RUI), "action", f"read-{field}", "--store", str(store), "--session", session, "--action", action],
         capture_output=True,
         timeout=15,
     )
@@ -704,7 +713,7 @@ def wait_for_result_release(store, key, session, deadline, *, inspect=None):
     answer = read_result(store, key, deadline=deadline) if observation["result"]["status"] == "completed" else None
     if inspect is None:
         def inspect(remaining):
-            return command("inspect-session", "--store", store, "--session", session,
+            return command("session", "inspect", "--store", store, "--session", session,
                            timeout=remaining)["execution"]
     execution = wait_for_execution_release(inspect, deadline)
     return observation, answer, execution
@@ -718,7 +727,7 @@ def wait_model_cleanup(diagnostics, store, session, observation, deadline):
     def inspect(remaining):
         diagnostics.claim_inspection(limit=49)
         return command(
-            "inspect-session", "--store", store, "--session", session,
+            "session", "inspect", "--store", store, "--session", session,
             timeout=remaining,
         )["execution"]
 
@@ -779,7 +788,7 @@ def main():
         configure(state, proposal_store, "proposal-config", "direct/proposal", "model-a")
         message(state, proposal_store, "proposal-message", "direct/proposal", "propose mixed calls")
         proposal = wait_for(
-            lambda: (value := command("inspect-session", "--store", proposal_store, "--session", "direct/proposal", "--profile", "full"))["actions"]["unresolved"] and value,
+            lambda: (value := command("session", "inspect", "--store", proposal_store, "--session", "direct/proposal", "--profile", "full"))["actions"]["unresolved"] and value,
             "complete exact Action collection",
         )
         assert proposal["actions"]["count"] == "2", proposal
@@ -798,7 +807,7 @@ def main():
         assert second_before_denial["call_ordinal"] == "3", second_before_denial
         denied = subprocess.run(
             [
-                str(RUI), "deny-action", "--store", str(proposal_store),
+                str(RUI), "action", "deny", "--store", str(proposal_store),
                 "--record", str(state / "proposal-denial.json"), "--key", "proposal-denial",
                 "--session", "direct/proposal", "--action", first_request["action"],
                 "--test-drop-reply", "after-commit",
@@ -827,11 +836,11 @@ def main():
         processes.append(proposal_host)
         proposal_milestones = HostDiagnostics(proposal_host)
         replay = command(
-            "retry", "--store", proposal_store, "--record", state / "proposal-denial.json",
+            "request", "recover", "--store", proposal_store, "--record", state / "proposal-denial.json",
             "--kind", "permission-decision",
         )
         assert replay["answer"]["status"] == "accepted" and replay["answer"]["replayed"] is True, replay
-        recovered = command("inspect-session", "--store", proposal_store, "--session", "direct/proposal", "--profile", "full")
+        recovered = command("session", "inspect", "--store", proposal_store, "--session", "direct/proposal", "--profile", "full")
         assert len([
             call for call in recovered["full"]["tool_calls"] if call["rejection"] is not None
         ]) == 2, recovered
@@ -849,13 +858,14 @@ def main():
         assert read_action(proposal_store, "direct/proposal", second["action"], "call-id") == calls[3][1].encode()
         assert read_action(proposal_store, "direct/proposal", second["action"], "arguments") == calls[3][2].encode()
         stopped = command(
-            "stop-session", "--store", proposal_store, "--record", state / "proposal-stop.json",
+            "session", "stop", "--store", proposal_store, "--record", state / "proposal-stop.json",
             "--key", "proposal-stop", "--session", "direct/proposal",
         )
         assert stopped["answer"]["status"] == "accepted", stopped
         stale = command(
-            "deny-action", "--store", proposal_store, "--record", state / "proposal-stale.json",
+            "action", "deny", "--store", proposal_store, "--record", state / "proposal-stale.json",
             "--key", "proposal-stale", "--session", "direct/proposal", "--action", second["action"],
+            expect=1,
         )
         assert stale["answer"]["status"] == "rejected" and stale["answer"]["code"] == "action_not_pending", stale
         assert not forbidden_effect.exists()
@@ -867,7 +877,7 @@ def main():
             message(state, proposal_store, f"{order}-message", session, f"race {order}")
             before = wait_for(
                 lambda: (lambda value: value if len(value["actions"]["unresolved"]) == 2 else None)(
-                    command("inspect-session", "--store", proposal_store, "--session", session)
+                    command("session", "inspect", "--store", proposal_store, "--session", session)
                 ),
                 f"{order} Actions",
             )
@@ -875,12 +885,12 @@ def main():
             first_key = f"{order}-deny" if order == "denial-first" else f"{order}-stop"
             second_key = f"{order}-stop" if order == "denial-first" else f"{order}-deny"
             deny_args = (
-                "deny-action", "--store", proposal_store,
+                "action", "deny", "--store", proposal_store,
                 "--record", state / f"{order}-deny.json", "--key", f"{order}-deny",
                 "--session", session, "--action", actions[0]["action"],
             )
             stop_args = (
-                "stop-session", "--store", proposal_store,
+                "session", "stop", "--store", proposal_store,
                 "--record", state / f"{order}-stop.json", "--key", f"{order}-stop",
                 "--session", session,
             )
@@ -897,7 +907,7 @@ def main():
                 gate_release = proposal_milestones.wait("control_gate_released", subject=first_key)[0]
                 first_result = finish_command(first_process)
                 second_lock = proposal_milestones.wait("control_lock_acquired", subject=second_key)[0]
-                second_result = finish_command(second_process)
+                second_result = finish_command(second_process, expect=0 if order == "denial-first" else 1)
                 assert int(first_lock["at_ns"]) < int(second_request["at_ns"])
                 assert int(second_request["at_ns"]) < int(gate_release["at_ns"])
                 assert int(gate_release["at_ns"]) < int(second_lock["at_ns"])
@@ -920,7 +930,7 @@ def main():
                 assert denial["answer"]["code"] == "action_not_pending", denial
                 expected_rows = [(0, 0, "cancelled"), (1, 0, "cancelled")]
             release_deadline = time.monotonic() + 8
-            after = command("inspect-session", "--store", proposal_store, "--session", session,
+            after = command("session", "inspect", "--store", proposal_store, "--session", session,
                             timeout=release_deadline - time.monotonic())
             assert after["actions"]["count"] == "0", after
             assert after["actions"]["unresolved"] == [], after
@@ -929,7 +939,7 @@ def main():
             assert "bash_execution" not in after["execution"]["unavailable"], after
             wait_for_execution_release(
                 lambda remaining: command(
-                    "inspect-session", "--store", proposal_store, "--session", session,
+                    "session", "inspect", "--store", proposal_store, "--session", session,
                     timeout=remaining,
                 )["execution"],
                 release_deadline,
@@ -992,7 +1002,7 @@ def main():
         message(state, continuation_store, "continuation-first", "direct/continuation", "make calls")
         continuation_report = wait_for(
             lambda: (lambda value: value if len(value["actions"]["unresolved"]) == 2 else None)(
-                command("inspect-session", "--store", continuation_store, "--session", "direct/continuation")
+                command("session", "inspect", "--store", continuation_store, "--session", "direct/continuation")
             ),
             "continuation Actions",
         )
@@ -1006,12 +1016,12 @@ def main():
         )
         processes.append(continuation_host)
         command(
-            "deny-action", "--store", continuation_store,
+            "action", "deny", "--store", continuation_store,
             "--record", state / "continuation-deny-3.json", "--key", "continuation-deny-3",
             "--session", "direct/continuation", "--action", continuation_actions[1]["action"],
         )
         partial_results = command(
-            "inspect-session", "--store", continuation_store, "--session", "direct/continuation"
+            "session", "inspect", "--store", continuation_store, "--session", "direct/continuation"
         )
         assert len(partial_results["actions"]["unresolved"]) == 1, partial_results
         assert len(partial_results["actions"]["resolved"]) == 1, partial_results
@@ -1029,12 +1039,12 @@ def main():
         )
         processes.append(continuation_host)
         command(
-            "deny-action", "--store", continuation_store,
+            "action", "deny", "--store", continuation_store,
             "--record", state / "continuation-deny-0.json", "--key", "continuation-deny-0",
             "--session", "direct/continuation", "--action", continuation_actions[0]["action"],
         )
         complete_results = command(
-            "inspect-session", "--store", continuation_store, "--session", "direct/continuation"
+            "session", "inspect", "--store", continuation_store, "--session", "direct/continuation"
         )
         assert complete_results["actions"]["unresolved"] == [], complete_results
         assert [item["call_ordinal"] for item in complete_results["actions"]["resolved"]] == ["0", "3"]
@@ -1111,17 +1121,18 @@ def main():
             if item.get("role") == "user"
         ] == ["make calls"], continuation_input
         replayed_denial = command(
-            "retry", "--store", continuation_store,
+            "request", "recover", "--store", continuation_store,
             "--record", state / "continuation-deny-0.json",
             "--kind", "permission-decision",
         )
         assert replayed_denial["answer"]["status"] == "accepted", replayed_denial
         assert replayed_denial["answer"]["replayed"] is True, replayed_denial
         stale_denial = command(
-            "deny-action", "--store", continuation_store,
+            "action", "deny", "--store", continuation_store,
             "--record", state / "continuation-stale-denial.json",
             "--key", "continuation-stale-denial", "--session", "direct/continuation",
             "--action", continuation_actions[0]["action"],
+            expect=1,
         )
         assert stale_denial["answer"]["status"] == "rejected", stale_denial
         assert stale_denial["answer"]["code"] == "action_not_pending", stale_denial
@@ -1155,7 +1166,7 @@ def main():
         queued_report = wait_for(
             lambda: (lambda value: value if len(value["actions"]["unresolved"]) == 1 else None)(
                 command(
-                    "inspect-session",
+                    "session", "inspect",
                     "--store",
                     continuation_store,
                     "--session",
@@ -1181,7 +1192,7 @@ def main():
             "input queued during tool wait",
         )
         command(
-            "deny-action",
+            "action", "deny",
             "--store",
             continuation_store,
             "--record",
@@ -1263,7 +1274,7 @@ def main():
         success_host = start_host(success_store, success_url, "--test-cleanup-delay-ms", "2000")
         processes.append(success_host)
         recovered_configuration = command(
-            "retry",
+            "request", "recover",
             "--store",
             success_store,
             "--record",
@@ -1274,7 +1285,7 @@ def main():
         assert recovered_configuration["answer"]["status"] == "accepted", recovered_configuration
         assert recovered_configuration["answer"]["replayed"] is True, recovered_configuration
         command(
-            "configure",
+            "session", "configure",
             "--store",
             success_store,
             "--record",
@@ -1299,7 +1310,7 @@ def main():
             first_answer
         ).digest()
         cleanup_state = command(
-            "inspect-session", "--store", success_store, "--session", "direct/success"
+            "session", "inspect", "--store", success_store, "--session", "direct/success"
         )["execution"]
         assert cleanup_state["custody_occupied"] == "1", cleanup_state
         stop_host(success_host)
@@ -1316,7 +1327,7 @@ def main():
         )
         processes.append(success_host)
         recovered_first = command(
-            "retry",
+            "request", "recover",
             "--store",
             success_store,
             "--record",
@@ -1328,10 +1339,10 @@ def main():
         assert recovered_first["answer"]["replayed"] is True, recovered_first
         assert read_result(success_store, "success-first") == first_answer
         before_model_change = command(
-            "inspect-session", "--store", success_store, "--session", "direct/success"
+            "session", "inspect", "--store", success_store, "--session", "direct/success"
         )["session"]
         incompatible_args = (
-            "configure",
+            "session", "configure",
             "--store",
             success_store,
             "--record",
@@ -1345,22 +1356,23 @@ def main():
             "--tools",
             "bash",
         )
-        incompatible = command(*incompatible_args)
+        incompatible = command(*incompatible_args, expect=1)
         assert incompatible["answer"]["status"] == "rejected", incompatible
         assert incompatible["answer"]["code"] == "model_is_immutable", incompatible
         replayed_incompatible = command(
-            "retry",
+            "request", "recover",
             "--store",
             success_store,
             "--record",
             state / "incompatible-model.json",
             "--kind",
             "configure",
+            expect=1,
         )
         assert replayed_incompatible["answer"]["status"] == "rejected", replayed_incompatible
         assert replayed_incompatible["answer"]["replayed"] is True, replayed_incompatible
         after_model_change = command(
-            "inspect-session", "--store", success_store, "--session", "direct/success"
+            "session", "inspect", "--store", success_store, "--session", "direct/success"
         )["session"]
         assert after_model_change["model"] == "model-a", after_model_change
         assert after_model_change["revision"] == before_model_change["revision"], (
@@ -1379,7 +1391,7 @@ def main():
         wait_for(lambda: len(success_endpoint.requests) == 2, "two successful requests")
         first_request = json.loads(success_endpoint.requests[0])
         second_request = json.loads(success_endpoint.requests[1])
-        assert first_request["instructions"] == second_request["instructions"] == model_instructions(ROOT)
+        assert first_request["instructions"] == second_request["instructions"] == model_instructions(ROOT, success_store, "direct/success")
         assert first_request["input"] == [
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
         ]
@@ -1397,7 +1409,7 @@ def main():
         success_host = start_host(success_store, success_url)
         processes.append(success_host)
         recovered_second = command(
-            "retry",
+            "request", "recover",
             "--store",
             success_store,
             "--record",
@@ -1774,7 +1786,7 @@ def main():
             assert observation["processing"]["attempt"] == "1", observation
             assert "result" not in observation, observation
             resources = command(
-                "inspect-session",
+                "session", "inspect",
                 "--store",
                 identity_store,
                 "--session",
@@ -2046,7 +2058,7 @@ def main():
         unreadable_result = subprocess.run(
             [
                 str(RUI),
-                "read-result",
+                "request", "read-result",
                 "--store",
                 str(contradictory_store),
                 "--key",
@@ -2085,7 +2097,7 @@ def main():
         processes.append(pending_host)
         configure(state, pending_store, "pending-config", "direct/pending", "model-a")
         command(
-            "configure",
+            "session", "configure",
             "--store",
             pending_store,
             "--record",
@@ -2108,7 +2120,7 @@ def main():
         pending_request = json.loads(pending_endpoint.requests[1])
         expected_pending_reasoning = dict(pending_reasoning)
         expected_pending_reasoning.pop("created_by")
-        assert pending_request["instructions"] == model_instructions(ROOT)
+        assert pending_request["instructions"] == model_instructions(ROOT, pending_store, "direct/pending")
         assert pending_request["input"] == [
             {"role": "user", "content": [{"type": "input_text", "text": "before cutoff"}]},
             expected_pending_reasoning,
@@ -2480,7 +2492,7 @@ def main():
         failed_destination = subprocess.Popen(
             [
                 str(RUI),
-                "read-result",
+                "request", "read-result",
                 "--store",
                 str(growth_store),
                 "--key",
@@ -2500,7 +2512,7 @@ def main():
             completed_read = subprocess.run(
                 [
                     str(RUI),
-                    "read-result",
+                    "request", "read-result",
                     "--store",
                     str(growth_store),
                     "--key",
@@ -2523,7 +2535,7 @@ def main():
         assert database.execute("SELECT coalesce(sum(length(payload)),0) FROM content WHERE private=0").fetchone()[0] < 1024
         database.close()
         resources = command(
-            "inspect-session", "--store", growth_store, "--session", "direct/growth-b"
+            "session", "inspect", "--store", growth_store, "--session", "direct/growth-b"
         )["execution"]
         assert resources["scratch_used_bytes"] == "0", resources
         stop_host(growth_host)
@@ -2601,7 +2613,7 @@ def main():
         if not endpoint.received.wait(8):
             raise AssertionError("endpoint did not receive committed request")
         active_model_change = command(
-            "configure",
+            "session", "configure",
             "--store",
             store,
             "--record",
@@ -2614,18 +2626,19 @@ def main():
             "model-b",
             "--tools",
             "none",
+            expect=1,
         )
         assert active_model_change["answer"]["status"] == "rejected", active_model_change
         assert active_model_change["answer"]["code"] == "model_is_immutable"
         active_settings = command(
-            "inspect-session", "--store", store, "--session", "direct/main"
+            "session", "inspect", "--store", store, "--session", "direct/main"
         )["session"]
         assert active_settings["model"] == "model-a", active_settings
         assert active_settings["tools"] == ["bash", "edit"], active_settings
         message(state, store, "message-b", "direct/main", "later message")
         assert len(endpoint.requests) == 1
         resources = command(
-            "inspect-session", "--store", store, "--session", "direct/main"
+            "session", "inspect", "--store", store, "--session", "direct/main"
         )["execution"]
         assert int(resources["scratch_used_bytes"]) == len(endpoint.requests[0]), resources
         endpoint.release.set()
@@ -2638,7 +2651,7 @@ def main():
         assert failed["queue"]["status"] == "failed", failed
         assert failed["processing"]["attempt"] == "1", failed
         post_failure_model_change = command(
-            "configure",
+            "session", "configure",
             "--store",
             store,
             "--record",
@@ -2651,11 +2664,12 @@ def main():
             "model-b",
             "--permission-mode",
             "bypass",
+            expect=1,
         )
         assert post_failure_model_change["answer"]["status"] == "rejected"
         assert post_failure_model_change["answer"]["code"] == "model_is_immutable"
         mutable_update = command(
-            "configure",
+            "session", "configure",
             "--store",
             store,
             "--record",
@@ -2679,7 +2693,7 @@ def main():
             "store": False,
             "stream": True,
             "include": ["reasoning.encrypted_content"],
-            "instructions": model_instructions(ROOT, "A"),
+            "instructions": model_instructions(ROOT, store, "direct/main", "A"),
             "input": [
                 {
                     "role": "user",
@@ -2744,7 +2758,7 @@ def main():
         assert successor["input"] == expected["input"] + [
             {"role": "user", "content": [{"type": "input_text", "text": "later message"}]}
         ], successor
-        assert successor["instructions"] == model_instructions(ROOT, "A"), successor
+        assert successor["instructions"] == model_instructions(ROOT, store, "direct/main", "A"), successor
         assert successor["model"] == "model-a", successor
         assert successor["tools"] == [], successor
         assert "text" not in successor, successor
@@ -2796,7 +2810,7 @@ def main():
             if observation.get("processing", {}).get("attempt") != "1":
                 return None
             resources = command(
-                "inspect-session",
+                "session", "inspect",
                 "--store",
                 preparation_store,
                 "--session",
@@ -2861,7 +2875,7 @@ def main():
         assert observe(preparation_store, "preparation-message")["processing"]["attempt"] == "2"
         assert len(preparation_endpoint.requests) == 1
         resources = command(
-            "inspect-session",
+            "session", "inspect",
             "--store",
             preparation_store,
             "--session",
@@ -2960,7 +2974,7 @@ def main():
         assert observe(prelaunch_store, "prelaunch-message")["processing"]["attempt"] == "2"
         assert len(prelaunch_endpoint.requests) == 1
         resources = command(
-            "inspect-session",
+            "session", "inspect",
             "--store",
             prelaunch_store,
             "--session",
@@ -3179,7 +3193,7 @@ def main():
         )
         wait_for(lambda: len(capacity_endpoint.requests) == 1, "occupied capacity")
         scratch_before = command(
-            "inspect-session",
+            "session", "inspect",
             "--store",
             durable_wait_store,
             "--session",
@@ -3193,7 +3207,7 @@ def main():
             "wait durably",
         )
         scratch_after = command(
-            "inspect-session",
+            "session", "inspect",
             "--store",
             durable_wait_store,
             "--session",
@@ -3371,10 +3385,9 @@ def main():
         backlog_host = start_host(
             backlog_store,
             f"http://127.0.0.1:{backlog_endpoint.server_port}/responses",
-            "--active-capacity",
-            "101",
             "--test-retry-waits-ms",
             "2000,60000,60000",
+            active_capacity=101,
         )
         processes.append(backlog_host)
         wait_for(lambda: len(backlog_endpoint.requests) == 1, "future-backlog initial Attempt")
@@ -3467,10 +3480,9 @@ def main():
         recovery_host = start_host(
             recovery_store,
             f"http://127.0.0.1:{recovery_endpoint.server_port}/responses",
-            "--active-capacity",
-            "2",
             "--test-retry-waits-ms",
             "60000,60000,60000",
+            active_capacity=2,
         )
         processes.append(recovery_host)
         for name in ("due", "sentinel"):
@@ -3491,7 +3503,7 @@ def main():
         wait_for(lambda: len(recovery_endpoint.requests) == 2, "recovery setup Attempts")
         wait_for(
             lambda: command(
-                "inspect-session",
+                "session", "inspect",
                 "--store",
                 recovery_store,
                 "--session",
@@ -3559,12 +3571,11 @@ def main():
         recovery_host = start_host(
             recovery_store,
             f"http://127.0.0.1:{recovery_endpoint.server_port}/responses",
-            "--active-capacity",
-            "101",
             "--test-before-launch-delay-ms",
             "100",
             "--test-retry-waits-ms",
             "60000,60000,60000",
+            active_capacity=101,
         )
         processes.append(recovery_host)
         due_admitted = wait_for(
@@ -3583,7 +3594,7 @@ def main():
         assert unresolved_sentinel["processing"]["attempt"] == "4", unresolved_sentinel
         assert "result" not in unresolved_sentinel, unresolved_sentinel
         inspection = command(
-            "inspect-session",
+            "session", "inspect",
             "--store",
             recovery_store,
             "--session",
@@ -3660,7 +3671,7 @@ def main():
             )
         wait_for(
             lambda: command(
-                "inspect-session", "--store", recovery_store,
+                "session", "inspect", "--store", recovery_store,
                 "--session", "direct/recovery-new",
             )["execution"]["custody_occupied"] == "0",
             "recovery custody drainage",
@@ -3785,8 +3796,7 @@ def main():
         host = start_host(
             capacity_store,
             f"http://127.0.0.1:{capacity_endpoint.server_port}/responses",
-            "--active-capacity",
-            "101",
+            active_capacity=101,
         )
         processes.append(host)
         configure(state, capacity_store, "capacity-config-a", "direct/capacity-a", "model-a")
@@ -3834,8 +3844,7 @@ def main():
         h1_host = start_host(
             h1_store,
             f"http://127.0.0.1:{h1_endpoint.server_port}/responses",
-            "--active-capacity",
-            "2",
+            active_capacity=2,
         )
         processes.append(h1_host)
         configure(state, h1_store, "h1-config-first", "direct/h1-first", "model-a")
@@ -3844,7 +3853,7 @@ def main():
         wait_for(lambda: len(h1_endpoint.requests) == 1, "first H1 request")
         message(state, h1_store, "h1-message-second", "direct/h1-second", "second")
         wait_for(
-            lambda: command("inspect-session", "--store", h1_store, "--session", "direct/h1-second")["execution"]["custody_occupied"] == "2",
+            lambda: command("session", "inspect", "--store", h1_store, "--session", "direct/h1-second")["execution"]["custody_occupied"] == "2",
             "second H1 Attempt queued under the connection bound",
         )
         assert len(h1_endpoint.requests) == 1, h1_endpoint.requests
@@ -3883,11 +3892,11 @@ def main():
         wait_for(lambda: len(slow_endpoint.requests) == 1, "progressing first H1 response")
         message(state, slow_store, "slow-message-second", "direct/slow-second", "second")
         wait_for(
-            lambda: command("inspect-session", "--store", slow_store, "--session", "direct/slow-second")["execution"]["custody_occupied"] == "2",
+            lambda: command("session", "inspect", "--store", slow_store, "--session", "direct/slow-second")["execution"]["custody_occupied"] == "2",
             "both H1 Attempts in custody",
         )
         wait_for(
-            lambda: command("inspect-session", "--store", slow_store, "--session", "direct/slow-second")["execution"]["custody_occupied"] == "1",
+            lambda: command("session", "inspect", "--store", slow_store, "--session", "direct/slow-second")["execution"]["custody_occupied"] == "1",
             "queued H1 Attempt releases custody on expiry",
         )
         assert len(slow_endpoint.requests) == 1, slow_endpoint.requests
@@ -4125,7 +4134,7 @@ def main():
         )
         preparation_stop_trace.wait("preparation_advance_completed")
         stopped_preparation = command(
-            "stop-session",
+            "session", "stop",
             "--store",
             preparation_stop_store,
             "--record",
@@ -4140,7 +4149,7 @@ def main():
             lambda: (lambda value: value if value["execution"]["custody_occupied"] == "0"
                     and value["execution"]["scratch_used_bytes"] == "0" else None)(
                 command(
-                    "inspect-session",
+                    "session", "inspect",
                     "--store",
                     preparation_stop_store,
                     "--session",
@@ -4213,7 +4222,7 @@ def main():
         shutdown_trigger = subprocess.run(
             [
                 str(RUI),
-                "inspect-session",
+                "session", "inspect",
                 "--store",
                 str(preparation_shutdown_store),
                 "--session",
@@ -4266,7 +4275,7 @@ def main():
         wait_for(lambda: len(endpoint.requests) == 1, "save-fault endpoint request")
         time.sleep(0.2)
         failed_observation = subprocess.run(
-            [str(RUI), "observe-command", "--store", str(save_store), "--key", "save-message"],
+            [str(RUI), "request", "inspect", "--store", str(save_store), "--key", "save-message"],
             text=True,
             capture_output=True,
             timeout=10,
@@ -4302,8 +4311,11 @@ def main():
         processes.append(host)
         wait_for(lambda: len(endpoint.requests) == 1, "many-input materialization")
         actual_request_bytes = len(endpoint.requests[0])
+        framing_instructions = model_instructions(ROOT, framing_store, "direct/framing")
+        assert json.loads(endpoint.requests[0])["instructions"] == framing_instructions
+        framing_instruction_bytes = len(json.dumps(framing_instructions, ensure_ascii=False).encode())
         resources = command(
-            "inspect-session", "--store", framing_store, "--session", "direct/framing"
+            "session", "inspect", "--store", framing_store, "--session", "direct/framing"
         )["execution"]
         assert int(resources["scratch_used_bytes"]) == actual_request_bytes, resources
         endpoint.release.set()
@@ -4318,6 +4330,9 @@ def main():
         endpoint.requests.clear()
         endpoint.release.clear()
         framing_exact_store = state / "framing-exact-store"
+        exact_request_bytes = actual_request_bytes - framing_instruction_bytes + len(
+            json.dumps(model_instructions(ROOT, framing_exact_store, "direct/framing-exact"), ensure_ascii=False).encode()
+        )
         host = start_host(framing_exact_store, url, "--fault", "attempt-before-commit")
         processes.append(host)
         configure(state, framing_exact_store, "exact-config", "direct/framing-exact", "model-a")
@@ -4329,21 +4344,21 @@ def main():
             framing_exact_store,
             url,
             "--test-request-scratch-limit",
-            str(actual_request_bytes),
+            str(exact_request_bytes),
             "--test-phase-trace", observations="control",
         )
         processes.append(host)
         exact_diagnostics = HostDiagnostics(host)
         wait_for(lambda: len(endpoint.requests) == 1, "exact request capacity")
-        assert len(endpoint.requests[0]) == actual_request_bytes
+        assert len(endpoint.requests[0]) == exact_request_bytes
         resources = command(
-            "inspect-session",
+            "session", "inspect",
             "--store",
             framing_exact_store,
             "--session",
             "direct/framing-exact",
         )["execution"]
-        assert int(resources["scratch_used_bytes"]) == actual_request_bytes, resources
+        assert int(resources["scratch_used_bytes"]) == exact_request_bytes, resources
         exact_deadline = time.monotonic() + 8
         endpoint.release.set()
         exact_result = wait_for(
@@ -4368,6 +4383,9 @@ def main():
         endpoint.requests.clear()
         endpoint.release.clear()
         framing_limit_store = state / "framing-limit-store"
+        limit_request_bytes = actual_request_bytes - framing_instruction_bytes + len(
+            json.dumps(model_instructions(ROOT, framing_limit_store, "direct/framing-limit"), ensure_ascii=False).encode()
+        )
         host = start_host(framing_limit_store, url, "--fault", "attempt-before-commit")
         processes.append(host)
         configure(state, framing_limit_store, "limit-config", "direct/framing-limit", "model-a")
@@ -4379,7 +4397,7 @@ def main():
             framing_limit_store,
             url,
             "--test-request-scratch-limit",
-            str(actual_request_bytes - 1),
+            str(limit_request_bytes - 1),
             "--test-phase-trace", observations="control",
         )
         processes.append(host)
@@ -4409,7 +4427,7 @@ def main():
         endpoint.requests.clear()
         deceptive = subprocess.run(
             [
-                str(RUI), "serve", "--store", str(state / "deceptive-store"),
+                str(RUI), "host", "serve", "--store", str(state / "deceptive-store"),
                 "--provider-endpoint", f"http://127.0.0.1:80@127.0.0.1:{endpoint.server_port}/responses",
             ],
             text=True,
@@ -4458,13 +4476,13 @@ def main():
         message(state, stall_store, "stall-message", "direct/stall", "stall")
         wait_for(
             lambda: command(
-                "inspect-session", "--store", stall_store, "--session", "direct/stall"
+                "session", "inspect", "--store", stall_store, "--session", "direct/stall"
             )["execution"]["custody_occupied"] == "1",
             "stalled response takes custody",
         )
         stalled_resources = wait_for(
             lambda: (lambda value: value if value["execution"]["custody_occupied"] == "0" else None)(
-                command("inspect-session", "--store", stall_store, "--session", "direct/stall")
+                command("session", "inspect", "--store", stall_store, "--session", "direct/stall")
             ),
             "stalled response releases custody into retry wait",
         )
@@ -4500,10 +4518,10 @@ def main():
             message(case_state, transient_store, "message", "direct/transient", "input")
             wait_for(lambda: len(endpoint.requests) == 1, "one endpoint request")
             wait_for(lambda: command(
-                "inspect-session", "--store", transient_store, "--session", "direct/transient"
+                "session", "inspect", "--store", transient_store, "--session", "direct/transient"
             )["execution"]["custody_occupied"] == "0", "response cleanup")
             observation = observe(transient_store, "message")
-            resources = command("inspect-session", "--store", transient_store, "--session", "direct/transient")["execution"]
+            resources = command("session", "inspect", "--store", transient_store, "--session", "direct/transient")["execution"]
             assert resources["scratch_used_bytes"] == "0", resources
             if path == "/large-422":
                 assert observation["result"]["code"] == "provider_http_422", observation
@@ -4565,7 +4583,7 @@ def main():
         database.commit()
         database.close()
         canonical_read = subprocess.run(
-            [str(RUI), "inspect-session", "--store", str(race_store), "--session", "direct/race"],
+            [str(RUI), "session", "inspect", "--store", str(race_store), "--session", "direct/race"],
             text=True,
             capture_output=True,
             timeout=10,
@@ -4603,7 +4621,7 @@ def main():
         report_failure = subprocess.run(
             [
                 str(RUI),
-                "inspect-session",
+                "session", "inspect",
                 "--store",
                 str(report_unlink_store),
                 "--session",
@@ -4629,7 +4647,7 @@ def main():
         failed_report_cleanup = subprocess.run(
             [
                 str(RUI),
-                "serve",
+                "host", "serve",
                 "--store",
                 str(report_unlink_store),
                 "--active-capacity",
@@ -4675,7 +4693,7 @@ def main():
                 lambda store=owned_store, session=f"direct/{fault}": (
                     report["execution"]
                     if (report := command(
-                        "inspect-session", "--store", store, "--session", session
+                        "session", "inspect", "--store", store, "--session", session
                     ))["execution"]["dispatch_fenced"]
                     else None
                 ),
@@ -4699,7 +4717,7 @@ def main():
             failed_cleanup = subprocess.run(
                 [
                     str(RUI),
-                    "serve",
+                    "host", "serve",
                     "--store",
                     str(owned_store),
                     "--active-capacity",
@@ -4718,7 +4736,7 @@ def main():
             processes.append(cleanup_host)
             assert not list((owned_store / "scratch").glob(pattern))
             resources = command(
-                "inspect-session", "--store", owned_store, "--session", f"direct/{fault}"
+                "session", "inspect", "--store", owned_store, "--session", f"direct/{fault}"
             )["execution"]
             assert resources["custody_occupied"] == "0", resources
             assert resources["scratch_used_bytes"] == "0", resources
@@ -4742,7 +4760,7 @@ def main():
             lambda: (
                 report["execution"]
                 if (report := command(
-                    "inspect-session", "--store", unlink_store, "--session", "direct/unlink"
+                    "session", "inspect", "--store", unlink_store, "--session", "direct/unlink"
                 ))["execution"]["dispatch_fenced"]
                 else None
             ),
@@ -4762,7 +4780,7 @@ def main():
         processes.append(offline)
         assert not list(unlink_store.rglob("request-*"))
         resources = command(
-            "inspect-session", "--store", unlink_store, "--session", "direct/unlink"
+            "session", "inspect", "--store", unlink_store, "--session", "direct/unlink"
         )["execution"]
         assert resources["custody_occupied"] == "0", resources
         assert resources["scratch_used_bytes"] == "0", resources

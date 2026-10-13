@@ -125,7 +125,7 @@ def prove_effect_without_result_becomes_indeterminate(state):
         home = state / "effect-before-result-home"
         home.mkdir()
         master, slave = pty.openpty()
-        entered = subprocess.Popen([str(RUI), "session", "--store", str(store), "--session", session],
+        entered = subprocess.Popen([str(RUI), "session", "resume", "--store", str(store), "--session", session],
             env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         try:

@@ -109,11 +109,11 @@ def run(model, external_credential=None):
         # an artifact or included in the payload-free qualification report.
         if not credential.exists():
             print("Rui-owned device login (requires an enabled account):", flush=True)
-            subprocess.run([str(caller.RUI), "login", "codex"], check=True, timeout=1000)
+            subprocess.run([str(caller.RUI), "auth", "login", "codex"], check=True, timeout=1000)
 
         def start():
             process, ready = start_ready_process(
-                [caller.RUI, "serve", "--store", store, "--active-capacity", "2", "--codex", "--test-phase-trace"],
+                [caller.RUI, "host", "serve", "--store", store, "--active-capacity", "2", "--codex", "--test-phase-trace"],
                 required_fields={"execution": "enabled"}, timeout=20,
             )
             records, thread = observations(process)
@@ -133,7 +133,7 @@ def run(model, external_credential=None):
 
         host, first_observations, reader, dependencies = start()
         configured = caller.command(
-            "configure", "--store", store, "--record", state / "configure.json",
+            "session", "configure", "--store", store, "--record", state / "configure.json",
             "--key", "configure", "--session", session, "--workspace", workspace,
             "--provider", "codex", "--model", model, "--tools", "none",
             "--permission-mode", "ask",
@@ -151,7 +151,7 @@ def run(model, external_credential=None):
         reasoning = wait_for(store, "reasoning", lambda value: value.get("result", {}).get("status") == "completed", "reasoning answer")
         assert not (workspace / "effect-count").exists(), "reasoning request caused a Bash effect"
         enabled = caller.command(
-            "configure", "--store", store, "--record", state / "enable-bash.json",
+            "session", "configure", "--store", store, "--record", state / "enable-bash.json",
             "--key", "enable-bash", "--session", session, "--tools", "bash",
         )
         assert enabled["answer"]["status"] == "accepted", "Bash configuration rejected"
@@ -172,7 +172,7 @@ def run(model, external_credential=None):
         assert action["authorization"] == "pending" and not (workspace / "effect-count").exists()
         bash.allow(state, store, "approve", session, action["action"])
         first = wait_for(store, "first", lambda value: value.get("result", {}).get("status") == "completed", "first answer")
-        bash_report = caller.command("inspect-session", "--store", store, "--session", session, "--profile", "full")
+        bash_report = caller.command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
         actions = bash_report["full"]["actions"]
         assert len(actions) == 1 and actions[0]["resolution"] == "succeeded", "Bash did not settle once"
         expected = hashlib.sha256(b"once\n").hexdigest()

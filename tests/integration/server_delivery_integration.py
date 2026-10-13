@@ -98,13 +98,14 @@ def main():
                     peer, length = hold_reply(sock, store, "/v1/read-result", "read_result", key="reply-message")
                 held.append((peer, length))
             full = resources(host.pid)
-            head, _ = exchange(sock, store, "/v1/observe-command", "observe_command", key="reply-message")
-            assert b" 503 " in head, head
+            head, observation = exchange(sock, store, "/v1/observe-command", "observe_command", key="reply-message")
+            assert head.startswith(b"HTTP/1.1 200 "), head
+            assert json.loads(observation)["observation"]["result"]["status"] == "completed"
             discovery_head, discovery_body = exchange(sock, store, "/v1/host-info", "host_info")
             assert discovery_head.startswith(b"HTTP/1.1 200 "), discovery_head
             assert json.loads(discovery_body)["store"] == str(store), discovery_body
-            # A committed idle stop fits protected capacity while all ten
-            # ordinary writers remain held; it cannot revoke the saved answer.
+            # A committed idle stop progresses while all ten ordinary writers
+            # remain held; it cannot revoke the saved answer.
             assert control.stop_session(state, store, "reply-stop", "direct/reply")["answer"]["status"] == "accepted"
             # Disconnect releases one exchange, not the committed result.
             held.pop(0)[0].close()  # Whole-stream Conversation reader.
@@ -113,7 +114,7 @@ def main():
                 head, body = exchange(sock, store, "/v1/read-result", "read_result", key="reply-message")
                 return body if head.startswith(b"HTTP/1.1 200 ") else None
 
-            assert control.wait_for(reclaimed, "disconnected place release") == expected
+            assert control.wait_for(reclaimed, "fresh read after disconnect") == expected
             assert int(control.inspect_execution(store, "direct/reply")["scratch_used_bytes"]) > 0
             held.append(hold_reply(sock, store, "/v1/read-result", "read_result", key="reply-message"))
             print(json.dumps({"phase": "held", "baseline": baseline, "held": full}), flush=True)
@@ -124,8 +125,11 @@ def main():
                                      capture_output=True, text=True, timeout=5)
             assert stopped.returncode == 0, stopped
             identity = json.loads(discovery_body)["instance"]
-            assert f"Host instance: {identity} (retry with --instance {identity})" in stopped.stdout, stopped
-            assert "Stop acknowledged; completion and lease release are not confirmed" in stopped.stdout, stopped
+            assert "stop affects all work in this Store" in stopped.stderr, stopped
+            assert f" --instance {identity}\n" in stopped.stderr, stopped
+            assert json.loads(stopped.stdout) == {"version": "1", "type": "host_stop",
+                "status": "acknowledged", "store": str(store), "instance": identity,
+                "retirement": "unconfirmed"}, stopped
             control.wait_for(lambda: not pathlib.Path(sock).exists(), "listener closure with ten readers held")
             with (store / "host.lock").open("rb") as lease:
                 try:
