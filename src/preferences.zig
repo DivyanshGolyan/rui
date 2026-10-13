@@ -137,6 +137,16 @@ fn apply(saved: Values, edit: Edit, readiness: provider_selection.Readiness) !Va
 }
 
 fn save(home: []const u8, edit: Edit, readiness: provider_selection.Readiness, only_if_unset: bool) !?Values {
+    return saveWithSync(home, edit, readiness, only_if_unset, NativeDirectorySync{});
+}
+
+const NativeDirectorySync = struct {
+    fn sync(_: @This(), fd: std.posix.fd_t) c_int {
+        return std.c.fsync(fd);
+    }
+};
+
+fn saveWithSync(home: []const u8, edit: Edit, readiness: provider_selection.Readiness, only_if_unset: bool, directory_sync: anytype) !?Values {
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = try directoryPath(home, &path);
     if (edit.provider == .set) {
@@ -180,7 +190,7 @@ fn save(home: []const u8, edit: Edit, readiness: provider_selection.Readiness, o
         try privateDirectory(opened);
         // Sync both parent entries even if another caller created them but
         // has not synced yet; close parent handles before lock/publication.
-        if (std.c.fsync(home_dir.handle) != 0 or std.c.fsync(config_dir.handle) != 0)
+        if (directory_sync.sync(home_dir.handle) != 0 or directory_sync.sync(config_dir.handle) != 0)
             return error.PreferenceDirectorySyncFailed;
         break :blk opened;
     };
@@ -235,7 +245,7 @@ fn save(home: []const u8, edit: Edit, readiness: provider_selection.Readiness, o
     open = false;
     try dir.rename("preferences.tmp", dir, "preferences", io);
     published = true;
-    if (std.c.fsync(dir.handle) != 0) return error.PreferenceDirectorySyncFailed;
+    if (directory_sync.sync(dir.handle) != 0) return error.PreferenceDirectorySyncFailed;
     return values;
 }
 
@@ -273,6 +283,56 @@ fn validateOwner(handle: anytype) !void {
     var stat: c.struct_stat = undefined;
     if (c.fstat(handle, &stat) != 0) return error.PreferenceStatFailed;
     if (stat.st_uid != c.geteuid()) return error.UnownedPreferences;
+}
+
+test "directory sync failures preserve complete preference publication" {
+    const Cut = struct {
+        at: usize,
+        expected: [3]c.struct_stat,
+        calls: usize = 0,
+        correct_directories: bool = true,
+
+        fn sync(self: *@This(), fd: std.posix.fd_t) c_int {
+            var actual: c.struct_stat = undefined;
+            const matches = self.calls < self.expected.len and c.fstat(fd, &actual) == 0 and
+                actual.st_dev == self.expected[self.calls].st_dev and
+                actual.st_ino == self.expected[self.calls].st_ino;
+            self.correct_directories = self.correct_directories and matches;
+            self.calls += 1;
+            // Only the selected returned error is synthetic; all other I/O is real.
+            return if (self.calls == self.at) -1 else std.c.fsync(fd);
+        }
+    };
+    const old = "version=1\nstore=\nprovider=codex\nmodel=deliberate-pin\n";
+    const new = "version=1\nstore=\nprovider=codex\nmodel=new-pin\n";
+    for (0..4) |cut| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const len = try tmp.dir.realPath(io, &path);
+        const home = path[0..len];
+        _ = try update(home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "deliberate-pin" } }, .missing);
+        var fault: Cut = .{ .at = cut, .expected = undefined };
+        for ([_][]const u8{ ".", ".config", ".config/rui" }, 0..) |name, index| {
+            const dir = try tmp.dir.openDir(io, name, .{});
+            defer dir.close(io);
+            try std.testing.expectEqual(@as(c_int, 0), c.fstat(dir.handle, &fault.expected[index]));
+        }
+        const result = saveWithSync(home, .{ .model = .{ .set = "new-pin" } }, .missing, false, &fault);
+        if (cut == 0) {
+            _ = try result;
+        } else try std.testing.expectError(error.PreferenceDirectorySyncFailed, result);
+        try std.testing.expect(fault.correct_directories);
+        try std.testing.expectEqual(if (cut == 0) @as(usize, 3) else cut, fault.calls);
+        const saved = try tmp.dir.openFile(io, ".config/rui/preferences", .{});
+        defer saved.close(io);
+        var bytes: [1024]u8 = undefined;
+        const count = try saved.readPositionalAll(io, &bytes, 0);
+        try std.testing.expectEqualStrings(if (cut == 1 or cut == 2) old else new, bytes[0..count]);
+        try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(io, ".config/rui/preferences.tmp", .{}));
+        const loaded = try load(home);
+        try std.testing.expectEqualStrings(if (cut == 1 or cut == 2) "deliberate-pin" else "new-pin", loaded.model.slice());
+    }
 }
 
 test "login fills only a missing provider under the preference lock" {

@@ -19,7 +19,7 @@ Before using Rui on a project:
 
 ## Install from source
 
-Requires Zig 0.16.0, Python 3, Git, Perl, `patch`, a C toolchain and Make. On macOS, install the Xcode command-line tools with `xcode-select --install` if needed. The build pins native dependencies.
+Requires Zig 0.16.0, Python 3.11 or newer, Git, Perl, `patch`, a C toolchain and Make. On macOS, install the Xcode command-line tools with `xcode-select --install` if needed. Ensure `python3` on PATH selects the newer interpreter, not Apple's Python 3.9. The build pins native dependencies.
 
 From the checkout you want to install, run:
 
