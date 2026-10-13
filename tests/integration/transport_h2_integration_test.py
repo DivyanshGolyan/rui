@@ -2,11 +2,13 @@
 """Transcript-oracle counterexamples; same h2 dependency and binary arg as fixture."""
 import copy
 import contextlib
+import http.client
 import io
 import json
 import pathlib
 import sys
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -277,6 +279,53 @@ class ManagedDescriptorTests(unittest.TestCase):
                 with patch.object(codex_h2.sys, "platform", "darwin"):
                     with self.assertRaises(AssertionError):
                         codex_h2.assert_managed_descriptor_rejection(rejected, 77)
+
+
+class H1ResponseBoundaryTests(unittest.TestCase):
+    def test_complete_response_does_not_wait_for_handler_retirement(self):
+        tail_entered = threading.Event()
+        release_tail = threading.Event()
+
+        class HeldTail(transport.H1Handler):
+            def __setattr__(self, name, value):
+                super().__setattr__(name, value)
+                if (name == "close_connection" and value is True
+                        and getattr(self, "requestline", "").startswith("POST")
+                        and getattr(self, "_headers_buffer", None) == []
+                        and not tail_entered.is_set()):
+                    tail_entered.set()
+                    assert release_tail.wait(5), "post-response handler tail was not released"
+
+        with patch.object(transport, "H1Handler", HeldTail):
+            endpoint = transport.H1Endpoint()
+        endpoint.release_first.set()
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for text in ("first", "second"):
+                connection = http.client.HTTPConnection("127.0.0.1", endpoint.server_port, timeout=3)
+                try:
+                    body = json.dumps({"input": [{"role": "user", "content": [{"text": text}]}]})
+                    connection.request("POST", "/responses", body)
+                    response = connection.getresponse()
+                    expected, _, _ = transport.dispatch.sse_answer(
+                        f"response-{text}", f"reasoning-{text}", f"message-{text}", f"answer-{text}")
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.read(), expected)
+                finally:
+                    connection.close()
+                self.assertTrue(tail_entered.wait(1))
+                self.assertFalse(release_tail.is_set())
+            with endpoint.lock:
+                self.assertEqual([text for text, _ in endpoint.requests], ["first", "second"])
+                self.assertEqual(endpoint.maximum_active, 1)
+                self.assertEqual(endpoint.active, 0)
+        finally:
+            release_tail.set()
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
 
 
 class QueuedH1CleanupTests(unittest.TestCase):
