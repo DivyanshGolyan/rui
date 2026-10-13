@@ -3,6 +3,7 @@ import re
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -285,6 +286,7 @@ class FullCheckPartitionTest(unittest.TestCase):
             # Exercise the shell gate's public commands without launching product
             # fixtures. This checks membership and failure propagation, not timing.
             command = '''#!/bin/sh
+if [ "$1" = - ]; then exec "$TEST_PYTHON" "$@"; fi
 fixture=$(basename "$1")
 if [ "$CHECK_OVERLAP" = 1 ]; then
     touch "$GATE_DIR/$fixture.started"
@@ -307,18 +309,21 @@ if [ "$CHECK_OVERLAP" = 1 ]; then
     esac
     touch "$GATE_DIR/$fixture.done"
 fi
-printf "%s %s\\n" "$fixture" "$2"
+printf "%s %s\\n" "$fixture" "$2" >> "$GATE_DIR/invocations"
 if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
 '''
             for name in ("python3", "sh"):
                 (root / name).write_text(command)
                 (root / name).chmod(0o755)
+            invocations = root / "invocations"
+            invocations.touch()
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", FAIL_FIXTURE=fail,
-                       CHECK_OVERLAP=str(int(overlap)), GATE_DIR=str(root))
-            return subprocess.run([
+                       CHECK_OVERLAP=str(int(overlap)), GATE_DIR=str(root), TEST_PYTHON=sys.executable)
+            result = subprocess.run([
                 "/bin/sh", "tests/integration/check.sh", "release", "debug", "status",
                 "sessions", "proposal", "activity", "preferences", part,
             ], env=env, text=True, capture_output=True, timeout=10)
+            return result, invocations.read_text().splitlines()
 
     def test_parts_are_disjoint_and_cover_the_unchanged_full_gate(self):
         expected = {
@@ -336,10 +341,8 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
         }
         outputs = {}
         for part in ("all", "execution", "callers"):
-            result = self.run_part(part)
+            result, lines = self.run_part(part)
             self.assertEqual(result.returncode, 0, result.stderr)
-            lines = [line for line in result.stdout.splitlines()[1:]
-                     if not line.endswith(" passed")]
             self.assertEqual(len(lines), len(set(lines)), lines)
             outputs[part] = set(lines)
         self.assertEqual(outputs["all"], expected)
@@ -349,7 +352,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
         self.assertIn("human_cli_integration.py release", outputs["callers"])
 
     def test_callers_overlap_private_fixtures_then_drain_before_deadline_cases(self):
-        result = self.run_part("callers", overlap=True)
+        result, _ = self.run_part("callers", overlap=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_failure_or_invalid_part_cannot_report_success(self):
@@ -359,8 +362,10 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                         "host_status_integration.py", "host_stop_integration.py",
                         "host_launch_integration.py", "host_process_test.py",
                         "host_allocator_test.py", "admission_integration.sh"):
-            self.assertNotEqual(self.run_part("callers", fixture).returncode, 0, fixture)
-        self.assertEqual(self.run_part("not-a-part").returncode, 2)
+            result, _ = self.run_part("callers", fixture)
+            self.assertNotEqual(result.returncode, 0, fixture)
+        result, _ = self.run_part("not-a-part")
+        self.assertEqual(result.returncode, 2)
 
 
 if __name__ == "__main__":
