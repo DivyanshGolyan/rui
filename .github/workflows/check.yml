@@ -98,7 +98,7 @@ jobs:
           echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
-      - run: actionlint -shellcheck= .github/workflows/check.yml .github/workflows/daily-macos.yml
+      - run: actionlint -shellcheck= .github/workflows/*.yml
         if: ${{ steps.cadence.outputs.run == 'true' }}
   linux_suites:
     name: linux suites (${{ matrix.part }})
