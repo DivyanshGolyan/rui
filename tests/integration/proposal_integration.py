@@ -21,11 +21,19 @@ CALLER = pathlib.Path(sys.argv[2]).resolve()
 SESSION = "direct/proposals"
 FIELDS = ("item_id", "name", "call_id", "arguments")
 LARGE = "é中🙂\n\\\"/" * 12000
-CALLS = [("bash", "exact-call", '{"cmd":"exit 0","timeout_ms":null}')]
+CALLS = [("bash", "exact-call", '{"cmd":"exit 0","timeout_ms":null,"description":"Exit with success"}')]
 CALLS += [("unknown" + str(i), f"call-{i}é\n", LARGE if i == 1 else "{}") for i in range(1, 18)]
 CALLS[2] = ("bash", "invalid-call", "{")
 CALLS[3] = ("edit", "edit-call", "{}")
 CALLS[4] = ("x" * 300, "long-name", "")
+DESCRIPTION_REJECTIONS = [
+    '{"cmd":"exit 0","timeout_ms":null}',
+    *[json.dumps({"cmd": "exit 0", "timeout_ms": None, "description": value})
+      for value in ("", "   ", None, 7, "Run\ncommand", "Run\rcommand", "x" * 101, "é" * 51, "\ud800")],
+]
+DESCRIPTION_START = len(CALLS)
+CALLS += [("bash", f"invalid-description-{index}", arguments)
+          for index, arguments in enumerate(DESCRIPTION_REJECTIONS)]
 
 
 def caller(store, mode, first, second, session=SESSION, ok=True):
@@ -121,10 +129,11 @@ def main():
             first = wait_for(lambda: (p if len((p := page(store))["items"]) == 16 else None), "proposal page")
             assert first["more"] and [i["call_ordinal"] for i in first["items"]] == list(range(16))
             last = page(store, first["next"]["end"], first["next"]["after"])
-            assert not last["more"] and len(last["items"]) == 2
+            assert not last["more"] and len(last["items"]) == len(CALLS) - 16
             items = first["items"] + last["items"]
             assert items[0]["action"] is not None and items[0]["rejection"] is None
             assert [i["rejection"] for i in items[1:4]] == ["unknown_tool", "invalid_arguments", "tool_unavailable"]
+            assert all(i["rejection"] == "invalid_arguments" for i in items[DESCRIPTION_START:])
             assert all(i["action"] is None for i in items[1:])
             for index, item in enumerate(items):
                 expected = (f"proposal-item-{index}", *CALLS[index])
@@ -197,9 +206,9 @@ def main():
                     db.execute(fault)
                 process, fields = start_host(store, provider)
                 data = caller(store, "field", items[1]["position"], "arguments", ok=False)
-                assert len(data) < len(LARGE.encode()), (index, len(data))
-                if index == 0:
-                    assert data == LARGE.encode()[:((len(LARGE.encode()) - 1) // 4096) * 4096]
+                # Certified metadata and complete accepted-item authentication
+                # reject this damage before delivering any argument bytes.
+                assert data == b"", ("corrupt proposal delivered a prefix", index, len(data))
                 assert process.wait(timeout=5) == 1, "canonical corruption did not fence Host"
                 stop_process(process)
                 process = None

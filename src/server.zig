@@ -1592,7 +1592,10 @@ fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) b
             });
             return false;
         }
-        traceAction(host, "cleanup_release_observed", active.binding);
+        // A released gate is one owner transition, not reclamation retry history.
+        // reclaim_failed already remembers whether this owner attempted reclaim.
+        if (!active.delivery.closed.reclaim_failed)
+            traceAction(host, "cleanup_release_observed", active.binding);
     }
     active.execution.reclaim(host.retention) catch |err| {
         const first_failure = !active.delivery.closed.reclaim_failed;
@@ -3332,9 +3335,17 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
             try response.appendFmt("{{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"{d}\",\"items\":[", .{page.end});
             for (page.items[0..page.count], 0..) |item, index| {
                 if (index != 0) try response.append(",");
-                try response.appendFmt("{{\"position\":\"{d}\",\"ordinal\":\"{d}\",\"kind\":\"{s}\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\",\"display\":\"omitted\"}}}}", .{
+                try response.appendFmt("{{\"position\":\"{d}\",\"ordinal\":\"{d}\",\"kind\":\"{s}\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\",\"display\":\"omitted\"}}", .{
                     item.position, item.ordinal, @tagName(item.kind), item.content.length, std.fmt.bytesToHex(item.content.digest, .lower),
                 });
+                if (item.presentation) |presentation| {
+                    var buffer: [protocol.max_tool_presentation_json_bytes]u8 = undefined;
+                    var writer = std.Io.Writer.fixed(&buffer);
+                    try presentation.writeJson(&writer);
+                    try response.append(",\"presentation\":");
+                    try response.append(writer.buffered());
+                }
+                try response.append("}");
             }
             try response.appendFmt("],\"more\":{s}", .{if (page.more) "true" else "false"});
             if (page.more) {
@@ -4729,15 +4740,83 @@ test "cleanup delay follows elapsed time and preserves custody reuse" {
     try std.testing.expect(slots[0] == .free);
 }
 
+test "required Bash observations publish while optional stderr custody is held" {
+    const native = @cImport({
+        @cUndef("_FORTIFY_SOURCE");
+        @cInclude("unistd.h");
+        @cInclude("fcntl.h");
+        @cInclude("stdio.h");
+    });
+    inline for (.{ TestObservation.Plan.bash_cleanup, TestObservation.Plan.bash_pipes }) |plan| {
+        var descriptors: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), native.pipe(&descriptors));
+        defer _ = native.close(descriptors[0]);
+        for (descriptors) |fd| {
+            try std.testing.expectEqual(@as(c_int, 0), native.fcntl(fd, native.F_SETFL, @as(c_int, native.O_NONBLOCK)));
+        }
+        const backing = native.tmpfile() orelse return error.TestUnexpectedResult;
+        defer _ = native.fclose(backing);
+        try std.testing.expectEqual(@as(c_int, 0), native.ftruncate(native.fileno(backing), TestObservation.state_bytes));
+        var observation = try TestObservation.init(descriptors[1], native.dup(native.fileno(backing)), plan, 37);
+        defer observation.close();
+        var host = Host{
+            .io = std.testing.io,
+            .allocator = std.testing.allocator,
+            .lease = undefined,
+            .store = undefined,
+            .faults = .{ .test_phase_trace = true },
+            .test_observation = &observation,
+        };
+        try std.testing.expect(stderr.tryAcquire());
+        defer stderr.release();
+        var count: u64 = 0;
+        inline for (.{ "cleanup_started", "cleanup_release_observed", "cleanup_completed", "inspection_captured", "bash_leader_observed_with_open_pipes", "control_store_complete" }) |phase| {
+            if (std.mem.eql(u8, phase, "inspection_captured") or std.mem.eql(u8, phase, "control_store_complete")) {
+                traceSubject(&host, phase, "command_key", "required");
+            } else {
+                traceAction(&host, phase, .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3, .attempt_ordinal = 1 });
+            }
+            const selected = if (plan == .bash_cleanup)
+                std.mem.startsWith(u8, phase, "cleanup_") or std.mem.eql(u8, phase, "inspection_captured")
+            else
+                std.mem.eql(u8, phase, "bash_leader_observed_with_open_pipes") or std.mem.eql(u8, phase, "control_store_complete");
+            var bytes: [TestObservation.record_bytes]u8 = undefined;
+            const length = native.read(descriptors[0], &bytes, bytes.len);
+            if (selected) {
+                count += 1;
+                try std.testing.expect(length >= 28);
+                const frame = bytes[0..@intCast(length)];
+                try std.testing.expectEqual(@as(u8, 0), frame[3]);
+                try std.testing.expectEqual(count, std.mem.readInt(u64, frame[4..12], .little));
+                try std.testing.expect(std.mem.indexOf(u8, frame, phase) != null);
+            } else {
+                try std.testing.expectEqual(@as(isize, -1), length);
+            }
+            try std.testing.expectEqual(count * 2, observation.shared.state.load(.acquire));
+            try std.testing.expectEqual(@as(u64, 0), observation.shared.active.load(.acquire));
+        }
+        try std.testing.expect(host.trace_lost.load(.acquire));
+    }
+}
+
 test "cleanup publication follows complete execution retirement" {
     const Boundary = struct {
         slot: *const ExecutionSlot = undefined,
         custody: *execution.CustodyPool = undefined,
         token: execution.CustodyToken = undefined,
         observed: bool = false,
+        release_expected: bool = false,
+        releases: usize = 0,
 
         fn now(context: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
             const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.release_expected) {
+                std.debug.assert(self.slot.* == .bash);
+                self.custody.checkDetached(self.token) catch unreachable;
+                self.release_expected = false;
+                self.releases += 1;
+                return clock.now(std.testing.io);
+            }
             // The completion timestamp is constructed before either native
             // publication or optional stderr. Inspect actual owner facts here.
             std.debug.assert(self.slot.* == .free);
@@ -4811,9 +4890,9 @@ test "cleanup publication follows complete execution retirement" {
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root});
     var storage = try store_module.Store.open(std.testing.io, database, root);
     defer storage.close() catch unreachable;
-    const arguments = "{\"cmd\":\"printf x\",\"timeout_ms\":1000}";
+    const arguments = "{\"description\":\"Print test marker\",\"cmd\":\"printf x\",\"timeout_ms\":1000}";
     const content = try store_module.testingPublicProjection(&storage, &tmp, &.{.{
-        .encoded = "{\\\"cmd\\\":\\\"printf x\\\",\\\"timeout_ms\\\":1000}",
+        .encoded = "{\\\"description\\\":\\\"Print test marker\\\",\\\"cmd\\\":\\\"printf x\\\",\\\"timeout_ms\\\":1000}",
         .decoded = arguments,
     }});
     const reader = try storage.openPublicConversationContent(content);
@@ -4894,8 +4973,25 @@ test "cleanup publication follows complete execution retirement" {
     try std.testing.expectEqual(@as(u64, 9), used.load(.acquire));
     boundary.token = token;
     boundary.observed = false;
+    var gate_path_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    host.faults.bash_cleanup_gate_path = try std.fmt.bufPrint(&gate_path_buffer, "{s}/released-gate", .{root});
+    // A released gate grants one reclamation transition, even if removal
+    // fails repeatedly. The same charged script and custody survive retry.
+    slot.bash.execution.script.cleanup_fault = .persistent;
+    boundary.release_expected = true;
+    try std.testing.expect(reclaimBash(&host, &slot, deadline));
+    try std.testing.expectEqual(@as(usize, 1), boundary.releases);
+    try std.testing.expect(!boundary.observed);
+    try std.testing.expectEqual(@as(u64, 8), used.load(.acquire));
+    try checkSlotCustodyAgreement(@as([*]const ExecutionSlot, @ptrCast(&slot))[0..1], &host.custody);
+    try std.testing.expect(!reclaimBash(&host, &slot, deadline));
+    try std.testing.expectEqual(@as(usize, 1), boundary.releases);
+    try std.testing.expectEqual(@as(u64, 8), used.load(.acquire));
+    try host.custody.checkDetachedAction(token, binding);
+    slot.bash.execution.script.cleanup_fault = .none;
     try std.testing.expect(reclaimBash(&host, &slot, deadline));
     try std.testing.expect(boundary.observed);
+    try std.testing.expectEqual(@as(usize, 1), boundary.releases);
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }

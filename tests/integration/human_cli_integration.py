@@ -88,8 +88,8 @@ def preference_edits(home, store):
     assert saved.read_text() == pinned
 
 
-def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False):
-    output = b""
+def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, initial=b""):
+    output = initial
     received = 0
     deadline = time.monotonic() + timeout
     limit = 1024 * 1024
@@ -104,14 +104,22 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
         if marker != "› ":
             if marker.encode() not in shown: return False
             if not composer: return True
-            shown = shown.split(marker.encode(), 1)[1]
+            offset = shown.index(marker.encode())
+            shown = shown[offset if marker.startswith("› ") else offset + len(marker.encode()):]
         return re.search("› [^\\r\\n]*(?:\\r\\n> [^\\r\\n]*)*(?:\\x1b\\[[0-9]+A)?\\r\\x1b\\[[0-9]+C".encode(), shown) is not None
     try:
+        assert len(output) < limit, "unexpected unbounded terminal output"
         while not reached():
             remaining = deadline - time.monotonic()
             assert remaining > 0, (marker, output.decode(errors="replace"))
             assert select.select([master], [], [], remaining)[0], (marker, output.decode(errors="replace"))
-            chunk = os.read(master, 65536)
+            try:
+                chunk = os.read(master, 65536)
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
+                chunk = b""
+            assert chunk, ("terminal closed before marker", marker, output.decode(errors="replace"))
             received += len(chunk)
             output += chunk
             if redraw:
@@ -127,9 +135,25 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
         .replace("\x1b[?2004h", "").replace("\x1b[?2004l", ""))
 
 
+def permanent_tool_count(output, heading):
+    # These short headings fit one row. Permanent results have a blank
+    # separator or hanging-indented summary; live snapshots have neither.
+    return len(re.findall(r"(?m)^" + re.escape(heading) + r"\n(?=\n|  )", output))
+
+
+def terminal_redraw(output, composer):
+    # A completed cursor placement ends each redraw. Erasure belongs to the
+    # following frame, whose heading and edited draft must be checked together.
+    for frame in reversed(re.split(r"\r\x1b\[[0-9]+C", output)[:-1]):
+        frame = frame.rsplit("\x1b[2K", 1)[-1]
+        if composer in frame:
+            return frame
+    raise AssertionError(("no complete edited redraw", composer, output))
+
+
 def terminal_wait_oracles():
     """Bound retained redraws; never confuse diagnostic text with readiness."""
-    def collect(frames, marker, *, redraw=False, composer=False, error=None):
+    def collect(frames, marker, *, redraw=False, composer=False, error=None, close_output=False, initial=b""):
         reader, writer = os.pipe()
         stopped = threading.Event()
 
@@ -138,7 +162,8 @@ def terminal_wait_oracles():
                 for frame in frames:
                     while frame:
                         frame = frame[os.write(writer, frame):]
-                stopped.wait()
+                if not close_output:
+                    stopped.wait()
             except BrokenPipeError:
                 pass  # The expected collector refusal closes its reader.
             finally:
@@ -148,11 +173,16 @@ def terminal_wait_oracles():
         thread.start()
         try:
             try:
-                output = read_terminal(reader, marker, timeout=0.5, redraw=redraw, composer=composer)
+                output = read_terminal(reader, marker, timeout=0.5, redraw=redraw, composer=composer, initial=initial)
             except AssertionError as failure:
                 assert error is not None, failure
                 if error == "deadline":
                     assert isinstance(failure.args[0], tuple) and failure.args[0][0] == marker, failure
+                elif error == "closed":
+                    prefix = initial + b"".join(frames)
+                    assert failure.args[0] == ("terminal closed before marker", marker, prefix.decode()), failure
+                    assert failure.terminal_metadata["received_bytes"] == len(prefix) - len(initial), failure.terminal_metadata
+                    assert failure.terminal_metadata["retained_bytes"] == len(prefix), failure.terminal_metadata
                 else:
                     assert str(failure) == error, failure
             else:
@@ -180,6 +210,55 @@ def terminal_wait_oracles():
     collect([diagnostic.encode()], diagnostic, composer=True, error="deadline")
     output = collect([diagnostic.encode(), b"\n\xe2\x80\xba \r", b"\x1b[2C"], diagnostic, composer=True)
     assert diagnostic in output and "› \r\x1b[2C" in output
+    # A marker naming the composer waits for that composer's own cursor,
+    # not another redraw. A partial marked composer is still not ready.
+    edited = "› fresh café"
+    collect([], edited, composer=True, initial=edited.encode(), close_output=True, error="closed")
+    marked_ready = (edited + "\r\x1b[11C").encode()
+    assert edited in collect([], edited, composer=True, initial=marked_ready)
+    for status in ("! Not confirmed · Ctrl-R retries original", "Working…\n+4 · /status"):
+        earlier = f"{status}\n› old\r\x1b[5C"
+        fresh = "\r\x1b[2K\n" + marked_ready.decode()
+        output = collect([], edited, composer=True, initial=(earlier + fresh).encode())
+        assert status not in terminal_redraw(output, edited), "earlier status became current-frame evidence"
+        complete = "\r\x1b[2K\n" + status + "\n" + marked_ready.decode()
+        output = collect([], edited, composer=True, initial=(earlier + complete).encode())
+        assert status in terminal_redraw(output, edited), "current heading was detached from edited composer"
+    # A retained draft before the answer is not post-answer input readiness,
+    # including when a previous diagnostic read already consumed that prefix.
+    prior = "› retained café\r\x1b[15C\nafter decision".encode()
+    collect([], "after decision", composer=True, initial=prior, close_output=True, error="closed")
+    ready = b"\n\xe2\x80\xba \r\x1b[2C"
+    assert "after decision" in collect([ready], "after decision", composer=True, initial=prior)
+    assert "after decision" in collect([], "after decision", composer=True, initial=prior + ready)
+    collect([], "after decision", initial=b"x" * (1024 * 1024), error="unexpected unbounded terminal output")
+    collect([b"distinctive prefix"], "required cursor", close_output=True, error="closed")
+    heading = "✓ Wait for bypass café"
+    redraw = f"\nWorking…\n{heading}\n{heading}\n+1 more calls · /status\n› draft\r\x1b[7C"
+    for summary in ("", "  Process retirement confirmed.\n"):
+        result = f"\n{heading}\n{summary}"
+        for repeats in (0, 1, 7):
+            for count in (1, 2, 3):
+                transcript = (redraw * repeats + result * count + "\n  group complete\n\n› \r\x1b[2C").encode()
+                # Split UTF-8 and heading/summary boundaries independently of
+                # OS write aggregation. A missing or extra permanent result
+                # still fails exact-two, however often live rows are replaced.
+                output = collect([transcript[n:n + 17] for n in range(0, len(transcript), 17)], "group complete", composer=True)
+                assert permanent_tool_count(output, heading) == count, output
+    # Linux PTY closure reports EIO; Darwin reports an empty read. Neither is
+    # input readiness or a deadline failure, and both retain the same context.
+    master, slave = pty.openpty()
+    os.close(slave)
+    try:
+        try:
+            read_terminal(master, "required cursor", timeout=0.5)
+        except AssertionError as failure:
+            assert failure.args[0] == ("terminal closed before marker", "required cursor", ""), failure
+            assert failure.terminal_metadata["received_bytes"] == 0, failure.terminal_metadata
+        else:
+            raise AssertionError("closed PTY became a ready terminal")
+    finally:
+        os.close(master)
     print("terminal wait oracles passed: bounded redraw suffix, exact cursor, strict transcript cap and returned composer", flush=True)
 
 
@@ -270,7 +349,7 @@ def command_entry_cases():
         fixture.sse_answer("stdin-answer", "stdin-reason", "stdin-message", "Stdin answered.")[0],
         fixture.ResponseSpec(b'{"error":"denied"}', {}, 401),
         fixture.sse_answer("lost-answer", "lost-reason", "lost-message", "Lost reply recovered.")[0],
-        (fixture.sse_tool_calls("exec-tools", [("bash", "exec-call", json.dumps({"cmd": "touch must-not-run", "timeout_ms": None}))]), permission_release),
+        (fixture.sse_tool_calls("exec-tools", [("bash", "exec-call", json.dumps({"cmd": "touch must-not-run", "description": "Create forbidden marker", "timeout_ms": None}))]), permission_release),
         fixture.sse_answer("dash-answer", "dash-reason", "dash-message", "Literal dash answered.")[0],
         fixture.sse_answer("option-answer", "option-reason", "option-message", "Literal option answered.")[0],
     ])
@@ -896,6 +975,21 @@ def persistent_input_cases():
         assert len(proxy.exchanges) == 1
         saved = proxy.exchanges[0][0]
         assert json.loads(saved)["text"]["value"] == "original éZ"
+        # Cosmetic spacing must yield before actionable recovery guidance.
+        # Fresh edits identify each resized frame, not an earlier status line.
+        for rows, columns, edit in ((2, 80, "Z"), (4, 20, "Q")):
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+            os.write(master, edit.encode())
+            marker = f"› next cafX{edit}é!"
+            narrow = terminal_redraw(read_terminal(master, marker, composer=True), marker)
+            shown = " ".join(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", narrow).split())
+            assert "! Not confirmed · Ctrl-R retries original" in shown, (
+                "optional spacer hid actionable recovery", rows, columns, narrow)
+            assert len(proxy.exchanges) == 1 and set(records.glob("*.json")) == before
+            os.write(master, b"\x7f")
+            read_terminal(master, "› next cafXé!", composer=True)
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        read_terminal(master, "› next cafXé!", composer=True)
         first_release.set()
         read_terminal(master, "first exact answer")
         assert len(proxy.exchanges) == 1, "idle Ctrl-R retried unrelated uncertain intent"
@@ -1003,7 +1097,7 @@ def persistent_input_cases():
 
 
 def persistent_permission_case(decision="deny-action", exit_code=0, signal_failure=False,
-                               lost_reply=False, fragmented_paste=False, stale_target=False):
+                               lost_reply=False, fragmented_paste=False, stale_target=False, timed_out=False):
     """Fresh inline choices retain draft custody and exact canonical targets."""
     import canonical_failure_integration as canonical
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-permission."))
@@ -1012,11 +1106,18 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
     store = state / "store'$(false)"
     reference = "persistent/permission'$(false) é\n"
     answer = "after explicit denial" if decision == "deny-action" else "after explicit approval"
-    arguments = json.dumps({"cmd": f"printf inspection-only-output; printf unsafe >> effect-count; exit {exit_code}", "timeout_ms": 30000})
+    description = "Inspect café output"
+    command = f"printf inspection-only-output; printf unsafe >> effect-count; exit {exit_code}"
+    if exit_code:
+        command = f"printf '%9000s' inspection-only-output; printf unsafe >> effect-count; exit {exit_code}"
+    if timed_out:
+        command = "printf inspection-only-output; printf unsafe >> effect-count; sleep 1"
+    timeout_ms = 100 if timed_out else 30000
+    arguments = json.dumps({"cmd": command, "description": description, "timeout_ms": timeout_ms})
     calls = [("bash", "persistent-call-id", arguments)]
     second_command = "printf distinct >> second-effect"
     if stale_target:
-        calls.append(("bash", "persistent-second-id", json.dumps({"cmd": second_command, "timeout_ms": None})))
+        calls.append(("bash", "persistent-second-id", json.dumps({"cmd": second_command, "description": "Write sibling effect", "timeout_ms": None})))
     endpoint = fixture.SuccessEndpoint([
         fixture.sse_tool_calls("persistent-call", calls),
         fixture.sse_answer("persistent-answer", "persistent-reason", "persistent-message", answer)[0],
@@ -1032,7 +1133,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
     completed = False
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
-            *(("--fault", "bash-signal") if signal_failure else ()))
+            *(("--fault", "bash-signal") if signal_failure else ()), active_capacity=4)
         run(home, "configure", "--store", store, "--session", reference,
             "--workspace", state, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
         master, slave = pty.openpty()
@@ -1073,12 +1174,27 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert "item_id:" not in transcript and "call_id:" not in transcript and "arguments:" not in transcript, transcript
         assert transcript.count("Workspace:") == 1 and transcript.count("Run Bash:") == 1, transcript
         assert f"\n? Run Bash:\n  {json.loads(arguments)['cmd']}\n" in transcript, transcript
+        assert f"? {description}" in transcript, ("approval live row lost its description", transcript)
         assert_permission_workspace(transcript, state, 100)
-        assert transcript.count("Time limit: 30000 ms") == 1, transcript
+        assert transcript.count(f"Time limit: {timeout_ms} ms") == 1, transcript
         assert transcript.count(json.loads(arguments)["cmd"]) == 1, transcript
         assert all(noise not in transcript for noise in ("You:", "Assistant:", "Rui:", "persistent-call-id")), transcript
         assert set(records.glob("*.json")) == before_choice, "queued chat created a record"
         assert not (state / "effect-count").exists(), "queued chat authorized an effect"
+        if decision == "allow-action" and not any((exit_code, signal_failure, lost_reply, fragmented_paste, stale_target)):
+            for rows, columns in ((3, 80), (4, 20), (8, 8)):
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+                os.write(master, b"\x01")  # Redraw an empty choice without granting authority.
+                narrow = read_terminal(master, "> \r\x1b[2C")
+                shown = narrow.replace("\r", "").replace("\n", "")
+                assert ("a: Allow once / d: Deny (Enter)" in " ".join(narrow.split())
+                        or "a Allow/d DenyEnter" in shown), narrow
+                if description not in shown:
+                    assert any(label in shown for label in ("+1 more calls · /status", "+1 · /status")), narrow
+                assert caller.poll() is None and not (state / "effect-count").exists(), narrow
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
+            os.write(master, b"\x01")
+            read_terminal(master, "a: Allow once / d: Deny (Enter)")
         for invalid in (b"Y\n", b"\x1b[200~a\x1b[201~\n"):
             os.write(master, invalid)
             rejected = read_terminal(master, "a: Allow once / d: Deny (Enter)")
@@ -1130,6 +1246,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             if "a: Allow once / d: Deny (Enter)" not in shown:
                 shown += read_terminal(master, "a: Allow once / d: Deny (Enter)")
             assert f"\n? Run Bash:\n  {second_command}\n" in shown, shown
+            assert "? Write sibling effect" in shown, ("sibling identity reused the first label", shown)
             os.write(master, b"/details\n")
             details = read_terminal(master, "Details complete")
             assert "\n› requires permission" in details, details
@@ -1147,8 +1264,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             assert not (state / "effect-count").exists() and not (state / "second-effect").exists()
             completed = True
             return
-        if answer not in settled:
-            settled += read_terminal(master, answer)
+        settled = read_terminal(master, answer, composer=True, initial=settled.encode())
         assert len(proxy.exchanges) == (2 if lost_reply else 1), proxy.exchanges
         if lost_reply:
             assert proxy.exchanges[0][0] == proxy.exchanges[1][0], "decision retry changed intent"
@@ -1160,17 +1276,24 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         saved = [json.loads(path.read_text()) for path in records.glob("*.json")]
         assert sum(row["kind"] == "permission_decision" for row in saved) == 1, saved
         assert len(endpoint.requests) == 2
-        if exit_code:
-            assert f"! Bash failed. Exit code: {exit_code}." in settled, ("quiet view hid tool failure", settled)
+        if timed_out:
+            assert f"! {description} — Timed out" in settled, settled
+            assert "/details for output." in settled, settled
+        elif exit_code:
+            assert f"! {description} — Failed" in settled, ("quiet view hid tool failure", settled)
+            assert f"Exit code: {exit_code}." in settled, settled
             assert "/details for output." in settled, settled
         elif decision == "allow-action":
-            assert "  • Bash succeeded." in settled, ("quiet view hid tool outcome", settled)
+            assert f"✓ {description}" in settled, ("quiet view hid tool outcome", settled)
             assert "Exit code: 0." not in settled, ("routine zero exit code leaked", settled)
         else:
-            assert "  • Permission denied." in settled, ("intentional denial was not a settled outcome", settled)
-            assert "! Permission denied." not in settled and "/details for output." not in settled, settled
+            assert f"• {description} — Denied" in settled, ("intentional denial was not a settled outcome", settled)
+            assert f"! {description}" not in settled and "/details for output." not in settled, settled
+        assert "Bash succeeded." not in settled and "Tool result:" not in settled, settled
         if signal_failure:
             assert "Process-group signaling reported a failure." in settled, ("quiet view hid cleanup warning", settled)
+            if timed_out:
+                assert "[summary shortened; /details]\n  Process-group signaling reported a failure.\n" in settled, settled
         assert f"\n  {answer}" in settled, settled
         assert all(noise not in settled for noise in ("You:", "Assistant:", "Rui:", "item_id:", "call_id:", "Capturing original", "Original reserved request")), settled
         assert "inspection-only-output" not in settled, ("routine tool output leaked", settled)
@@ -1182,19 +1305,116 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         proxy.exchanges.clear()
         proxy.rewrite = lambda response: response
         os.write(master, b"Y\n")
-        submitted_draft = read_terminal(master, "\n› next cafXaYé!")
+        # An answer prefix is not the joined reader boundary. Wait for its
+        # final composer before a command handoff may cancel that borrower.
+        submitted_draft = read_terminal(master, "retained draft complete", composer=True)
+        assert "\n› next cafXaYé!" in submitted_draft, submitted_draft
         fixture.wait_for(lambda: proxy.exchanges, "retained draft queued Message")
         assert json.loads(proxy.exchanges[0][0])["text"]["value"] == "next cafXaYé!"
-        if "retained draft complete" not in submitted_draft:
-            read_terminal(master, "retained draft complete")
+        quiet_status = terminal_step(master, "/status")
+        assert f"✓ {description}" not in quiet_status and "Bash succeeded." not in quiet_status, (
+            "already presented outcome repeated on refresh", quiet_status)
         os.write(master, b"/details\n")
         details = read_terminal(master, "Details complete")
-        assert "Recent conversation — tool details" in details and "  Tool result:\n" in details, details
+        assert "Recent conversation — tool details" in details and description in details, details
         assert "\n› requires permission" in details and f"\n  {answer}" in details, details
-        assert all(noise not in details for noise in ("You:", "Assistant:", "Rui:", "Tool Result:")), details
-        if decision == "allow-action":
-            assert "inspection-only-output" in details, ("saved tool output unavailable on inspection", details)
-            assert f"Exit code: {exit_code}." in details, ("exact exit code unavailable on inspection", details)
+        assert all(noise not in details for noise in ("You:", "Assistant:", "Tool Result:")), details
+        if exit_code:
+            assert f"! {description} — Failed\nRui: Historical item omitted:" in details, details
+            assert "inspection-only-output" not in details and "Exit code:" not in details, details
+            export = next(line.removeprefix("Raw export: ") for line in details.splitlines() if line.startswith("Raw export: "))
+            exported = run(home, *shlex.split(export)[1:])
+            assert len(exported.encode()) > 8192 and exported.startswith(f"Bash failed. Exit code: {exit_code}.\n"), exported[:200]
+            assert "inspection-only-output" in exported
+        else:
+            assert "Rui:" not in details, details
+            if decision == "allow-action":
+                assert "inspection-only-output" in details, ("saved tool output unavailable on inspection", details)
+                assert f"Exit code: {exit_code}." in details, ("exact exit code unavailable on inspection", details)
+        if decision == "allow-action" and not any((exit_code, signal_failure, lost_reply, timed_out)):
+            # Four real held effects exceed the display bound. Repeated labels
+            # must not merge identities. A later, long-labelled failure must
+            # stay truthful while an earlier sibling remains unresolved.
+            bypass_description = "Wait for bypass café"
+            long_description = "Inspect application settings and report configuration errors before applying changes to local assets"
+            assert len(long_description.encode()) == 100
+            bypass_descriptions = [bypass_description, long_description, bypass_description, "Check final sibling"]
+            bypass_releases = [state / f"bypass-release-{index}" for index in range(4)]
+            endpoint.responses.extend([
+                fixture.sse_tool_calls("bypass-call", [("bash", f"bypass-distinct-id-{index}", json.dumps({
+                    "cmd": f"touch bypass-started-{index}; while [ ! -e bypass-release-{index} ]; do sleep 0.05; done; printf bypass-output-{index}; exit {7 if index == 1 else 0}",
+                    "description": label, "timeout_ms": 30000}))
+                    for index, label in enumerate(bypass_descriptions)]),
+                fixture.sse_answer("bypass-answer", "bypass-reason", "bypass-message", "bypass complete")[0],
+            ])
+            run(home, "configure", "--store", store, "--session", reference,
+                "--workspace", state, "--provider", "codex", "--model", "model-a", "--permission-mode", "bypass")
+            try:
+                os.write(master, b"run without approval\n")
+                live = read_terminal(master, "+1 more calls · /status", composer=True)
+                fixture.wait_for(lambda: all((state / f"bypass-started-{index}").exists() for index in range(4)), "held bypass effects")
+                assert live.index(f"• {bypass_description}") < live.index("• Inspect application settings"), live
+                assert "Check final sibling" not in live, live
+                assert "Run Bash:" not in live and "Allow once" not in live, live
+                os.write(master, "live café!\x1b[D\x1b[DX".encode())
+                live += read_terminal(master, "› live cafXé!")
+                assert f"• {bypass_description}" in live and f"✓ {bypass_description}" not in live, live
+                bypass_releases[1].touch()
+                reverse = read_terminal(master, "— Failed", composer=True)
+                assert "! Inspect application settings" in reverse and f"• {bypass_description}" in reverse, reverse
+                assert "+1 more calls · /status" in reverse and len(endpoint.requests) == 4, reverse
+                bypass_releases[0].touch()
+                partial = read_terminal(master, f"✓ {bypass_description}", composer=True)
+                assert f"• {bypass_description}" in partial and "+1 more calls · /status" in partial, partial
+                assert len(endpoint.requests) == 4, "a partial tool group continued model work"
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 6, 32, 0, 0))
+                short = read_terminal(master, "+3 more calls · /status", composer=True)
+                assert "› live cafXé!" in short, short
+                assert "Inspect application" not in short, ("a clipped call hid its failure", short)
+                for index, (rows, columns) in enumerate(((2, 80), (3, 20), (3, 8), (4, 20), (8, 8))):
+                    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+                    edit = chr(ord("A") + index)
+                    os.write(master, b"\x01" + edit.encode())
+                    marker = f"› {edit}live"
+                    narrow = terminal_redraw(read_terminal(master, marker, composer=True), marker)
+                    shown = narrow.replace("\r", "").replace("\n", "")
+                    assert any(label in shown for label in ("+4 more calls · /status", "+4 · /status")), narrow
+                    if (rows, columns) in ((3, 20), (4, 20)):
+                        assert "Working…" in shown, ("optional spacing or wording hid status", narrow)
+                    assert caller.poll() is None, ("wrapped overflow displaced the composer", narrow)
+                    os.write(master, b"\x7f")
+                    read_terminal(master, "› live", composer=True)
+                os.write(master, b"\x05\x1b[D\x1b[D")
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 32, 0, 0))
+                wrapped = read_terminal(master, "— Failed", composer=True)
+                assert "! Inspect application settings" in wrapped and "+1 more calls · /status" in wrapped, wrapped
+                assert "› live cafXé!" in wrapped, wrapped
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
+                read_terminal(master, "+1 more calls · /status", composer=True)
+                terminal_step(master, "\x01\x0b/exit", "Detached.")
+                assert caller.wait(timeout=5) == 0, caller.stderr.read()
+                caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+                    "--session", reference], env={**os.environ, "HOME": str(home), "TERM": "xterm-256color", "NO_COLOR": ""},
+                    stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                reopened = read_terminal(master, "+1 more calls · /status", composer=True)
+                assert f"✓ {bypass_description}" in reopened and f"• {bypass_description}" in reopened, reopened
+                assert "bypass complete" not in reopened and len(endpoint.requests) == 4, reopened
+                os.write(master, "live café!\x1b[D\x1b[DX".encode())
+                read_terminal(master, "› live cafXé!")
+                for release in bypass_releases:
+                    release.touch()
+                outcome = read_terminal(master, "bypass complete", composer=True)
+                assert permanent_tool_count(outcome, f"✓ {bypass_description}") == 2, outcome
+                assert "! Inspect application settings" in outcome and "— Failed" in outcome and "Exit code: 7." in outcome, outcome
+                assert "✓ Check final sibling" in outcome, outcome
+                assert "Bash succeeded." not in outcome and "Tool result:" not in outcome, outcome
+                assert "› live cafXé!" in outcome, outcome
+                refreshed = terminal_step(master, "\x01\x0b/status")
+                assert f"✓ {bypass_description}" not in refreshed, ("presented bypass result repeated", refreshed)
+                assert len(endpoint.requests) == 5, "bypass refresh repeated provider work"
+            finally:
+                for release in bypass_releases:
+                    release.touch()
         # A resize must retain the exact non-tail Unicode cursor without prose.
         os.write(master, "next café!\x1b[D\x1b[DX".encode())
         read_terminal(master, "› next cafXé!")
@@ -1211,21 +1431,55 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             actual[3] &= ~mask
             original[3] &= ~mask
         assert actual == original, "signal after inspection handoff did not restore terminal"
-        # Quiet proposal fields must still be consumed and validated on opening.
+        # Opening uses certified labels, not undisplayed exact proposal fields.
+        # Explicit inspection and permission above still read the exact command.
+        hidden_reads = []
         proxy.route = "/v1/proposal-field"
-        proxy.rewrite = lambda response: response[:-1] if b"effect-count" in response else response
+        def observe_hidden_read(response):
+            hidden_reads.append(len(response))
+            return response
+        proxy.rewrite = observe_hidden_read
         caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", reference], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        read_terminal(master, "› ", composer=True)
+        assert not hidden_reads, ("label-only opening read undisplayed proposal bytes", hidden_reads)
+        os.write(master, b"/exit\n")
         _, errors = terminal_exit(caller, master)
-        assert caller.returncode != 0 and b"TruncatedResponse" in errors, errors
+        assert caller.returncode == 0, errors
         actual = termios.tcgetattr(slave)
         if sys.platform == "darwin":
             mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
             actual[3] &= ~mask
-        assert actual == original, "hidden proposal failure left terminal configuration changed"
+        assert actual == original, "label-only opening left terminal configuration changed"
+        if exit_code:
+            # Age the same saved result out of opening, then reconstruct it
+            # through /history. Neither navigation nor export may rerun Bash.
+            proxy.close()
+            proxy = None
+            for index in range(9):
+                endpoint.responses.append(fixture.sse_answer(f"aging-{index}", f"aging-r-{index}",
+                    f"aging-m-{index}", f"later answer {index}")[0])
+                key = f"aging-{index}"
+                fixture.message(state, store, key, reference, f"later input {index}")
+                fixture.wait_for(lambda: fixture.completed_observation(store, key), "age saved Tool Result")
+            calls_before_history = len(endpoint.requests)
+            caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+                "--session", reference], env={**os.environ, "HOME": str(home)},
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            read_terminal(master, "› ")
+            os.write(master, b"/history\n")
+            history = read_terminal(master, "History page complete", composer=True)
+            assert f"! {description} — Failed\nRui: Historical item omitted:" in history, history
+            assert "inspection-only-output" not in history
+            history_export = next(line.removeprefix("Raw export: ") for line in history.splitlines() if line.startswith("Raw export: "))
+            assert history_export == export and run(home, *shlex.split(history_export)[1:]) == exported
+            assert len(endpoint.requests) == calls_before_history and effect.read_text() == "unsafe"
+            os.write(master, b"/exit\n")
+            _, errors = terminal_exit(caller, master)
+            assert caller.returncode == 0, errors
         completed = True
-        print(f"persistent permission: inline {decision}, lost={lost_reply}, fragmented={fragmented_paste}, quiet outcome, retained cursor, hidden-field validation and TERM cleanup passed", flush=True)
+        print(f"persistent permission: inline {decision}, lost={lost_reply}, fragmented={fragmented_paste}, quiet outcome, retained cursor, label-only opening and TERM cleanup passed", flush=True)
     finally:
         if sys.exc_info()[0] is not None:
             preserve_failure_metadata(state / "pty-failure.json", lambda: {
@@ -1274,7 +1528,6 @@ def store_selection_cases(state, workspace, valid_store):
         caller = subprocess.Popen([str(fixture.RUI), *args], cwd=workspace,
             env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
             pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-        os.close(slave)
         os.close(ready_write)
         try:
             settlement_timeout = 5
@@ -1310,7 +1563,8 @@ def store_selection_cases(state, workspace, valid_store):
                     fixture.wait_for(lambda: "Host: unavailable" in run(home, "host", "status", "--store", destination), "created Host stopped")
 
             dispose_all(lambda: stop_process(caller, timeout=5),
-                        lambda: os.close(ready_read), lambda: os.close(master), stop_created_host)
+                        lambda: os.close(ready_read), lambda: os.close(master),
+                        lambda: os.close(slave), stop_created_host)
 
 
 def action_ready(descriptor, master, timeout=15):
@@ -1472,7 +1726,6 @@ int fsync(int fd) {
     entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
         "--session", "capture/original"], env={**os.environ, "HOME": str(home)},
         stdin=slave, stdout=slave, stderr=slave)
-    os.close(slave)
     try:
         read_terminal(master, "› ")
         listing = terminal_step(master, "/requests")
@@ -1481,7 +1734,8 @@ int fsync(int fd) {
         terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
     finally:
-        dispose_all(lambda: stop_process(entered, timeout=5), lambda: os.close(master))
+        dispose_all(lambda: stop_process(entered, timeout=5),
+                    lambda: os.close(master), lambda: os.close(slave))
     print("saved capture owner: pinned original bytes, preference-independent recovery, failed announcement, "
         "sync uncertainty, listing asymmetry", flush=True)
 
@@ -1558,8 +1812,8 @@ def opaque_session_commands_case():
     store = state / "store"
     reference = "human/nul\x00' é\n--last"
     endpoint = fixture.SuccessEndpoint([
-        fixture.sse_tool_calls("opaque-actions", [("bash", "opaque-deny", json.dumps({"cmd": "touch must-not-run", "timeout_ms": None})),
-                                                   ("bash", "opaque-allow", json.dumps({"cmd": "touch allowed-once", "timeout_ms": None}))]),
+        fixture.sse_tool_calls("opaque-actions", [("bash", "opaque-deny", json.dumps({"cmd": "touch must-not-run", "description": "Create forbidden marker", "timeout_ms": None})),
+                                                   ("bash", "opaque-allow", json.dumps({"cmd": "touch allowed-once", "description": "Create approved marker", "timeout_ms": None}))]),
         fixture.sse_answer("opaque-answer", "opaque-r", "opaque-m", "Opaque decisions complete.")[0],
     ])
     thread = threading.Thread(target=endpoint.serve_forever)
@@ -1674,8 +1928,6 @@ def long_input_case(home, store, workspace, endpoint, host):
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", long_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
-        slave = None
         greeting = read_terminal(master, "› ")
         assert "Permission:" not in greeting, greeting
         assert "Bash runs without approval" in greeting, greeting
@@ -1782,10 +2034,57 @@ def long_input_case(home, store, workspace, endpoint, host):
         dispose_all(*disposals)
 
 
+def incomplete_input_case(home, store, session, endpoint, host):
+    """Retain terminal custody through delayed collection and restoration."""
+    import canonical_failure_integration as canonical
+    callers = []
+    before = len(endpoint.requests)
+    records = home / ".config/rui/requests"
+    before_records = {path: path.read_bytes() for path in records.glob("*.json")}
+    proxy = canonical.ReplyProxy(host, None)
+    try:
+        for incomplete in (b"\xc3", b"\x1b[200~unfinished", b"\x1b[", b"\x1bO"):
+            master, slave = pty.openpty()
+            try:
+                original = termios.tcgetattr(slave)
+                entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+                    "--session", session], env={**os.environ, "HOME": str(home)},
+                    stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            except BaseException:
+                dispose_all(lambda: os.close(master), lambda: os.close(slave))
+                raise
+            deadline = time.monotonic() + 7
+            callers.append((master, slave, entered, original, deadline))
+            read_terminal(master, "› ", timeout=deadline - time.monotonic())
+            os.write(master, incomplete)
+            # Shared-Host polling is not decoder load coverage. Reap each
+            # caller before collection while retaining its parent slave.
+            assert entered.wait(timeout=deadline - time.monotonic()) != 0
+            output, errors = terminal_exit(entered, master, timeout=deadline - time.monotonic())
+            assert b"IncompleteTerminalInput" in errors, (output, errors)
+            assert b"\x1b[0m\x1b[?2004l" in output, "delayed collector lost terminal cleanup"
+            actual = termios.tcgetattr(slave)
+            if sys.platform == "darwin":
+                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                actual[3] &= ~mask
+                original[3] &= ~mask
+            assert actual == original, (actual, original)
+    finally:
+        disposals = []
+        for master, slave, entered, _, _ in callers:
+            disposals.extend((lambda process=entered: stop_process(process, timeout=5),
+                              lambda fd=master: os.close(fd), lambda fd=slave: os.close(fd)))
+        dispose_all(*disposals, proxy.close)
+    assert not proxy.mutations, "incomplete terminal input transmitted a Message or Decision"
+    assert {path: path.read_bytes() for path in records.glob("*.json")} == before_records, "incomplete input published a capture"
+    assert len(endpoint.requests) == before, "incomplete terminal input reached provider"
+    print("incomplete input: all four native deadlines, delayed output, exact restoration and no dispatch passed", flush=True)
+
+
 def main(selected="all"):
     import canonical_failure_integration
     import terminal_restoration_integration
-    assert selected in ("all", "long-input", "terminal-waits"), selected
+    assert selected in ("all", "long-input", "terminal-waits", "persistent-permission", "incomplete-input"), selected
     if selected == "all":
         help_case()
     if selected in ("all", "terminal-waits"):
@@ -1799,13 +2098,18 @@ def main(selected="all"):
         persistent_opening_case()
         persistent_pending_case()
         persistent_input_cases()
+    if selected in ("all", "persistent-permission"):
         persistent_permission_case()
         persistent_permission_case("allow-action")
         persistent_permission_case("allow-action", exit_code=7)
         persistent_permission_case("allow-action", signal_failure=True)
+        persistent_permission_case("allow-action", signal_failure=True, timed_out=True)
         persistent_permission_case("allow-action", lost_reply=True)
         persistent_permission_case(fragmented_paste=True)
         persistent_permission_case(stale_target=True)
+    if selected == "persistent-permission":
+        return
+    if selected == "all":
         terminal_restoration_integration.main()
         canonical_failure_integration.main()
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-human-cli."))
@@ -1816,7 +2120,7 @@ def main(selected="all"):
     workspace.mkdir()
     session = "human/bash"
     counter = workspace / "effect-count"
-    arguments = json.dumps({"cmd": "printf x >> effect-count", "timeout_ms": None}, separators=(",", ":"))
+    arguments = json.dumps({"cmd": "printf x >> effect-count", "description": "Write first effect", "timeout_ms": None}, separators=(",", ":"))
     control_call = "human-call\x1b[1Ghidden\u202e"
     control_arguments = arguments + "\r  "
     sibling_started = state / "sibling-started"
@@ -1824,7 +2128,7 @@ def main(selected="all"):
     sibling_effect = workspace / "sibling-effect"
     sibling_arguments = json.dumps({"cmd": f"touch {shlex.quote(str(sibling_started))}; "
         f"while [ ! -e {shlex.quote(str(sibling_release))} ]; do sleep 0.05; done; "
-        "printf y >> sibling-effect", "timeout_ms": None}, separators=(",", ":"))
+        "printf y >> sibling-effect", "description": "Write delayed sibling effect", "timeout_ms": None}, separators=(",", ":"))
     endpoint = fixture.SuccessEndpoint([
         fixture.sse_tool_calls("human-calls", [("bash", control_call, control_arguments)]),
         fixture.sse_answer("human-answer", "human-reason", "human-message", "first answer")[0],
@@ -1850,6 +2154,12 @@ def main(selected="all"):
     completed = False
     try:
         host = fixture.start_host(store, url)
+        if selected == "incomplete-input":
+            run(home, "configure", "--store", store, "--session", "incomplete/input",
+                "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+            incomplete_input_case(home, store, "incomplete/input", endpoint, host)
+            completed = True
+            return
         if selected == "long-input":
             long_input_case(home, store, workspace, endpoint, host)
             completed = True
@@ -2045,14 +2355,14 @@ def main(selected="all"):
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", session], env={**os.environ, "HOME": str(preferences_home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             assert "Session:" not in read_terminal(master, "› ")
             assert f"Session: {session}" in terminal_step(master, "/status")
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
-            dispose_all(lambda: stop_process(entered, timeout=5), lambda: os.close(master))
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
         saved.unlink()
         fallback.parent.mkdir(parents=True)
         fallback.symlink_to(store, target_is_directory=True)
@@ -2060,14 +2370,14 @@ def main(selected="all"):
         entered = subprocess.Popen([str(fixture.RUI), "session", "--session", session],
             env={**os.environ, "HOME": str(preferences_home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             assert "Session:" not in read_terminal(master, "› ")
             assert f"Session: {session}" in terminal_step(master, "/status")
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
-            dispose_all(lambda: stop_process(entered, timeout=5), lambda: os.close(master))
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
         fallback.unlink()
         saved.write_text(f"version=1\nstore={state / 'missing'}\nprovider=codex\nmodel=gpt-6-luna\n")
         saved.chmod(0o600)
@@ -2106,10 +2416,10 @@ def main(selected="all"):
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            dispose_all(lambda: os.close(master), lambda: os.close(ready_read))
+            dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
             raise
         finally:
-            dispose_all(lambda: os.close(slave), lambda: os.close(ready_write))
+            dispose_all(lambda: os.close(ready_write))
         try:
             offered = provider_prompt(master, ready_read)
             assert "No locally ready provider" in offered and "Codex login" in offered, offered
@@ -2118,7 +2428,7 @@ def main(selected="all"):
             assert set(run(preferences_home, "requests").splitlines()) == before_missing
         finally:
             dispose_all(lambda: stop_process(deferred, timeout=5),
-                        lambda: os.close(ready_read), lambda: os.close(master))
+                        lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         explicit_home = state / "explicit-home"
         explicit_config = explicit_home / ".config/rui"
         explicit_config.mkdir(parents=True, mode=0o700)
@@ -2134,10 +2444,10 @@ def main(selected="all"):
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            dispose_all(lambda: os.close(master), lambda: os.close(ready_read))
+            dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
             raise
         finally:
-            dispose_all(lambda: os.close(slave), lambda: os.close(ready_write))
+            dispose_all(lambda: os.close(ready_write))
         try:
             assert "No locally ready provider" in provider_prompt(master, ready_read)
             # Another client installs a fixture credential while this caller
@@ -2145,18 +2455,7 @@ def main(selected="all"):
             # malformed prospective defaults when it rechecks readiness.
             codex_fixture.credentials(explicit_config / "codex.json")
             os.write(master, b"d\n")
-            welcome = b""
-            deadline = time.monotonic() + 10
-            while "› ".encode("utf-8") not in welcome and time.monotonic() < deadline:
-                if not select.select([master], [], [], max(0, deadline - time.monotonic()))[0]:
-                    break
-                try:
-                    welcome += os.read(master, 65536)
-                except OSError as err:
-                    if err.errno != errno.EIO:
-                        raise
-                    break
-            welcome = welcome.decode(errors="replace")
+            welcome = read_terminal(master, "› ", timeout=10)
             assert all(noise not in welcome for noise in ("Session:", "Provider:", "Model:", "request:")), welcome
             record, = (explicit_config / "requests").glob("*.json")
             saved = json.loads(record.read_bytes())
@@ -2168,7 +2467,7 @@ def main(selected="all"):
             assert explicit.wait(timeout=5) == 0
         finally:
             dispose_all(lambda: stop_process(explicit, timeout=5),
-                        lambda: os.close(ready_read), lambda: os.close(master))
+                        lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         # A valid opaque credential arrives while the prompt is open, then
         # becomes renewal-due before the choice. It remains usable for creation.
         (explicit_config / "codex.json").unlink()
@@ -2181,10 +2480,10 @@ def main(selected="all"):
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            dispose_all(lambda: os.close(master), lambda: os.close(ready_read))
+            dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
             raise
         finally:
-            dispose_all(lambda: os.close(slave), lambda: os.close(ready_write))
+            dispose_all(lambda: os.close(ready_write))
         try:
             assert "No locally ready provider" in provider_prompt(master, ready_read)
             expiry = int(time.time()) + 2
@@ -2206,7 +2505,7 @@ def main(selected="all"):
             assert malformed.read_text() == "version=9\n"
         finally:
             dispose_all(lambda: stop_process(expiring, timeout=5),
-                        lambda: os.close(ready_read), lambda: os.close(master))
+                        lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         longer_store = state / "another-longer-store-selector"
         other_host = fixture.start_host(longer_store, url)
         try:
@@ -2223,10 +2522,10 @@ def main(selected="all"):
                             "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                         pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
                 except BaseException:
-                    dispose_all(lambda: os.close(master), lambda: os.close(ready_read))
+                    dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
                     raise
                 finally:
-                    dispose_all(lambda: os.close(slave), lambda: os.close(ready_write))
+                    dispose_all(lambda: os.close(ready_write))
                 try:
                     assert "No locally ready provider" in provider_prompt(master, ready_read)
                     assert "Saved defaults" in run(changing_home, "setup", "--store", after)
@@ -2244,7 +2543,7 @@ def main(selected="all"):
                     assert changing.wait(timeout=5) == 0
                 finally:
                     dispose_all(lambda: stop_process(changing, timeout=5),
-                                lambda: os.close(ready_read), lambda: os.close(master))
+                                lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         finally:
             fixture.stop_host(other_host)
         codex_fixture.credentials(credential)
@@ -2261,7 +2560,6 @@ def main(selected="all"):
             master, slave = pty.openpty()
             caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store), "--session", warning_ref],
                 env={**os.environ, "HOME": str(preferences_home)}, stdin=slave, stdout=slave, stderr=slave)
-            os.close(slave)
             try:
                 welcome = read_terminal(master, "› ")
                 assert "Permission:" not in welcome, welcome
@@ -2274,7 +2572,8 @@ def main(selected="all"):
                 terminal_step(master, "/exit", "Detached.")
                 assert caller.wait(timeout=5) == 0
             finally:
-                dispose_all(lambda: stop_process(caller, timeout=5), lambda: os.close(master))
+                dispose_all(lambda: stop_process(caller, timeout=5),
+                            lambda: os.close(master), lambda: os.close(slave))
         created = []
         records = preferences_home / ".config/rui/requests"
         for persistent in (False, True):
@@ -2283,7 +2582,6 @@ def main(selected="all"):
             caller = subprocess.Popen([str(fixture.RUI), *(["--persistent"] if persistent else [])], cwd=workspace,
                 env={**os.environ, "HOME": str(preferences_home)},
                 stdin=slave, stdout=slave, stderr=slave)
-            os.close(slave)
             try:
                 welcome = read_terminal(master, "› ")
                 assert "Attached to the ready Host" not in welcome and "Diagnostics:" not in welcome, welcome
@@ -2310,7 +2608,8 @@ def main(selected="all"):
                 assert "Detached." in terminal_step(master, "/exit", "Detached.")
                 assert caller.wait(timeout=5) == 0
             finally:
-                dispose_all(lambda: stop_process(caller, timeout=5), lambda: os.close(master))
+                dispose_all(lambda: stop_process(caller, timeout=5),
+                            lambda: os.close(master), lambda: os.close(slave))
         assert len(set(created)) == 2, "independent new intent reused a reference"
         blocked_home = state / "blocked-capture-home"
         blocked_config = blocked_home / ".config/rui"
@@ -2322,7 +2621,7 @@ def main(selected="all"):
         codex_fixture.credentials(blocked_config / "codex.json")
         sessions_before = run(preferences_home, "sessions", "--store", store, "--all", "--json")
         master, slave = pty.openpty()
-        original_mode = termios.tcgetattr(master)
+        original_mode = termios.tcgetattr(slave)
         blocked = None
         try:
             blocked = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
@@ -2332,9 +2631,9 @@ def main(selected="all"):
             # discard unread PTY bytes when the last slave closes.
             output, errors = terminal_exit(blocked, master, timeout=20)
             assert blocked.returncode == 1 and b"error: NotDir" in errors, (output, errors)
-            output = (output + errors).decode(errors="replace")
-            assert "New Session intent" not in output and "request: " not in output and "› " not in output, output
-            assert termios.tcgetattr(master) == original_mode
+            combined = output + errors
+            assert all(text not in combined for text in (b"New Session intent", b"request: ", "› ".encode())), combined
+            assert termios.tcgetattr(slave) == original_mode
             assert (blocked_config / "requests").read_text() == "not a directory"
             assert run(preferences_home, "sessions", "--store", store, "--all", "--json") == sessions_before
         finally:
@@ -2346,7 +2645,6 @@ def main(selected="all"):
         interrupted = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
             env={**os.environ, "HOME": str(preferences_home), "RUI_TEST_CAPTURE_GATE": str(gate)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             fixture.wait_for(lambda: pathlib.Path(f"{gate}.ready").exists(), "fresh configuration captured")
             early = os.read(master, 65536) if select.select([master], [], [], 0)[0] else b""
@@ -2365,7 +2663,8 @@ def main(selected="all"):
             assert fixture.command("inspect-session", "--store", store,
                 "--session", f"rui/{handle}")["session"]["permission_mode"] == "bypass"
         finally:
-            dispose_all(lambda: stop_process(interrupted, timeout=5), lambda: os.close(master))
+            dispose_all(lambda: stop_process(interrupted, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
         credential.unlink()
         initial = fixture.command("inspect-session", "--store", store, "--session", session)
         assert initial["selected_message"] is None and initial["recent_messages"] == [], initial
@@ -2470,10 +2769,10 @@ def main(selected="all"):
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            dispose_all(lambda: os.close(master), lambda: os.close(ready_read))
+            dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
             raise
         finally:
-            dispose_all(lambda: os.close(slave), lambda: os.close(ready_write))
+            dispose_all(lambda: os.close(ready_write))
         try:
             greeting = read_terminal(master, "› ")
             assert all(noise not in greeting for noise in ("Session:", "Workspace:", "Provider:", "Model:", "Permission:", "Store:", queued)), greeting
@@ -2540,7 +2839,7 @@ def main(selected="all"):
             assert entered.wait(timeout=5) == 0
         finally:
             dispose_all(lambda: stop_process(entered, timeout=5),
-                        lambda: os.close(ready_read), lambda: os.close(master))
+                        lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         assert run(home, "follow", queued) == "return: outcome\nadmitted: accepted\nstatus: completed\n"
         assert run(home, "recover", stale["request"]) == (
             f"Store: {store}\nSession: {session}\nkey: {stale['request']}\n"
@@ -2617,7 +2916,6 @@ def main(selected="all"):
             "--session", sibling_session], env={**os.environ, "HOME": str(fresh_home),
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             deadline = time.monotonic() + 15
             opening = read_terminal(master, "a: Allow once / d: Deny (Enter)", timeout=deadline - time.monotonic())
@@ -2632,7 +2930,7 @@ def main(selected="all"):
             assert entered.wait(timeout=5) == 0
         finally:
             dispose_all(lambda: stop_process(entered, timeout=5),
-                        *(lambda fd=fd: os.close(fd) for fd in (master, ready_read, ready_write)))
+                        *(lambda fd=fd: os.close(fd) for fd in (master, ready_read, ready_write, slave)))
         run(home, "allow-action", "--store", store, "--session", sibling_session,
             "--action", running)
         fixture.wait_for(lambda: sibling_started.exists(), "approved sibling in flight")
@@ -2645,7 +2943,6 @@ def main(selected="all"):
             "--session", sibling_session], env={**os.environ, "HOME": str(home),
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             waiting = read_terminal(master, "a: Allow once / d: Deny (Enter)")
             waiting += action_ready(ready_read, master)
@@ -2679,7 +2976,7 @@ def main(selected="all"):
             assert entered.wait(timeout=5) == 0
         finally:
             dispose_all(sibling_release.touch, lambda: stop_process(entered, timeout=5),
-                        *(lambda fd=fd: os.close(fd) for fd in (master, ready_read, ready_write)))
+                        *(lambda fd=fd: os.close(fd) for fd in (master, ready_read, ready_write, slave)))
         fixture.wait_for(lambda: fixture.completed_observation(store, sibling_key), "sibling outcome")
         assert run(home, "result", sibling_key) == "admitted: accepted\nresult: completed\nsiblings done\n"
         assert sibling_effect.read_text() == "y" and counter.read_text() == "x"
@@ -2714,7 +3011,6 @@ def main(selected="all"):
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", failure_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             read_terminal(master, "› ")
             failed = terminal_step(master, f"/result {failed_key}")
@@ -2724,7 +3020,8 @@ def main(selected="all"):
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
-            dispose_all(lambda: stop_process(entered, timeout=5), lambda: os.close(master))
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
 
         stop_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("stopped-answer", "stopped-reason",
@@ -2852,7 +3149,7 @@ def main(selected="all"):
         control_call = "interactive-bash\x1b[1Ghidden\u202e"
         argument_prefix = '{"cmd":"printf x >> effect-count # '
         padded_arguments = json.dumps({"cmd": "printf x >> effect-count # " +
-            "A" * (4095 - len(argument_prefix)) + "é", "timeout_ms": None},
+            "A" * (4095 - len(argument_prefix)) + "é", "description": "Write interactive effect", "timeout_ms": None},
             ensure_ascii=False, separators=(",", ":")) + "\r  "
         assert padded_arguments.encode()[4095:4097] == "é".encode()
         endpoint.responses.extend([
@@ -2872,10 +3169,10 @@ def main(selected="all"):
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            dispose_all(lambda: os.close(master), lambda: os.close(ready_read))
+            dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
             raise
         finally:
-            dispose_all(lambda: os.close(slave), lambda: os.close(ready_write))
+            dispose_all(lambda: os.close(ready_write))
         try:
             assert "Permission:" not in read_terminal(master, "› ")
             os.write(master, b"interactive request\na\n")
@@ -2883,7 +3180,7 @@ def main(selected="all"):
             proposal += action_ready(ready_read, master)
             assert counter.read_text() == "x", "pasted typeahead approved an unseen Action"
             assert "\n› interactive request" in proposal, proposal
-            shown_command = proposal.split("\n? Run Bash:\n", 1)[1].split("\n  Workspace:", 1)[0]
+            shown_command = proposal.split("\n? Run Bash:\n", 1)[1].split("\n  Description:", 1)[0].split("\n  Workspace:", 1)[0]
             assert "".join(line.removeprefix("  ") for line in shown_command.splitlines()) == json.loads(padded_arguments)["cmd"], proposal
             assert_permission_workspace(proposal, workspace.resolve())
             assert "call ID:" not in proposal and "request:" not in proposal and "return:" not in proposal, proposal
@@ -2932,7 +3229,7 @@ def main(selected="all"):
             assert counter.read_text() == "xx", counter.read_text()
         finally:
             dispose_all(lambda: stop_process(entered, timeout=5),
-                        lambda: os.close(ready_read), lambda: os.close(master))
+                        lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         control_session = "human/name\n\x1b[2J\u202e"
         run(home, "configure", "--store", store, "--session", control_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
@@ -2940,7 +3237,6 @@ def main(selected="all"):
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", control_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             greeting = read_terminal(master, "› ")
             assert "Session:" not in greeting, greeting
@@ -2961,12 +3257,12 @@ def main(selected="all"):
             resume_bin.mkdir()
             (resume_bin / "rui").symlink_to(fixture.RUI)
             os.close(master)
+            os.close(slave)
             master, slave = pty.openpty()
             entered = subprocess.Popen(["bash", "-c", "exec " + resume],
                 env={**os.environ, "HOME": str(home),
                      "PATH": str(resume_bin) + os.pathsep + os.environ["PATH"]},
                 stdin=slave, stdout=slave, stderr=slave)
-            os.close(slave)
             read_terminal(master, "› ")
             resumed = terminal_step(master, "/status")
             assert "Session: human/name\\n\\x1b[2J\\u202e" in resumed, resumed
@@ -2975,7 +3271,8 @@ def main(selected="all"):
             assert entered.wait(timeout=5) == 0
             run(home, "setup", "--store", store)
         finally:
-            dispose_all(lambda: stop_process(entered, timeout=5), lambda: os.close(master))
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
         unsafe_session = "human/unsafe-key"
         unsafe_key = "message\n\x1b[2J\u202e"
         unsafe_release = threading.Event()
@@ -2998,7 +3295,6 @@ def main(selected="all"):
             entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
                 "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
                 stdin=slave, stdout=slave, stderr=slave)
-            os.close(slave)
             try:
                 read_terminal(master, "› ")
                 status = terminal_step(master, "/status")
@@ -3007,7 +3303,8 @@ def main(selected="all"):
                 assert "Detached." in terminal_step(master, "/exit", "Detached.")
                 assert entered.wait(timeout=5) == 0
             finally:
-                dispose_all(lambda: stop_process(entered, timeout=5), lambda: os.close(master))
+                dispose_all(lambda: stop_process(entered, timeout=5),
+                            lambda: os.close(master), lambda: os.close(slave))
         finally:
             waiter_deadline = time.monotonic() + 10
             dispose_all(unsafe_release.set,
@@ -3020,7 +3317,6 @@ def main(selected="all"):
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             greeting = read_terminal(master, "› ")
             assert "Session:" not in greeting and "\n  safe result" in greeting, greeting
@@ -3031,7 +3327,8 @@ def main(selected="all"):
             assert "Detached." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
-            dispose_all(lambda: stop_process(entered, timeout=5), lambda: os.close(master))
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
         empty_session = "human/empty-key"
         run(home, "configure", "--store", store, "--session", empty_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
@@ -3082,7 +3379,6 @@ def main(selected="all"):
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", editor_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             read_terminal(master, "› ")
             for index, (typed, expected) in enumerate(cases):
@@ -3173,12 +3469,12 @@ def main(selected="all"):
             assert entered.wait(timeout=5) == 0
             assert termios.tcgetattr(master)[3] & termios.ICANON
         finally:
-            dispose_all(lambda: stop_process(entered, timeout=5), lambda: os.close(master))
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
         master, slave = pty.openpty()
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", empty_session], env={**os.environ, "HOME": str(fresh_home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             assert "Recent messages" not in read_terminal(master, "› ")
             fixture.wait_for(lambda: not termios.tcgetattr(master)[3] & termios.ICANON,
@@ -3188,7 +3484,8 @@ def main(selected="all"):
             assert entered.wait(timeout=5) == 0
             assert termios.tcgetattr(master)[3] & termios.ICANON
         finally:
-            dispose_all(lambda: stop_process(entered, timeout=5), lambda: os.close(master))
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
         for columns in (7, 8):
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
@@ -3214,26 +3511,9 @@ def main(selected="all"):
                 assert set((fresh_home / ".config/rui/requests").glob("*.json")) == before
             finally:
                 dispose_all(lambda: stop_process(entered, timeout=5),
+                            entered.stderr.close,
                             lambda: os.close(master), lambda: os.close(slave))
-        # These are decoder witnesses, not Host admission load. Polling
-        # callers sharing this Host can exhaust its classification places.
-        before = len(endpoint.requests)
-        for incomplete in (b"\xc3", b"\x1b[200~unfinished", b"\x1b[", b"\x1bO"):
-            master, slave = pty.openpty()
-            entered = None
-            try:
-                entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-                    "--session", empty_session], env={**os.environ, "HOME": str(fresh_home)},
-                    stdin=slave, stdout=slave, stderr=slave)
-                read_terminal(master, "› ")
-                os.write(master, incomplete)
-                assert "IncompleteTerminalInput" in read_terminal(master, "IncompleteTerminalInput", timeout=7)
-                assert entered.wait(timeout=5) != 0
-                assert termios.tcgetattr(master)[3] & termios.ICANON
-            finally:
-                dispose_all(lambda: stop_process(entered, timeout=5) if entered is not None else None,
-                            lambda: os.close(master), lambda: os.close(slave))
-        assert len(endpoint.requests) == before, "incomplete terminal input reached Host"
+        incomplete_input_case(fresh_home, store, empty_session, endpoint, host)
         observation_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("observed-later", "observed-later-reason",
             "observed-later-message", "observed later")[0], observation_release))

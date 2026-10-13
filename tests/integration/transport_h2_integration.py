@@ -73,6 +73,8 @@ class H1Endpoint(http.server.ThreadingHTTPServer):
         self.release_first = threading.Event()
         self.requests = []
         self.connections = set()
+        # Responses whose complete Content-Length body has not been sent,
+        # not Python handler lifetimes or server-side socket retirement.
         self.active = 0
         self.maximum_active = 0
 
@@ -92,6 +94,7 @@ class H1Handler(http.server.BaseHTTPRequestHandler):
             self.server.active += 1
             self.server.maximum_active = max(self.server.maximum_active, self.server.active)
             first = len(self.server.requests) == 1
+        retired = False
         try:
             payload, _, _ = dispatch.sse_answer(
                 f"response-{text}", f"reasoning-{text}", f"message-{text}", f"answer-{text}",
@@ -108,17 +111,27 @@ class H1Handler(http.server.BaseHTTPRequestHandler):
             if first and self.server.trickle_first:
                 offset = 0
                 while not self.server.release_first.is_set():
+                    assert offset < len(payload) - 1, "trickle exhausted incomplete response bytes"
                     self.wfile.write(payload[offset:offset + 1])
                     self.wfile.flush()
                     offset += 1
-                    assert self.server.release_first.wait(0.2) or offset < len(payload)
-                self.wfile.write(payload[offset:])
+                    self.server.release_first.wait(0.2)
+                self.wfile.write(payload[offset:-1])
             else:
-                self.wfile.write(payload)
+                self.wfile.write(payload[:-1])
+            # The client can advance queued work as soon as the final byte
+            # arrives. Retire response accounting before another handler can
+            # enter it, independently of this handler's remaining cleanup.
+            with self.server.lock:
+                self.wfile.write(payload[-1:])
+                self.wfile.flush()
+                self.server.active -= 1
+                retired = True
             self.close_connection = True
         finally:
-            with self.server.lock:
-                self.server.active -= 1
+            if not retired:
+                with self.server.lock:
+                    self.server.active -= 1
 
     def log_message(self, *_):
         pass

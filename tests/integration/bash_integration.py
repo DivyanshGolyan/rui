@@ -13,9 +13,29 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 
 import model_fixture as fixture
 from host_process import HostDiagnostics, ReleaseGate
+
+
+def assert_cleanup_population(diagnostics, *, actions, models, model_releases, inspection_limit):
+    # Reap/drain validates final native loss and sequence first. Endpoints cannot
+    # be supplied by this census after their original waits have expired.
+    def owners(phase):
+        return Counter((r.get("turn"), r.get("operation"), r.get("attempt"), r.get("action"))
+                       for r in diagnostics.matching(phase))
+
+    started = owners("cleanup_started")
+    assert all(count == 1 for count in started.values()), started
+    assert len(started) == len(actions) + models, started
+    assert Counter(owner[3] for owner in started if owner[3] is not None) == Counter(map(str, actions)), started
+    assert owners("cleanup_completed") == started, diagnostics.records
+    releases = started if model_releases else Counter({owner: count for owner, count in started.items() if owner[3] is not None})
+    assert owners("cleanup_release_observed") == releases, diagnostics.records
+    inspections = diagnostics.matching("inspection_captured")
+    assert len(inspections) <= inspection_limit, inspections
+    assert len(diagnostics.records) == sum(started.values()) * 2 + sum(releases.values()) + len(inspections), diagnostics.records
 
 
 def detached_shell(command):
@@ -171,7 +191,7 @@ def result_text(store, session):
 
 
 def add_exchange(responses, name, command, answer="continued", timeout_ms=None):
-    arguments = {"cmd": command, "timeout_ms": timeout_ms}
+    arguments = {"cmd": command, "timeout_ms": timeout_ms, "description": f"Run {name} command"}
     responses.append(
         fixture.sse_tool_calls(
             f"{name}-calls",
@@ -205,13 +225,13 @@ def prove_reused_session(state):
                 (
                     "bash",
                     "reuse-slow-call",
-                    json.dumps({"cmd": slow_command, "timeout_ms": None}, separators=(",", ":")),
+                    json.dumps({"cmd": slow_command, "timeout_ms": None, "description": "Append slow settlement"}, separators=(",", ":")),
                 ),
                 ("missing-tool", "reuse-unknown-call", "{}"),
                 (
                     "bash",
                     "reuse-fast-call",
-                    json.dumps({"cmd": fast_command, "timeout_ms": None}, separators=(",", ":")),
+                    json.dumps({"cmd": fast_command, "timeout_ms": None, "description": "Append fast settlement"}, separators=(",", ":")),
                 ),
                 ("bash", "reuse-invalid-call", '{"cmd":7}'),
             ],
@@ -253,6 +273,7 @@ def prove_reused_session(state):
             "--test-phase-trace",
             accelerated_retries=False,
             active_capacity=5,
+            observations="bash_cleanup",
         )
         milestones = HostDiagnostics(host)
         configure(state, store, "reuse-config", "direct/reuse")
@@ -592,6 +613,10 @@ def prove_reused_session(state):
         endpoint.shutdown()
         endpoint.server_close()
         endpoint_thread.join(timeout=5)
+        if host is not None and active_failure is None:
+            assert_cleanup_population(milestones, actions=[a["action"] for a in actions_by_ordinal.values()],
+                                      models=4, model_releases=True,
+                                      inspection_limit=3 * 321 + 601 + 201 + 6)
 
 
 def show_command(*args):
@@ -626,7 +651,7 @@ def walkthrough():
     message_record = state / f"{message_key}.json"
     counter = workspace / "effect-count"
     arguments = json.dumps(
-        {"cmd": "printf x >> effect-count", "timeout_ms": None}, separators=(",", ":")
+        {"cmd": "printf x >> effect-count", "timeout_ms": None, "description": "Append effect counter"}, separators=(",", ":")
     )
     responses = [
         fixture.sse_tool_calls(
@@ -854,7 +879,7 @@ def main():
         "head -c 12000 /dev/zero | tr '\\0' z; printf '\\377'; printf stderr-marker >&2"
     )
     success_arguments = json.dumps(
-        {"cmd": large_command, "timeout_ms": None}, separators=(",", ":")
+        {"cmd": large_command, "timeout_ms": None, "description": "Write large captured output"}, separators=(",", ":")
     )
     responses.append(
         fixture.sse_tool_calls(
@@ -880,14 +905,14 @@ def main():
     responses.append(
         fixture.sse_tool_calls(
             "unattempted-calls",
-            [("bash", "unattempted-call", json.dumps({"cmd": f"printf x >> {unattempted_marker}", "timeout_ms": None}))],
+            [("bash", "unattempted-call", json.dumps({"cmd": f"printf x >> {unattempted_marker}", "timeout_ms": None, "description": "Append unattempted marker"}))],
         )
     )
     prelaunch_stop_marker = state / "prelaunch-stop-marker"
     responses.append(
         fixture.sse_tool_calls(
             "prelaunch-stop-calls",
-            [("bash", "prelaunch-stop-call", json.dumps({"cmd": f"printf x >> {prelaunch_stop_marker}", "timeout_ms": None}))],
+            [("bash", "prelaunch-stop-call", json.dumps({"cmd": f"printf x >> {prelaunch_stop_marker}", "timeout_ms": None, "description": "Append prelaunch stop marker"}))],
         )
     )
     before_launch_marker = state / "before-launch-marker"
@@ -897,13 +922,13 @@ def main():
     responses.append(
         fixture.sse_tool_calls(
             "stop-calls",
-            [("bash", "stop-call", json.dumps({"cmd": "trap '' TERM; sleep 30", "timeout_ms": None}, separators=(",", ":")))],
+            [("bash", "stop-call", json.dumps({"cmd": "trap '' TERM; sleep 30", "timeout_ms": None, "description": "Wait through termination signal"}, separators=(",", ":")))],
         )
     )
     responses.append(
         fixture.sse_tool_calls(
             "settlement-stop-calls",
-            [("bash", "settlement-stop-call", json.dumps({"cmd": "printf sealed", "timeout_ms": None}))],
+            [("bash", "settlement-stop-call", json.dumps({"cmd": "printf sealed", "timeout_ms": None, "description": "Print sealed output"}))],
         )
     )
     exited_child_pid = state / "exited-child-pid"
@@ -917,6 +942,7 @@ def main():
                     {
                         "cmd": f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & printf $! > {exited_child_pid}",
                         "timeout_ms": None,
+                        "description": "Start detached pipe-free child",
                     },
                     separators=(",", ":"),
                 ),
@@ -948,6 +974,7 @@ def main():
                             f"while [ ! -e {stopped_pipes_leader_release} ]; do sleep 0.01; done"
                         ),
                         "timeout_ms": None,
+                        "description": "Hold stopped child output pipes",
                     },
                     separators=(",", ":"),
                 ),
@@ -997,7 +1024,7 @@ def main():
     responses.append(
         fixture.sse_tool_calls(
             "post-resolution-calls",
-            [("bash", "post-resolution-call", json.dumps({"cmd": "printf complete", "timeout_ms": None}))],
+            [("bash", "post-resolution-call", json.dumps({"cmd": "printf complete", "timeout_ms": None, "description": "Print completed output"}))],
         )
     )
     sibling_marker = state / "sibling-marker"
@@ -1009,7 +1036,7 @@ def main():
                     "bash",
                     "sibling-call-0",
                     json.dumps(
-                        {"cmd": f"sleep 0.2; printf a >> {sibling_marker}", "timeout_ms": None},
+                        {"cmd": f"sleep 0.2; printf a >> {sibling_marker}", "timeout_ms": None, "description": "Append first sibling marker"},
                         separators=(",", ":"),
                     ),
                 ),
@@ -1017,7 +1044,7 @@ def main():
                     "bash",
                     "sibling-call-1",
                     json.dumps(
-                        {"cmd": f"printf b >> {sibling_marker}", "timeout_ms": None},
+                        {"cmd": f"printf b >> {sibling_marker}", "timeout_ms": None, "description": "Append second sibling marker"},
                         separators=(",", ":"),
                     ),
                 ),
@@ -1057,6 +1084,7 @@ def main():
             success_cleanup_gate,
             "--test-phase-trace",
             active_capacity=3,
+            observations="bash_cleanup",
         )
         success_milestones = HostDiagnostics(host)
         resource_samples.append({"phase": "cold", **process_resources(host), **scratch_resources(store)})
@@ -1224,6 +1252,8 @@ def main():
 
         fixture.stop_host(host)
         host = None
+        assert_cleanup_population(success_milestones, actions=[success_action["action"]],
+                                  models=2, model_releases=False, inspection_limit=321 + 2)
         success_milestones = None
         host = fixture.start_host(store, endpoint_url, active_capacity=0)
         configure(state, store, "rollback-config", "direct/rollback")
@@ -1567,6 +1597,7 @@ def main():
             "--test-bash-observed-exit-gate-path",
             observed_exit_gate,
             "--test-phase-trace",
+            observations="bash_pipes",
         )
         milestones = HostDiagnostics(host)
         configure(state, store, "stopped-pipes-config", "direct/stopped-pipes")
@@ -1623,7 +1654,12 @@ def main():
         fixture.wait_for(lambda: not process_exists(stopped_child), "stopped Bash descendant cleanup")
 
         fixture.stop_host(host)
-        host, milestones = None, None
+        host = None
+        assert len(milestones.matching("bash_leader_observed_with_open_pipes")) == 1, milestones.records
+        assert Counter(r["subject"] for r in milestones.matching("control_store_complete")) == Counter(
+            ("stopped-pipes-allow", "stopped-pipes-stop")), milestones.records
+        assert len(milestones.records) == 3, milestones.records
+        milestones = None
         host = fixture.start_host(store, endpoint_url, "--bash-timeout-ms", "30000")
         configure(state, store, "timeout-config", "direct/timeout")
         fixture.message(state, store, "timeout-message", "direct/timeout", "execute")

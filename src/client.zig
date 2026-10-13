@@ -299,6 +299,7 @@ pub const ConversationPage = struct {
         ordinal: u64,
         kind: enum { user, assistant, tool_result },
         content: CommandObservation.ContentReference,
+        presentation: ?protocol.ToolPresentation = null,
     };
     end: u64,
     items: [protocol.public_conversation_page_items]Item = undefined,
@@ -316,6 +317,7 @@ pub const ConversationPage = struct {
             ordinal: JsonString(20),
             kind: JsonEnum(@FieldType(Item, "kind")),
             content: struct { bytes: JsonString(20), sha256: JsonString(64), display: JsonString(16) },
+            presentation: ?JsonToolPresentation = null,
         };
         const Rows = struct {
             values: [protocol.public_conversation_page_items]Row = undefined,
@@ -352,6 +354,9 @@ pub const ConversationPage = struct {
         var ordinal = cursor.before_ordinal;
         for (wire.items.values[0..page.count], page.items[0..page.count]) |row, *item| {
             item.* = .{ .position = try mutationId(row.position, false), .ordinal = try mutationId(row.ordinal, true), .kind = row.kind.value, .content = .{ .bytes = try mutationId(row.content.bytes, true), .digest = undefined } };
+            item.presentation = if (row.presentation) |p| p.value else null;
+            if ((item.kind == .tool_result) != (item.presentation != null)) return error.InvalidConversationPage;
+            if (item.presentation) |p| if (p.publication_position != item.position) return error.InvalidConversationPage;
             if (item.position > page.end or item.ordinal > std.math.maxInt(i64) or item.content.bytes > protocol.max_sqlite_content_bytes or
                 ((item.kind == .tool_result) != (item.ordinal != 0)) or !row.content.display.eql("omitted") or row.content.sha256.slice().len != 64 or
                 (position != 0 and (item.position > position or (item.position == position and item.ordinal >= ordinal)))) return error.InvalidConversationPage;
@@ -475,7 +480,7 @@ pub const ActivityPage = struct {
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [4]Ref };
         const Outcome = struct { turn: JsonString(20), operation: JsonString(20), code: JsonString(96), content: ?Ref };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
-        const Item = struct { position: JsonString(20), ordinal: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: Ref, call: Call, tool_result: Ref, outcome: Outcome, stop: Stop } };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: Ref, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, outcome: Outcome, stop: Stop } };
         const Items = struct {
             values: [16]Item = undefined,
             count: usize = 0,
@@ -491,7 +496,23 @@ pub const ActivityPage = struct {
                 return result;
             }
         };
-        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool };
+        const CallEntry = struct { operation: JsonString(20), ordinal: JsonString(20), presentation: JsonToolPresentation };
+        const Calls = struct {
+            values: [3]CallEntry = undefined,
+            count: usize = 0,
+            pub fn jsonParse(a: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+                if (try source.next() != .array_begin) return error.UnexpectedToken;
+                var result: @This() = .{};
+                while (try source.peekNextTokenType() != .array_end) {
+                    if (result.count == result.values.len) return error.LengthMismatch;
+                    result.values[result.count] = try std.json.innerParse(CallEntry, a, source, options);
+                    result.count += 1;
+                }
+                _ = try source.next();
+                return result;
+            }
+        };
+        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls } };
         var storage: [2 * protocol.max_activity_page_response_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{}) catch return error.InvalidActivityPage;
@@ -513,7 +534,11 @@ pub const ActivityPage = struct {
                     if ((value.state == .applied) != (value.turn != null) or (item.value == .user and value.state != .applied)) return error.InvalidActivityPage;
                     fact.value = if (item.value == .user) .{ .user = value } else .{ .admission = value };
                 },
-                .assistant, .tool_result => |reference| fact.value = if (item.value == .assistant) .{ .assistant = try content(reference) } else .{ .tool_result = try content(reference) },
+                .assistant => |reference| fact.value = .{ .assistant = try content(reference) },
+                .tool_result => |result| {
+                    if (result.presentation.value.publication_position != fact.position) return error.InvalidActivityPage;
+                    fact.value = .{ .tool_result = .{ .content = try content(result.content), .presentation = result.presentation.value } };
+                },
                 .call => |call| {
                     var value: Fact.Call = .{ .position = fact.position, .operation = try id(call.operation, false), .turn = try id(call.turn, false), .call_ordinal = try id(call.call_ordinal, true), .action = if (call.action) |action| try id(action, false) else null, .rejection = if (call.rejection) |code| code.value else null, .fields = undefined };
                     if ((value.action != null) == (value.rejection != null)) return error.InvalidActivityPage;
@@ -534,6 +559,22 @@ pub const ActivityPage = struct {
             }
             position = fact.position;
             ordinal = fact.ordinal;
+        }
+        page.facts.call_activity.total = try id(wire.call_activity.total, true);
+        page.facts.call_activity.count = wire.call_activity.entries.count;
+        if (page.facts.call_activity.count != @min(3, page.facts.call_activity.total)) return error.InvalidActivityPage;
+        const last = if (page.facts.direction == .forward and page.facts.more) page.facts.items[page.facts.count - 1] else null;
+        const boundary_position = if (last) |item| item.position else page.facts.end;
+        const boundary_ordinal: ?u64 = if (last) |item| item.ordinal else null;
+        var previous: ?protocol.CallActivity.Entry = null;
+        for (wire.call_activity.entries.values[0..page.facts.call_activity.count], page.facts.call_activity.entries[0..page.facts.call_activity.count]) |entry, *fact| {
+            fact.* = .{ .operation = try id(entry.operation, false), .ordinal = try id(entry.ordinal, true), .presentation = entry.presentation.value };
+            if (fact.ordinal == std.math.maxInt(i64)) return error.InvalidActivityPage;
+            if (previous) |prior| if (fact.operation < prior.operation or
+                fact.operation == prior.operation and fact.ordinal <= prior.ordinal) return error.InvalidActivityPage;
+            if (fact.presentation.publication_position) |p| if (p < boundary_position or
+                p == boundary_position and (boundary_ordinal == null or fact.ordinal + 1 <= boundary_ordinal.?)) return error.InvalidActivityPage;
+            previous = fact.*;
         }
         return page;
     }
@@ -956,6 +997,7 @@ pub const Current = struct {
     };
     pub const Attention = union(enum) {
         unresolved: struct {
+            presentation: JsonToolPresentation,
             action: Id,
             parent_operation: Id,
             call_ordinal: Count,
@@ -966,6 +1008,7 @@ pub const Current = struct {
             arguments: Reference,
         },
         resolved: struct {
+            presentation: JsonToolPresentation,
             action: Id,
             parent_operation: Id,
             call_ordinal: Count,
@@ -974,6 +1017,7 @@ pub const Current = struct {
             result: Reference,
         },
         rejected: struct {
+            presentation: JsonToolPresentation,
             parent_operation: Id,
             call_ordinal: Count,
             code: JsonString(32),
@@ -1243,6 +1287,15 @@ fn AttentionRows(comptime tag: std.meta.Tag(Current.Attention)) type {
                     if (field.type == Current.Reference and @field(row, field.name).type.value == null) return error.InvalidObservation;
                 }
                 if ((tag == .resolved or tag == .rejected) and row.code.slice().len == 0) return error.InvalidObservation;
+                if (tag == .unresolved) {
+                    const p = row.presentation.value;
+                    if (p.publication_position != null or p.code != (if (row.authorization.value == .pending) protocol.ToolPresentation.Code.pending_permission else .unresolved)) return error.InvalidObservation;
+                }
+                if (tag == .resolved or tag == .rejected) {
+                    const p = row.presentation.value;
+                    if (!std.mem.eql(u8, @tagName(p.code), row.code.slice())) return error.InvalidObservation;
+                    if (p.publication_position) |position| if (position < row.acceptance_position.value) return error.InvalidObservation;
+                }
                 if (tag != .rejected) {
                     if (result.first == null) result.first = row.action.value;
                 }
@@ -1953,6 +2006,99 @@ fn JsonString(comptime limit: usize) type {
 
 // The stdlib also accepts numeric enum tags. Host facts require named strings;
 // their closed vocabulary derives the token bound, with JsonString's lifetime.
+pub const JsonToolPresentation = struct {
+    value: protocol.ToolPresentation,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        const Wire = struct { description: ?JsonString(protocol.max_tool_description_bytes), code: JsonEnum(protocol.ToolPresentation.Code), publication_position: ?JsonString(20) };
+        const wire = try std.json.innerParse(Wire, allocator, source, options);
+        const position = if (wire.publication_position) |p| mutationId(p, false) catch return error.InvalidCharacter else null;
+        if (position) |p| if (p > std.math.maxInt(i64)) return error.InvalidCharacter;
+        if (wire.description) |d| if (!@import("tools.zig").validDescription(d.slice())) return error.InvalidCharacter;
+        if (wire.description == null) switch (wire.code.value) {
+            .unknown_tool, .invalid_arguments, .tool_unavailable => {},
+            else => return error.InvalidCharacter,
+        };
+        if (position != null and (wire.code.value == .unresolved or wire.code.value == .pending_permission)) return error.InvalidCharacter;
+        return .{ .value = .{ .description = if (wire.description) |d| d.value else null, .code = wire.code.value, .publication_position = position } };
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        try jw.objectField("description");
+        if (self.value.description) |d| try jw.write(d.slice()) else try jw.write(null);
+        try jw.objectField("code");
+        try jw.write(@tagName(self.value.code));
+        try jw.objectField("publication_position");
+        if (self.value.publication_position) |p| {
+            var buffer: [20]u8 = undefined;
+            try jw.write(std.fmt.bufPrint(&buffer, "{d}", .{p}) catch unreachable);
+        } else try jw.write(null);
+        try jw.endObject();
+    }
+};
+
+test "canonical presentation typed ingress owns escaped labels and closed facts" {
+    const bytes = "{\"description\":\"Read \\u20ac files\",\"code\":\"denied\",\"publication_position\":null}";
+    const parsed = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("Read € files", parsed.value.value.description.?.slice());
+    try std.testing.expectEqual(protocol.ToolPresentation.Code.denied, parsed.value.value.code);
+    try std.testing.expect(parsed.value.value.publication_position == null);
+    for ([_][]const u8{
+        "{\"description\":null,\"code\":0,\"publication_position\":null}",
+        "{\"description\":null,\"code\":\"invented\",\"publication_position\":null}",
+        "{\"description\":null,\"code\":\"succeeded\",\"publication_position\":\"1\"}",
+        "{\"description\":\"Read\\nfiles\",\"code\":\"succeeded\",\"publication_position\":\"1\"}",
+        "{\"description\":\" \",\"code\":\"succeeded\",\"publication_position\":\"1\"}",
+        "{\"description\":null,\"code\":\"succeeded\",\"publication_position\":1}",
+        "{\"description\":null,\"code\":\"succeeded\",\"publication_position\":\"0\"}",
+        "{\"description\":null,\"code\":\"succeeded\",\"publication_position\":\"9223372036854775808\"}",
+        "{\"description\":null,\"code\":\"pending_permission\",\"publication_position\":\"1\"}",
+        "{\"code\":\"succeeded\",\"publication_position\":null}",
+        "{\"description\":null,\"code\":\"succeeded\",\"code\":\"failed\",\"publication_position\":null}",
+        "{\"description\":\"" ++ "x" ** 101 ++ "\",\"code\":\"succeeded\",\"publication_position\":null}",
+    }) |invalid| {
+        if (std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, invalid, .{})) |unexpected| {
+            unexpected.deinit();
+            return error.AcceptedInvalidPresentation;
+        } else |_| {}
+    }
+    // Worst JSON escaping is six bytes per decoded byte, not the token bound.
+    const escaped = "{\"description\":\"" ++ "\\u0001" ** 100 ++ "\",\"code\":\"succeeded\",\"publication_position\":\"9223372036854775807\"}";
+    const maximum = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, escaped, .{});
+    defer maximum.deinit();
+    try std.testing.expectEqual(@as(usize, 100), maximum.value.value.description.?.slice().len);
+    var buffer: [protocol.max_tool_presentation_json_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try maximum.value.value.writeJson(&writer);
+    const roundtrip = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, writer.buffered(), .{});
+    defer roundtrip.deinit();
+    try std.testing.expectEqualDeep(maximum.value.value, roundtrip.value.value);
+    var facts: protocol.ActivityFacts = .{ .end = 16, .count = 16 };
+    for (&facts.items, 0..) |*item, index| item.* = .{
+        .position = index + 1,
+        .ordinal = 1,
+        .value = .{ .tool_result = .{ .content = .{ .length = 0, .digest = protocol.contentDigest("") }, .presentation = .{ .description = maximum.value.value.description, .code = .succeeded, .publication_position = index + 1 } } },
+    };
+    facts.call_activity = .{ .total = std.math.maxInt(i64), .count = 3 };
+    for (&facts.call_activity.entries, 0..) |*entry, index| entry.* = .{
+        .operation = std.math.maxInt(i64) - 2 + index,
+        .ordinal = std.math.maxInt(i64) - 1,
+        .presentation = .{ .description = maximum.value.value.description, .code = .infrastructure_shutdown, .publication_position = std.math.maxInt(i64) },
+    };
+    var page_buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+    var page_writer = std.Io.Writer.fixed(&page_buffer);
+    try facts.writeJson(&page_writer);
+    const page = try ActivityPage.parse(page_writer.buffered(), .{});
+    try std.testing.expectEqual(@as(usize, 16), page.facts.count);
+    try std.testing.expectEqualDeep(facts.call_activity, page.facts.call_activity);
+    for (page.facts.items) |item| {
+        try std.testing.expectEqual(@as(usize, 100), item.value.tool_result.presentation.description.?.slice().len);
+        try std.testing.expectEqual(item.position, item.value.tool_result.presentation.publication_position.?);
+    }
+}
+
 fn JsonEnum(comptime T: type) type {
     const limit = comptime blk: {
         var longest: usize = 0;
@@ -4810,19 +4956,19 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i });
-        try writer.writeAll(reference ++ ",\"arguments\":" ++ reference ++ "}");
+        try writer.writeAll(reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"description\":\"Run parser tests\",\"code\":\"pending_permission\",\"publication_position\":null}}");
     }
     try writer.writeAll("],\"resolved\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"11\",\"call_ordinal\":\"{d}\",\"code\":\"indeterminate\",\"acceptance_position\":\"{d}\",\"result\":", .{ i + 1001, i, i + 71 });
-        try writer.writeAll(reference ++ "}");
+        try writer.writeAll(reference ++ ",\"presentation\":{\"description\":\"Run parser tests\",\"code\":\"indeterminate\",\"publication_position\":null}}");
     }
     try writer.writeAll("]},\"rejected_calls\":{\"count\":\"257\",\"items\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"parent_operation\":\"11\",\"call_ordinal\":\"{d}\",\"code\":\"unknown_tool\",\"acceptance_position\":\"{d}\",\"result\":", .{ i + 1000, i + 5001 });
-        try writer.writeAll(reference ++ ",\"item_id\":" ++ reference ++ ",\"name\":" ++ reference ++ ",\"call_id\":" ++ reference ++ ",\"arguments\":" ++ reference ++ "}");
+        try writer.writeAll(reference ++ ",\"item_id\":" ++ reference ++ ",\"name\":" ++ reference ++ ",\"call_id\":" ++ reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"description\":null,\"code\":\"unknown_tool\",\"publication_position\":null}}");
     }
     try writer.writeAll("]},\"actionable_permissions\":[");
     for (0..257) |i| {
@@ -4852,17 +4998,21 @@ test "Current facts traverse every attention row and preserve metadata with fixe
                     try std.testing.expectEqual(@as(u64, i), row.call_ordinal.value);
                     try std.testing.expectEqual(@as(u64, 13), row.arguments.bytes.value);
                     try std.testing.expectEqualStrings("ab" ** 32, row.call_id.sha256.slice());
+                    try std.testing.expectEqualStrings("Run parser tests", row.presentation.value.description.?.slice());
+                    try std.testing.expectEqual(protocol.ToolPresentation.Code.pending_permission, row.presentation.value.code);
                 },
                 .resolved => |row| {
                     try std.testing.expectEqual(@as(u64, 1001 + i), row.action.value);
                     try std.testing.expectEqual(@as(u64, 71 + i), row.acceptance_position.value);
                     try std.testing.expectEqualStrings("indeterminate", row.code.slice());
+                    try std.testing.expect(row.presentation.value.publication_position == null);
                 },
                 .rejected => |row| {
                     try std.testing.expectEqual(@as(u64, 1000 + i), row.call_ordinal.value);
                     try std.testing.expectEqual(@as(u64, 5001 + i), row.acceptance_position.value);
                     try std.testing.expectEqualStrings("unknown_tool", row.code.slice());
                     try std.testing.expectEqual(@as(u64, 13), row.name.bytes.value);
+                    try std.testing.expect(row.presentation.value.description == null);
                 },
                 .actionable => |row| {
                     try std.testing.expectEqual(@as(u64, 31 + i), row.action.value);

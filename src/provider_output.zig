@@ -306,7 +306,7 @@ fn Fields(comptime names: []const []const u8) type {
     };
 }
 
-fn collectFields(source: *FileSource, comptime names: []const []const u8) !Fields(names) {
+fn collectFields(source: anytype, comptime names: []const []const u8) !Fields(names) {
     var fields: Fields(names) = .{};
     try source.expect('{');
     try source.space();
@@ -361,6 +361,23 @@ fn stringDigest(io: std.Io, file: std.Io.File, value: Range) ![32]u8 {
     try source.expectEnd();
     if (parsed.decoded_length == 0) return error.EmptyProviderIdentity;
     return hash.finalResult();
+}
+
+/// Bind every public call field to the accepted private provider item, including
+/// deduplicated content whose projection may originate in another item.
+pub fn authenticateCall(source: anytype, references: anytype) !void {
+    const names = &.{ "id", "name", "call_id", "arguments" };
+    const fields = try collectFields(source, names);
+    inline for (names, 0..) |name, index| {
+        const range = try fields.required(name);
+        try source.setRange(range.start, range.length);
+        var hash = protocol.contentHasher();
+        var decoded: Decoded = .{ .hash = &hash };
+        const parsed = try parseString(source, &decoded);
+        try source.expectEnd();
+        if (parsed.decoded_length != references[index].length or
+            !std.mem.eql(u8, &hash.finalResult(), &references[index].digest)) return error.CorruptStore;
+    }
 }
 
 fn readIndex(io: std.Io, file: std.Io.File, value: Range) !u64 {

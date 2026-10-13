@@ -2,7 +2,8 @@
 const std = @import("std");
 const Editor = @import("TerminalEditor.zig");
 const Text = @import("TerminalText.zig");
-const Style = @import("session_view.zig").Style;
+const View = @import("session_view.zig");
+const Style = View.Style;
 const protocol = @import("protocol.zig");
 const termios = @cImport(@cInclude("termios.h"));
 const Self = @This();
@@ -53,6 +54,12 @@ pub fn begin(colour: bool) !Self {
 pub fn finish(self: *Self) !void {
     if (!self.active) return self.result;
     self.active = false;
+    // Disposal must not leave a transient call or draft in the transcript.
+    // One nonblocking attempt cannot hold restoration on output credit.
+    var control: [6 * (1 + 5 + 3 * 5 + 5 + 5) + 32]u8 = undefined;
+    const erase = self.clearSequence(geometry(), &control);
+    const erased = erase.len == 0 or std.c.write(1, erase.ptr, erase.len) == @as(isize, @intCast(erase.len));
+    self.rows = 0;
     // The UI owns emitted style, even if a renderer's next window was cancelled.
     // Attempt controls independently; neither may hold restoration on output credit.
     const reset = std.c.write(1, "\x1b[0m", 4) == 4;
@@ -65,7 +72,7 @@ pub fn finish(self: *Self) !void {
     for (self.flags, 0..) |flags, fd| {
         if (std.c.fcntl(@intCast(fd), std.c.F.SETFL, flags) < 0) flags_ok = false;
     }
-    self.result = if (restored) |_| if (flags_ok and reset and disabled and flushed) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
+    self.result = if (restored) |_| if (erased and flags_ok and reset and disabled and flushed) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
     return self.result;
 }
 
@@ -203,25 +210,33 @@ pub fn geometry() std.posix.winsize {
     return size;
 }
 
-fn clear(self: *Self) !void {
-    const size = geometry();
-    var control: [32]u8 = undefined;
+// Spacer, five status rows, three five-row calls, five overflow rows and five
+// draft rows bound the erase controls independently of history/population.
+fn clearSequence(self: *const Self, size: std.posix.winsize, buffer: *[6 * (1 + 5 + 3 * 5 + 5 + 5) + 32]u8) []const u8 {
+    var control = std.Io.Writer.fixed(buffer);
     if (self.rows != 0) {
         if (size.row != self.size.row or size.col != self.size.col) {
             // Old physical rows cannot be erased reliably after reflow. Start
             // the retained composer on a fresh line without transcript chatter.
-            try self.write("\r\n");
+            control.writeAll("\r\n") catch unreachable;
         } else {
-            if (self.caret_row != 0) try self.write(try std.fmt.bufPrint(&control, "\x1b[{d}A", .{self.caret_row}));
-            try self.write("\r");
+            if (self.caret_row != 0) control.print("\x1b[{d}A", .{self.caret_row}) catch unreachable;
+            control.writeAll("\r") catch unreachable;
             for (0..self.rows) |row| {
-                try self.write("\x1b[2K");
-                if (row + 1 < self.rows) try self.write("\r\n");
+                control.writeAll("\x1b[2K") catch unreachable;
+                if (row + 1 < self.rows) control.writeAll("\r\n") catch unreachable;
             }
-            if (self.rows > 1) try self.write(try std.fmt.bufPrint(&control, "\x1b[{d}A", .{self.rows - 1}));
-            try self.write("\r");
+            if (self.rows > 1) control.print("\x1b[{d}A", .{self.rows - 1}) catch unreachable;
+            control.writeAll("\r") catch unreachable;
         }
     }
+    return control.buffered();
+}
+
+fn clear(self: *Self) !void {
+    const size = geometry();
+    var control: [6 * (1 + 5 + 3 * 5 + 5 + 5) + 32]u8 = undefined;
+    try self.write(self.clearSequence(size, &control));
     self.rows = 0;
     self.size = size;
 }
@@ -231,24 +246,40 @@ pub fn permanent(self: *Self, bytes: []const u8) !void {
     try self.write(bytes);
 }
 
-pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8, prompt: []const u8) !void {
+pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8, prompt: []const u8, live: *const View.Live) !void {
     const size = geometry();
     var storage: FrameStorage = undefined;
-    const frame = try planFrame(size, bytes, cursor, status, prompt, &storage);
+    const frame = try planFrame(size, bytes, cursor, status, prompt, live, &storage);
     const view = frame.draft;
     const heading = frame.heading;
     try self.clear();
     // Own the spacer along with the composer, so repeated redraws erase it
     // rather than growing scrollback or moving transcript rows.
-    try self.write("\r\n");
+    if (frame.spacer != 0) try self.write("\r\n");
     try self.write(frame.status_style.code(self.colour));
     for (0..heading) |row| {
         if (row != 0) try self.write("\r\n");
         try self.writeRow(frame.status.data[row], size.col - 1);
     }
+    for (frame.activity[0..frame.visible], 0..) |wrapped, index| {
+        if (heading != 0 or index != 0) try self.write("\r\n");
+        try self.write(frame.activity_styles[index].code(self.colour));
+        for (0..wrapped.rows) |row| {
+            if (row != 0) try self.write("\r\n");
+            try self.writeRow(wrapped.data[row], size.col - 1);
+        }
+    }
+    if (frame.overflow.rows != 0) {
+        if (heading + frame.visible != 0) try self.write("\r\n");
+        try self.write(Style.quiet.code(self.colour));
+        for (0..frame.overflow.rows) |row| {
+            if (row != 0) try self.write("\r\n");
+            try self.writeRow(frame.overflow.data[row], size.col - 1);
+        }
+    }
     try self.write(Style.normal.code(self.colour));
     for (0..view.rows) |row| {
-        if (row != 0 or heading != 0) try self.write("\r\n");
+        if (row != 0 or heading + frame.activity_rows != 0) try self.write("\r\n");
         try self.write(frame.prompt_style.code(self.colour));
         try self.write(if (row == 0) frame.prompt else "> ");
         try self.write(Style.normal.code(self.colour));
@@ -265,6 +296,9 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
 const FrameStorage = struct {
     status_buffer: [256]u8,
     status_snapshot: [256]u8,
+    compact_snapshot: [256]u8,
+    activity: [3][View.Live.line_bytes]u8,
+    overflow: [80]u8,
     draft: [@import("SessionInput.zig").capacity]u8,
     prompt: [256]u8,
 };
@@ -276,6 +310,12 @@ const Frame = struct {
     draft: Viewport,
     prompt: []const u8,
     heading: usize,
+    activity: [3]Viewport,
+    activity_styles: [3]Style,
+    visible: usize,
+    activity_rows: usize,
+    overflow: Viewport,
+    spacer: usize,
     columns: usize,
     status_style: Style,
     prompt_style: Style,
@@ -285,7 +325,7 @@ const Frame = struct {
     caret_row: usize,
 };
 
-fn planFrame(size: std.posix.winsize, bytes: []const u8, cursor: usize, status: []const u8, prompt: []const u8, storage: *FrameStorage) !Frame {
+fn planFrame(size: std.posix.winsize, bytes: []const u8, cursor: usize, status: []const u8, prompt: []const u8, live: *const View.Live, storage: *FrameStorage) !Frame {
     if (size.row < 2 or size.col < 8) return error.UncertainTerminalCursor;
     // Stage the bounded view before output can pump and mutate the draft.
     var status_writer = std.Io.Writer.fixed(&storage.status_buffer);
@@ -301,29 +341,88 @@ fn planFrame(size: std.posix.winsize, bytes: []const u8, cursor: usize, status: 
         try status_writer.writeAll(word);
         column += width;
     }
-    const status_view = try viewport(status_writer.buffered(), 0, size.col - 1, 5, &storage.status_snapshot);
-    const heading: usize = if (status.len == 0) 0 else status_view.rows;
+    const full_status = try viewport(status_writer.buffered(), 0, size.col - 1, 5, &storage.status_snapshot);
+    const compact_status = try viewport("a Allow/d Deny\nEnter", 0, size.col - 1, 5, &storage.compact_snapshot);
+    const approval = std.mem.eql(u8, prompt, "> ");
+    var activity: [3]Viewport = undefined;
+    var activity_styles: [3]Style = undefined;
+    var line_buffer: [View.Live.line_bytes]u8 = undefined;
+    for (0..live.count) |index| {
+        activity[index] = try viewport(try live.line(index, &line_buffer), 0, size.col - 1, 5, &storage.activity[index]);
+        activity_styles[index] = live.style(index);
+    }
+    var overflow_buffer: [80]u8 = undefined;
+    var overflow_view: Viewport = undefined;
+    var status_view = full_status;
+    var heading: usize = 0;
+    var spacer: usize = 0;
+    var visible: usize = 0;
+    var activity_rows: usize = 0;
+    // Select a complete layout before clearing anything. Overflow is the
+    // actual undisplayed population, never a speculative reservation. Optional
+    // spacing and wording cannot displace required choices or /status access.
+    layout: {
+        var count = live.count;
+        while (true) {
+            for (0..3) |variant| {
+                spacer = if (variant == 0) 1 else 0;
+                status_view = if (approval and variant == 2 and compact_status.total_rows < full_status.total_rows) compact_status else full_status;
+                if (approval and status_view.total_rows != status_view.rows) continue;
+                var rows: usize = 0;
+                var complete = true;
+                for (activity[0..count]) |wrapped| {
+                    rows += wrapped.rows;
+                    complete = complete and wrapped.rows == wrapped.total_rows;
+                }
+                const overflow_line = if (live.total > count) try std.fmt.bufPrint(&overflow_buffer, "+{d}{s} /status", .{ live.total - count, if (variant == 2) " ·" else " more calls ·" }) else "";
+                overflow_view = if (overflow_line.len != 0) try viewport(overflow_line, 0, size.col - 1, 5, &storage.overflow) else .{ .rows = 0, .first = 0, .caret = .{} };
+                rows += overflow_view.rows;
+                // Preserve ordinary status/recovery guidance before admitting
+                // previews, but never at the cost of the exact overflow count.
+                heading = if (approval) status_view.rows else if (status.len == 0) 0 else @min(full_status.rows, size.row -| (overflow_view.rows + spacer + 1));
+                const required = rows + spacer + 1 + heading;
+                // Try removing optional spacing and shortening overflow before
+                // accepting an ordinary status prefix under genuine row pressure.
+                if (complete and overflow_view.rows == overflow_view.total_rows and required <= size.row and
+                    (approval or status.len == 0 or heading == full_status.rows or variant == 2))
+                {
+                    visible = count;
+                    activity_rows = rows;
+                    if (!approval and heading != 0) status_view = try viewport(status_writer.buffered(), 0, size.col - 1, heading, &storage.status_snapshot);
+                    break :layout;
+                }
+            }
+            if (count == 0) break;
+            count -= 1;
+        }
+        return error.UncertainTerminalCursor;
+    }
     const prompt_columns = try std.unicode.utf8CountCodepoints(prompt);
-    if (heading + 1 >= size.row) return error.UncertainTerminalCursor;
     // Visible raw bytes cannot exceed the complete semantic draft. Tabs expand
     // only during emission, without consuming a second semantic-byte budget.
     if (prompt_columns + 1 >= size.col or prompt.len > storage.prompt.len) return error.UncertainTerminalCursor;
     @memcpy(storage.prompt[0..prompt.len], prompt);
     const columns = size.col - prompt_columns - 1;
-    const view = try viewport(bytes, cursor, columns, @min(5, size.row - heading - 1), &storage.draft);
+    const view = try viewport(bytes, cursor, columns, @min(5, size.row - heading - activity_rows - spacer), &storage.draft);
     const status_style: Style = if (std.mem.eql(u8, prompt, "> ")) .attention else if (std.mem.startsWith(u8, status, "!") or std.mem.startsWith(u8, status, "Rejected") or std.mem.startsWith(u8, status, "Work failed")) .failure else .quiet;
     return .{
         .status = status_view,
         .draft = view,
         .prompt = storage.prompt[0..prompt.len],
         .heading = heading,
+        .activity = activity,
+        .activity_styles = activity_styles,
+        .visible = visible,
+        .activity_rows = activity_rows,
+        .overflow = overflow_view,
+        .spacer = spacer,
         .columns = columns,
         .status_style = status_style,
         .prompt_style = if (std.mem.eql(u8, prompt, "> ")) .attention else .user,
         .up = view.rows - 1 - view.caret.row,
         .caret_column = view.caret.col + @as(usize, if (view.caret.row == 0) prompt_columns else 2),
-        .rows = view.rows + heading + 1,
-        .caret_row = view.caret.row + heading + 1,
+        .rows = view.rows + heading + activity_rows + spacer,
+        .caret_row = view.caret.row + heading + activity_rows + spacer,
     };
 }
 
@@ -334,7 +433,7 @@ test "frame planning stages asymmetric Unicode and tab views before draft mutati
     for ([_]u16{ 13, 19 }) |width| {
         @memcpy(&bytes, text);
         const narrow = width == 13;
-        const frame = try planFrame(.{ .row = 9, .col = width, .xpixel = 0, .ypixel = 0 }, &bytes, if (narrow) bytes.len else 2, "! wait for work", "› ", &storage);
+        const frame = try planFrame(.{ .row = 9, .col = width, .xpixel = 0, .ypixel = 0 }, &bytes, if (narrow) bytes.len else 2, "! wait for work", "› ", &.{}, &storage);
         // A occupies one cell, the tab reaches cell eight, é one cell,
         // and the joined emoji two cells. Ten draft columns wrap the emoji;
         // sixteen retain the whole line. Expected positions include the marker.
@@ -360,7 +459,31 @@ test "frame planning stages asymmetric Unicode and tab views before draft mutati
         try std.testing.expectEqualStrings("› ", copied.prompt);
         try std.testing.expectEqual(storage.draft[0..].ptr, copied.draft.data[0].ptr);
     }
-    try std.testing.expectError(error.UncertainTerminalCursor, planFrame(.{ .row = 3, .col = 13, .xpixel = 0, .ypixel = 0 }, text, 0, "! wait for work", "› ", &storage));
+    const tight = try planFrame(.{ .row = 3, .col = 13, .xpixel = 0, .ypixel = 0 }, text, 0, "! wait for work", "› ", &.{}, &storage);
+    try std.testing.expectEqual(@as(usize, 0), tight.spacer);
+    try std.testing.expectEqual(@as(usize, 2), tight.heading);
+    try std.testing.expectEqual(@as(usize, 3), tight.rows);
+    try std.testing.expectError(error.UncertainTerminalCursor, planFrame(.{ .row = 2, .col = 13, .xpixel = 0, .ypixel = 0 }, text, 0, "a Allow/d Deny\nEnter", "> ", &.{}, &storage));
+}
+
+test "complete calls take precedence over optional frame spacing" {
+    var live: View.Live = .{ .count = 3, .total = 3 };
+    for (live.entries[0..live.count], 0..) |*entry, index| {
+        entry.* = .{ .operation = index + 1, .ordinal = index, .presentation = .{ .description = null, .code = .unresolved, .publication_position = null } };
+    }
+    var storage: FrameStorage = undefined;
+    for ([_]bool{ false, true }) |approval| {
+        const frame = try planFrame(.{ .row = if (approval) 6 else 4, .col = 40, .xpixel = 0, .ypixel = 0 }, "draft", 2, if (approval) "a Allow/d Deny\nEnter" else "", if (approval) "> " else "› ", &live, &storage);
+        try std.testing.expectEqual(@as(usize, 3), frame.visible);
+        try std.testing.expectEqual(@as(usize, 0), frame.spacer);
+        try std.testing.expectEqual(@as(usize, 0), frame.overflow.rows);
+        try std.testing.expectEqual(@as(usize, if (approval) 2 else 0), frame.heading);
+        const staged = frame;
+        live.entries[0].presentation.code = .failed;
+        try std.testing.expectEqualStrings("• Tool call", staged.activity[0].data[0]);
+        try std.testing.expectEqual(Style.quiet, staged.activity_styles[0]);
+        live.entries[0].presentation.code = .unresolved;
+    }
 }
 
 fn writeRow(self: *Self, bytes: []const u8, columns: usize) !void {
@@ -384,6 +507,7 @@ const Position = struct { row: usize = 0, col: usize = 0 };
 const Viewport = struct {
     data: [5][]const u8 = @splat(""),
     rows: usize,
+    total_rows: usize = 0,
     first: usize,
     caret: Position,
 };
@@ -458,7 +582,7 @@ fn viewport(bytes: []const u8, cursor: usize, columns: usize, limit: usize, stor
         if (pass == 0) {
             const first = if (caret.row >= limit) caret.row - limit + 1 else 0;
             const rows = @min(limit, pos.row - first + 1);
-            result = .{ .rows = rows, .first = first, .caret = .{ .row = caret.row - first, .col = caret.col } };
+            result = .{ .rows = rows, .total_rows = pos.row + 1, .first = first, .caret = .{ .row = caret.row - first, .col = caret.col } };
         }
     }
     return result;

@@ -237,12 +237,15 @@ def lower_descriptor_limit():
 
 
 def wait_for_terminal_exit(caller, master, output, deadline):
-    """Sole reader retains output through PTY EOF and reap, without renewed time."""
+    """Drain output through reap, including a retained slave without EOF."""
     while True:
+        exited = caller.poll() is not None
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise subprocess.TimeoutExpired(caller.args, 5)
-        if not select.select([master], [], [], min(remaining, 0.05))[0]:
+        if not select.select([master], [], [], 0 if exited else min(remaining, 0.05))[0]:
+            if exited:
+                return caller.wait(timeout=max(0, deadline - time.monotonic()))
             continue
         try:
             chunk = os.read(master, 65536)
@@ -427,14 +430,13 @@ def main():
             original_terminal = termios.tcgetattr(master)
             caller = subprocess.Popen([RUI], cwd=root, env=bare_env,
                 stdin=slave, stdout=slave, stderr=slave)
-            os.close(slave)
-            slave = None
             output = bytearray()
             until = time.monotonic() + COMMAND_TIMEOUT
             while "› ".encode("utf-8") not in output:
                 remaining = until - time.monotonic()
                 assert remaining > 0 and select.select([master], [], [], remaining)[0], output
                 chunk = os.read(master, 65536)
+                assert chunk, ("terminal closed before prompt", output)
                 assert len(output) + len(chunk) < PTY_OUTPUT_LIMIT, "unexpected unbounded terminal output"
                 output.extend(chunk)
             # Automatic success is quiet; readiness is established separately
@@ -464,7 +466,12 @@ def main():
             deadline = time.monotonic() + 5
             assert os.write(master, b"/exit\n") == 6, "incomplete /exit submission"
             assert wait_for_terminal_exit(caller, master, output, deadline) == 0, output
-            assert termios.tcgetattr(master) == original_terminal, output
+            actual_terminal = termios.tcgetattr(slave)
+            if sys.platform == "darwin":
+                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                actual_terminal[3] &= ~mask
+                original_terminal[3] &= ~mask
+            assert actual_terminal == original_terminal, (actual_terminal, original_terminal, output)
             assert b"Host ready" not in output and b"Attached to the ready Host" not in output and b"Diagnostics:" not in output, output
             assert instance(status(bare_store, bare_env), 8)
             inspected = subprocess.run([RUI, "inspect-session", "--store", bare_store, "--session", reference],

@@ -30,6 +30,8 @@ submission: Submission = undefined,
 reader: Task = .{},
 current: client.Current = undefined,
 observed: client.Current = undefined,
+live: View.Live = .{},
+observed_live: View.Live = .{},
 cursor: client.ActivityCursor = .{},
 next_cursor: client.ActivityCursor = .{},
 history_cursor: ?client.ConversationCursor = null,
@@ -308,7 +310,7 @@ fn driveActive(self: *Self) !void {
                 .idle, .completed => "",
             };
             self.dirty = false;
-            try self.terminal.redraw(view.bytes, view.cursor, status, if (self.choice_action != null) "> " else "› ");
+            try self.terminal.redraw(view.bytes, view.cursor, status, if (self.choice_action != null) "> " else "› ", &self.live);
             if (self.choice_action != null and !self.choice_ready and self.choice.pending() == .none) {
                 // Every prompt byte was accepted by stdout. Discard input
                 // through its decoder, not tcflush: a paste prefix or Ctrl-C
@@ -558,9 +560,12 @@ fn applyReader(self: *Self, end: ReadEnd) void {
         self.notice = "  Details complete.";
     } else if (self.read_phase == .permission) {
         self.current = self.observed;
+        self.live = self.observed_live;
+        self.cursor = self.next_cursor;
         if (self.prepared_action == null) self.read_phase = .activity;
     } else {
         self.current = self.observed;
+        self.live = self.observed_live;
         self.cursor = self.next_cursor;
         if (self.opening) self.history_cursor = self.next_history_cursor;
         self.opening = false;
@@ -621,7 +626,7 @@ fn dispatchCommand(self: *Self) !void {
 
 fn permission(raw: *anyopaque, task: *Task) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    self.observed = try View.current(task.requests(), self.store, self.session, self.scratch);
+    try scan(raw, task);
     if (self.observed.first_action) |action| {
         try View.permission(task.requests(), self.store, self.session, action, self.observed.settings.workspace.slice(), self.scratch, task, self.read_columns, self.colour);
         self.prepared_action = action;
@@ -652,11 +657,13 @@ fn scan(raw: *anyopaque, task: *Task) !void {
     try View.render(requests, self.store, self.session, &page, task, self.read_columns, self.colour);
     if (self.opening) {
         self.next_cursor = .{ .position = page.facts.end };
-        return;
+    } else {
+        self.next_cursor = page.continuation() orelse .{ .position = page.facts.end };
+        if (!page.facts.more) self.next_cursor.end = null;
     }
-    self.next_cursor = page.continuation() orelse .{ .position = page.facts.end };
-    if (page.facts.more) return;
-    self.next_cursor.end = null;
+    // The worker publishes this bounded snapshot only after every result window
+    // was acknowledged; applyReader commits it alongside that successful cursor.
+    self.observed_live = View.Live.init(page.facts.call_activity);
 }
 
 fn history(raw: *anyopaque, task: *Task) !void {

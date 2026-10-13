@@ -963,7 +963,7 @@ def consent_boundary_cases(state, library):
         home.mkdir(mode=0o700)
         endpoint = fixture.SuccessEndpoint([
             fixture.sse_tool_calls("consent-call", [("bash", "consent-id",
-                json.dumps({"cmd": "printf forbidden > effect", "timeout_ms": None}))]),
+                json.dumps({"cmd": "printf forbidden > effect", "timeout_ms": None, "description": "Write consent effect marker"}))]),
             fixture.sse_answer("consent-answer", "consent-reason", "consent-message",
                 "Allowed." if case == "escape-allow" else "Denied.")[0],
         ])
@@ -1008,7 +1008,7 @@ def consent_boundary_cases(state, library):
                 assert set(records.glob("*.json")) == before, "expiry captured stale permission"
                 assert not (root / "effect").exists(), "stale input ran Bash"
                 os.write(master, b"a\n" if case == "escape-allow" else b"d\n")
-                human.read_terminal(master, "Allowed." if case == "escape-allow" else "Permission denied.")
+                human.read_terminal(master, "Allowed." if case == "escape-allow" else "• Write consent effect marker — Denied")
                 assert len(set(records.glob("*.json")) - before) == 1, "first fresh choice was not captured"
                 os.write(master, b"\x03")
             else:
@@ -1019,7 +1019,7 @@ def consent_boundary_cases(state, library):
                 os.write(master, b"\x1b[201~")
                 presentation += human.action_ready(read_ready, master)
                 os.write(master, b"d\n")
-                human.read_terminal(master, "Permission denied.")
+                human.read_terminal(master, "• Write consent effect marker — Denied")
                 os.write(master, b"\x03")
             output, errors = human.terminal_exit(caller, master)
             assert caller.wait(timeout=5) == 0, (output, errors)
@@ -1065,7 +1065,7 @@ def command_interruption_cases(state, library):
     endpoint = fixture.SuccessEndpoint([
         fixture.sse_answer("command-answer", "command-reason", "command-message", "Saved answer.")[0],
         fixture.sse_tool_calls("command-tool", [("bash", "command-id",
-            json.dumps({"cmd": "printf forbidden > effect", "timeout_ms": None}))]),
+            json.dumps({"cmd": "printf forbidden > effect", "timeout_ms": None, "description": "Write interruption effect marker"}))]),
     ])
     thread = threading.Thread(target=endpoint.serve_forever)
     thread.start()
@@ -1350,7 +1350,7 @@ def decision_reporting_cases(state):
     for decision, lost in cases:
         name = f"{decision}-{lost}"
         responses.extend([
-            fixture.sse_tool_calls(name, [("bash", name, json.dumps({"cmd": f"printf once >> effect-{name}", "timeout_ms": 1000}))]),
+            fixture.sse_tool_calls(name, [("bash", name, json.dumps({"cmd": f"printf once >> effect-{name}", "timeout_ms": 1000, "description": f"Append effect-{name} marker"}))]),
             fixture.sse_answer(f"{name}-a", f"{name}-r", f"{name}-m", f"SETTLED-{name}")[0],
         ])
     endpoint = fixture.SuccessEndpoint(responses)
@@ -1528,7 +1528,7 @@ def detach_reporting_cases(state, library):
     for kind, fault in cases:
         name = f"{kind}-{fault}"
         if kind != "message":
-            responses.append(fixture.sse_tool_calls(name, [("bash", name, json.dumps({"cmd": f"printf once >> effect-{name}", "timeout_ms": 1000}))]))
+            responses.append(fixture.sse_tool_calls(name, [("bash", name, json.dumps({"cmd": f"printf once >> effect-{name}", "timeout_ms": 1000, "description": f"Append effect-{name} marker"}))]))
         responses.append(fixture.sse_answer(f"{name}-a", f"{name}-r", f"{name}-m", f"SETTLED-{name}")[0])
     endpoint = fixture.SuccessEndpoint(responses)
     thread = threading.Thread(target=endpoint.serve_forever)
@@ -1636,7 +1636,7 @@ def startup_reporting_cases(state, library):
         home.mkdir(mode=0o700)
         responses = [fixture.sse_answer("seed", "seed-r", "seed-m", "SEED-ACCEPTED")[0]]
         if kind in ("allow_once", "deny"):
-            responses.append(fixture.sse_tool_calls("choice", [("bash", "choice-call", json.dumps({"cmd": "touch must-not-run", "timeout_ms": 1000}))]))
+            responses.append(fixture.sse_tool_calls("choice", [("bash", "choice-call", json.dumps({"cmd": "touch must-not-run", "timeout_ms": 1000, "description": "Create must-not-run marker"}))]))
         elif kind == "retry":
             responses.append(fixture.sse_answer("retry", "retry-r", "retry-m", "ORIGINAL-ACCEPTED")[0])
         endpoint = fixture.SuccessEndpoint(responses)
@@ -1748,7 +1748,7 @@ def visible_stream_handoff_cases(state, library):
         root.mkdir()
         home, store = root / "home", root / "store"
         home.mkdir(mode=0o700)
-        text = json.dumps({"cmd": "echo " + marker + " # " + "x" * 6000, "timeout_ms": 1000})
+        text = json.dumps({"cmd": "echo " + marker + " # " + "x" * 6000, "timeout_ms": 1000, "description": "Print visible permission marker"})
         responses = [fixture.sse_tool_calls("visible", [("bash", "visible-call", text)])] if phase == "permission" else [
             fixture.sse_answer("visible", "visible-r", "visible-m", long)[0]]
         if phase == "history":
