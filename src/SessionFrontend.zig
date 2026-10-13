@@ -87,6 +87,8 @@ poll_at: i96 = 0,
 dirty: bool = true,
 detached: bool = false,
 notice: ?[]const u8 = null,
+// One joined read at a time; no reuse until its live diagnostic is delivered.
+pending_diagnostic: ?struct { failure: client.ReadFailure, phase: ReadPhase, recoverable: bool } = null,
 notice_buffer: [512]u8 = undefined,
 previous_signals: [2]std.posix.Sigaction = undefined,
 
@@ -116,6 +118,12 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
     const result = self.drive(initial_text);
     const settled = self.quiesce();
     self.submission.close();
+    if (self.pending_diagnostic != null) {
+        var bytes: [1024]u8 = undefined;
+        var out = std.Io.Writer.fixed(&bytes);
+        self.writePendingDiagnostic(&out) catch unreachable;
+        @import("TerminalText.zig").diagnostic("rui: Read failed: {s}\n", .{out.buffered()});
+    }
     const cause: ?anyerror = if (result) |_| null else |err| err;
     if (settled.failure(.final_exit, cause)) |err| {
         self.recoveryGuide();
@@ -281,6 +289,9 @@ fn driveActive(self: *Self) !void {
             self.reader.acknowledge();
         }
         if (self.reader.thread != null and self.reader.completed()) try self.settleReader();
+        if (self.pending_diagnostic) |pending| {
+            if (pending.recoverable) try self.presentReadDiagnostic(&self.terminal);
+        }
         if (self.reader.thread == null and (self.choice_action == null or self.history_requested != null) and self.prepared_action == null) {
             self.read_columns = Terminal.geometry().col;
             if (self.history_requested != null and !self.opening) {
@@ -495,13 +506,94 @@ fn joinReader(self: *Self) ReadEnd {
     if (self.reader.thread == null) return .absent;
     const result = self.reader.join();
     const progress: ReadEnd.Progress = .{ .phase = self.read_phase, .rendering = self.history_render_started, .output_owned = self.reader_output_started };
-    result catch |err| return if (err == error.Cancelled) .{ .cancelled = progress } else .{ .failed = .{ .err = err, .progress = progress } };
-    return .complete;
+    const end: ReadEnd = if (result) |_| .complete else |err| if (err == error.Cancelled) .{ .cancelled = progress } else .{ .failed = .{ .err = err, .progress = progress } };
+    if (self.reader.read_failure) |failure| {
+        std.debug.assert(self.pending_diagnostic == null);
+        self.pending_diagnostic = .{ .failure = failure, .phase = self.read_phase, .recoverable = end.preparationFailure() };
+        self.reader.read_failure = null;
+    }
+    return end;
+}
+
+fn writePendingDiagnostic(self: *const Self, out: *std.Io.Writer) !void {
+    try self.pending_diagnostic.?.failure.writeDiagnostic(out);
+}
+
+fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
+    const pending = self.pending_diagnostic.?;
+    var bytes: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    try out.writeAll(if (pending.phase == .details) "! Details unavailable; draft retained. " else "! History unavailable; older cursor and draft retained. ");
+    try self.writePendingDiagnostic(&out);
+    try sink.permanent("\n");
+    try sink.permanent(View.Style.failure.code(self.colour));
+    try sink.permanent(out.buffered());
+    try sink.permanent(View.Style.normal.code(self.colour));
+    try sink.permanent("\n");
+    self.pending_diagnostic = null;
+    self.dirty = true;
+}
+
+test "frontend joined read diagnostic survives failed notice and worker reset" {
+    const Worker = struct {
+        fn fail(_: *anyopaque, task: *Task) !void {
+            var failure: client.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
+            try failure.diagnostic.type.set("busy");
+            try failure.diagnostic.code.set("host_busy\x1b\n");
+            return task.requests().failRead(failure);
+        }
+        fn idle(_: *anyopaque, _: *Task) !void {}
+    };
+    const Sink = struct {
+        bytes: [2048]u8 = undefined,
+        length: usize = 0,
+        calls: usize = 0,
+        fail_at: ?usize,
+
+        fn permanent(self: *@This(), bytes: []const u8) !void {
+            self.calls += 1;
+            if (self.fail_at == self.calls) return error.WriteFailed;
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    for ([_]ReadPhase{ .history, .details }) |phase| {
+        for (1..6) |fail_at| {
+            var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false, .read_phase = phase };
+            self.init.io = std.testing.io;
+            try self.reader.start(std.testing.io, &self, Worker.fail);
+            try self.settleReader(); // Preparation is recoverable, not fatal.
+            try std.testing.expect(self.pending_diagnostic != null);
+            try std.testing.expect(self.reader.read_failure == null);
+            var sink: Sink = .{ .fail_at = fail_at };
+            try std.testing.expectError(error.WriteFailed, self.presentReadDiagnostic(&sink));
+            try std.testing.expect(self.pending_diagnostic != null);
+            // Exercise the actual Task reset, also performed before spawn can fail.
+            try self.reader.start(std.testing.io, &self, Worker.idle);
+            try self.reader.join();
+            self.input.init();
+            self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
+            self.terminal = .{ .original = undefined, .flags = undefined, .colour = false, .active = false };
+            const settled = self.quiesce();
+            for ([_]anyerror{ error.WriteFailed, error.SystemResources }) |cause|
+                try std.testing.expectEqual(cause, settled.failure(.final_exit, cause).?);
+            var bytes: [1024]u8 = undefined;
+            var out = std.Io.Writer.fixed(&bytes);
+            try self.writePendingDiagnostic(&out);
+            try std.testing.expectEqualStrings("HTTP 503; type: busy; code: host_busy\\x1b\\n", out.buffered());
+            sink = .{ .fail_at = null };
+            try self.presentReadDiagnostic(&sink);
+            try std.testing.expect(self.pending_diagnostic == null);
+            try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], out.buffered()) != null);
+            try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], if (phase == .details) "Details unavailable" else "History unavailable") != null);
+        }
+    }
 }
 
 fn applyReader(self: *Self, end: ReadEnd) void {
     if (end.preparationFailure()) {
-        self.notice = if (self.read_phase == .details) "! Details unavailable; draft retained." else "! History unavailable; older cursor and draft retained.";
+        if (self.pending_diagnostic == null)
+            self.notice = if (self.read_phase == .details) "! Details unavailable; draft retained." else "! History unavailable; older cursor and draft retained.";
         self.dirty = true;
         return;
     }
@@ -588,7 +680,7 @@ fn scan(raw: *anyopaque, task: *Task) !void {
     if (self.opening) cursor.direction = .backward;
     const page = switch (try requests.activityPage(self.store, self.session, cursor)) {
         .page => |page| page,
-        .failure => |failure| return failure.err(),
+        .failure => |failure| return requests.failRead(failure),
     };
     if (self.opening) {
         self.next_history_cursor = if (page.facts.more) .{ .end = page.facts.end } else null;

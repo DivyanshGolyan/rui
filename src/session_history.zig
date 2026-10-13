@@ -55,10 +55,24 @@ pub const Prepared = struct {
 pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8, cursor: client.ConversationCursor, scratch: std.Io.File) !Prepared {
     const page = switch (try requests.conversationPage(store, session, cursor)) {
         .page => |value| value,
-        .failure => |failure| return failure.err(),
+        .failure => |failure| return requests.failRead(failure),
     };
+    const Source = struct {
+        requests: client.Requests,
+        store: []const u8,
+        session: []const u8,
+        fn read(self: @This(), item: client.ConversationPage.Item, _: usize, sink: anytype) !void {
+            if (try self.requests.readConversationContent(self.store, self.session, item.position, item.ordinal, item.content, sink)) |failure| return self.requests.failRead(failure);
+        }
+    };
+    return stagePage(requests.io, page, scratch, Source{ .requests = requests, .store = store, .session = session });
+}
+
+// The source owns received-byte validation; this owner independently verifies
+// the actual scratch bytes before returning any presentation authority.
+fn stagePage(io: std.Io, page: client.ConversationPage, scratch: std.Io.File, source: anytype) !Prepared {
     var prepared: Prepared = .{ .page = page };
-    try scratch.setLength(requests.io, 0);
+    try scratch.setLength(io, 0);
     const Staging = struct {
         io: std.Io,
         file: std.Io.File,
@@ -68,11 +82,11 @@ pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8
             self.offset += bytes.len;
         }
     };
-    var staging: Staging = .{ .io = requests.io, .file = scratch };
+    var staging: Staging = .{ .io = io, .file = scratch };
     for (page.items[0..page.count], 0..) |item, index| {
         if (item.content.bytes > item_bytes) continue;
         prepared.offsets[index] = staging.offset;
-        if (try requests.readConversationContent(store, session, item.position, item.ordinal, item.content, &staging)) |failure| return failure.err();
+        try source.read(item, index, &staging);
     }
     // Received-byte integrity does not prove that staging preserved those bytes.
     var window: [protocol.content_window_bytes]u8 = undefined;
@@ -82,7 +96,7 @@ pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8
         var offset: u64 = 0;
         while (offset < item.content.bytes) {
             const wanted: usize = @intCast(@min(item.content.bytes - offset, window.len));
-            if (try scratch.readPositionalAll(requests.io, window[0..wanted], start + offset) != wanted) return error.TruncatedHistoryScratch;
+            if (try scratch.readPositionalAll(io, window[0..wanted], start + offset) != wanted) return error.TruncatedHistoryScratch;
             hash.update(window[0..wanted]);
             offset += wanted;
         }
@@ -125,9 +139,7 @@ test "historical export preserves opaque identities without terminal or shell in
 
 test "history preparation binds wire and staged bytes before exposure" {
     const Peer = struct {
-        var clients: [3]std.posix.fd_t = undefined;
-        var large: bool = false;
-        var empty_second: bool = false;
+        var clients: [2]std.posix.fd_t = undefined;
         var fault_offset: u64 = 0;
         var fault_hits: usize = 0;
         const large_body = "a" ** 4096 ++ "Z";
@@ -160,10 +172,7 @@ test "history preparation binds wire and staged bytes before exposure" {
         fn exchange(fds: []const std.posix.fd_t) !void {
             // Independent Python hashlib oracle for domain-prefixed "first".
             const metadata = "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"2\",\"items\":[{\"position\":\"2\",\"ordinal\":\"0\",\"kind\":\"user\",\"content\":{\"bytes\":\"5\",\"sha256\":\"2e37afae3fe85c8c30175c6f0a1b578b3cbe5f4482248f77cb55656781d2790b\",\"display\":\"omitted\"}}],\"more\":false}";
-            // Independent hashlib oracles: a*4096 + Z, end, and empty.
-            var metadata_buffer: [1024]u8 = undefined;
-            const large_metadata = try std.fmt.bufPrint(&metadata_buffer, "{{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"2\",\"items\":[{{\"position\":\"2\",\"ordinal\":\"0\",\"kind\":\"user\",\"content\":{{\"bytes\":\"4097\",\"sha256\":\"c4507c75ffffb20c21aad1b5eecab12e273533475e6d3204a866471d86c5a3cb\",\"display\":\"omitted\"}}}},{{\"position\":\"1\",\"ordinal\":\"0\",\"kind\":\"assistant\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\",\"display\":\"omitted\"}}}}],\"more\":false}}", .{ @as(usize, if (empty_second) 0 else 3), if (empty_second) "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528" else "743b6084710002f2040770ad1e35947dce27acfb1b5c6d3a1ddc28f74b462972" });
-            const bodies: [3][]const u8 = if (large) .{ large_metadata, large_body, if (empty_second) "" else "end" } else .{ metadata, "first", "" };
+            const bodies = [_][]const u8{ metadata, "first" };
             for (fds, 0..) |fd, index| {
                 const normal_body = bodies[index];
                 const content_type = if (index == 0) "application/json" else "application/octet-stream";
@@ -232,34 +241,54 @@ test "history preparation binds wire and staged bytes before exposure" {
     }) |case| {
         const mode = case.mode;
         Peer.mode = mode;
-        Peer.large = case.large;
-        Peer.empty_second = case.empty_second;
         Peer.fault_offset = case.fault_offset;
         Peer.fault_hits = 0;
         Peer.connected = 0;
         Peer.failure = null;
-        const exchanges: usize = if (case.large) 3 else 2;
-        var servers: [3]std.posix.fd_t = undefined;
+        const supplied = case.large or mode == .corrupt or mode == .missing;
+        const exchanges: usize = if (supplied) 0 else 2;
+        var servers: [2]std.posix.fd_t = undefined;
         for (Peer.clients[0..exchanges], servers[0..exchanges]) |*caller, *server| {
             var sockets: [2]std.posix.fd_t = undefined;
             if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
             caller.* = sockets[0];
             server.* = sockets[1];
         }
-        const peer = try std.Thread.spawn(.{}, Peer.serve, .{servers[0..exchanges]});
-        const result = prepare(requests, root, "history/session", .{ .end = 2 }, scratch);
+        const peer = if (supplied) null else try std.Thread.spawn(.{}, Peer.serve, .{servers[0..exchanges]});
+        const Bytes = struct {
+            bodies: [2][]const u8,
+            fn read(self: @This(), _: client.ConversationPage.Item, index: usize, sink: anytype) !void {
+                const body = self.bodies[index];
+                var offset: usize = 0;
+                while (offset < body.len) {
+                    const end = @min(body.len, offset + protocol.content_window_bytes);
+                    try sink.feed(body[offset..end]);
+                    offset = end;
+                }
+            }
+        };
+        const bytes: Bytes = .{ .bodies = .{ if (case.large) Peer.large_body else "first", if (case.empty_second) "" else "end" } };
+        var page: client.ConversationPage = .{ .end = 2, .count = if (case.large) 2 else 1, .more = false };
+        for (page.items[0..page.count], 0..) |*item, index| {
+            item.* = .{ .position = 2 - index, .ordinal = 0, .kind = if (index == 0) .user else .assistant, .content = .{ .bytes = bytes.bodies[index].len, .digest = undefined } };
+            // Independent hashlib oracles, not the staging implementation.
+            _ = try std.fmt.hexToBytes(&item.content.digest, if (index == 0)
+                (if (case.large) "c4507c75ffffb20c21aad1b5eecab12e273533475e6d3204a866471d86c5a3cb" else "2e37afae3fe85c8c30175c6f0a1b578b3cbe5f4482248f77cb55656781d2790b")
+            else if (case.empty_second) "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528" else "743b6084710002f2040770ad1e35947dce27acfb1b5c6d3a1ddc28f74b462972");
+        }
+        const result = if (supplied) stagePage(requests.io, page, scratch, bytes) else prepare(requests, root, "history/session", .{ .end = 2 }, scratch);
         // Release any request never reached after an earlier protocol failure.
         for (Peer.clients[Peer.connected..exchanges]) |fd| {
             const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
             file.close(io);
         }
-        peer.join();
+        if (peer) |thread| thread.join();
         if (Peer.failure) |err| {
             _ = try result;
             return err;
         }
         if (mode == .corrupt or mode == .missing) try std.testing.expectEqual(@as(usize, 1), Peer.fault_hits);
-        if (case.large) try std.testing.expectEqual(exchanges, Peer.connected);
+        try std.testing.expectEqual(exchanges, Peer.connected);
         if (mode == .intact) {
             const prepared = try result;
             try std.testing.expectEqual(@as(usize, if (case.large) 2 else 1), prepared.page.count);

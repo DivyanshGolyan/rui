@@ -14,6 +14,7 @@ changed: std.Io.Condition = .init,
 window: [4096]u8 = undefined,
 pending: ?usize = null,
 result: ?anyerror!void = null,
+read_failure: ?client.ReadFailure = null,
 
 /// All arguments and this owner stay in final storage through join.
 pub fn start(self: *Self, io: std.Io, context: *anyopaque, run: Run) !void {
@@ -23,6 +24,7 @@ pub fn start(self: *Self, io: std.Io, context: *anyopaque, run: Run) !void {
     self.run = run;
     self.cancellation = .{};
     self.result = null;
+    self.read_failure = null;
     self.thread = try std.Thread.spawn(.{}, execute, .{self});
 }
 
@@ -35,7 +37,7 @@ fn execute(self: *Self) void {
 }
 
 pub fn requests(self: *Self) client.Requests {
-    return .{ .io = self.io, .cancellation = &self.cancellation };
+    return .{ .io = self.io, .cancellation = &self.cancellation, .read_failure = &self.read_failure };
 }
 
 /// Worker sink. No source slice escapes feed. Stop wakes a blocked delivery.
@@ -114,4 +116,41 @@ test "ClientTask cancelled delivery remains borrowed until acknowledged after jo
     try std.testing.expectEqualStrings("original window", bytes);
     task.acknowledge();
     try std.testing.expect(task.take() == null);
+}
+
+test "ClientTask read diagnostic survives join with isolated borrowers and resets on reuse" {
+    const Worker = struct {
+        fn run(raw: *anyopaque, owner: *Self) !void {
+            const code: *[]const u8 = @ptrCast(@alignCast(raw));
+            if (code.*.len == 0) return;
+            var failure: client.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
+            try failure.diagnostic.type.set("busy");
+            try failure.diagnostic.code.set(code.*);
+            const borrower = owner.requests();
+            try std.testing.expectEqual(error.HostInvocationFailed, borrower.failRead(failure));
+            failure.status = 500;
+            try failure.diagnostic.code.set("canonical_store_failure");
+            return borrower.failRead(failure);
+        }
+    };
+    var first: Self = .{};
+    var second: Self = .{};
+    var first_code: []const u8 = "classification_capacity_exhausted";
+    var second_code: []const u8 = "other\x1b\n";
+    try first.start(std.testing.io, @ptrCast(&first_code), Worker.run);
+    try second.start(std.testing.io, @ptrCast(&second_code), Worker.run);
+    try std.testing.expectError(error.CanonicalStoreFailure, first.join());
+    try std.testing.expectError(error.CanonicalStoreFailure, second.join());
+    var bytes: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    try first.read_failure.?.writeDiagnostic(&out);
+    try std.testing.expectEqualStrings("HTTP 503; type: busy; code: classification_capacity_exhausted", out.buffered());
+    out = std.Io.Writer.fixed(&bytes);
+    try second.read_failure.?.writeDiagnostic(&out);
+    try std.testing.expectEqualStrings("HTTP 503; type: busy; code: other\\x1b\\n", out.buffered());
+    first_code = "";
+    try first.start(std.testing.io, @ptrCast(&first_code), Worker.run);
+    try first.join();
+    try std.testing.expect(first.read_failure == null);
+    try std.testing.expectEqualStrings(second_code, second.read_failure.?.diagnostic.code.slice());
 }
