@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from select_tests import execution_batches, select, setup_requirements
@@ -88,13 +89,14 @@ class SelectionTest(unittest.TestCase):
                                  "evaluator-churn", "transport-h2-integration",
                                  "codex-h2-integration"} <= set(result[family]))
 
-    def test_shared_driver_keeps_parallel_and_full_modes(self):
+    def test_shared_driver_selects_one_native_inventory(self):
         for paths in (["tests/integration/check.sh"],
                       ["tests/integration/check.sh", "build.zig"],
                       ["tests/integration/check.sh", "src/server.zig"]):
             result = select(paths, "review", AVAILABLE)
             for family in ("targets", "native_targets"):
-                self.assertTrue({"check", "check-full"} <= set(result[family]))
+                self.assertIn("check-full", result[family])
+                self.assertNotIn("check", result[family])
 
     def test_standalone_oracles_have_executable_platform_routes(self):
         for owner in ("login-signal", "current-facts", "server-delivery"):
@@ -107,12 +109,17 @@ class SelectionTest(unittest.TestCase):
             self.assertIn(f"{owner}-integration", combined["targets"])
 
     def test_standalone_imported_helpers_keep_their_real_oracles(self):
-        result = select(["tests/integration/dispatch_integration.py"], "review", AVAILABLE)
+        result = select(["tests/integration/model_fixture.py"], "review", AVAILABLE)
         for family in ("targets", "native_targets"):
             self.assertTrue({"current-facts-integration", "server-delivery-integration"}
                             <= set(result[family]))
         self.assertEqual(execution_batches(["current-facts-integration", "server-delivery-integration"]),
                          [["current-facts-integration"], ["server-delivery-integration"]])
+
+    def test_model_scenarios_do_not_select_shared_fixture_consumers(self):
+        result = select(["tests/integration/dispatch_integration.py"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertEqual(result[family], ["dispatch-integration"])
 
     def test_standalone_helper_routes_add_without_losing_existing_consumers(self):
         for path, owner in (("host_process.py", "check"),
@@ -123,7 +130,7 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn(owner, result[family])
 
     def test_shared_fixture_helpers_keep_composed_and_separate_consumers(self):
-        for name in ("control_integration.py", "dispatch_integration.py", "host_process.py"):
+        for name in ("control_integration.py", "model_fixture.py", "host_process.py"):
             path = f"tests/integration/{name}"
             standalone = {"codex-h2-integration", "transport-h2-integration", "server-delivery-integration"}
             if name != "control_integration.py":
@@ -287,49 +294,94 @@ class SelectionTest(unittest.TestCase):
 
 
 class FullCheckPartitionTest(unittest.TestCase):
-    def run_part(self, part, fail="", overlap=False):
+    def run_part(self, part, fail="", overlap=False, hold=""):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             # Exercise the shell gate's public commands without launching product
             # fixtures. This checks membership and failure propagation, not timing.
             command = '''#!/bin/sh
 if [ "$1" = - ]; then exec "$TEST_PYTHON" "$@"; fi
-fixture=$(basename "$1")
+fixture=$(basename "${1:-$0}")
+identity="$fixture.$2"
 if [ "$CHECK_OVERLAP" = 1 ]; then
-    touch "$GATE_DIR/$fixture.started"
+    touch "$GATE_DIR/$identity.started"
     if [ "$fixture" = human_cli_integration.py ]; then
         n=0
-        while [ ! -e "$GATE_DIR/activity_integration.py.started" ]; do
+        while [ ! -e "$GATE_DIR/activity_integration.py.release.started" ]; do
             n=$((n + 1))
             if [ "$n" -ge 200 ]; then exit 43; fi
             sleep 0.01
         done
     fi
-    case "$fixture" in
-        host_launch_integration.py|host_process_test.py|host_allocator_test.py|admission_integration.sh)
-            for peer in human_cli_integration.py preference_policy_integration.py \\
-                session_list_integration.py conversation_page_integration.py \\
-                proposal_integration.py activity_integration.py \\
-                host_status_integration.py host_stop_integration.py; do
+    case "$fixture:$2" in
+        host_launch_integration.py:*|host_process_test.py:*|host_allocator_test.py:*|admission_integration.sh:debug)
+            touch "$GATE_DIR/isolated.started"
+            peers="human_cli_integration.py.release preference_policy_integration.py.preferences
+                session_list_integration.py.release conversation_page_integration.py.release
+                proposal_integration.py.release activity_integration.py.release
+                host_status_integration.py.release host_stop_integration.py.release"
+            if [ "$TEST_PART" = parallel ]; then
+                peers="$peers native. admission_integration.sh.release dispatch_integration.py.release
+                    bash_owner_integration.py.release bash_integration.py.release
+                    bash_lifecycle_integration.py.release bash_recovery_integration.py.release
+                    codex_integration.py.release control_integration.py.release
+                    descriptor_capacity_integration.py.release"
+            fi
+            for peer in $peers; do
                 if [ ! -e "$GATE_DIR/$peer.done" ]; then exit 44; fi
             done ;;
     esac
-    touch "$GATE_DIR/$fixture.done"
+    if [ "$fixture" = "$HOLD_FIXTURE" ] && [ "$2" != debug ]; then
+        read -r release < "$GATE_DIR/release"
+        test "$release" = r || exit 45
+    fi
+    touch "$GATE_DIR/$identity.done"
 fi
 printf "%s %s\\n" "$fixture" "$2" >> "$GATE_DIR/invocations"
 if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
 '''
-            for name in ("python3", "sh"):
+            for name in ("python3", "sh", "native"):
                 (root / name).write_text(command)
                 (root / name).chmod(0o755)
             invocations = root / "invocations"
             invocations.touch()
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", FAIL_FIXTURE=fail,
-                       CHECK_OVERLAP=str(int(overlap)), GATE_DIR=str(root), TEST_PYTHON=sys.executable)
-            result = subprocess.run([
-                "/bin/sh", "tests/integration/check.sh", "release", "debug", "status",
-                "sessions", "proposal", "activity", "preferences", part,
-            ], env=env, text=True, capture_output=True, timeout=10)
+                       CHECK_OVERLAP=str(int(overlap)), GATE_DIR=str(root), TEST_PYTHON=sys.executable,
+                       HOLD_FIXTURE=hold, TEST_PART=part)
+            arguments = (["parallel", str(root / "native"), "status", "sessions", "proposal", "activity", "preferences"]
+                         if part == "parallel" else
+                         ["status", "sessions", "proposal", "activity", "preferences", part])
+            command = [
+                "/bin/sh", "tests/integration/check.sh", "release", "debug", *arguments,
+            ]
+            if hold:
+                os.mkfifo(root / "release")
+                # Own release before launch, including assertion-failure disposal.
+                release = os.open(root / "release", os.O_RDWR | os.O_NONBLOCK)
+                process = None
+                try:
+                    process = subprocess.Popen(command, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    deadline = time.monotonic() + 3
+                    while not list(root.glob(f"{hold}.*.started")):
+                        self.assertIsNone(process.poll())
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(.005)
+                    # The peer is explicitly held, not assumed slow. Give an
+                    # incorrectly skipped wait a bounded chance to launch work.
+                    deadline = time.monotonic() + .1
+                    while time.monotonic() < deadline:
+                        self.assertFalse((root / "isolated.started").exists())
+                        time.sleep(.005)
+                finally:
+                    os.write(release, b"r\n")
+                    try:
+                        if process is not None:
+                            stdout, stderr = process.communicate(timeout=10)
+                    finally:
+                        os.close(release)
+                result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            else:
+                result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=10)
             return result, invocations.read_text().splitlines()
 
     def test_parts_are_disjoint_and_cover_the_unchanged_full_gate(self):
@@ -347,20 +399,33 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
             "host_allocator_test.py release",
         }
         outputs = {}
-        for part in ("all", "execution", "callers"):
+        for part in ("all", "execution", "callers", "parallel"):
             result, lines = self.run_part(part)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(len(lines), len(set(lines)), lines)
             outputs[part] = set(lines)
         self.assertEqual(outputs["all"], expected)
+        # The ordinary driver also owns the native binary; the full gate runs
+        # that binary in the build graph instead. Every process case is shared.
+        self.assertEqual(outputs["parallel"], expected | {"native "})
         self.assertEqual(outputs["execution"] & outputs["callers"], set())
         self.assertEqual(outputs["execution"] | outputs["callers"], expected)
         self.assertIn("dispatch_integration.py release", outputs["execution"])
         self.assertIn("human_cli_integration.py release", outputs["callers"])
 
     def test_callers_overlap_private_fixtures_then_drain_before_deadline_cases(self):
-        result, _ = self.run_part("callers", overlap=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for part in ("callers", "parallel"):
+            result, _ = self.run_part(part, overlap=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_parallel_gate_drains_native_and_execution_peers(self):
+        for peer in ("native", "admission_integration.sh", "dispatch_integration.py",
+                     "bash_owner_integration.py", "bash_integration.py",
+                     "bash_lifecycle_integration.py", "bash_recovery_integration.py",
+                     "codex_integration.py", "control_integration.py", "descriptor_capacity_integration.py"):
+            with self.subTest(peer=peer):
+                result, _ = self.run_part("parallel", overlap=True, hold=peer)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_failure_or_invalid_part_cannot_report_success(self):
         for fixture in ("human_cli_integration.py", "preference_policy_integration.py",
@@ -369,8 +434,14 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                         "host_status_integration.py", "host_stop_integration.py",
                         "host_launch_integration.py", "host_process_test.py",
                         "host_allocator_test.py", "admission_integration.sh"):
-            result, _ = self.run_part("callers", fixture)
-            self.assertNotEqual(result.returncode, 0, fixture)
+            for part in ("callers", "parallel", "all"):
+                result, _ = self.run_part(part, fixture)
+                self.assertNotEqual(result.returncode, 0, (part, fixture))
+        for part in ("execution", "parallel", "all"):
+            result, _ = self.run_part(part, "dispatch_integration.py")
+            self.assertNotEqual(result.returncode, 0, part)
+        result, _ = self.run_part("parallel", "native")
+        self.assertNotEqual(result.returncode, 0)
         result, _ = self.run_part("not-a-part")
         self.assertEqual(result.returncode, 2)
 

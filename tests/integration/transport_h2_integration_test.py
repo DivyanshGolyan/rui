@@ -342,7 +342,13 @@ class QueuedH1CleanupTests(unittest.TestCase):
     def test_inactivity_startup_failure_still_disposes_endpoint(self):
         self.run_caller("queued_h1_inactivity", fail_body=False, fail_start=True)
 
-    def run_caller(self, caller, *, fail_body, fail_start=False):
+    def test_actual_body_requires_every_caller_eof_before_first_idle_sample(self):
+        self.run_caller("queued_h1", fail_body=False, eof_oracle=True)
+        for kind in ("configure", "message", "observe_command", "read_result", "inspect_session"):
+            with self.subTest(omitted_eof=kind):
+                self.run_caller("queued_h1", fail_body=False, eof_oracle=True, omitted_eof=kind)
+
+    def run_caller(self, caller, *, fail_body, fail_start=False, eof_oracle=False, omitted_eof=None):
         calls = []
         primary = AssertionError("original queued H1 body failure")
         secondary = RuntimeError("endpoint shutdown failure")
@@ -363,7 +369,8 @@ class QueuedH1CleanupTests(unittest.TestCase):
 
         def shutdown():
             calls.append("shutdown")
-            raise secondary
+            if not eof_oracle:
+                raise secondary
 
         endpoint.shutdown = shutdown
         endpoint.server_close = lambda: calls.append("close")
@@ -373,7 +380,7 @@ class QueuedH1CleanupTests(unittest.TestCase):
         def start(*args, **kwargs):
             if fail_start:
                 raise primary
-            return SimpleNamespace(pid=1)
+            return SimpleNamespace(pid=1, rui_ready_fields={"socket": "/fixture/socket"})
 
         def message(root, store, key, session, text):
             if fail_body:
@@ -399,13 +406,54 @@ class QueuedH1CleanupTests(unittest.TestCase):
             text = key.replace("h1-message-", "h1-").replace("queued-message-", "queued-")
             return ("answer-" + text).encode()
 
+        replies = []
+        samples = []
+        real_request = transport.closed_host_request
+
+        def request(socket_path, store, kind, **fields):
+            if kind == "message":
+                message(None, store, fields["key"], fields["session"], fields["text"]["value"])
+            if kind == "observe_command":
+                value = {"observation": observe(store, fields["key"],
+                         **({"deadline": fields["deadline"]} if "deadline" in fields else {}))}
+            elif kind == "read_result":
+                value = read(store, fields["key"], deadline=fields["deadline"])
+            elif kind == "inspect_session":
+                value = {"execution": {"dispatch_fenced": False, "scratch_used_bytes": "0",
+                         "custody_occupied": "0" if released[0] else "1"}}
+                if released[0]:
+                    endpoint.active = 0
+            else:
+                value = {"answer": {"status": "accepted"}}
+            if not eof_oracle:
+                return value
+            # Body and EOF are separate recv events, including the final
+            # inspection. A later request cannot release an earlier caller.
+            reply = HostReply(body=value if isinstance(value, bytes) else json.dumps(value).encode(),
+                              content_type=b"text/plain" if kind == "read_result" else b"application/json")
+            replies.append((kind, reply))
+            with patch.object(transport.socket, "socket", return_value=reply):
+                if kind == omitted_eof:
+                    # Model the old Content-Length-only completion boundary.
+                    _, body = transport.control.read_http_response(reply)
+                    return body if kind == "read_result" else json.loads(body)
+                return real_request(socket_path, store, kind, **fields)
+
+        def descriptors(pid):
+            samples.append(len(replies))
+            if eof_oracle and len(samples) >= 2:
+                self.assertTrue(all(reply.released for _, reply in replies),
+                                "caller has not reached EOF at first idle sample")
+            return 10
+
         with contextlib.ExitStack() as stack:
             for owner, name, value in (
                     (transport, "H1Endpoint", lambda **kwargs: endpoint),
                     (transport.threading, "Thread", lambda **kwargs: thread),
                     (transport.time, "sleep", lambda _: None),
                     (transport.subprocess, "check_output", lambda *a, **k: "0"),
-                    (transport, "open_descriptors", lambda _: 10),
+                    (transport, "open_descriptors", descriptors),
+                    (transport, "closed_host_request", request),
                     (transport.dispatch, "start_host", start),
                     (transport.dispatch, "configure", lambda *a: None),
                     (transport.dispatch, "message", message),
@@ -414,23 +462,34 @@ class QueuedH1CleanupTests(unittest.TestCase):
                     (transport.dispatch, "read_result", read),
                     (transport.dispatch, "command", lambda *a, **k:
                      {"execution": {"custody_occupied": "1"}}),
-                    (transport, "wait_for_drain", drain),
+                    (transport, "wait_for_drain", transport.wait_for_drain if eof_oracle else drain),
                     (transport.dispatch, "stop_host", lambda _: calls.append("stop"))):
                 stack.enter_context(patch.object(owner, name, side_effect=value))
             output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
             expected = primary if fail_body or fail_start else secondary
-            with self.assertRaises(type(expected)) as raised:
+            if eof_oracle and omitted_eof is None:
                 getattr(transport, caller)(pathlib.Path("/fixture"))
-            self.assertIs(raised.exception, expected)
+                self.assertEqual(len(samples), 3)
+                self.assertEqual({kind for kind, _ in replies},
+                                 {"configure", "message", "observe_command", "read_result", "inspect_session"})
+            elif eof_oracle:
+                with self.assertRaisesRegex(AssertionError, "caller has not reached EOF at first idle sample"):
+                    getattr(transport, caller)(pathlib.Path("/fixture"))
+                self.assertEqual(len(samples), 2, "counterexample must fail at the first idle sample")
+            else:
+                with self.assertRaises(type(expected)) as raised:
+                    getattr(transport, caller)(pathlib.Path("/fixture"))
+                self.assertIs(raised.exception, expected)
         order = ["release", "stop"] if caller == "queued_h1" else ["stop", "release"]
         if fail_start:
             order.remove("stop")
         expected_disposals = [*order, "shutdown", "close", ("join", 5)]
         self.assertEqual(calls[-len(expected_disposals):], expected_disposals)
         if not fail_body and not fail_start and caller == "queued_h1":
-            self.assertEqual(len(endpoint.requests), 16)
-            self.assertEqual(json.loads(output.getvalue())["requests"], 16)
+            self.assertEqual(len(endpoint.requests), 8 if omitted_eof else 16)
+            if not omitted_eof:
+                self.assertEqual(json.loads(output.getvalue())["requests"], 16)
         elif not fail_body and not fail_start:
             self.assertEqual(reads, ["queued-message-0"])
 
@@ -511,9 +570,11 @@ class ObservationDeadlineTests(unittest.TestCase):
 
                         def request(socket_path, store, kind, **fields):
                             if kind == "observe_command":
-                                return {"observation": observe(store, fields["key"], deadline=fields["deadline"])}
+                                return {"observation": observe(store, fields["key"], deadline=fields.get("deadline"))}
                             if kind == "read_result":
                                 return read(store, fields["key"], deadline=fields["deadline"])
+                            if kind == "inspect_session" and "timeout" not in fields:
+                                return command("inspect-session")
                             return command(kind.replace("_", "-"), timeout=fields.get("timeout"))
 
                         real_drain = transport.wait_for_drain
@@ -529,7 +590,8 @@ class ObservationDeadlineTests(unittest.TestCase):
                         with contextlib.ExitStack() as stack:
                             for owner, attribute, value in (
                                 (transport.time, "monotonic", lambda: clock[0]), (transport.time, "sleep", lambda _: None),
-                                (transport.dispatch, "start_host", lambda *a, **k: SimpleNamespace(pid=1)),
+                                (transport.dispatch, "start_host", lambda *a, **k:
+                                 SimpleNamespace(pid=1, rui_ready_fields={"socket": "socket"})),
                                 (transport.dispatch, "start_ready_process", lambda *a, **k: (SimpleNamespace(pid=1), {"socket": "socket"})),
                                 (transport.dispatch, "stop_host", lambda *a: None),
                                 (transport.dispatch, "configure", lambda *a: None), (transport.dispatch, "message", lambda *a: None),

@@ -7,7 +7,7 @@ import tempfile
 import threading
 
 import bash_integration as bash_fixture
-import dispatch_integration as fixture
+import model_fixture as fixture
 from control_integration import raw_request
 from host_process import canonical_fixture_root, start_ready_process
 

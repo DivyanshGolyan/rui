@@ -14,7 +14,7 @@ import threading
 
 from control_integration import RUI, command, configure, inspect_execution, message, observe, start_host, successful_sse, wait_for
 from conversation_page_integration import host_resources, idle_resources, request
-from dispatch_integration import sse_tool_calls
+from model_fixture import sse_tool_calls
 from host_process import TestHTTPServer, stop_process
 
 CALLER = pathlib.Path(sys.argv[2]).resolve()
@@ -195,54 +195,23 @@ def main():
             with sqlite3.connect(store / "rui.sqlite3") as db:
                 db.backup(saved)
             faults = [
-                "UPDATE content SET private=1,payload=zeroblob(byte_length) WHERE content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=1 LIMIT 1)",
-                "DELETE FROM model_tool_call WHERE call_ordinal=1 AND operation_id=(SELECT min(operation_id) FROM model_tool_call)",
-                "UPDATE turn SET session_ref='foreign' WHERE turn_id=(SELECT min(turn_id) FROM turn)",
                 "UPDATE content SET digest=zeroblob(32) WHERE content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=1 LIMIT 1)",
                 "UPDATE content SET payload=CAST(replace(CAST(payload AS TEXT),'\\u00e9','\\q00e9') AS BLOB) WHERE content_id IN "
                 "(SELECT source_content_id FROM answer_text_projection WHERE answer_content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=1 LIMIT 1))",
             ]
             for index, fault in enumerate(faults):
-                for mode in (("page", "cursor", "field") if index < 3 else ("field",)):
-                    with sqlite3.connect(store / "rui.sqlite3") as db:
-                        saved.backup(db)
-                        db.execute("PRAGMA foreign_keys=OFF")
-                        db.execute(fault)
-                    process, fields = start_host(store, provider)
-                    if mode == "field":
-                        data = caller(store, "field", items[1]["position"], "arguments", ok=False)
-                        # Accepted-item authentication rejects contradictory
-                        # provenance before delivering any argument bytes.
-                        assert data == b"", ("corrupt proposal delivered a prefix", index, len(data))
-                    else:
-                        caller(store, "page", first["end"], items[1]["position"] if mode == "cursor" else 0, ok=False)
-                    assert process.wait(timeout=5) == 1, "canonical corruption did not fence Host"
-                    stop_process(process)
-                    process = None
-            # A valid public replacement is still the wrong accepted item ID.
-            # Exercise both routes independently before asserting, so the old
-            # path demonstrates successful fabrication on each native read.
-            substituted = []
-            for mode, first_arg, second_arg in (("page", first["end"], 0),
-                    ("field", items[1]["position"], "item_id"),
-                    ("page", first["end"], items[1]["position"])):
                 with sqlite3.connect(store / "rui.sqlite3") as db:
                     saved.backup(db)
-                    db.execute("UPDATE model_tool_call SET item_id_content_id=(SELECT item_id_content_id "
-                        "FROM model_tool_call WHERE call_ordinal=2 AND operation_id=(SELECT min(operation_id) FROM model_tool_call)) "
-                        "WHERE call_ordinal=1 AND operation_id=(SELECT min(operation_id) FROM model_tool_call)")
+                    db.execute("PRAGMA foreign_keys=OFF")
+                    db.execute(fault)
                 process, fields = start_host(store, provider)
-                result = subprocess.run([str(CALLER), mode, str(store), SESSION, str(first_arg), str(second_arg)],
-                    capture_output=True, timeout=10)
-                substituted.append((mode, second_arg, result.returncode, len(result.stdout)))
-                if result.returncode != 0:
-                    assert result.stdout == b"", "contradictory item ID delivered a prefix"
-                    assert process.wait(timeout=5) == 1, "item ID contradiction did not fence Host"
-                elif mode == "field":
-                    assert result.stdout == b"proposal-item-2", "replacement fixture changed"
+                data = caller(store, "field", items[1]["position"], "arguments", ok=False)
+                # Certified metadata and complete accepted-item authentication
+                # reject this damage before delivering any argument bytes.
+                assert data == b"", ("corrupt proposal delivered a prefix", index, len(data))
+                assert process.wait(timeout=5) == 1, "canonical corruption did not fence Host"
                 stop_process(process)
                 process = None
-            assert all(code != 0 for _, _, code, _ in substituted), ("substituted item ID accepted", substituted)
             with sqlite3.connect(store / "rui.sqlite3") as db:
                 saved.backup(db)
             saved.close()

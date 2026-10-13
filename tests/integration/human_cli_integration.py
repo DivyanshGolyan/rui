@@ -20,7 +20,7 @@ import threading
 import time
 
 from host_process import canonical_fixture_root, preserve_failure_metadata, stop_process
-import dispatch_integration as fixture
+import model_fixture as fixture
 import codex_integration as codex_fixture
 
 
@@ -1461,19 +1461,27 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             actual[3] &= ~mask
             original[3] &= ~mask
         assert actual == original, "signal after inspection handoff did not restore terminal"
-        # Quiet proposal fields must still be consumed and validated on opening.
+        # Opening uses certified labels, not undisplayed exact proposal fields.
+        # Explicit inspection and permission above still read the exact command.
+        hidden_reads = []
         proxy.route = "/v1/proposal-field"
-        proxy.rewrite = lambda response: response[:-1] if b'"cmd":' in response else response
+        def observe_hidden_read(response):
+            hidden_reads.append(len(response))
+            return response
+        proxy.rewrite = observe_hidden_read
         caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", reference], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        read_terminal(master, "› ", composer=True)
+        assert not hidden_reads, ("label-only opening read undisplayed proposal bytes", hidden_reads)
+        os.write(master, b"/exit\n")
         _, errors = terminal_exit(caller, master)
-        assert caller.returncode != 0 and b"TruncatedResponse" in errors, errors
+        assert caller.returncode == 0, errors
         actual = termios.tcgetattr(slave)
         if sys.platform == "darwin":
             mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
             actual[3] &= ~mask
-        assert actual == original, "hidden proposal failure left terminal configuration changed"
+        assert actual == original, "label-only opening left terminal configuration changed"
         if exit_code:
             # Age the same saved result out of opening, then reconstruct it
             # through /history. Neither navigation nor export may rerun Bash.
@@ -1501,7 +1509,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             _, errors = terminal_exit(caller, master)
             assert caller.returncode == 0, errors
         completed = True
-        print(f"persistent permission: inline {decision}, lost={lost_reply}, fragmented={fragmented_paste}, quiet outcome, retained cursor, hidden-field validation and TERM cleanup passed", flush=True)
+        print(f"persistent permission: inline {decision}, lost={lost_reply}, fragmented={fragmented_paste}, quiet outcome, retained cursor, label-only opening and TERM cleanup passed", flush=True)
     finally:
         if sys.exc_info()[0] is not None:
             preserve_failure_metadata(state / "pty-failure.json", lambda: {

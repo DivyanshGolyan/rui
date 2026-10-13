@@ -11879,7 +11879,7 @@ test "public foreign Turn page fences" {
     try testingOrdinaryPublicCorruption(.page, true);
 }
 
-fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { private, missing, sibling_ordinal, sibling_item_id, sibling_call_id }) !void {
+fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { private, missing, sibling_ordinal, sibling_item_id, sibling_call_id, sibling_arguments }, target_sibling: bool) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
@@ -11889,22 +11889,24 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
         .{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
-        .{ .item_id = "sibling", .name = "unknown", .encoded_call_id = "sibling-call", .decoded_call_id = "sibling-call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        .{ .item_id = "sibling", .name = "other", .encoded_call_id = "sibling-call", .decoded_call_id = "sibling-call", .encoded_arguments = "[]", .decoded_arguments = "[]" },
     };
     try settleCallsForTesting(&storage, &tmp, binding, "tool-output", &calls);
+    // Damaging the first rejection must leave the requested sibling healthy;
+    // identical rejection bytes would deduplicate into one content identity.
+    try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call"));
     var request = protocol.ConversationPage{};
     try request.session.set("direct/corrupt-tool");
     const valid = try storage.publicConversationPage(request);
     try std.testing.expectEqual(@as(usize, 3), valid.count);
-    const sibling_damage = damage == .sibling_ordinal or damage == .sibling_item_id or damage == .sibling_call_id;
-    const item = valid.items[if (sibling_damage) 0 else 1];
-    try std.testing.expect(item.kind == .tool_result and item.ordinal == (if (sibling_damage) @as(u64, 2) else 1));
+    const item = valid.items[if (target_sibling) 0 else 1];
+    try std.testing.expect(item.kind == .tool_result and item.ordinal == (if (target_sibling) @as(u64, 2) else 1));
     {
         var reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal });
         defer reader.close();
         var bytes: [64]u8 = undefined;
         const count = try reader.read(0, &bytes);
-        try std.testing.expectEqualStrings("Unknown tool: unknown.", bytes[0..count]);
+        try std.testing.expectEqualStrings(if (target_sibling) "Unknown tool: other." else "Unknown tool: unknown.", bytes[0..count]);
     }
     // Keep counts, acceptance positions and results intact for sibling damage:
     // reading the healthy highest ordinal must validate the entire group.
@@ -11912,6 +11914,7 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
         .sibling_ordinal => try exec(storage.database, "UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE call_ordinal=0"),
         .sibling_item_id => try exec(storage.database, "UPDATE model_tool_call SET item_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0"),
         .sibling_call_id => try exec(storage.database, "UPDATE model_tool_call SET call_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0"),
+        .sibling_arguments => try exec(storage.database, "UPDATE model_tool_call SET arguments_content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0"),
         .private => try exec(storage.database, "UPDATE content SET private=1 WHERE content_id=(SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=0)"),
         .missing => {
             try exec(storage.database, "PRAGMA foreign_keys=OFF");
@@ -11940,28 +11943,88 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
 }
 
 test "public private tool bytes fence" {
-    try testingToolPublicCorruption(.content, .private);
+    try testingToolPublicCorruption(.content, .private, false);
 }
 
 test "public private tool page fences" {
-    try testingToolPublicCorruption(.page, .private);
+    try testingToolPublicCorruption(.page, .private, false);
 }
 
 test "public private tool cursor fences" {
-    try testingToolPublicCorruption(.cursor, .private);
+    try testingToolPublicCorruption(.cursor, .private, false);
 }
 
 test "public completed tool group with missing exposed content fences" {
-    try testingToolPublicCorruption(.page, .missing);
-    try testingToolPublicCorruption(.content, .missing);
-    try testingToolPublicCorruption(.cursor, .missing);
+    try testingToolPublicCorruption(.page, .missing, false);
+    try testingToolPublicCorruption(.content, .missing, false);
+    try testingToolPublicCorruption(.cursor, .missing, false);
 }
 
 test "public completed tool group with corrupt sibling provenance fences" {
     for ([_]TestingPublicReadRoute{ .page, .cursor, .content }) |route| {
-        try testingToolPublicCorruption(route, .sibling_ordinal);
-        try testingToolPublicCorruption(route, .sibling_item_id);
-        try testingToolPublicCorruption(route, .sibling_call_id);
+        try testingToolPublicCorruption(route, .sibling_ordinal, true);
+        try testingToolPublicCorruption(route, .sibling_item_id, true);
+        try testingToolPublicCorruption(route, .sibling_call_id, true);
+        try testingToolPublicCorruption(route, .sibling_arguments, true);
+        try testingToolPublicCorruption(route, .private, true);
+        try testingToolPublicCorruption(route, .missing, true);
+    }
+}
+
+test "public completed Action sibling corruption fences first Conversation read" {
+    const faults = [_][:0]const u8{
+        "UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE call_ordinal=0",
+        "UPDATE model_tool_call SET item_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0",
+        "UPDATE model_tool_call SET call_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0",
+        "UPDATE model_tool_call SET arguments_content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0",
+        "UPDATE content SET private=1 WHERE content_id=(SELECT resolution_content_id FROM action_operation WHERE call_ordinal=0)",
+        "DELETE FROM content WHERE content_id=(SELECT resolution_content_id FROM action_operation WHERE call_ordinal=0)",
+    };
+    for (faults) |fault| {
+        for ([_]TestingPublicReadRoute{ .page, .cursor, .content }) |route| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSessionAsk(&storage, "config", "direct/actions", false);
+            try submitTestMessage(&storage, &tmp, "input", "message", "direct/actions", "two tools");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, binding, "output");
+            for ([_][]const u8{ "allow-first", "allow-second" }) |key| {
+                const action_id = try queryU64(storage.database, "SELECT min(action_id) FROM action_operation WHERE resolution_code IS NULL");
+                var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
+                try allow.key.set(key);
+                try allow.session.set("direct/actions");
+                try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+                const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+                _ = try storage.settleActionAttempt(action_binding, .succeeded, key, .{});
+            }
+            // Obtain only the immutable identity, not a traversal on another
+            // public route that could accidentally supply validation authority.
+            const position = try queryU64(storage.database, "SELECT max(acceptance_position) FROM action_operation");
+            try exec(storage.database, "PRAGMA foreign_keys=OFF");
+            try exec(storage.database, fault);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+            try exec(storage.database, "PRAGMA foreign_keys=ON");
+            var request: protocol.ConversationPage = .{ .end = position };
+            try request.session.set("direct/actions");
+            if (route == .cursor) {
+                request.before_position = position;
+                request.before_ordinal = 2;
+            }
+            const result: anyerror!void = if (route == .content)
+                if (storage.openPublicConversationContent(.{ .session = request.session, .position = position, .ordinal = 2 })) |value| blk: {
+                    var reader = value;
+                    reader.close();
+                    break :blk {};
+                } else |err| err
+            else if (storage.publicConversationPage(request)) |_| {} else |err| err;
+            try std.testing.expectError(error.CorruptStore, result);
+            try std.testing.expect(storage.isFenced());
+            try std.testing.expectError(error.StoreFenced, storage.publicConversationPage(request));
+            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+        }
     }
 }
 
@@ -13515,6 +13578,58 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(outcomes, 1));
 }
 
+test "public proposal structural corruption fences independently on every route" {
+    const faults = [_][:0]const u8{
+        "UPDATE content SET private=1,payload=zeroblob(byte_length) WHERE content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=0)",
+        "DELETE FROM model_tool_call WHERE call_ordinal=0",
+        "UPDATE turn SET session_ref='foreign'",
+        "UPDATE model_tool_call SET item_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0",
+    };
+    for (faults) |fault| {
+        for ([_]TestingPublicReadRoute{ .page, .cursor, .content }) |route| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "config", "direct/proposal");
+            try submitTestMessage(&storage, &tmp, "input", "message", "direct/proposal", "run tools");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{
+                .{ .item_id = "original", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                .{ .item_id = "replacement", .name = "unknown", .encoded_call_id = "sibling", .decoded_call_id = "sibling", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            };
+            try settleCallsForTesting(&storage, &tmp, binding, "output", &calls);
+            var request: protocol.ProposalPage = .{};
+            try request.session.set("direct/proposal");
+            const healthy = try storage.proposalPage(request);
+            try std.testing.expectEqual(@as(usize, 2), healthy.count);
+            const item = healthy.items[0];
+            try std.testing.expectEqual(binding.operation_id, item.operation);
+            try std.testing.expectEqual(binding.turn_id, item.turn);
+            try std.testing.expectEqual(@as(u64, 0), item.call_ordinal);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("original"), &item.fields[0].digest);
+            try exec(storage.database, "PRAGMA foreign_keys=OFF");
+            try exec(storage.database, fault);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+            try exec(storage.database, "PRAGMA foreign_keys=ON");
+            request.end = healthy.end;
+            if (route == .cursor) request.after = item.position;
+            const result: anyerror!void = if (route == .content)
+                if (storage.openProposalField(.{ .session = request.session, .position = item.position, .field = .item_id })) |value| blk: {
+                    var reader = value;
+                    reader.close();
+                    break :blk {};
+                } else |err| err
+            else if (storage.proposalPage(request)) |_| {} else |err| err;
+            try std.testing.expectError(error.CorruptStore, result);
+            try std.testing.expect(storage.isFenced());
+            try std.testing.expectError(error.StoreFenced, storage.proposalPage(request));
+            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+        }
+    }
+}
+
 test "proposal callable cursor domain preserves healthy Store" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -13537,6 +13652,47 @@ test "proposal callable cursor domain preserves healthy Store" {
     try std.testing.expectEqual(@as(usize, 0), page.count);
     try std.testing.expect(!page.more and !storage.isFenced());
     try std.testing.expectError(error.ContentNotFound, storage.openProposalField(.{ .position = std.math.maxInt(u64) }));
+}
+
+test "public activity admission corruption fences page and content independently" {
+    const faults = [_][:0]const u8{
+        "UPDATE message_admission SET admission_position=NULL WHERE command_key='message'",
+        "UPDATE core_command SET target='direct/foreign' WHERE command_key='message'",
+        "DELETE FROM conversation_entry WHERE source_admission_id=(SELECT admission_id FROM message_admission WHERE command_key='message')",
+    };
+    for (faults) |fault| {
+        for ([_]bool{ false, true }) |content_route| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "config", "direct/activity");
+            try submitTestMessage(&storage, &tmp, "input", "message", "direct/activity", "input bytes");
+            var request: protocol.ActivityPage = .{};
+            try request.session.set("direct/activity");
+            const queued = try storage.activityPage(request);
+            try std.testing.expectEqual(@as(usize, 1), queued.count);
+            const item = queued.items[0];
+            try std.testing.expectEqualStrings("message", item.value.admission.key.slice());
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("input bytes"), &item.value.admission.content.digest);
+            _ = (try storage.admitNextModelAttempt(.{})).?;
+            try exec(storage.database, fault);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+            request.position = item.position - 1;
+            const result: anyerror!void = if (content_route)
+                if (storage.openActivityContent(.{ .session = request.session, .position = item.position })) |value| blk: {
+                    var reader = value;
+                    reader.close();
+                    break :blk {};
+                } else |err| err
+            else if (storage.activityPage(request)) |_| {} else |err| err;
+            try std.testing.expectError(error.CorruptStore, result);
+            try std.testing.expect(storage.isFenced());
+            try std.testing.expectError(error.StoreFenced, storage.activityPage(request));
+            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+        }
+    }
 }
 
 test "activity fixed admission prefix survives later application and stop" {

@@ -15,8 +15,8 @@ import threading
 import time
 
 from control_integration import command, configure, inspect_execution, message, observe, start_host, stop_session, successful_sse, wait_for
-from conversation_page_integration import host_resources, idle_resources, request
-from dispatch_integration import sse_tool_calls
+from conversation_page_integration import host_resources, idle_resources
+from model_fixture import sse_tool_calls
 from host_process import TestHTTPServer, canonical_fixture_root, stop_process
 from proposal_integration import digest
 
@@ -208,10 +208,9 @@ def main():
             assert history(store, stopped_end)[1] == stopped, "restart changed fixed activity"
             stop_process(process)
             process = None
-            for corrupt, position, ordinal in (("UPDATE message_admission SET admission_position=NULL WHERE command_key='first'", pending[0]["position"], 0),
-                    ("UPDATE core_command SET target='direct/foreign' WHERE command_key='first'", pending[0]["position"], 0),
-                    ("DELETE FROM conversation_entry WHERE source_admission_id=(SELECT admission_id FROM message_admission WHERE command_key='first')", pending[0]["position"], 0),
-                    ("UPDATE turn SET outcome_position=NULL WHERE outcome_code IS NOT NULL", pending[0]["position"], 0),
+            # Keep representative Host fencing for sequence and group faults;
+            # admission and first-read Conversation matrices live with Store.
+            for corrupt, position, ordinal in (("UPDATE turn SET outcome_position=NULL WHERE outcome_code IS NOT NULL", pending[0]["position"], 0),
                     ("UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call)", results[0]["position"], results[0]["ordinal"])):
                 for mode in ("page", "content"):
                     with sqlite3.connect(store / "rui.sqlite3") as db:
@@ -221,36 +220,6 @@ def main():
                     args = ("null", int(position)-1, "null", "forward") if mode == "page" else (position, ordinal)
                     caller(store, mode, *args, ok=False)
                     assert process.wait(timeout=5) == 1, "damaged activity silently disappeared"
-                    stop_process(process)
-                    process = None
-            # First read after each independent restore/restart is Conversation,
-            # never proposal/activity traversal that could rescue validation.
-            # Corrupt only the first call; target the healthy highest sibling.
-            sibling = results[-1]
-            for corrupt in (
-                    "UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0",
-                    "UPDATE model_tool_call SET item_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=1) WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0",
-                    "UPDATE model_tool_call SET call_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=1) WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0",
-                    "UPDATE model_tool_call SET arguments_content_id=(SELECT arguments_content_id FROM model_tool_call WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0) WHERE operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=1",
-                    "UPDATE content SET private=1 WHERE content_id=(SELECT resolution_content_id FROM action_operation WHERE parent_operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0)",
-                    "DELETE FROM content WHERE content_id=(SELECT resolution_content_id FROM action_operation WHERE parent_operation_id=(SELECT min(operation_id) FROM model_tool_call) AND call_ordinal=0)"):
-                for mode in ("page", "cursor", "content"):
-                    with sqlite3.connect(store / "rui.sqlite3") as db:
-                        saved.backup(db)
-                        assert db.execute(corrupt).rowcount == 1
-                    process, fields = start_host(store, provider)
-                    if mode == "content":
-                        route, wire_kind = "/v1/conversation-content", "conversation_content"
-                        identity = {"position": sibling["position"], "ordinal": sibling["ordinal"], "start": "0"}
-                    else:
-                        route, wire_kind = "/v1/conversation-page", "conversation_page"
-                        identity = {"end": sibling["position"], "before_position": "0", "before_ordinal": "0"}
-                        if mode == "cursor":
-                            identity.update(before_position=sibling["position"], before_ordinal=sibling["ordinal"])
-                    head, body = request(fields["socket"], store, route, wire_kind, SESSION, **identity)
-                    assert head.startswith(b"HTTP/1.1 500 "), (corrupt, mode, head, body)
-                    assert json.loads(body)["code"] == "canonical_store_failure", (corrupt, mode, body)
-                    assert process.wait(timeout=5) == 1, "damaged Conversation did not shut down Host"
                     stop_process(process)
                     process = None
             saved.close()
@@ -310,7 +279,7 @@ def main():
 
 def performance_case(item_bytes):
     """Opt-in real admission witness; stream both copies of the provider item."""
-    from dispatch_integration import read_result
+    from model_fixture import read_result
     root = tempfile.mkdtemp(prefix="rui-activity-performance-")
     completed = False
     process = None

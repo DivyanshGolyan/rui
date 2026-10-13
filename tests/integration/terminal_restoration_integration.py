@@ -18,7 +18,7 @@ import time
 from collections import Counter
 
 import canonical_failure_integration as canonical
-import dispatch_integration as fixture
+import model_fixture as fixture
 import human_cli_integration as human
 from host_process import HostDiagnostics, HostStartError, ReleaseGate, canonical_fixture_root, preserve_failure_metadata, start_ready_process, stop_process
 
@@ -85,17 +85,40 @@ static int probe_pthread_create(pthread_t *thread, const pthread_attr_t *attrs,
 
 static int command_return_signal(int fd, const void *bytes, size_t count) {
     const char *fault = getenv("RUI_TERMINAL_FAULT");
-    const size_t start = count && ((const char *)bytes)[0] == '\n' ? 1 : 0;
     static int signaled = 0;
-    if (!signaled && fault &&
-        ((fd == 1 && (!strcmp(fault, "configure-admitted") || !strcmp(fault, "configure-presentation")) &&
-          count == 17 && !memcmp(bytes, "Rui: Configured.\n", 17)) ||
-         (fd == 1 && !strcmp(fault, "configure-rejected") && count == 19 && !memcmp(bytes, "admitted: rejected\n", 19)) ||
-         (fd == 2 && !strcmp(fault, "configure-canonical") && count >= start + 19 && !memcmp((const char *)bytes + start, "rui: Configuration ", 19)))) {
-        signaled = 1;
-        record("command-return-signal\n");
-        raise(SIGINT);  /* Complete admission/error is already decoded by its owner. */
-        if (!strcmp(fault, "configure-presentation")) { errno = EIO; return -1; }
+    static size_t matched = 0;
+    static int mismatch = 0;
+    if (signaled || !fault) return 0;
+    const char *marker = NULL;
+    int prefix = 0;
+    if (fd == 1 && (!strcmp(fault, "configure-admitted") || !strcmp(fault, "configure-presentation")))
+        marker = "Rui: Configured.";
+    else if (fd == 1 && !strcmp(fault, "configure-rejected")) marker = "admitted: rejected";
+    else if (fd == 2 && !strcmp(fault, "configure-canonical")) {
+        marker = "rui: Configuration ";
+        prefix = 1;
+    }
+    if (!marker) return 0;
+    const size_t length = strlen(marker);
+    /* Retain only a bounded prefix and mismatch bit, never a diagnostic line.
+       Newline is the completion boundary, independent of syscall segmentation. */
+    for (size_t i = 0; i < count; ++i) {
+        char byte = ((const char *)bytes)[i];
+        if (byte == '\n') {
+            int complete = !mismatch && matched == length;
+            matched = 0;
+            mismatch = 0;
+            if (!complete) continue;
+            signaled = 1;
+            record("command-return-signal\n");
+            raise(SIGINT);  /* Complete admission/error is already decoded by its owner. */
+            if (!strcmp(fault, "configure-presentation")) { errno = EIO; return -1; }
+            break;
+        }
+        if (!mismatch) {
+            if (matched < length && byte == marker[matched]) ++matched;
+            else if (!(prefix && matched == length)) mismatch = 1;
+        }
     }
     return 0;
 }
@@ -469,6 +492,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attrs, void *(*run)(
 FORWARD_DRIVER = r"""
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/param.h>
@@ -477,7 +501,48 @@ FORWARD_DRIVER = r"""
 #include <termios.h>
 #include <unistd.h>
 
+static volatile sig_atomic_t signals = 0;
+static void interrupted(int sig) { (void)sig; ++signals; }
+
 int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "command-marker")) {
+        const char *fault = getenv("RUI_TERMINAL_FAULT");
+        int canonical = !strcmp(fault, "configure-canonical");
+        int presentation = !strcmp(fault, "configure-presentation");
+        int fd = canonical ? 2 : 1;
+        const char *marker = canonical ? "rui: Configuration failed" :
+            !strcmp(fault, "configure-rejected") ? "admitted: rejected" : "Rui: Configured.";
+        signal(SIGINT, interrupted);
+        /* Embedded and truncated line lookalikes must not signal. */
+        write(fd, "x", 1);
+        write(fd, marker, strlen(marker));
+        write(fd, "\n", 1);
+        write(fd, marker, 3);
+        write(fd, "\n", 1);
+        if (signals) return 30;
+        ssize_t result;
+        if (!strcmp(argv[2], "coalesced")) {
+            char buffer[128];
+            strcpy(buffer, "context\n");
+            strcat(buffer, marker);
+            strcat(buffer, "\ntrailer\n");
+            result = write(fd, buffer, strlen(buffer));
+        } else {
+            write(fd, "context\n", 8);
+            write(fd, marker, 3);
+            if (signals) return 31;
+            struct iovec parts[] = {{(void *)(marker + 3), strlen(marker) - 3}, {(void *)"", 0}};
+            writev(fd, parts, 2);
+            if (signals) return 32;
+            struct iovec end[] = {{(void *)"\n", 1}, {(void *)"trailer\n", 8}};
+            result = writev(fd, end, 2);
+        }
+        if (signals != 1) return 33;
+        if (presentation ? (result != -1 || errno != EIO) : result < 0) return 34;
+        write(fd, marker, strlen(marker));
+        write(fd, "\n", 1);
+        return signals == 1 ? 0 : 35;
+    }
     if (argc == 2) {
         const char *negative[] = {
             "{\"rui_test_phase\":\"lifecycle_service_observation\",\"subject_kind\":\"session\",\"subject\":\"diagnostic/session\"}\n",
@@ -618,6 +683,17 @@ def check_forwarding(state, library):
         termios.tcsetattr(slave, termios.TCSAFLUSH, original)
         os.close(master)
         os.close(slave)
+
+    for fault in ("configure-admitted", "configure-presentation", "configure-rejected", "configure-canonical"):
+        for shape in ("coalesced", "split-writev"):
+            log = state / f"forward-{fault}-{shape}.log"
+            env["RUI_TERMINAL_PROBE"] = str(log)
+            env["RUI_TERMINAL_FAULT"] = fault
+            result = subprocess.run([str(executable), "command-marker", shape], env=env,
+                capture_output=True, timeout=5)
+            assert result.returncode == 0, (fault, shape, result.returncode, result.stdout, result.stderr)
+            assert log.read_text().splitlines() == ["command-return-signal"], (fault, shape)
+    print("terminal fixture command markers: four selectors, coalesced/split writev, line boundaries and one signal passed", flush=True)
 
     negative_root = state / "forward-contention-negatives"
     negative_root.mkdir(mode=0o700)

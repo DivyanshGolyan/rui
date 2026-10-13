@@ -615,7 +615,7 @@ def prove_observation_disposal():
 def prove_intentional_crash_retirement():
     import host_process
     with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
-        import dispatch_integration as dispatch
+        import model_fixture as dispatch
 
     # Drive the real crash owner and native accessor. Synthetic state changes
     # discriminate receipt from retirement; actual native holds remain in Zig.

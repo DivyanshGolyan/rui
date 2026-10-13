@@ -17,7 +17,7 @@ import termios
 import threading
 import time
 
-import dispatch_integration as fixture
+import model_fixture as fixture
 from host_process import canonical_fixture_root, preserve_failure_metadata
 
 ERROR = {"version": "1", "type": "invocation_error", "code": "canonical_store_failure"}
@@ -217,53 +217,6 @@ def wrong_target(response, null_code=False):
     return (head.split(b"\r\n", 1)[0] + b"\r\nContent-Type: application/json\r\n"
         b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
         + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
-
-
-def presentation_cases(state):
-    home = state / "presentation"
-    home.mkdir(mode=0o700)
-    store = home / "store"
-    host = fixture.start_host(store, None)
-    try:
-        for fatal in (False, True):
-            def rewrite(response):
-                value = json.loads(response.split(b"\r\n\r\n", 1)[1])
-                if fatal:
-                    value = {"version": "1", "type": "busy", "code": "ordinary_capacity_exhausted"}
-                value["wire_only"] = "must-not-be-presented"
-                encoded = json.dumps(value, indent=2, ensure_ascii=True).encode()
-                return ((b"HTTP/1.1 503 Unavailable" if fatal else b"HTTP/1.1 200 OK")
-                    + b"\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
-                    + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
-            for mode in ("explicit", "human", "json"):
-                record = home / f"{fatal}-{mode}.json"
-                args = ["configure", "--store", store, "--session", 'original/µ"',
-                    "--workspace", state, "--provider", "codex", "--model", "model-a"]
-                args += ["--record", record, "--key", 'explicit/µ"'] if mode == "explicit" else (["--json"] if mode == "json" else [])
-                proxy = ReplyProxy(host, "/v1/configure", rewrite)
-                try:
-                    result = invoke(home, *args)
-                finally:
-                    proxy.close()
-                saved = json.loads(proxy.exchanges[0][0])
-                assert "must-not-be-presented" not in result.stdout and '"version"' not in result.stdout, result
-                if fatal:
-                    assert result.returncode != 0 and "HostInvocationFailed" in result.stderr, result
-                    expect_mutation_error(result, saved, human=mode == "human", status=503,
-                        reason="HostInvocationFailed", diagnostic={"type": "busy", "code": "ordinary_capacity_exhausted"})
-                else:
-                    assert result.returncode == 0, result
-                    if mode == "human":
-                        assert "admitted: accepted" in result.stdout and "revision:" in result.stdout, result
-                    else:
-                        rendered = json.loads(result.stdout.splitlines()[-1])
-                        if mode == "json":
-                            rendered = rendered["admission"]
-                        assert rendered["answer"] == json.loads(proxy.exchanges[0][1].split(b"\r\n\r\n", 1)[1])["answer"], rendered
-                        assert rendered["context"]["key"] == saved["key"] and rendered["context"]["session"] == saved["session"], rendered
-    finally:
-        fixture.stop_host(host)
-    print("mutation presentation: typed explicit/human/JSON facts and noncanonical diagnostics, original escaped identity; no Host wire passthrough", flush=True)
 
 
 def binding_cases(state, null_code=False):
@@ -656,6 +609,12 @@ def permission_read_cases(state):
                     raise
                 errors = errors.decode()
                 assert caller.returncode != 0 and expected in errors, (expected, errors)
+                if expected == "CanonicalStoreFailure":
+                    assert "rui: Read failed: HTTP 500; type: invocation_error; code: canonical_store_failure\n" in errors, errors
+                elif expected == "ActionReadFailed":
+                    assert "rui: Read failed: HTTP 503; type: busy; code: host_busy\n" in errors, errors
+                else:
+                    assert "rui: Read failed:" not in errors and "type:" not in errors and "code:" not in errors, errors
                 assert b"a: Allow once" not in output and b"Run Bash:" not in output, output
                 assert len(proxy.exchanges) == 1 and proxy.mutations == [], proxy.mutations
                 assert {path.name: path.read_bytes() for path in records.glob("*.json")} == before
@@ -682,6 +641,47 @@ def permission_read_cases(state):
                     caller.stderr.close()
                 os.close(master)
                 os.close(slave)
+        # An ordinary details preparation failure stays live and is delivered
+        # before the next Activity borrower can reset its diagnostic storage.
+        assert invoke(home, "configure", "--store", store, "--session", "details/read",
+            "--workspace", state, "--provider", "codex", "--model", "model-a").returncode == 0
+        before = {path.name: path.read_bytes() for path in records.glob("*.json")}
+        body = b'{"version":"1","type":"busy","code":"host_busy"}'
+        response = (b"HTTP/1.1 503 Rejected\r\nContent-Type: application/json\r\n"
+            b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
+            + str(len(body)).encode() + b"\r\n\r\n" + body)
+        proxy = ReplyProxy(host, "/v1/conversation-page", lambda reply: response)
+        master, slave = pty.openpty()
+        original = termios.tcgetattr(slave)
+        caller = None
+        try:
+            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "details/read"],
+                env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            human.read_terminal(master, "› ")
+            os.write(master, b"/details\n")
+            output = human.read_terminal(master,
+                "! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy", timeout=10)
+            assert caller.poll() is None, output
+            os.write(master, b"\x03")
+            _, errors = human.terminal_exit(caller, master, timeout=10)
+            assert caller.returncode == 0 and b"rui: Read failed:" not in errors, errors
+            assert len(proxy.exchanges) == 1 and proxy.mutations == [], proxy.mutations
+            assert {path.name: path.read_bytes() for path in records.glob("*.json")} == before
+            actual = termios.tcgetattr(slave)
+            if sys.platform == "darwin":
+                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                actual[3] &= ~mask
+                original[3] &= ~mask
+            assert actual == original, "recoverable details failure did not restore terminal"
+        finally:
+            proxy.close()
+            if caller is not None and caller.poll() is None:
+                caller.kill()
+                caller.wait(timeout=5)
+            if caller is not None:
+                caller.stderr.close()
+            os.close(master)
+            os.close(slave)
     finally:
         if host is not None:
             fixture.stop_host(host)
@@ -768,10 +768,10 @@ def main(selected="all"):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-canonical-failure."))
     completed = False
     try:
-        assert selected in ("all", "producers", "committed", "interactive", "permission-read", "bindings", "nulls", "binding-interactive", "null-interactive", "presentation", "keyed", "keyed-bindings", "keyed-output"), selected
+        assert selected in ("all", "producers", "committed", "interactive", "permission-read", "bindings", "nulls", "binding-interactive", "null-interactive", "keyed", "keyed-bindings", "keyed-output"), selected
         if selected in ("keyed-bindings", "keyed-output"):
             keyed_observation_cases(state, selected)
-        for name, case in (("producers", producer_cases), ("committed", committed_cases), ("interactive", interactive_cases), ("permission-read", permission_read_cases), ("bindings", binding_cases), ("nulls", lambda path: binding_cases(path, null_code=True)), ("binding-interactive", lambda path: interactive_cases(path, binding=True)), ("null-interactive", lambda path: interactive_cases(path, null_code=True)), ("presentation", presentation_cases), ("keyed", keyed_observation_cases)):
+        for name, case in (("producers", producer_cases), ("committed", committed_cases), ("interactive", interactive_cases), ("permission-read", permission_read_cases), ("bindings", binding_cases), ("nulls", lambda path: binding_cases(path, null_code=True)), ("binding-interactive", lambda path: interactive_cases(path, binding=True)), ("null-interactive", lambda path: interactive_cases(path, null_code=True)), ("keyed", keyed_observation_cases)):
             if selected in ("all", name):
                 case(state)
         completed = True

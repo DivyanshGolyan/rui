@@ -205,7 +205,11 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     var reply: client.ReplyBuffer = .{};
     const result = try requests.readActionArguments(store, session, action, scratch, &reply);
     if (result == .command) {
-        try client.checkCanonicalFailure(result.command);
+        const failure = requests.captureReadFailure(result.command) catch {
+            try client.checkCanonicalFailure(result.command);
+            return error.ActionReadFailed;
+        };
+        if (failure.err() == error.CanonicalStoreFailure) return error.CanonicalStoreFailure;
         return error.ActionReadFailed;
     }
     var buffer: [4096]u8 = undefined;
@@ -261,7 +265,7 @@ pub fn current(requests: client.Requests, store: []const u8, session: []const u8
     return switch (try client.CurrentReply.decode(requests.io, scratch, session, report)) {
         .current => |value| value,
         .unconfigured => error.SessionNotConfigured,
-        .failure => |failure| failure.err(),
+        .failure => |failure| requests.failRead(failure),
     };
 }
 
@@ -376,7 +380,7 @@ pub const Pending = struct {
         for (self.items[0..self.count]) |item| {
             try sink.feed("Queued: ");
             var preview: Preview = .{ .escaped = .{ .sink = sink, .text = .{ .mode = .line } } };
-            if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = item.content.length, .digest = item.content.digest }, &preview)) |failure| return failure.err();
+            if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = item.content.length, .digest = item.content.digest }, &preview)) |failure| return requests.failRead(failure);
             try preview.escaped.finish();
             if (preview.omitted) try sink.feed(" [preview truncated]");
             try sink.feed("\n");
@@ -390,7 +394,7 @@ pub fn pending(requests: client.Requests, store: []const u8, session: []const u8
     while (true) {
         const page = switch (try requests.activityPage(store, session, cursor)) {
             .page => |page| page,
-            .failure => |failure| return failure.err(),
+            .failure => |failure| return requests.failRead(failure),
         };
         for (page.facts.items[0..page.facts.count]) |item| {
             if (item.value != .admission or item.value.admission.state != .queued) continue;
@@ -408,11 +412,11 @@ fn content(requests: client.Requests, store: []const u8, session: []const u8, it
     if (item.value == .assistant) {
         var answer: Answer(@TypeOf(&indented)) = undefined;
         answer.init(&indented);
-        if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &answer)) |failure| return failure.err();
+        if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &answer)) |failure| return requests.failRead(failure);
         try answer.finish();
     } else {
         var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .multiline } };
-        if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &escaped)) |failure| return failure.err();
+        if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &escaped)) |failure| return requests.failRead(failure);
         try escaped.finish();
     }
     try indented.finish();
@@ -420,10 +424,6 @@ fn content(requests: client.Requests, store: []const u8, session: []const u8, it
 }
 
 pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const client.ActivityPage, sink: anytype, columns: usize, colour: bool) !void {
-    const Drain = struct {
-        pub fn feed(_: *@This(), _: []const u8) !void {}
-    };
-    var drain: Drain = .{};
     const historical = page.facts.direction == .backward;
     for (0..page.facts.count) |index| {
         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
@@ -505,19 +505,14 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                     },
                 };
                 const reference = result.content;
-                if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &summary)) |failure| return failure.err();
+                if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &summary)) |failure| return requests.failRead(failure);
                 try summary.finish();
                 if (failed) try sink.feed("\n  /details for output.");
                 if (summary.emitted or failed) try sink.feed("\n");
             },
-            .call => |call| {
-                // Proposal bookkeeping is inspection-only. Even hidden fields
-                // must drain and validate before advancing the Activity cursor.
-                for (std.meta.tags(client.ProposalField), 0..) |field, field_index| {
-                    const reference = call.fields[field_index];
-                    if (try requests.readProposalField(store, session, item.position, field, .{ .bytes = reference.length, .digest = reference.digest }, &drain)) |failure| return failure.err();
-                }
-            },
+            // Hidden call rows use admission-certified page metadata. Exact
+            // proposal and permission inspection authenticate originals instead.
+            .call => {},
             .outcome => |outcome| {
                 // Successful content aggregates assistant rows, never a second answer.
                 if (outcome.code.eql("completed")) continue;

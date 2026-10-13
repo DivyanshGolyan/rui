@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import bash_integration as bash
 import control_integration as control
-import dispatch_integration as fixture
+import model_fixture as fixture
 from host_process import HostDiagnostics, TestHTTPServer, start_ready_process, stop_process
 
 

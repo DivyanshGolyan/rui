@@ -18,6 +18,7 @@
 struct cancellation {
     int immediate;
     const char *ready;
+    const char *gate_entered;
     atomic_int output_seen;
     pthread_t caller;
     const char *watchdog_gate;
@@ -25,16 +26,17 @@ struct cancellation {
 
 static int cancelled(void *context) {
     struct cancellation *state = context;
-    if (race.mode >= 5 && !pthread_equal(pthread_self(), race.caller)) return 1;
     if (state->watchdog_gate && !pthread_equal(pthread_self(), state->caller)) {
         int fd;
         do { fd = open(state->watchdog_gate, O_RDONLY); } while (fd < 0 && errno == EINTR);
-        if (fd < 0) _exit(9);
+        if (fd < 0) return 1;
+        int entered = open(state->gate_entered, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (entered < 0 || close(entered)) { close(fd); return 1; }
         char release;
         ssize_t count;
         do { count = read(fd, &release, 1); } while (count < 0 && errno == EINTR);
         close(fd);
-        if (count != 1 || release != 'r') _exit(9);
+        if (count != 1 || release != 'r') return 1;
         state->watchdog_gate = NULL;
     }
     return state->immediate || atomic_load(&state->output_seen) ||
@@ -53,22 +55,26 @@ static int descriptor_count(void) {
 }
 
 struct output_sink {
-    int fd; uint64_t budget, length; int stall;
+    int fd; uint64_t budget, length;
+    const char *append_gate;
+    const char *gate_entered;
     struct cancellation *cancel_on_output;
 };
 
 static int append_output(void *context, const unsigned char *bytes, size_t length) {
     struct output_sink *sink = context;
-    if (race.mode == 5) return -1;
-    if (race.mode == 6) {
-        race_wait(&race.watchdog_parked);
-        atomic_store(&race.release_watchdog, 1);
-        race_wait(&race.watchdog_signalled);
-        return -1;
-    }
-    if (sink->stall) {
-        struct timespec delay = {6, 0};
-        while (nanosleep(&delay, &delay) && errno == EINTR) {}
+    if (sink->append_gate) {
+        int fd;
+        do { fd = open(sink->append_gate, O_RDONLY); } while (fd < 0 && errno == EINTR);
+        if (fd < 0) return -1;
+        int entered = open(sink->gate_entered, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (entered < 0 || close(entered)) { close(fd); return -1; }
+        char release;
+        ssize_t count;
+        do { count = read(fd, &release, 1); } while (count < 0 && errno == EINTR);
+        close(fd);
+        if (count != 1 || release != 'r') return -1;
+        sink->append_gate = NULL;
     }
     if (length > sink->budget - sink->length) return -1;
     size_t remaining = length;
@@ -86,16 +92,13 @@ static int append_output(void *context, const unsigned char *bytes, size_t lengt
 }
 
 int main(int argc, char **argv) {
-    if (argc != 5 && argc != 6) return 2;
+    if (argc == 2 && !strcmp(argv[1], "terminal-decisions"))
+        return check_terminal_decisions();
+    if (argc != 5 && argc != 6 && argc != 7) return 2;
     int ignored_child = !strcmp(argv[3], "check-ignored-sigchld");
     int no_child_wait = !strcmp(argv[3], "check-no-cldwait");
     int handled_child = !strcmp(argv[3], "check-handled-sigchld");
-    race.mode = !strcmp(argv[3], "stale-watchdog") ? 1 :
-                !strcmp(argv[3], "exit-race") ? 2 :
-                !strcmp(argv[3], "exit-deadline") ? 3 :
-                !strcmp(argv[3], "exit-clock-error") ? 4 :
-                !strcmp(argv[3], "failure-cancel-race") ? 5 :
-                !strcmp(argv[3], "cancel-failure-race") ? 6 : 0;
+    race.mode = !strcmp(argv[3], "stale-watchdog");
     race.caller = pthread_self();
     int signal_case = ignored_child || no_child_wait || handled_child;
     int check = !strcmp(argv[3], "check") || signal_case;
@@ -123,8 +126,9 @@ int main(int argc, char **argv) {
     };
     atomic_init(&cancellation.output_seen, 0);
     if (!strcmp(argv[3], "delayed-watchdog")) {
-        if (argc != 6) return 2;
+        if (argc != 7) return 2;
         cancellation.watchdog_gate = argv[5];
+        cancellation.gate_entered = argv[6];
     }
     if (!strcmp(argv[3], "live-cancel")) {
         if (argc != 6 || access(argv[5], F_OK) == 0) return 2;
@@ -132,10 +136,13 @@ int main(int argc, char **argv) {
     }
     int cancel_on_output = !strcmp(argv[3], "output-cancel");
     int use_cancel = cancellation.immediate || cancellation.ready || cancel_on_output;
-    int use_callback = use_cancel || cancellation.watchdog_gate || race.mode >= 5;
+    int use_callback = use_cancel || cancellation.watchdog_gate;
+    int stall = !strcmp(argv[3], "stall-write");
+    if (stall && argc != 7) return 2;
     struct output_sink sink = {
         .fd = output, .budget = strtoull(argv[4], NULL, 10),
-        .stall = !strcmp(argv[3], "stall-write"),
+        .append_gate = stall ? argv[5] : NULL,
+        .gate_entered = stall ? argv[6] : NULL,
         .cancel_on_output = cancel_on_output ? &cancellation : NULL,
     };
     int baseline = descriptor_count();
@@ -164,8 +171,7 @@ int main(int argc, char **argv) {
             int status;
             if (!race.child || waitpid(race.child, &status, WNOHANG) != -1 || errno != ECHILD)
                 return 11;
-            if (race.mode == 5 && result != -1) return 12;
-            if (race.mode == 6 && result != 1) return 12;
+            if (atomic_load(&race.signals)) return 12;
         }
         if (descriptor_count() != baseline) return 7;
         if (repeat > 1 && result == 0) {

@@ -15,7 +15,7 @@ import threading
 import time
 from collections import Counter
 
-import dispatch_integration as fixture
+import model_fixture as fixture
 from host_process import HostDiagnostics, ReleaseGate
 
 
