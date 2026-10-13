@@ -71,6 +71,19 @@ pub fn finish(self: *Self) !void {
 
 /// Optional exit notice cannot hold a restored caller on stdout backpressure.
 pub fn detached(self: *Self, store: []const u8, session: []const u8) !void {
+    return self.detachedWithOps(store, session, NativeNoticeOps{});
+}
+
+const NativeNoticeOps = struct {
+    fn setFlags(_: @This(), flags: c_int) c_int {
+        return std.c.fcntl(1, std.c.F.SETFL, flags);
+    }
+    fn writeNotice(_: @This(), bytes: []const u8) isize {
+        return std.c.write(1, bytes.ptr, bytes.len);
+    }
+};
+
+fn detachedWithOps(self: *Self, store: []const u8, session: []const u8, ops: anytype) !void {
     std.debug.assert(!self.active);
     // Four characters per escaped byte, plus fixed labels and quoting.
     var buffer: [4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 128]u8 = undefined;
@@ -80,11 +93,73 @@ pub fn detached(self: *Self, store: []const u8, session: []const u8) !void {
     try Text.writeShellSession(&notice, session, true);
     try notice.writeAll("\n");
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
-    const enabled = std.c.fcntl(1, std.c.F.SETFL, self.flags[1] | nonblock) == 0;
-    const written = if (enabled) std.c.write(1, notice.buffered().ptr, notice.buffered().len) else -1;
+    const enabled = ops.setFlags(self.flags[1] | nonblock) == 0;
+    const written = if (enabled) ops.writeNotice(notice.buffered()) else -1;
     // Restore every attempted enable, without writing after a failed attempt.
-    if (std.c.fcntl(1, std.c.F.SETFL, self.flags[1]) < 0) return error.TerminalCleanupFailed;
+    if (ops.setFlags(self.flags[1]) < 0) return error.TerminalCleanupFailed;
     if (written != @as(isize, @intCast(notice.buffered().len))) return error.TerminalCleanupFailed;
+}
+
+test "detached notice restores flags and requires one complete nonblocking write" {
+    const Output = struct {
+        enable_failed: bool,
+        restore_failed: bool,
+        delivery: enum { failed, zero, short, full },
+        flags: c_int = 2,
+        sets: usize = 0,
+        writes: usize = 0,
+        blocking_write: bool = false,
+        bytes: [1024]u8 = undefined,
+        len: usize = 0,
+
+        fn setFlags(self: *@This(), flags: c_int) c_int {
+            self.sets += 1;
+            if (self.sets == 1) {
+                // Model the harder failure: enable mutates before failing.
+                self.flags = flags;
+                return if (self.enable_failed) -1 else 0;
+            }
+            if (self.restore_failed) return -1;
+            self.flags = flags;
+            return 0;
+        }
+        fn writeNotice(self: *@This(), bytes: []const u8) isize {
+            self.writes += 1;
+            const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+            self.blocking_write = self.blocking_write or self.flags & nonblock == 0;
+            @memcpy(self.bytes[0..bytes.len], bytes);
+            self.len = bytes.len;
+            return switch (self.delivery) {
+                .failed => -1,
+                .zero => 0,
+                .short => @intCast(bytes.len - 1),
+                .full => @intCast(bytes.len),
+            };
+        }
+    };
+    for ([_]bool{ false, true }) |enable_failed| {
+        for ([_]bool{ false, true }) |restore_failed| {
+            for ([_]@FieldType(Output, "delivery"){ .failed, .zero, .short, .full }) |delivery| {
+                var output: Output = .{ .enable_failed = enable_failed, .restore_failed = restore_failed, .delivery = delivery };
+                var terminal: Self = .{ .original = undefined, .flags = .{ 0, 2 }, .colour = false, .active = false };
+                const result = terminal.detachedWithOps("/tmp/a'\\\n", "--s", &output);
+                const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+                try std.testing.expectEqual(@as(c_int, 2) | (if (restore_failed) nonblock else 0), output.flags);
+                try std.testing.expectEqual(@as(usize, 2), output.sets);
+                try std.testing.expectEqual(@as(usize, if (enable_failed) 0 else 1), output.writes);
+                try std.testing.expect(!output.blocking_write);
+                if (!enable_failed) try std.testing.expectEqualStrings(
+                    "\nDetached. Host work continues.\nResume: rui resume --store $'/tmp/a\\'\\\\\\012' -- $'--s'\n",
+                    output.bytes[0..output.len],
+                );
+                if (!enable_failed and !restore_failed and delivery == .full) try result else try std.testing.expectError(error.TerminalCleanupFailed, result);
+            }
+        }
+    }
+    var output: Output = .{ .enable_failed = false, .restore_failed = false, .delivery = .full };
+    var terminal: Self = .{ .original = undefined, .flags = .{ 0, 2 }, .colour = false, .active = false };
+    try terminal.detachedWithOps("/tmp/store", "A\x00Z", &output);
+    try std.testing.expectEqualStrings("\nDetached. Host work continues.\nResume: rui resume --store $'/tmp/store' --session-hex 41005a\n", output.bytes[0..output.len]);
 }
 
 pub fn next(self: *Self, io: std.Io, pending: Editor.Pending, wait: i32) !?u8 {

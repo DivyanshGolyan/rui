@@ -160,12 +160,9 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     if (!real_write || real_write == probe_write) _exit(96);
     const char *fault = getenv("RUI_TERMINAL_FAULT");
     if (command_return_signal(fd, bytes, count)) return -1;
-    if (fd == 1 && detach_phase == 3 && fault && !strncmp(fault, "detach-write-", 13)) {
+    if (fd == 1 && detach_phase == 3 && fault && !strcmp(fault, "detach-write-full")) {
         record("detach-write\n");
         if (!(fcntl(fd, F_GETFL) & O_NONBLOCK)) record("detach-write-blocking\n");
-        if (!strcmp(fault, "detach-write-error")) { errno = EAGAIN; return -1; }
-        if (!strcmp(fault, "detach-write-zero")) return 0;
-        if (!strcmp(fault, "detach-write-short")) return real_write(fd, bytes, 1);
     }
     const char *diagnostic_arm = getenv("RUI_DIAGNOSTIC_ARM");
     if (fd == 2 && diagnostic_arm && !access(diagnostic_arm, F_OK)) {
@@ -352,8 +349,7 @@ int probe_fcntl(int fd, int command, ...) {
         if (detach_phase == 2 && (value & O_NONBLOCK)) {
             detach_phase = 3;
             record("detach-enable\n");
-            if (!strcmp(fault, "detach-enable")) { errno = EIO; return -1; }
-            if (!strncmp(fault, "detach-enable-mutated", 21)) {
+            if (!strcmp(fault, "detach-enable-mutated-reset")) {
                 int result = real_fcntl(fd, command, value);
                 if (result) return result;
                 record("detach-mutated\n");
@@ -362,7 +358,7 @@ int probe_fcntl(int fd, int command, ...) {
         } else if (detach_phase == 3 && !(value & O_NONBLOCK)) {
             detach_phase = 4;
             record("detach-reset\n");
-            if (!strcmp(fault, "detach-reset") || !strcmp(fault, "detach-enable-mutated-reset")) { errno = EIO; return -1; }
+            if (!strcmp(fault, "detach-enable-mutated-reset")) { errno = EIO; return -1; }
         }
     }
     return real_fcntl(fd, command, value);
@@ -1472,9 +1468,10 @@ def detach_reporting_cases(state, library):
     root.mkdir()
     home, store = root / "home", root / "store"
     home.mkdir(mode=0o700)
+    # Syscall permutations live with SessionTerminal. These cases own the
+    # frontend handoff: exact accepted identity, no resend and saved recovery.
     cases = [(kind, fault) for kind in ("message", "allow_once", "deny") for fault in
-        ("detach-enable-mutated", "detach-enable", "detach-enable-mutated-reset", "detach-reset")]
-    cases += [("message", f"detach-write-{result}") for result in ("error", "zero", "short", "full")]
+        ("detach-enable-mutated-reset", "detach-write-full")]
     responses = []
     for kind, fault in cases:
         name = f"{kind}-{fault}"
@@ -2358,6 +2355,62 @@ def host_diagnostic_cases(state, library):
                     pass  # Optional reporting cannot replace the original failure.
 
 
+def native_notice_cases(state):
+    """Exercise the public notice's libc adapter without a Host or interposer."""
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    binary = state / "terminal-notice"
+    subprocess.run(["zig", "build-exe", "-O", "ReleaseSafe", "-lc", "--dep", "terminal",
+        f"-Mroot={repo / 'tests/integration/terminal_notice.zig'}",
+        f"-Mterminal={repo / 'src/SessionTerminal.zig'}", f"-femit-bin={binary}"],
+        check=True, timeout=120)
+    expected = b"\nDetached. Host work continues.\nResume: rui resume --store $'/tmp/a\\' path' -- $'--session'\n"
+    for transport, full in (("pipe", False), ("pipe", True), ("pty", False)):
+        # PTY EAGAIN is not persistent: internal delivery can make space without
+        # a reader. A full pipe with no reader owns the backpressure witness.
+        reader, writer = os.pipe() if transport == "pipe" else pty.openpty()
+        try:
+            if transport == "pty":
+                attrs = termios.tcgetattr(writer)
+                attrs[1] &= ~termios.OPOST
+                termios.tcsetattr(writer, termios.TCSANOW, attrs)
+            flags = fcntl.fcntl(writer, fcntl.F_GETFL)
+            filled = 0
+            if full:
+                fcntl.fcntl(writer, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                while True:
+                    try:
+                        filled += os.write(writer, b"x" * 1024)
+                        assert filled < 1024 * 1024, "unbounded fixture output"
+                    except BlockingIOError:
+                        break
+                fcntl.fcntl(writer, fcntl.F_SETFL, flags)
+            result = subprocess.run([str(binary)], stdout=writer, stderr=subprocess.PIPE, timeout=5)
+            assert_file_flags(fcntl.fcntl(writer, fcntl.F_GETFL), flags)
+            assert result.returncode == (1 if full else 0), result.stderr
+            if full:
+                assert b"TerminalCleanupFailed" in result.stderr, result.stderr
+            else:
+                assert not result.stderr, result.stderr
+            # Read only after the actor exits. Bound reads even on a broken
+            # adapter, and reject extra/missing bytes, not just a prefix.
+            fcntl.fcntl(reader, fcntl.F_SETFL, fcntl.fcntl(reader, fcntl.F_GETFL) | os.O_NONBLOCK)
+            actual = bytearray()
+            while True:
+                try:
+                    chunk = os.read(reader, 4096)
+                    if not chunk:
+                        break
+                    actual.extend(chunk)
+                    assert len(actual) <= max(filled, len(expected)), "extra notice bytes"
+                except BlockingIOError:
+                    break
+            assert actual == (b"x" * filled if full else expected), actual
+            print(f"native notice: {transport} full={full}, exact bytes and restored flags passed", flush=True)
+        finally:
+            os.close(reader)
+            os.close(writer)
+
+
 def main(selected=None):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-terminal-restoration."))
     home = state / "home"
@@ -2366,6 +2419,11 @@ def main(selected=None):
     host = None
     completed = False
     try:
+        if selected in (None, "notice", "detach"):
+            native_notice_cases(state)
+        if selected == "notice":
+            completed = True
+            return
         source, library = state / "probe.c", state / "probe.so"
         source.write_text(PROBE)
         subprocess.run(["cc", "-dynamiclib" if sys.platform == "darwin" else "-shared",

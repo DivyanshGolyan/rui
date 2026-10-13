@@ -1,6 +1,13 @@
 #!/bin/sh
 set -eu
 
+python3 - <<'PY'
+import sys
+if sys.version_info < (3, 11):
+    sys.exit(f"Rui integration checks require Python 3.11 or newer; found {sys.version.split()[0]} at {sys.executable}. Select a newer python3 on PATH before running checks.")
+print(f"Integration Python: {sys.version.split()[0]} ({sys.executable})")
+PY
+
 directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 release_safe=$1
 debug=$2
