@@ -88,8 +88,8 @@ def preference_edits(home, store):
     assert saved.read_text() == pinned
 
 
-def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False):
-    output = b""
+def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, initial=b""):
+    output = initial
     received = 0
     deadline = time.monotonic() + timeout
     limit = 1024 * 1024
@@ -107,11 +107,18 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
             shown = shown.split(marker.encode(), 1)[1]
         return re.search("› [^\\r\\n]*(?:\\r\\n> [^\\r\\n]*)*(?:\\x1b\\[[0-9]+A)?\\r\\x1b\\[[0-9]+C".encode(), shown) is not None
     try:
+        assert len(output) < limit, "unexpected unbounded terminal output"
         while not reached():
             remaining = deadline - time.monotonic()
             assert remaining > 0, (marker, output.decode(errors="replace"))
             assert select.select([master], [], [], remaining)[0], (marker, output.decode(errors="replace"))
-            chunk = os.read(master, 65536)
+            try:
+                chunk = os.read(master, 65536)
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
+                chunk = b""
+            assert chunk, ("terminal closed before marker", marker, output.decode(errors="replace"))
             received += len(chunk)
             output += chunk
             if redraw:
@@ -129,7 +136,7 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
 
 def terminal_wait_oracles():
     """Bound retained redraws; never confuse diagnostic text with readiness."""
-    def collect(frames, marker, *, redraw=False, composer=False, error=None):
+    def collect(frames, marker, *, redraw=False, composer=False, error=None, close_output=False, initial=b""):
         reader, writer = os.pipe()
         stopped = threading.Event()
 
@@ -138,7 +145,8 @@ def terminal_wait_oracles():
                 for frame in frames:
                     while frame:
                         frame = frame[os.write(writer, frame):]
-                stopped.wait()
+                if not close_output:
+                    stopped.wait()
             except BrokenPipeError:
                 pass  # The expected collector refusal closes its reader.
             finally:
@@ -148,11 +156,16 @@ def terminal_wait_oracles():
         thread.start()
         try:
             try:
-                output = read_terminal(reader, marker, timeout=0.5, redraw=redraw, composer=composer)
+                output = read_terminal(reader, marker, timeout=0.5, redraw=redraw, composer=composer, initial=initial)
             except AssertionError as failure:
                 assert error is not None, failure
                 if error == "deadline":
                     assert isinstance(failure.args[0], tuple) and failure.args[0][0] == marker, failure
+                elif error == "closed":
+                    prefix = initial + b"".join(frames)
+                    assert failure.args[0] == ("terminal closed before marker", marker, prefix.decode()), failure
+                    assert failure.terminal_metadata["received_bytes"] == len(prefix) - len(initial), failure.terminal_metadata
+                    assert failure.terminal_metadata["retained_bytes"] == len(prefix), failure.terminal_metadata
                 else:
                     assert str(failure) == error, failure
             else:
@@ -179,6 +192,29 @@ def terminal_wait_oracles():
     collect([diagnostic.encode()], diagnostic, composer=True, error="deadline")
     output = collect([diagnostic.encode(), b"\n\xe2\x80\xba \r", b"\x1b[2C"], diagnostic, composer=True)
     assert diagnostic in output and "› \r\x1b[2C" in output
+    # A retained draft before the answer is not post-answer input readiness,
+    # including when a previous diagnostic read already consumed that prefix.
+    prior = "› retained café\r\x1b[15C\nafter decision".encode()
+    collect([], "after decision", composer=True, initial=prior, close_output=True, error="closed")
+    ready = b"\n\xe2\x80\xba \r\x1b[2C"
+    assert "after decision" in collect([ready], "after decision", composer=True, initial=prior)
+    assert "after decision" in collect([], "after decision", composer=True, initial=prior + ready)
+    collect([], "after decision", initial=b"x" * (1024 * 1024), error="unexpected unbounded terminal output")
+    collect([b"distinctive prefix"], "required cursor", close_output=True, error="closed")
+    # Linux PTY closure reports EIO; Darwin reports an empty read. Neither is
+    # input readiness or a deadline failure, and both retain the same context.
+    master, slave = pty.openpty()
+    os.close(slave)
+    try:
+        try:
+            read_terminal(master, "required cursor", timeout=0.5)
+        except AssertionError as failure:
+            assert failure.args[0] == ("terminal closed before marker", "required cursor", ""), failure
+            assert failure.terminal_metadata["received_bytes"] == 0, failure.terminal_metadata
+        else:
+            raise AssertionError("closed PTY became a ready terminal")
+    finally:
+        os.close(master)
     print("terminal wait oracles passed: bounded redraw suffix, exact cursor, strict transcript cap and returned composer", flush=True)
 
 
@@ -1193,8 +1229,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             assert not (state / "effect-count").exists() and not (state / "second-effect").exists()
             completed = True
             return
-        if answer not in settled:
-            settled += read_terminal(master, answer)
+        settled = read_terminal(master, answer, composer=True, initial=settled.encode())
         assert len(proxy.exchanges) == (2 if lost_reply else 1), proxy.exchanges
         if lost_reply:
             assert proxy.exchanges[0][0] == proxy.exchanges[1][0], "decision retry changed intent"
@@ -1409,7 +1444,6 @@ def store_selection_cases(state, workspace, valid_store):
         caller = subprocess.Popen([str(fixture.RUI), *args], cwd=workspace,
             env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
             pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-        os.close(slave)
         os.close(ready_write)
         try:
             settlement_timeout = 5
@@ -1444,6 +1478,7 @@ def store_selection_cases(state, workspace, valid_store):
                 caller.wait(timeout=5)
             os.close(ready_read)
             os.close(master)
+            os.close(slave)
             if case in ("explicit-create", "home-create") and destination.exists():
                 run(home, "host", "stop", "--store", destination)
                 fixture.wait_for(lambda: "Host: unavailable" in run(home, "host", "status", "--store", destination), "created Host stopped")
@@ -1611,7 +1646,6 @@ int fsync(int fd) {
     entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
         "--session", "capture/original"], env={**os.environ, "HOME": str(home)},
         stdin=slave, stdout=slave, stderr=slave)
-    os.close(slave)
     try:
         read_terminal(master, "› ")
         listing = terminal_step(master, "/requests")
@@ -1624,6 +1658,7 @@ int fsync(int fd) {
             entered.kill()
             entered.wait(timeout=5)
         os.close(master)
+        os.close(slave)
     print("saved capture owner: pinned original bytes, preference-independent recovery, failed announcement, "
         "sync uncertainty, listing asymmetry", flush=True)
 
@@ -1825,8 +1860,6 @@ def long_input_case(home, store, workspace, endpoint, host):
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", long_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
-        slave = None
         greeting = read_terminal(master, "› ")
         assert "Permission:" not in greeting, greeting
         assert "Bash runs without approval" in greeting, greeting
@@ -1945,10 +1978,70 @@ def long_input_case(home, store, workspace, endpoint, host):
             raise errors[0]
 
 
+def incomplete_input_case(home, store, session, endpoint, host):
+    """Retain terminal custody through delayed collection and restoration."""
+    import canonical_failure_integration as canonical
+    callers = []
+    before = len(endpoint.requests)
+    records = home / ".config/rui/requests"
+    before_records = {path: path.read_bytes() for path in records.glob("*.json")}
+    proxy = canonical.ReplyProxy(host, None)
+    try:
+        for incomplete in (b"\xc3", b"\x1b[200~unfinished", b"\x1b[", b"\x1bO"):
+            master, slave = pty.openpty()
+            try:
+                original = termios.tcgetattr(slave)
+                entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+                    "--session", session], env={**os.environ, "HOME": str(home)},
+                    stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            except BaseException:
+                os.close(master)
+                os.close(slave)
+                raise
+            deadline = time.monotonic() + 7
+            callers.append((master, slave, entered, original, deadline))
+            read_terminal(master, "› ", timeout=deadline - time.monotonic())
+            os.write(master, incomplete)
+            # Shared-Host polling is not decoder load coverage. Reap each
+            # caller before collection while retaining its parent slave.
+            assert entered.wait(timeout=deadline - time.monotonic()) != 0
+            output, errors = terminal_exit(entered, master, timeout=deadline - time.monotonic())
+            assert b"IncompleteTerminalInput" in errors, (output, errors)
+            assert b"\x1b[0m\x1b[?2004l" in output, "delayed collector lost terminal cleanup"
+            actual = termios.tcgetattr(slave)
+            if sys.platform == "darwin":
+                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                actual[3] &= ~mask
+                original[3] &= ~mask
+            assert actual == original, (actual, original)
+    finally:
+        incoming = sys.exc_info()[1]
+        errors = []
+        for master, slave, entered, _, _ in callers:
+            for dispose in (lambda: stop_process(entered, timeout=5),
+                            lambda: os.close(master), lambda: os.close(slave)):
+                try:
+                    dispose()
+                except BaseException as error:
+                    errors.append(error)
+        try:
+            proxy.close()
+        except BaseException as error:
+            errors.append(error)
+        if incoming is not None and errors:
+            incoming.add_note("incomplete-input disposal failed: " + ", ".join(type(error).__name__ for error in errors))
+        if incoming is None and errors:
+            raise errors[0]
+    assert not proxy.mutations, "incomplete terminal input transmitted a Message or Decision"
+    assert {path: path.read_bytes() for path in records.glob("*.json")} == before_records, "incomplete input published a capture"
+    assert len(endpoint.requests) == before, "incomplete terminal input reached provider"
+    print("incomplete input: all four native deadlines, delayed output, exact restoration and no dispatch passed", flush=True)
+
+
 def main(selected="all"):
     import canonical_failure_integration
     import terminal_restoration_integration
-    assert selected in ("all", "long-input", "terminal-waits", "persistent-permission"), selected
+    assert selected in ("all", "long-input", "terminal-waits", "persistent-permission", "incomplete-input"), selected
     if selected == "all":
         help_case()
     if selected in ("all", "terminal-waits"):
@@ -2017,6 +2110,12 @@ def main(selected="all"):
     completed = False
     try:
         host = fixture.start_host(store, url)
+        if selected == "incomplete-input":
+            run(home, "configure", "--store", store, "--session", "incomplete/input",
+                "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+            incomplete_input_case(home, store, "incomplete/input", endpoint, host)
+            completed = True
+            return
         if selected == "long-input":
             long_input_case(home, store, workspace, endpoint, host)
             completed = True
@@ -2213,7 +2312,6 @@ def main(selected="all"):
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", session], env={**os.environ, "HOME": str(preferences_home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             assert "Session:" not in read_terminal(master, "› ")
             assert f"Session: {session}" in terminal_step(master, "/status")
@@ -2224,6 +2322,7 @@ def main(selected="all"):
                 entered.kill()
                 entered.wait(timeout=5)
             os.close(master)
+            os.close(slave)
         saved.unlink()
         fallback.parent.mkdir(parents=True)
         fallback.symlink_to(store, target_is_directory=True)
@@ -2231,7 +2330,6 @@ def main(selected="all"):
         entered = subprocess.Popen([str(fixture.RUI), "session", "--session", session],
             env={**os.environ, "HOME": str(preferences_home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             assert "Session:" not in read_terminal(master, "› ")
             assert f"Session: {session}" in terminal_step(master, "/status")
@@ -2242,6 +2340,7 @@ def main(selected="all"):
                 entered.kill()
                 entered.wait(timeout=5)
             os.close(master)
+            os.close(slave)
         fallback.unlink()
         saved.write_text(f"version=1\nstore={state / 'missing'}\nprovider=codex\nmodel=gpt-6-luna\n")
         saved.chmod(0o600)
@@ -2281,10 +2380,10 @@ def main(selected="all"):
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
             os.close(master)
+            os.close(slave)
             os.close(ready_read)
             raise
         finally:
-            os.close(slave)
             os.close(ready_write)
         try:
             offered = provider_prompt(master, ready_read)
@@ -2298,6 +2397,7 @@ def main(selected="all"):
                 deferred.wait(timeout=5)
             os.close(ready_read)
             os.close(master)
+            os.close(slave)
         explicit_home = state / "explicit-home"
         explicit_config = explicit_home / ".config/rui"
         explicit_config.mkdir(parents=True, mode=0o700)
@@ -2314,10 +2414,10 @@ def main(selected="all"):
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
             os.close(master)
+            os.close(slave)
             os.close(ready_read)
             raise
         finally:
-            os.close(slave)
             os.close(ready_write)
         try:
             assert "No locally ready provider" in provider_prompt(master, ready_read)
@@ -2326,18 +2426,7 @@ def main(selected="all"):
             # malformed prospective defaults when it rechecks readiness.
             codex_fixture.credentials(explicit_config / "codex.json")
             os.write(master, b"d\n")
-            welcome = b""
-            deadline = time.monotonic() + 10
-            while "› ".encode("utf-8") not in welcome and time.monotonic() < deadline:
-                if not select.select([master], [], [], max(0, deadline - time.monotonic()))[0]:
-                    break
-                try:
-                    welcome += os.read(master, 65536)
-                except OSError as err:
-                    if err.errno != errno.EIO:
-                        raise
-                    break
-            welcome = welcome.decode(errors="replace")
+            welcome = read_terminal(master, "› ", timeout=10)
             assert all(noise not in welcome for noise in ("Session:", "Provider:", "Model:", "request:")), welcome
             record, = (explicit_config / "requests").glob("*.json")
             saved = json.loads(record.read_bytes())
@@ -2353,6 +2442,7 @@ def main(selected="all"):
                 explicit.wait(timeout=5)
             os.close(ready_read)
             os.close(master)
+            os.close(slave)
         # A valid opaque credential arrives while the prompt is open, then
         # becomes renewal-due before the choice. It remains usable for creation.
         (explicit_config / "codex.json").unlink()
@@ -2366,10 +2456,10 @@ def main(selected="all"):
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
             os.close(master)
+            os.close(slave)
             os.close(ready_read)
             raise
         finally:
-            os.close(slave)
             os.close(ready_write)
         try:
             assert "No locally ready provider" in provider_prompt(master, ready_read)
@@ -2396,6 +2486,7 @@ def main(selected="all"):
                 expiring.wait(timeout=5)
             os.close(ready_read)
             os.close(master)
+            os.close(slave)
         longer_store = state / "another-longer-store-selector"
         other_host = fixture.start_host(longer_store, url)
         try:
@@ -2413,10 +2504,10 @@ def main(selected="all"):
                         pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
                 except BaseException:
                     os.close(master)
+                    os.close(slave)
                     os.close(ready_read)
                     raise
                 finally:
-                    os.close(slave)
                     os.close(ready_write)
                 try:
                     assert "No locally ready provider" in provider_prompt(master, ready_read)
@@ -2439,6 +2530,7 @@ def main(selected="all"):
                         changing.wait(timeout=5)
                     os.close(ready_read)
                     os.close(master)
+                    os.close(slave)
         finally:
             fixture.stop_host(other_host)
         codex_fixture.credentials(credential)
@@ -2455,7 +2547,6 @@ def main(selected="all"):
             master, slave = pty.openpty()
             caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store), "--session", warning_ref],
                 env={**os.environ, "HOME": str(preferences_home)}, stdin=slave, stdout=slave, stderr=slave)
-            os.close(slave)
             try:
                 welcome = read_terminal(master, "› ")
                 assert "Permission:" not in welcome, welcome
@@ -2472,6 +2563,7 @@ def main(selected="all"):
                     caller.kill()
                     caller.wait(timeout=5)
                 os.close(master)
+                os.close(slave)
         created = []
         records = preferences_home / ".config/rui/requests"
         for persistent in (False, True):
@@ -2480,7 +2572,6 @@ def main(selected="all"):
             caller = subprocess.Popen([str(fixture.RUI), *(["--persistent"] if persistent else [])], cwd=workspace,
                 env={**os.environ, "HOME": str(preferences_home)},
                 stdin=slave, stdout=slave, stderr=slave)
-            os.close(slave)
             try:
                 welcome = read_terminal(master, "› ")
                 assert "Attached to the ready Host" not in welcome and "Diagnostics:" not in welcome, welcome
@@ -2511,6 +2602,7 @@ def main(selected="all"):
                     caller.kill()
                     caller.wait(timeout=5)
                 os.close(master)
+                os.close(slave)
         assert len(set(created)) == 2, "independent new intent reused a reference"
         blocked_home = state / "blocked-capture-home"
         blocked_config = blocked_home / ".config/rui"
@@ -2522,7 +2614,7 @@ def main(selected="all"):
         codex_fixture.credentials(blocked_config / "codex.json")
         sessions_before = run(preferences_home, "sessions", "--store", store, "--all", "--json")
         master, slave = pty.openpty()
-        original_mode = termios.tcgetattr(master)
+        original_mode = termios.tcgetattr(slave)
         blocked = None
         try:
             blocked = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
@@ -2532,9 +2624,9 @@ def main(selected="all"):
             # discard unread PTY bytes when the last slave closes.
             output, errors = terminal_exit(blocked, master, timeout=20)
             assert blocked.returncode == 1 and b"error: NotDir" in errors, (output, errors)
-            output = (output + errors).decode(errors="replace")
-            assert "New Session intent" not in output and "request: " not in output and "› " not in output, output
-            assert termios.tcgetattr(master) == original_mode
+            combined = output + errors
+            assert all(text not in combined for text in (b"New Session intent", b"request: ", "› ".encode())), combined
+            assert termios.tcgetattr(slave) == original_mode
             assert (blocked_config / "requests").read_text() == "not a directory"
             assert run(preferences_home, "sessions", "--store", store, "--all", "--json") == sessions_before
         finally:
@@ -2551,7 +2643,6 @@ def main(selected="all"):
         interrupted = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
             env={**os.environ, "HOME": str(preferences_home), "RUI_TEST_CAPTURE_GATE": str(gate)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             fixture.wait_for(lambda: pathlib.Path(f"{gate}.ready").exists(), "fresh configuration captured")
             early = os.read(master, 65536) if select.select([master], [], [], 0)[0] else b""
@@ -2574,6 +2665,7 @@ def main(selected="all"):
                 interrupted.kill()
                 interrupted.wait(timeout=5)
             os.close(master)
+            os.close(slave)
         credential.unlink()
         initial = fixture.command("inspect-session", "--store", store, "--session", session)
         assert initial["selected_message"] is None and initial["recent_messages"] == [], initial
@@ -2679,10 +2771,10 @@ def main(selected="all"):
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
             os.close(master)
+            os.close(slave)
             os.close(ready_read)
             raise
         finally:
-            os.close(slave)
             os.close(ready_write)
         try:
             greeting = read_terminal(master, "› ")
@@ -2754,6 +2846,7 @@ def main(selected="all"):
                 entered.wait(timeout=5)
             os.close(ready_read)
             os.close(master)
+            os.close(slave)
         assert run(home, "follow", queued) == "return: outcome\nadmitted: accepted\nstatus: completed\n"
         assert run(home, "recover", stale["request"]) == (
             f"Store: {store}\nSession: {session}\nkey: {stale['request']}\n"
@@ -2830,7 +2923,6 @@ def main(selected="all"):
             "--session", sibling_session], env={**os.environ, "HOME": str(fresh_home),
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             deadline = time.monotonic() + 15
             opening = read_terminal(master, "a: Allow once / d: Deny (Enter)", timeout=deadline - time.monotonic())
@@ -2850,6 +2942,7 @@ def main(selected="all"):
             os.close(master)
             os.close(ready_read)
             os.close(ready_write)
+            os.close(slave)
         run(home, "allow-action", "--store", store, "--session", sibling_session,
             "--action", running)
         fixture.wait_for(lambda: sibling_started.exists(), "approved sibling in flight")
@@ -2862,7 +2955,6 @@ def main(selected="all"):
             "--session", sibling_session], env={**os.environ, "HOME": str(home),
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             waiting = read_terminal(master, "a: Allow once / d: Deny (Enter)")
             waiting += action_ready(ready_read, master)
@@ -2902,6 +2994,7 @@ def main(selected="all"):
             os.close(master)
             os.close(ready_read)
             os.close(ready_write)
+            os.close(slave)
         fixture.wait_for(lambda: fixture.completed_observation(store, sibling_key), "sibling outcome")
         assert run(home, "result", sibling_key) == "admitted: accepted\nresult: completed\nsiblings done\n"
         assert sibling_effect.read_text() == "y" and counter.read_text() == "x"
@@ -2936,7 +3029,6 @@ def main(selected="all"):
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", failure_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             read_terminal(master, "› ")
             failed = terminal_step(master, f"/result {failed_key}")
@@ -2950,6 +3042,7 @@ def main(selected="all"):
                 entered.kill()
                 entered.wait(timeout=5)
             os.close(master)
+            os.close(slave)
 
         stop_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("stopped-answer", "stopped-reason",
@@ -3100,10 +3193,10 @@ def main(selected="all"):
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
             os.close(master)
+            os.close(slave)
             os.close(ready_read)
             raise
         finally:
-            os.close(slave)
             os.close(ready_write)
         try:
             assert "Permission:" not in read_terminal(master, "› ")
@@ -3165,6 +3258,7 @@ def main(selected="all"):
                 entered.wait(timeout=5)
             os.close(ready_read)
             os.close(master)
+            os.close(slave)
         control_session = "human/name\n\x1b[2J\u202e"
         run(home, "configure", "--store", store, "--session", control_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
@@ -3172,7 +3266,6 @@ def main(selected="all"):
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", control_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             greeting = read_terminal(master, "› ")
             assert "Session:" not in greeting, greeting
@@ -3193,12 +3286,12 @@ def main(selected="all"):
             resume_bin.mkdir()
             (resume_bin / "rui").symlink_to(fixture.RUI)
             os.close(master)
+            os.close(slave)
             master, slave = pty.openpty()
             entered = subprocess.Popen(["bash", "-c", "exec " + resume],
                 env={**os.environ, "HOME": str(home),
                      "PATH": str(resume_bin) + os.pathsep + os.environ["PATH"]},
                 stdin=slave, stdout=slave, stderr=slave)
-            os.close(slave)
             read_terminal(master, "› ")
             resumed = terminal_step(master, "/status")
             assert "Session: human/name\\n\\x1b[2J\\u202e" in resumed, resumed
@@ -3211,6 +3304,7 @@ def main(selected="all"):
                 entered.kill()
                 entered.wait(timeout=5)
             os.close(master)
+            os.close(slave)
         unsafe_session = "human/unsafe-key"
         unsafe_key = "message\n\x1b[2J\u202e"
         unsafe_release = threading.Event()
@@ -3233,7 +3327,6 @@ def main(selected="all"):
             entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
                 "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
                 stdin=slave, stdout=slave, stderr=slave)
-            os.close(slave)
             try:
                 read_terminal(master, "› ")
                 status = terminal_step(master, "/status")
@@ -3246,6 +3339,7 @@ def main(selected="all"):
                     entered.kill()
                     entered.wait(timeout=5)
                 os.close(master)
+                os.close(slave)
         finally:
             unsafe_release.set()
             waiter.communicate(timeout=10)
@@ -3256,7 +3350,6 @@ def main(selected="all"):
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             greeting = read_terminal(master, "› ")
             assert "Session:" not in greeting and "\n  safe result" in greeting, greeting
@@ -3271,6 +3364,7 @@ def main(selected="all"):
                 entered.kill()
                 entered.wait(timeout=5)
             os.close(master)
+            os.close(slave)
         empty_session = "human/empty-key"
         run(home, "configure", "--store", store, "--session", empty_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
@@ -3324,7 +3418,6 @@ def main(selected="all"):
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", editor_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             read_terminal(master, "› ")
             for index, (typed, expected) in enumerate(cases):
@@ -3419,11 +3512,11 @@ def main(selected="all"):
                 entered.kill()
                 entered.wait(timeout=5)
             os.close(master)
+            os.close(slave)
         master, slave = pty.openpty()
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", empty_session], env={**os.environ, "HOME": str(fresh_home)},
             stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             assert "Recent messages" not in read_terminal(master, "› ")
             fixture.wait_for(lambda: not termios.tcgetattr(master)[3] & termios.ICANON,
@@ -3437,6 +3530,7 @@ def main(selected="all"):
                 entered.kill()
                 entered.wait(timeout=5)
             os.close(master)
+            os.close(slave)
         for columns in (7, 8):
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
@@ -3467,28 +3561,7 @@ def main(selected="all"):
                 entered.stderr.close()
                 os.close(master)
                 os.close(slave)
-        # These are decoder witnesses, not Host admission load. Polling
-        # callers sharing this Host can exhaust its classification places.
-        before = len(endpoint.requests)
-        for incomplete in (b"\xc3", b"\x1b[200~unfinished", b"\x1b[", b"\x1bO"):
-            master, slave = pty.openpty()
-            entered = None
-            try:
-                entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-                    "--session", empty_session], env={**os.environ, "HOME": str(fresh_home)},
-                    stdin=slave, stdout=slave, stderr=slave)
-                read_terminal(master, "› ")
-                os.write(master, incomplete)
-                assert "IncompleteTerminalInput" in read_terminal(master, "IncompleteTerminalInput", timeout=7)
-                assert entered.wait(timeout=5) != 0
-                assert termios.tcgetattr(master)[3] & termios.ICANON
-            finally:
-                if entered is not None and entered.poll() is None:
-                    entered.kill()
-                    entered.wait(timeout=5)
-                os.close(master)
-                os.close(slave)
-        assert len(endpoint.requests) == before, "incomplete terminal input reached Host"
+        incomplete_input_case(fresh_home, store, empty_session, endpoint, host)
         observation_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("observed-later", "observed-later-reason",
             "observed-later-message", "observed later")[0], observation_release))
