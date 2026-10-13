@@ -573,6 +573,40 @@ class HostStartError(RuntimeError):
         self.pid = pid
 
 
+def cleanup_failure(error):
+    """Bound secondary diagnostics while retaining the failing owner and action."""
+    try:
+        detail = str(error)[:512]
+    except BaseException:
+        detail = "<message unavailable>"
+    trace = error.__traceback__
+    while trace is not None and trace.tb_next is not None:
+        trace = trace.tb_next
+    location = (f" at {pathlib.Path(trace.tb_frame.f_code.co_filename).name}:{trace.tb_lineno}"
+                if trace is not None else "")
+    return f"{type(error).__name__}{location}: {detail}"
+
+
+def dispose_all(*disposals):
+    """Run ordered fixture disposals without replacing an active body failure."""
+    incoming_error = sys.exception()
+    errors = []
+    for index, dispose in enumerate(disposals, 1):
+        try:
+            dispose()
+        except BaseException as error:
+            errors.append((index, error))
+    if errors:
+        primary = incoming_error if incoming_error is not None else errors[0][1]
+        for index, error in errors:
+            try:
+                primary.add_note(f"Fixture disposal {index} failed: {cleanup_failure(error)}")
+            except BaseException:
+                pass  # Secondary reporting cannot replace the primary failure.
+        if incoming_error is None:
+            raise primary
+
+
 def stop_process(process, timeout=10, *, seal_observations=True):
     deadline = time.monotonic() + timeout
     errors = []
@@ -609,12 +643,15 @@ def stop_process(process, timeout=10, *, seal_observations=True):
         if errors:
             for error in errors:
                 try:
-                    print(f"Host cleanup failed: {type(error).__name__}", file=sys.stderr)
-                except Exception:
+                    print(f"Host cleanup failed: {cleanup_failure(error)}", file=sys.stderr)
+                except BaseException:
                     pass
             if incoming_error is None:
                 raise errors[0]
-            incoming_error.add_note("Host cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
+            try:
+                incoming_error.add_note("Host cleanup failed: " + ", ".join(cleanup_failure(error) for error in errors))
+            except BaseException:
+                pass  # Secondary reporting cannot replace the primary failure.
     finally:
         if (incoming_error is not None or errors) and observations is not None:
             observations.preserve_failure(snapshot)

@@ -13,6 +13,10 @@ import subprocess
 RULES = (
     (("src/logic_tests.zig", "src/execution_turn.zig", "src/request_encoding.zig", "src/AnswerRenderer.zig"),
      ("test-logic",), (), "Portable owner transitions and encoding"),
+    (("src/SessionFrontend.zig", "src/session_departure.zig"),
+     ("test-logic", "check", "admission-debug-integration"),
+     ("test-logic", "check", "admission-debug-integration"),
+     "Frontend value decisions and native terminal/borrower handoffs"),
     (("src/cli.zig", "src/client.zig", "src/Terminal*", "src/preferences.zig", "src/provider_selection.zig"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
      "CLI selection and otherwise unnamed native terminal/caller checks"),

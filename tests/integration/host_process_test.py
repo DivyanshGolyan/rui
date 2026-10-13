@@ -24,6 +24,7 @@ from host_process import (
     HostStartError,
     ReleaseGate,
     _Observations,
+    dispose_all,
     start_ready_process,
     stop_process,
 )
@@ -60,6 +61,7 @@ def assert_reaped(source, description, *, timeout=0.2, required_fields=None, obs
 
 
 def main():
+    prove_dispose_all()
     prove_terminal_capture_budget()
     prove_execution_release_oracles()
     prove_required_capture_receipts()
@@ -367,21 +369,35 @@ time.sleep(30)
             assert (facts['returncode'] is None) == (case != 'duplicate'), facts
             assert facts['post_reap_state'][0:3] == [1, pid, 37], facts
             assert not list(destination.rglob('rui.sqlite3'))
-    with tempfile.TemporaryDirectory() as directory:
-        root = pathlib.Path(directory)
-        process, _ = start_ready_process(child(source) + ['--store', str(root / 'store'), '--case', 'lost'],
-                                         observations='managed', timeout=1)
-        diagnostics = HostDiagnostics(process)
-        primary = AssertionError('original managed result assertion')
-        try:
+    class NoteFailure(AssertionError):
+        def add_note(self, note):
+            raise RuntimeError('secondary reporting unavailable')
+
+    for nested, primary in ((True, AssertionError('original managed result assertion')),
+                            (False, NoteFailure('original managed result assertion'))):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            process, _ = start_ready_process(child(source) + ['--store', str(root / 'store'), '--case', 'lost'],
+                                             observations='managed', timeout=1)
+            diagnostics = HostDiagnostics(process)
+            disposed = threading.Event()
             try:
-                raise primary
-            finally:
-                stop_process(process)
-        except AssertionError as error:
-            assert error is primary and any('Host cleanup failed' in note for note in error.__notes__), error
-        assert process.returncode is not None and process.stdout.closed and process.stderr.closed
-        assert not diagnostics.thread.is_alive() and not process.rui_observations.thread.is_alive()
+                try:
+                    raise primary
+                finally:
+                    if nested:
+                        dispose_all(lambda: stop_process(process), disposed.set)
+                    else:
+                        stop_process(process)
+            except AssertionError as error:
+                assert error is primary, error
+                if nested:
+                    assert any('Host cleanup failed' in note for note in error.__notes__), error
+                    assert any('native observation loss invalidates evidence' in note for note in error.__notes__), error.__notes__
+            if nested:
+                assert disposed.is_set(), 'nested cleanup failure skipped later disposal'
+            assert process.returncode is not None and process.stdout.closed and process.stderr.closed
+            assert not diagnostics.thread.is_alive() and not process.rui_observations.thread.is_alive()
     print('Required receipts: optional authority/wrong plan/disposable retention refused; missing/duplicate/lost native gate fails; original failure survives release/reap/root teardown')
 
 
@@ -1000,6 +1016,58 @@ def prove_terminal_capture_budget():
                 assert late_stage is None, f"accepted late {late_stage} at {clock[0]}"
                 assert reached == ["read", "release"], reached
     print("Terminal capture caller clock: timely exact read/release accepted; late exact read and release rejected")
+
+
+def prove_dispose_all():
+    for body_failed in (True, False):
+        body_error = AssertionError("original body failure")
+        cleanup_error = RuntimeError("first cleanup failure")
+        later_error = OSError("later cleanup failure; release gate manually: " + "x" * 2000)
+        reader, writer = os.pipe()
+        process = subprocess.Popen(child("time.sleep(10)"))
+        attempted = []
+
+        def fail(error):
+            attempted.append(error)
+            raise error
+
+        try:
+            try:
+                if body_failed:
+                    raise body_error
+            finally:
+                dispose_all(lambda: fail(cleanup_error),
+                            lambda: os.close(reader),
+                            lambda: fail(later_error),
+                            lambda: stop_process(process, timeout=5),
+                            lambda: os.close(writer))
+        except BaseException as error:
+            assert error is (body_error if body_failed else cleanup_error), error
+            assert attempted == [cleanup_error, later_error], attempted
+            assert len(error.__notes__) == 2, error.__notes__
+            assert "disposal 1" in error.__notes__[0] and "first cleanup failure" in error.__notes__[0], error.__notes__
+            assert "disposal 3" in error.__notes__[1] and "release gate manually" in error.__notes__[1], error.__notes__
+            assert all(len(note) < 1024 for note in error.__notes__), "unbounded cleanup diagnostic"
+            assert process.poll() is not None, "later child disposal skipped"
+            for fd in (reader, writer):
+                try:
+                    os.fstat(fd)
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError("later descriptor disposal skipped")
+        else:
+            raise AssertionError("cleanup failure suppressed on successful body")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            for fd in (reader, writer):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+    print("Fixture disposal: primary failure retained, all resources attempted")
 
 
 if __name__ == "__main__":
