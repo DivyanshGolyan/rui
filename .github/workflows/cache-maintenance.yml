@@ -13,18 +13,25 @@ on:
       - '.github/scripts/prune-caches.cjs'
   schedule:
     - cron: '43 5 * * *'
+  workflow_run:
+    workflows: [Selected checks, Daily changed-main macOS]
+    types: [completed]
 
 permissions:
   contents: read
 
 concurrency:
-  group: cache-maintenance
+  # Completion cleanups must not replace a pending scheduled/push baseline.
+  group: cache-maintenance-${{ github.event_name == 'workflow_run' && 'prune' || 'baseline' }}
   # Finish cache saves; only superseded pending refreshes may be replaced.
   cancel-in-progress: false
 
 jobs:
   prune:
-    if: ${{ !github.event.repository.private && github.ref == 'refs/heads/main' }}
+    needs: baseline
+    # Job completion includes post-job saves. A successful matrix peer can save
+    # even when another fails; workflow_run skips baseline but still cleans up.
+    if: ${{ always() && !github.event.repository.private && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -34,6 +41,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          # workflow_run uses the default-branch SHA, never the producer's head.
+          # Do not restore its caches or download its artifacts in this job.
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Remove obsolete Rui cache snapshots
@@ -42,7 +51,7 @@ jobs:
           script: |
             await require('./.github/scripts/prune-caches.cjs')({github, context, core});
   baseline:
-    needs: prune
+    if: ${{ github.event_name != 'workflow_run' && !github.event.repository.private && github.ref == 'refs/heads/main' }}
     strategy:
       fail-fast: false
       matrix:

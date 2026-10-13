@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const {readFileSync, readdirSync} = require('node:fs');
 const {test} = require('node:test');
 const prune = require('../../.github/scripts/prune-caches.cjs');
 
@@ -86,4 +87,55 @@ test('only already-absent deletion is recoverable', async () => {
   const denied = await run(caches, {1: 'closed'}, {deletion: 403});
   assert.equal(denied.error.status, 403);
   assert.deepEqual(denied.ids, [1, 2]);
+});
+
+test('cleanup follows every cache producer, including failed workflows with successful jobs', () => {
+  const directory = `${__dirname}/../../.github/workflows`;
+  const workflow = readFileSync(`${directory}/cache-maintenance.yml`, 'utf8');
+  // Inspect the owning dependency and event declarations. Actionlint validates
+  // complete YAML/Actions syntax; these assertions guard lifecycle ordering.
+  const jobs = Object.fromEntries([...workflow.matchAll(/^  (\w+):\n((?: {4}[^\n]*\n|\n)+)/gm)]
+    .map(([, name, body]) => [name, body]));
+  assert.match(jobs.prune, /^    needs: baseline\s*$/m,
+    'prune must wait for baseline post-job cache saves');
+  assert.match(jobs.prune, /^    if:.*always\(\)/m,
+    'successful matrix peers may save even if another peer fails');
+  assert.doesNotMatch(jobs.prune, /needs\.baseline\.result|workflow_run\.conclusion/);
+  assert.match(jobs.baseline, /github\.event_name != 'workflow_run'/,
+    'completion events must not launch another baseline');
+  assert.match(jobs.workflow_run, /types: \[completed\]/);
+  for (const file of readdirSync(directory).filter(file => file.endsWith('.yml') && file !== 'cache-maintenance.yml')) {
+    const producer = readFileSync(`${directory}/${file}`, 'utf8');
+    if (!/uses: (?:\.\/\.github\/actions\/setup|actions\/cache(?:\/save)?@)/.test(producer)) continue;
+    const name = producer.match(/^name: (.+)$/m)[1];
+    assert.ok(jobs.workflow_run.includes(name), `${file} needs post-publication cleanup`);
+  }
+  assert.match(jobs.prune, /ref: \$\{\{ github\.sha \}\}/);
+  assert.doesNotMatch(jobs.prune, /workflow_run\.head_|actions\/download-artifact|actions\/cache|uses: \.\/\.github\/actions\/setup/,
+    'privileged cleanup must use default-branch code, not producer code or caches');
+});
+
+test('post-publication cleanup retains new saves and reconciles later concurrent saves', async () => {
+  // Exact hits publish nothing; fallback hits and cold builds publish new keys.
+  // A failed matrix peer does not undo another peer's successful post-job save.
+  for (const [ref, platform, part, limit] of [
+    ['refs/heads/main', 'Linux-X64', 'baseline', 2],
+    ['refs/heads/main', 'macOS-ARM64', 'baseline', 2],
+    ['refs/heads/main', 'macOS-ARM64', 'all', 2],
+    ['refs/pull/12/merge', 'Linux-X64', 'all', 1],
+  ]) {
+    const original = Array.from({length: limit}, (_, i) => cache(i + 1, ref, platform, part));
+    for (const saved of [false, true]) {
+      const published = saved ? [...original, cache(10, ref, platform, part)] : original;
+      const result = await run(published, {12: 'open'});
+      assert.ifError(result.error);
+      assert.deepEqual(result.ids, saved ? (limit === 2 ? [2, 10] : [10]) : original.map(c => c.id));
+      // Publication after this inventory temporarily exceeds the target. Its
+      // own completion requests another cleanup; this is not an atomic quota.
+      const later = [...published.filter(c => result.ids.includes(c.id)), cache(20, ref, platform, part)];
+      const reconciled = await run(later, {12: 'open'});
+      assert.ifError(reconciled.error);
+      assert.deepEqual(reconciled.ids, limit === 2 ? [saved ? 10 : 2, 20] : [20]);
+    }
+  }
 });
