@@ -12,6 +12,7 @@ import select
 import shlex
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -651,7 +652,7 @@ def peer_population_case(*, qualify_latency=True):
             incoming.add_note("Peer population disposal failures: " + ", ".join(type(error).__name__ for error in errors))
 
 
-def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False):
+def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, after=None):
     output = b""
     received = 0
     deadline = time.monotonic() + timeout
@@ -664,6 +665,9 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
         return re.sub(rb"\x1b\[(?:33|39|90|91|94)m", b"", output)
     def reached():
         shown = visible()
+        if after is not None:
+            _, boundary, shown = shown.partition(after.encode())
+            if not boundary: return False
         if marker != "› ":
             if marker.encode() not in shown: return False
             if not composer: return True
@@ -742,6 +746,32 @@ def terminal_wait_oracles():
     collect([diagnostic.encode()], diagnostic, composer=True, error="deadline")
     output = collect([diagnostic.encode(), b"\n\xe2\x80\xba \r", b"\x1b[2C"], diagnostic, composer=True)
     assert diagnostic in output and "› \r\x1b[2C" in output
+    # Sending a command does not make its nonempty editing redraw a reply.
+    # Exercise terminal_step itself, with the producer still open after the
+    # draft. Include Home-position cursor, multi-line draft and an unread
+    # idle redraw. Slash commands end and reacquire terminal custody.
+    for prefix, draft in (("", "› /setup --model example\r\x1b[24C"),
+                          ("", "› /setup\r\x1b[2C"),
+                          ("", "› /setup\r\n> --model example\r\x1b[17C"),
+                          ("", "› \r\x1b[2C"), ("\x15", "› \r\x1b[2C")):
+        for handoff, completed in ((False, False), (True, False), (True, True)):
+            reader, writer = socket.socketpair()
+            try:
+                frame = draft + ("\x1b[?2004l\r\nSaved defaults for future Sessions.\r\n\x1b[?2004h" if handoff else "")
+                if completed:
+                    frame += "› \r\x1b[2C"
+                writer.sendall(frame.encode())
+                try:
+                    output = terminal_step(reader.fileno(), prefix + "/setup --model example", timeout=0.05)
+                except AssertionError as error:
+                    assert not completed, "complete command reply was not observed"
+                    assert isinstance(error.args[0], tuple) and error.args[0][0] == "› \r\x1b[2C", error
+                else:
+                    assert completed, "editing redraw was accepted as a command reply"
+                    assert "Saved defaults for future Sessions." in output, output
+            finally:
+                reader.close()
+                writer.close()
     print("terminal wait oracles passed: bounded redraw suffix, exact cursor, strict transcript cap and returned composer", flush=True)
 
 
@@ -807,9 +837,14 @@ def terminal_gate(caller, master, reached, context, timeout=10):
     return bytes(streams[master])
 
 
-def terminal_step(master, command, marker="› ", *, composer=False):
+def terminal_step(master, command, marker="› ", *, composer=False, timeout=15):
     os.write(master, (command + "\n").encode())
-    return read_terminal(master, marker, composer=composer)
+    if marker == "› ":
+        # Command handoff and entry from provider choice acquire terminal
+        # custody before the returned composer. Editing/idle redraws do not.
+        # Input may contain editing controls, so do not parse it as a command.
+        return read_terminal(master, "› \r\x1b[2C", timeout=timeout, after="\x1b[?2004h")
+    return read_terminal(master, marker, composer=composer, timeout=timeout)
 
 
 def command_entry_cases():
@@ -3220,10 +3255,13 @@ def main(selected="all"):
             assert "gpt-6-luna" in terminal_step(master, "/setup")
             assert "Permission: ask" in terminal_step(master, "/status")
             assert not credential.exists(), "unsupported in-session login created credentials"
-            assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model gpt-6-luna")
-            assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model other-model")
+            setup_reply = terminal_step(master, "/setup --model gpt-6-luna")
+            assert "Saved defaults for future Sessions" in setup_reply, setup_reply
+            setup_reply = terminal_step(master, "/setup --model other-model")
+            assert "Saved defaults for future Sessions" in setup_reply, setup_reply
             interactive_saved = preferences_home / ".config/rui/preferences"
-            assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --clear-model")
+            setup_reply = terminal_step(master, "/setup --clear-model")
+            assert "Saved defaults for future Sessions" in setup_reply, setup_reply
             assert interactive_saved.read_text().endswith("provider=codex\nmodel=\n")
             cleared_preferences = interactive_saved.read_bytes()
             for command, error in (("/setup --clear-model --model gpt-6-luna", "ConflictingPreferenceModelEdit"),
@@ -3234,20 +3272,23 @@ def main(selected="all"):
             assert "Permission: ask" in terminal_step(master, "/status")
             active = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
             assert active["model"] == "model-a" and active["permission_mode"] == "ask", active
-            assert "Saved defaults for future Sessions" in terminal_step(master, "/setup --model gpt-6-luna")
+            setup_reply = terminal_step(master, "/setup --model gpt-6-luna")
+            assert "Saved defaults for future Sessions" in setup_reply, setup_reply
             spaced_store = state / "spaced store"
             spaced_store.mkdir(mode=0o700)
-            assert "Saved defaults for future Sessions" in terminal_step(master, f'/setup --store "{spaced_store}"')
+            setup_reply = terminal_step(master, f'/setup --store "{spaced_store}"')
+            assert "Saved defaults for future Sessions" in setup_reply, setup_reply
             assert json.loads(run(preferences_home, "defaults", "inspect"))["store"] == str(spaced_store.resolve())
             quoted_store = state / 'quoted "store"'
             quoted_store.mkdir(mode=0o700)
             escaped_store = str(quoted_store).replace('"', r'\"')
-            assert "Saved defaults for future Sessions" in terminal_step(
-                master, f'/setup --store "{escaped_store}"')
+            setup_reply = terminal_step(master, f'/setup --store "{escaped_store}"')
+            assert "Saved defaults for future Sessions" in setup_reply, setup_reply
             assert json.loads(run(preferences_home, "defaults", "inspect"))["store"] == str(quoted_store.resolve())
             assert "Usage: /setup" in terminal_step(master, '/setup --store "unfinished')
             assert json.loads(run(preferences_home, "defaults", "inspect"))["store"] == str(quoted_store.resolve())
-            assert "Saved defaults for future Sessions" in terminal_step(master, f'/setup --store "{store}"')
+            setup_reply = terminal_step(master, f'/setup --store "{store}"')
+            assert "Saved defaults for future Sessions" in setup_reply, setup_reply
             assert "Permission: ask" in terminal_step(master, "/status")
             assert fixture.command("session", "inspect", "--store", store,
                 "--session", session)["session"]["model"] == "model-a"
