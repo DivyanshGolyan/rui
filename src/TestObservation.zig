@@ -19,7 +19,7 @@ const TestHold = struct {
     var before_sealed_loss: ?*const fn () void = null;
 };
 
-pub const Plan = enum { control, status, stop, list, dispatch, capture, recovery, managed };
+pub const Plan = enum { control, status, stop, list, dispatch, capture, recovery, managed, bash_cleanup, bash_pipes };
 pub const record_bytes = 512; // POSIX minimum atomic pipe-write size.
 const header_bytes = 28;
 // Fixture-owned unlinked backing. Fixture mutation is only atomic admission
@@ -140,6 +140,16 @@ pub const Publication = struct {
 };
 
 fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
+    if (self.plan == .bash_cleanup) {
+        inline for (.{ "cleanup_started", "cleanup_release_observed", "cleanup_completed", "inspection_captured" }) |name| {
+            if (std.mem.eql(u8, phase, name)) return true;
+        }
+        return false;
+    }
+    if (self.plan == .bash_pipes) {
+        return std.mem.eql(u8, phase, "bash_leader_observed_with_open_pipes") or
+            std.mem.eql(u8, phase, "control_store_complete");
+    }
     if (self.plan == .capture) {
         inline for (.{ "capture_write_gate_entered", "transport_resume_capture_failure", "effect_stop_requested" }) |name| {
             if (std.mem.eql(u8, phase, name)) return true;
@@ -320,6 +330,8 @@ test "private owner observations preserve selected custody through SIGKILL" {
         const plan: Plan = @enumFromInt(field.value);
         const phase = switch (plan) {
             .control => "cleanup_completed",
+            .bash_cleanup => "cleanup_release_observed",
+            .bash_pipes => "bash_leader_observed_with_open_pipes",
             .dispatch => "control_store_queued",
             .capture => "capture_write_gate_entered",
             .recovery => "action_attempt_admitted",
@@ -387,6 +399,8 @@ test "private owner observations seal admission without forgiving held or late p
         const plan: Plan = @enumFromInt(field.value);
         const phase = switch (plan) {
             .control => "cleanup_completed",
+            .bash_cleanup => "cleanup_release_observed",
+            .bash_pipes => "bash_leader_observed_with_open_pipes",
             .dispatch => "control_store_queued",
             .capture => "capture_write_gate_entered",
             .recovery => "action_attempt_admitted",

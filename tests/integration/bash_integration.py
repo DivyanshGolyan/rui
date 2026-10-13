@@ -13,9 +13,29 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 
 import dispatch_integration as fixture
 from host_process import HostDiagnostics, ReleaseGate
+
+
+def assert_cleanup_population(diagnostics, *, actions, models, model_releases, inspection_limit):
+    # Reap/drain validates final native loss and sequence first. Endpoints cannot
+    # be supplied by this census after their original waits have expired.
+    def owners(phase):
+        return Counter((r.get("turn"), r.get("operation"), r.get("attempt"), r.get("action"))
+                       for r in diagnostics.matching(phase))
+
+    started = owners("cleanup_started")
+    assert all(count == 1 for count in started.values()), started
+    assert len(started) == len(actions) + models, started
+    assert Counter(owner[3] for owner in started if owner[3] is not None) == Counter(map(str, actions)), started
+    assert owners("cleanup_completed") == started, diagnostics.records
+    releases = started if model_releases else Counter({owner: count for owner, count in started.items() if owner[3] is not None})
+    assert owners("cleanup_release_observed") == releases, diagnostics.records
+    inspections = diagnostics.matching("inspection_captured")
+    assert len(inspections) <= inspection_limit, inspections
+    assert len(diagnostics.records) == sum(started.values()) * 2 + sum(releases.values()) + len(inspections), diagnostics.records
 
 
 def detached_shell(command):
@@ -253,6 +273,7 @@ def prove_reused_session(state):
             "--test-phase-trace",
             accelerated_retries=False,
             active_capacity=5,
+            observations="bash_cleanup",
         )
         milestones = HostDiagnostics(host)
         configure(state, store, "reuse-config", "direct/reuse")
@@ -592,6 +613,10 @@ def prove_reused_session(state):
         endpoint.shutdown()
         endpoint.server_close()
         endpoint_thread.join(timeout=5)
+        if host is not None and active_failure is None:
+            assert_cleanup_population(milestones, actions=[a["action"] for a in actions_by_ordinal.values()],
+                                      models=4, model_releases=True,
+                                      inspection_limit=3 * 321 + 601 + 201 + 6)
 
 
 def show_command(*args):
@@ -1059,6 +1084,7 @@ def main():
             success_cleanup_gate,
             "--test-phase-trace",
             active_capacity=3,
+            observations="bash_cleanup",
         )
         success_milestones = HostDiagnostics(host)
         resource_samples.append({"phase": "cold", **process_resources(host), **scratch_resources(store)})
@@ -1226,6 +1252,8 @@ def main():
 
         fixture.stop_host(host)
         host = None
+        assert_cleanup_population(success_milestones, actions=[success_action["action"]],
+                                  models=2, model_releases=False, inspection_limit=321 + 2)
         success_milestones = None
         host = fixture.start_host(store, endpoint_url, active_capacity=0)
         configure(state, store, "rollback-config", "direct/rollback")
@@ -1569,6 +1597,7 @@ def main():
             "--test-bash-observed-exit-gate-path",
             observed_exit_gate,
             "--test-phase-trace",
+            observations="bash_pipes",
         )
         milestones = HostDiagnostics(host)
         configure(state, store, "stopped-pipes-config", "direct/stopped-pipes")
@@ -1625,7 +1654,12 @@ def main():
         fixture.wait_for(lambda: not process_exists(stopped_child), "stopped Bash descendant cleanup")
 
         fixture.stop_host(host)
-        host, milestones = None, None
+        host = None
+        assert len(milestones.matching("bash_leader_observed_with_open_pipes")) == 1, milestones.records
+        assert Counter(r["subject"] for r in milestones.matching("control_store_complete")) == Counter(
+            ("stopped-pipes-allow", "stopped-pipes-stop")), milestones.records
+        assert len(milestones.records) == 3, milestones.records
+        milestones = None
         host = fixture.start_host(store, endpoint_url, "--bash-timeout-ms", "30000")
         configure(state, store, "timeout-config", "direct/timeout")
         fixture.message(state, store, "timeout-message", "direct/timeout", "execute")
