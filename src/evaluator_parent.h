@@ -9,6 +9,9 @@
  * receives complete framed body slices and returns nonzero on failure.
  * This synchronous shim cannot bound a stalled callback. The caller also
  * owns serialization: another lifecycle cannot begin until this call returns.
+ * SIGCHLD must remain SIG_DFL without SA_NOCLDWAIT, and no other waiter may
+ * reap this child. An incompatible disposition rejects before spawn without
+ * changing process-wide signal handling.
  * No database transaction should be held during this call. Returns 1 only
  * for confirmed cancellation, -1 for failure, and 0 only after exact framing,
  * EOF and normal child exit. The worker owns strict-data encoding; this shim

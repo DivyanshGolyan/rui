@@ -45,45 +45,55 @@ enum watchdog_outcome {
     watchdog_deadline,
     watchdog_cancelled,
     watchdog_clock_failed,
+    watchdog_failed,
 };
 
 struct watchdog {
     pthread_mutex_t mutex;
     pid_t pid;
     int64_t deadline;
-    int stop;
     int (*cancelled)(void *);
     void *cancel_context;
     enum watchdog_outcome outcome;
 };
 
+static int fail_evaluation(struct watchdog *watchdog) {
+    pthread_mutex_lock(&watchdog->mutex);
+    if (watchdog->outcome == watchdog_running)
+        watchdog->outcome = watchdog_failed;
+    pthread_mutex_unlock(&watchdog->mutex);
+    return 1;
+}
+
 static void *watch_child(void *context) {
     struct watchdog *watchdog = context;
     for (;;) {
         pthread_mutex_lock(&watchdog->mutex);
-        int stop = watchdog->stop;
+        enum watchdog_outcome outcome = watchdog->outcome;
         pthread_mutex_unlock(&watchdog->mutex);
-        if (stop) {
-            pthread_mutex_lock(&watchdog->mutex);
-            watchdog->outcome = watchdog_stopped;
+        if (outcome != watchdog_running) return NULL;
+
+        /* A callback may block; it cannot hold terminal-decision authority. */
+        int cancelled = watchdog->cancelled && watchdog->cancelled(watchdog->cancel_context);
+        pthread_mutex_lock(&watchdog->mutex);
+        if (watchdog->outcome != watchdog_running) {
             pthread_mutex_unlock(&watchdog->mutex);
             return NULL;
         }
-
         int64_t now = milliseconds();
-        enum watchdog_outcome outcome = watchdog_running;
         if (now < 0) outcome = watchdog_clock_failed;
         else if (now >= watchdog->deadline) outcome = watchdog_deadline;
-        else if (watchdog->cancelled && watchdog->cancelled(watchdog->cancel_context))
-            outcome = watchdog_cancelled;
+        else if (cancelled) outcome = watchdog_cancelled;
+        watchdog->outcome = outcome;
+        pthread_mutex_unlock(&watchdog->mutex);
         if (outcome != watchdog_running) {
             /* The owner does not reap until this thread has joined, so pid
              * cannot have been reused while this signal is attempted. */
-            if (kill(watchdog->pid, SIGKILL) && errno != ESRCH)
-                outcome = watchdog_clock_failed;
-            pthread_mutex_lock(&watchdog->mutex);
-            watchdog->outcome = outcome;
-            pthread_mutex_unlock(&watchdog->mutex);
+            if (kill(watchdog->pid, SIGKILL) && errno != ESRCH) {
+                pthread_mutex_lock(&watchdog->mutex);
+                watchdog->outcome = watchdog_failed;
+                pthread_mutex_unlock(&watchdog->mutex);
+            }
             return NULL;
         }
         struct timespec pause = {0, 10000000};
@@ -98,6 +108,10 @@ int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
                  char *diagnostic, size_t diagnostic_capacity,
                  size_t *diagnostic_length) {
     if (diagnostic_length) *diagnostic_length = 0;
+    struct sigaction child_action;
+    if (sigaction(SIGCHLD, NULL, &child_action) ||
+        child_action.sa_handler != SIG_DFL || (child_action.sa_flags & SA_NOCLDWAIT))
+        return -1;
     int input_flags = fcntl(source_fd, F_GETFL);
     struct stat source_stat;
     if (input_flags < 0 || (input_flags & O_ACCMODE) != O_RDONLY ||
@@ -203,20 +217,20 @@ int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
     int reaped = 0, status = 0;
     while (!failed && (!output_eof || !diagnostic_eof)) {
         int64_t remaining = start + 5000 - milliseconds();
-        if (remaining <= 0 || remaining > 5000) { failed = 1; break; }
+        if (remaining <= 0 || remaining > 5000) { failed = fail_evaluation(&watchdog); break; }
         struct pollfd poll_fds[2] = {
             {.fd = output_eof ? -1 : output_pipe[0], .events = POLLIN | POLLHUP},
             {.fd = diagnostic_eof ? -1 : diagnostic_pipe[0], .events = POLLIN | POLLHUP},
         };
         int ready = poll(poll_fds, 2, remaining < 25 ? (int)remaining : 25);
         if (ready < 0 && errno == EINTR) continue;
-        if (ready < 0) { failed = 1; break; }
+        if (ready < 0) { failed = fail_evaluation(&watchdog); break; }
         if (!ready) continue;
         for (unsigned stream = 0; stream < 2 && !failed; stream++) {
             if (!(poll_fds[stream].revents & (POLLIN | POLLHUP | POLLERR))) continue;
             ssize_t n = read(poll_fds[stream].fd, window, sizeof(window));
             if (n < 0 && errno == EINTR) continue;
-            if (n < 0) { failed = 1; break; }
+            if (n < 0) { failed = fail_evaluation(&watchdog); break; }
             if (!n) {
                 if (stream) diagnostic_eof = 1;
                 else output_eof = 1;
@@ -232,10 +246,10 @@ int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
                 }
                 continue; /* Drain even after the diagnostic buffer fills. */
             }
-            if (compile_only) { failed = 1; break; }
+            if (compile_only) { failed = fail_evaluation(&watchdog); break; }
             size_t offset = 0;
             while (offset < (size_t)n) {
-                if (complete) { failed = 1; break; }
+                if (complete) { failed = fail_evaluation(&watchdog); break; }
                 if (!remaining_chunk) {
                     while (offset < (size_t)n && header_used < sizeof(header))
                         header[header_used++] = window[offset++];
@@ -246,7 +260,7 @@ int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
                     header_used = 0;
                     if (!length) { complete = 1; continue; }
                     if (length > 16384) {
-                        failed = 1;
+                        failed = fail_evaluation(&watchdog);
                         break;
                     }
                     remaining_chunk = length;
@@ -255,7 +269,7 @@ int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
                 if (body > remaining_chunk) body = remaining_chunk;
                 if (body > UINT64_MAX - received || !append_output ||
                     append_output(output_context, window + offset, body)) {
-                    failed = 1;
+                    failed = fail_evaluation(&watchdog);
                     break;
                 }
                 received += body;
@@ -264,35 +278,43 @@ int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
             }
         }
     }
+    if (!failed && !compile_only && (!complete || remaining_chunk || header_used || !received))
+        failed = fail_evaluation(&watchdog);
     close(output_pipe[0]);
     close(diagnostic_pipe[0]);
+    if (!failed) {
+        /* Keep pid custody. Clock validation and monitoring retirement are one
+         * decision, competing with watchdog failure under the same mutex. */
+        for (;;) {
+            siginfo_t child = {0};
+            if (waitid(P_PID, (id_t)pid, &child, WEXITED | WNOHANG | WNOWAIT)) {
+                if (errno == EINTR) continue;
+                failed = fail_evaluation(&watchdog);
+                break;
+            }
+            pthread_mutex_lock(&watchdog.mutex);
+            if (watchdog.outcome == watchdog_running) {
+                int64_t now = milliseconds();
+                if (now < 0) watchdog.outcome = watchdog_clock_failed;
+                else if (now >= watchdog.deadline) watchdog.outcome = watchdog_deadline;
+                else if (child.si_pid == pid)
+                    watchdog.outcome = child.si_code == CLD_EXITED && child.si_status == 0
+                        ? watchdog_stopped : watchdog_failed;
+            }
+            enum watchdog_outcome outcome = watchdog.outcome;
+            pthread_mutex_unlock(&watchdog.mutex);
+            if (outcome != watchdog_running) {
+                failed = outcome != watchdog_stopped;
+                break;
+            }
+            struct timespec pause = {0, 10000000};
+            nanosleep(&pause, NULL);
+        }
+    }
     if (failed && kill(pid, SIGKILL) && errno != ESRCH)
         failed = 1;
     enum watchdog_outcome watchdog_result = watchdog_clock_failed;
     if (watchdog_started) {
-        if (!failed) {
-            /* Observe exit without releasing the pid. The watchdog remains
-             * authoritative until either exit is visible or it terminates the
-             * child; only the later waitpid releases the numeric pid. */
-            for (;;) {
-                siginfo_t child = {0};
-                if (waitid(P_PID, (id_t)pid, &child, WEXITED | WNOHANG | WNOWAIT)) {
-                    if (errno == EINTR) continue;
-                    failed = 1;
-                    break;
-                }
-                if (child.si_pid == pid) break;
-                pthread_mutex_lock(&watchdog.mutex);
-                enum watchdog_outcome outcome = watchdog.outcome;
-                pthread_mutex_unlock(&watchdog.mutex);
-                if (outcome != watchdog_running) break;
-                struct timespec pause = {0, 10000000};
-                nanosleep(&pause, NULL);
-            }
-        }
-        pthread_mutex_lock(&watchdog.mutex);
-        watchdog.stop = 1;
-        pthread_mutex_unlock(&watchdog.mutex);
         pthread_join(watchdog_thread, NULL);
         watchdog_result = watchdog.outcome;
         pthread_mutex_destroy(&watchdog.mutex);

@@ -14,6 +14,7 @@ import threading
 
 import bash_integration as bash_fixture
 import dispatch_integration as fixture
+from host_process import canonical_fixture_root
 
 
 def publish_bash_pid(path):
@@ -265,16 +266,27 @@ else:
         thread.join(timeout=5)
 
 
-def natural_exit_signaling(root):
-    state = root / "natural-exit-signaling"
+def natural_exit_signaling(root, inherited_ignore=False):
+    name = "inherited-sigchld" if inherited_ignore else "natural-exit-signaling"
+    state = root / name
     state.mkdir(mode=0o700)
     store = state / "store"
-    endpoint, thread, endpoint_url = endpoint_for("natural-exit-signaling", "printf finished")
+    endpoint, thread, endpoint_url = endpoint_for(name, "printf finished")
     host = None
     try:
-        host, session = admit(state, store, endpoint_url, "natural-exit-signaling")
+        args = fixture.host_arguments(store, endpoint_url)
+        if inherited_ignore:
+            args = [sys.executable, "-c",
+                    "import os,signal,sys; signal.signal(signal.SIGCHLD,signal.SIG_IGN); "
+                    "os.execv(sys.argv[1],sys.argv[1:])", *args]
+        host, _ = fixture.start_ready_process(args, required_fields={"execution": "enabled"})
+        session = f"direct/{name}"
+        bash_fixture.configure(state, store, f"{name}-config", session)
+        fixture.message(state, store, f"{name}-message", session, "execute")
+        action = fixture.wait_for(lambda: bash_fixture.action_for(store, session), f"{name} Action")
+        bash_fixture.allow(state, store, f"{name}-allow", session, action["action"])
         fixture.wait_for(
-            lambda: fixture.completed_observation(store, "natural-exit-signaling-message"),
+            lambda: fixture.completed_observation(store, f"{name}-message"),
             "natural exit continuation",
         )
         result = bash_fixture.result_text(store, session)
@@ -297,7 +309,7 @@ def natural_exit_signaling(root):
 
 
 def main():
-    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-bash-lifecycle."))
+    root = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-bash-lifecycle."))
     completed = False
     try:
         prove_pid_publication(root)
@@ -305,6 +317,7 @@ def main():
             completed = True
             return
         natural_exit_signaling(root)
+        natural_exit_signaling(root, inherited_ignore=True)
         name = "lifecycle-observe"
         state = root / name
         state.mkdir(mode=0o700)

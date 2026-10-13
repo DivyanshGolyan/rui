@@ -272,6 +272,14 @@ pub fn serve(
     bash_path: []const u8,
     bash_timeout_ms: u64,
 ) !void {
+    // The Host owns child waits. Automatic reaping or an inherited handler
+    // would release process identities before their signal owners retire.
+    const child_action: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.DFL },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.CHLD, &child_action, null);
     const descriptor_observation = try descriptor_limit.observe(io);
     const descriptor_requirement = try descriptor_capacity.calculate(
         descriptor_observation.open_descriptors,

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Focused disposable QuickJS worker checks (not a Workflow/Host integration)."""
 import argparse
+import errno
 import json
+import os
 import pathlib
 import resource
+import signal
 import struct
 import subprocess
 import sys
@@ -41,10 +44,122 @@ def check_repetition(mode):
     assert result.stdout == b'5', (mode, result.stdout)
 
 
+def check_wait_ownership(root):
+    source, child, marker = root / 'source', root / 'child', root / 'launched'
+    source.write_text(expression('5'))
+    child.write_text(f'#!/bin/sh\n: > "{marker}"\n')
+    child.chmod(0o700)
+    for mode in ('check-ignored-sigchld', 'check-no-cldwait', 'check-handled-sigchld'):
+        result = subprocess.run([driver, child, source, mode, '1000'],
+                                capture_output=True, timeout=7)
+        assert result.returncode == 1 and not result.stdout, (mode, result)
+        assert not marker.exists(), f'{mode}: incompatible wait ownership allowed child launch'
+    assert invoke('run', expression('5')).stdout == b'5'
+
+
+def check_delayed_watchdog(root, child_seconds):
+    source, child = root / 'source', root / 'child'
+    gate, entered, identity = root / 'gate', root / 'entered', root / 'pid'
+    output_closed = root / 'output-closed'
+    source.write_text(expression('5'))
+    os.mkfifo(gate, 0o600)
+    child.write_text(f'''#!{sys.executable}
+import os, pathlib, time
+identity = pathlib.Path({str(identity)!r})
+temporary = identity.with_suffix('.tmp')
+temporary.write_text(str(os.getpid()))
+temporary.replace(identity)
+deadline = time.monotonic() + 3
+while not pathlib.Path({str(entered)!r}).exists():
+    if time.monotonic() >= deadline: raise SystemExit(2)
+    time.sleep(.01)
+os.write(1, b'\\x01\\x00\\x00\\x00x\\x00\\x00\\x00\\x00')
+os.close(1)
+os.close(2)
+pathlib.Path({str(output_closed)!r}).touch()
+time.sleep({child_seconds})
+''')
+    child.chmod(0o700)
+    process = subprocess.Popen([driver, child, source, 'delayed-watchdog', '1000', gate],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    release = pid = None
+    deadline = time.monotonic() + 12
+    try:
+        # The open succeeds only when the actual watchdog callback is held.
+        while release is None:
+            try:
+                release = os.open(gate, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError as error:
+                if error.errno != errno.ENXIO: raise
+                assert process.poll() is None and time.monotonic() < deadline
+                time.sleep(.01)
+        entered.touch()
+        while True:
+            assert process.poll() is None, 'parent exited while watchdog was held'
+            assert time.monotonic() < deadline, 'child remained alive while watchdog was held'
+            if identity.exists():
+                pid = int(identity.read_text())
+                state = subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)],
+                                       capture_output=True, text=True, timeout=2)
+                if state.stdout.lstrip().startswith('Z'): break
+            time.sleep(.02)
+        assert output_closed.exists(), 'child exited before completing its output'
+        # Observe real child exit while the watchdog still cannot check time.
+        os.write(release, b'r')
+        os.close(release)
+        release = None
+        stdout, stderr = process.communicate(timeout=8)
+        expected = (0, b'x') if child_seconds == 0 else (1, b'')
+        assert (process.returncode, stdout) == expected, (process.returncode, stdout, stderr)
+        state = subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)],
+                               capture_output=True, text=True, timeout=2)
+        assert state.returncode == 1 and not state.stdout, state
+    finally:
+        primary = sys.exc_info()[1]
+        errors = []
+
+        def attempt(dispose):
+            try:
+                dispose()
+            except BaseException as error:
+                errors.append(error)
+
+        if release is not None:
+            # The held watchdog prevents reap/PID reuse. Terminate the exact
+            # child before releasing it, even when the retirement check fails.
+            if process.poll() is None and pid is not None:
+                attempt(lambda: os.kill(pid, signal.SIGKILL))
+            attempt(lambda: os.write(release, b'r'))
+            attempt(lambda: os.close(release))
+        attempt(lambda: process.communicate(timeout=8))
+        if process.poll() is None:
+            attempt(process.kill)
+            attempt(lambda: process.communicate(timeout=8))
+        if errors:
+            if primary is None:
+                raise errors[0]
+            for error in errors:
+                primary.add_note(f'watchdog fixture cleanup: {error}')
+    assert invoke('run', expression('5')).stdout == b'5'
+
+
 if args.churn_only:
     check_repetition('churn')
     print(f'evaluator churn: 1,000 same-parent exact results and descriptor balance passed on {sys.platform}')
     sys.exit(0)
+
+
+for mode in ('stale-watchdog', 'exit-race', 'exit-deadline', 'exit-clock-error',
+             'failure-cancel-race', 'cancel-failure-race'):
+    result = invoke(mode, expression('2+3'))
+    expected = (0, b'5') if mode in ('stale-watchdog', 'exit-race') else (1, b'')
+    assert (result.returncode, result.stdout) == expected, (mode, result)
+
+with tempfile.TemporaryDirectory() as directory:
+    check_wait_ownership(pathlib.Path(directory))
+for child_seconds in (0, 5.3, 30):
+    with tempfile.TemporaryDirectory() as directory:
+        check_delayed_watchdog(pathlib.Path(directory), child_seconds)
 
 
 def reject_check(source, reason):
