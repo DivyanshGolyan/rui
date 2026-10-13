@@ -264,50 +264,61 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
         try status_writer.writeAll(word);
         column += width;
     }
-    var overflow_buffer: [80]u8 = undefined;
-    var overflow_snapshot: [overflow_buffer.len]u8 = undefined;
-    var overflow_suffix: []const u8 = " more calls ·";
-    var overflow_rows = if (live.total != 0) (try viewport(try std.fmt.bufPrint(&overflow_buffer, "+{d}{s} /status", .{ live.total, overflow_suffix }), 0, size.col - 1, 5, &overflow_snapshot)).total_rows else 0;
     var status_snapshot: [status_buffer.len]u8 = undefined;
+    const full_status = try viewport(status_writer.buffered(), 0, size.col - 1, 5, &status_snapshot);
+    var compact_snapshot: [status_buffer.len]u8 = undefined;
+    const compact_status = try viewport("a Allow/d Deny\nEnter", 0, size.col - 1, 5, &compact_snapshot);
     const approval = std.mem.eql(u8, prompt, "> ");
-    const status_limit = if (approval) 5 else @min(5, size.row - 2 - @min(size.row - 2, overflow_rows));
-    var status_view = if (status_limit != 0) try viewport(status_writer.buffered(), 0, size.col - 1, status_limit, &status_snapshot) else Viewport{ .rows = 0, .first = 0, .caret = .{} };
-    var spacer: usize = 1;
-    if (approval) {
-        // Choices are required content, unlike ordinary transient status.
-        // Compact them and overflow before sacrificing any decision label.
-        if (status_view.total_rows != status_view.rows or status_view.rows + overflow_rows + 2 > size.row) {
-            status_view = try viewport("a Allow/d Deny\nEnter", 0, size.col - 1, 5, &status_snapshot);
-            overflow_suffix = " ·";
-            overflow_rows = if (live.total != 0) (try viewport(try std.fmt.bufPrint(&overflow_buffer, "+{d}{s} /status", .{ live.total, overflow_suffix }), 0, size.col - 1, 5, &overflow_snapshot)).total_rows else 0;
-        }
-        if (status_view.rows + overflow_rows + 2 > size.row) spacer = 0;
-        if (status_view.total_rows != status_view.rows or status_view.rows + overflow_rows + spacer + 1 > size.row) return error.UncertainTerminalCursor;
-    }
-    const heading: usize = if (status.len == 0) 0 else status_view.rows;
-    const available = size.row - heading - spacer - 1;
-    var visible: usize = 0;
-    var activity_rows: usize = 0;
     var activity_buffer: [3][View.Live.line_bytes]u8 = undefined;
     var activity: [3]Viewport = undefined;
     var line_buffer: [View.Live.line_bytes]u8 = undefined;
-    // Fit complete call descriptions and outcome explanations, not clipped
-    // one-line prefixes that can make denial or uncertainty look unresolved.
     for (0..live.count) |index| {
-        const line = try live.line(index, &line_buffer);
-        const wrapped = try viewport(line, 0, size.col - 1, 5, &activity_buffer[index]);
-        const remaining = live.total - index - 1;
-        const extra = if (remaining != 0) try viewport(try std.fmt.bufPrint(&overflow_buffer, "+{d}{s} /status", .{ remaining, overflow_suffix }), 0, size.col - 1, 5, &overflow_snapshot) else Viewport{ .rows = 0, .first = 0, .caret = .{} };
-        if (wrapped.total_rows != wrapped.rows or activity_rows + wrapped.rows + extra.total_rows > available) break;
-        activity[index] = wrapped;
-        activity_rows += wrapped.rows;
-        visible += 1;
+        activity[index] = try viewport(try live.line(index, &line_buffer), 0, size.col - 1, 5, &activity_buffer[index]);
     }
-    const overflow = live.total > visible and available != 0;
-    const overflow_line = if (overflow) try std.fmt.bufPrint(&overflow_buffer, "+{d}{s} /status", .{ live.total - visible, overflow_suffix }) else "";
-    const overflow_view = if (overflow) try viewport(overflow_line, 0, size.col - 1, 5, &overflow_snapshot) else Viewport{ .rows = 0, .first = 0, .caret = .{} };
-    if (overflow_view.total_rows > available - activity_rows or overflow_view.total_rows != overflow_view.rows) return error.UncertainTerminalCursor;
-    activity_rows += overflow_view.rows;
+    var overflow_buffer: [80]u8 = undefined;
+    var overflow_snapshot: [overflow_buffer.len]u8 = undefined;
+    var overflow_view: Viewport = undefined;
+    var status_view = full_status;
+    var heading: usize = 0;
+    var spacer: usize = 0;
+    var visible: usize = 0;
+    var activity_rows: usize = 0;
+    // Select a complete layout before clearing anything. Overflow is the
+    // actual undisplayed population, never a speculative reservation. Optional
+    // spacing and wording cannot displace required choices or /status access.
+    layout: {
+        for (0..3) |variant| {
+            spacer = if (variant == 0) 1 else 0;
+            status_view = if (approval and variant == 2 and compact_status.total_rows < full_status.total_rows) compact_status else full_status;
+            if (approval and status_view.total_rows != status_view.rows) continue;
+            var count = live.count;
+            while (true) {
+                var rows: usize = 0;
+                var complete = true;
+                for (activity[0..count]) |wrapped| {
+                    rows += wrapped.rows;
+                    complete = complete and wrapped.rows == wrapped.total_rows;
+                }
+                const overflow_line = if (live.total > count) try std.fmt.bufPrint(&overflow_buffer, "+{d}{s} /status", .{ live.total - count, if (variant == 2) " ·" else " more calls ·" }) else "";
+                overflow_view = if (overflow_line.len != 0) try viewport(overflow_line, 0, size.col - 1, 5, &overflow_snapshot) else .{ .rows = 0, .first = 0, .caret = .{} };
+                rows += overflow_view.rows;
+                // Preserve ordinary status/recovery guidance before admitting
+                // previews, but never at the cost of the exact overflow count.
+                heading = if (approval) status_view.rows else if (status.len == 0) 0 else @min(full_status.rows, size.row -| (overflow_view.rows + spacer + 1));
+                const required = rows + spacer + 1 + heading;
+                if (complete and overflow_view.rows == overflow_view.total_rows and required <= size.row) {
+                    visible = count;
+                    activity_rows = rows;
+                    if (!approval and heading != 0) status_view = try viewport(status_writer.buffered(), 0, size.col - 1, heading, &status_snapshot);
+                    break :layout;
+                }
+                if (count == 0) break;
+                count -= 1;
+            }
+        }
+        return error.UncertainTerminalCursor;
+    }
+    const overflow = live.total > visible;
     const prompt_columns = try std.unicode.utf8CountCodepoints(prompt);
     // Visible raw bytes cannot exceed the complete semantic draft. Tabs expand
     // only during emission, without consuming a second semantic-byte budget.

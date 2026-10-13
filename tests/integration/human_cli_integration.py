@@ -134,6 +134,12 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
         .replace("\x1b[?2004h", "").replace("\x1b[?2004l", ""))
 
 
+def permanent_tool_count(output, heading):
+    # These short headings fit one row. Permanent results have a blank
+    # separator or hanging-indented summary; live snapshots have neither.
+    return len(re.findall(r"(?m)^" + re.escape(heading) + r"\n(?=\n|  )", output))
+
+
 def terminal_wait_oracles():
     """Bound retained redraws; never confuse diagnostic text with readiness."""
     def collect(frames, marker, *, redraw=False, composer=False, error=None, close_output=False, initial=b""):
@@ -201,6 +207,18 @@ def terminal_wait_oracles():
     assert "after decision" in collect([], "after decision", composer=True, initial=prior + ready)
     collect([], "after decision", initial=b"x" * (1024 * 1024), error="unexpected unbounded terminal output")
     collect([b"distinctive prefix"], "required cursor", close_output=True, error="closed")
+    heading = "✓ Wait for bypass café"
+    redraw = f"\nWorking…\n{heading}\n{heading}\n+1 more calls · /status\n› draft\r\x1b[7C"
+    for summary in ("", "  Process retirement confirmed.\n"):
+        result = f"\n{heading}\n{summary}"
+        for repeats in (0, 1, 7):
+            for count in (1, 2, 3):
+                transcript = (redraw * repeats + result * count + "\n  group complete\n\n› \r\x1b[2C").encode()
+                # Split UTF-8 and heading/summary boundaries independently of
+                # OS write aggregation. A missing or extra permanent result
+                # still fails exact-two, however often live rows are replaced.
+                output = collect([transcript[n:n + 17] for n in range(0, len(transcript), 17)], "group complete", composer=True)
+                assert permanent_tool_count(output, heading) == count, output
     # Linux PTY closure reports EIO; Darwin reports an empty read. Neither is
     # input readiness or a deadline failure, and both retain the same context.
     master, slave = pty.openpty()
@@ -1148,14 +1166,15 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert set(records.glob("*.json")) == before_choice, "queued chat created a record"
         assert not (state / "effect-count").exists(), "queued chat authorized an effect"
         if decision == "allow-action" and not any((exit_code, signal_failure, lost_reply, fragmented_paste, stale_target)):
-            for rows, columns in ((4, 20), (8, 8)):
+            for rows, columns in ((3, 80), (4, 20), (8, 8)):
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
                 os.write(master, b"\x01")  # Redraw an empty choice without granting authority.
                 narrow = read_terminal(master, "> \r\x1b[2C")
                 shown = narrow.replace("\r", "").replace("\n", "")
-                assert all(label in shown for label in ("a Allow", "d Deny", "Enter")), narrow
+                assert ("a: Allow once / d: Deny (Enter)" in " ".join(narrow.split())
+                        or "a Allow/d DenyEnter" in shown), narrow
                 if description not in shown:
-                    assert "+1 · /status" in shown, narrow
+                    assert any(label in shown for label in ("+1 more calls · /status", "+1 · /status")), narrow
                 assert caller.poll() is None and not (state / "effect-count").exists(), narrow
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
             os.write(master, b"\x01")
@@ -1322,10 +1341,11 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 short = read_terminal(master, "+3 more calls · /status", composer=True)
                 assert "› live cafXé!" in short, short
                 assert "Inspect application" not in short, ("a clipped call hid its failure", short)
-                for rows, columns in ((4, 20), (8, 8)):
+                for rows, columns in ((2, 80), (3, 20), (3, 8), (4, 20), (8, 8)):
                     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
-                    narrow = read_terminal(master, "+4 more", composer=True)
-                    assert "/status" in narrow.replace("\r", "").replace("\n", ""), narrow
+                    narrow = read_terminal(master, "+4", composer=True)
+                    shown = narrow.replace("\r", "").replace("\n", "")
+                    assert any(label in shown for label in ("+4 more calls · /status", "+4 · /status")), narrow
                     assert caller.poll() is None, ("wrapped overflow displaced the composer", narrow)
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 32, 0, 0))
                 wrapped = read_terminal(master, "— Failed", composer=True)
@@ -1346,7 +1366,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 for release in bypass_releases:
                     release.touch()
                 outcome = read_terminal(master, "bypass complete", composer=True)
-                assert outcome.count(f"✓ {bypass_description}") == 2, outcome
+                assert permanent_tool_count(outcome, f"✓ {bypass_description}") == 2, outcome
                 assert "! Inspect application settings" in outcome and "— Failed" in outcome and "Exit code: 7." in outcome, outcome
                 assert "✓ Check final sibling" in outcome, outcome
                 assert "Bash succeeded." not in outcome and "Tool result:" not in outcome, outcome
