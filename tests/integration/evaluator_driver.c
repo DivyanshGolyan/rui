@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "../../src/evaluator_parent.h"
 #include <dirent.h>
 #include <errno.h>
@@ -12,6 +13,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "evaluator_race.h"
+
 struct cancellation {
     int immediate;
     const char *ready;
@@ -22,6 +25,7 @@ struct cancellation {
 
 static int cancelled(void *context) {
     struct cancellation *state = context;
+    if (race.mode >= 5 && !pthread_equal(pthread_self(), race.caller)) return 1;
     if (state->watchdog_gate && !pthread_equal(pthread_self(), state->caller)) {
         int fd;
         do { fd = open(state->watchdog_gate, O_RDONLY); } while (fd < 0 && errno == EINTR);
@@ -55,6 +59,13 @@ struct output_sink {
 
 static int append_output(void *context, const unsigned char *bytes, size_t length) {
     struct output_sink *sink = context;
+    if (race.mode == 5) return -1;
+    if (race.mode == 6) {
+        race_wait(&race.watchdog_parked);
+        atomic_store(&race.release_watchdog, 1);
+        race_wait(&race.watchdog_signalled);
+        return -1;
+    }
     if (sink->stall) {
         struct timespec delay = {6, 0};
         while (nanosleep(&delay, &delay) && errno == EINTR) {}
@@ -79,6 +90,13 @@ int main(int argc, char **argv) {
     int ignored_child = !strcmp(argv[3], "check-ignored-sigchld");
     int no_child_wait = !strcmp(argv[3], "check-no-cldwait");
     int handled_child = !strcmp(argv[3], "check-handled-sigchld");
+    race.mode = !strcmp(argv[3], "stale-watchdog") ? 1 :
+                !strcmp(argv[3], "exit-race") ? 2 :
+                !strcmp(argv[3], "exit-deadline") ? 3 :
+                !strcmp(argv[3], "exit-clock-error") ? 4 :
+                !strcmp(argv[3], "failure-cancel-race") ? 5 :
+                !strcmp(argv[3], "cancel-failure-race") ? 6 : 0;
+    race.caller = pthread_self();
     int signal_case = ignored_child || no_child_wait || handled_child;
     int check = !strcmp(argv[3], "check") || signal_case;
     int input = open(argv[2], O_RDONLY);
@@ -99,7 +117,7 @@ int main(int argc, char **argv) {
         unlink(prepared_path);
         if (prepared < 0) return 3;
     }
-    int repeat = !strcmp(argv[3], "churn") ? 1000 : !strcmp(argv[3], "repeat") ? 10 : 1;
+    int repeat = !strcmp(argv[3], "churn") ? 1000 : !strcmp(argv[3], "repeat") ? 10 : race.mode ? 2 : 1;
     struct cancellation cancellation = {
         .immediate = !strcmp(argv[3], "cancel"), .caller = pthread_self(),
     };
@@ -114,7 +132,7 @@ int main(int argc, char **argv) {
     }
     int cancel_on_output = !strcmp(argv[3], "output-cancel");
     int use_cancel = cancellation.immediate || cancellation.ready || cancel_on_output;
-    int use_callback = use_cancel || cancellation.watchdog_gate;
+    int use_callback = use_cancel || cancellation.watchdog_gate || race.mode >= 5;
     struct output_sink sink = {
         .fd = output, .budget = strtoull(argv[4], NULL, 10),
         .stall = !strcmp(argv[3], "stall-write"),
@@ -137,11 +155,18 @@ int main(int argc, char **argv) {
     for (int i = 0; i < repeat && result == 0; i++) {
         if (ftruncate(output, 0) || lseek(output, 0, SEEK_SET) < 0) return 4;
         sink.length = 0;
-        result = rui_evaluate(argv[1], input, prepared, check,
+        result = (race.mode && i == 0 ? race_evaluate : rui_evaluate)(argv[1], input, prepared, check,
                               use_callback ? cancelled : NULL, &cancellation,
                               append_output, &sink,
                               check ? diagnostic : NULL, check ? sizeof(diagnostic) : 0,
                               check ? &diagnostic_length : NULL);
+        if (race.mode && i == 0) {
+            int status;
+            if (!race.child || waitpid(race.child, &status, WNOHANG) != -1 || errno != ECHILD)
+                return 11;
+            if (race.mode == 5 && result != -1) return 12;
+            if (race.mode == 6 && result != 1) return 12;
+        }
         if (descriptor_count() != baseline) return 7;
         if (repeat > 1 && result == 0) {
             /* Both reuse witnesses evaluate 2+3; a later success must not hide

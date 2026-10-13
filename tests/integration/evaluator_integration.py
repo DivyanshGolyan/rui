@@ -149,6 +149,12 @@ if args.churn_only:
     sys.exit(0)
 
 
+for mode in ('stale-watchdog', 'exit-race', 'exit-deadline', 'exit-clock-error',
+             'failure-cancel-race', 'cancel-failure-race'):
+    result = invoke(mode, expression('2+3'))
+    expected = (0, b'5') if mode in ('stale-watchdog', 'exit-race') else (1, b'')
+    assert (result.returncode, result.stdout) == expected, (mode, result)
+
 with tempfile.TemporaryDirectory() as directory:
     check_wait_ownership(pathlib.Path(directory))
 for child_seconds in (0, 5.3, 30):
