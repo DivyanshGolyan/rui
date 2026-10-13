@@ -98,6 +98,10 @@ int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
                  char *diagnostic, size_t diagnostic_capacity,
                  size_t *diagnostic_length) {
     if (diagnostic_length) *diagnostic_length = 0;
+    struct sigaction child_action;
+    if (sigaction(SIGCHLD, NULL, &child_action) ||
+        child_action.sa_handler != SIG_DFL || (child_action.sa_flags & SA_NOCLDWAIT))
+        return -1;
     int input_flags = fcntl(source_fd, F_GETFL);
     struct stat source_stat;
     if (input_flags < 0 || (input_flags & O_ACCMODE) != O_RDONLY ||
@@ -266,30 +270,34 @@ int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
     }
     close(output_pipe[0]);
     close(diagnostic_pipe[0]);
+    if (!failed) {
+        /* Observe without releasing the pid. Accept exit against the original
+         * deadline even if the watchdog has not yet observed its expiry. */
+        for (;;) {
+            siginfo_t child = {0};
+            if (waitid(P_PID, (id_t)pid, &child, WEXITED | WNOHANG | WNOWAIT)) {
+                if (errno == EINTR) continue;
+                failed = 1;
+                break;
+            }
+            int64_t now = milliseconds();
+            if (now < 0 || now >= watchdog.deadline) {
+                failed = 1;
+                break;
+            }
+            if (child.si_pid == pid) break;
+            pthread_mutex_lock(&watchdog.mutex);
+            enum watchdog_outcome outcome = watchdog.outcome;
+            pthread_mutex_unlock(&watchdog.mutex);
+            if (outcome != watchdog_running) break;
+            struct timespec pause = {0, 10000000};
+            nanosleep(&pause, NULL);
+        }
+    }
     if (failed && kill(pid, SIGKILL) && errno != ESRCH)
         failed = 1;
     enum watchdog_outcome watchdog_result = watchdog_clock_failed;
     if (watchdog_started) {
-        if (!failed) {
-            /* Observe exit without releasing the pid. The watchdog remains
-             * authoritative until either exit is visible or it terminates the
-             * child; only the later waitpid releases the numeric pid. */
-            for (;;) {
-                siginfo_t child = {0};
-                if (waitid(P_PID, (id_t)pid, &child, WEXITED | WNOHANG | WNOWAIT)) {
-                    if (errno == EINTR) continue;
-                    failed = 1;
-                    break;
-                }
-                if (child.si_pid == pid) break;
-                pthread_mutex_lock(&watchdog.mutex);
-                enum watchdog_outcome outcome = watchdog.outcome;
-                pthread_mutex_unlock(&watchdog.mutex);
-                if (outcome != watchdog_running) break;
-                struct timespec pause = {0, 10000000};
-                nanosleep(&pause, NULL);
-            }
-        }
         pthread_mutex_lock(&watchdog.mutex);
         watchdog.stop = 1;
         pthread_mutex_unlock(&watchdog.mutex);
