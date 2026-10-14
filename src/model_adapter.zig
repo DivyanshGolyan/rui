@@ -1912,6 +1912,8 @@ test "request preparation resumes large private replay validation before emissio
         for (0..5) |_| try item.writeAll(&window);
         try item.writeAll("\",");
         for (0..1000) |_| try item.writeAll("\"future\":{\"open\":[0,null]},");
+        try item.writeAll("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}],");
+        try item.writeAll("\"summary\":[{\"type\":\"summary_text\",\"text\":\"summary\",\"annotations\":[{\"type\":\"future\",\"type\":false}]}],");
         try item.writeAll(if (supported)
             "\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}"
         else
