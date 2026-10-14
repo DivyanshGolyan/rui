@@ -296,7 +296,8 @@ class H1ResponseBoundaryTests(unittest.TestCase):
                     tail_entered.set()
                     assert release_tail.wait(5), "post-response handler tail was not released"
 
-        with patch.object(transport, "H1Handler", HeldTail):
+        with patch.object(transport, "H1Handler", HeldTail), \
+                patch.object(transport.socket, "getfqdn", side_effect=OSError("reverse DNS unavailable")):
             endpoint = transport.H1Endpoint()
         endpoint.release_first.set()
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
