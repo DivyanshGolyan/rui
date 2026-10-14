@@ -88,9 +88,14 @@ func overallStatus(statuses ...string) string {
 	}
 	for _, status := range statuses {
 		switch status {
-		case "passed", "target_miss", "unavailable":
+		case "passed", "target_miss", "unavailable", "invalid_measurement":
 		default:
 			return "behavior_error"
+		}
+	}
+	for _, status := range statuses {
+		if status == "invalid_measurement" {
+			return status
 		}
 	}
 	for _, status := range statuses {
@@ -471,7 +476,8 @@ func runCase(binary, sqliteBinary, root, name string, p population, resources bo
 			macOSSample, macOSSampleErr := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-held.txt"))
 			sampleErr = macOSSampleErr
 			if macOSSampleErr != nil {
-				result["macos_physical_footprint"] = map[string]any{"status": "unavailable", "error": macOSSampleErr.Error()}
+				physicalStatus = measurement.FailureStatus(macOSSampleErr)
+				result["macos_physical_footprint"] = map[string]any{"status": physicalStatus, "error": macOSSampleErr.Error()}
 			} else {
 				sample = macOSSample.Portable()
 				var upper uint64
@@ -480,10 +486,10 @@ func runCase(binary, sqliteBinary, root, name string, p population, resources bo
 			}
 		} else {
 			sample, sampleErr = measurement.SamplePortableProcess(host.Process)
-			result["macos_physical_footprint"] = map[string]any{"status": "unavailable", "target_bytes": physicalFootprintTargetBytes, "reason": "requires macOS footprint(1)"}
+			result["macos_physical_footprint"] = map[string]any{"status": "unavailable", "target_bytes": physicalFootprintTargetBytes, "reason": "requires macOS with cgo enabled"}
 		}
 		if sampleErr != nil {
-			result["resource_collection_status"] = "unavailable"
+			result["resource_collection_status"] = physicalStatus
 			result["resource_error"] = sampleErr.Error()
 		} else {
 			database, databaseErr := measurement.DatabaseSize(store)
@@ -579,20 +585,13 @@ func main() {
 	result := map[string]any{
 		"format": "rui-model-queue-v1-go", "scope": "issue-202 production model-only queue discovery, Operation admission order, settlement, and resource observation",
 		"status": status, "cases": cases, "maximum_mixed": mixed, "artifacts": root,
-		"classification_legend": map[string]string{"behavior_failure": "runner exits nonzero", "unavailable": "a required measurement could not be validly collected", "target_miss": "a valid required measurement exceeds its target", "passed": "behavior and every valid required measurement pass their targets", "diagnostic": "reported observation such as terminal-observation duration; not a qualification target"},
+		"classification_legend": map[string]string{"behavior_failure": "runner exits nonzero", "unavailable": "a required measurement could not be collected", "invalid_measurement": "native evidence was inconsistent and rejected; inspect retained raw reports", "target_miss": "a valid required measurement exceeds its target", "passed": "behavior and every valid required measurement pass their targets", "diagnostic": "reported observation such as terminal-observation duration; not a qualification target"},
 		"limits":                []string{"model-only qualification; Bash composition remains GitHub issue #168", "Linux runtime results are development evidence under the current platform contract; macOS physical footprint is reported only when available", "deterministic loopback HTTP; no TLS or live-provider behavior", "Rui's pinned SQLite builds controlled populations in stopped Stores, but subsequent Host discovery, Operation admission, provider request, and settlement are authoritative", "Operation IDs prove admission order, not independent provider-request launch identity", "process termination is not power-loss qualification", "population sizes are qualification workloads, not product quotas"},
 	}
-	evidence, environmentError := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
+	environmentError := measurement.AttachEnvironmentEvidence(result, binary, *output)
 	if environmentError != nil {
-		result["environment_evidence_status"] = "unavailable"
-		result["environment_evidence_error"] = environmentError.Error()
 		status = overallStatus(status, "unavailable")
 		result["status"] = status
-	} else {
-		result["environment_evidence_status"] = "passed"
-		for key, value := range evidence {
-			result[key] = value
-		}
 	}
 	sqliteHash, sqliteHashError := measurement.SHA256File(sqliteBinary)
 	if sqliteHashError != nil {

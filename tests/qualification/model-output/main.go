@@ -661,6 +661,15 @@ func spillVerdict(enabled, completed, naturalHostFailure bool, providerRequests 
 
 func measureCase(binary, root string, endpoint *payloadEndpoint, name string, reasoning int, answer string) (result map[string]any, resultError error) {
 	directory := filepath.Join(root, name)
+	partial := map[string]any{"artifacts": directory, "answer_bytes": len(answer), "reasoning_items": reasoning}
+	defer func() {
+		if resultError != nil {
+			if result == nil {
+				result = partial
+			}
+			result["status"], result["error"] = measurement.FailureStatus(resultError), resultError.Error()
+		}
+	}()
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		return nil, err
 	}
@@ -679,6 +688,7 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 	if err != nil {
 		return nil, err
 	}
+	partial["cold"] = map[string]any{"host": cold, "whole_rui": wholeRui(cold)}
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
 	if err := client.Submit(name, "measure/"+name, "measure"); err != nil {
 		return nil, err
@@ -696,6 +706,7 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 	if delivery["destination_bytes"] != int64(len(answer)) || delivery["destination_sha256"] != expectedDigest {
 		return nil, errors.New("saved result differs from response")
 	}
+	partial["client_delivery"], partial["answer_sha256"], partial["observation"] = delivery, expectedDigest, observation
 	inspection, err := client.Inspect("measure/" + name)
 	if err != nil {
 		return nil, err
@@ -705,10 +716,12 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 	if !scratchOK || !custodyOK || scratch != 0 || custody != 0 {
 		return nil, fmt.Errorf("retained resources after completion: %v", inspection)
 	}
+	partial["execution_after_completion"] = inspection["execution"]
 	retained, err := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-retained.txt"))
 	if err != nil {
 		return nil, err
 	}
+	partial["retained_idle"] = map[string]any{"host": retained, "whole_rui": wholeRui(retained)}
 	audit, err := readOutputAudit(deadline, store)
 	if err != nil {
 		return nil, err
@@ -731,6 +744,15 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 		name = "spill-off"
 	}
 	directory := filepath.Join(root, name)
+	partial := map[string]any{"artifacts": directory, "spill_enabled": enabled}
+	defer func() {
+		if resultError != nil {
+			if result == nil {
+				result = partial
+			}
+			result["status"], result["error"] = measurement.FailureStatus(resultError), resultError.Error()
+		}
+	}()
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		return nil, err
 	}
@@ -766,6 +788,7 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 	if err != nil {
 		return nil, err
 	}
+	partial["initial"] = initial
 	started := time.Now()
 	if err := client.Message("spill", "measure/spill", "spill comparison"); err != nil {
 		return nil, err
@@ -806,6 +829,7 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 		if delivery["destination_bytes"] != int64(len(answer)) || delivery["destination_sha256"] != hex.EncodeToString(digest[:]) {
 			return nil, errors.New("spill result differed")
 		}
+		partial["client_delivery"], partial["observation"] = delivery, observation
 		inspection, err = client.Inspect("measure/spill")
 		if err != nil {
 			return nil, err
@@ -815,6 +839,7 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 			return nil, err
 		}
 		final = &value
+		partial["final"] = value
 	}
 	hostExit, stopError := host.StopWithExit(measurement.TeardownAllowance)
 	hostNeedsStop = false
@@ -857,11 +882,11 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 func spillComparison(binary, root string, endpoint *payloadEndpoint) (map[string]any, error) {
 	on, err := measureSpillCase(binary, root, endpoint, true)
 	if err != nil {
-		return nil, err
+		return map[string]any{"status": measurement.FailureStatus(err), "rows": []map[string]any{on}, "error": err.Error()}, err
 	}
 	off, err := measureSpillCase(binary, root, endpoint, false)
 	if err != nil {
-		return map[string]any{"status": "failed", "rows": []map[string]any{on}, "error": err.Error()}, err
+		return map[string]any{"status": measurement.FailureStatus(err), "rows": []map[string]any{on, off}, "error": err.Error()}, err
 	}
 	status := spillComparisonStatus(on["status"], off["status"])
 	return map[string]any{"status": status, "rows": []map[string]any{on, off}, "write_sync_qualification": map[string]any{"status": "unavailable", "sync_calls": nil, "reason": "Darwin exposes per-process disk-write bytes but no direct per-process sync-call oracle; effective Host SQLite settings are recorded separately in Host diagnostics"}}, nil
@@ -1546,7 +1571,7 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 					unavailableOfflineCapacityAudit(row)
 				}
 			}
-			result["status"] = "failed"
+			result["status"] = measurement.FailureStatus(resultError)
 			result["error"] = resultError.Error()
 		}
 	}()
@@ -1739,7 +1764,9 @@ func finalizeQualification(result map[string]any, runError error, cleanup ...fun
 		result = map[string]any{}
 	}
 	if runError != nil {
-		result["status"] = "failed"
+		if result["status"] != "failed" {
+			result["status"] = measurement.FailureStatus(runError)
+		}
 		result["error"] = runError.Error()
 	}
 	return result, runError
@@ -1839,7 +1866,8 @@ func measureOutput(binary, output string, capacityOnly int, repeatWork, growthOn
 	var spillRows map[string]any
 	capacityRows := []map[string]any{}
 	var repeatWorkRow map[string]any
-	result = map[string]any{"format": "rui-model-output-v8-go", "scope": "assembled model-path capacity and same-Host repeated-work qualification"}
+	result = map[string]any{"format": "rui-model-output-v8-go", "scope": "assembled model-path capacity and same-Host repeated-work qualification",
+		"limits": []string{"partial deterministic local-provider evidence; no live-provider or aggregate descendant qualification; Linux RSS/PSS do not qualify physical footprint"}}
 	// This finalizer runs after every resource owner's deferred cleanup.
 	defer func() {
 		result["answer_byte_growth"], result["item_count_growth"] = byteRows, itemRows
@@ -1853,10 +1881,7 @@ func measureOutput(binary, output string, capacityOnly int, repeatWork, growthOn
 			supplemental = append(supplemental, repeatWorkRow)
 		}
 		result["status"] = reduceStatuses(byteRows, itemRows, capacityRows, supplemental)
-		evidence, evidenceError := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, output)
-		for name, value := range evidence {
-			result[name] = value
-		}
+		evidenceError := measurement.AttachEnvironmentEvidence(result, binary, output)
 		result, runError = finalizeQualification(result, errors.Join(runError, evidenceError))
 		if growthOnly && result["status"] == "passed" {
 			result["status"] = "smoke_passed"

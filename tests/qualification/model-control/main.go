@@ -428,6 +428,16 @@ func inspectCustodyZero(client measurement.Client, session string) (bool, error)
 
 func headroom(binary, root, url string) (result map[string]any, resultError error) {
 	directory := filepath.Join(root, "headroom")
+	partial := map[string]any{"artifacts": directory}
+	latencies := make([]float64, 0, 50)
+	defer func() {
+		if resultError != nil {
+			if result == nil {
+				result = partial
+			}
+			result["control_acknowledgments_ms"], result["status"], result["error"] = latencies, measurement.FailureStatus(resultError), resultError.Error()
+		}
+	}()
 	_ = os.Mkdir(directory, 0o700)
 	store := filepath.Join(directory, "store")
 	deadline := measurement.NewDeadline(4 * time.Minute)
@@ -447,6 +457,7 @@ func headroom(binary, root, url string) (result map[string]any, resultError erro
 	if err != nil {
 		return nil, err
 	}
+	partial["idle"] = idle
 	held, err := openHeldPopulation(socket)
 	if err != nil {
 		return nil, err
@@ -459,7 +470,7 @@ func headroom(binary, root, url string) (result map[string]any, resultError erro
 	if err != nil {
 		return nil, err
 	}
-	latencies := make([]float64, 0, 50)
+	partial["before_controls"] = before
 	for index := range 50 {
 		started := time.Now()
 		reply, err := stopSession(client, fmt.Sprintf("headroom-stop-%d", index), "measure/headroom")
@@ -475,6 +486,7 @@ func headroom(binary, root, url string) (result map[string]any, resultError erro
 	if err != nil {
 		return nil, err
 	}
+	partial["after_controls"] = after
 	closeAll(held)
 	held = nil
 	time.Sleep(time.Second)
@@ -482,6 +494,7 @@ func headroom(binary, root, url string) (result map[string]any, resultError erro
 	if err != nil {
 		return nil, err
 	}
+	partial["retained_after_first_drain"] = drainedFirst
 	if drainedFirst.OpenDescriptors != idle.OpenDescriptors {
 		return nil, fmt.Errorf("first drain retained %d descriptors over idle", drainedFirst.OpenDescriptors-idle.OpenDescriptors)
 	}
@@ -497,6 +510,7 @@ func headroom(binary, root, url string) (result map[string]any, resultError erro
 	if err != nil {
 		return nil, err
 	}
+	partial["second_saturation_round"] = secondSaturation
 	closeAll(held)
 	held = nil
 	time.Sleep(time.Second)
@@ -504,6 +518,7 @@ func headroom(binary, root, url string) (result map[string]any, resultError erro
 	if err != nil {
 		return nil, err
 	}
+	partial["retained_after_second_drain"] = drainedSecond
 	if drainedSecond.OpenDescriptors != idle.OpenDescriptors {
 		return nil, fmt.Errorf("second drain retained %d descriptors over idle", drainedSecond.OpenDescriptors-idle.OpenDescriptors)
 	}
@@ -524,6 +539,16 @@ func activeCancellation(binary, root, url string, endpoint *streamEndpoint) (res
 	const capacity = 100
 	const measuredControls = 25
 	directory := filepath.Join(root, "active")
+	partial := map[string]any{"artifacts": directory}
+	samples := []map[string]any{}
+	defer func() {
+		if resultError != nil {
+			if result == nil {
+				result = partial
+			}
+			result["control_samples"], result["status"], result["error"] = samples, measurement.FailureStatus(resultError), resultError.Error()
+		}
+	}()
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		return nil, err
 	}
@@ -575,8 +600,8 @@ func activeCancellation(binary, root, url string, endpoint *streamEndpoint) (res
 	if err != nil {
 		return nil, err
 	}
+	partial["before_controls"] = before
 	stops := []float64{}
-	samples := []map[string]any{}
 	interruptionMS := 0.0
 	for index := range measuredControls {
 		if err := waitFull(); err != nil {
@@ -1527,71 +1552,72 @@ func run() (exitCode int) {
 		os.Exit(1)
 	}
 	binary, _ := filepath.Abs(flag.Arg(0))
+	result, err := measureControl(binary)
+	err = errors.Join(err, measurement.AttachEnvironmentEvidence(result, binary, *output))
+	return measurement.FinishQualification(*output, result, err)
+}
+
+func measureControl(binary string) (result map[string]any, runError error) {
+	cases := map[string]any{}
+	result = map[string]any{"format": "rui-model-control-v5-go", "status": "incomplete", "configurations": cases,
+		"scope":  "issue-175 production Session stop and exact model interruption",
+		"limits": []string{"local-provider control evidence; no live-provider or aggregate qualification"}}
 	root, err := os.MkdirTemp("/tmp", "rui-control-measure-")
 	if err != nil {
-		panic(err)
+		return result, err
 	}
+	result["artifacts"] = root
 	endpoint, err := startStreamEndpoint(false, root)
 	if err != nil {
-		panic(err)
+		return result, err
 	}
 	defer func() {
 		if endpoint != nil {
-			if err := endpoint.Close(); err != nil {
-				fmt.Fprintln(os.Stderr, "endpoint cleanup:", err)
-				exitCode = 1
-			}
+			measurement.JoinCleanup(&runError, endpoint.Close)
 		}
 	}()
 	started := time.Now()
 	headroomResult, err := headroom(binary, root, endpoint.URL())
+	cases["stalled_incomplete_ingress_diagnostic"] = headroomResult
 	if err != nil {
-		panic(err)
+		return result, err
 	}
-	if err := endpoint.Close(); err != nil {
-		panic(err)
-	}
+	err = endpoint.Close()
 	endpoint = nil
+	if err != nil {
+		return result, err
+	}
 	activeEndpoint, err := startStreamEndpoint(true, root)
 	if err != nil {
-		panic(err)
+		return result, err
 	}
 	defer func() {
 		if activeEndpoint != nil {
-			if err := activeEndpoint.Close(); err != nil {
-				fmt.Fprintln(os.Stderr, "active endpoint cleanup:", err)
-				exitCode = 1
-			}
+			measurement.JoinCleanup(&runError, activeEndpoint.Close)
 		}
 	}()
 	activeResult, err := activeCancellation(binary, root, activeEndpoint.URL(), activeEndpoint)
+	cases["live_model_cancellation"] = activeResult
 	if err != nil {
-		panic(err)
+		return result, err
 	}
-	if err := activeEndpoint.Close(); err != nil {
-		panic(err)
-	}
+	err = activeEndpoint.Close()
 	activeEndpoint = nil
-	controlFirstResult, err := controlFirst(binary, root)
 	if err != nil {
-		panic(err)
+		return result, err
+	}
+	controlFirstResult, err := controlFirst(binary, root)
+	cases["control_first_settlement_race"] = controlFirstResult
+	if err != nil {
+		return result, err
 	}
 	realSettlementResult, err := realSettlement(binary, root)
+	cases["real_settlement_import_workload"] = realSettlementResult
 	if err != nil {
-		panic(err)
+		return result, err
 	}
-	result := map[string]any{"format": "rui-model-control-v5-go", "scope": "issue-175 production Session stop and exact model interruption", "status": controlStatus(headroomResult, activeResult, controlFirstResult, realSettlementResult), "artifacts": root, "configurations": map[string]any{"stalled_incomplete_ingress_diagnostic": headroomResult, "live_model_cancellation": activeResult, "control_first_settlement_race": controlFirstResult, "real_settlement_import_workload": realSettlementResult}, "elapsed_seconds": time.Since(started).Seconds()}
-	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
-	if err != nil {
-		panic(err)
-	}
-	for name, value := range evidence {
-		result[name] = value
-	}
-	if err := measurement.PublishQualification(*output, result); err != nil {
-		panic(err)
-	}
-	return measurement.QualificationExitCode(result)
+	result["scope"], result["status"], result["elapsed_seconds"] = "issue-175 production Session stop and exact model interruption", controlStatus(headroomResult, activeResult, controlFirstResult, realSettlementResult), time.Since(started).Seconds()
+	return result, nil
 }
 
 func main() {

@@ -239,41 +239,40 @@ func idleCapacity(binary, root string, fixture *endpoint) ([]map[string]any, err
 	for _, capacity := range capacities {
 		directory := filepath.Join(root, fmt.Sprintf("idle-%d", capacity))
 		if err := os.Mkdir(directory, 0o700); err != nil {
-			return nil, err
+			return rows, err
 		}
 		deadline := measurement.NewDeadline(45 * time.Second)
 		host, err := startHost(deadline, binary, directory, fixture.URL(), directory, capacity, 0)
 		if err != nil {
-			return nil, err
+			return rows, err
 		}
 		before, err := measurement.CPUSeconds(host.Process)
 		if err != nil {
-			host.Stop(measurement.TeardownAllowance)
-			return nil, err
+			return rows, errors.Join(err, host.Stop(measurement.TeardownAllowance))
 		}
 		started := time.Now()
 		time.Sleep(2 * time.Second)
 		elapsed := time.Since(started).Seconds()
 		after, err := measurement.CPUSeconds(host.Process)
 		if err != nil {
-			host.Stop(measurement.TeardownAllowance)
-			return nil, err
+			return rows, errors.Join(err, host.Stop(measurement.TeardownAllowance))
 		}
 		cpuDelta, err := measurement.CheckedCPUDelta(before, after)
 		if err != nil {
-			host.Stop(measurement.TeardownAllowance)
-			return nil, err
+			return rows, errors.Join(err, host.Stop(measurement.TeardownAllowance))
 		}
 		cpuPercent := 100 * cpuDelta / elapsed
 		process, sampleError := sample(host, directory, "idle")
 		stopError := host.Stop(measurement.TeardownAllowance)
 		if err := errors.Join(sampleError, stopError); err != nil {
-			return nil, err
+			return rows, err
 		}
+		status := "passed"
 		if cpuPercent >= 1 {
-			return nil, fmt.Errorf("idle capacity %d consumed %.3f%% of one core", capacity, cpuPercent)
+			status = "target_miss"
 		}
 		rows = append(rows, map[string]any{
+			"status": status, "idle_cpu_limit_percent_one_core": 1,
 			"active_capacity": capacity, "custody_record_bytes": host.Ready["custody_record_bytes"],
 			"execution_slot_bytes": host.Ready["execution_slot_bytes"], "idle_cpu_percent_one_core": cpuPercent,
 			"idle_cpu_sample_seconds": elapsed, "process": process,
@@ -288,12 +287,12 @@ func requestGrowth(binary, root string, fixture *endpoint) ([]map[string]any, er
 		fixture.reset()
 		directory := filepath.Join(root, fmt.Sprintf("payload-%d", size))
 		if err := os.Mkdir(directory, 0o700); err != nil {
-			return nil, err
+			return rows, err
 		}
 		deadline := measurement.NewDeadline(60 * time.Second)
 		host, err := startHost(deadline, binary, directory, fixture.URL(), directory, 1, 3000)
 		if err != nil {
-			return nil, err
+			return rows, err
 		}
 		session := fmt.Sprintf("measure/payload-%d", size)
 		work := func() error {
@@ -338,7 +337,7 @@ func requestGrowth(binary, root string, fixture *endpoint) ([]map[string]any, er
 		}()
 		fixture.releaseAll()
 		if err := errors.Join(work, host.Stop(measurement.TeardownAllowance)); err != nil {
-			return nil, err
+			return rows, err
 		}
 	}
 	return rows, nil
@@ -398,51 +397,53 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	result, err := run(os.Args[1])
+	err = errors.Join(err, measurement.AttachEnvironmentEvidence(result, os.Args[1], ""))
+	os.Exit(measurement.FinishQualification("", result, err))
+}
+
+func run(binary string) (result map[string]any, runError error) {
 	started := time.Now()
+	result = map[string]any{"format": "rui-model-dispatch-v3-go", "status": "incomplete",
+		"scope":  "issue-172 production frozen-request dispatch",
+		"limits": []string{"partial local-provider evidence; no live-provider or aggregate qualification"}}
 	root, err := os.MkdirTemp("/private/tmp", "rui-dispatch-measure-")
 	if err != nil {
-		panic(err)
+		return result, err
 	}
+	result["artifacts"] = root
 	fixture, err := newEndpoint()
 	if err != nil {
-		panic(err)
+		return result, err
 	}
-	defer fixture.Close()
-	idle, err := idleCapacity(os.Args[1], root, fixture)
+	defer measurement.JoinCleanup(&runError, fixture.Close)
+	idle, err := idleCapacity(binary, root, fixture)
+	result["idle_capacity_growth"] = idle
 	if err != nil {
-		panic(err)
+		return result, err
 	}
-	growth, err := requestGrowth(os.Args[1], root, fixture)
+	growth, err := requestGrowth(binary, root, fixture)
+	result["request_growth_and_delayed_cleanup"] = growth
 	if err != nil {
-		panic(err)
+		return result, err
 	}
 	overlapFixture, err := newEndpointTLS(root)
 	if err != nil {
-		panic(err)
+		return result, err
 	}
-	defer overlapFixture.Close()
-	overlapping, err := overlap(os.Args[1], root, overlapFixture)
+	defer measurement.JoinCleanup(&runError, overlapFixture.Close)
+	overlapping, err := overlap(binary, root, overlapFixture)
+	result["overlapping_transport"] = overlapping
 	if err != nil {
-		panic(err)
+		return result, err
 	}
-	result := map[string]any{
-		"format": "rui-model-dispatch-v3-go", "scope": "issue-172 production frozen-request dispatch", "status": "passed",
+	result = map[string]any{
+		"format": "rui-model-dispatch-v3-go", "scope": "issue-172 production frozen-request dispatch", "status": measurement.QualificationStatus(idle),
 		"artifacts":            root,
 		"transport":            map[string]string{"curl": "8.22.0", "openssl": "3.6.3", "resolver": "threaded"},
 		"idle_capacity_growth": idle, "request_growth_and_delayed_cleanup": growth, "overlapping_transport": overlapping,
 		"elapsed_seconds": time.Since(started).Seconds(),
 		"limits":          []string{"macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only", "idle and request-growth cases use loopback H1; overlapping transport uses trusted local TLS/H2, not a live provider", "request cases size aggregate context input; endpoint_request_bytes reports the complete serialized request including envelope", "idle CPU is process CPU-time growth over a two-second quiet interval and must remain below 1% of one core", "process termination is crash evidence, not power-loss qualification"},
 	}
-	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), os.Args[1], "")
-	if err != nil {
-		panic(err)
-	}
-	for name, value := range evidence {
-		result[name] = value
-	}
-	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(result); err != nil {
-		panic(err)
-	}
+	return result, nil
 }

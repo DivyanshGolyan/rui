@@ -1,7 +1,7 @@
 package main
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -121,7 +121,7 @@ func payloadProfile(binary, workspace, parent string) ([]map[string]any, error) 
 	for _, size := range payloadBytes {
 		row, err := payloadCase(binary, workspace, parent, size)
 		if err != nil {
-			return nil, err
+			return rows, err
 		}
 		rows = append(rows, row)
 	}
@@ -211,10 +211,10 @@ func historyProfile(binary, workspace, parent string) (rows []map[string]any, re
 			var answer map[string]any
 			elapsed, err := measurement.TimedExchangeUnix(deadline, socket, "/v1/message", messageValue(store, key, session, ""), &answer)
 			if err != nil {
-				return nil, err
+				return rows, err
 			}
 			if field(answer, "answer", "status") != "accepted" {
-				return nil, fmt.Errorf("history admission differed: %v", answer)
+				return rows, fmt.Errorf("history admission differed: %v", answer)
 			}
 			lastAdmissionMS = elapsed
 			admitted++
@@ -222,10 +222,10 @@ func historyProfile(binary, workspace, parent string) (rows []map[string]any, re
 		var inspection map[string]any
 		inspectionMS, err := measurement.TimedExchangeUnix(deadline, socket, "/v1/inspect-session", inspectValue(store, session), &inspection)
 		if err != nil {
-			return nil, err
+			return rows, err
 		}
 		if inspection["pending_messages"] != fmt.Sprint(admitted) {
-			return nil, fmt.Errorf("history pending count differed: %v", inspection)
+			return rows, fmt.Errorf("history pending count differed: %v", inspection)
 		}
 		row := map[string]any{
 			"queued_messages":                admitted,
@@ -240,10 +240,10 @@ func historyProfile(binary, workspace, parent string) (rows []map[string]any, re
 				var observation map[string]any
 				elapsed, err := measurement.TimedExchangeUnix(deadline, socket, "/v1/observe-command", observeValue(store, key), &observation)
 				if err != nil {
-					return nil, err
+					return rows, err
 				}
 				if field(observation, "observation", "queue", "status") != "queued" {
-					return nil, fmt.Errorf("history queue changed: %v", observation)
+					return rows, fmt.Errorf("history queue changed: %v", observation)
 				}
 				row[name] = elapsed
 			}
@@ -251,7 +251,7 @@ func historyProfile(binary, workspace, parent string) (rows []map[string]any, re
 		time.Sleep(50 * time.Millisecond)
 		sample, err := stageSample(host, store, directory, fmt.Sprint(admitted))
 		if err != nil {
-			return nil, err
+			return rows, err
 		}
 		row["sample"] = sample
 		rows = append(rows, row)
@@ -268,24 +268,36 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	result, err := run(os.Args[1])
+	err = errors.Join(err, measurement.AttachEnvironmentEvidence(result, os.Args[1], ""))
+	os.Exit(measurement.FinishQualification("", result, err))
+}
+
+func run(binary string) (map[string]any, error) {
 	started := time.Now()
+	result := map[string]any{"format": "rui-message-admission-v3-go", "status": "incomplete",
+		"scope":  "issue-171 production Host message admission and observation",
+		"limits": []string{"partial queued-message evidence; model processing intentionally unavailable; no aggregate qualification"}}
 	parent, err := os.MkdirTemp("/private/tmp", "rui-message-measure-")
 	if err != nil {
-		panic(err)
+		return result, err
 	}
+	result["artifacts"] = parent
 	workspace, err := measurement.RepositoryRoot()
 	if err != nil {
-		panic(err)
+		return result, err
 	}
-	payload, err := payloadProfile(os.Args[1], workspace, parent)
+	payload, err := payloadProfile(binary, workspace, parent)
+	result["payload_growth"] = payload
 	if err != nil {
-		panic(err)
+		return result, err
 	}
-	history, err := historyProfile(os.Args[1], workspace, parent)
+	history, err := historyProfile(binary, workspace, parent)
+	result["queued_history_growth"] = history
 	if err != nil {
-		panic(err)
+		return result, err
 	}
-	result := map[string]any{
+	result = map[string]any{
 		"format": "rui-message-admission-v3-go",
 		"scope":  "issue-171 production Host message admission and observation",
 		"status": "passed", "artifacts": parent,
@@ -301,16 +313,5 @@ func main() {
 			"model processing is intentionally unavailable in this experiment",
 		},
 	}
-	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), os.Args[1], "")
-	if err != nil {
-		panic(err)
-	}
-	for name, value := range evidence {
-		result[name] = value
-	}
-	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(result); err != nil {
-		panic(err)
-	}
+	return result, nil
 }

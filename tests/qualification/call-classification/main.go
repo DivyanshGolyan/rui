@@ -477,7 +477,7 @@ func latencySummary(samples []float64) map[string]any {
 }
 
 func combineStatus(current, next string) string {
-	rank := map[string]int{"passed": 0, "unavailable": 1, "target_miss": 2, "behavior_error": 3}
+	rank := map[string]int{"passed": 0, "unavailable": 1, "invalid_measurement": 2, "target_miss": 3, "failed": 4, "behavior_error": 4}
 	currentRank, currentKnown := rank[current]
 	nextRank, nextKnown := rank[next]
 	if !currentKnown || !nextKnown {
@@ -770,11 +770,6 @@ type cliFamilyMeasurement struct {
 	CompletedWorkHold bool                      `json:"completed_work_hold"`
 }
 
-type physicalMeasurementUnavailable struct{ cause error }
-
-func (e physicalMeasurementUnavailable) Error() string { return e.cause.Error() }
-func (e physicalMeasurementUnavailable) Unwrap() error { return e.cause }
-
 type physicalQualification struct {
 	hostLower      uint64
 	hostUpper      uint64
@@ -897,21 +892,20 @@ func measureHeldCLI(binary string, arguments []string, host *measurement.Host, d
 	}
 	cliProcess, err := measurement.SampleProcess(cli, filepath.Join(directory, label+"-cli-footprint.txt"))
 	if err != nil {
-		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+		return result, append([]byte(nil), stdout.Bytes()...), errors.Join(err, cleanup())
 	}
 	hostChildren, err := host.Process.Children()
 	if err != nil {
-		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+		return result, append([]byte(nil), stdout.Bytes()...), errors.Join(measurement.UnavailableMeasurement(err), cleanup())
 	}
 	jsonPath := filepath.Join(directory, label+"-aggregate-footprint.json")
 	toolOutput, err := os.OpenFile(filepath.Join(directory, label+"-aggregate-footprint.txt"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+		return result, append([]byte(nil), stdout.Bytes()...), errors.Join(err, cleanup())
 	}
 	toolError, err := os.OpenFile(filepath.Join(directory, label+"-aggregate-footprint-stderr.txt"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		_ = toolOutput.Close()
-		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+		return result, append([]byte(nil), stdout.Bytes()...), errors.Join(err, toolOutput.Close(), cleanup())
 	}
 	sampler := exec.Command("/usr/bin/footprint", "-f", "bytes", "--sample", "0.2", "--sample-duration", "0.5", "-j", jsonPath, "-p", strconv.Itoa(host.Cmd.Process.Pid), "-p", strconv.Itoa(command.Process.Pid))
 	sampler.Stdout = toolOutput
@@ -919,21 +913,24 @@ func measureHeldCLI(binary string, arguments []string, host *measurement.Host, d
 	if err = sampler.Start(); err == nil {
 		err = waitCommand(sampler, measurement.TeardownAllowance)
 	}
+	if err != nil {
+		err = measurement.UnavailableMeasurement(err)
+	}
 	err = errors.Join(err, toolOutput.Close(), toolError.Close())
 	if err != nil {
-		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+		return result, append([]byte(nil), stdout.Bytes()...), errors.Join(err, cleanup())
 	}
 	encoded, err := os.ReadFile(jsonPath)
 	if err != nil {
-		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+		return result, append([]byte(nil), stdout.Bytes()...), errors.Join(measurement.UnavailableMeasurement(err), cleanup())
 	}
 	var report footprintSamples
 	if err := json.Unmarshal(encoded, &report); err != nil {
-		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+		return result, append([]byte(nil), stdout.Bytes()...), errors.Join(measurement.InvalidMeasurement(err), cleanup())
 	}
 	aggregate, err := summarizeAggregateFootprint(report, host.Cmd.Process.Pid, command.Process.Pid)
 	if err != nil {
-		return result, append([]byte(nil), stdout.Bytes()...), physicalMeasurementUnavailable{errors.Join(err, cleanup())}
+		return result, append([]byte(nil), stdout.Bytes()...), errors.Join(measurement.InvalidMeasurement(err), cleanup())
 	}
 	if _, err := releaseWrite.Write([]byte{1}); err != nil {
 		return result, nil, errors.Join(err, cleanup())
@@ -994,11 +991,10 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 	measure := func(label, family string, arguments []string, verify func([]byte) error) error {
 		measured, output, measureError := measureHeldCLI(binary, arguments, host, directory, label, family, &qualification.population)
 		if verifyError := verify(output); verifyError != nil {
-			return verifyError
+			return errors.Join(verifyError, measureError)
 		}
 		if measureError != nil {
-			var unavailable physicalMeasurementUnavailable
-			if !errors.As(measureError, &unavailable) {
+			if measurement.FailureStatus(measureError) != "unavailable" {
 				return measureError
 			}
 			physicalUnavailable = true
@@ -1209,6 +1205,9 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		}
 		physical, sampleError := measurement.SampleProcess(host.Process, filepath.Join(directory, "retained-footprint.txt"))
 		if sampleError != nil {
+			if measurement.FailureStatus(sampleError) != "unavailable" {
+				return result, sampleError
+			}
 			result["physical_footprint_error"] = sampleError.Error()
 			physicalUnavailable = true
 			physicalErrors = append(physicalErrors, "Host: "+sampleError.Error())
@@ -1221,7 +1220,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 			}
 		}
 	} else {
-		result["physical_footprint_error"] = "accepted physical-footprint counter requires macOS /usr/bin/footprint"
+		result["physical_footprint_error"] = "accepted physical-footprint counter requires macOS with cgo enabled"
 	}
 	if len(physicalErrors) != 0 {
 		result["physical_measurement_errors"] = physicalErrors
@@ -1331,9 +1330,8 @@ func main() {
 	for _, candidate := range scenarios {
 		value, caseError := runScenario(binary, sqliteBinary, root, candidate, physical)
 		if caseError != nil {
-			value["status"] = "behavior_error"
+			value["status"] = measurement.FailureStatus(caseError)
 			value["error"] = caseError.Error()
-			status = combineStatus(status, "behavior_error")
 		}
 		if portableStatus, ok := value["portable_measurement_status"].(string); ok && portableStatus == "unavailable" {
 			status = combineStatus(status, portableStatus)
@@ -1343,7 +1341,7 @@ func main() {
 		cases[candidate.Name] = value
 	}
 	physicalVerdict := measurement.FootprintVerdict{Status: "unavailable", TargetBytes: physicalFootprintTargetBytes, UpperBoundBytes: ^uint64(0)}
-	physicalReason := "Host physical-footprint counter requires macOS /usr/bin/footprint"
+	physicalReason := "Host physical-footprint counter requires macOS with cgo enabled"
 	aggregateVerdict := measurement.FootprintVerdict{Status: "unavailable", TargetBytes: physicalFootprintTargetBytes, UpperBoundBytes: ^uint64(0)}
 	aggregateReason := "diagnostic aggregate counter requires macOS /usr/bin/footprint"
 	if runtime.GOOS == "darwin" {
@@ -1376,7 +1374,8 @@ func main() {
 			"network_boundary": "real loopback HTTP/SSE production transport drove Rui's in-process network allocations during each same-Host lifetime; external deterministic provider fixture process memory is excluded; kernel/socket buffers absent from macOS process phys_footprint remain separate network/kernel counters",
 		},
 		"physical_measurement_method": map[string]any{
-			"tool":                           "/usr/bin/footprint",
+			"host_and_cli_lifetime_peaks":    "proc_pid_rusage/RUSAGE_INFO_V4; exact bytes with PID/start/exit and Mach clock bracket; inconsistent observations rejected",
+			"aggregate_diagnostic_tool":      "/usr/bin/footprint",
 			"installed_tool_contract":        "multiple -p arguments de-duplicate multiply mapped objects and report a total de-duplicated footprint",
 			"sampling_interval_seconds":      0.2,
 			"ordinary_cli_population":        1,
@@ -1388,16 +1387,11 @@ func main() {
 		},
 		"limits": limits,
 	}
-	evidence, evidenceError := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
-	if evidenceError != nil {
-		result["environment_evidence_status"] = "unavailable"
-		result["environment_evidence_error"] = evidenceError.Error()
+	legend := result["classification_legend"].(map[string]string)
+	legend["invalid_measurement"] = "native or tool evidence was inconsistent and rejected; inspect retained raw reports"
+	legend["failed"] = "workload, artifact publication or mandatory disposal failed; the error includes joined causes"
+	if err := measurement.AttachEnvironmentEvidence(result, binary, *output); err != nil {
 		status = combineStatus(status, "unavailable")
-	} else {
-		result["environment_evidence_status"] = "passed"
-		for key, value := range evidence {
-			result[key] = value
-		}
 	}
 	sqliteHash, sqliteError := measurement.SHA256File(sqliteBinary)
 	if sqliteError != nil {
@@ -1418,7 +1412,5 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	if status == "behavior_error" || status == "target_miss" {
-		os.Exit(1)
-	}
+	os.Exit(measurement.QualificationExitCode(result))
 }

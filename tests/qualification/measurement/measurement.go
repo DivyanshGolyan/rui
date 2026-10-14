@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -435,6 +434,38 @@ type Footprint struct {
 	LifetimePeakTolerance uint64 `json:"lifetime_peak_physical_footprint_rounding_tolerance_bytes"`
 }
 
+// The kernel reads peak before current; this is a bracketed observation, not
+// an atomic snapshot. Keep the untouched counters even when validation fails.
+type nativeFootprintReport struct {
+	API           string `json:"api"`
+	PID           int32  `json:"pid"`
+	BeginTicks    uint64 `json:"begin_mach_absolute_ticks"`
+	EndTicks      uint64 `json:"end_mach_absolute_ticks"`
+	TimebaseNumer uint32 `json:"timebase_numer"`
+	TimebaseDenom uint32 `json:"timebase_denom"`
+	ProcessStart  uint64 `json:"process_start_mach_absolute_ticks"`
+	ProcessExit   uint64 `json:"process_exit_mach_absolute_ticks"`
+	CurrentBytes  uint64 `json:"physical_footprint_bytes"`
+	PeakBytes     uint64 `json:"lifetime_peak_physical_footprint_bytes"`
+	Error         string `json:"error,omitempty"`
+}
+
+func (r nativeFootprintReport) footprint(pid int32) (Footprint, error) {
+	if r.Error != "" {
+		return Footprint{}, UnavailableMeasurement(fmt.Errorf("native footprint: %s", r.Error))
+	}
+	if r.PID != pid || r.ProcessStart == 0 || r.ProcessStart > r.BeginTicks || r.ProcessExit != 0 {
+		return Footprint{}, InvalidMeasurement(errors.New("native footprint requires an identified live process"))
+	}
+	if r.BeginTicks == 0 || r.EndTicks < r.BeginTicks || r.TimebaseNumer == 0 || r.TimebaseDenom == 0 {
+		return Footprint{}, InvalidMeasurement(errors.New("invalid native footprint clock bracket"))
+	}
+	if r.CurrentBytes == 0 || r.PeakBytes == 0 || r.PeakBytes < r.CurrentBytes {
+		return Footprint{}, InvalidMeasurement(fmt.Errorf("invalid native footprint counters: current=%d peak=%d", r.CurrentBytes, r.PeakBytes))
+	}
+	return Footprint{PhysicalBytes: r.CurrentBytes, LifetimePeakBytes: r.PeakBytes}, nil
+}
+
 type FootprintVerdict struct {
 	Status          string `json:"status"`
 	TargetBytes     uint64 `json:"target_bytes"`
@@ -492,7 +523,7 @@ func (v SampleValidity) Status() string {
 // QualificationStatus reduces required evidence only. Optional diagnostic rows
 // must stay outside this boundary; missing or unknown verdicts cannot pass.
 func QualificationStatus(rowFamilies ...[]map[string]any) string {
-	precedence := map[string]int{"passed": 0, "target_miss": 1, "incomplete": 2, "failed": 3}
+	precedence := map[string]int{"passed": 0, "target_miss": 1, "incomplete": 2, "unavailable": 3, "invalid_measurement": 4, "failed": 5}
 	status := "passed"
 	count := 0
 	for _, rows := range rowFamilies {
@@ -512,73 +543,6 @@ func QualificationStatus(rowFamilies ...[]map[string]any) string {
 		return "incomplete"
 	}
 	return status
-}
-
-var footprintCounter = regexp.MustCompile(`^\s*(phys_footprint|phys_footprint_peak):\s+([0-9]+(?:\.[0-9]+)?)\s+(B|KB|MB|GB)\s*$`)
-
-func ParseFootprint(report string) (Footprint, error) {
-	values := map[string]struct {
-		bytes     uint64
-		tolerance uint64
-	}{}
-	scales := map[string]uint64{"B": 1, "KB": 1024, "MB": 1024 * 1024, "GB": 1024 * 1024 * 1024}
-	for _, line := range strings.Split(report, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "phys_footprint") {
-			continue
-		}
-		match := footprintCounter.FindStringSubmatch(line)
-		if match == nil {
-			return Footprint{}, fmt.Errorf("malformed footprint counter %q", line)
-		}
-		if _, duplicate := values[match[1]]; duplicate {
-			return Footprint{}, fmt.Errorf("duplicate footprint counter %q", match[1])
-		}
-		number, err := strconv.ParseFloat(match[2], 64)
-		if err != nil || number <= 0 {
-			return Footprint{}, fmt.Errorf("invalid footprint counter %q", match[0])
-		}
-		scale := scales[match[3]]
-		decimals := len(strings.SplitN(match[2], ".", 2))
-		quantum := float64(scale)
-		if decimals == 2 {
-			quantum /= float64(pow10(len(strings.SplitN(match[2], ".", 2)[1])))
-		}
-		tolerance := uint64(0)
-		if scale != 1 || decimals == 2 {
-			tolerance = uint64(quantum/2 + 0.999999999)
-		}
-		values[match[1]] = struct {
-			bytes     uint64
-			tolerance uint64
-		}{uint64(number*float64(scale) + 0.5), tolerance}
-	}
-	current, currentOK := values["phys_footprint"]
-	peak, peakOK := values["phys_footprint_peak"]
-	if !currentOK || !peakOK {
-		return Footprint{}, fmt.Errorf("required footprint counters unavailable: %q", report)
-	}
-	currentLow := uint64(0)
-	if current.bytes > current.tolerance {
-		currentLow = current.bytes - current.tolerance
-	}
-	if peak.bytes+peak.tolerance < currentLow {
-		return Footprint{}, fmt.Errorf("lifetime peak below current beyond rounding tolerance: %q", report)
-	}
-	return Footprint{
-		PhysicalBytes:         current.bytes,
-		PhysicalTolerance:     current.tolerance,
-		LifetimePeakBytes:     peak.bytes,
-		LifetimePeakTolerance: peak.tolerance,
-	}, nil
-}
-
-func pow10(exponent int) uint64 {
-	result := uint64(1)
-	for range exponent {
-		result *= 10
-	}
-	return result
 }
 
 type ProcessSample struct {
@@ -673,7 +637,7 @@ func SamplePortableProcess(target *process.Process) (PortableProcessSample, erro
 func SampleProcess(target *process.Process, rawFootprintPath string) (ProcessSample, error) {
 	core, err := sampleProcessCore(target)
 	if err != nil {
-		return ProcessSample{}, err
+		return ProcessSample{}, UnavailableMeasurement(err)
 	}
 	result := ProcessSample{
 		RSSBytes: core.memory.RSS, VirtualBytes: core.memory.VMS,
@@ -687,28 +651,25 @@ func SampleProcess(target *process.Process, rawFootprintPath string) (ProcessSam
 		return result, err
 	}
 	if runtime.GOOS != "darwin" {
-		return ProcessSample{}, fmt.Errorf("unsupported process sampling platform %s", runtime.GOOS)
+		return ProcessSample{}, UnavailableMeasurement(fmt.Errorf("unsupported process sampling platform %s", runtime.GOOS))
 	}
 	pid := strconv.Itoa(int(target.Pid))
-	footprintContext, cancelFootprint := context.WithTimeout(context.Background(), TeardownAllowance)
-	defer cancelFootprint()
-	footprintCommand := exec.CommandContext(footprintContext, "/usr/bin/footprint", "-p", pid)
-	report, err := footprintCommand.CombinedOutput()
+	native := readNativeFootprint(target.Pid)
+	report, err := json.Marshal(native)
 	if err != nil {
-		return ProcessSample{}, fmt.Errorf("footprint failed: %w; output=%q", err, report)
-	}
-	if err := os.WriteFile(rawFootprintPath, report, 0o600); err != nil {
 		return ProcessSample{}, err
 	}
-	footprint, err := ParseFootprint(string(report))
-	if err != nil {
+	footprint, validationError := native.footprint(target.Pid)
+	// Preserve the raw report even on an API or consistency failure. No retry,
+	// clamping or RSS fallback may turn missing evidence into qualification.
+	if err := errors.Join(validationError, os.WriteFile(rawFootprintPath, append(report, '\n'), 0o600)); err != nil {
 		return ProcessSample{}, err
 	}
 	lsofContext, cancelLsof := context.WithTimeout(context.Background(), TeardownAllowance)
 	defer cancelLsof()
 	lsof, err := exec.CommandContext(lsofContext, "/usr/sbin/lsof", "-n", "-P", "-p", pid).Output()
 	if err != nil {
-		return ProcessSample{}, fmt.Errorf("lsof failed: %w", err)
+		return ProcessSample{}, UnavailableMeasurement(fmt.Errorf("lsof failed: %w", err))
 	}
 	rows := strings.Count(string(lsof), "\n") - 1
 	if rows < 0 {
@@ -851,35 +812,81 @@ func RepositoryRoot() (string, error) {
 }
 
 func EnvironmentEvidence(deadline Deadline, binary, output string) (map[string]any, error) {
+	runtimeManifest, err := RuntimeManifest()
+	result := map[string]any{"binary": binary, "measurement_runtime": runtimeManifest}
+	if err != nil {
+		return result, err
+	}
 	root, err := RepositoryRoot()
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	revision, dirty, err := SourceProvenance(deadline, root, output)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
+	result["tested_revision"], result["working_tree_dirty"] = revision, dirty
 	binaryHash, err := SHA256File(binary)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
+	result["binary_sha256"] = binaryHash
 	sumHash, err := SHA256File(filepath.Join(root, "tests", "qualification", "go.sum"))
 	if err != nil {
-		return nil, err
+		return result, err
 	}
+	result["measurement_go_sum_sha256"] = sumHash
+	// These identify the files present at observation time, not an assertion
+	// that a previously built collector used this checkout.
+	sources := map[string]string{}
+	module := filepath.Join(root, "tests", "qualification")
+	if err := filepath.WalkDir(module, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !(strings.HasSuffix(path, ".go") || entry.Name() == "go.mod" || entry.Name() == "go.sum") {
+			return nil
+		}
+		digest, err := SHA256File(path)
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		sources[relative] = digest
+		return nil
+	}); err != nil {
+		return result, err
+	}
+	runtimeManifest["source_files_at_observation_sha256"] = sources
 	zig, err := Run(deadline, "zig", "version")
 	if err != nil {
-		return nil, err
+		return result, err
 	}
+	result["zig"] = strings.TrimSpace(string(zig))
 	platform, err := Run(deadline, "uname", "-a")
 	if err != nil {
-		return nil, err
+		return result, err
 	}
-	runtimeManifest, err := RuntimeManifest()
+	result["platform"] = strings.TrimSpace(string(platform))
+	return result, nil
+}
+
+// AttachEnvironmentEvidence preserves partial provenance even when a later
+// probe fails. Call from the runner's finalizer, including failed workloads.
+func AttachEnvironmentEvidence(result map[string]any, binary, output string) error {
+	evidence, err := EnvironmentEvidence(NewDeadline(time.Minute), binary, output)
+	for name, value := range evidence {
+		result[name] = value
+	}
 	if err != nil {
-		return nil, err
+		result["environment_evidence_status"], result["environment_evidence_error"] = "unavailable", err.Error()
+		return UnavailableMeasurement(err)
 	}
-	return map[string]any{"tested_revision": revision, "working_tree_dirty": dirty, "binary": binary, "binary_sha256": binaryHash, "zig": strings.TrimSpace(string(zig)), "platform": strings.TrimSpace(string(platform)), "measurement_go_sum_sha256": sumHash, "measurement_runtime": runtimeManifest}, nil
+	result["environment_evidence_status"] = "passed"
+	return nil
 }
 
 func WriteJSON(path string, value any) error {
@@ -916,6 +923,72 @@ func PublishQualification(path string, result map[string]any) error {
 	return EncodeJSON(os.Stdout, result)
 }
 
+type measurementError struct {
+	status string
+	cause  error
+}
+
+func (e measurementError) Error() string { return e.cause.Error() }
+func (e measurementError) Unwrap() error { return e.cause }
+
+// Wrap only collection/validation failures, never a joined cleanup error.
+func UnavailableMeasurement(err error) error {
+	return measurementError{status: "unavailable", cause: err}
+}
+
+func InvalidMeasurement(err error) error {
+	return measurementError{status: "invalid_measurement", cause: err}
+}
+
+// FailureStatus checks every joined branch. Finding one measurement error
+// with errors.As would incorrectly hide a sibling behavior/disposal failure.
+func FailureStatus(err error) string {
+	switch e := err.(type) {
+	case nil:
+		return "passed"
+	case measurementError:
+		return e.status
+	case interface{ Unwrap() []error }:
+		children := e.Unwrap()
+		if len(children) == 0 {
+			return "failed"
+		}
+		status := "unavailable"
+		for _, child := range children {
+			switch FailureStatus(child) {
+			case "failed", "passed":
+				return "failed"
+			case "invalid_measurement":
+				status = "invalid_measurement"
+			}
+		}
+		return status
+	case interface{ Unwrap() error }:
+		if cause := e.Unwrap(); cause != nil {
+			return FailureStatus(cause)
+		}
+		return "failed"
+	default:
+		return "failed"
+	}
+}
+
+// FinishQualification runs after owned resources have been disposed. Partial
+// rows and artifact locations survive collection, behavior and cleanup errors.
+func FinishQualification(path string, result map[string]any, runError error) int {
+	if runError != nil {
+		if result["status"] != "failed" && result["status"] != "behavior_error" {
+			result["status"] = FailureStatus(runError)
+		}
+		result["error"] = runError.Error()
+	}
+	if err := PublishQualification(path, result); err != nil {
+		fmt.Fprintln(os.Stderr, "publish qualification:", err)
+		return 1
+	}
+	return QualificationExitCode(result)
+}
+
 // QualificationExitCode keeps process success as strict as the published
 // qualification reducers. Smoke-only runners use their established success
 // vocabulary; every missing or non-success verdict fails the process.
@@ -930,25 +1003,42 @@ func QualificationExitCode(result map[string]any) int {
 var readVirtualMemory = mem.VirtualMemory
 
 func RuntimeManifest() (map[string]any, error) {
-	virtual, err := readVirtualMemory()
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	digest, err := SHA256File(executable)
 	if err != nil {
 		return nil, err
 	}
 	manifest := map[string]any{
-		"go_version":            runtime.Version(),
-		"go_os":                 runtime.GOOS,
-		"go_arch":               runtime.GOARCH,
-		"logical_cpus":          runtime.NumCPU(),
-		"physical_memory_bytes": virtual.Total,
+		"collector_executable_sha256": digest,
+		"go_version":                  runtime.Version(),
+		"go_os":                       runtime.GOOS,
+		"go_arch":                     runtime.GOARCH,
+		"logical_cpus":                runtime.NumCPU(),
 	}
 	if info, ok := debug.ReadBuildInfo(); ok {
 		manifest["module_path"] = info.Main.Path
+		settings := map[string]string{}
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "CGO_ENABLED", "CGO_CFLAGS", "CGO_CPPFLAGS", "CGO_CXXFLAGS", "CGO_LDFLAGS", "GOOS", "GOARCH", "GOAMD64", "GOARM64", "-compiler", "-buildmode", "-tags", "vcs.revision", "vcs.modified":
+				settings[setting.Key] = setting.Value
+			}
+		}
+		manifest["collector_build_settings"] = settings
 		for _, dependency := range info.Deps {
 			if dependency.Path == "github.com/shirou/gopsutil/v4" {
 				manifest["gopsutil_version"] = dependency.Version
 			}
 		}
 	}
+	virtual, err := readVirtualMemory()
+	if err != nil {
+		return manifest, err
+	}
+	manifest["physical_memory_bytes"] = virtual.Total
 	return manifest, nil
 }
 

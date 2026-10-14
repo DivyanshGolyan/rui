@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -65,15 +64,23 @@ func configuration(store, workspace, identity string) configurationCommand {
 
 func run(binary string) (result map[string]any, resultError error) {
 	started := time.Now()
+	result = map[string]any{"format": "rui-configuration-admission-v2-go", "status": "incomplete",
+		"scope":  "issue-170 production Host configuration admission",
+		"limits": []string{"partial sequential configuration evidence; no concurrent or aggregate qualification"}}
+	stages := make([]map[string]any, 0, len(sessionCounts))
+	defer func() {
+		result["stages"], result["elapsed_seconds"] = stages, time.Since(started).Seconds()
+	}()
 	directory, err := os.MkdirTemp("/private/tmp", "rui-configuration-measure-")
 	if err != nil {
-		return nil, err
+		return result, err
 	}
+	result["artifacts"] = directory
 	store := filepath.Join(directory, "store")
 	deadline := measurement.NewDeadline(10 * time.Minute)
 	host, err := measurement.StartHost(binary, store, "", 1000, filepath.Join(directory, "host-stderr.log"), deadline)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	defer func() {
 		measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
@@ -81,13 +88,12 @@ func run(binary string) (result map[string]any, resultError error) {
 	canonicalStore, storeOK := host.Ready["store"]
 	socketPath, socketOK := host.Ready["socket"]
 	if !storeOK || !socketOK {
-		return nil, errors.New("Host readiness omitted Store or socket")
+		return result, errors.New("Host readiness omitted Store or socket")
 	}
 	workspace, err := measurement.RepositoryRoot()
 	if err != nil {
-		return nil, err
+		return result, err
 	}
-	stages := make([]map[string]any, 0, len(sessionCounts))
 	admitted := 0
 	for _, target := range sessionCounts {
 		for admitted < target {
@@ -98,28 +104,28 @@ func run(binary string) (result map[string]any, resultError error) {
 				} `json:"answer"`
 			}
 			if err := measurement.ExchangeUnix(deadline, socketPath, "/v1/configure", configuration(canonicalStore, workspace, identity), &answer); err != nil {
-				return nil, err
+				return result, err
 			}
 			if answer.Answer.Status != "accepted" {
-				return nil, fmt.Errorf("configuration %s was %s", identity, answer.Answer.Status)
+				return result, fmt.Errorf("configuration %s was %s", identity, answer.Answer.Status)
 			}
 			admitted++
 		}
 		time.Sleep(100 * time.Millisecond)
 		sample, err := measurement.SampleProcess(host.Process, filepath.Join(directory, fmt.Sprintf("footprint-%d.txt", admitted)))
 		if err != nil {
-			return nil, err
+			return result, err
 		}
 		database, err := measurement.DatabaseSize(store)
 		if err != nil {
-			return nil, err
+			return result, err
 		}
 		stage := map[string]any{"dormant_sessions": admitted, "process": sample, "database": database}
 		stages = append(stages, stage)
 	}
 	peak, err := clientPeak(binary, store)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	result = map[string]any{
 		"format":                       "rui-configuration-admission-v2-go",
@@ -136,13 +142,6 @@ func run(binary string) (result map[string]any, resultError error) {
 			"driver work is excluded from Host counters",
 		},
 	}
-	evidence, err := measurement.EnvironmentEvidence(deadline, binary, "")
-	if err != nil {
-		return nil, err
-	}
-	for name, value := range evidence {
-		result[name] = value
-	}
 	return result, nil
 }
 
@@ -156,13 +155,6 @@ func main() {
 		os.Exit(1)
 	}
 	result, err := run(os.Args[1])
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(result); err != nil {
-		panic(err)
-	}
+	err = errors.Join(err, measurement.AttachEnvironmentEvidence(result, os.Args[1], ""))
+	os.Exit(measurement.FinishQualification("", result, err))
 }

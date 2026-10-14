@@ -33,15 +33,24 @@ func TestQualificationPublisherProcess(t *testing.T) {
 		status := os.Getenv("RUI_TEST_QUALIFICATION_STATUS")
 		output := os.Getenv("RUI_TEST_QUALIFICATION_OUTPUT")
 		result := map[string]any{"status": status, "marker": "published"}
-		if err := PublishQualification(output, result); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(2)
+		var runError error
+		switch os.Getenv("RUI_TEST_QUALIFICATION_FAULT") {
+		case "sample":
+			runError = UnavailableMeasurement(errors.New("sample unavailable"))
+		case "invalid":
+			runError = InvalidMeasurement(errors.New("current exceeds peak"))
+		case "sample-and-cleanup":
+			runError = errors.Join(UnavailableMeasurement(errors.New("sample unavailable")), errors.New("cleanup failed"))
+		case "nil-cause":
+			runError = fmt.Errorf("wrong result with no transport error: %w", error(nil))
 		}
-		os.Exit(QualificationExitCode(result))
+		os.Exit(FinishQualification(output, result, runError))
 	}
 	for _, test := range []struct {
 		status string
 		code   int
+		fault  string
+		want   string
 	}{
 		{status: "passed", code: 0},
 		{status: "smoke_passed", code: 0},
@@ -49,11 +58,16 @@ func TestQualificationPublisherProcess(t *testing.T) {
 		{status: "incomplete", code: 1},
 		{status: "target_miss", code: 1},
 		{status: "", code: 1},
+		{status: "passed", code: 1, fault: "sample", want: "unavailable"},
+		{status: "passed", code: 1, fault: "invalid", want: "invalid_measurement"},
+		{status: "passed", code: 1, fault: "sample-and-cleanup", want: "failed"},
+		{status: "failed", code: 1, fault: "sample", want: "failed"},
+		{status: "passed", code: 1, fault: "nil-cause", want: "failed"},
 	} {
-		t.Run(test.status, func(t *testing.T) {
+		t.Run(test.status+test.fault, func(t *testing.T) {
 			output := filepath.Join(t.TempDir(), "result.json")
 			command := exec.Command(os.Args[0], "-test.run=^TestQualificationPublisherProcess$")
-			command.Env = append(os.Environ(), "RUI_TEST_QUALIFICATION_CHILD=1", "RUI_TEST_QUALIFICATION_STATUS="+test.status, "RUI_TEST_QUALIFICATION_OUTPUT="+output)
+			command.Env = append(os.Environ(), "RUI_TEST_QUALIFICATION_CHILD=1", "RUI_TEST_QUALIFICATION_STATUS="+test.status, "RUI_TEST_QUALIFICATION_OUTPUT="+output, "RUI_TEST_QUALIFICATION_FAULT="+test.fault)
 			err := command.Run()
 			if got := command.ProcessState.ExitCode(); got != test.code {
 				t.Fatalf("exit code = %d, want %d: %v", got, test.code, err)
@@ -66,7 +80,14 @@ func TestQualificationPublisherProcess(t *testing.T) {
 			if err := json.Unmarshal(contents, &result); err != nil {
 				t.Fatalf("published result invalid: %v", err)
 			}
-			if result["status"] != test.status || result["marker"] != "published" {
+			want := test.status
+			if test.fault != "" {
+				want = test.want
+				if result["error"] == nil {
+					t.Fatalf("missing failure evidence: %v", result)
+				}
+			}
+			if result["status"] != want || result["marker"] != "published" {
 				t.Fatalf("published result = %v", result)
 			}
 		})
@@ -116,23 +137,79 @@ func TestStopWithExitPreservesCleanupFailureBesideExpectedStatus(t *testing.T) {
 	}
 }
 
-func TestParseFootprintMixedUnitRounding(t *testing.T) {
-	result, err := ParseFootprint("phys_footprint: 2 MB\nphys_footprint_peak: 2047 KB\n")
-	if err != nil {
-		t.Fatal(err)
+func TestNativeFootprintPreservesExactCountersAndRejectsInvalidEvidence(t *testing.T) {
+	valid := nativeFootprintReport{API: "proc_pid_rusage/RUSAGE_INFO_V4", PID: 7,
+		BeginTicks: 100, EndTicks: 120, TimebaseNumer: 125, TimebaseDenom: 3,
+		ProcessStart: 10, CurrentBytes: 918272, PeakBytes: 9306880}
+	got, err := valid.footprint(7)
+	if err != nil || got != (Footprint{PhysicalBytes: 918272, LifetimePeakBytes: 9306880}) {
+		t.Fatalf("native byte counters changed: %+v, %v", got, err)
 	}
-	if result.PhysicalBytes != 2*1024*1024 || result.LifetimePeakBytes != 2047*1024 {
-		t.Fatalf("unexpected counters: %+v", result)
+	for name, change := range map[string]func(*nativeFootprintReport){
+		"historical inconsistent pair": func(r *nativeFootprintReport) { r.CurrentBytes, r.PeakBytes = 6849*1024, 6705*1024 },
+		"missing peak":                 func(r *nativeFootprintReport) { r.PeakBytes = 0 },
+		"missing current":              func(r *nativeFootprintReport) { r.CurrentBytes = 0 },
+		"foreign PID":                  func(r *nativeFootprintReport) { r.PID = 8 },
+		"missing birth":                func(r *nativeFootprintReport) { r.ProcessStart = 0 },
+		"new process":                  func(r *nativeFootprintReport) { r.ProcessStart = 110 },
+		"exited process":               func(r *nativeFootprintReport) { r.ProcessExit = 115 },
+		"backward bracket":             func(r *nativeFootprintReport) { r.EndTicks = 99 },
+		"missing clock scale":          func(r *nativeFootprintReport) { r.TimebaseDenom = 0 },
+		"API failure":                  func(r *nativeFootprintReport) { r.Error = "permission denied" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			report := valid
+			change(&report)
+			if _, err := report.footprint(7); err == nil {
+				t.Fatalf("invalid evidence accepted: %+v", report)
+			}
+		})
 	}
 }
 
-func TestParseFootprintIntegralBytesAreExact(t *testing.T) {
-	result, err := ParseFootprint("phys_footprint: 1 B\nphys_footprint_peak: 1 B\n")
+func TestRuntimeManifestIdentifiesCollectorExecutable(t *testing.T) {
+	manifest, err := RuntimeManifest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.PhysicalTolerance != 0 || result.LifetimePeakTolerance != 0 {
-		t.Fatalf("byte counters were not exact: %+v", result)
+	path, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := SHA256File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest["collector_executable_sha256"] != expected {
+		t.Fatalf("running collector identity missing: %+v", manifest)
+	}
+}
+
+func TestEnvironmentFailurePreservesCollectorAndSourceIdentity(t *testing.T) {
+	t.Chdir("..")
+	// The later zig/uname probe must fail without erasing earlier evidence.
+	t.Setenv("PATH", t.TempDir())
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := map[string]any{"status": "passed", "artifacts": "/retained/root"}
+	err = AttachEnvironmentEvidence(result, executable, "")
+	if err == nil || result["environment_evidence_status"] != "unavailable" {
+		t.Fatalf("missing tool accepted: %v, %v", result, err)
+	}
+	manifest := result["measurement_runtime"].(map[string]any)
+	if manifest["collector_executable_sha256"] == nil || result["binary_sha256"] == nil {
+		t.Fatalf("executable identity lost: %v", result)
+	}
+	sources := manifest["source_files_at_observation_sha256"].(map[string]string)
+	for _, path := range []string{"tests/qualification/measurement/footprint_darwin.go", "tests/qualification/measurement/footprint_unavailable.go"} {
+		if len(sources[path]) != 64 {
+			t.Fatalf("source identity missing for %s", path)
+		}
+	}
+	if code := FinishQualification(filepath.Join(t.TempDir(), "result.json"), result, err); code == 0 {
+		t.Fatal("incomplete provenance qualified")
 	}
 }
 
@@ -171,22 +248,6 @@ func TestSampleValidityDoesNotTurnMissingSamplesIntoZeroEvidence(t *testing.T) {
 	validity.Record(nil)
 	if validity.Status() != "diagnostic" {
 		t.Fatalf("complete sample validity = %+v", validity)
-	}
-}
-
-func TestParseFootprintRejectsMissingMalformedNonpositiveAndInconsistent(t *testing.T) {
-	reports := []string{
-		"phys_footprint: 1 MB\n",
-		"phys_footprint: 1 MB\nphys_footprint_peak: 1.2.3 MB\n",
-		"phys_footprint: 1 MB\nphys_footprint_peak: 2 MB\nphys_footprint: malformed\n",
-		"phys_footprint: 1 MB\nphys_footprint_peak: 2 MB\nphys_footprint: 1 MB\n",
-		"phys_footprint: 0 B\nphys_footprint_peak: 1 B\n",
-		"phys_footprint: 4 MB\nphys_footprint_peak: 1 KB\n",
-	}
-	for _, report := range reports {
-		if _, err := ParseFootprint(report); err == nil {
-			t.Fatalf("accepted invalid report %q", report)
-		}
 	}
 }
 
@@ -371,7 +432,7 @@ func TestRuntimeManifestPropagatesPhysicalMemoryFailure(t *testing.T) {
 	sentinel := errors.New("virtual memory unavailable")
 	readVirtualMemory = func() (*mem.VirtualMemoryStat, error) { return nil, sentinel }
 	manifest, err := RuntimeManifest()
-	if !errors.Is(err, sentinel) || manifest != nil {
+	if !errors.Is(err, sentinel) || manifest["collector_executable_sha256"] == nil || manifest["physical_memory_bytes"] != nil {
 		t.Fatalf("manifest=%v error=%v", manifest, err)
 	}
 }
@@ -481,7 +542,7 @@ func TestQualificationStatusRequiresEvidenceAndPreservesPrecedence(t *testing.T)
 	if got := QualificationStatus(nil, []map[string]any{}); got != "incomplete" {
 		t.Fatalf("empty evidence = %s", got)
 	}
-	statuses := []string{"passed", "target_miss", "incomplete", "failed"}
+	statuses := []string{"passed", "target_miss", "incomplete", "unavailable", "invalid_measurement", "failed"}
 	for left, a := range statuses {
 		for right, b := range statuses {
 			want := a
@@ -492,7 +553,7 @@ func TestQualificationStatusRequiresEvidenceAndPreservesPrecedence(t *testing.T)
 				t.Errorf("%s + %s = %s, want %s", a, b, got, want)
 			}
 		}
-		for _, bad := range []map[string]any{nil, {}, {"status": nil}, {"status": "unavailable"}, {"status": "unknown"}, {"status": 0}} {
+		for _, bad := range []map[string]any{nil, {}, {"status": nil}, {"status": "unknown"}, {"status": 0}} {
 			for _, rows := range [][]map[string]any{{bad, {"status": a}}, {{"status": a}, bad}} {
 				if got := QualificationStatus(rows); got != "failed" {
 					t.Errorf("invalid evidence reduced to %s", got)
