@@ -30,8 +30,9 @@ class SelectionTest(unittest.TestCase):
         result = select(["src/logic_tests.zig"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["test-logic"])
 
-    def test_frontend_departure_keeps_value_and_native_handoff_checks(self):
-        for path in ("src/SessionFrontend.zig", "src/session_departure.zig"):
+    def test_frontend_policy_keeps_value_and_native_handoff_checks(self):
+        for path in ("src/SessionFrontend.zig", "src/SessionSubmission.zig",
+                     "src/session_consent.zig", "src/session_departure.zig"):
             result = select([path], "review", AVAILABLE)
             for family in ("targets", "native_targets"):
                 self.assertEqual(result[family], ["admission-debug-integration", "check", "test-logic"])
