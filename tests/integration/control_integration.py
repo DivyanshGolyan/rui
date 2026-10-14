@@ -730,15 +730,17 @@ def open_held_population(socket_path, peers):
         raise
 
 
-def assert_intake_progress(socket_path, store, peers):
+def assert_intake_progress(socket_path, store, peers=None):
     """Both Store observation and protected discovery progress beside borrowers."""
     for kind, route in (("observe_command", "/v1/observe-command"),
                         ("host_info", "/v1/host-info")):
         request = {"version": "1", "kind": kind, "store": str(store)}
         if kind == "observe_command":
             request["key"] = "intake-progress-absent"
-        head, body = peers.call("observe" if kind == "observe_command" else kind,
-                                lambda: raw_request(socket_path, route, json.dumps(request).encode()))
+        def invoke():
+            return raw_request(socket_path, route, json.dumps(request).encode())
+        head, body = invoke() if peers is None else peers.call(
+            "observe" if kind == "observe_command" else kind, invoke)
         assert head.startswith(b"HTTP/1.1 200 "), (head, body)
         value = json.loads(body)
         if kind == "observe_command":
