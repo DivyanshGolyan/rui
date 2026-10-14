@@ -1316,7 +1316,11 @@ test "provider field collection cannot grant authority through escaped metadata 
 
 test "fuzz provider decoded answers and rejection across file windows" {
     try std.testing.fuzz({}, fuzzAnswer, .{ .corpus = &.{
-        "\xfd\x0f", "\xfe\x0f", "\xff\x0f", "\x00\x10", "\xff\x1f",
+        "\xfd\x0f\x00\x00\x00\x00\x00\x00",
+        "\xfe\x0f\x00\x00\x00\x00\x00\x00",
+        "\xff\x0f\x00\x00\x00\x00\x00\x00",
+        "\x00\x10\x00\x00\x00\x00\x00\x00",
+        "\xff\x1f\x00\x00\x00\x00\x00\x00",
     } });
 }
 
