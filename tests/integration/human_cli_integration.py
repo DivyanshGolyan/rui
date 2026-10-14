@@ -1130,6 +1130,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
     reference = "persistent/permission'$(false) é\n"
     answer = "after explicit denial" if decision == "deny-action" else "after explicit approval"
     description = "Inspect café output"
+    retirement = ("Process retirement confirmed: the child was reaped and the original process group was observed absent. "
+                  "macOS group signaling returned EPERM, which can mean no live targets or permission denial.")
     command = f"printf inspection-only-output; printf unsafe >> effect-count; exit {exit_code}"
     if exit_code:
         command = f"printf '%9000s' inspection-only-output; printf unsafe >> effect-count; exit {exit_code}"
@@ -1299,6 +1301,14 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         saved = [json.loads(path.read_text()) for path in records.glob("*.json")]
         assert sum(row["kind"] == "permission_decision" for row in saved) == 1, saved
         assert len(endpoint.requests) == 2
+        outputs = [item["output"] for item in json.loads(endpoint.requests[1])["input"]
+                   if item.get("type") == "function_call_output"]
+        assert len(outputs) == 1, outputs
+        saved_result = outputs[0]
+        if sys.platform == "darwin" and decision == "allow-action" and not (timed_out or signal_failure):
+            assert retirement in saved_result, ("native retirement evidence missing from saved result", saved_result)
+        assert "Process retirement confirmed" not in settled and "macOS group signaling returned EPERM" not in settled, (
+            "routine retirement diagnostics leaked into conversation", settled)
         if timed_out:
             assert f"! {description} — Timed out" in settled, settled
             assert "/details for output." in settled, settled
@@ -1349,11 +1359,14 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             exported = run(home, *shlex.split(export)[1:])
             assert len(exported.encode()) > 8192 and exported.startswith(f"Bash failed. Exit code: {exit_code}.\n"), exported[:200]
             assert "inspection-only-output" in exported
+            assert exported == saved_result, "raw export changed the canonical Tool Result"
         else:
             assert "Rui:" not in details, details
             if decision == "allow-action":
                 assert "inspection-only-output" in details, ("saved tool output unavailable on inspection", details)
                 assert f"Exit code: {exit_code}." in details, ("exact exit code unavailable on inspection", details)
+                if retirement in saved_result:
+                    assert retirement in " ".join(details.split()), ("details hid retirement evidence", details)
         if decision == "allow-action" and not any((exit_code, signal_failure, lost_reply, timed_out)):
             # Four real held effects exceed the display bound. Repeated labels
             # must not merge identities. A later, long-labelled failure must
@@ -1431,6 +1444,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 assert "! Inspect application settings" in outcome and "— Failed" in outcome and "Exit code: 7." in outcome, outcome
                 assert "✓ Check final sibling" in outcome, outcome
                 assert "Bash succeeded." not in outcome and "Tool result:" not in outcome, outcome
+                assert "Process retirement confirmed" not in outcome, ("sibling retirement diagnostics leaked", outcome)
                 assert "› live cafXé!" in outcome, outcome
                 refreshed = terminal_step(master, "\x01\x0b/status", "Session: ", composer=True)
                 assert f"✓ {bypass_description}" not in refreshed, ("presented bypass result repeated", refreshed)
@@ -1465,7 +1479,11 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", reference], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-        read_terminal(master, "› ", composer=True)
+        reopened = read_terminal(master, "› ", composer=True)
+        assert "Process retirement confirmed" not in reopened and "macOS group signaling returned EPERM" not in reopened, (
+            "routine retirement diagnostics leaked on reopening", reopened)
+        if signal_failure:
+            assert "Process-group signaling reported a failure." in reopened, ("reopening hid cleanup warning", reopened)
         assert not hidden_reads, ("label-only opening read undisplayed proposal bytes", hidden_reads)
         os.write(master, b"/exit\n")
         _, errors = terminal_exit(caller, master)
