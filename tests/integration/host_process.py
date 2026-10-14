@@ -553,6 +553,7 @@ class HostDiagnostics:
         assert released["run"] == started["run"] and released["clock"] == started["clock"] == "awake_ns", (started, released)
         assert int(released["sequence"]) > int(started["sequence"]), (started, released)
         assert int(released["at_ns"]) >= int(started["at_ns"]), (started, released)
+        assert int(released["at_ns"]) <= int(deadline * 1e9), ("release exceeded original deadline", released)
         return released
 
     def borrower_census(self, deadline, expected_routes):
@@ -613,7 +614,6 @@ class PeerCensus:
     def release(self, request, deadline):
         record = self.diagnostics.borrower_release(self.started(request, deadline), deadline)
         assert time.monotonic() <= deadline, "peer release exceeded original deadline"
-        assert int(record["at_ns"]) <= int(deadline * 1e9), record
         return record
 
     def call(self, route, invoke, *, timeout=15, deadline=None):

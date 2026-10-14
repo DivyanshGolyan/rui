@@ -328,6 +328,17 @@ def prove_peer_census():
             pass
         else:
             raise AssertionError(f"{fault} release accepted as retirement")
+    observations.records[:] = [record("connection_request_inspect", 1),
+                              dict(record("connection_resources_released", 2),
+                                   at_ns=str(time.monotonic_ns() + 1_000_000_000))]
+    peers = PeerCensus(diagnostics)
+    peers.expect("inspect")
+    try:
+        peers.finish(time.monotonic())
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("final census accepted a late retirement")
     observations.records[:] = [record("connection_request_inspect", 1), record("connection_resources_released", 2)]
     peers = PeerCensus(diagnostics)
     try:
