@@ -2153,8 +2153,14 @@ def host_diagnostic_cases(state, library):
             if credit.startswith("diagnostic-"):
                 arm.touch()
             if credit == "diagnostic-partial":
+                partial_deadline = time.monotonic() + 8
                 fixture.command("session", "inspect", "--store", store, "--session", session)
-                assert "diagnostic-partial\n" in log.read_text()
+                # Inspection can complete while another optional writer owns
+                # stderr. Observe the injection itself before disarming it.
+                fixture.wait_for(lambda: "diagnostic-partial\n" in log.read_text(),
+                    "partial diagnostic write", deadline=partial_deadline)
+                fixture.wait_for(lambda: "diagnostic-restored\n" in log.read_text(),
+                    "partial diagnostic flags restored", deadline=partial_deadline)
                 arm.unlink()
             if credit == "diagnostic-contention-host":
                 # The forwarding driver proves the exact inspection matcher.
@@ -2312,13 +2318,32 @@ def host_diagnostic_cases(state, library):
             errors = bytearray()
             if not reader.closed:
                 os.set_blocking(reader.fileno(), False)
-                while True:
-                    try:
-                        chunk = os.read(reader.fileno(), 65536)
-                    except BlockingIOError:
-                        break
-                    if not chunk: break
-                    errors.extend(chunk)
+                def drain_errors():
+                    while True:
+                        try:
+                            chunk = os.read(reader.fileno(), 65536)
+                        except BlockingIOError:
+                            break
+                        if not chunk: break
+                        errors.extend(chunk)
+                    if not errors.endswith(b"\n"):
+                        return False
+                    for line in errors.splitlines():
+                        try:
+                            record = json.loads(line)
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            continue  # Validate diagnostic framing below.
+                        if isinstance(record, dict) and record.get("trace_lost") is True:
+                            return True
+                    return False
+
+                if credit in ("diagnostic-contention-host", "diagnostic-partial"):
+                    # Result/release receipts precede optional stderr writes.
+                    # Wait for the actual later record, not canonical progress.
+                    fixture.wait_for(drain_errors, "later sticky diagnostic loss record",
+                        deadline=retirement_deadline)
+                else:
+                    drain_errors()
             (root / "stderr.log").write_bytes(errors)
             contexts = {"response-acquire": b"provider preparation failed for operation",
                 "response-metadata": b"provider output rejected for operation 1: InjectedMetadataFailure",
