@@ -13,6 +13,10 @@ import subprocess
 RULES = (
     (("src/logic_tests.zig", "src/execution_turn.zig", "src/request_encoding.zig", "src/AnswerRenderer.zig"),
      ("test-logic",), (), "Portable owner transitions and encoding"),
+    (("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/session_departure.zig"),
+     ("test-logic", "check", "admission-debug-integration"),
+     ("test-logic", "check", "admission-debug-integration"),
+     "Frontend value decisions and native terminal/borrower handoffs"),
     (("src/cli.zig", "src/client.zig", "src/Terminal*", "src/preferences.zig", "src/provider_selection.zig"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
      "CLI selection and otherwise unnamed native terminal/caller checks"),
@@ -36,9 +40,11 @@ RULES = (
      ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
      ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
      "Bash execution, direct custody and process-crash recovery"),
-    (("src/provider.zig", "src/provider_output.zig", "src/model_adapter.zig", "tests/integration/dispatch*"),
+    (("src/provider.zig", "src/provider_output.zig", "src/model_adapter.zig"),
      ("test", "dispatch-integration", "transport-h2-integration"),
      ("test", "dispatch-integration", "transport-h2-integration"), "Model admission and transport"),
+    (("tests/integration/dispatch_integration.py",),
+     ("dispatch-integration",), ("dispatch-integration",), "Model scenarios, not shared fixture infrastructure"),
     (("tests/integration/transport_h2*",),
      ("transport-h2-integration",), ("transport-h2-integration",),
      "Native H2 fixture and its companion transcript oracle"),
@@ -53,26 +59,26 @@ RULES = (
      ("test", "host-launch-integration"), ("test", "host-launch-integration"), "Native Host launch and startup failures"),
     (("src/descriptor*", "tests/integration/descriptor*"),
      ("test", "descriptor-capacity-integration"), ("test", "descriptor-capacity-integration"), "Native descriptor capacity"),
-    (("tests/integration/check.sh",), ("check", "check-full"), ("check", "check-full"),
-     "Shared driver: both parallel and full-check execution modes"),
+    (("tests/integration/check.sh",), ("check-full",), ("check-full",),
+     "Shared process inventory: native cases once, scheduling modes checked by driver tests"),
     (("tests/integration/login_signal_integration.py", "build.zig"), ("login-signal-integration",), (),
      "Linux-only native login signal loader witness"),
     (("tests/integration/current_facts_integration.py", "build.zig"),
      ("current-facts-integration",), ("current-facts-integration",), "Current producer/consumer oracle"),
     (("tests/integration/server_delivery_integration.py", "build.zig"),
      ("server-delivery-integration",), ("server-delivery-integration",), "Real reply inactivity and Host drain"),
-    (("tests/integration/canonical_failure_integration.py", "tests/integration/dispatch_integration.py",
+    (("tests/integration/canonical_failure_integration.py", "tests/integration/model_fixture.py",
       "tests/integration/host_process.py", "build.zig"),
      ("canonical-failure-integration",), ("canonical-failure-integration",), "Canonical failure caller oracle"),
-    (("tests/integration/control_integration.py", "tests/integration/dispatch_integration.py",
+    (("tests/integration/control_integration.py", "tests/integration/model_fixture.py",
       "tests/integration/host_process.py"),
      ("check", "transport-h2-integration", "codex-h2-integration"),
      ("check", "transport-h2-integration", "codex-h2-integration"),
      "Shared fixture helpers retain composed callers and separately owned H2 consumers"),
-    (("tests/integration/dispatch_integration.py", "tests/integration/host_process.py",
+    (("tests/integration/model_fixture.py", "tests/integration/host_process.py",
       "tests/integration/canonical_failure_integration.py"),
      ("current-facts-integration",), ("current-facts-integration",), "Current oracle's imported fixture owners"),
-    (("tests/integration/dispatch_integration.py", "tests/integration/host_process.py",
+    (("tests/integration/model_fixture.py", "tests/integration/host_process.py",
       "tests/integration/control_integration.py"),
      ("server-delivery-integration",), ("server-delivery-integration",), "Delivery oracle's imported fixture owners"),
     (("build.zig", "build.zig.zon", "install.sh", "src/build_*", "src/*.patch", ".agents/setup",
@@ -170,7 +176,7 @@ def select(paths, phase, available):
             targets.add("evaluator-string-sanitizer")
             native_targets.add("evaluator-string-sanitizer")
     for checks in (targets, native_targets):
-        if "check-full" in checks and "tests/integration/check.sh" not in paths:
+        if "check-full" in checks:
             checks.discard("check")
         if checks & {"check", "check-full"}:
             checks -= CHECK_COVERS

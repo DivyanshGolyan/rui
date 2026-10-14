@@ -1943,55 +1943,67 @@ const MutationPresentation = enum {
 };
 
 fn writeMutationReply(io: std.Io, reply: client.MutationReply, presentation: MutationPresentation) !void {
-    if (presentation == .interactive_configuration and reply.isAccepted())
-        return std.Io.File.stdout().writeStreamingAll(io, "Rui: Configured.\n");
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    var output = std.Io.File.stdout().writerStreaming(io, &buffer);
+    presentMutationReply(&output.interface, reply, presentation) catch |err| return output.err orelse err;
+}
+
+fn writeMutationField(writer: *std.Io.Writer, label: []const u8, value: []const u8) !void {
+    try writer.writeAll(label);
+    var text: TerminalText = .{ .mode = .line };
+    try text.feed(writer, value);
+    try text.finish(writer);
+    try writer.writeByte('\n');
+}
+
+fn presentMutationReply(writer: *std.Io.Writer, reply: client.MutationReply, presentation: MutationPresentation) !void {
+    if (presentation == .interactive_configuration and reply.isAccepted()) {
+        try writer.writeAll("Rui: Configured.\n");
+        return writer.flush();
+    }
     if (presentation == .json) {
-        var buffer: [protocol.content_window_bytes]u8 = undefined;
-        var output = std.Io.File.stdout().writerStreaming(io, &buffer);
-        const writer = &output.interface;
         try writeMutationJson(writer, reply);
         try writer.writeByte('\n');
-        try output.flush();
+        try writer.flush();
         _ = try reply.answer;
         if (!reply.isAccepted()) return error.MutationNotAccepted;
         return;
     }
-    try writeSafeField(io, "Store: ", reply.context.store.slice());
-    try writeSafeField(io, "Session: ", reply.context.session.slice());
-    try writeSafeField(io, "key: ", reply.context.key.slice());
-    var target_line: [128]u8 = undefined;
+    try writeMutationField(writer, "Store: ", reply.context.store.slice());
+    try writeMutationField(writer, "Session: ", reply.context.session.slice());
+    try writeMutationField(writer, "key: ", reply.context.key.slice());
     switch (reply.target) {
-        .model_interruption => |target| try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&target_line, "target Turn: {d}; Operation: {d}\n", .{ target.turn, target.operation })),
-        .permission_decision => |target| try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&target_line, "target Action: {d}; decision: {s}\n", .{ target.action, @tagName(target.decision) })),
+        .model_interruption => |target| try writer.print("target Turn: {d}; Operation: {d}\n", .{ target.turn, target.operation }),
+        .permission_decision => |target| try writer.print("target Action: {d}; decision: {s}\n", .{ target.action, @tagName(target.decision) }),
         else => {},
     }
     const answer = reply.answer catch |err| {
-        var line: [128]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "invocation: {s} (HTTP {d}); outcome unconfirmed\n", .{ @errorName(err), reply.status }));
+        try writer.print("invocation: {s} (HTTP {d}); outcome unconfirmed\n", .{ @errorName(err), reply.status });
         if (reply.diagnostic) |diagnostic| {
-            try writeSafeField(io, "type: ", diagnostic.type.slice());
-            try writeSafeField(io, "code: ", diagnostic.code.slice());
+            try writeMutationField(writer, "type: ", diagnostic.type.slice());
+            try writeMutationField(writer, "code: ", diagnostic.code.slice());
         }
+        try writer.flush();
         return err;
     };
-    var line: [128]u8 = undefined;
-    try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "admitted: {s}\n", .{@tagName(answer.result)}));
-    try std.Io.File.stdout().writeStreamingAll(io, if (answer.replayed) "replayed: true\n" else "replayed: false\n");
+    try writer.print("admitted: {s}\n", .{@tagName(answer.result)});
+    try writer.writeAll(if (answer.replayed) "replayed: true\n" else "replayed: false\n");
     const code: ?[]const u8 = switch (answer.result) {
         .accepted => null,
         .rejected => |*code| code.slice(),
         .conflict => "idempotency_key_conflict",
     };
-    if (code) |value| try writeSafeField(io, "code: ", value);
+    if (code) |value| try writeMutationField(writer, "code: ", value);
     if (answer.result == .accepted) switch (answer.result.accepted) {
-        .configure => |value| try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "revision: {d}; created: {}\n", .{ value.revision, value.created })),
-        .message => |value| try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "queue admission: {d}\n", .{value.admission})),
+        .configure => |value| try writer.print("revision: {d}; created: {}\n", .{ value.revision, value.created }),
+        .message => |value| try writer.print("queue admission: {d}\n", .{value.admission}),
         .session_stop => |value| {
-            if (value.turn) |turn| try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "selected Turn: {d}\n", .{turn})) else try writeSafeField(io, "selected Turn: ", "none");
-            try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "admission cutoff: {d}; completion: {s}\n", .{ value.admission_cutoff, @tagName(value.completion) }));
+            if (value.turn) |turn| try writer.print("selected Turn: {d}\n", .{turn}) else try writeMutationField(writer, "selected Turn: ", "none");
+            try writer.print("admission cutoff: {d}; completion: {s}\n", .{ value.admission_cutoff, @tagName(value.completion) });
         },
         .model_interruption, .permission_decision => {},
     };
+    try writer.flush();
 }
 
 // Presentation of owned facts only: no wire representation or second parser.
@@ -2053,7 +2065,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: client.MutationReply) !void 
     try writer.writeByte('}');
 }
 
-test "mutation JSON renders owned diagnostics and context with bounded writer" {
+test "mutation presentation renders owned diagnostics and context with bounded writer" {
     const wire = "{\"version\":\"1\",\"type\":\"invocation_error\",\"code\":\"busy\\u002fµ\",\"wire_only\":true}";
     var bytes: [wire.len]u8 = wire.*;
     var reply = client.decodeMutationReply(.{ .status = 409, .body = &bytes }, "original/session", .configure);
@@ -2068,6 +2080,67 @@ test "mutation JSON renders owned diagnostics and context with bounded writer" {
     var tiny: [1]u8 = undefined;
     var failing = std.Io.Writer.fixed(&tiny);
     try std.testing.expectError(error.WriteFailed, writeMutationJson(&failing, reply));
+}
+
+test "mutation presentation complete modes preserve escaped original context" {
+    const accepted_wire = "{\"version\":\"1\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"original/µ\\\"\\n\\u001b\",\"revision\":\"7\",\"created\":true},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"},\"wire_only\":true}";
+    const failed_wire = "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\",\"wire_only\":true}";
+    const context = "{\"store\":\"/store\",\"session\":\"original/µ\\\"\\n\\u001b\",\"key\":\"key\\\"\\n\",\"kind\":\"configure\"}";
+    const accepted_json = "{\"context\":" ++ context ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"original/µ\\\"\\n\\u001b\",\"revision\":\"7\",\"created\":true}}";
+    const failed_json = "{\"context\":" ++ context ++ ",\"error\":{\"status\":\"503\",\"reason\":\"HostInvocationFailed\",\"certainty\":\"unconfirmed\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\"}}";
+    const human_context = "Store: /store\nSession: original/µ\\\"\\n\\x1b\nkey: key\\\"\\n\n";
+    const failed_human = human_context ++ "invocation: HostInvocationFailed (HTTP 503); outcome unconfirmed\ntype: busy\ncode: capacity\\n\\x1b\n";
+    const modes = [_]MutationPresentation{ .json, .human, .interactive_configuration };
+    const accepted_expected = [_][]const u8{
+        accepted_json ++ "\n",
+        human_context ++ "admitted: accepted\nreplayed: false\nrevision: 7; created: true\n",
+        "Rui: Configured.\n",
+    };
+    const failed_expected = [_][]const u8{
+        failed_json ++ "\n",
+        failed_human,
+        failed_human,
+    };
+    for ([_]bool{ false, true }) |failed| {
+        var reply = client.decodeMutationReply(.{ .status = if (failed) 503 else 200, .body = if (failed) failed_wire else accepted_wire }, "original/µ\"\n\x1b", .configure);
+        try reply.context.store.set("/store");
+        try reply.context.key.set("key\"\n");
+        try reply.context.kind.set("configure");
+        for (modes, 0..) |mode, index| {
+            var buffer: [2048]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&buffer);
+            if (failed) try std.testing.expectError(error.HostInvocationFailed, presentMutationReply(&writer, reply, mode)) else try presentMutationReply(&writer, reply, mode);
+            try std.testing.expectEqualStrings(if (failed) failed_expected[index] else accepted_expected[index], writer.buffered());
+            var tiny: [1]u8 = undefined;
+            var failing = std.Io.Writer.fixed(&tiny);
+            try std.testing.expectError(error.WriteFailed, presentMutationReply(&failing, reply, mode));
+            // All bytes fit: only final delivery fails, before success or the invocation error returns.
+            var flush_failure: std.Io.Writer = .{ .buffer = &buffer, .vtable = &.{ .drain = struct {
+                fn drain(_: *std.Io.Writer, _: []const []const u8, _: usize) std.Io.Writer.Error!usize {
+                    return error.WriteFailed;
+                }
+            }.drain } };
+            try std.testing.expectError(error.WriteFailed, presentMutationReply(&flush_failure, reply, mode));
+            try std.testing.expectEqualStrings(if (failed) failed_expected[index] else accepted_expected[index], flush_failure.buffered());
+        }
+    }
+}
+
+test "mutation presentation wrong binding keeps caller context even interactively" {
+    const wire = "{\"version\":\"1\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"foreign\",\"revision\":\"7\",\"created\":true}}";
+    var reply = client.decodeMutationReply(.{ .status = 200, .body = wire }, "original", .configure);
+    try reply.context.store.set("/original-store");
+    try reply.context.key.set("original-key");
+    try reply.context.kind.set("configure");
+    var buffer: [1024]u8 = undefined;
+    for ([_]MutationPresentation{ .human, .interactive_configuration }) |mode| {
+        var writer = std.Io.Writer.fixed(&buffer);
+        try std.testing.expectError(error.RequestBindingMismatch, presentMutationReply(&writer, reply, mode));
+        try std.testing.expectEqualStrings("Store: /original-store\nSession: original\nkey: original-key\ninvocation: RequestBindingMismatch (HTTP 200); outcome unconfirmed\n", writer.buffered());
+    }
+    var writer = std.Io.Writer.fixed(&buffer);
+    try std.testing.expectError(error.RequestBindingMismatch, presentMutationReply(&writer, reply, .json));
+    try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/original-store\",\"session\":\"original\",\"key\":\"original-key\",\"kind\":\"configure\"},\"error\":{\"status\":\"200\",\"reason\":\"RequestBindingMismatch\",\"certainty\":\"unconfirmed\",\"type\":null,\"code\":null}}\n", writer.buffered());
 }
 
 const SavedRequest = client.CapturedIdentity;

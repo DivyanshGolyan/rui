@@ -13,7 +13,7 @@ import threading
 import time
 
 import codex_integration as codex
-import dispatch_integration as fixture
+import model_fixture as fixture
 import transport_h2_integration as h2_fixture
 from host_process import HostDiagnostics, start_ready_process
 

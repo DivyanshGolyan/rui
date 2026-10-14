@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Focused disposable QuickJS worker checks (not a Workflow/Host integration)."""
 import argparse
-import errno
 import json
 import os
 import pathlib
 import resource
-import signal
 import struct
 import subprocess
 import sys
@@ -19,8 +17,10 @@ parser.add_argument('driver')
 parser.add_argument('probe', nargs='?')
 parser.add_argument('--churn-only', action='store_true',
                     help='Run only the 1,000-evaluation native reuse witness')
+parser.add_argument('--native-gates-only', action='store_true',
+                    help='Run only terminal decisions, wait ownership and native gates')
 args = parser.parse_args()
-if not args.churn_only and args.probe is None:
+if not args.churn_only and not args.native_gates_only and args.probe is None:
     parser.error('probe is required for boundary checks')
 binary, driver, probe = args.binary, args.driver, args.probe
 
@@ -42,6 +42,76 @@ def check_repetition(mode):
     result = invoke(mode, expression('2+3'))
     assert result.returncode == 0, (mode, result.returncode, result.stderr)
     assert result.stdout == b'5', (mode, result.stdout)
+
+
+def check_append_gate(root, inject_setup_failure=False):
+    source, child, identity = root / 'source', root / 'child', root / 'pid'
+    gate, acknowledged = root / 'gate', root / 'entered'
+    source.write_text(expression('5'))
+    child.write_text(f'''#!/bin/sh
+echo $$ > "{identity}"
+printf "\\001\\000\\000\\000x"
+while :; do :; done
+''')
+    child.chmod(0o700)
+    os.mkfifo(gate, 0o600)
+    release = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+    process = pid = None
+    original = OSError('injected append setup failure')
+    caught = None
+    output = []
+    deadline = time.monotonic() + 8
+    try:
+        try:
+            process = subprocess.Popen(
+                [driver, child, source, 'stall-write', '1000000', gate, acknowledged],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            while not acknowledged.exists():
+                assert process.poll() is None and time.monotonic() < deadline
+                time.sleep(.01)
+            # Fail before adopting child identity, at the former writer-open
+            # acquisition boundary. Disposal must need neither PID nor readiness.
+            if inject_setup_failure:
+                raise original
+            pid = int(identity.read_text())
+            while True:
+                state = subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)],
+                                       capture_output=True, text=True, timeout=2)
+                if state.stdout.lstrip().startswith('Z'): break
+                assert process.poll() is None and time.monotonic() < deadline, state
+                time.sleep(.01)
+            assert process.poll() is None
+        finally:
+            primary = sys.exc_info()[1]
+            errors = []
+
+            def attempt(dispose):
+                try:
+                    dispose()
+                except BaseException as error:
+                    errors.append(error)
+
+            # Credit remains buffered even if the native reader has not opened
+            # yet. Keep both ends alive until the owner has joined and reaped.
+            attempt(lambda: os.write(release, b'r'))
+            if process is not None:
+                attempt(lambda: output.append(process.communicate(timeout=8)))
+            attempt(lambda: os.close(release))
+            if errors:
+                if primary is None:
+                    raise errors[0]
+                for error in errors:
+                    primary.add_note(f'append fixture cleanup: {error}')
+    except OSError as error:
+        if not inject_setup_failure: raise
+        caught = error
+    if inject_setup_failure:
+        assert caught is original and not getattr(caught, '__notes__', []), caught
+    assert process.returncode == 1 and output and not output[0][0], (process.returncode, output)
+    pid = int(identity.read_text())
+    state = subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)],
+                           capture_output=True, text=True, timeout=2)
+    assert state.returncode == 1 and not state.stdout, state
 
 
 def check_wait_ownership(root):
@@ -80,19 +150,16 @@ pathlib.Path({str(output_closed)!r}).touch()
 time.sleep({child_seconds})
 ''')
     child.chmod(0o700)
-    process = subprocess.Popen([driver, child, source, 'delayed-watchdog', '1000', gate],
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    release = pid = None
+    acknowledged = root / 'watchdog-entered'
+    release = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+    process = pid = None
     deadline = time.monotonic() + 12
     try:
-        # The open succeeds only when the actual watchdog callback is held.
-        while release is None:
-            try:
-                release = os.open(gate, os.O_WRONLY | os.O_NONBLOCK)
-            except OSError as error:
-                if error.errno != errno.ENXIO: raise
-                assert process.poll() is None and time.monotonic() < deadline
-                time.sleep(.01)
+        process = subprocess.Popen([driver, child, source, 'delayed-watchdog', '1000', gate,
+                                    acknowledged], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        while not acknowledged.exists():
+            assert process.poll() is None and time.monotonic() < deadline
+            time.sleep(.01)
         entered.touch()
         while True:
             assert process.poll() is None, 'parent exited while watchdog was held'
@@ -125,16 +192,11 @@ time.sleep({child_seconds})
                 errors.append(error)
 
         if release is not None:
-            # The held watchdog prevents reap/PID reuse. Terminate the exact
-            # child before releasing it, even when the retirement check fails.
-            if process.poll() is None and pid is not None:
-                attempt(lambda: os.kill(pid, signal.SIGKILL))
             attempt(lambda: os.write(release, b'r'))
-            attempt(lambda: os.close(release))
-        attempt(lambda: process.communicate(timeout=8))
-        if process.poll() is None:
-            attempt(process.kill)
+        if process is not None:
             attempt(lambda: process.communicate(timeout=8))
+        if release is not None:
+            attempt(lambda: os.close(release))
         if errors:
             if primary is None:
                 raise errors[0]
@@ -149,17 +211,21 @@ if args.churn_only:
     sys.exit(0)
 
 
-for mode in ('stale-watchdog', 'exit-race', 'exit-deadline', 'exit-clock-error',
-             'failure-cancel-race', 'cancel-failure-race'):
-    result = invoke(mode, expression('2+3'))
-    expected = (0, b'5') if mode in ('stale-watchdog', 'exit-race') else (1, b'')
-    assert (result.returncode, result.stdout) == expected, (mode, result)
+subprocess.run([driver, 'terminal-decisions'], check=True, timeout=7)
+result = invoke('stale-watchdog', expression('2+3'))
+assert (result.returncode, result.stdout) == (0, b'5'), result
 
 with tempfile.TemporaryDirectory() as directory:
     check_wait_ownership(pathlib.Path(directory))
 for child_seconds in (0, 5.3, 30):
     with tempfile.TemporaryDirectory() as directory:
         check_delayed_watchdog(pathlib.Path(directory), child_seconds)
+for injected in (False, True):
+    with tempfile.TemporaryDirectory() as directory:
+        check_append_gate(pathlib.Path(directory), injected)
+if args.native_gates_only:
+    print(f'evaluator native decisions, stale bridge, wait ownership and gates passed on {sys.platform}')
+    sys.exit(0)
 
 
 def reject_check(source, reason):
@@ -346,40 +412,6 @@ with tempfile.TemporaryDirectory() as directory:
     assert owned(fake, 'live-cancel', extra=marker).returncode == 1
     assert marker.exists()  # cancellation was observed after successful spawn
     assert time.monotonic() - start < 1
-    # Block the parent's synchronous output reservation callback rather than a
-    # real filesystem. The child becomes a zombie at the deadline because the
-    # watchdog must be joined before waitpid, while the owner stays blocked.
-    child_pid = pathlib.Path(directory) / 'child-pid'
-    fake.write_text(f'''#!/bin/sh
-echo $$ > "{child_pid}"
-printf "\\001\\000\\000\\000x"
-while :; do :; done
-''')
-    process = subprocess.Popen(
-        [driver, str(fake), str(source), 'stall-write', '1000000'],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    for _ in range(100):
-        if child_pid.exists():
-            break
-        time.sleep(.01)
-    assert child_pid.exists()
-    pid = int(child_pid.read_text())
-    if sys.platform == 'linux':
-        deadline = time.monotonic() + 5.7
-        state = ''
-        while time.monotonic() < deadline:
-            try:
-                state = pathlib.Path(f'/proc/{pid}/stat').read_text().split()[2]
-            except FileNotFoundError:
-                state = 'gone'
-            if state in ('Z', 'gone'):
-                break
-            time.sleep(.01)
-        assert state == 'Z', state  # terminated, not reaped while output is gated
-        assert process.poll() is None
-    assert process.wait(timeout=8) == 1
-    if sys.platform == 'linux':
-        assert not pathlib.Path(f'/proc/{pid}').exists()  # joined, then reaped
     # Cancel only after the parent has received a nonempty framed payload.
     marker.unlink(missing_ok=True)
     fake.write_text(f'''#!/bin/sh

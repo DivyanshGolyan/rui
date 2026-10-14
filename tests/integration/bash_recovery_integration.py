@@ -12,7 +12,7 @@ import tempfile
 import threading
 
 import bash_integration as bash
-import dispatch_integration as fixture
+import model_fixture as fixture
 import human_cli_integration as human
 from host_process import HostDiagnostics
 
@@ -127,10 +127,9 @@ def prove_effect_without_result_becomes_indeterminate(state):
         master, slave = pty.openpty()
         entered = subprocess.Popen([str(RUI), "session", "resume", "--store", str(store), "--session", session],
             env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         try:
             human.read_terminal(master, "› ")
-            status = human.terminal_step(master, "/status")
+            status = human.terminal_step(master, "/status", "Session: ", composer=True)
             assert "Indeterminate Action: 1" in status, status
             assert "The command may have run; Rui did not replay it." in status, status
             human.terminal_step(master, "/exit", "Detached.")
@@ -140,6 +139,7 @@ def prove_effect_without_result_becomes_indeterminate(state):
                 entered.kill()
                 entered.wait(timeout=5)
             os.close(master)
+            os.close(slave)
         continuation_release.set()
         fixture.wait_for(lambda: fixture.completed_observation(store, "effect-before-result-message"), "continuation")
         assert marker.read_text() == "x"

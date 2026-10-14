@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 
-import dispatch_integration as dispatch
+import model_fixture as dispatch
 import transport_h2_integration as h2_fixture
 
 

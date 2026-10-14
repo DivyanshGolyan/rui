@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import bash_integration as bash
 import control_integration as control
-import dispatch_integration as fixture
+import model_fixture as fixture
 from host_process import HostDiagnostics, TestHTTPServer, canonical_fixture_root, start_ready_process, stop_process
 
 
@@ -254,7 +254,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
                 (
                     "bash",
                     f"descriptor-bash-{ordinal}-call",
-                    json.dumps({"cmd": commands[ordinal], "timeout_ms": None}, separators=(",", ":")),
+                    json.dumps({"cmd": commands[ordinal], "timeout_ms": None, "description": f"Write descriptor marker {ordinal}"}, separators=(",", ":")),
                 )
             ],
         )

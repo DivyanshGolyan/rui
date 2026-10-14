@@ -4,11 +4,13 @@ const protocol = @import("protocol.zig");
 pub const bash_definition_json =
     "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed.\",\"strict\":true," ++
     "\"parameters\":{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}," ++
+    "\"description\":{\"type\":\"string\",\"description\":\"A short human-facing activity label: base verb + concrete target + useful scope, in sentence case with no trailing punctuation. Describe the intended work, not its status, success or safety. Required, nonblank, single-line valid UTF-8, at most 100 decoded UTF-8 bytes. Aim for 40–60 characters; use more only for useful scope. Example: Run parser regression tests\"}," ++
     "\"timeout_ms\":{\"type\":[\"integer\",\"null\"],\"description\":\"Use null for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.\",\"minimum\":1,\"maximum\":9223372036854775807}}," ++
-    "\"required\":[\"cmd\",\"timeout_ms\"],\"additionalProperties\":false}}";
+    "\"required\":[\"cmd\",\"description\",\"timeout_ms\"],\"additionalProperties\":false}}";
 
 pub const BashArguments = struct {
     timeout_ms: ?u64 = null,
+    description: protocol.Bounded(protocol.max_tool_description_bytes) = .{},
 };
 
 pub fn validBashArguments(source: anytype) !bool {
@@ -63,8 +65,8 @@ pub const BashParser = struct {
         after_value,
         after_object,
     };
-    const StringTarget = enum { key, command };
-    const ValueTarget = enum { none, command, timeout };
+    const StringTarget = enum { key, command, description };
+    const ValueTarget = enum { none, command, timeout, description };
 
     phase: Phase = .object_start,
     string_target: StringTarget = .key,
@@ -73,6 +75,7 @@ pub const BashParser = struct {
     result: BashArguments = .{},
     has_command: bool = false,
     has_timeout: bool = false,
+    has_description: bool = false,
     timeout_value: u64 = 0,
     null_index: u3 = 0,
     unicode_value: u21 = 0,
@@ -113,12 +116,19 @@ pub const BashParser = struct {
                                     .command
                                 else if (self.key.eql("timeout_ms"))
                                     .timeout
+                                else if (self.key.eql("description"))
+                                    .description
                                 else
                                     return .invalid;
                                 self.phase = .colon;
                             },
                             .command => {
                                 self.has_command = true;
+                                self.phase = .after_value;
+                            },
+                            .description => {
+                                if (!validDescription(self.result.description.slice())) return .invalid;
+                                self.has_description = true;
                                 self.phase = .after_value;
                             },
                         }
@@ -201,6 +211,11 @@ pub const BashParser = struct {
                             self.string_target = .command;
                             self.phase = .string;
                         },
+                        .description => {
+                            if (self.has_description or next != '"') return .invalid;
+                            self.string_target = .description;
+                            self.phase = .string;
+                        },
                         .timeout => {
                             if (self.has_timeout) return .invalid;
                             if (next == 'n') {
@@ -243,7 +258,7 @@ pub const BashParser = struct {
     }
 
     fn finishAtEof(self: *const BashParser) BashParseProgress {
-        if (self.phase != .after_object or !self.has_command or !self.has_timeout) return .invalid;
+        if (self.phase != .after_object or !self.has_command or !self.has_timeout or !self.has_description) return .invalid;
         return .{ .complete = self.result };
     }
 
@@ -251,6 +266,12 @@ pub const BashParser = struct {
         switch (self.string_target) {
             .key => try emit(&self.key, null, bytes),
             .command => try emit(null, writer, bytes),
+            .description => {
+                const label = &self.result.description;
+                if (bytes.len > label.bytes.len - label.len) return error.InvalidDescriptorShape;
+                @memcpy(label.bytes[label.len..][0..bytes.len], bytes);
+                label.len += bytes.len;
+            },
         }
     }
 
@@ -262,6 +283,20 @@ pub const BashParser = struct {
         return true;
     }
 };
+
+pub fn validDescription(bytes: []const u8) bool {
+    if (bytes.len == 0 or bytes.len > protocol.max_tool_description_bytes or !std.unicode.utf8ValidateSlice(bytes)) return false;
+    var scalars = std.unicode.Utf8View.initUnchecked(bytes).iterator();
+    var nonblank = false;
+    while (scalars.nextCodepoint()) |scalar| {
+        switch (scalar) {
+            '\n', '\r', 0x85, 0x2028, 0x2029 => return false,
+            ' ', '\t', 0xb, 0xc, 0xa0, 0x1680, 0x2000...0x200a, 0x202f, 0x205f, 0x3000 => {},
+            else => nonblank = true,
+        }
+    }
+    return nonblank;
+}
 
 fn isSpace(byte: u8) bool {
     return switch (byte) {
@@ -322,7 +357,7 @@ const TestWriter = struct {
 
 test "resumable Bash parser preserves state across every byte boundary" {
     var source = TestSource{
-        .bytes = " \n{\"timeout_ms\":123,\"cmd\":\"a\\n\\u20ac\\ud83d\\ude00\\\\z\"}\t",
+        .bytes = " \n{\"description\":\"Read \\u20ac\\ud83d\\ude00\",\"timeout_ms\":123,\"cmd\":\"a\\n\\u20ac\\ud83d\\ude00\\\\z\"}\t",
     };
     var writer: TestWriter = .{};
     var parser: BashParser = .{};
@@ -331,6 +366,7 @@ test "resumable Bash parser preserves state across every byte boundary" {
         .invalid => return error.TestUnexpectedInvalidDescriptor,
         .complete => |arguments| {
             try std.testing.expectEqual(@as(?u64, 123), arguments.timeout_ms);
+            try std.testing.expectEqualStrings("Read €😀", arguments.description.slice());
             try std.testing.expectEqualStrings("a\n€😀\\z", writer.slice());
             break;
         },
@@ -339,9 +375,9 @@ test "resumable Bash parser preserves state across every byte boundary" {
 
 test "resumable Bash parser rejects malformed split values" {
     const descriptors = [_][]const u8{
-        "{\"cmd\":\"\\ud83dX\",\"timeout_ms\":null}",
-        "{\"cmd\":\"ok\",\"timeout_ms\":9223372036854775808}",
-        "{\"cmd\":\"ok\",\"timeout_ms\":null,\"cmd\":\"again\"}",
+        "{\"description\":\"Run command\",\"cmd\":\"\\ud83dX\",\"timeout_ms\":null}",
+        "{\"description\":\"Run command\",\"cmd\":\"ok\",\"timeout_ms\":9223372036854775808}",
+        "{\"description\":\"Run command\",\"cmd\":\"ok\",\"timeout_ms\":null,\"cmd\":\"again\"}",
     };
     for (descriptors) |descriptor| {
         var source = TestSource{ .bytes = descriptor };
@@ -353,4 +389,28 @@ test "resumable Bash parser rejects malformed split values" {
             .complete => return error.TestUnexpectedValidDescriptor,
         };
     }
+}
+
+test "Bash descriptions are required and bounded by decoded UTF-8 bytes" {
+    var missing = TestSource{ .bytes = "{\"cmd\":\"true\",\"timeout_ms\":null}" };
+    try std.testing.expect(!try validBashArguments(&missing));
+    const invalid = [_][]const u8{
+        "\"\"",        "\"   \"",     "null",      "1", "\"line\\nnext\"", "\"line\\rnext\"",
+        "\"\\u2028\"", "\"\\ud800\"", "\"\xc3(\"",
+    };
+    var buffer: [512]u8 = undefined;
+    for (invalid) |description| {
+        var source = TestSource{ .bytes = try std.fmt.bufPrint(&buffer, "{{\"cmd\":\"true\",\"timeout_ms\":null,\"description\":{s}}}", .{description}) };
+        try std.testing.expect(!try validBashArguments(&source));
+    }
+    for ([_][]const u8{ "a" ** 98 ++ "é", "\\u00e9" ** 50 }) |description| {
+        var source = TestSource{ .bytes = try std.fmt.bufPrint(&buffer, "{{\"description\":\"{s}\",\"cmd\":\"printf ok\",\"timeout_ms\":null}}", .{description}) };
+        try std.testing.expect(try validBashArguments(&source));
+    }
+    for ([_][]const u8{ "a" ** 99 ++ "é", "\\u00e9" ** 51 }) |description| {
+        var source = TestSource{ .bytes = try std.fmt.bufPrint(&buffer, "{{\"cmd\":\"true\",\"description\":\"{s}\",\"timeout_ms\":null}}", .{description}) };
+        try std.testing.expect(!try validBashArguments(&source));
+    }
+    var duplicate = TestSource{ .bytes = "{\"description\":\"Run tests\",\"cmd\":\"true\",\"description\":\"Read files\",\"timeout_ms\":null}" };
+    try std.testing.expect(!try validBashArguments(&duplicate));
 }

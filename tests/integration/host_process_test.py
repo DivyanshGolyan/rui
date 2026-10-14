@@ -25,6 +25,7 @@ from host_process import (
     ReleaseGate,
     _Observations,
     _observation_atomics,
+    dispose_all,
     start_ready_process,
     stop_process,
 )
@@ -65,8 +66,10 @@ def assert_reaped(source, description, *, timeout=0.2, required_fields=None, obs
 
 
 def main():
+    prove_dispose_all()
     prove_terminal_capture_budget()
     prove_execution_release_oracles()
+    prove_bash_cleanup_population()
     prove_required_capture_receipts()
     prove_peer_setup_disposal()
     assert_reaped("time.sleep(10)", "silent alive")
@@ -207,7 +210,7 @@ def prove_coalesced_phase_records():
         "subject": "stopped-pipes-stop",
     }
     second = {
-        "rui_test_phase": "control_store_complete",
+        "rui_test_phase": "control_lock_acquired",
         "subject_kind": "command_key",
         "subject": "stopped-pipes-stop",
     }
@@ -226,7 +229,7 @@ def prove_coalesced_phase_records():
     diagnostics = HostDiagnostics(process)
     try:
         matches = diagnostics.wait(
-            "control_store_complete",
+            "control_lock_acquired",
             timeout=2,
             subject_kind="command_key",
             subject="stopped-pipes-stop",
@@ -286,6 +289,7 @@ def observation_state(process, state, *, run=37, active=0, version=1):
 
 
 def prove_required_capture_receipts():
+    import host_process
     # Optional output cannot manufacture native authority, even when complete.
     receipt = b'{"rui_test_phase":"capture_write_gate_entered","written_bytes":12345}\n'
     process = SimpleNamespace(pid=os.getpid(), stderr=io.BytesIO(receipt), poll=lambda: 0)
@@ -293,7 +297,10 @@ def prove_required_capture_receipts():
     diagnostics.thread.join(timeout=1)
     for phase in ("capture_write_gate_entered", "transport_resume_capture_failure", "effect_stop_requested",
                   "action_attempt_admitted", "action_result_ready", "action_result_committed",
-                  "preparation_completed", "prepared_before_handoff", "codex_transfer"):
+                  "preparation_completed", "prepared_before_handoff", "codex_transfer",
+                  "cleanup_started", "cleanup_completed", "cleanup_release_observed",
+                  "inspection_captured",
+                  "bash_leader_observed_with_open_pipes", "control_store_complete"):
         for invoke in (lambda: diagnostics.wait(phase, timeout=.01), lambda: diagnostics.matching(phase)):
             try:
                 invoke()
@@ -302,6 +309,35 @@ def prove_required_capture_receipts():
             else:
                 raise AssertionError("optional stderr supplied required capture evidence")
     diagnostics.close()
+    # Complete optional records and wrong native plans must both fail at the
+    # authority boundary, for positive waits and negative/exact censuses.
+    required = {
+        "cleanup_started": ("control", "stop", "bash_cleanup"),
+        "cleanup_completed": ("control", "stop", "bash_cleanup"),
+        "cleanup_release_observed": ("bash_cleanup",),
+        "inspection_captured": ("control", "bash_cleanup"),
+        "bash_leader_observed_with_open_pipes": ("bash_pipes",),
+        "control_store_complete": ("bash_pipes",),
+    }
+    for phase, plans in required.items():
+        record = {"rui_test_phase": phase}
+        for plan in (None, *host_process.OBSERVATION_LIMITS):
+            observations = SimpleNamespace(plan=plan, records=[record], condition=threading.Condition(), error=None)
+            process = SimpleNamespace(stderr=io.BytesIO(json.dumps(record).encode() + b"\n"), poll=lambda: 0)
+            if plan is not None:
+                process.rui_observations = observations
+            diagnostics = HostDiagnostics(process)
+            diagnostics.close()
+            for invoke in (lambda: diagnostics.wait(phase, timeout=.001), lambda: diagnostics.matching(phase)):
+                if plan in plans:
+                    assert invoke() == [record]
+                else:
+                    try:
+                        invoke()
+                    except AssertionError as error:
+                        assert "native observation authority" in str(error), error
+                    else:
+                        raise AssertionError((phase, plan, "wrong authority accepted"))
     assert_reaped("print('not-ready'); time.sleep(30)", "native startup retains readiness error",
                   observations="managed")
     with tempfile.TemporaryDirectory() as directory:
@@ -373,21 +409,35 @@ time.sleep(30)
             assert (facts['returncode'] is None) == (case != 'duplicate'), facts
             assert facts['post_reap_state'][0:3] == [1, pid, 37], facts
             assert not list(destination.rglob('rui.sqlite3'))
-    with tempfile.TemporaryDirectory() as directory:
-        root = pathlib.Path(directory)
-        process, _ = start_ready_process(child(source) + ['--store', str(root / 'store'), '--case', 'lost'],
-                                         observations='managed', timeout=1)
-        diagnostics = HostDiagnostics(process)
-        primary = AssertionError('original managed result assertion')
-        try:
+    class NoteFailure(AssertionError):
+        def add_note(self, note):
+            raise RuntimeError('secondary reporting unavailable')
+
+    for nested, primary in ((True, AssertionError('original managed result assertion')),
+                            (False, NoteFailure('original managed result assertion'))):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            process, _ = start_ready_process(child(source) + ['--store', str(root / 'store'), '--case', 'lost'],
+                                             observations='managed', timeout=1)
+            diagnostics = HostDiagnostics(process)
+            disposed = threading.Event()
             try:
-                raise primary
-            finally:
-                stop_process(process)
-        except AssertionError as error:
-            assert error is primary and any('Host cleanup failed' in note for note in error.__notes__), error
-        assert process.returncode is not None and process.stdout.closed and process.stderr.closed
-        assert not diagnostics.thread.is_alive() and not process.rui_observations.thread.is_alive()
+                try:
+                    raise primary
+                finally:
+                    if nested:
+                        dispose_all(lambda: stop_process(process), disposed.set)
+                    else:
+                        stop_process(process)
+            except AssertionError as error:
+                assert error is primary, error
+                if nested:
+                    assert any('Host cleanup failed' in note for note in error.__notes__), error
+                    assert any('native observation loss invalidates evidence' in note for note in error.__notes__), error.__notes__
+            if nested:
+                assert disposed.is_set(), 'nested cleanup failure skipped later disposal'
+            assert process.returncode is not None and process.stdout.closed and process.stderr.closed
+            assert not diagnostics.thread.is_alive() and not process.rui_observations.thread.is_alive()
     print('Required receipts: optional authority/wrong plan/disposable retention refused; missing/duplicate/lost native gate fails; original failure survives release/reap/root teardown')
 
 
@@ -543,7 +593,8 @@ def prove_observation_disposal():
                     try:
                         diagnostics.wait("cleanup_completed", operation="7", timeout=.02)
                     except AssertionError as error:
-                        assert "timed out waiting" in str(error), error
+                        expected = "timed out waiting" if plan in ("control", "stop", "bash_cleanup") else "native observation authority"
+                        assert expected in str(error), error
                     else:
                         raise AssertionError("sealed zero-active channel invented a required endpoint")
             else:
@@ -586,7 +637,7 @@ def prove_observation_disposal():
 def prove_intentional_crash_retirement():
     import host_process
     with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
-        import dispatch_integration as dispatch
+        import model_fixture as dispatch
 
     # Drive the real crash owner and native accessor. Synthetic state changes
     # discriminate receipt from retirement; actual native holds remain in Zig.
@@ -853,8 +904,8 @@ def prove_execution_release_oracles():
         ([dict(endpoint, operation="12")], False), ([dict(endpoint, attempt="3")], False),
         ([dict(endpoint, action="19")], False), ([endpoint, endpoint], False),
     ):
-        reader = io.BytesIO(b"".join(json.dumps(value).encode() + b"\n" for value in records))
-        diagnostics = HostDiagnostics(SimpleNamespace(stderr=reader, poll=lambda: 0))
+        observations = SimpleNamespace(plan="control", records=list(records), condition=threading.Condition(), error=None)
+        diagnostics = HostDiagnostics(SimpleNamespace(stderr=io.BytesIO(), poll=lambda: 0, rui_observations=observations))
         diagnostics.close()
         invoke = lambda: diagnostics.wait_model_cleanup(processing, time.monotonic() + 0.001)
         if accepted:
@@ -886,6 +937,108 @@ def prove_execution_release_oracles():
         else:
             refused(invoke, "timed out")
     print("Execution release oracle: simultaneous accounting, exact cleanup owners/final population, withheld custody/scratch, late replies, caller and inspection bounds")
+
+
+def prove_bash_cleanup_population():
+    from bash_integration import assert_cleanup_population
+
+    records = []
+    for action in (None, "19"):
+        for phase in ("cleanup_started", "cleanup_release_observed", "cleanup_completed"):
+            records.append(dict(rui_test_phase=phase, turn="7", operation="11", attempt="1", action=action))
+    records.append(dict(rui_test_phase="inspection_captured"))
+    for case in ("normal", "missing", "duplicate", "wrong-owner", "extra-phase", "inspection-overflow"):
+        values = [dict(r) for r in records]
+        if case == "missing":
+            values.pop(2)
+        elif case == "duplicate":
+            values.append(dict(values[1]))  # Retry must not duplicate release authority.
+        elif case == "wrong-owner":
+            values[2]["operation"] = "12"
+        elif case == "extra-phase":
+            values.append(dict(rui_test_phase="lifecycle_boundary"))
+        elif case == "inspection-overflow":
+            values.append(dict(values[-1]))
+        observations = SimpleNamespace(plan="bash_cleanup", records=values, condition=threading.Condition(), error=None)
+        diagnostics = HostDiagnostics(SimpleNamespace(stderr=io.BytesIO(), poll=lambda: 0, rui_observations=observations))
+        diagnostics.close()
+        try:
+            assert_cleanup_population(diagnostics, actions=[19], models=1, model_releases=True, inspection_limit=1)
+        except AssertionError:
+            assert case != "normal", case
+        else:
+            assert case == "normal", case
+    print("Bash cleanup census: exact unique owner endpoints, single release, inspection bound and no extra phases")
+
+
+def prove_capacity_refusal_oracle(probe):
+    module = sys.modules[probe.__module__]
+    class ConnectedSocket(socket.socket):
+        def connect(self, _path):
+            pass  # The socketpair is already connected; send/receive/close are real.
+
+    connection_body = b'{"version":"1","type":"busy","code":"connection_capacity_exhausted"}'
+    ordinary_body = b'{"version":"1","type":"busy","code":"ordinary_capacity_exhausted"}'
+    for case in ("early-complete", "ordinary-complete", "empty", "truncated", "wrong-code",
+                 "wrong-status", "code-suffix", "missing-length", "duplicate-length"):
+        body = connection_body
+        if case == "wrong-code":
+            body = ordinary_body
+        elif case == "code-suffix":
+            body = connection_body.replace(b'"connection_capacity_exhausted"', b'"connection_capacity_exhausted_extra"')
+        elif case == "ordinary-complete":
+            body = ordinary_body
+        status = b"200 OK" if case == "wrong-status" else b"503 Service Unavailable"
+        length = b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+        if case == "missing-length":
+            length = b""
+        elif case == "duplicate-length":
+            length *= 2
+        response = b"HTTP/1.1 " + status + b"\r\n" + length + b"\r\n" + body
+        if case == "truncated":
+            response = response[:-1]
+        elif case == "empty":
+            response = b""
+        client, peer = socket.socketpair()
+        client = ConnectedSocket(fileno=client.detach())
+        peer.settimeout(3)
+        errors = []
+
+        def respond():
+            try:
+                if case == "ordinary-complete":
+                    request = bytearray()
+                    while b"\r\n" not in request:
+                        chunk = peer.recv(4096)
+                        assert chunk, "ordinary probe closed before classification"
+                        request.extend(chunk)
+                peer.sendall(response)
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                peer.close()
+
+        thread = None
+        if case == "ordinary-complete":
+            thread = threading.Thread(target=respond)
+            thread.start()
+        else:
+            respond()  # A complete refusal can precede the client's first write.
+        try:
+            with patch.object(module.socket, "socket", return_value=client):
+                probe("unused", b"ordinary_capacity_exhausted" if case == "ordinary-complete"
+                      else b"connection_capacity_exhausted")
+        except (AssertionError, ValueError):
+            assert case not in ("early-complete", "ordinary-complete"), case
+        else:
+            assert case in ("early-complete", "ordinary-complete"), ("invalid refusal accepted", case)
+        finally:
+            client.close()
+            if thread is not None:
+                thread.join(3)
+                assert not thread.is_alive(), case
+            assert not errors, errors
+    print("Capacity refusal oracle: pre-write close and classified replies; empty, truncated, wrong status/code/framing refused")
 
 
 def prove_control_disposal_oracle(dispose):
@@ -992,6 +1145,60 @@ def prove_terminal_capture_budget():
                 assert late_stage is None, f"accepted late {late_stage} at {clock[0]}"
                 assert reached == ["read", "release"], reached
     print("Terminal capture caller clock: timely exact read/release accepted; late exact read and release rejected")
+
+
+def prove_dispose_all():
+    for body_failed in (True, False):
+        body_error = AssertionError("original body failure")
+        cleanup_error = RuntimeError("first cleanup failure")
+        later_error = OSError("later cleanup failure; release gate manually: " + "x" * 2000)
+        reader, writer = os.pipe()
+        process = subprocess.Popen(child("time.sleep(10)"))
+        attempted = []
+
+        def fail(error):
+            attempted.append(error)
+            raise error
+
+        try:
+            try:
+                if body_failed:
+                    raise body_error
+            finally:
+                dispose_all(lambda: fail(cleanup_error),
+                            lambda: os.close(reader),
+                            lambda: fail(later_error),
+                            lambda: stop_process(process, timeout=5),
+                            lambda: os.close(writer))
+        except BaseException as error:
+            assert error is (body_error if body_failed else cleanup_error), error
+            assert attempted == [cleanup_error, later_error], attempted
+            assert len(error.__notes__) == 2, error.__notes__
+            assert "disposal 1" in error.__notes__[0] and "first cleanup failure" in error.__notes__[0], error.__notes__
+            assert "disposal 3" in error.__notes__[1] and "release gate manually" in error.__notes__[1], error.__notes__
+            assert "[truncated]" not in error.__notes__[0], error.__notes__
+            assert error.__notes__[1].endswith("[truncated]"), "cleanup detail was silently truncated"
+            assert all(len(note) < 1024 for note in error.__notes__), "unbounded cleanup diagnostic"
+            assert process.poll() is not None, "later child disposal skipped"
+            for fd in (reader, writer):
+                try:
+                    os.fstat(fd)
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError("later descriptor disposal skipped")
+        else:
+            raise AssertionError("cleanup failure suppressed on successful body")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            for fd in (reader, writer):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+    print("Fixture disposal: primary failure retained, all resources attempted")
 
 
 if __name__ == "__main__":

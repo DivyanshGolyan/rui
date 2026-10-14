@@ -16,7 +16,7 @@ import threading
 import time
 
 import bash_integration as bash
-import dispatch_integration as caller
+import model_fixture as caller
 from host_process import start_ready_process
 
 
@@ -96,7 +96,8 @@ def run(model, external_credential=None):
     session = "qualification/codex"
     command = "printf 'once\\n' >> effect-count; shasum -a 256 effect-count"
     prompt = (
-        "Call Bash once with exactly this cmd and timeout_ms null: " + command +
+        "Call Bash once with description exactly 'Append and hash effect counter', "
+        "timeout_ms null, and exactly this cmd: " + command +
         ". After its result, answer with the hex SHA-256 value printed by Bash. "
         "Do not run another tool or guess the value."
     )
@@ -168,7 +169,7 @@ def run(model, external_credential=None):
             time.sleep(0.5)
         assert action is not None, "no inspectable Bash proposal"
         args = json.loads(caller.read_action(store, session, action["action"], "arguments"))
-        assert args == {"cmd": command, "timeout_ms": None}, "proposal differed from the safe command; nothing approved"
+        assert args == {"cmd": command, "timeout_ms": None, "description": "Append and hash effect counter"}, "proposal differed from the safe command; nothing approved"
         assert action["authorization"] == "pending" and not (workspace / "effect-count").exists()
         bash.allow(state, store, "approve", session, action["action"])
         first = wait_for(store, "first", lambda value: value.get("result", {}).get("status") == "completed", "first answer")

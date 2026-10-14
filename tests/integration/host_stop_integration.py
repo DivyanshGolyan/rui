@@ -14,7 +14,7 @@ import threading
 import time
 
 import bash_integration as bash_fixture
-import dispatch_integration as fixture
+import model_fixture as fixture
 from host_process import HostDiagnostics, ReleaseGate, stop_process
 from host_status_integration import socket_path, status
 
@@ -115,7 +115,7 @@ def mixed_effect_drain(provider_first):
             f"for ((i=0; i<600; i++)); do printf 'alive\\n' >> {quoted_events}; sleep 0.05; done"
         )
         proposal = fixture.sse_tool_calls("bash-proposal", [
-            ("bash", "bash-call", json.dumps({"cmd": command, "timeout_ms": None}))
+            ("bash", "bash-call", json.dumps({"cmd": command, "timeout_ms": None, "description": "Write Host stop lifecycle events"}))
         ])
         large = fixture.sse_answer("held-provider", "private-reason", "answer", "x" * 128000)[0]
         endpoint = fixture.SuccessEndpoint([], responses_by_input={"bash": proposal, "provider": large})

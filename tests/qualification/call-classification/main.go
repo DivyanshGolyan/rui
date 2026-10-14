@@ -152,9 +152,10 @@ func scenarioCalls(value scenario, forbidden string) []call {
 	for index := range value.Valid {
 		command := fmt.Sprintf("touch %q # %s", forbidden, padding)
 		arguments, _ := json.Marshal(struct {
-			Cmd       string `json:"cmd"`
-			TimeoutMS *int   `json:"timeout_ms"`
-		}{Cmd: command})
+			Description string `json:"description"`
+			Cmd         string `json:"cmd"`
+			TimeoutMS   *int   `json:"timeout_ms"`
+		}{Description: "Create the forbidden-effect classification sentinel", Cmd: command})
 		calls = append(calls, call{fmt.Sprintf("%s-item-%06d", value.Name, len(calls)), "bash", fmt.Sprintf("valid-%06d", index), string(arguments)})
 	}
 	for index := range value.Rejected {
@@ -1021,10 +1022,10 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		if err != nil {
 			return result, err
 		}
-		if err := measure("cli-configuration", "configuration", []string{"session", "configure", "--store", store, "--record", filepath.Join(directory, value.Name+"-configure.json"), "--key", value.Name + "-configure", "--session", session, "--workspace", workspace, "--provider", "codex", "--model", "model-a", "--tools", "bash"}, accepted); err != nil {
+		if err := measure("cli-configuration", "configuration", []string{"session", "configure", "--store", store, "--record", filepath.Join(directory, value.Name+"-configure.json"), "--key", value.Name + "-configure", "--session", session, "--workspace", workspace, "--provider", "codex", "--model", "model-a", "--tools", "bash", "--permission-mode", "ask"}, accepted); err != nil {
 			return result, err
 		}
-	} else if err := client.Configure(value.Name, session, "--tools", "bash"); err != nil {
+	} else if err := client.Configure(value.Name, session, "--tools", "bash", "--permission-mode", "ask"); err != nil {
 		return result, err
 	}
 	recordPortableSample(result, "retained_idle_before", host)

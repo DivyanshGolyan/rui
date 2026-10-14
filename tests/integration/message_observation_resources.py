@@ -36,7 +36,8 @@ def retained(state, binary, label, repetition, failed_key):
         samples = [sample(process.pid)]
         for _ in range(4):
             for _ in range(25):
-                result = cli.terminal_step(master, f"/result {failed_key}", prompt)
+                result = cli.terminal_step(master, f"/result {failed_key}",
+                    prompt if label == "baseline" else "result: failed", composer=label != "baseline")
                 assert ("This saved Message failed" in result or "result: failed" in result) and "provider_http_422" in result, result
             samples.append(sample(process.pid))
         cli.terminal_step(master, "/exit", "Detached.")

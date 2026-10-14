@@ -993,7 +993,7 @@ const DrainedRequest = struct { bytes: []u8, length: u64, digest: [32]u8 };
 
 // Independently authored tool definitions for full-request goldens. These
 // literals must match the provider's frozen tool catalog, not reference it.
-const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed.\",\"strict\":true,\"parameters\":{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":[\"integer\",\"null\"],\"description\":\"Use null for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.\",\"minimum\":1,\"maximum\":9223372036854775807}},\"required\":[\"cmd\",\"timeout_ms\"],\"additionalProperties\":false}}";
+const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed.\",\"strict\":true,\"parameters\":{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"},\"description\":{\"type\":\"string\",\"description\":\"A short human-facing activity label: base verb + concrete target + useful scope, in sentence case with no trailing punctuation. Describe the intended work, not its status, success or safety. Required, nonblank, single-line valid UTF-8, at most 100 decoded UTF-8 bytes. Aim for 40–60 characters; use more only for useful scope. Example: Run parser regression tests\"},\"timeout_ms\":{\"type\":[\"integer\",\"null\"],\"description\":\"Use null for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.\",\"minimum\":1,\"maximum\":9223372036854775807}},\"required\":[\"cmd\",\"description\",\"timeout_ms\"],\"additionalProperties\":false}}";
 const edit_tool_json = "{\"type\":\"function\",\"name\":\"edit\",\"description\":\"Edit one file\"}";
 
 // Supply only fixture inputs, never the adapter's emitted context or constants.
@@ -1131,8 +1131,8 @@ fn settleComposedForTesting(
     reasoning_json: []const u8,
     calls: []const ComposedCall,
 ) !void {
-    const decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}";
-    const encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}";
+    const decoded_arguments = "{\"cmd\":\"true\",\"description\":\"Run no-op command\",\"timeout_ms\":null}";
+    const encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}";
     var source_buffer: [64 * 1024]u8 = undefined;
     var source_writer = std.Io.Writer.fixed(&source_buffer);
     try source_writer.writeAll(reasoning_json);
@@ -1308,8 +1308,8 @@ const composed_replayed = "{\"type\":\"reasoning\",\"id\":\"r1\",\"encrypted_con
 // Replayed call items appear verbatim: they carry no top-level
 // response-only fields. Written separately from the settle helper so the
 // golden does not share its construction.
-const composed_replayed_call_a = "{\"type\":\"function_call\",\"id\":\"order-item-a\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"order-call-a\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}\"}";
-const composed_replayed_call_b = "{\"type\":\"function_call\",\"id\":\"order-item-b\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"order-call-b\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}\"}";
+const composed_replayed_call_a = "{\"type\":\"function_call\",\"id\":\"order-item-a\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"order-call-a\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\"}";
+const composed_replayed_call_b = "{\"type\":\"function_call\",\"id\":\"order-item-b\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"order-call-b\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\"}";
 
 const composed_expected =
     "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[" ++

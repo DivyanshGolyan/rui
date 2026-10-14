@@ -10,7 +10,7 @@ const c = @cImport({
 });
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 19;
+pub const schema_version: u32 = 21;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
@@ -315,6 +315,7 @@ pub const PublicConversationItem = struct {
     ordinal: u64, // Zero for User/Assistant; one-based call ordinal in a completed Tool Result group.
     kind: enum { user, assistant, tool_result },
     content: ContentReference,
+    presentation: ?protocol.ToolPresentation = null,
 };
 
 pub const PublicConversationPage = struct {
@@ -2535,7 +2536,7 @@ pub const Store = struct {
         }
         observation.pending_messages = self.countPendingMessages(session_ref) catch |err|
             return self.fenceReadFailure(err);
-        self.validateActiveTurnToolCalls(session_ref) catch |err|
+        self.validateActiveTurnToolCalls(session_ref, true) catch |err|
             return self.fenceReadFailure(err);
         observation.action_count = self.countActions(session_ref) catch |err|
             return self.fenceReadFailure(err);
@@ -2619,7 +2620,7 @@ pub const Store = struct {
                 3 => .assistant,
                 4 => .tool_result,
                 else => unreachable,
-            }, .content = .{ .length = metadata.length, .digest = metadata.digest } };
+            }, .content = .{ .length = metadata.length, .digest = metadata.digest }, .presentation = if (resolved.tool_operation) |operation| try self.toolPresentationLocked(operation, @intCast(ordinal - 1), @intCast(position)) else null };
             page.count += 1;
         }
         return page;
@@ -2648,7 +2649,7 @@ pub const Store = struct {
 
     // A cursor and a byte reader resolve the same public identity and exposed
     // metadata. Neither may accept a private or absent canonical result.
-    fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !struct { id: i64, metadata: ContentMetadata } {
+    fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !struct { id: i64, metadata: ContentMetadata, tool_operation: ?u64 } {
         // One indexed ordinary identity owns provenance for pages, cursors and
         // bytes. LEFT JOIN retains damage instead of hiding dependencies.
         const statement = try prepare(self.database, if (ordinal == 0)
@@ -2668,7 +2669,7 @@ pub const Store = struct {
                 "LEFT JOIN content result ON result.content_id=a.resolution_content_id " ++
                 "WHERE linked.operation_id=op.operation_id AND CASE WHEN item.item_kind=3 AND item.session_ref=op.session_ref AND t.session_ref=op.session_ref " ++
                 "AND item.attempt_ordinal=op.attempt_ordinal AND source.private=1 AND id.private=0 AND id.digest=item.item_id_digest AND " ++
-                "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref AND result.private=0)) THEN 0 ELSE 1 END=1) FROM model_operation op " ++
+                "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref AND result.private=0)) THEN 0 ELSE 1 END=1),op.operation_id,call.call_ordinal FROM model_operation op " ++
                 "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
                 "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
                 "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' AND call.call_ordinal+1=?3 " ++
@@ -2691,7 +2692,113 @@ pub const Store = struct {
         if (c.sqlite3_column_int(statement, 1) != 1) return error.CorruptStore;
         const content_id = c.sqlite3_column_int64(statement, 0);
         if (content_id <= 0) return error.CorruptStore;
-        return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id) };
+        const operation: ?u64 = if (ordinal == 0) null else @intCast(try readNullablePositiveI64(statement, 2) orelse return error.CorruptStore);
+        if (operation) |op| _ = try self.readToolOutcomeFacts(op, true, false);
+        return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id), .tool_operation = operation };
+    }
+
+    const ContentSource = struct {
+        store: *Store,
+        reader: ContentReader,
+        position: u64 = 0,
+        end: u64,
+        window: [4096]u8 = undefined,
+        used: usize = 0,
+        count: usize = 0,
+
+        fn init(storage: *Store, id: i64, private: bool) !ContentSource {
+            const metadata = try storage.readContentMetadata(id);
+            return .{ .store = storage, .reader = try storage.openContentIdentityLocked(.{ .length = metadata.length, .digest = metadata.digest }, private), .end = metadata.length };
+        }
+
+        pub fn peek(source: *@This()) !?u8 {
+            if (source.used == source.count) {
+                const wanted: usize = @intCast(@min(source.window.len, source.end - source.position));
+                source.count = try source.store.readOwnedContentLocked(&source.reader, source.position, source.window[0..wanted]);
+                source.used = 0;
+                if (source.count == 0) return null;
+            }
+            return source.window[source.used];
+        }
+
+        pub fn take(source: *@This()) !u8 {
+            const byte = try source.peek() orelse return error.UnexpectedEof;
+            source.used += 1;
+            source.position += 1;
+            return byte;
+        }
+
+        pub fn next(source: *@This()) !?u8 {
+            return if (try source.peek() != null) try source.take() else null;
+        }
+
+        pub fn offset(source: *@This()) u64 {
+            return source.position;
+        }
+
+        pub fn setRange(source: *@This(), start: u64, length: u64) !void {
+            const end = try std.math.add(u64, start, length);
+            if (end > source.reader.reference.length) return error.CorruptStore;
+            source.position = start;
+            source.end = end;
+            source.used = 0;
+            source.count = 0;
+        }
+
+        pub fn space(source: *@This()) !void {
+            while (try source.peek()) |byte| switch (byte) {
+                ' ', '\t', '\r', '\n' => _ = try source.take(),
+                else => return,
+            };
+        }
+
+        pub fn expect(source: *@This(), expected: u8) !void {
+            try source.space();
+            if (try source.take() != expected) return error.CorruptStore;
+        }
+
+        pub fn expectEnd(source: *@This()) !void {
+            try source.space();
+            if (try source.peek() != null) return error.CorruptStore;
+        }
+    };
+
+    fn toolPresentationLocked(self: *Store, operation: u64, ordinal: u64, publication_position: ?u64) !protocol.ToolPresentation {
+        const statement = try prepare(self.database, "SELECT call.description,coalesce(call.rejection_code,a.resolution_code),a.permission_state,item.session_ref,item.session_position FROM model_tool_call call LEFT JOIN action_operation a ON a.parent_operation_id=call.operation_id AND a.call_ordinal=call.call_ordinal LEFT JOIN model_output_item item ON item.operation_id=call.operation_id AND item.item_ordinal=call.item_ordinal WHERE call.operation_id=?1 AND call.call_ordinal=?2");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, operation);
+        try bindU64(statement, 2, ordinal);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try readText(statement, 3, &session);
+        const position = try readNullablePositiveI64(statement, 4) orelse return error.CorruptStore;
+        _ = try self.proposalLocked(session.slice(), @intCast(position), false);
+        var result: protocol.ToolPresentation = .{ .description = null, .code = .unresolved, .publication_position = publication_position };
+        if (c.sqlite3_column_type(statement, 0) != c.SQLITE_NULL) {
+            var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+            try readText(statement, 0, &description);
+            if (!tool_catalog.validDescription(description.slice())) return error.CorruptStore;
+            result.description = description;
+        }
+        if (c.sqlite3_column_type(statement, 1) != c.SQLITE_NULL) {
+            var code: protocol.Bounded(32) = .{};
+            try readText(statement, 1, &code);
+            result.code = std.meta.stringToEnum(protocol.ToolPresentation.Code, code.slice()) orelse return error.CorruptStore;
+        } else if (c.sqlite3_column_int(statement, 2) == 0) result.code = .pending_permission;
+        if (result.description == null) switch (result.code) {
+            .unknown_tool, .invalid_arguments, .tool_unavailable => {},
+            else => return error.CorruptStore,
+        };
+        return result;
+    }
+
+    fn appendToolPresentation(self: *Store, operation: u64, ordinal: u64, publication_position: ?u64, capture: *SessionReportCapture) !void {
+        const presentation = try self.toolPresentationLocked(operation, ordinal, publication_position);
+        var buffer: [protocol.max_tool_presentation_json_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try presentation.writeJson(&writer);
+        try capture.append(",\"presentation\":");
+        try capture.append(writer.buffered());
     }
 
     pub fn activityPage(self: *Store, request: protocol.ActivityPage) !protocol.ActivityFacts {
@@ -2743,7 +2850,46 @@ pub const Store = struct {
             page.items[page.count] = (try self.activityItemLocked(request.session.slice(), end, @intCast(position), @intCast(ordinal))).item;
             page.count += 1;
         }
+        const last = if (request.direction == .forward and page.more) page.items[page.count - 1] else null;
+        page.call_activity = try self.readCallActivityLocked(request.session.slice(), if (last) |item| item.position else end, if (last) |item| item.ordinal else null);
         return page;
+    }
+
+    // This projection shares the page's canonical capture, not Current's active
+    // Turn lifetime. It is staged until the frontend acknowledges that page.
+    fn readCallActivityLocked(self: *Store, session: []const u8, position: u64, ordinal: ?u64) !protocol.CallActivity {
+        const statement = try prepare(self.database, public_tool_groups_sql ++
+            "candidates AS (SELECT op.operation_id,call.call_ordinal,groups.position FROM model_operation op " ++
+            "LEFT JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
+            "LEFT JOIN groups ON groups.operation_id=op.operation_id WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' " ++
+            "AND (groups.position IS NULL OR groups.position>?2 OR (groups.position=?2 AND ?3 IS NOT NULL AND call.call_ordinal+1>?3))) " ++
+            "SELECT operation_id,call_ordinal,position FROM candidates ORDER BY operation_id,call_ordinal");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session);
+        try bindU64(statement, 2, position);
+        try bindNullableU64(statement, 3, ordinal);
+        var result: protocol.CallActivity = .{};
+        var last_operation: u64 = 0;
+        var publication: ?u64 = null;
+        while (true) {
+            const step = c.sqlite3_step(statement);
+            if (step == c.SQLITE_DONE) break;
+            if (step != c.SQLITE_ROW) return error.CallReadFailed;
+            const operation: u64 = @intCast(try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore);
+            const call_ordinal = c.sqlite3_column_int64(statement, 1);
+            if (c.sqlite3_column_type(statement, 1) == c.SQLITE_NULL or call_ordinal < 0) return error.CorruptStore;
+            if (last_operation != operation) {
+                publication = (try self.readToolOutcomeFacts(operation, false, false)).position;
+                const projected = try readNullablePositiveI64(statement, 2);
+                if (publication != (if (projected) |p| @as(u64, @intCast(p)) else null)) return error.CorruptStore;
+                last_operation = operation;
+            }
+            result.total = try std.math.add(u64, result.total, 1);
+            if (result.count == result.entries.len) continue;
+            result.entries[result.count] = .{ .operation = operation, .ordinal = @intCast(call_ordinal), .presentation = try self.toolPresentationLocked(operation, @intCast(call_ordinal), publication) };
+            result.count += 1;
+        }
+        return result;
     }
 
     fn validateActivitySequence(self: *Store, session: []const u8) !void {
@@ -2804,10 +2950,10 @@ pub const Store = struct {
             },
             3, 5 => |kind| {
                 const content = try self.publicConversationContentLocked(session, position, ordinal);
-                result.item.value = if (kind == 3) .{ .assistant = .{ .length = content.metadata.length, .digest = content.metadata.digest } } else .{ .tool_result = .{ .length = content.metadata.length, .digest = content.metadata.digest } };
+                result.item.value = if (kind == 3) .{ .assistant = .{ .length = content.metadata.length, .digest = content.metadata.digest } } else .{ .tool_result = .{ .content = .{ .length = content.metadata.length, .digest = content.metadata.digest }, .presentation = try self.toolPresentationLocked(content.tool_operation orelse return error.CorruptStore, ordinal - 1, position) } };
                 result.content_id = content.id;
             },
-            4 => result.item.value = .{ .call = (try self.proposalLocked(session, position)).metadata },
+            4 => result.item.value = .{ .call = (try self.proposalLocked(session, position, false)).metadata },
             6 => {
                 const select = try prepare(self.database, "SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.session_ref=t.session_ref AND o.turn_id=t.turn_id " ++
                     "AND o.resolution_code IS NOT NULL AND ((t.outcome_code='completed' AND t.outcome_content_id=o.resolution_content_id) OR " ++
@@ -2852,11 +2998,21 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.validateActivitySequence(request.session.slice()) catch |err| return self.fenceReadFailure(err);
-        const identity = self.activityItemLocked(request.session.slice(), std.math.maxInt(i64), request.position, request.ordinal) catch |err| switch (err) {
-            error.ContentNotFound => return err,
-            else => return self.fenceReadFailure(err),
+        // Only Tool Results have nonzero ordinals. Byte readers need their
+        // canonical identity, not a second scan of the original arguments.
+        const id = if (request.ordinal != 0) id: {
+            const content = self.publicConversationContentLocked(request.session.slice(), request.position, request.ordinal) catch |err| switch (err) {
+                error.ContentNotFound => return err,
+                else => return self.fenceReadFailure(err),
+            };
+            break :id content.id;
+        } else id: {
+            const identity = self.activityItemLocked(request.session.slice(), std.math.maxInt(i64), request.position, request.ordinal) catch |err| switch (err) {
+                error.ContentNotFound => return err,
+                else => return self.fenceReadFailure(err),
+            };
+            break :id identity.content_id orelse return error.ContentNotFound;
         };
-        const id = identity.content_id orelse return error.ContentNotFound;
         const content = self.readPublicContentMetadata(id) catch |err| return self.fenceReadFailure(err);
         const raw = self.contentIsRaw(id, content.length) catch |err| return self.fenceReadFailure(err);
         return .{ .store = self, .content_id = id, .reference = .{ .length = content.length, .digest = content.digest }, .representation = if (raw) .raw else .{ .projection = .{} } };
@@ -2879,7 +3035,7 @@ pub const Store = struct {
         const end = request.end orelse session.next_position - 1;
         if (end >= session.next_position) return error.InvalidCursor;
         if (request.after != 0) {
-            _ = self.proposalLocked(request.session.slice(), request.after) catch |err| switch (err) {
+            _ = self.proposalLocked(request.session.slice(), request.after, true) catch |err| switch (err) {
                 error.ContentNotFound => return error.InvalidCursor,
                 else => return err,
             };
@@ -2903,7 +3059,7 @@ pub const Store = struct {
                 break;
             }
             const position = try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore;
-            page.items[page.count] = (try self.proposalLocked(request.session.slice(), @intCast(position))).metadata;
+            page.items[page.count] = (try self.proposalLocked(request.session.slice(), @intCast(position), true)).metadata;
             page.count += 1;
         }
         return page;
@@ -2913,7 +3069,7 @@ pub const Store = struct {
 
     // The page, continuation cursor and byte route share one provenance check.
     // LEFT JOIN keeps missing/contradictory owners visible as corruption.
-    fn proposalLocked(self: *Store, session: []const u8, position: u64) !ProposalIdentity {
+    fn proposalLocked(self: *Store, session: []const u8, position: u64, authenticate: bool) !ProposalIdentity {
         const statement = try prepare(self.database, "SELECT item.operation_id,op.turn_id,call.call_ordinal,action.action_id,call.rejection_code," ++
             "call.item_id_content_id,call.name_content_id,call.call_id_content_id,call.arguments_content_id," ++
             "CASE WHEN op.session_ref=item.session_ref AND t.session_ref=item.session_ref AND " ++
@@ -2922,7 +3078,7 @@ pub const Store = struct {
             "((call.rejection_code IS NOT NULL AND action.action_id IS NULL AND call.acceptance_position IS NOT NULL AND " ++
             "rejection.content_id IS NOT NULL AND rejection.private=0) OR " ++
             "(call.rejection_code IS NULL AND action.action_id IS NOT NULL AND action.session_ref=item.session_ref)) " ++
-            "THEN 1 ELSE 0 END FROM model_output_item item " ++
+            "THEN 1 ELSE 0 END,source.content_id,call.field_metadata FROM model_output_item item " ++
             "LEFT JOIN model_operation op ON op.operation_id=item.operation_id LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
             "LEFT JOIN content source ON source.content_id=item.content_id " ++
             "LEFT JOIN model_tool_call call ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal " ++
@@ -2955,10 +3111,21 @@ pub const Store = struct {
             try readText(statement, 4, &code);
             result.metadata.rejection = std.meta.stringToEnum(protocol.ProposalRejection, code.slice()) orelse return error.CorruptStore;
         }
+        // Four admission-certified (little-endian length, SHA-256) pairs.
+        // Reference substitution is detectable without reopening payloads.
+        if (c.sqlite3_column_bytes(statement, 11) != 160) return error.CorruptStore;
+        const certified: [*]const u8 = @ptrCast(c.sqlite3_column_blob(statement, 11) orelse return error.CorruptStore);
         for (&result.content_ids, &result.metadata.fields, 0..) |*id, *field, index| {
             id.* = try readNullablePositiveI64(statement, @intCast(5 + index)) orelse return error.CorruptStore;
             const metadata = try self.readPublicContentMetadata(id.*);
+            if (metadata.length != std.mem.readInt(u64, certified[index * 40 ..][0..8], .little) or
+                !std.mem.eql(u8, &metadata.digest, certified[index * 40 + 8 ..][0..32])) return error.CorruptStore;
             field.* = .{ .length = metadata.length, .digest = metadata.digest };
+        }
+        if (authenticate) {
+            var source = try ContentSource.init(self, try readNullablePositiveI64(statement, 10) orelse return error.CorruptStore, true);
+            defer source.reader.close();
+            @import("provider_output.zig").authenticateCall(&source, result.metadata.fields) catch return error.CorruptStore;
         }
         return result;
     }
@@ -2969,7 +3136,7 @@ pub const Store = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
-        const identity = self.proposalLocked(request.session.slice(), request.position) catch |err| switch (err) {
+        const identity = self.proposalLocked(request.session.slice(), request.position, true) catch |err| switch (err) {
             error.ContentNotFound => return err,
             else => return self.fenceReadFailure(err),
         };
@@ -3107,7 +3274,7 @@ pub const Store = struct {
         else
             null;
         const pending_messages = try self.countPendingMessages(session_ref);
-        try self.validateActiveTurnToolCalls(session_ref);
+        try self.validateActiveTurnToolCalls(session_ref, profile == .full);
         const action_count = try self.countActions(session_ref);
         const rejected_call_count = try self.countRejectedCalls(session_ref);
 
@@ -3368,6 +3535,7 @@ pub const Store = struct {
                 .length = @intCast(arguments_length),
                 .digest = try readDigest(statement, 8),
             });
+            try self.appendToolPresentation(@intCast(parent), @intCast(ordinal), null, capture);
             try capture.append("}");
         }
     }
@@ -3391,6 +3559,8 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         var first = true;
+        var last_parent: i64 = 0;
+        var publication: ?u64 = null;
         while (true) {
             const result = c.sqlite3_step(statement);
             if (result == c.SQLITE_DONE) return;
@@ -3401,6 +3571,10 @@ pub const Store = struct {
             const position = c.sqlite3_column_int64(statement, 4);
             const length = c.sqlite3_column_int64(statement, 5);
             if (action_id <= 0 or parent <= 0 or ordinal < 0 or position <= 0 or length < 0) return error.CorruptStore;
+            if (parent != last_parent) {
+                publication = (try self.readToolOutcomeFacts(@intCast(parent), false, false)).position;
+                last_parent = parent;
+            }
             var code: protocol.Bounded(32) = .{};
             try readText(statement, 3, &code);
             if (!first) try capture.append(",");
@@ -3416,6 +3590,7 @@ pub const Store = struct {
                 .length = @intCast(length),
                 .digest = try readDigest(statement, 6),
             });
+            try self.appendToolPresentation(@intCast(parent), @intCast(ordinal), publication, capture);
             try capture.append("}");
         }
     }
@@ -3446,6 +3621,8 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         var first = true;
+        var last_parent: i64 = 0;
+        var publication: ?u64 = null;
         while (true) {
             const result = c.sqlite3_step(statement);
             if (result == c.SQLITE_DONE) return;
@@ -3455,6 +3632,10 @@ pub const Store = struct {
             const acceptance_position = c.sqlite3_column_int64(statement, 3);
             const rejection_length = c.sqlite3_column_int64(statement, 4);
             if (operation_id <= 0 or call_ordinal < 0 or acceptance_position <= 0 or rejection_length < 0) return error.CorruptStore;
+            if (operation_id != last_parent) {
+                publication = (try self.readToolOutcomeFacts(@intCast(operation_id), false, false)).position;
+                last_parent = operation_id;
+            }
             var code: protocol.Bounded(32) = .{};
             try readText(statement, 2, &code);
             if (!first) try capture.append(",");
@@ -3485,6 +3666,7 @@ pub const Store = struct {
                     .digest = try readDigest(statement, field[2]),
                 });
             }
+            try self.appendToolPresentation(@intCast(operation_id), @intCast(call_ordinal), publication, capture);
             try capture.append("}");
         }
     }
@@ -3960,7 +4142,7 @@ pub const Store = struct {
         return @intCast(value);
     }
 
-    fn validateActiveTurnToolCalls(self: *Store, session_ref: []const u8) !void {
+    fn validateActiveTurnToolCalls(self: *Store, session_ref: []const u8, authenticate: bool) !void {
         const statement = try prepare(
             self.database,
             "SELECT operation.operation_id FROM turn active INDEXED BY turn_one_active_per_session " ++
@@ -3976,7 +4158,7 @@ pub const Store = struct {
             c.SQLITE_ROW => {
                 const operation_id = c.sqlite3_column_int64(statement, 0);
                 if (operation_id <= 0) return error.CorruptStore;
-                _ = try self.readToolOutcomeFacts(@intCast(operation_id), false);
+                _ = try self.readToolOutcomeFacts(@intCast(operation_id), false, authenticate);
             },
             c.SQLITE_DONE => return,
             else => return error.CallReadFailed,
@@ -3995,6 +4177,7 @@ pub const Store = struct {
         self: *Store,
         operation_id: u64,
         require_terminal: bool,
+        authenticate: bool,
     ) !ToolOutcomeFacts {
         const statement = try prepare(
             self.database,
@@ -4036,8 +4219,22 @@ pub const Store = struct {
             (require_terminal and terminal != expected)) return error.CorruptStore;
         const position = try readNullablePositiveI64(statement, 4);
         if (require_terminal and position == null) return error.CorruptStore;
+        const sources = try prepare(self.database, "SELECT item.session_ref,item.session_position FROM model_tool_call call " ++
+            "LEFT JOIN model_output_item item ON item.operation_id=call.operation_id AND item.item_ordinal=call.item_ordinal " ++
+            "WHERE call.operation_id=?1 ORDER BY call.call_ordinal");
+        defer _ = c.sqlite3_finalize(sources);
+        try bindU64(sources, 1, operation_id);
+        while (true) {
+            const step = c.sqlite3_step(sources);
+            if (step == c.SQLITE_DONE) break;
+            if (step != c.SQLITE_ROW) return error.CallReadFailed;
+            var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+            try readText(sources, 0, &session);
+            const source_position = try readNullablePositiveI64(sources, 1) orelse return error.CorruptStore;
+            _ = try self.proposalLocked(session.slice(), @intCast(source_position), authenticate);
+        }
         return .{
-            .position = if (position) |value| @intCast(value) else null,
+            .position = if (terminal == expected) (if (position) |value| @intCast(value) else null) else null,
             .call_count = @intCast(calls),
         };
     }
@@ -4065,8 +4262,9 @@ pub const Store = struct {
     fn actionContentLocked(self: *Store, session_ref: []const u8, action_id: u64, comptime column: []const u8) !ContentReference {
         const statement = try prepare(
             self.database,
-            "SELECT call." ++ column ++ " FROM action_operation action JOIN model_tool_call call " ++
+            "SELECT call." ++ column ++ ",item.session_position FROM action_operation action JOIN model_tool_call call " ++
                 "ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal " ++
+                "LEFT JOIN model_output_item item ON item.operation_id=call.operation_id AND item.item_ordinal=call.item_ordinal " ++
                 "WHERE action.action_id=?1 AND action.session_ref=?2",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -4079,7 +4277,9 @@ pub const Store = struct {
         }
         const content_id = c.sqlite3_column_int64(statement, 0);
         if (content_id <= 0) return error.CorruptStore;
-        const metadata = try self.readContentMetadata(content_id);
+        const position = try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
+        _ = try self.proposalLocked(session_ref, @intCast(position), true);
+        const metadata = try self.readPublicContentMetadata(content_id);
         return .{ .length = metadata.length, .digest = metadata.digest };
     }
 
@@ -4176,7 +4376,7 @@ pub const Store = struct {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         const statement = prepare(
             self.database,
-            "SELECT revision.workspace,call.arguments_content_id,action.bash_timeout_ms,operation.turn_id " ++
+            "SELECT revision.workspace,call.arguments_content_id,action.bash_timeout_ms,operation.turn_id,action.session_ref " ++
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
                 "JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
                 "JOIN model_tool_call call ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal " ++
@@ -4196,10 +4396,12 @@ pub const Store = struct {
         const content_id = c.sqlite3_column_int64(statement, 1);
         const timeout_ms = c.sqlite3_column_int64(statement, 2);
         if (content_id <= 0 or timeout_ms <= 0) return self.fenceReadFailure(error.CorruptStore);
-        const metadata = self.readContentMetadata(content_id) catch |err| return self.fenceReadFailure(err);
+        var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+        readText(statement, 4, &session) catch |err| return self.fenceReadFailure(err);
+        const arguments = self.actionContentLocked(session.slice(), binding.action_id, "arguments_content_id") catch |err| return self.fenceReadFailure(err);
         return .{
             .workspace = workspace,
-            .arguments = .{ .length = metadata.length, .digest = metadata.digest },
+            .arguments = arguments,
             .timeout_ms = @intCast(timeout_ms),
         };
     }
@@ -4699,7 +4901,7 @@ pub const Store = struct {
             c.SQLITE_ROW => {
                 const operation_id = c.sqlite3_column_int64(statement, 0);
                 if (operation_id <= 0) return error.CorruptStore;
-                _ = try self.readToolOutcomeFacts(@intCast(operation_id), false);
+                _ = try self.readToolOutcomeFacts(@intCast(operation_id), false, false);
             },
             c.SQLITE_DONE => return,
             else => return error.CallReadFailed,
@@ -4908,7 +5110,7 @@ pub const Store = struct {
         const source_operation_id = c.sqlite3_column_int64(statement, 0);
         const admission_position = c.sqlite3_column_int64(statement, 1);
         if (source_operation_id <= 0 or admission_position <= 0) return error.CorruptStore;
-        const facts = try self.readToolOutcomeFacts(@intCast(source_operation_id), true);
+        const facts = try self.readToolOutcomeFacts(@intCast(source_operation_id), true, true);
         const position = facts.position orelse return error.CorruptStore;
         if (position >= admission_position) return error.CorruptStore;
         return .{
@@ -4962,7 +5164,7 @@ pub const Store = struct {
         if (after_call_ordinal) |ordinal| try bindU64(statement, 3, ordinal);
         const result = c.sqlite3_step(statement);
         if (result == c.SQLITE_DONE) {
-            const facts = try self.readToolOutcomeFacts(source_operation_id, true);
+            const facts = try self.readToolOutcomeFacts(source_operation_id, true, true);
             if (view.active_tool_group_count != facts.call_count) return error.CorruptStore;
             view.active_tool_group_source_id = null;
             view.active_tool_group_after_ordinal = null;
@@ -5366,7 +5568,7 @@ pub const Store = struct {
 
                 const is_bash = try metadataStringEql(self.io, output.source, name, "bash");
                 const is_edit = try metadataStringEql(self.io, output.source, name, "edit");
-                const bash_arguments = if (is_bash and frozen_tools & 1 != 0)
+                const bash_arguments = if (is_bash)
                     try bashArguments(self.io, output.source, record)
                 else
                     null;
@@ -5397,7 +5599,7 @@ pub const Store = struct {
                 const insert_call = try prepare(
                     self.database,
                     "INSERT INTO model_tool_call(operation_id,call_ordinal,item_ordinal,item_id_content_id,name_content_id,call_id_content_id,arguments_content_id," ++
-                        "rejection_code,rejection_content_id,acceptance_position,action_kind) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                        "rejection_code,rejection_content_id,acceptance_position,action_kind,description,field_metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
                 );
                 defer _ = c.sqlite3_finalize(insert_call);
                 try bindU64(insert_call, 1, binding.operation_id);
@@ -5411,6 +5613,13 @@ pub const Store = struct {
                 try bindNullableI64(insert_call, 9, rejection_content_id);
                 try bindNullableU64(insert_call, 10, acceptance_position);
                 if (rejection_code == null) try bindI64(insert_call, 11, 1) else try bindNullableI64(insert_call, 11, null);
+                try bindOptionalText(insert_call, 12, if (bash_arguments) |args| args.description.slice() else "");
+                var field_metadata: [160]u8 = undefined;
+                for ([_]OutputMetadataRecord{ item_id, name, call_id, record }, 0..) |field, index| {
+                    std.mem.writeInt(u64, field_metadata[index * 40 ..][0..8], field.decoded_length, .little);
+                    @memcpy(field_metadata[index * 40 + 8 ..][0..32], &field.content_digest);
+                }
+                try bindBlob(insert_call, 13, &field_metadata);
                 try expectDone(insert_call);
 
                 if (rejection_code == null) {
@@ -6620,6 +6829,8 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ name_content_id INTEGER NOT NULL REFERENCES content(content_id),
         \\ call_id_content_id INTEGER NOT NULL REFERENCES content(content_id),
         \\ arguments_content_id INTEGER NOT NULL REFERENCES content(content_id),
+        \\ description TEXT CHECK(description IS NULL OR length(CAST(description AS BLOB)) BETWEEN 1 AND 100),
+        \\ field_metadata BLOB NOT NULL CHECK(length(field_metadata)=160),
         \\ rejection_code TEXT CHECK(rejection_code IS NULL OR rejection_code IN ('unknown_tool','invalid_arguments','tool_unavailable')),
         \\ rejection_content_id INTEGER REFERENCES content(content_id),
         \\ acceptance_position INTEGER CHECK(acceptance_position IS NULL OR acceptance_position>0),
@@ -7266,28 +7477,32 @@ fn settleCallsForTestingWithFaults(
     var offset: u64 = 0;
     for (calls, 0..) |call, index| {
         const item_start = offset;
-        try source_writer.writeAll(call.item_id);
+        try source_writer.writeAll("{\"type\":\"function_call\",\"id\":");
+        const id_start = source_writer.end + 1;
+        try std.json.Stringify.value(call.item_id, .{}, &source_writer);
         try metadata.append(.{
             .tag = .item_id,
             .kind = .function_call,
             .ordinal = index,
-            .start = offset,
-            .length = call.item_id.len,
+            .start = id_start,
+            .length = source_writer.end - id_start - 1,
             .decoded_length = call.item_id.len,
             .content_digest = protocol.contentDigest(call.item_id),
         });
-        offset += call.item_id.len;
-        try source_writer.writeAll(call.name);
+        try source_writer.writeAll(",\"name\":");
+        const name_start = source_writer.end + 1;
+        try std.json.Stringify.value(call.name, .{}, &source_writer);
         try metadata.append(.{
             .tag = .name,
             .kind = .function_call,
             .ordinal = index,
-            .start = offset,
-            .length = call.name.len,
+            .start = name_start,
+            .length = source_writer.end - name_start - 1,
             .decoded_length = call.name.len,
             .content_digest = protocol.contentDigest(call.name),
         });
-        offset += call.name.len;
+        try source_writer.writeAll(",\"call_id\":\"");
+        offset = source_writer.end;
         try source_writer.writeAll(call.encoded_call_id);
         try metadata.append(.{
             .tag = .call_id,
@@ -7298,7 +7513,8 @@ fn settleCallsForTestingWithFaults(
             .decoded_length = call.decoded_call_id.len,
             .content_digest = protocol.contentDigest(call.decoded_call_id),
         });
-        offset += call.encoded_call_id.len;
+        try source_writer.writeAll("\",\"arguments\":\"");
+        offset = source_writer.end;
         try source_writer.writeAll(call.encoded_arguments);
         try metadata.append(.{
             .tag = .arguments,
@@ -7309,7 +7525,8 @@ fn settleCallsForTestingWithFaults(
             .decoded_length = call.decoded_arguments.len,
             .content_digest = protocol.contentDigest(call.decoded_arguments),
         });
-        offset += call.encoded_arguments.len;
+        try source_writer.writeAll("\"}");
+        offset = source_writer.end;
         try metadata.append(.{
             .tag = .item,
             .kind = .function_call,
@@ -7355,16 +7572,16 @@ fn settleTwoActionsForTesting(
             .name = "bash",
             .encoded_call_id = "call\\nA",
             .decoded_call_id = "call\nA",
-            .encoded_arguments = "{\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}",
-            .decoded_arguments = "{\"cmd\":\"one\",\"timeout_ms\":null}",
+            .encoded_arguments = "{\\\"description\\\":\\\"Run first command\\\",\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run first command\",\"cmd\":\"one\",\"timeout_ms\":null}",
         },
         .{
             .item_id = "item-2",
             .name = "bash",
             .encoded_call_id = "call-B",
             .decoded_call_id = "call-B",
-            .encoded_arguments = "{\\\"cmd\\\":\\\"two\\\",\\\"timeout_ms\\\":null}",
-            .decoded_arguments = "{\"cmd\":\"two\",\"timeout_ms\":null}",
+            .encoded_arguments = "{\\\"description\\\":\\\"Run second command\\\",\\\"cmd\\\":\\\"two\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run second command\",\"cmd\":\"two\",\"timeout_ms\":null}",
         },
     };
     try settleCallsForTesting(storage, tmp, binding, file_prefix, &calls);
@@ -7956,6 +8173,12 @@ test "Bash proposals retain exact order permission provenance denial and stop te
         defer parsed.deinit();
         try std.testing.expectEqualStrings("2", parsed.value.actions.count);
         try std.testing.expectEqual(@as(usize, 2), parsed.value.actions.unresolved.len);
+        const wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report_bytes, .{});
+        defer wire.deinit();
+        const presentation = wire.value.object.get("actions").?.object.get("unresolved").?.array.items[0].object.get("presentation").?.object;
+        try std.testing.expectEqualStrings("Run first command", presentation.get("description").?.string);
+        try std.testing.expectEqualStrings("pending_permission", presentation.get("code").?.string);
+        try std.testing.expect(presentation.get("publication_position").? == .null);
         const first = parsed.value.actions.unresolved[0];
         try std.testing.expectEqualStrings("0", first.call_ordinal);
         try std.testing.expectEqualStrings("1", first.permission_revision);
@@ -7965,7 +8188,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     try std.testing.expectError(error.ActionNotFound, storage.actionArguments("direct/actions", std.math.maxInt(u64)));
     try std.testing.expect(!storage.isFenced());
     try expectContent(&storage, try storage.actionCallId("direct/actions", first_action_id), "call\nA");
-    try expectContent(&storage, try storage.actionArguments("direct/actions", first_action_id), "{\"cmd\":\"one\",\"timeout_ms\":null}");
+    try expectContent(&storage, try storage.actionArguments("direct/actions", first_action_id), "{\"description\":\"Run first command\",\"cmd\":\"one\",\"timeout_ms\":null}");
 
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
     try deny.key.set("deny-first");
@@ -7989,13 +8212,22 @@ test "Bash proposals retain exact order permission provenance denial and stop te
         const parsed = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, report_bytes, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
         try std.testing.expectEqual(@as(usize, 1), parsed.value.actions.unresolved.len);
+        const wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report_bytes, .{});
+        defer wire.deinit();
+        const resolved = wire.value.object.get("actions").?.object.get("resolved").?.array.items[0].object;
+        try std.testing.expectEqualStrings("0", resolved.get("call_ordinal").?.string);
+        const presentation = resolved.get("presentation").?.object;
+        try std.testing.expectEqualStrings("Run first command", presentation.get("description").?.string);
+        try std.testing.expectEqualStrings("denied", presentation.get("code").?.string);
+        // A terminal sibling is not a published complete group.
+        try std.testing.expectEqual(std.json.Value.null, std.meta.activeTag(presentation.get("publication_position").?));
         const second = parsed.value.actions.unresolved[0];
         try std.testing.expectEqualStrings("1", second.call_ordinal);
         try std.testing.expectEqualStrings("1", second.permission_revision);
         break :second try std.fmt.parseInt(u64, second.action, 10);
     };
     try expectContent(&storage, try storage.actionCallId("direct/actions", second_action_id), "call-B");
-    try expectContent(&storage, try storage.actionArguments("direct/actions", second_action_id), "{\"cmd\":\"two\",\"timeout_ms\":null}");
+    try expectContent(&storage, try storage.actionArguments("direct/actions", second_action_id), "{\"description\":\"Run second command\",\"cmd\":\"two\",\"timeout_ms\":null}");
 
     var stop = try completeSessionStop("action-stop", "direct/actions");
     const action_stop = storage.stopSession(&stop, .{});
@@ -8007,6 +8239,19 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     try std.testing.expectEqual(settled_page.items[0].position, settled_page.items[1].position);
     try std.testing.expectEqual(@as(u64, 2), settled_page.items[0].ordinal);
     try std.testing.expectEqual(@as(u64, 1), settled_page.items[1].ordinal);
+    try std.testing.expectEqualStrings("Run second command", settled_page.items[0].presentation.?.description.?.slice());
+    try std.testing.expectEqualStrings("Run first command", settled_page.items[1].presentation.?.description.?.slice());
+    try std.testing.expectEqual(protocol.ToolPresentation.Code.denied, settled_page.items[1].presentation.?.code);
+    for (settled_page.items[0..2]) |item| try std.testing.expectEqual(item.position, item.presentation.?.publication_position.?);
+    const activity = try storage.activityPage(.{ .session = public_request.session, .direction = .backward });
+    var results: usize = 0;
+    for (activity.items[0..activity.count]) |item| if (item.value == .tool_result) {
+        const p = item.value.tool_result.presentation;
+        try std.testing.expectEqual(item.position, p.publication_position.?);
+        try std.testing.expectEqualStrings(if (item.ordinal == 1) "Run first command" else "Run second command", p.description.?.slice());
+        results += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), results);
     var result_reader = try storage.openPublicConversationContent(.{
         .session = public_request.session,
         .position = settled_page.items[0].position,
@@ -8113,8 +8358,8 @@ test "Action settlement atomically yields to an earlier Session stop" {
         .name = "bash",
         .encoded_call_id = "settlement-stop-call",
         .decoded_call_id = "settlement-stop-call",
-        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
-        .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+        .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
     }};
     try settleCallsForTesting(&storage, &tmp, model_binding, "settlement-stop-metadata", &calls);
     const action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation");
@@ -8185,8 +8430,8 @@ test "earlier Action settlement remains authoritative after Session stop" {
         .name = "bash",
         .encoded_call_id = "settlement-first-call",
         .decoded_call_id = "settlement-first-call",
-        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
-        .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+        .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
     }};
     try settleCallsForTesting(&storage, &tmp, model_binding, "settlement-first-metadata", &calls);
     const action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation");
@@ -8275,8 +8520,8 @@ test "Full reports every closed Action resolution without fencing" {
         .name = "bash",
         .encoded_call_id = "shutdown-report-call",
         .decoded_call_id = "shutdown-report-call",
-        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":1234}",
-        .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":1234}",
+        .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":1234}",
+        .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":1234}",
     }};
     try settleCallsForTesting(&storage, &tmp, model_binding, "shutdown-report-metadata", &calls);
     const action_id = try queryU64(storage.database, "SELECT action_id FROM action_operation");
@@ -8383,6 +8628,40 @@ test "canonical report and Action read failures fence later commands" {
     try std.testing.expectError(error.CorruptStore, action_store.actionCallId("direct/action-corrupt", action_id));
     try std.testing.expect(action_store.isFenced());
     try std.testing.expectError(error.StoreFenced, action_store.actionArguments("direct/action-corrupt", action_id));
+
+    // Existing public content is not necessarily a valid accepted descriptor.
+    // A changed name must fence just like changed arguments, before dispatch.
+    for ([_][:0]const u8{
+        "UPDATE model_tool_call SET arguments_content_id=name_content_id",
+        "UPDATE model_tool_call SET name_content_id=call_id_content_id",
+        "UPDATE model_tool_call SET arguments_content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0",
+    }) |damage| {
+        for ([_]enum { report, arguments, execution }{ .report, .arguments, .execution }) |route| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "descriptor-config", "direct/descriptor-corrupt");
+            try submitTestMessage(&storage, &tmp, "descriptor-input", "descriptor-message", "direct/descriptor-corrupt", "propose");
+            const source = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, source, "descriptor-metadata");
+            try exec(storage.database, damage);
+            const result: anyerror!void = switch (route) {
+                .report => if (testingSessionReport(&storage, &tmp, "direct/descriptor-corrupt", 1024 * 1024)) |bytes| blk: {
+                    std.testing.allocator.free(bytes);
+                    break :blk {};
+                } else |err| err,
+                .arguments => if (storage.actionArguments("direct/descriptor-corrupt", try queryU64(storage.database, "SELECT min(action_id) FROM action_operation"))) |_| {} else |err| err,
+                .execution => blk: {
+                    const action = (try storage.admitNextActionAttempt(300_000, .{})).?;
+                    break :blk if (storage.readBashExecutionInput(action.permit.binding)) |_| {} else |err| err;
+                },
+            };
+            try std.testing.expectError(error.CorruptStore, result);
+            try std.testing.expect(storage.isFenced());
+            try std.testing.expectError(error.StoreFenced, storage.admitNextActionAttempt(300_000, .{}));
+        }
+    }
 }
 
 test "Core classifies trustworthy calls atomically without Action-shaped rejections" {
@@ -8396,13 +8675,13 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     try submitTestMessage(&storage, &tmp, "mixed-message", "mixed-message", "direct/mixed-calls", "classify");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
-        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"one\",\"timeout_ms\":null}" },
+        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run first command\\\",\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run first command\",\"cmd\":\"one\",\"timeout_ms\":null}" },
         .{ .item_id = "item-2", .name = "other", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{}", .decoded_arguments = "{}" },
         .{ .item_id = "item-3", .name = "bash", .encoded_call_id = "call-3", .decoded_call_id = "call-3", .encoded_arguments = "{", .decoded_arguments = "{" },
         .{ .item_id = "item-4", .name = "bash", .encoded_call_id = "call-4", .decoded_call_id = "call-4", .encoded_arguments = "{\\\"command\\\":\\\"wrong\\\"}", .decoded_arguments = "{\"command\":\"wrong\"}" },
         .{ .item_id = "item-5", .name = "edit", .encoded_call_id = "call-5", .decoded_call_id = "call-5", .encoded_arguments = "{}", .decoded_arguments = "{}" },
         .{ .item_id = "item-6", .name = "x" ** 300, .encoded_call_id = "call-6", .decoded_call_id = "call-6", .encoded_arguments = "{}", .decoded_arguments = "{}" },
-        .{ .item_id = "item-7", .name = "bash", .encoded_call_id = "call-7", .decoded_call_id = "call-7", .encoded_arguments = "{\\\"cmd\\\":\\\"seven\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"seven\",\"timeout_ms\":null}" },
+        .{ .item_id = "item-7", .name = "bash", .encoded_call_id = "call-7", .decoded_call_id = "call-7", .encoded_arguments = "{\\\"description\\\":\\\"Run seventh command\\\",\\\"cmd\\\":\\\"seven\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run seventh command\",\"cmd\":\"seven\",\"timeout_ms\":null}" },
     };
     try settleCallsForTesting(&storage, &tmp, binding, "mixed-metadata", &calls);
 
@@ -8459,6 +8738,13 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
         }
         var full = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report_bytes, .{});
         defer full.deinit();
+        const rejected_rows = full.value.object.get("rejected_calls").?.object.get("items").?.array.items;
+        for (rejected_rows) |row| {
+            const p = row.object.get("presentation").?.object;
+            try std.testing.expect(p.get("description").? == .null);
+            try std.testing.expect(p.get("publication_position").? == .null);
+            try std.testing.expectEqualStrings(row.object.get("code").?.string, p.get("code").?.string);
+        }
         const full_rejected = full.value.object.get("full").?.object.get("tool_calls").?.array.items[1].object;
         try std.testing.expectEqualStrings("other", full_rejected.get("name").?.object.get("text").?.string);
         try std.testing.expectEqualStrings("{}", full_rejected.get("arguments").?.object.get("text").?.string);
@@ -8529,7 +8815,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
             "AND action_id=CAST((SELECT min(action_id) FROM action_operation) AS TEXT)",
     ));
     try expectContent(&reopened, try reopened.actionCallId("direct/mixed-calls", first_action_id), "call-1");
-    try expectContent(&reopened, try reopened.actionArguments("direct/mixed-calls", first_action_id), "{\"cmd\":\"one\",\"timeout_ms\":null}");
+    try expectContent(&reopened, try reopened.actionArguments("direct/mixed-calls", first_action_id), "{\"description\":\"Run first command\",\"cmd\":\"one\",\"timeout_ms\":null}");
     const recovered_bytes = try testingSessionReport(&reopened, &tmp, "direct/mixed-calls", 1024 * 1024);
     defer std.testing.allocator.free(recovered_bytes);
     const recovered_report = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, recovered_bytes, .{ .ignore_unknown_fields = true });
@@ -8549,10 +8835,10 @@ test "complete call outcomes continue once in call order ahead of pending input"
     try submitTestMessage(&storage, &tmp, "result-first", "result-first", "direct/tool-results", "first");
     const first_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
-        .{ .item_id = "result-item-0", .name = "bash", .encoded_call_id = "result-call-0", .decoded_call_id = "result-call-0", .encoded_arguments = "{\\\"cmd\\\":\\\"zero\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"zero\",\"timeout_ms\":null}" },
+        .{ .item_id = "result-item-0", .name = "bash", .encoded_call_id = "result-call-0", .decoded_call_id = "result-call-0", .encoded_arguments = "{\\\"description\\\":\\\"Run zeroth command\\\",\\\"cmd\\\":\\\"zero\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run zeroth command\",\"cmd\":\"zero\",\"timeout_ms\":null}" },
         .{ .item_id = "result-item-1", .name = "unknown", .encoded_call_id = "result-call-1", .decoded_call_id = "result-call-1", .encoded_arguments = "{}", .decoded_arguments = "{}" },
         .{ .item_id = "result-item-2", .name = "bash", .encoded_call_id = "result-call-2", .decoded_call_id = "result-call-2", .encoded_arguments = "{", .decoded_arguments = "{" },
-        .{ .item_id = "result-item-3", .name = "bash", .encoded_call_id = "result-call-3", .decoded_call_id = "result-call-3", .encoded_arguments = "{\\\"cmd\\\":\\\"three\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"three\",\"timeout_ms\":null}" },
+        .{ .item_id = "result-item-3", .name = "bash", .encoded_call_id = "result-call-3", .decoded_call_id = "result-call-3", .encoded_arguments = "{\\\"description\\\":\\\"Run third command\\\",\\\"cmd\\\":\\\"three\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run third command\",\"cmd\":\"three\",\"timeout_ms\":null}" },
     };
     try settleCallsForTesting(&storage, &tmp, first_binding, "result-metadata", &calls);
     try submitTestMessage(&storage, &tmp, "result-second", "result-second", "direct/tool-results", "second");
@@ -8775,7 +9061,7 @@ test "production turn preserves skipped continuation preference through actual S
     try std.testing.expectEqual(@as(?anyerror, null), context.failure);
     const sender = context.model.?;
     try std.testing.expect(sender.turn_id != peer.turn_id);
-    const bash_calls = [_]TestingCall{.{ .item_id = "bash-item", .name = "bash", .encoded_call_id = "bash-call", .decoded_call_id = "bash-call", .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}" }};
+    const bash_calls = [_]TestingCall{.{ .item_id = "bash-item", .name = "bash", .encoded_call_id = "bash-call", .decoded_call_id = "bash-call", .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}" }};
     try settleCallsForTesting(&storage, &tmp, sender, "sender-result", &bash_calls);
     context.model = null;
     context.preparation_open = false;
@@ -8859,7 +9145,7 @@ test "terminal call-result import and read failures preserve canonical authority
     try configureTestSessionAsk(&import_store, "result-import-config", "direct/result-import", false);
     try submitTestMessage(&import_store, &import_tmp, "result-import-message", "result-import-message", "direct/result-import", "call");
     const import_binding = (try import_store.admitNextModelAttempt(.{})).?.permit.binding;
-    const valid_call = [_]TestingCall{.{ .item_id = "import-item", .name = "bash", .encoded_call_id = "import-call", .decoded_call_id = "import-call", .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}" }};
+    const valid_call = [_]TestingCall{.{ .item_id = "import-item", .name = "bash", .encoded_call_id = "import-call", .decoded_call_id = "import-call", .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}" }};
     try settleCallsForTesting(&import_store, &import_tmp, import_binding, "result-import-metadata", &valid_call);
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = try queryU64(import_store.database, "SELECT action_id FROM action_operation") };
     try deny.key.set("result-import-deny");
@@ -8916,8 +9202,8 @@ test "runnable discovery fences structurally incomplete current tool calls" {
             .name = "bash",
             .encoded_call_id = "discovery-call",
             .decoded_call_id = "discovery-call",
-            .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
-            .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+            .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
         }};
         try settleCallsForTesting(&storage, &tmp, source, metadata[index], &calls);
         try exec(storage.database, "PRAGMA foreign_keys=OFF");
@@ -8962,8 +9248,8 @@ test "missing canonical call outcome rows fence history and inspection" {
             .name = "bash",
             .encoded_call_id = "missing-call",
             .decoded_call_id = "missing-call",
-            .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
-            .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+            .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
         }};
         try settleCallsForTesting(
             &storage,
@@ -9363,8 +9649,8 @@ test "call classification uses the proposing Operation frozen catalog" {
         .name = "bash",
         .encoded_call_id = "frozen-call",
         .decoded_call_id = "frozen-call",
-        .encoded_arguments = "{\\\"cmd\\\":\\\"echo frozen\\\",\\\"timeout_ms\\\":null}",
-        .decoded_arguments = "{\"cmd\":\"echo frozen\",\"timeout_ms\":null}",
+        .encoded_arguments = "{\\\"description\\\":\\\"Print frozen marker\\\",\\\"cmd\\\":\\\"echo frozen\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"description\":\"Print frozen marker\",\"cmd\":\"echo frozen\",\"timeout_ms\":null}",
     }};
     try settleCallsForTesting(&storage, &tmp, binding, "frozen-call-metadata", &calls);
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation"));
@@ -9381,8 +9667,8 @@ test "duplicate trustworthy call identity rolls back every imported consequence"
     try submitTestMessage(&storage, &tmp, "duplicate-call-message", "duplicate-call-message", "direct/duplicate-call", "duplicate");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
-        .{ .item_id = "duplicate-item-1", .name = "bash", .encoded_call_id = "same-call", .decoded_call_id = "same-call", .encoded_arguments = "{\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"one\",\"timeout_ms\":null}" },
-        .{ .item_id = "duplicate-item-2", .name = "bash", .encoded_call_id = "same-call", .decoded_call_id = "same-call", .encoded_arguments = "{\\\"cmd\\\":\\\"two\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"cmd\":\"two\",\"timeout_ms\":null}" },
+        .{ .item_id = "duplicate-item-1", .name = "bash", .encoded_call_id = "same-call", .decoded_call_id = "same-call", .encoded_arguments = "{\\\"description\\\":\\\"Run first command\\\",\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run first command\",\"cmd\":\"one\",\"timeout_ms\":null}" },
+        .{ .item_id = "duplicate-item-2", .name = "bash", .encoded_call_id = "same-call", .decoded_call_id = "same-call", .encoded_arguments = "{\\\"description\\\":\\\"Run second command\\\",\\\"cmd\\\":\\\"two\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run second command\",\"cmd\":\"two\",\"timeout_ms\":null}" },
     };
     try std.testing.expectError(
         error.InvalidProviderEnvelope,
@@ -9415,8 +9701,8 @@ test "valid and rejected call populations grow independently" {
             .name = "bash",
             .encoded_call_id = valid_call,
             .decoded_call_id = valid_call,
-            .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
-            .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+            .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+            .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
         };
         const rejected_item = try std.fmt.bufPrint(&rejected_item_storage[index], "rejected-item-{d}", .{index});
         const rejected_call = try std.fmt.bufPrint(&rejected_call_storage[index], "rejected-call-{d}", .{index});
@@ -9692,8 +9978,8 @@ test "controls wait behind an active model settlement transaction" {
         .name = "bash",
         .encoded_call_id = "transaction-race-call",
         .decoded_call_id = "transaction-race-call",
-        .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
-        .decoded_arguments = "{\"cmd\":\"true\",\"timeout_ms\":null}",
+        .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
     }};
 
     const SettlementCheckpoint = enum(u8) { waiting, transaction_active, worker_finished };
@@ -9908,7 +10194,7 @@ test "controls wait behind an active model settlement transaction" {
     try expectContent(
         &storage,
         try storage.actionArguments("direct/transaction-race", action_id),
-        "{\"cmd\":\"true\",\"timeout_ms\":null}",
+        "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
     );
 }
 
@@ -11829,7 +12115,7 @@ test "public foreign Turn page fences" {
     try testingOrdinaryPublicCorruption(.page, true);
 }
 
-fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { private, missing, sibling_ordinal, sibling_item_id }) !void {
+fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { private, missing, sibling_ordinal, sibling_item_id, sibling_call_id, sibling_arguments }, target_sibling: bool) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
@@ -11839,28 +12125,32 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
         .{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
-        .{ .item_id = "sibling", .name = "unknown", .encoded_call_id = "sibling-call", .decoded_call_id = "sibling-call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        .{ .item_id = "sibling", .name = "other", .encoded_call_id = "sibling-call", .decoded_call_id = "sibling-call", .encoded_arguments = "[]", .decoded_arguments = "[]" },
     };
     try settleCallsForTesting(&storage, &tmp, binding, "tool-output", &calls);
+    // Damaging the first rejection must leave the requested sibling healthy;
+    // identical rejection bytes would deduplicate into one content identity.
+    try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call"));
     var request = protocol.ConversationPage{};
     try request.session.set("direct/corrupt-tool");
     const valid = try storage.publicConversationPage(request);
     try std.testing.expectEqual(@as(usize, 3), valid.count);
-    const sibling_damage = damage == .sibling_ordinal or damage == .sibling_item_id;
-    const item = valid.items[if (sibling_damage) 0 else 1];
-    try std.testing.expect(item.kind == .tool_result and item.ordinal == (if (sibling_damage) @as(u64, 2) else 1));
+    const item = valid.items[if (target_sibling) 0 else 1];
+    try std.testing.expect(item.kind == .tool_result and item.ordinal == (if (target_sibling) @as(u64, 2) else 1));
     {
         var reader = try storage.openPublicConversationContent(.{ .session = request.session, .position = item.position, .ordinal = item.ordinal });
         defer reader.close();
         var bytes: [64]u8 = undefined;
         const count = try reader.read(0, &bytes);
-        try std.testing.expectEqualStrings("Unknown tool: unknown.", bytes[0..count]);
+        try std.testing.expectEqualStrings(if (target_sibling) "Unknown tool: other." else "Unknown tool: unknown.", bytes[0..count]);
     }
     // Keep counts, acceptance positions and results intact for sibling damage:
     // reading the healthy highest ordinal must validate the entire group.
     switch (damage) {
         .sibling_ordinal => try exec(storage.database, "UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE call_ordinal=0"),
         .sibling_item_id => try exec(storage.database, "UPDATE model_tool_call SET item_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0"),
+        .sibling_call_id => try exec(storage.database, "UPDATE model_tool_call SET call_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0"),
+        .sibling_arguments => try exec(storage.database, "UPDATE model_tool_call SET arguments_content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0"),
         .private => try exec(storage.database, "UPDATE content SET private=1 WHERE content_id=(SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=0)"),
         .missing => {
             try exec(storage.database, "PRAGMA foreign_keys=OFF");
@@ -11889,27 +12179,88 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
 }
 
 test "public private tool bytes fence" {
-    try testingToolPublicCorruption(.content, .private);
+    try testingToolPublicCorruption(.content, .private, false);
 }
 
 test "public private tool page fences" {
-    try testingToolPublicCorruption(.page, .private);
+    try testingToolPublicCorruption(.page, .private, false);
 }
 
 test "public private tool cursor fences" {
-    try testingToolPublicCorruption(.cursor, .private);
+    try testingToolPublicCorruption(.cursor, .private, false);
 }
 
 test "public completed tool group with missing exposed content fences" {
-    try testingToolPublicCorruption(.page, .missing);
-    try testingToolPublicCorruption(.content, .missing);
-    try testingToolPublicCorruption(.cursor, .missing);
+    try testingToolPublicCorruption(.page, .missing, false);
+    try testingToolPublicCorruption(.content, .missing, false);
+    try testingToolPublicCorruption(.cursor, .missing, false);
 }
 
 test "public completed tool group with corrupt sibling provenance fences" {
     for ([_]TestingPublicReadRoute{ .page, .cursor, .content }) |route| {
-        try testingToolPublicCorruption(route, .sibling_ordinal);
-        try testingToolPublicCorruption(route, .sibling_item_id);
+        try testingToolPublicCorruption(route, .sibling_ordinal, true);
+        try testingToolPublicCorruption(route, .sibling_item_id, true);
+        try testingToolPublicCorruption(route, .sibling_call_id, true);
+        try testingToolPublicCorruption(route, .sibling_arguments, true);
+        try testingToolPublicCorruption(route, .private, true);
+        try testingToolPublicCorruption(route, .missing, true);
+    }
+}
+
+test "public completed Action sibling corruption fences first Conversation read" {
+    const faults = [_][:0]const u8{
+        "UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE call_ordinal=0",
+        "UPDATE model_tool_call SET item_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0",
+        "UPDATE model_tool_call SET call_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0",
+        "UPDATE model_tool_call SET arguments_content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0",
+        "UPDATE content SET private=1 WHERE content_id=(SELECT resolution_content_id FROM action_operation WHERE call_ordinal=0)",
+        "DELETE FROM content WHERE content_id=(SELECT resolution_content_id FROM action_operation WHERE call_ordinal=0)",
+    };
+    for (faults) |fault| {
+        for ([_]TestingPublicReadRoute{ .page, .cursor, .content }) |route| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSessionAsk(&storage, "config", "direct/actions", false);
+            try submitTestMessage(&storage, &tmp, "input", "message", "direct/actions", "two tools");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, binding, "output");
+            for ([_][]const u8{ "allow-first", "allow-second" }) |key| {
+                const action_id = try queryU64(storage.database, "SELECT min(action_id) FROM action_operation WHERE resolution_code IS NULL");
+                var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
+                try allow.key.set(key);
+                try allow.session.set("direct/actions");
+                try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+                const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+                _ = try storage.settleActionAttempt(action_binding, .succeeded, key, .{});
+            }
+            // Obtain only the immutable identity, not a traversal on another
+            // public route that could accidentally supply validation authority.
+            const position = try queryU64(storage.database, "SELECT max(acceptance_position) FROM action_operation");
+            try exec(storage.database, "PRAGMA foreign_keys=OFF");
+            try exec(storage.database, fault);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+            try exec(storage.database, "PRAGMA foreign_keys=ON");
+            var request: protocol.ConversationPage = .{ .end = position };
+            try request.session.set("direct/actions");
+            if (route == .cursor) {
+                request.before_position = position;
+                request.before_ordinal = 2;
+            }
+            const result: anyerror!void = if (route == .content)
+                if (storage.openPublicConversationContent(.{ .session = request.session, .position = position, .ordinal = 2 })) |value| blk: {
+                    var reader = value;
+                    reader.close();
+                    break :blk {};
+                } else |err| err
+            else if (storage.publicConversationPage(request)) |_| {} else |err| err;
+            try std.testing.expectError(error.CorruptStore, result);
+            try std.testing.expect(storage.isFenced());
+            try std.testing.expectError(error.StoreFenced, storage.publicConversationPage(request));
+            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+        }
     }
 }
 
@@ -13463,6 +13814,58 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(outcomes, 1));
 }
 
+test "public proposal structural corruption fences independently on every route" {
+    const faults = [_][:0]const u8{
+        "UPDATE content SET private=1,payload=zeroblob(byte_length) WHERE content_id=(SELECT arguments_content_id FROM model_tool_call WHERE call_ordinal=0)",
+        "DELETE FROM model_tool_call WHERE call_ordinal=0",
+        "UPDATE turn SET session_ref='foreign'",
+        "UPDATE model_tool_call SET item_id_content_id=(SELECT item_id_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0",
+    };
+    for (faults) |fault| {
+        for ([_]TestingPublicReadRoute{ .page, .cursor, .content }) |route| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "config", "direct/proposal");
+            try submitTestMessage(&storage, &tmp, "input", "message", "direct/proposal", "run tools");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{
+                .{ .item_id = "original", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                .{ .item_id = "replacement", .name = "unknown", .encoded_call_id = "sibling", .decoded_call_id = "sibling", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            };
+            try settleCallsForTesting(&storage, &tmp, binding, "output", &calls);
+            var request: protocol.ProposalPage = .{};
+            try request.session.set("direct/proposal");
+            const healthy = try storage.proposalPage(request);
+            try std.testing.expectEqual(@as(usize, 2), healthy.count);
+            const item = healthy.items[0];
+            try std.testing.expectEqual(binding.operation_id, item.operation);
+            try std.testing.expectEqual(binding.turn_id, item.turn);
+            try std.testing.expectEqual(@as(u64, 0), item.call_ordinal);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("original"), &item.fields[0].digest);
+            try exec(storage.database, "PRAGMA foreign_keys=OFF");
+            try exec(storage.database, fault);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+            try exec(storage.database, "PRAGMA foreign_keys=ON");
+            request.end = healthy.end;
+            if (route == .cursor) request.after = item.position;
+            const result: anyerror!void = if (route == .content)
+                if (storage.openProposalField(.{ .session = request.session, .position = item.position, .field = .item_id })) |value| blk: {
+                    var reader = value;
+                    reader.close();
+                    break :blk {};
+                } else |err| err
+            else if (storage.proposalPage(request)) |_| {} else |err| err;
+            try std.testing.expectError(error.CorruptStore, result);
+            try std.testing.expect(storage.isFenced());
+            try std.testing.expectError(error.StoreFenced, storage.proposalPage(request));
+            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+        }
+    }
+}
+
 test "proposal callable cursor domain preserves healthy Store" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -13485,6 +13888,47 @@ test "proposal callable cursor domain preserves healthy Store" {
     try std.testing.expectEqual(@as(usize, 0), page.count);
     try std.testing.expect(!page.more and !storage.isFenced());
     try std.testing.expectError(error.ContentNotFound, storage.openProposalField(.{ .position = std.math.maxInt(u64) }));
+}
+
+test "public activity admission corruption fences page and content independently" {
+    const faults = [_][:0]const u8{
+        "UPDATE message_admission SET admission_position=NULL WHERE command_key='message'",
+        "UPDATE core_command SET target='direct/foreign' WHERE command_key='message'",
+        "DELETE FROM conversation_entry WHERE source_admission_id=(SELECT admission_id FROM message_admission WHERE command_key='message')",
+    };
+    for (faults) |fault| {
+        for ([_]bool{ false, true }) |content_route| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "config", "direct/activity");
+            try submitTestMessage(&storage, &tmp, "input", "message", "direct/activity", "input bytes");
+            var request: protocol.ActivityPage = .{};
+            try request.session.set("direct/activity");
+            const queued = try storage.activityPage(request);
+            try std.testing.expectEqual(@as(usize, 1), queued.count);
+            const item = queued.items[0];
+            try std.testing.expectEqualStrings("message", item.value.admission.key.slice());
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("input bytes"), &item.value.admission.content.digest);
+            _ = (try storage.admitNextModelAttempt(.{})).?;
+            try exec(storage.database, fault);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+            request.position = item.position - 1;
+            const result: anyerror!void = if (content_route)
+                if (storage.openActivityContent(.{ .session = request.session, .position = item.position })) |value| blk: {
+                    var reader = value;
+                    reader.close();
+                    break :blk {};
+                } else |err| err
+            else if (storage.activityPage(request)) |_| {} else |err| err;
+            try std.testing.expectError(error.CorruptStore, result);
+            try std.testing.expect(storage.isFenced());
+            try std.testing.expectError(error.StoreFenced, storage.activityPage(request));
+            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+        }
+    }
 }
 
 test "activity fixed admission prefix survives later application and stop" {
@@ -13513,4 +13957,199 @@ test "activity fixed admission prefix survives later application and stop" {
     try std.testing.expect(frozen.items[0].value.admission.state == .queued and frozen.items[0].value.admission.turn == null);
     request.end = empty.end;
     try std.testing.expectEqual(@as(usize, 0), (try storage.activityPage(request)).count);
+}
+
+test "persisted tool label corruption fences every publication route" {
+    const invalid = [_]struct { sql: []const u8, failure: anyerror = error.CorruptStore }{
+        .{ .sql = "' '" },
+        .{ .sql = "'Read' || char(10) || 'files'" },
+        .{ .sql = "char(160)" },
+        .{ .sql = "'Read' || char(8232) || 'files'" },
+        // Bounded text rejects malformed UTF-8 before semantic validation.
+        .{ .sql = "CAST(X'80' AS TEXT)", .failure = error.InvalidUtf8 },
+    };
+    for (invalid) |description| {
+        for ([_]enum { current, full, live_activity, settled_activity, conversation }{ .current, .full, .live_activity, .settled_activity, .conversation }) |route| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSessionAsk(&storage, "label-config", "direct/label", true);
+            try submitTestMessage(&storage, &tmp, "label-input", "label-input", "direct/label", "propose");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, binding, "label-calls");
+            var request: protocol.ActivityPage = .{};
+            try request.session.set("direct/label");
+            request.direction = .backward;
+            const healthy = try storage.activityPage(request);
+            try std.testing.expectEqual(@as(u64, 2), healthy.call_activity.total);
+            try std.testing.expectEqualStrings("Run first command", healthy.call_activity.entries[0].presentation.description.?.slice());
+            if (route == .settled_activity or route == .conversation) {
+                var stop = try completeSessionStop("label-stop", "direct/label");
+                try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                try std.testing.expectEqual(@as(usize, 3), (try storage.publicConversationPage(.{ .session = request.session })).count);
+            }
+            var sql: [256]u8 = undefined;
+            try exec(storage.database, try std.fmt.bufPrintZ(&sql, "UPDATE model_tool_call SET description={s} WHERE call_ordinal=0", .{description.sql}));
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+            const result: anyerror!void = switch (route) {
+                .current, .full => if (testingSessionReportWithProfile(&storage, &tmp, "direct/label", 1024 * 1024, if (route == .full) .full else .current)) |bytes| blk: {
+                    std.testing.allocator.free(bytes);
+                    break :blk {};
+                } else |err| err,
+                .live_activity, .settled_activity => if (storage.activityPage(request)) |_| {} else |err| err,
+                .conversation => if (storage.publicConversationPage(.{ .session = request.session })) |_| {} else |err| err,
+            };
+            try std.testing.expectError(description.failure, result);
+            try std.testing.expect(storage.isFenced());
+            try std.testing.expectError(error.StoreFenced, storage.activityPage(request));
+            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+        }
+    }
+}
+
+test "tool label observation trusts admission but exact inspection authenticates payload" {
+    for ([_]enum { arguments, execution, proposal, full }{ .arguments, .execution, .proposal, .full }) |route| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try configureTestSession(&storage, "label-config", "direct/label");
+        try submitTestMessage(&storage, &tmp, "label-input", "label-input", "direct/label", "propose");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try settleTwoActionsForTesting(&storage, &tmp, binding, "label-calls");
+        var request: protocol.ActivityPage = .{};
+        try request.session.set("direct/label");
+        const before = try storage.activityPage(request);
+        const action = try queryU64(storage.database, "SELECT min(action_id) FROM action_operation");
+        // Damage only undisplayed private bytes, not the accepted references or
+        // their metadata. Lightweight observations no longer read those bytes.
+        try exec(storage.database, "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (SELECT content_id FROM model_output_item WHERE item_kind=3)");
+        const report = try testingSessionReportWithProfile(&storage, &tmp, "direct/label", 1024 * 1024, .current);
+        defer std.testing.allocator.free(report);
+        try std.testing.expect(std.mem.indexOf(u8, report, "Run first command") != null);
+        const after = try storage.activityPage(request);
+        try std.testing.expectEqual(before.call_activity.total, after.call_activity.total);
+        for (before.call_activity.entries[0..before.call_activity.count], after.call_activity.entries[0..after.call_activity.count]) |original, observed| {
+            try std.testing.expectEqualStrings(original.presentation.description.?.slice(), observed.presentation.description.?.slice());
+            try std.testing.expectEqual(original.presentation.code, observed.presentation.code);
+        }
+        try std.testing.expect(!storage.isFenced());
+        const result: anyerror!void = switch (route) {
+            .arguments => if (storage.actionArguments("direct/label", action)) |_| {} else |err| err,
+            .execution => blk: {
+                const admitted = (try storage.admitNextActionAttempt(300_000, .{})).?;
+                break :blk if (storage.readBashExecutionInput(admitted.permit.binding)) |_| {} else |err| err;
+            },
+            .proposal => blk: {
+                const position = try queryU64(storage.database, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3");
+                if (storage.openProposalField(.{ .session = request.session, .position = position, .field = .arguments })) |value| {
+                    var reader = value;
+                    reader.close();
+                    break :blk {};
+                } else |err| break :blk err;
+            },
+            .full => if (testingSessionReportWithProfile(&storage, &tmp, "direct/label", 1024 * 1024, .full)) |bytes| blk: {
+                std.testing.allocator.free(bytes);
+                break :blk {};
+            } else |err| err,
+        };
+        try std.testing.expectError(error.CorruptStore, result);
+        try std.testing.expect(storage.isFenced());
+    }
+}
+
+test "completed tool labels trust admission while model replay authenticates payload" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "replay-config", "direct/replay-label");
+    try submitTestMessage(&storage, &tmp, "replay-input", "replay-input", "direct/replay-label", "propose");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleTwoActionsForTesting(&storage, &tmp, binding, "replay-calls");
+    var stop = try completeSessionStop("replay-stop", "direct/replay-label");
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    var request: protocol.ConversationPage = .{};
+    try request.session.set("direct/replay-label");
+    const before = try storage.publicConversationPage(request);
+    try exec(storage.database, "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (SELECT content_id FROM model_output_item WHERE item_kind=3)");
+    const after = try storage.publicConversationPage(request);
+    try std.testing.expectEqual(before.count, after.count);
+    var results: usize = 0;
+    for (before.items[0..before.count], after.items[0..after.count]) |original, observed| {
+        if (original.presentation) |presentation| {
+            results += 1;
+            try std.testing.expectEqualStrings(presentation.description.?.slice(), observed.presentation.?.description.?.slice());
+            try std.testing.expectEqual(presentation.code, observed.presentation.?.code);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), results);
+    try submitTestMessage(&storage, &tmp, "replay-next", "replay-next", "direct/replay-label", "continue");
+    const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var view = try storage.openHistoricalView(next);
+    defer view.close();
+    try std.testing.expectError(error.CorruptStore, view.nextEntry(0));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "live tool activity survives completed Turns and split result pages" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "live-config", "direct/live");
+    try submitTestMessage(&storage, &tmp, "live-input", "input", "direct/live", "propose");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var identities: [20][24]u8 = undefined;
+    var calls: [20]TestingCall = undefined;
+    for (&calls, &identities, 0..) |*call, *identity, index| {
+        const id = try std.fmt.bufPrint(identity, "live-{d}", .{index});
+        call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "", .decoded_arguments = "" };
+    }
+    try settleCallsForTesting(&storage, &tmp, binding, "live-calls", &calls);
+    var stop = try completeSessionStop("live-stop", "direct/live");
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    var request: protocol.ActivityPage = .{};
+    try request.session.set("direct/live");
+    const page = try storage.activityPage(request);
+    try std.testing.expect(page.more);
+    for (page.items[0..page.count]) |item| try std.testing.expect(item.value != .tool_result);
+    try std.testing.expectEqual(@as(u64, 20), page.call_activity.total);
+    try std.testing.expectEqual(@as(usize, 3), page.call_activity.count);
+    for (page.call_activity.entries, 0..) |entry, index| {
+        try std.testing.expectEqual(binding.operation_id, entry.operation);
+        try std.testing.expectEqual(index, entry.ordinal);
+        try std.testing.expect(entry.presentation.code == .unknown_tool);
+    }
+    const last = page.items[page.count - 1];
+    request.end = page.end;
+    request.position = last.position;
+    request.ordinal = last.ordinal;
+    const split = try storage.activityPage(request);
+    try std.testing.expect(split.more);
+    try std.testing.expectEqual(@as(u64, 10), split.call_activity.total);
+    try std.testing.expectEqual(@as(u64, 10), split.call_activity.entries[0].ordinal);
+    const split_last = split.items[split.count - 1];
+    request.position = split_last.position;
+    request.ordinal = split_last.ordinal;
+    const finished = try storage.activityPage(request);
+    try std.testing.expect(!finished.more);
+    try std.testing.expectEqual(@as(u64, 0), finished.call_activity.total);
+    request.position = 0;
+    request.ordinal = null;
+    request.direction = .backward;
+    try std.testing.expectEqual(@as(u64, 0), (try storage.activityPage(request)).call_activity.total);
+
+    // Fixed history boundaries cannot suppress newer live calls.
+    try submitTestMessage(&storage, &tmp, "live-new", "new", "direct/live", "propose again");
+    const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleTwoActionsForTesting(&storage, &tmp, next, "live-new-calls");
+    request.direction = .forward;
+    request.position = finished.end;
+    const frozen = try storage.activityPage(request);
+    try std.testing.expectEqual(@as(usize, 0), frozen.count);
+    try std.testing.expectEqual(@as(u64, 2), frozen.call_activity.total);
+    try std.testing.expectEqual(next.operation_id, frozen.call_activity.entries[0].operation);
 }

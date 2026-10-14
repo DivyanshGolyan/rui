@@ -14,14 +14,15 @@ from unittest.mock import Mock, patch
 
 
 @contextmanager
-def child_pty(source):
+def child_pty(source, *, close_slave=False):
     master, slave = pty.openpty()
     caller = None
     try:
         caller = subprocess.Popen([sys.executable, "-c", source],
             stdin=subprocess.DEVNULL, stdout=slave, stderr=slave)
-        os.close(slave)
-        slave = None
+        if close_slave:
+            os.close(slave)
+            slave = None
         yield caller, master
     finally:
         try:
@@ -43,7 +44,7 @@ def check_exit_reader(wait_for_exit):
     # Exercise both platform EOF forms independently of this machine and
     # ensure unrelated read failures do not become successful EOF/reap.
     for effect in (b"", OSError(errno.EIO, "PTY EOF"), OSError(errno.EBADF, "bad descriptor")):
-        caller = SimpleNamespace(args=["adapter"], wait=Mock(return_value=17))
+        caller = SimpleNamespace(args=["adapter"], poll=Mock(return_value=None), wait=Mock(return_value=17))
         output = bytearray(b"entry:")
         with patch.object(owner.select, "select", return_value=([123], [], [])), \
                 patch.object(owner.os, "read", side_effect=[effect]):
@@ -79,7 +80,7 @@ raise SystemExit(17)
 
     # EOF is not child exit. Observe the actual monotonic operand to require
     # exactly the remaining allowance, not a fresh five seconds at reap.
-    with child_pty("import os,time; os.close(1); os.close(2); time.sleep(30)") as (caller, master):
+    with child_pty("import os,time; os.close(1); os.close(2); time.sleep(30)", close_slave=True) as (caller, master):
         deadline = time.monotonic() + 0.2
         original_wait = caller.wait
         original_clock = time.monotonic
@@ -106,6 +107,21 @@ raise SystemExit(17)
             else:
                 raise AssertionError("EOF accepted without caller exit")
         assert waited, "reader did not exercise EOF-to-reap boundary"
+
+    # A retained slave is quiet rather than EOF. Silence still cannot count as
+    # child exit, while post-reap collection must preserve all unread bytes.
+    with child_pty("import time; time.sleep(30)") as (caller, master):
+        try:
+            wait_for_exit(caller, master, bytearray(), time.monotonic() + 0.2)
+        except subprocess.TimeoutExpired:
+            assert caller.poll() is None, "quiet timeout did not hold a live child"
+        else:
+            raise AssertionError("quiet live terminal accepted as exited")
+    with child_pty("import os; os.write(1,b'head:asymmetric-tail'); raise SystemExit(17)") as (caller, master):
+        assert caller.wait(timeout=5) == 17
+        output = bytearray(b"entry:")
+        assert wait_for_exit(caller, master, output, time.monotonic() + 5) == 17
+        assert output == b"entry:head:asymmetric-tail", "delayed collector lost unread exit output"
 
     with child_pty("import os; os.write(1,b'z')") as (caller, master):
         output = bytearray(b"x" * (1024 * 1024 - 2))

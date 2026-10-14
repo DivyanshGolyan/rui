@@ -14,7 +14,7 @@ import threading
 import time
 
 import bash_integration as bash
-import dispatch_integration as fixture
+import model_fixture as fixture
 from host_process import HostDiagnostics, start_ready_process
 
 
@@ -58,7 +58,7 @@ def proposal_with_private_reasoning(command):
                  "encrypted_content": "synthetic-private-reasoning"}
     call = {"type": "function_call", "id": "managed-call-item", "status": "completed",
             "name": "bash", "call_id": "managed-call",
-            "arguments": json.dumps({"cmd": command, "timeout_ms": None}, separators=(",", ":"))}
+            "arguments": json.dumps({"cmd": command, "timeout_ms": None, "description": "Run managed provider command"}, separators=(",", ":"))}
     return fixture.encode_sse([
         {"type": "response.output_item.added", "output_index": 0,
          "item": {"type": "reasoning", "id": reasoning["id"]}},

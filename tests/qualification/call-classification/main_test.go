@@ -23,11 +23,15 @@ func TestScenarioCallsVaryClassificationAndPayloadIndependently(t *testing.T) {
 			t.Fatalf("valid call %d classified by fixture as %q", index, calls[index].Name)
 		}
 		var descriptor struct {
-			Cmd       string `json:"cmd"`
-			TimeoutMS *int   `json:"timeout_ms"`
+			Description string `json:"description"`
+			Cmd         string `json:"cmd"`
+			TimeoutMS   *int   `json:"timeout_ms"`
 		}
 		if err := json.Unmarshal([]byte(calls[index].Arguments), &descriptor); err != nil {
 			t.Fatal(err)
+		}
+		if descriptor.Description != "Create the forbidden-effect classification sentinel" {
+			t.Fatalf("valid descriptor has no bounded workload description: %s", calls[index].Arguments)
 		}
 		if !bytes.Contains([]byte(calls[index].Arguments), []byte(`"timeout_ms":null`)) || descriptor.TimeoutMS != nil {
 			t.Fatalf("valid descriptor omitted required nullable timeout: %s", calls[index].Arguments)
@@ -41,6 +45,14 @@ func TestScenarioCallsVaryClassificationAndPayloadIndependently(t *testing.T) {
 	}
 	if calls[2].Name != "unknown" || calls[3].Name != "bash" || calls[3].Arguments != "{" || calls[4].Name != "unknown" {
 		t.Fatalf("rejected population does not alternate unknown/malformed: %+v", calls[2:])
+	}
+	large := scenarioCalls(scenario{Name: "large", Valid: 1, ArgumentBytes: 100000}, "/must/not/run")
+	var descriptor map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(large[0].Arguments), &descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if len(descriptor) != 3 || string(descriptor["description"]) != `"Create the forbidden-effect classification sentinel"` {
+		t.Fatalf("payload scaling changed the descriptor shape or label: fields=%d description=%s", len(descriptor), descriptor["description"])
 	}
 }
 

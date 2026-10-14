@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 
 from canonical_failure_integration import ReplyProxy
-import dispatch_integration as fixture
+import model_fixture as fixture
 
 
 def main():

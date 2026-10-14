@@ -37,10 +37,16 @@ STDERR_TAIL_LIMIT = 16 * 1024
 # No cleanup or polling history; public drainage remains its separate oracle.
 # recovery: two Bash Attempts with handoff + three cuts, two model proposal handoffs.
 # managed: three preparations/transfers, at most three injected delayed handoffs.
+# bash_cleanup: reuse has four model attempts and two Bash owners, three
+# endpoints each. Inspections: three 8s polls, one 15s drain, one 5s
+# emergency drain (25ms intervals, including final probes), six fixed reads.
+# bash_pipes: one held leader observation, one permission and one Session stop.
 OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2 + 2,
                       "stop": 321 + 20 + 5 + 12 + 3 * 2 + 1 + 1,
                       "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 3 + 1,
-                      "capture": 3, "recovery": 2 * 4 + 2, "managed": 9}
+                      "capture": 3, "recovery": 2 * 4 + 2, "managed": 9,
+                      "bash_cleanup": 6 * 3 + 3 * 321 + 601 + 201 + 6,
+                      "bash_pipes": 1 + 2}
 OBSERVATION_STATE_BYTES = 5 * 8  # version, pid, run, reserved count/loss, active writers.
 OBSERVATION_SEALED = 1 << 63
 OBSERVATION_FIELDS = (
@@ -481,6 +487,14 @@ class HostDiagnostics:
             plans = ("managed",)
         elif phase == "prepared_before_handoff":
             plans = ("managed", "control", "recovery")
+        elif phase in ("cleanup_started", "cleanup_completed"):
+            plans = ("control", "stop", "bash_cleanup")
+        elif phase == "cleanup_release_observed":
+            plans = ("bash_cleanup",)
+        elif phase == "inspection_captured":
+            plans = ("control", "bash_cleanup")
+        elif phase in ("bash_leader_observed_with_open_pipes", "control_store_complete"):
+            plans = ("bash_pipes",)
         if plans is not None:
             assert self.observations is not None and self.observations.plan in plans, (
                 "required receipt needs native observation authority", phase)
@@ -573,6 +587,43 @@ class HostStartError(RuntimeError):
         self.pid = pid
 
 
+def cleanup_failure(error):
+    """Bound secondary diagnostics while retaining the failing owner and action."""
+    try:
+        detail = str(error)
+        if len(detail) > 512:
+            marker = " [truncated]"
+            detail = detail[:512 - len(marker)] + marker
+    except BaseException:
+        detail = "<message unavailable>"
+    trace = error.__traceback__
+    while trace is not None and trace.tb_next is not None:
+        trace = trace.tb_next
+    location = (f" at {pathlib.Path(trace.tb_frame.f_code.co_filename).name}:{trace.tb_lineno}"
+                if trace is not None else "")
+    return f"{type(error).__name__}{location}: {detail}"
+
+
+def dispose_all(*disposals):
+    """Run ordered fixture disposals without replacing an active body failure."""
+    incoming_error = sys.exception()
+    errors = []
+    for index, dispose in enumerate(disposals, 1):
+        try:
+            dispose()
+        except BaseException as error:
+            errors.append((index, error))
+    if errors:
+        primary = incoming_error if incoming_error is not None else errors[0][1]
+        for index, error in errors:
+            try:
+                primary.add_note(f"Fixture disposal {index} failed: {cleanup_failure(error)}")
+            except BaseException:
+                pass  # Secondary reporting cannot replace the primary failure.
+        if incoming_error is None:
+            raise primary
+
+
 def stop_process(process, timeout=10, *, seal_observations=True):
     deadline = time.monotonic() + timeout
     errors = []
@@ -609,12 +660,15 @@ def stop_process(process, timeout=10, *, seal_observations=True):
         if errors:
             for error in errors:
                 try:
-                    print(f"Host cleanup failed: {type(error).__name__}", file=sys.stderr)
-                except Exception:
+                    print(f"Host cleanup failed: {cleanup_failure(error)}", file=sys.stderr)
+                except BaseException:
                     pass
             if incoming_error is None:
                 raise errors[0]
-            incoming_error.add_note("Host cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
+            try:
+                incoming_error.add_note("Host cleanup failed: " + ", ".join(cleanup_failure(error) for error in errors))
+            except BaseException:
+                pass  # Secondary reporting cannot replace the primary failure.
     finally:
         if (incoming_error is not None or errors) and observations is not None:
             observations.preserve_failure(snapshot)

@@ -48,6 +48,24 @@ enum watchdog_outcome {
     watchdog_failed,
 };
 
+enum terminal_observation {
+    terminal_poll, terminal_success, terminal_child_failure, terminal_failure,
+};
+
+/* Value-only terminal authority. Callers serialize the observation and commit
+ * under the watchdog mutex; callbacks and process effects stay outside it. */
+static enum watchdog_outcome terminal_decision(enum watchdog_outcome current,
+        enum terminal_observation observation, int64_t now, int64_t deadline,
+        int cancelled) {
+    if (current != watchdog_running) return current;
+    if (observation == terminal_failure) return watchdog_failed;
+    if (now < 0) return watchdog_clock_failed;
+    if (now >= deadline) return watchdog_deadline;
+    if (cancelled) return watchdog_cancelled;
+    if (observation == terminal_child_failure) return watchdog_failed;
+    return observation == terminal_success ? watchdog_stopped : watchdog_running;
+}
+
 struct watchdog {
     pthread_mutex_t mutex;
     pid_t pid;
@@ -55,12 +73,13 @@ struct watchdog {
     int (*cancelled)(void *);
     void *cancel_context;
     enum watchdog_outcome outcome;
+    int signal_failed;
 };
 
 static int fail_evaluation(struct watchdog *watchdog) {
     pthread_mutex_lock(&watchdog->mutex);
-    if (watchdog->outcome == watchdog_running)
-        watchdog->outcome = watchdog_failed;
+    watchdog->outcome = terminal_decision(watchdog->outcome,
+        terminal_failure, 0, watchdog->deadline, 0);
     pthread_mutex_unlock(&watchdog->mutex);
     return 1;
 }
@@ -81,9 +100,8 @@ static void *watch_child(void *context) {
             return NULL;
         }
         int64_t now = milliseconds();
-        if (now < 0) outcome = watchdog_clock_failed;
-        else if (now >= watchdog->deadline) outcome = watchdog_deadline;
-        else if (cancelled) outcome = watchdog_cancelled;
+        outcome = terminal_decision(watchdog->outcome,
+            terminal_poll, now, watchdog->deadline, cancelled);
         watchdog->outcome = outcome;
         pthread_mutex_unlock(&watchdog->mutex);
         if (outcome != watchdog_running) {
@@ -91,7 +109,7 @@ static void *watch_child(void *context) {
              * cannot have been reused while this signal is attempted. */
             if (kill(watchdog->pid, SIGKILL) && errno != ESRCH) {
                 pthread_mutex_lock(&watchdog->mutex);
-                watchdog->outcome = watchdog_failed;
+                watchdog->signal_failed = 1;
                 pthread_mutex_unlock(&watchdog->mutex);
             }
             return NULL;
@@ -295,11 +313,12 @@ int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
             pthread_mutex_lock(&watchdog.mutex);
             if (watchdog.outcome == watchdog_running) {
                 int64_t now = milliseconds();
-                if (now < 0) watchdog.outcome = watchdog_clock_failed;
-                else if (now >= watchdog.deadline) watchdog.outcome = watchdog_deadline;
-                else if (child.si_pid == pid)
-                    watchdog.outcome = child.si_code == CLD_EXITED && child.si_status == 0
-                        ? watchdog_stopped : watchdog_failed;
+                enum terminal_observation observation = terminal_poll;
+                if (child.si_pid == pid)
+                    observation = child.si_code == CLD_EXITED && child.si_status == 0
+                        ? terminal_success : terminal_child_failure;
+                watchdog.outcome = terminal_decision(watchdog.outcome,
+                    observation, now, watchdog.deadline, 0);
             }
             enum watchdog_outcome outcome = watchdog.outcome;
             pthread_mutex_unlock(&watchdog.mutex);
@@ -317,6 +336,7 @@ int rui_evaluate(const char *executable, int source_fd, int prepared_fd,
     if (watchdog_started) {
         pthread_join(watchdog_thread, NULL);
         watchdog_result = watchdog.outcome;
+        if (watchdog.signal_failed) watchdog_result = watchdog_failed;
         pthread_mutex_destroy(&watchdog.mutex);
         if (watchdog_result != watchdog_stopped) failed = 1;
     }

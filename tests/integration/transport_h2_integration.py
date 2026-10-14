@@ -22,7 +22,7 @@ import h2.errors
 import h2.settings
 
 import control_integration as control
-import dispatch_integration as dispatch
+import model_fixture as dispatch
 from host_process import HostDiagnostics, ReleaseGate, wait_for_execution_release as wait_for_drain
 
 
@@ -73,6 +73,8 @@ class H1Endpoint(http.server.ThreadingHTTPServer):
         self.release_first = threading.Event()
         self.requests = []
         self.connections = set()
+        # Responses whose complete Content-Length body has not been sent,
+        # not Python handler lifetimes or server-side socket retirement.
         self.active = 0
         self.maximum_active = 0
 
@@ -92,6 +94,7 @@ class H1Handler(http.server.BaseHTTPRequestHandler):
             self.server.active += 1
             self.server.maximum_active = max(self.server.maximum_active, self.server.active)
             first = len(self.server.requests) == 1
+        retired = False
         try:
             payload, _, _ = dispatch.sse_answer(
                 f"response-{text}", f"reasoning-{text}", f"message-{text}", f"answer-{text}",
@@ -108,17 +111,27 @@ class H1Handler(http.server.BaseHTTPRequestHandler):
             if first and self.server.trickle_first:
                 offset = 0
                 while not self.server.release_first.is_set():
+                    assert offset < len(payload) - 1, "trickle exhausted incomplete response bytes"
                     self.wfile.write(payload[offset:offset + 1])
                     self.wfile.flush()
                     offset += 1
-                    assert self.server.release_first.wait(0.2) or offset < len(payload)
-                self.wfile.write(payload[offset:])
+                    self.server.release_first.wait(0.2)
+                self.wfile.write(payload[offset:-1])
             else:
-                self.wfile.write(payload)
+                self.wfile.write(payload[:-1])
+            # The client can advance queued work as soon as the final byte
+            # arrives. Retire response accounting before another handler can
+            # enter it, independently of this handler's remaining cleanup.
+            with self.server.lock:
+                self.wfile.write(payload[-1:])
+                self.wfile.flush()
+                self.server.active -= 1
+                retired = True
             self.close_connection = True
         finally:
-            with self.server.lock:
-                self.server.active -= 1
+            if not retired:
+                with self.server.lock:
+                    self.server.active -= 1
 
     def log_message(self, *_):
         pass
@@ -574,14 +587,30 @@ def queued_h1(root):
     try:
         host = dispatch.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
                                    active_capacity=capacity)
+        socket_path = host.rui_ready_fields["socket"]
         idle_fds = []
         for round_number in range(2):
             for index in range(capacity):
                 session = f"direct/h1-{index}"
                 if round_number == 0:
-                    dispatch.configure(root, store, f"h1-config-{index}", session, "model-a")
-                dispatch.message(root, store, f"h1-message-{round_number}-{index}", session,
-                                 f"h1-{round_number}-{index}")
+                    configured = closed_host_request(
+                        socket_path, store, "configure", key=f"h1-config-{index}",
+                        session=session, configuration={
+                            "workspace": {"state": "value", "value": str(dispatch.ROOT)},
+                            "provider": {"state": "value", "value": "codex"},
+                            "model": {"state": "value", "value": "model-a"},
+                            "instructions": {"state": "omitted"},
+                            "tools": {"state": "value", "value": ["bash", "edit"]},
+                            "permission_mode": {"state": "value", "value": "ask"},
+                            "output_schema": {"state": "omitted"},
+                        },
+                    )
+                    assert configured["answer"]["status"] == "accepted", configured
+                submitted = closed_host_request(
+                    socket_path, store, "message", key=f"h1-message-{round_number}-{index}",
+                    session=session, text={"state": "value", "value": f"h1-{round_number}-{index}"},
+                )
+                assert submitted["answer"]["status"] == "accepted", submitted
             if round_number == 0:
                 assert endpoint.first_ready.wait(15), "first H1 request never arrived"
                 # An all-eight-ready barrier would strand work behind the one-connection cap.
@@ -600,27 +629,34 @@ def queued_h1(root):
                 held_fds = open_descriptors(host.pid)
                 assert held_cpu <= 1, f"queued H1 Host used {held_cpu} CPU seconds in 3 wall seconds"
                 for index in range(capacity):
-                    pending = dispatch.observe(store, f"h1-message-0-{index}")
+                    pending = closed_host_request(
+                        socket_path, store, "observe_command", key=f"h1-message-0-{index}",
+                    )["observation"]
                     assert (pending.get("processing") or {}).get("attempt") == "1", pending
                     assert pending.get("result") is None, pending
-                inspection = dispatch.command("session", "inspect", "--store", store,
-                                              "--session", "direct/h1-1")["execution"]
+                inspection = closed_host_request(
+                    socket_path, store, "inspect_session", session="direct/h1-1",
+                )["execution"]
                 assert int(inspection["custody_occupied"]) > 0, inspection
                 endpoint.release_first.set()
             result_deadline = time.monotonic() + 40
             for index in range(capacity):
                 key = f"h1-message-{round_number}-{index}"
                 result = dispatch.wait_for(
-                    lambda key=key: dispatch.observe(
-                        store, key, deadline=result_deadline,
-                    ).get("result"),
+                    lambda key=key: closed_host_request(
+                        socket_path, store, "observe_command", key=key, deadline=result_deadline,
+                    )["observation"].get("result"),
                     f"queued H1 result {key}", deadline=result_deadline,
                 )
                 assert result["status"] == "completed", result
-                assert dispatch.read_result(store, key, deadline=result_deadline) == f"answer-h1-{round_number}-{index}".encode()
+                assert closed_host_request(
+                    socket_path, store, "read_result", key=key, deadline=result_deadline,
+                ) == f"answer-h1-{round_number}-{index}".encode()
             wait_for_drain(
-                lambda remaining: dispatch.command("session", "inspect", "--store", store,
-                                                  "--session", "direct/h1-0", timeout=remaining)["execution"],
+                lambda remaining: closed_host_request(
+                    socket_path, store, "inspect_session", session="direct/h1-0",
+                    timeout=remaining, deadline=result_deadline,
+                )["execution"],
                 result_deadline,
             )
             idle_fds.append(open_descriptors(host.pid))

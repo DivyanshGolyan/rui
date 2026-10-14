@@ -95,6 +95,18 @@ contains() {
     esac
 }
 
+require_test() {
+    description=$1
+    shift
+    if test "$@"; then
+        return 0
+    else
+        result=$?
+        printf 'admission assertion failed: %s\n' "$description" >&2
+        return "$result"
+    fi
+}
+
 start_host
 
 # SIGKILL skips capture.abort; revisiting the same record recovers its temporary.
@@ -439,7 +451,7 @@ if unknown_provider=$($rui session configure --store "$store" --record "$records
 fi
 contains "$unknown_provider" '"code":"unsupported_provider"'
 contains "$($rui session inspect --store "$store" --session direct/unknown-provider)" '"session":null'
-test -z "$(find "$store/scratch" -name 'request-*.tmp' -print)"
+require_test 'rejected provider releases all request scratch' -z "$(find "$store/scratch" -name 'request-*.tmp' -print)"
 
 # Equal and omitted binding fields preserve the initial binding. An unequal
 # model rejects the entire mixed update before work and across Host restart.
@@ -792,7 +804,7 @@ with socket.socket(socket.AF_UNIX) as connection:
 PYCRASH
 wait "$host_pid" 2>/dev/null || true
 host_pid=
-test -f "$store/scratch/request-0-1.tmp"
+require_test 'first streamed request scratch survives Host crash' -f "$store/scratch/request-0-1.tmp"
 
 # Failed owned-leftover cleanup refuses startup and retains the accounting
 # evidence; an ordinary restart then removes only that owned temporary.
@@ -803,13 +815,13 @@ if "$rui" host serve --store "$store" --active-capacity 1 --fault startup-cleanu
     echo "Host admitted after failed startup cleanup" >&2
     exit 1
 fi
-test -f "$store/scratch/request-0-1.tmp"
+require_test 'failed startup cleanup retains owned request scratch' -f "$store/scratch/request-0-1.tmp"
 start_host
-test ! -e "$store/scratch/request-0-1.tmp"
-test -f "$store/scratch/request-00-1.tmp"
-test -f "$store/scratch/diagnostic.log"
-test -f "$store/scratch/unrelated.data"
-test -f "$store/rui.sqlite3"
+require_test 'restart removes owned request scratch' ! -e "$store/scratch/request-0-1.tmp"
+require_test 'restart preserves noncanonical request lookalike' -f "$store/scratch/request-00-1.tmp"
+require_test 'restart preserves diagnostic file' -f "$store/scratch/diagnostic.log"
+require_test 'restart preserves unrelated file' -f "$store/scratch/unrelated.data"
+require_test 'restart preserves canonical Store' -f "$store/rui.sqlite3"
 recovered=$($rui session configure --store "$store" --record "$records/first-recovered.json" --key first-recovered --session direct/first-recovered --workspace "$root" --provider codex --model model-a --instructions "$state/fault-content.txt")
 contains "$recovered" '"status":"accepted"'
 
@@ -823,13 +835,13 @@ if "$rui" host serve --store "$store" --active-capacity 1 >"$state/startup-type.
     exit 1
 fi
 contains "$(cat "$state/startup-type.err")" "UnexpectedIngressLeftover"
-test -d "$store/scratch/request-1-1.tmp"
+require_test 'wrong-type startup refusal retains owned directory' -d "$store/scratch/request-1-1.tmp"
 rmdir "$store/scratch/request-1-1.tmp"
 start_host
-test -f "$store/scratch/request-00-1.tmp"
-test -f "$store/scratch/diagnostic.log"
-test -f "$store/scratch/unrelated.data"
-test -f "$store/rui.sqlite3"
+require_test 'restart after wrong-type repair preserves request lookalike' -f "$store/scratch/request-00-1.tmp"
+require_test 'restart after wrong-type repair preserves diagnostic file' -f "$store/scratch/diagnostic.log"
+require_test 'restart after wrong-type repair preserves unrelated file' -f "$store/scratch/unrelated.data"
+require_test 'restart after wrong-type repair preserves canonical Store' -f "$store/rui.sqlite3"
 
 # Exact public identity bounds are independent and count decoded UTF-8 bytes.
 key128=$(python3 -c 'print("k" * 128)')
@@ -841,7 +853,7 @@ if "$rui" session configure --store "$store" --record "$records/too-long.json" -
     echo "129-byte key was admitted" >&2
     exit 1
 fi
-test ! -e "$records/too-long.json"
+require_test 'oversized Configure key creates no request record' ! -e "$records/too-long.json"
 
 # Message identities use the same exact decoded-byte limits while preserving
 # Unicode and transport escaping without normalization.
@@ -854,7 +866,7 @@ if "$rui" session send --store "$store" --record "$records/message-too-long.json
     echo "129-byte message key was admitted" >&2
     exit 1
 fi
-test ! -e "$records/message-too-long.json"
+require_test 'oversized Message key creates no request record' ! -e "$records/message-too-long.json"
 
 escaped_key=$(python3 -c 'print("".join(map(chr, (34, 92, 10, 9))) * 32, end="")')
 escaped_message=$($rui session send --store "$store" --record "$records/escaped-message.json" --key "$escaped_key" --session "$session128" --text "$state/message.txt")
@@ -908,7 +920,7 @@ expected = {
     "journal_mode": "delete",
     "mmap_size": 0,
     "application_id": 0x4C544631,
-    "user_version": 19,
+    "user_version": 21,
 }
 for name, value in expected.items():
     actual = db.execute("PRAGMA " + name).fetchone()[0]
@@ -955,7 +967,7 @@ wire_socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$wire_ready")
 kill -9 "$extra_pid"
 wait "$extra_pid" 2>/dev/null || true
 extra_pid=
-test -S "$wire_socket"
+require_test 'wire-version Host crash leaves its Unix socket' -S "$wire_socket"
 python3 - "$wire_store/rui.sqlite3" <<'PY'
 import sqlite3, sys
 database = sqlite3.connect(sys.argv[1])
@@ -968,4 +980,4 @@ if "$rui" host serve --store "$wire_store" --active-capacity 1 >"$state/wrong-wi
     exit 1
 fi
 contains "$(cat "$state/wrong-wire.err")" "WrongStoreVersion"
-test -S "$wire_socket"
+require_test 'wrong wire version refuses before reclaiming stale socket' -S "$wire_socket"

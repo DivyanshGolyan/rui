@@ -18,6 +18,7 @@ pub const Prepared = struct {
         for (0..self.page.count) |reverse| {
             const index = self.page.count - 1 - reverse;
             const item = self.page.items[index];
+            if (item.kind == .tool_result) try View.toolHeading(item.presentation.?, sink, columns, colour);
             if (item.content.bytes > item_bytes) {
                 var buffer: [192]u8 = undefined;
                 try sink.feed(try std.fmt.bufPrint(&buffer, "Rui: Historical item omitted: position {d}, ordinal {d}, {d} raw bytes.\nRaw export: rui session read-conversation --store-hex ", .{ item.position, item.ordinal, item.content.bytes }));
@@ -33,7 +34,11 @@ pub const Prepared = struct {
                 try sink.feed("›");
                 try sink.feed(View.Style.normal.code(colour));
                 try sink.feed(" ");
-            } else try sink.feed(if (item.kind == .assistant) "\n  " else "\n  Tool result:\n  ");
+            } else if (item.kind == .assistant) {
+                try sink.feed("\n  ");
+            } else {
+                try sink.feed("  ");
+            }
             var indented: View.Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };
             var answer: View.Answer(@TypeOf(&indented)) = undefined;
             answer.init(&indented);
@@ -55,10 +60,24 @@ pub const Prepared = struct {
 pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8, cursor: client.ConversationCursor, scratch: std.Io.File) !Prepared {
     const page = switch (try requests.conversationPage(store, session, cursor)) {
         .page => |value| value,
-        .failure => |failure| return failure.err(),
+        .failure => |failure| return requests.failRead(failure),
     };
+    const Source = struct {
+        requests: client.Requests,
+        store: []const u8,
+        session: []const u8,
+        fn read(self: @This(), item: client.ConversationPage.Item, _: usize, sink: anytype) !void {
+            if (try self.requests.readConversationContent(self.store, self.session, item.position, item.ordinal, item.content, sink)) |failure| return self.requests.failRead(failure);
+        }
+    };
+    return stagePage(requests.io, page, scratch, Source{ .requests = requests, .store = store, .session = session });
+}
+
+// The source owns received-byte validation; this owner independently verifies
+// the actual scratch bytes before returning any presentation authority.
+fn stagePage(io: std.Io, page: client.ConversationPage, scratch: std.Io.File, source: anytype) !Prepared {
     var prepared: Prepared = .{ .page = page };
-    try scratch.setLength(requests.io, 0);
+    try scratch.setLength(io, 0);
     const Staging = struct {
         io: std.Io,
         file: std.Io.File,
@@ -68,11 +87,11 @@ pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8
             self.offset += bytes.len;
         }
     };
-    var staging: Staging = .{ .io = requests.io, .file = scratch };
+    var staging: Staging = .{ .io = io, .file = scratch };
     for (page.items[0..page.count], 0..) |item, index| {
         if (item.content.bytes > item_bytes) continue;
         prepared.offsets[index] = staging.offset;
-        if (try requests.readConversationContent(store, session, item.position, item.ordinal, item.content, &staging)) |failure| return failure.err();
+        try source.read(item, index, &staging);
     }
     // Received-byte integrity does not prove that staging preserved those bytes.
     var window: [protocol.content_window_bytes]u8 = undefined;
@@ -82,7 +101,7 @@ pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8
         var offset: u64 = 0;
         while (offset < item.content.bytes) {
             const wanted: usize = @intCast(@min(item.content.bytes - offset, window.len));
-            if (try scratch.readPositionalAll(requests.io, window[0..wanted], start + offset) != wanted) return error.TruncatedHistoryScratch;
+            if (try scratch.readPositionalAll(io, window[0..wanted], start + offset) != wanted) return error.TruncatedHistoryScratch;
             hash.update(window[0..wanted]);
             offset += wanted;
         }
@@ -123,11 +142,56 @@ test "historical export preserves opaque identities without terminal or shell in
     try std.testing.expectEqualStrings("Rui: Historical item omitted: position 2, ordinal 0, 8193 raw bytes.\nRaw export: rui session read-conversation --store-hex 2f746d702f6127242866616c736529 --session-hex 7465616d1b5b324a0a00c3a9e280ae --position 2 --ordinal 0\n", sink.bytes[0..sink.length]);
 }
 
+test "history body limit preserves contextual tool outcomes" {
+    const Sink = struct {
+        bytes: [16 * 1024]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(io, "history", .{ .read = true });
+    defer scratch.close(io);
+    const body = "x" ** 8192;
+    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    try description.set("Compile package");
+    const Case = struct { code: protocol.ToolPresentation.Code, heading: []const u8, fallback: bool = false };
+    for ([_]Case{
+        .{ .code = .failed, .heading = "\n! Compile package — Failed\n" },
+        .{ .code = .succeeded, .heading = "\n✓ Compile package\n" },
+        .{ .code = .indeterminate, .heading = "\n! Compile package — Outcome unknown; may have run\n" },
+        .{ .code = .denied, .heading = "\n• Compile package — Denied\n" },
+        .{ .code = .invalid_arguments, .heading = "\n• Tool call — Rejected: invalid arguments\n", .fallback = true },
+    }) |case| {
+        for ([_]u64{ 8192, 8193 }) |size| {
+            var prepared: Prepared = .{ .page = .{ .end = 7, .count = 1, .more = false } };
+            prepared.page.items[0] = .{ .position = 7, .ordinal = 2, .kind = .tool_result, .content = .{ .bytes = size, .digest = @splat(0) }, .presentation = .{ .description = if (case.fallback) null else description, .code = case.code, .publication_position = 7 } };
+            // Oversized bodies have no staged bytes or valid scratch offset.
+            try scratch.setLength(io, 0);
+            if (size == 8192) try scratch.writePositionalAll(io, body, 0);
+            prepared.offsets[0] = if (size == 8192) 0 else std.math.maxInt(u64);
+            var sink: Sink = .{};
+            try prepared.render(io, scratch, "store", "session", &sink, 0, false);
+            const output = sink.bytes[0..sink.length];
+            try std.testing.expect(std.mem.startsWith(u8, output, case.heading));
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, case.heading));
+            if (size == 8192) {
+                try std.testing.expect(std.mem.endsWith(u8, output, body ++ "\n"));
+                try std.testing.expect(std.mem.indexOf(u8, output, "Historical item omitted") == null);
+            } else {
+                try std.testing.expectEqualStrings("Rui: Historical item omitted: position 7, ordinal 2, 8193 raw bytes.\nRaw export: rui session read-conversation --store-hex 73746f7265 --session-hex 73657373696f6e --position 7 --ordinal 2\n", output[case.heading.len..]);
+            }
+        }
+    }
+}
+
 test "history preparation binds wire and staged bytes before exposure" {
     const Peer = struct {
-        var clients: [3]std.posix.fd_t = undefined;
-        var large: bool = false;
-        var empty_second: bool = false;
+        var clients: [2]std.posix.fd_t = undefined;
         var fault_offset: u64 = 0;
         var fault_hits: usize = 0;
         const large_body = "a" ** 4096 ++ "Z";
@@ -160,10 +224,7 @@ test "history preparation binds wire and staged bytes before exposure" {
         fn exchange(fds: []const std.posix.fd_t) !void {
             // Independent Python hashlib oracle for domain-prefixed "first".
             const metadata = "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"2\",\"items\":[{\"position\":\"2\",\"ordinal\":\"0\",\"kind\":\"user\",\"content\":{\"bytes\":\"5\",\"sha256\":\"2e37afae3fe85c8c30175c6f0a1b578b3cbe5f4482248f77cb55656781d2790b\",\"display\":\"omitted\"}}],\"more\":false}";
-            // Independent hashlib oracles: a*4096 + Z, end, and empty.
-            var metadata_buffer: [1024]u8 = undefined;
-            const large_metadata = try std.fmt.bufPrint(&metadata_buffer, "{{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"2\",\"items\":[{{\"position\":\"2\",\"ordinal\":\"0\",\"kind\":\"user\",\"content\":{{\"bytes\":\"4097\",\"sha256\":\"c4507c75ffffb20c21aad1b5eecab12e273533475e6d3204a866471d86c5a3cb\",\"display\":\"omitted\"}}}},{{\"position\":\"1\",\"ordinal\":\"0\",\"kind\":\"assistant\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\",\"display\":\"omitted\"}}}}],\"more\":false}}", .{ @as(usize, if (empty_second) 0 else 3), if (empty_second) "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528" else "743b6084710002f2040770ad1e35947dce27acfb1b5c6d3a1ddc28f74b462972" });
-            const bodies: [3][]const u8 = if (large) .{ large_metadata, large_body, if (empty_second) "" else "end" } else .{ metadata, "first", "" };
+            const bodies = [_][]const u8{ metadata, "first" };
             for (fds, 0..) |fd, index| {
                 const normal_body = bodies[index];
                 const content_type = if (index == 0) "application/json" else "application/octet-stream";
@@ -232,34 +293,54 @@ test "history preparation binds wire and staged bytes before exposure" {
     }) |case| {
         const mode = case.mode;
         Peer.mode = mode;
-        Peer.large = case.large;
-        Peer.empty_second = case.empty_second;
         Peer.fault_offset = case.fault_offset;
         Peer.fault_hits = 0;
         Peer.connected = 0;
         Peer.failure = null;
-        const exchanges: usize = if (case.large) 3 else 2;
-        var servers: [3]std.posix.fd_t = undefined;
+        const supplied = case.large or mode == .corrupt or mode == .missing;
+        const exchanges: usize = if (supplied) 0 else 2;
+        var servers: [2]std.posix.fd_t = undefined;
         for (Peer.clients[0..exchanges], servers[0..exchanges]) |*caller, *server| {
             var sockets: [2]std.posix.fd_t = undefined;
             if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
             caller.* = sockets[0];
             server.* = sockets[1];
         }
-        const peer = try std.Thread.spawn(.{}, Peer.serve, .{servers[0..exchanges]});
-        const result = prepare(requests, root, "history/session", .{ .end = 2 }, scratch);
+        const peer = if (supplied) null else try std.Thread.spawn(.{}, Peer.serve, .{servers[0..exchanges]});
+        const Bytes = struct {
+            bodies: [2][]const u8,
+            fn read(self: @This(), _: client.ConversationPage.Item, index: usize, sink: anytype) !void {
+                const body = self.bodies[index];
+                var offset: usize = 0;
+                while (offset < body.len) {
+                    const end = @min(body.len, offset + protocol.content_window_bytes);
+                    try sink.feed(body[offset..end]);
+                    offset = end;
+                }
+            }
+        };
+        const bytes: Bytes = .{ .bodies = .{ if (case.large) Peer.large_body else "first", if (case.empty_second) "" else "end" } };
+        var page: client.ConversationPage = .{ .end = 2, .count = if (case.large) 2 else 1, .more = false };
+        for (page.items[0..page.count], 0..) |*item, index| {
+            item.* = .{ .position = 2 - index, .ordinal = 0, .kind = if (index == 0) .user else .assistant, .content = .{ .bytes = bytes.bodies[index].len, .digest = undefined } };
+            // Independent hashlib oracles, not the staging implementation.
+            _ = try std.fmt.hexToBytes(&item.content.digest, if (index == 0)
+                (if (case.large) "c4507c75ffffb20c21aad1b5eecab12e273533475e6d3204a866471d86c5a3cb" else "2e37afae3fe85c8c30175c6f0a1b578b3cbe5f4482248f77cb55656781d2790b")
+            else if (case.empty_second) "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528" else "743b6084710002f2040770ad1e35947dce27acfb1b5c6d3a1ddc28f74b462972");
+        }
+        const result = if (supplied) stagePage(requests.io, page, scratch, bytes) else prepare(requests, root, "history/session", .{ .end = 2 }, scratch);
         // Release any request never reached after an earlier protocol failure.
         for (Peer.clients[Peer.connected..exchanges]) |fd| {
             const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
             file.close(io);
         }
-        peer.join();
+        if (peer) |thread| thread.join();
         if (Peer.failure) |err| {
             _ = try result;
             return err;
         }
         if (mode == .corrupt or mode == .missing) try std.testing.expectEqual(@as(usize, 1), Peer.fault_hits);
-        if (case.large) try std.testing.expectEqual(exchanges, Peer.connected);
+        try std.testing.expectEqual(exchanges, Peer.connected);
         if (mode == .intact) {
             const prepared = try result;
             try std.testing.expectEqual(@as(usize, if (case.large) 2 else 1), prepared.page.count);
