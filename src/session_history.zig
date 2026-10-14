@@ -18,7 +18,7 @@ pub const Prepared = struct {
         for (0..self.page.count) |reverse| {
             const index = self.page.count - 1 - reverse;
             const item = self.page.items[index];
-            if (item.kind == .tool_result) try View.toolHeading(item.presentation.?, sink, columns, colour);
+            if (item.kind == .tool_result) try View.toolHeading(item.presentation.?, sink, columns, colour, true);
             if (item.content.bytes > item_bytes) {
                 var buffer: [192]u8 = undefined;
                 try sink.feed(try std.fmt.bufPrint(&buffer, "Rui: Historical item omitted: position {d}, ordinal {d}, {d} raw bytes.\nRaw export: rui session read-conversation --store-hex ", .{ item.position, item.ordinal, item.content.bytes }));

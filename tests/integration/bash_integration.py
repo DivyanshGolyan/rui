@@ -55,6 +55,15 @@ def start_detached_shell(command, ready_path):
     return f"{detached_shell(command)} & while [ ! -s {ready} ]; do :; done"
 
 
+def publish_pid(path, value="$$"):
+    """Publish a fixture-owned shell PID expression atomically for exists waits."""
+    temporary = shlex.quote(str(path.with_suffix(".tmp")))
+    return (
+        f'printf "%s" "{value}" > {temporary} && '
+        f"mv {temporary} {shlex.quote(str(path))}"
+    )
+
+
 def configure(state, store, key, session, permission="ask", workspace=fixture.ROOT):
     result = fixture.command(
         "session", "configure",
@@ -940,7 +949,7 @@ def main():
                 "exited-pipes-call",
                 json.dumps(
                     {
-                        "cmd": f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & printf $! > {exited_child_pid}",
+                        "cmd": f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & {publish_pid(exited_child_pid, '$!')}",
                         "timeout_ms": None,
                         "description": "Start detached pipe-free child",
                     },
@@ -969,8 +978,7 @@ def main():
                     {
                         "cmd": (
                             f"(trap '' TERM; sleep 30) & child=$!; "
-                            f"printf '%s\\n' \"$child\" > {stopped_pipes_child_pid}.tmp; "
-                            f"mv {stopped_pipes_child_pid}.tmp {stopped_pipes_child_pid}; "
+                            f"{publish_pid(stopped_pipes_child_pid, '$child')}; "
                             f"while [ ! -e {stopped_pipes_leader_release} ]; do sleep 0.01; done"
                         ),
                         "timeout_ms": None,
@@ -987,7 +995,7 @@ def main():
         responses,
         "detached-timeout",
         start_detached_shell(
-            f"trap '' TERM PIPE; echo $$ > {detached_pid}; "
+            f"trap '' TERM PIPE; {publish_pid(detached_pid)}; "
             "head -c 32768 /dev/zero; while :; do printf detached; sleep 1; done",
             detached_pid,
         ),
@@ -998,8 +1006,7 @@ def main():
         responses,
         "same-group-timeout",
         f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & child=$!; "
-        f"printf '%s\n' \"$child\" > {same_group_pid}.tmp; "
-        f"mv {same_group_pid}.tmp {same_group_pid}; wait \"$child\"",
+        f"{publish_pid(same_group_pid, '$child')}; wait \"$child\"",
         timeout_ms=100,
     )
     add_exchange(
@@ -1028,6 +1035,7 @@ def main():
         )
     )
     sibling_marker = state / "sibling-marker"
+    sibling_release = state / "sibling-release"
     responses.append(
         fixture.sse_tool_calls(
             "sibling-calls",
@@ -1036,7 +1044,7 @@ def main():
                     "bash",
                     "sibling-call-0",
                     json.dumps(
-                        {"cmd": f"sleep 0.2; printf a >> {sibling_marker}", "timeout_ms": None, "description": "Append first sibling marker"},
+                        {"cmd": f"while [ ! -e {shlex.quote(str(sibling_release))} ]; do sleep 0.01; done; printf a >> {shlex.quote(str(sibling_marker))}", "timeout_ms": None, "description": "Append first sibling marker"},
                         separators=(",", ":"),
                     ),
                 ),
@@ -2019,6 +2027,17 @@ def main():
         host = fixture.start_host(store, endpoint_url, active_capacity=2)
         configure(state, store, "sibling-config", "direct/sibling", "bypass")
         fixture.message(state, store, "sibling-message", "direct/sibling", "execute")
+        # Observe the second sibling's durable result before releasing the first;
+        # command duration alone cannot establish canonical acceptance order.
+        def second_sibling_settled():
+            actions = list(action_rows_by_id(store, "direct/sibling").values())
+            return len(actions) == 2 and {
+                row["call_ordinal"]: row["resolution"] for row in actions
+            } == {"0": None, "1": "succeeded"}
+
+        fixture.wait_for(second_sibling_settled, "second sibling accepted while first is held")
+        assert sibling_marker.read_text() == "b"
+        sibling_release.touch()
         fixture.wait_for(
             lambda: fixture.completed_observation(store, "sibling-message"),
             "independent sibling continuation",
@@ -2090,6 +2109,7 @@ def main():
         if settlement_gate is not None:
             cleanups.append(settlement_gate.release)
         cleanups.append(lambda: settlement_cleanup_gate.unlink(missing_ok=True))
+        cleanups.append(sibling_release.touch)
         if host is not None:
             cleanups.append(lambda: fixture.stop_host(host))
         if detached_process is not None and process_exists(detached_process):

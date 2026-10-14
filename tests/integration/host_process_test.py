@@ -67,11 +67,13 @@ def assert_reaped(source, description, *, timeout=0.2, required_fields=None, obs
 
 def main():
     prove_dispose_all()
+    prove_one_reply()
     prove_terminal_capture_budget()
     prove_execution_release_oracles()
     prove_bash_cleanup_population()
     prove_required_capture_receipts()
     prove_peer_setup_disposal()
+    prove_caller_disposal()
     assert_reaped("time.sleep(10)", "silent alive")
     assert_reaped("sys.stdout.write('rea'); sys.stdout.flush(); time.sleep(10)", "partial line")
     assert_reaped("print('not-ready'); time.sleep(10)", "malformed readiness")
@@ -1147,6 +1149,232 @@ def prove_terminal_capture_budget():
     print("Terminal capture caller clock: timely exact read/release accepted; late exact read and release rejected")
 
 
+def prove_caller_disposal():
+    with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
+        import dispatch_integration as dispatch
+        import conversation_page_integration as page
+        import bash_owner_integration as bash
+
+    for owner in (dispatch, page, bash):
+        for body_failed in (False, True):
+            for fault in (None, "stop", "shutdown", "shutdown-before", "close"):
+                primary = AssertionError("original caller assertion")
+                cleanup = RuntimeError(f"injected {fault}")
+                processes = [subprocess.Popen(child("time.sleep(30)"), stdout=subprocess.PIPE,
+                                              stderr=subprocess.PIPE)
+                             for _ in range(2 if owner is dispatch else 1)]
+                endpoints = [dispatch.SuccessEndpoint([]) for _ in processes]
+                threads = [threading.Thread(target=endpoint.serve_forever) for endpoint in endpoints]
+                for thread in threads:
+                    thread.start()
+                release = threading.Event()
+                retained = []
+                original_shutdown = endpoints[0].shutdown
+                original_close = endpoints[0].server_close
+                shutdown_attempts = 0
+
+                def stop(process):
+                    stop_process(process)
+                    if process is processes[0] and fault == "stop":
+                        raise cleanup
+
+                def shutdown():
+                    nonlocal shutdown_attempts
+                    shutdown_attempts += 1
+                    if fault == "shutdown-before" and shutdown_attempts == 1:
+                        raise cleanup
+                    original_shutdown()
+                    if fault == "shutdown":
+                        raise cleanup
+
+                def close():
+                    original_close()
+                    if fault == "close":
+                        raise cleanup
+
+                stop_module, stop_name = (bash.fixture, "stop_host") if owner is bash else (
+                    owner, "stop_host" if owner is dispatch else "stop_process")
+                try:
+                    with patch.object(stop_module, stop_name, stop), \
+                            patch.object(endpoints[0], "shutdown", shutdown), \
+                            patch.object(endpoints[0], "server_close", close):
+                        caught = None
+                        try:
+                            try:
+                                if body_failed:
+                                    raise primary
+                            finally:
+                                if owner is dispatch:
+                                    dispatch.dispose_dispatch(processes, dict(zip(endpoints, threads)),
+                                                              [release.set], lambda: retained.append(True))
+                                else:
+                                    dispose = (lambda: page.dispose_page(processes[0], endpoints[0], threads[0], 3)
+                                               if owner is page else
+                                               bash.dispose_owner_case(processes[0], endpoints[0], threads[0]))
+                                    dispose_all(release.set, dispose, lambda: retained.append(True))
+                        except BaseException as error:
+                            caught = error
+                        # Check retirement before exception identity so a grouped
+                        # process loop mutation fails at the skipped second child.
+                        assert all(process.poll() is not None for process in processes), "later child disposal skipped"
+                        assert all(process.stdout.closed and process.stderr.closed for process in processes)
+                        assert all(endpoint.fileno() == -1 for endpoint in endpoints), "endpoint close skipped"
+                        assert all(not thread.is_alive() for thread in threads), "endpoint retirement skipped"
+                        assert release.is_set() and retained == [True], "release or retention skipped"
+                        assert caught is (primary if body_failed else cleanup if fault else None), caught
+                        if fault:
+                            assert any(f"injected {fault}" in note for note in caught.__notes__), caught
+                finally:
+                    # Keep a deliberately broken candidate from leaking test resources.
+                    dispose_all(*(lambda process=process: stop_process(process) for process in processes),
+                                original_shutdown, original_close,
+                                *(endpoint.shutdown for endpoint in endpoints[1:]),
+                                *(endpoint.server_close for endpoint in endpoints[1:]),
+                                *(lambda thread=thread: thread.join(timeout=5) for thread in threads))
+
+    # A close refusal before its effect must leave the endpoint owned for the
+    # outer finalizer, including when an existing assertion stays primary.
+    for body_failed in (False, True):
+        endpoint = dispatch.SuccessEndpoint([])
+        thread = threading.Thread(target=endpoint.serve_forever)
+        thread.start()
+        endpoints = {endpoint: thread}
+        primary = AssertionError("body before endpoint close")
+        close_error = OSError("close refused before effect")
+        try:
+            with patch.object(endpoint, "server_close", side_effect=close_error):
+                try:
+                    try:
+                        if body_failed:
+                            raise primary
+                    finally:
+                        dispatch.stop_endpoint(endpoint, endpoints)
+                except BaseException as error:
+                    assert error is (primary if body_failed else close_error), error
+            assert endpoint in endpoints, "unclosed endpoint lost its disposal owner"
+            dispatch.dispose_dispatch([], endpoints, [])
+            assert endpoint.fileno() == -1 and endpoints == {}, "outer finalizer did not close retained endpoint"
+        finally:
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
+
+    # Execute stage_action's actual startup boundary, not just its disposer.
+    endpoint = dispatch.SuccessEndpoint([])
+    startup = RuntimeError("Host startup refused")
+    with patch.object(bash.fixture, "SuccessEndpoint", return_value=endpoint), \
+            patch.object(bash.fixture, "start_host", side_effect=startup):
+        try:
+            bash.stage_action(pathlib.Path("unused"), pathlib.Path("unused"), "startup", "true")
+        except RuntimeError as error:
+            assert error is startup
+        finally:
+            closed = endpoint.fileno() == -1
+            endpoint.shutdown()
+            endpoint.server_close()
+        assert closed, "stage_action startup leaked endpoint"
+
+    # A permanent refusal remains a failure and reports unretired custody. Use
+    # a short join only for this deliberate leak, then release it ourselves.
+    for owner in (dispatch, page, bash):
+        for body_failed in (False, True):
+            endpoint = dispatch.SuccessEndpoint([])
+            serving = threading.Event()
+            endpoint.service_actions = serving.set
+            thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+            thread.start()
+            primary = AssertionError("body before shutdown refusal")
+            shutdown_error = OSError("persistent shutdown refusal")
+            try:
+                # Thread.start does not establish selector registration. Closing
+                # earlier could kill the worker instead of leaving live custody.
+                assert serving.wait(timeout=5), "endpoint did not enter serving loop"
+                with patch.object(endpoint, "shutdown", side_effect=shutdown_error), \
+                        patch.object(thread, "join", lambda timeout: threading.Thread.join(thread, .01)):
+                    try:
+                        try:
+                            if body_failed:
+                                raise primary
+                        finally:
+                            if owner is dispatch:
+                                dispatch.stop_endpoint(endpoint, {endpoint: thread})
+                            elif owner is page:
+                                page.dispose_page(None, endpoint, thread, 3)
+                            else:
+                                bash.dispose_owner_case(None, endpoint, thread)
+                    except BaseException as error:
+                        assert error is (primary if body_failed else shutdown_error), error
+                        assert any("thread did not retire" in note for note in error.__notes__), error
+                    else:
+                        raise AssertionError("persistent shutdown refusal accepted")
+                assert thread.is_alive() and endpoint.fileno() == -1
+            finally:
+                endpoint.shutdown()
+                endpoint.server_close()
+                thread.join(timeout=5)
+                assert not thread.is_alive()
+
+    # Run the actual whole-stream caller in a fresh interpreter. A non-daemon
+    # serving thread would hang after the preserved failure, despite the join.
+    try:
+        exit_probe = subprocess.run([sys.executable, "-c", """
+import faulthandler
+faulthandler.dump_traceback_later(8)
+import sys
+import threading
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+sys.argv = [sys.argv[0], "unused-rui"]
+import conversation_page_integration as page
+primary = AssertionError("whole-stream startup failure")
+serving = threading.Event()
+real_dispose = page.dispose_page
+
+def fail_startup(*args, **kwargs):
+    assert serving.wait(timeout=5), "whole-stream endpoint did not enter serving loop"
+    raise primary
+
+def dispose_without_wait(process, endpoint, thread, timeout):
+    # The witness needs live custody, not five seconds of deliberate refusal.
+    return real_dispose(process, endpoint, thread, timeout=0)
+
+# Reverse DNS is unrelated to this teardown/exit witness. Keep real socket
+# binding and the real serving loop, but give HTTPServer a local fixture name.
+with patch("socket.getfqdn", return_value="localhost"), \
+        patch.object(page.TestHTTPServer, "service_actions", lambda self: serving.set()), \
+        patch.object(page, "start_host", fail_startup), \
+        patch.object(page, "dispose_page", dispose_without_wait), \
+        patch.object(page.TestHTTPServer, "shutdown", side_effect=OSError("shutdown refused")):
+    try:
+        page.whole_stream_shape(0)
+    except AssertionError as error:
+        assert error is primary
+        assert any("thread did not retire" in note for note in error.__notes__)
+    else:
+        raise AssertionError("whole-stream failure suppressed")
+print("whole-stream failure survived teardown and interpreter exit", flush=True)
+""", str(pathlib.Path(__file__).resolve().parent)], capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired as error:
+        error.add_note(f"whole-stream exit probe stdout={error.stdout!r}; stderr={error.stderr!r}")
+        raise
+    assert exit_probe.returncode == 0, exit_probe.stderr
+    assert exit_probe.stdout.strip() == "whole-stream failure survived teardown and interpreter exit", exit_probe.stdout
+
+    # A timed join returning is not retirement, even with successful shutdown.
+    endpoint = MagicMock()
+    thread = SimpleNamespace(ident=1, join=lambda timeout: None, is_alive=lambda: True)
+    for dispose in (lambda: dispatch.stop_endpoint(endpoint, {endpoint: thread}),
+                    lambda: page.dispose_page(None, endpoint, thread, 3),
+                    lambda: bash.dispose_owner_case(None, endpoint, thread)):
+        try:
+            dispose()
+        except AssertionError as error:
+            assert "thread did not retire" in str(error), error
+        else:
+            raise AssertionError("live endpoint thread accepted as retired")
+    print("Caller disposal: dispatch/page/Bash body and cleanup faults, multiple children/endpoints, startup refusal and live-thread rejection passed")
+
+
 def prove_dispose_all():
     for body_failed in (True, False):
         body_error = AssertionError("original body failure")
@@ -1199,6 +1427,150 @@ def prove_dispose_all():
                 except OSError:
                     pass
     print("Fixture disposal: primary failure retained, all resources attempted")
+
+
+def prove_one_reply():
+    from one_reply import BODY_LIMIT, HEADER_LIMIT, one_reply
+
+    original_socket = socket.socket
+    sockets = []
+    accepted = threading.Event()
+
+    class TrackedSocket(original_socket):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            sockets.append(self)
+
+        def accept(self):
+            result = super().accept()
+            accepted.set()
+            return result
+
+    def request(length, padding=0):
+        return (f"POST /fixture HTTP/1.1\r\nContent-Length: {length}\r\nX-Pad: ".encode()
+                + b"x" * padding + b"\r\n\r\n")
+
+    def connect(path):
+        client = socket.socket(socket.AF_UNIX)
+        client.settimeout(2)
+        client.connect(str(path))
+        assert accepted.wait(2), "one-reply worker never accepted"
+        return client
+
+    @contextlib.contextmanager
+    def case():
+        sockets.clear()
+        accepted.clear()
+        threads = set(threading.enumerate())
+        with tempfile.TemporaryDirectory(prefix="rui-reply-") as root:
+            path = pathlib.Path(root) / "peer"
+            try:
+                with patch("socket.socket", TrackedSocket):
+                    yield path
+            finally:
+                assert set(threading.enumerate()) == threads, "one-reply worker survived disposal"
+                assert sockets and all(sock.fileno() == -1 for sock in sockets), "one-reply socket leaked"
+                assert not path.exists(), "one-reply path survived disposal"
+
+    # Asymmetric binary response, split request, exact header/body limits and reuse.
+    response = b"deliberately not HTTP\x00\xff" * 4000
+    for length in (0, BODY_LIMIT):
+        with case() as path:
+            with one_reply(path, response):
+                with connect(path) as client:
+                    header = request(length)
+                    header = request(length, HEADER_LIMIT - len(header))
+                    client.sendall(header[:-1])
+                    client.sendall(header[-1:] + b"b" * length)
+                    received = bytearray()
+                    while chunk := client.recv(4096):
+                        received.extend(chunk)
+                    assert received == response, "one-reply changed caller-owned bytes"
+
+    for supplied, error_type, message in (
+        (b"POST /fixture", EOFError, "header"),
+        (request(4) + b"abc", EOFError, "body"),
+        (b"x" * HEADER_LIMIT, ValueError, "header exceeds"),
+        (request(BODY_LIMIT + 1), ValueError, "body exceeds"),
+        (request(-1), ValueError, "one decimal"),
+        (b"POST / HTTP/1.1\r\n\r\n", ValueError, "one decimal"),
+        (b"POST / HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n", ValueError, "one decimal"),
+    ):
+        with case() as path:
+            try:
+                with one_reply(path, b"must not be sent"):
+                    with connect(path) as client:
+                        client.sendall(supplied)
+                        client.shutdown(socket.SHUT_WR)
+                        assert client.recv(1) == b"", "invalid request received a response"
+            except error_type as error:
+                assert message in str(error), error
+            else:
+                raise AssertionError("one-reply worker error was lost")
+
+    # Silent accept/header/body and response backpressure all spend the same budget.
+    for supplied in (None, b"POST /", request(4) + b"abc", request(0)):
+        with case() as path:
+            with contextlib.ExitStack() as clients:
+                started = time.monotonic()
+                try:
+                    with one_reply(path, b"r" * (4 * 1024 * 1024), timeout=0.2):
+                        if supplied is not None:
+                            client = clients.enter_context(connect(path))
+                            client.sendall(supplied)
+                except TimeoutError:
+                    elapsed = time.monotonic() - started
+                    assert 0.15 <= elapsed < 2, elapsed
+                else:
+                    raise AssertionError("one-reply deadline was restarted or ignored")
+
+    # Client failure before accept, during header/body, and during blocked send.
+    for supplied in (None, b"POST /", request(4) + b"abc", request(0)):
+        with case() as path:
+            with contextlib.ExitStack() as clients:
+                primary = RuntimeError("original client failure")
+                started = time.monotonic()
+                try:
+                    with one_reply(path, b"r" * (4 * 1024 * 1024)):
+                        if supplied is not None:
+                            client = clients.enter_context(connect(path))
+                            client.sendall(supplied)
+                            if supplied == request(0):
+                                assert client.recv(1) == b"r", "worker did not reach send"
+                        raise primary
+                except RuntimeError as error:
+                    assert error is primary
+                else:
+                    raise AssertionError("client failure was suppressed")
+                assert time.monotonic() - started < 2, "cancellation waited for exchange timeout"
+
+    # A completed worker failure and failed unlink remain secondary to the client.
+    with tempfile.TemporaryDirectory(prefix="rui-reply-failure-") as root:
+        path = pathlib.Path(root) / "peer"
+        primary = RuntimeError("original client failure")
+        sockets.clear()
+        accepted.clear()
+        threads = set(threading.enumerate())
+        with contextlib.ExitStack() as faults:
+            try:
+                with patch("socket.socket", TrackedSocket):
+                    with one_reply(path, b"unused"):
+                        with connect(path) as client:
+                            client.shutdown(socket.SHUT_WR)
+                            assert client.recv(1) == b""
+                        faults.enter_context(patch.object(pathlib.Path, "unlink", side_effect=OSError("unlink fault")))
+                        raise primary
+            except RuntimeError as error:
+                assert error is primary
+                assert any("EOFError" in note for note in error.__notes__), error.__notes__
+                assert any("unlink fault" in note for note in error.__notes__), error.__notes__
+            else:
+                raise AssertionError("client failure was suppressed during disposal")
+        assert set(threading.enumerate()) == threads
+        assert all(sock.fileno() == -1 for sock in sockets)
+        assert path.exists(), "failed unlink was reported as removal"
+        path.unlink()
+    print("One-reply peer: exact bytes, EOF/limits/deadlines, primary errors, sockets/path and worker retirement")
 
 
 if __name__ == "__main__":

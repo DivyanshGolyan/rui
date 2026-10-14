@@ -17,14 +17,6 @@ import model_fixture as fixture
 from host_process import canonical_fixture_root
 
 
-def publish_bash_pid(path):
-    temporary = shlex.quote(str(path.with_suffix(".tmp")))
-    return (
-        f"printf '%s' \"$$\" > {temporary} && "
-        f"mv {temporary} {shlex.quote(str(path))}"
-    )
-
-
 def prove_pid_publication(root):
     state = root / "PID publication"
     state.mkdir(mode=0o700)
@@ -34,7 +26,7 @@ def prove_pid_publication(root):
     command = (
         "printf() { builtin printf r >&2; "
         "IFS= read -r release || return; builtin printf \"$@\"; }; "
-        f"{publish_bash_pid(path)}; status=$?; exit \"$status\""
+        f"{bash_fixture.publish_pid(path)}; status=$?; exit \"$status\""
     )
     child = subprocess.Popen(
         ["bash", "-c", command],
@@ -58,23 +50,30 @@ def prove_pid_publication(root):
             child.kill()
         child.communicate(timeout=8)
 
-    # An ordinary, ungated publisher must still publish its exact Bash PID.
-    path.unlink()
-    child = subprocess.Popen(
-        ["bash", "-c", f"{publish_bash_pid(path)}; status=$?; exit \"$status\""],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        _, stderr = child.communicate(timeout=8)
-        assert child.returncode == 0, stderr
-        assert path.read_text() == str(child.pid)
-        assert int(path.read_text()) == child.pid
-        assert list(state.iterdir()) == [path], "unreleased publication temporary"
-    finally:
-        if child.poll() is None:
-            child.kill()
-        child.communicate(timeout=8)
+    # Preserve the selected identity, including a background child rather than
+    # the publishing shell. Reap that child before publication to own its cleanup.
+    for shell in ("bash", "sh"):
+        for value in ("$$", "$!", "$child"):
+            path.unlink()
+            setup = "" if value == "$$" else 'true & child=$!; wait "$child"; printf "%s" "$child" >&2; '
+            child = subprocess.Popen(
+                [shell, "-c", f"{setup}{bash_fixture.publish_pid(path, value)}; status=$?; exit \"$status\""],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                _, stderr = child.communicate(timeout=8)
+                assert child.returncode == 0, stderr
+                expected = child.pid if value == "$$" else int(stderr)
+                if value != "$$":
+                    assert expected != child.pid, "background identity was not distinct"
+                assert path.read_text() == str(expected)
+                assert int(path.read_text()) == expected
+                assert list(state.iterdir()) == [path], "unreleased publication temporary"
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate(timeout=8)
     print(json.dumps({"bash_pid_publication": "passed"}, sort_keys=True))
 
 
@@ -325,7 +324,7 @@ def main():
         bash_pid_path = state / "bash-pid"
         endpoint, thread, endpoint_url = endpoint_for(
             name,
-            f"{publish_bash_pid(bash_pid_path)} && trap '' TERM && sleep 30",
+            f"{bash_fixture.publish_pid(bash_pid_path)} && trap '' TERM && sleep 30",
         )
         host = None
         try:
@@ -374,7 +373,7 @@ def main():
         command_release = state / "command-release"
         endpoint, thread, endpoint_url = endpoint_for(
             name,
-            f"{publish_bash_pid(bash_pid_path)} && "
+            f"{bash_fixture.publish_pid(bash_pid_path)} && "
             f"while [ ! -e {command_release} ]; do sleep 0.01; done",
         )
         host = None
@@ -544,7 +543,7 @@ def main():
         endpoint, thread, endpoint_url = endpoint_for(
             name,
             bash_fixture.start_detached_shell(
-                f"echo $$ > {detached_pid_path}; sleep 30", detached_pid_path
+                f"{bash_fixture.publish_pid(detached_pid_path)}; sleep 30", detached_pid_path
             ),
         )
         host = None

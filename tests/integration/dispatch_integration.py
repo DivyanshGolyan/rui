@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, preserve_failure_metadata, stop_process, wait_for_execution_release
+from host_process import HostDiagnostics, dispose_all, preserve_failure_metadata, stop_process, wait_for_execution_release
 from model_fixture import (
     ROOT, RUI, FailureEndpoint, ResponseSpec, SuccessEndpoint,
     assert_model_cleanup_census, classification_population, command,
@@ -24,13 +24,53 @@ from model_fixture import (
 )
 
 
+def stop_endpoint(endpoint, endpoints):
+    thread = endpoints[endpoint]
+
+    def shutdown():
+        if thread.ident is not None:
+            try:
+                endpoint.shutdown()
+            except BaseException:
+                # A pre-effect refusal leaves serve_forever alive. Retry once,
+                # retaining the first failure even if retirement then succeeds.
+                dispose_all(endpoint.shutdown)
+                raise
+
+    def join():
+        if thread.ident is not None:
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "Dispatch endpoint thread did not retire"
+
+    # shutdown/server_close may block; the join timeout is not a shutdown bound.
+    dispose_all(
+        shutdown,
+        endpoint.server_close,
+        join,
+    )
+    # dispose_all retains an active body error; inspect retirement rather than
+    # treating its return as proof that every disposal succeeded.
+    if endpoint.fileno() == -1 and not thread.is_alive():
+        del endpoints[endpoint]
+
+
+def dispose_dispatch(processes, endpoints, releases, *after):
+    dispose_all(
+        *(lambda process=process: stop_host(process) for process in processes),
+        *releases,
+        *(lambda endpoint=endpoint: stop_endpoint(endpoint, endpoints) for endpoint in tuple(endpoints)),
+        *after,
+    )
+
+
 def main():
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-dispatch."))
     endpoint = FailureEndpoint()
     endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-    endpoint_thread.start()
     url = f"http://127.0.0.1:{endpoint.server_port}/responses"
     processes = []
+    endpoints = {endpoint: endpoint_thread}
+    releases = [endpoint.release.set]
     success_endpoint = None
     success_thread = None
     proposal_endpoint = None
@@ -43,6 +83,7 @@ def main():
     continuation_diagnostics = None
     completed = False
     try:
+        endpoint_thread.start()
         forbidden_effect = state / "proposal-must-not-launch"
         calls = [
             ("bash", "call\nA", json.dumps({"cmd": f"touch {forbidden_effect}", "timeout_ms": None, "description": "Create forbidden effect marker"}, separators=(",", ":"))),
@@ -66,6 +107,7 @@ def main():
             *race_responses,
         ])
         proposal_thread = threading.Thread(target=proposal_endpoint.serve_forever, daemon=True)
+        endpoints[proposal_endpoint] = proposal_thread
         proposal_thread.start()
         proposal_url = f"http://127.0.0.1:{proposal_endpoint.server_port}/responses"
         proposal_store = state / "proposal-store"
@@ -206,12 +248,10 @@ def main():
                 assert int(second_request["at_ns"]) < int(gate_release["at_ns"])
                 assert int(gate_release["at_ns"]) < int(second_lock["at_ns"])
             finally:
-                if first_process.poll() is None:
-                    first_process.kill()
-                    first_process.wait(timeout=5)
-                if second_process is not None and second_process.poll() is None:
-                    second_process.kill()
-                    second_process.wait(timeout=5)
+                dispose_all(
+                    lambda: stop_process(first_process, timeout=5),
+                    lambda: stop_process(second_process, timeout=5) if second_process is not None else None,
+                )
 
             denial = first_result if order == "denial-first" else second_result
             stop = second_result if order == "denial-first" else first_result
@@ -285,6 +325,7 @@ def main():
             queued_sse,
         ])
         continuation_thread = threading.Thread(target=continuation_endpoint.serve_forever, daemon=True)
+        endpoints[continuation_endpoint] = continuation_thread
         continuation_thread.start()
         continuation_store = state / "continuation-store"
         continuation_host = start_host(
@@ -554,6 +595,7 @@ def main():
         )
         success_endpoint = SuccessEndpoint([first_sse, second_sse])
         success_thread = threading.Thread(target=success_endpoint.serve_forever, daemon=True)
+        endpoints[success_endpoint] = success_thread
         success_thread.start()
         success_url = f"http://127.0.0.1:{success_endpoint.server_port}/responses"
         success_store = state / "success-store"
@@ -787,6 +829,7 @@ def main():
             ]
         )
         retry_thread = threading.Thread(target=retry_endpoint.serve_forever, daemon=True)
+        endpoints[retry_endpoint] = retry_thread
         retry_thread.start()
         retry_store = state / "retry-store"
         retry_host = start_host(
@@ -822,9 +865,7 @@ def main():
         database.close()
         stop_host(retry_host)
         processes.remove(retry_host)
-        retry_endpoint.shutdown()
-        retry_endpoint.server_close()
-        retry_thread.join(timeout=5)
+        stop_endpoint(retry_endpoint, endpoints)
 
         # A date four seconds ahead expires during five seconds of progressing
         # error-body transfer. It must not add the original delay again.
@@ -834,6 +875,7 @@ def main():
         )
         dated_endpoint = SuccessEndpoint([dated_failure, retry_sse])
         dated_thread = threading.Thread(target=dated_endpoint.serve_forever, daemon=True)
+        endpoints[dated_endpoint] = dated_thread
         dated_thread.start()
         dated_store = state / "dated-retry-store"
         dated_host = start_host(dated_store, f"http://127.0.0.1:{dated_endpoint.server_port}/responses")
@@ -855,9 +897,7 @@ def main():
         assert 0.04 <= after_body < 2.5, after_body
         stop_host(dated_host)
         processes.remove(dated_host)
-        dated_endpoint.shutdown()
-        dated_endpoint.server_close()
-        dated_thread.join(timeout=5)
+        stop_endpoint(dated_endpoint, endpoints)
 
         # A permanent request/authentication-class HTTP failure is terminal
         # after one Attempt and is never blindly retried.
@@ -867,6 +907,7 @@ def main():
         permanent_thread = threading.Thread(
             target=permanent_endpoint.serve_forever, daemon=True
         )
+        endpoints[permanent_endpoint] = permanent_thread
         permanent_thread.start()
         permanent_store = state / "permanent-store"
         permanent_host = start_host(
@@ -896,9 +937,7 @@ def main():
         assert len(permanent_endpoint.requests) == 1
         stop_host(permanent_host)
         processes.remove(permanent_host)
-        permanent_endpoint.shutdown()
-        permanent_endpoint.server_close()
-        permanent_thread.join(timeout=5)
+        stop_endpoint(permanent_endpoint, endpoints)
 
         # Redirects are disabled and contradictory provider headers are
         # deterministic response failures. Neither is a connection retry.
@@ -923,6 +962,7 @@ def main():
         disposition_thread = threading.Thread(
             target=disposition_endpoint.serve_forever, daemon=True
         )
+        endpoints[disposition_endpoint] = disposition_thread
         disposition_thread.start()
         for case_index, (name, _, expected_code) in enumerate(disposition_cases, 1):
             disposition_store = state / f"{name}-store"
@@ -958,9 +998,7 @@ def main():
             assert len(disposition_endpoint.requests) == case_index
             stop_host(disposition_host)
             processes.remove(disposition_host)
-        disposition_endpoint.shutdown()
-        disposition_endpoint.server_close()
-        disposition_thread.join(timeout=5)
+        stop_endpoint(disposition_endpoint, endpoints)
 
         # A local read failure while curl owns the request is a Host fault,
         # not provider evidence. Fence dispatch, retain uncertainty and avoid
@@ -971,6 +1009,7 @@ def main():
         local_read_thread = threading.Thread(
             target=local_read_endpoint.serve_forever, daemon=True
         )
+        endpoints[local_read_endpoint] = local_read_thread
         local_read_thread.start()
         local_read_store = state / "local-read-store"
         local_read_host = start_host(
@@ -999,6 +1038,7 @@ def main():
             "local request-read fenced shutdown",
         )
         assert local_read_host.returncode != 0
+        stop_host(local_read_host)
         processes.remove(local_read_host)
         database = sqlite3.connect(local_read_store / "rui.sqlite3")
         assert database.execute(
@@ -1006,9 +1046,7 @@ def main():
         ).fetchone() == (1, 1, 1, None)
         database.close()
         assert len(local_read_endpoint.requests) <= 1
-        local_read_endpoint.shutdown()
-        local_read_endpoint.server_close()
-        local_read_thread.join(timeout=5)
+        stop_endpoint(local_read_endpoint, endpoints)
 
         # Completion identity is recovered only after the fixed slot owner
         # matches curl's native handle. Missing, foreign and mismatched private
@@ -1028,6 +1066,7 @@ def main():
         identity_thread = threading.Thread(
             target=identity_endpoint.serve_forever, daemon=True
         )
+        endpoints[identity_endpoint] = identity_thread
         identity_thread.start()
         for index, (fault, expected_error) in enumerate(
             (
@@ -1062,10 +1101,11 @@ def main():
                 lambda process=identity_host: process.poll() is not None,
                 f"{fault} fenced shutdown",
             )
-            processes.remove(identity_host)
             assert identity_host.returncode == 1, identity_host.returncode
             stderr = identity_host.stderr.read()
             assert expected_error.encode() in stderr, stderr
+            stop_host(identity_host)
+            processes.remove(identity_host)
             assert len(identity_endpoint.requests) == index + 1
             database = sqlite3.connect(identity_store / "rui.sqlite3")
             assert database.execute(
@@ -1086,9 +1126,7 @@ def main():
             )
             stop_host(offline)
             processes.remove(offline)
-        identity_endpoint.shutdown()
-        identity_endpoint.server_close()
-        identity_thread.join(timeout=5)
+        stop_endpoint(identity_endpoint, endpoints)
 
         # A replacement Attempt reuses the exact historical view, including
         # private continuation, even after newer settings and input commit.
@@ -1102,6 +1140,7 @@ def main():
             "continued-later", "continued-r-3", "continued-m-3", "later answer"
         )
         continued_retry_release = threading.Event()
+        releases.append(continued_retry_release.set)
         continued_endpoint = SuccessEndpoint(
             [
                 continued_first,
@@ -1113,6 +1152,7 @@ def main():
         continued_thread = threading.Thread(
             target=continued_endpoint.serve_forever, daemon=True
         )
+        endpoints[continued_endpoint] = continued_thread
         continued_thread.start()
         continued_store = state / "continued-retry-store"
         continued_host = start_host(
@@ -1184,9 +1224,7 @@ def main():
         assert len(continued_endpoint.requests) == 4
         stop_host(continued_host)
         processes.remove(continued_host)
-        continued_endpoint.shutdown()
-        continued_endpoint.server_close()
-        continued_thread.join(timeout=5)
+        stop_endpoint(continued_endpoint, endpoints)
 
         evidence_cases = (
             ("body-only", "model-a-served", {}, ("model-a-served", None, None, None)),
@@ -1235,6 +1273,7 @@ def main():
             ]
         )
         evidence_thread = threading.Thread(target=evidence_endpoint.serve_forever, daemon=True)
+        endpoints[evidence_endpoint] = evidence_thread
         evidence_thread.start()
         evidence_url = f"http://127.0.0.1:{evidence_endpoint.server_port}/responses"
         for name, _, _, expected_evidence in evidence_cases:
@@ -1266,9 +1305,7 @@ def main():
             assert actual_evidence == expected_evidence, (name, actual_evidence, expected_evidence)
             stop_host(reopened)
             processes.remove(reopened)
-        evidence_endpoint.shutdown()
-        evidence_endpoint.server_close()
-        evidence_thread.join(timeout=5)
+        stop_endpoint(evidence_endpoint, endpoints)
 
         contradictory_sse, _, _ = sse_answer(
             "contradictory-response",
@@ -1292,6 +1329,7 @@ def main():
         contradictory_thread = threading.Thread(
             target=contradictory_endpoint.serve_forever, daemon=True
         )
+        endpoints[contradictory_endpoint] = contradictory_thread
         contradictory_thread.start()
         contradictory_store = state / "contradictory-evidence-store"
         contradictory_host = start_host(
@@ -1360,9 +1398,7 @@ def main():
         assert unreadable_result.returncode != 0, unreadable_result.stdout
         stop_host(contradictory_reopened)
         processes.remove(contradictory_reopened)
-        contradictory_endpoint.shutdown()
-        contradictory_endpoint.server_close()
-        contradictory_thread.join(timeout=5)
+        stop_endpoint(contradictory_endpoint, endpoints)
 
         # Input committed after the first request's cutoff is selected at the
         # next boundary. The first complete candidate is durable history but
@@ -1375,10 +1411,12 @@ def main():
         )
         first_release = threading.Event()
         second_release = threading.Event()
+        releases.extend((first_release.set, second_release.set))
         pending_endpoint = SuccessEndpoint(
             [(pending_first_sse, first_release), (pending_second_sse, second_release)]
         )
         pending_thread = threading.Thread(target=pending_endpoint.serve_forever, daemon=True)
+        endpoints[pending_endpoint] = pending_thread
         pending_thread.start()
         pending_store = state / "pending-store"
         pending_host = start_host(
@@ -1423,9 +1461,7 @@ def main():
         assert read_result(pending_store, "pending-second") == b"actual final"
         stop_host(pending_host)
         processes.remove(pending_host)
-        pending_endpoint.shutdown()
-        pending_endpoint.server_close()
-        pending_thread.join(timeout=5)
+        stop_endpoint(pending_endpoint, endpoints)
 
         # Structured output remains an explicitly unavailable partial-build
         # surface. Even a complete 2xx text response cannot be published under
@@ -1435,6 +1471,7 @@ def main():
         )[0]
         schema_endpoint = SuccessEndpoint([schema_candidate])
         schema_thread = threading.Thread(target=schema_endpoint.serve_forever, daemon=True)
+        endpoints[schema_endpoint] = schema_thread
         schema_thread.start()
         schema_store = state / "unsupported-schema-store"
         schema_host = start_host(
@@ -1474,9 +1511,7 @@ def main():
         database.close()
         stop_host(schema_host)
         processes.remove(schema_host)
-        schema_endpoint.shutdown()
-        schema_endpoint.server_close()
-        schema_thread.join(timeout=5)
+        stop_endpoint(schema_endpoint, endpoints)
 
         # Completed transport is not success: the whole SSE candidate must be
         # complete, consistent and limited to the supported text subset.
@@ -1572,6 +1607,7 @@ def main():
             ]
         )
         invalid_thread = threading.Thread(target=invalid_endpoint.serve_forever, daemon=True)
+        endpoints[invalid_endpoint] = invalid_thread
         invalid_thread.start()
         for index, expected_code in enumerate(
             (
@@ -1619,9 +1655,7 @@ def main():
             database.close()
             stop_host(invalid_host)
             processes.remove(invalid_host)
-        invalid_endpoint.shutdown()
-        invalid_endpoint.server_close()
-        invalid_thread.join(timeout=5)
+        stop_endpoint(invalid_endpoint, endpoints)
 
         fault_effect = state / "output-fault-must-not-launch"
         fault_calls = classification_population("fault", fault_effect)
@@ -1637,6 +1671,7 @@ def main():
         output_fault_thread = threading.Thread(
             target=output_fault_endpoint.serve_forever, daemon=True
         )
+        endpoints[output_fault_endpoint] = output_fault_thread
         output_fault_thread.start()
         for index, (fault, expected_code) in enumerate(
             (
@@ -1684,6 +1719,7 @@ def main():
             message(state, fault_store, f"{fault}-message", f"direct/{fault}", "fault")
             wait_for(lambda: fault_host.poll() is not None, f"{fault} fenced shutdown")
             assert fault_host.returncode != 0
+            stop_host(fault_host)
             processes.remove(fault_host)
             database = sqlite3.connect(fault_store / "rui.sqlite3")
             assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
@@ -1694,14 +1730,13 @@ def main():
             assert database.execute("SELECT count(*) FROM action_operation").fetchone()[0] == 0
             database.close()
         assert not fault_effect.exists()
-        output_fault_endpoint.shutdown()
-        output_fault_endpoint.server_close()
-        output_fault_thread.join(timeout=5)
+        stop_endpoint(output_fault_endpoint, endpoints)
 
         scratch_endpoint = SuccessEndpoint(
             [sse_answer("scratch-response", "scratch-r", "scratch-m", "x" * 100_000)[0]]
         )
         scratch_thread = threading.Thread(target=scratch_endpoint.serve_forever, daemon=True)
+        endpoints[scratch_endpoint] = scratch_thread
         scratch_thread.start()
         scratch_store = state / "response-scratch-store"
         scratch_host = start_host(
@@ -1733,9 +1768,7 @@ def main():
         stop_host(scratch_host)
         assert_model_cleanup_census(scratch_diagnostics, rejected)
         processes.remove(scratch_host)
-        scratch_endpoint.shutdown()
-        scratch_endpoint.server_close()
-        scratch_thread.join(timeout=5)
+        stop_endpoint(scratch_endpoint, endpoints)
 
         # Item cardinality and answer bytes grow independently while execution
         # capacity remains one and metadata/capture stay in shared scratch.
@@ -1744,6 +1777,7 @@ def main():
         byte_payload = sse_many("large-answer", 1, large_answer)
         growth_endpoint = SuccessEndpoint([count_payload, byte_payload])
         growth_thread = threading.Thread(target=growth_endpoint.serve_forever, daemon=True)
+        endpoints[growth_endpoint] = growth_thread
         growth_thread.start()
         growth_store = state / "growth-store"
         growth_host = start_host(
@@ -1779,22 +1813,25 @@ def main():
         # the read successful or consume the saved keyed answer. A fresh read
         # streams the complete bytes again without inventing a newline.
         read_fd, write_fd = os.pipe()
-        failed_destination = subprocess.Popen(
-            [
-                str(RUI),
-                "request", "read-result",
-                "--store",
-                str(growth_store),
-                "--key",
-                "growth-bytes",
-            ],
-            stdout=write_fd,
-            stderr=subprocess.PIPE,
-        )
-        os.close(write_fd)
-        prefix = os.read(read_fd, 4096)
-        os.close(read_fd)
-        _, failure_stderr = failed_destination.communicate(timeout=15)
+        failed_destination = None
+        try:
+            failed_destination = subprocess.Popen(
+                [str(RUI), "request", "read-result", "--store", str(growth_store), "--key", "growth-bytes"],
+                stdout=write_fd,
+                stderr=subprocess.PIPE,
+            )
+            os.close(write_fd)
+            write_fd = None
+            prefix = os.read(read_fd, 4096)
+            os.close(read_fd)
+            read_fd = None
+            _, failure_stderr = failed_destination.communicate(timeout=15)
+        finally:
+            dispose_all(
+                lambda: os.close(write_fd) if write_fd is not None else None,
+                lambda: os.close(read_fd) if read_fd is not None else None,
+                lambda: stop_process(failed_destination) if failed_destination is not None else None,
+            )
         assert failed_destination.returncode != 0, failure_stderr
         assert 0 < len(prefix) < len(large_answer), len(prefix)
         complete_path = state / "growth-answer.bin"
@@ -1831,9 +1868,7 @@ def main():
         stop_host(growth_host)
         assert_model_cleanup_census(growth_diagnostics, counted, imported)
         processes.remove(growth_host)
-        growth_endpoint.shutdown()
-        growth_endpoint.server_close()
-        growth_thread.join(timeout=5)
+        stop_endpoint(growth_endpoint, endpoints)
 
         # Public answers are projections of immutable provider items. Exercise
         # both dedup orders: answer then caller input, and caller then answer.
@@ -1844,6 +1879,7 @@ def main():
             sse_answer("projection-2", "p-r2", "p-m2", "caller-first")[0],
         ])
         projection_thread = threading.Thread(target=projection_endpoint.serve_forever, daemon=True)
+        endpoints[projection_endpoint] = projection_thread
         projection_thread.start()
         projection_store = state / "projection-store"
         projection_url = f"http://127.0.0.1:{projection_endpoint.server_port}/responses"
@@ -1872,9 +1908,7 @@ def main():
         assert read_result(projection_store, "projection-second") == b"caller-first"
         stop_host(host)
         processes.remove(host)
-        projection_endpoint.shutdown()
-        projection_endpoint.server_close()
-        projection_thread.join(timeout=5)
+        stop_endpoint(projection_endpoint, endpoints)
 
         # A committed permit launches exactly one complete frozen request. The
         # endpoint holds the response so later settings and input arrive while
@@ -2074,6 +2108,7 @@ def main():
         preparation_thread = threading.Thread(
             target=preparation_endpoint.serve_forever, daemon=True
         )
+        endpoints[preparation_endpoint] = preparation_thread
         preparation_thread.start()
         preparation_store = state / "known-preparation-store"
         preparation_host = start_host(
@@ -2178,9 +2213,7 @@ def main():
         assert resources["dispatch_fenced"] is False, resources
         stop_host(preparation_host)
         processes.remove(preparation_host)
-        preparation_endpoint.shutdown()
-        preparation_endpoint.server_close()
-        preparation_thread.join(timeout=5)
+        stop_endpoint(preparation_endpoint, endpoints)
 
         # Fresh processes are terminated after committed Attempt admission,
         # launch, sealed validation input, and final result commit. Only the
@@ -2192,6 +2225,7 @@ def main():
         prelaunch_thread = threading.Thread(
             target=prelaunch_endpoint.serve_forever, daemon=True
         )
+        endpoints[prelaunch_endpoint] = prelaunch_thread
         prelaunch_thread.start()
         prelaunch_store = state / "crash-prelaunch-store"
         prelaunch_host = start_host(
@@ -2277,11 +2311,10 @@ def main():
         assert resources["dispatch_fenced"] is False, resources
         stop_host(prelaunch_host)
         processes.remove(prelaunch_host)
-        prelaunch_endpoint.shutdown()
-        prelaunch_endpoint.server_close()
-        prelaunch_thread.join(timeout=5)
+        stop_endpoint(prelaunch_endpoint, endpoints)
 
         launched_release = threading.Event()
+        releases.append(launched_release.set)
         launched_lost = sse_answer(
             "launched-lost", "launched-lost-r", "launched-lost-m", "lost answer"
         )[0]
@@ -2297,6 +2330,7 @@ def main():
         launched_thread = threading.Thread(
             target=launched_endpoint.serve_forever, daemon=True
         )
+        endpoints[launched_endpoint] = launched_thread
         launched_thread.start()
         launched_store = state / "crash-launched-store"
         launched_host = start_host(
@@ -2331,9 +2365,7 @@ def main():
         assert len(launched_endpoint.requests) == 2
         stop_host(launched_host)
         processes.remove(launched_host)
-        launched_endpoint.shutdown()
-        launched_endpoint.server_close()
-        launched_thread.join(timeout=5)
+        stop_endpoint(launched_endpoint, endpoints)
 
         sealed_lost = sse_answer(
             "sealed-lost", "sealed-lost-r", "sealed-lost-m", "lost sealed answer"
@@ -2343,6 +2375,7 @@ def main():
         )[0]
         sealed_endpoint = SuccessEndpoint([sealed_lost, sealed_recovered])
         sealed_thread = threading.Thread(target=sealed_endpoint.serve_forever, daemon=True)
+        endpoints[sealed_endpoint] = sealed_thread
         sealed_thread.start()
         sealed_store = state / "crash-sealed-store"
         sealed_host = start_host(
@@ -2385,9 +2418,7 @@ def main():
         assert len(sealed_endpoint.requests) == 2
         stop_host(sealed_host)
         processes.remove(sealed_host)
-        sealed_endpoint.shutdown()
-        sealed_endpoint.server_close()
-        sealed_thread.join(timeout=5)
+        stop_endpoint(sealed_endpoint, endpoints)
 
         committed_sse = sse_answer(
             "committed-response", "committed-r", "committed-m", "committed answer"
@@ -2396,6 +2427,7 @@ def main():
         committed_thread = threading.Thread(
             target=committed_endpoint.serve_forever, daemon=True
         )
+        endpoints[committed_endpoint] = committed_thread
         committed_thread.start()
         committed_store = state / "crash-committed-store"
         committed_host = start_host(
@@ -2431,15 +2463,14 @@ def main():
         assert len(committed_endpoint.requests) == 1
         stop_host(committed_host)
         processes.remove(committed_host)
-        committed_endpoint.shutdown()
-        committed_endpoint.server_close()
-        committed_thread.join(timeout=5)
+        stop_endpoint(committed_endpoint, endpoints)
 
         # Full execution capacity leaves later work as only a durable queued
         # admission: no Attempt, request scratch, or resident waiter appears.
         # Releasing custody is sufficient to make progress without a new
         # message or notification.
         capacity_release = threading.Event()
+        releases.append(capacity_release.set)
         capacity_answer = sse_answer(
             "capacity-release-response",
             "capacity-release-r",
@@ -2455,6 +2486,7 @@ def main():
         capacity_thread = threading.Thread(
             target=capacity_endpoint.serve_forever, daemon=True
         )
+        endpoints[capacity_endpoint] = capacity_thread
         capacity_thread.start()
         durable_wait_store = state / "durable-capacity-wait-store"
         durable_wait_host = start_host(
@@ -2538,15 +2570,14 @@ def main():
         )
         stop_host(durable_wait_host)
         processes.remove(durable_wait_host)
-        capacity_endpoint.shutdown()
-        capacity_endpoint.server_close()
-        capacity_thread.join(timeout=5)
+        stop_endpoint(capacity_endpoint, endpoints)
 
         # Retry selection is taken only when execution capacity is available.
         # A candidate observed while full cannot survive until release and
         # bypass an older Operation that becomes due in the meantime.
         stale_release = threading.Event()
         newer_initial_release = threading.Event()
+        releases.extend((newer_initial_release.set, stale_release.set))
         stale_endpoint = SuccessEndpoint(
             [
                 ResponseSpec(b"older waiting", {"Retry-After": "3"}, 503),
@@ -2560,6 +2591,7 @@ def main():
             ]
         )
         stale_thread = threading.Thread(target=stale_endpoint.serve_forever, daemon=True)
+        endpoints[stale_endpoint] = stale_thread
         stale_thread.start()
         stale_store = state / "retry-release-order-store"
         stale_host = start_host(
@@ -2625,15 +2657,14 @@ def main():
         assert released_user_text == "stale-older", released_user_text
         stop_host(stale_host)
         processes.remove(stale_host)
-        stale_endpoint.shutdown()
-        stale_endpoint.server_close()
-        stale_thread.join(timeout=5)
+        stop_endpoint(stale_endpoint, endpoints)
 
         # The smallest age-indexed selector keeps no scan state. With one live
         # transport and a second permitted H1 connection it still finds a due
         # Operation behind 100 older future retries within the light-discovery target.
         backlog_stall_release = threading.Event()
         backlog_retry_release = threading.Event()
+        releases.extend((backlog_retry_release.set, backlog_stall_release.set))
         backlog_endpoint = SuccessEndpoint(
             [
                 ResponseSpec(b"initial temporary failure", {}, 503),
@@ -2642,6 +2673,7 @@ def main():
             ]
         )
         backlog_thread = threading.Thread(target=backlog_endpoint.serve_forever, daemon=True)
+        endpoints[backlog_endpoint] = backlog_thread
         backlog_thread.start()
         backlog_store = state / "retry-age-backlog-store"
         backlog_host = start_host(
@@ -2722,9 +2754,7 @@ def main():
         backlog_stall_release.set()
         stop_host(backlog_host)
         processes.remove(backlog_host)
-        backlog_endpoint.shutdown()
-        backlog_endpoint.server_close()
-        backlog_thread.join(timeout=5)
+        stop_endpoint(backlog_endpoint, endpoints)
 
         # Exhausted recovery and admission are independent work in one Host
         # turn. A due retry and then queued new work both receive free custody
@@ -2733,6 +2763,7 @@ def main():
         # eventually drains.
         recovery_retry_release = threading.Event()
         recovery_new_release = threading.Event()
+        releases.extend((recovery_retry_release.set, recovery_new_release.set))
         recovery_endpoint = SuccessEndpoint(
             [
                 ResponseSpec(b"retry later", {}, 503),
@@ -2744,6 +2775,7 @@ def main():
         recovery_thread = threading.Thread(
             target=recovery_endpoint.serve_forever, daemon=True
         )
+        endpoints[recovery_endpoint] = recovery_thread
         recovery_thread.start()
         recovery_store = state / "exhausted-control-store"
         recovery_host = start_host(
@@ -2980,14 +3012,13 @@ def main():
             ).fetchone()[0] == 0
         finally:
             database.close()
-        recovery_endpoint.shutdown()
-        recovery_endpoint.server_close()
-        recovery_thread.join(timeout=5)
+        stop_endpoint(recovery_endpoint, endpoints)
 
         # Exhaustion settles only the selected prefix. Input admitted while
         # those retries run remains unselected and receives the outcome of the
         # successor Turn that eventually takes it.
         exhaustion_release = threading.Event()
+        releases.append(exhaustion_release.set)
         exhaustion_answer = sse_answer(
             "exhaustion-success",
             "exhaustion-success-r",
@@ -3006,6 +3037,7 @@ def main():
         exhaustion_thread = threading.Thread(
             target=exhaustion_endpoint.serve_forever, daemon=True
         )
+        endpoints[exhaustion_endpoint] = exhaustion_thread
         exhaustion_thread.start()
         exhaustion_store = state / "retry-exhaustion-store"
         exhaustion_host = start_host(
@@ -3062,15 +3094,14 @@ def main():
         assert len(exhaustion_endpoint.requests) == 5
         stop_host(exhaustion_host)
         processes.remove(exhaustion_host)
-        exhaustion_endpoint.shutdown()
-        exhaustion_endpoint.server_close()
-        exhaustion_thread.join(timeout=5)
+        stop_endpoint(exhaustion_endpoint, endpoints)
 
         # One reactor fills two fixed custody records without allocating a
         # worker per Session. Complete beta first and verify that the opaque
         # completion identity settles beta's binding while alpha remains live.
         alpha_release = threading.Event()
         beta_release = threading.Event()
+        releases.extend((beta_release.set, alpha_release.set))
         capacity_endpoint = SuccessEndpoint(
             [],
             responses_by_input={
@@ -3085,6 +3116,7 @@ def main():
             },
         )
         capacity_thread = threading.Thread(target=capacity_endpoint.serve_forever, daemon=True)
+        endpoints[capacity_endpoint] = capacity_thread
         capacity_thread.start()
         capacity_store = state / "capacity-store"
         host = start_host(
@@ -3116,15 +3148,14 @@ def main():
         assert len(capacity_endpoint.requests) == 2
         stop_host(host)
         processes.remove(host)
-        capacity_endpoint.shutdown()
-        capacity_endpoint.server_close()
-        capacity_thread.join(timeout=5)
+        stop_endpoint(capacity_endpoint, endpoints)
 
         # H1 loopback is still supported, but a capacity-two Host now has
         # only one provider connection. The second admitted Attempt waits in
         # curl, then drains after the first releases it rather than spinning
         # or opening a second socket.
         h1_release = threading.Event()
+        releases.append(h1_release.set)
         h1_endpoint = SuccessEndpoint(
             [],
             responses_by_input={
@@ -3133,6 +3164,7 @@ def main():
             },
         )
         h1_thread = threading.Thread(target=h1_endpoint.serve_forever, daemon=True)
+        endpoints[h1_endpoint] = h1_thread
         h1_thread.start()
         h1_store = state / "h1-queued-store"
         h1_host = start_host(
@@ -3158,18 +3190,18 @@ def main():
         assert len(h1_endpoint.requests) == 2
         stop_host(h1_host)
         processes.remove(h1_host)
-        h1_endpoint.shutdown()
-        h1_endpoint.server_close()
-        h1_thread.join(timeout=5)
+        stop_endpoint(h1_endpoint, endpoints)
 
         # A capacity-waiting easy has no curl progress callback. Its Attempt
         # must still expire while the first H1 response makes steady progress.
         pacing_end = threading.Event()
+        releases.append(pacing_end.set)
         slow_response = ResponseSpec(
             b"x" * 2048, {}, 422, chunk_delay=0.015, pacing_end=pacing_end
         )
         slow_endpoint = SuccessEndpoint([slow_response])
         slow_thread = threading.Thread(target=slow_endpoint.serve_forever, daemon=True)
+        endpoints[slow_endpoint] = slow_thread
         slow_thread.start()
         slow_store = state / "h1-queue-deadline-store"
         slow_host = start_host(
@@ -3212,9 +3244,7 @@ def main():
                 "WHERE session_ref='direct/slow-second'"
             ).fetchone()
         assert retry[0] == 1 and retry[1] == 0 and retry[2] is not None, retry
-        slow_endpoint.shutdown()
-        slow_endpoint.server_close()
-        slow_thread.join(timeout=5)
+        stop_endpoint(slow_endpoint, endpoints)
 
         # A failed Attempt commit rolls back all provenance and cannot produce
         # an endpoint launch.
@@ -3400,6 +3430,7 @@ def main():
         preparation_stop_thread = threading.Thread(
             target=preparation_stop_endpoint.serve_forever, daemon=True
         )
+        endpoints[preparation_stop_endpoint] = preparation_stop_thread
         preparation_stop_thread.start()
         preparation_stop_store = state / "preparation-stop-store"
         preparation_stop_host = start_host(
@@ -3461,9 +3492,7 @@ def main():
         assert preparation_stop_endpoint.requests == []
         stop_process(preparation_stop_host)
         processes.remove(preparation_stop_host)
-        preparation_stop_endpoint.shutdown()
-        preparation_stop_endpoint.server_close()
-        preparation_stop_thread.join(timeout=5)
+        stop_endpoint(preparation_stop_endpoint, endpoints)
 
         # Infrastructure shutdown owns the same cancellation path. Populate
         # durable work while execution is unavailable, then make the listener
@@ -3479,6 +3508,7 @@ def main():
         preparation_shutdown_thread = threading.Thread(
             target=preparation_shutdown_endpoint.serve_forever, daemon=True
         )
+        endpoints[preparation_shutdown_endpoint] = preparation_shutdown_thread
         preparation_shutdown_thread.start()
         preparation_shutdown_store = state / "preparation-shutdown-store"
         offline_shutdown_host = start_host(preparation_shutdown_store, None)
@@ -3552,9 +3582,7 @@ def main():
         ) == b"prepared after shutdown"
         stop_host(preparation_shutdown_host)
         processes.remove(preparation_shutdown_host)
-        preparation_shutdown_endpoint.shutdown()
-        preparation_shutdown_endpoint.server_close()
-        preparation_shutdown_thread.join(timeout=5)
+        stop_endpoint(preparation_shutdown_endpoint, endpoints)
 
         # A canonical save fault rolls back the claimed failure, fences the
         # live dispatch owner, and leaves the admitted Attempt uncertain for
@@ -3885,6 +3913,7 @@ def main():
         assert canonical_read.returncode != 0
         wait_for(lambda: host.poll() is not None, "effect-aware Host shutdown", timeout=5)
         assert host.returncode != 0
+        stop_host(host)
         processes.remove(host)
         assert endpoint.requests == []
         database = sqlite3.connect(race_store / "rui.sqlite3")
@@ -3934,6 +3963,7 @@ def main():
             timeout=5,
         )
         assert report_unlink_host.returncode != 0
+        stop_host(report_unlink_host)
         processes.remove(report_unlink_host)
         report_leftover = report_unlink_store / "scratch" / "report-0-1.tmp"
         assert report_leftover.exists(), report_leftover
@@ -3972,6 +4002,7 @@ def main():
         )
         unlink_endpoint = SuccessEndpoint([unlink_output])
         unlink_thread = threading.Thread(target=unlink_endpoint.serve_forever, daemon=True)
+        endpoints[unlink_endpoint] = unlink_thread
         unlink_thread.start()
         unlink_url = f"http://127.0.0.1:{unlink_endpoint.server_port}/responses"
         for fault, pattern, launched in (
@@ -4037,9 +4068,7 @@ def main():
             stop_host(cleanup_host)
             processes.remove(cleanup_host)
         assert not unlink_effect.exists()
-        unlink_endpoint.shutdown()
-        unlink_endpoint.server_close()
-        unlink_thread.join(timeout=5)
+        stop_endpoint(unlink_endpoint, endpoints)
 
         # If initial unlink fails, the live owner keeps both descriptors and
         # named scratch while fencing later dispatch. No bytes have yet been
@@ -4083,52 +4112,39 @@ def main():
         completed = True
     finally:
         incoming_error = sys.exc_info()[1]
-        collector_error = None
-        if continuation_diagnostics is not None:
-            preserve_failure_metadata(state / "successor-pre-kill.json", lambda: {
-                "process": continuation_host.pid, "returncode": continuation_host.poll(),
-                "atomic_census": False, "stderr_tail": continuation_diagnostics.tail().decode(errors="replace")})
+
+        def collect_successor():
+            if continuation_diagnostics is None:
+                return
             try:
+                preserve_failure_metadata(state / "successor-pre-kill.json", lambda: {
+                    "process": continuation_host.pid, "returncode": continuation_host.poll(),
+                    "atomic_census": False, "stderr_tail": continuation_diagnostics.tail().decode(errors="replace")})
                 if continuation_host.poll() is None:
                     crash_host(continuation_host, state, "successor-failure", diagnostics=continuation_diagnostics)
                 else:
                     continuation_diagnostics.close()
                     (state / "successor-failure.stderr").write_bytes(continuation_diagnostics.tail())
-            except Exception as error:
-                collector_error = error  # Never skip unrelated mandatory teardown.
-        for process in processes:
-            stop_host(process)
-        endpoint.shutdown()
-        endpoint.server_close()
-        endpoint_thread.join(timeout=5)
-        if success_endpoint is not None:
-            success_endpoint.shutdown()
-            success_endpoint.server_close()
-        if success_thread is not None:
-            success_thread.join(timeout=5)
-        if proposal_endpoint is not None:
-            proposal_endpoint.shutdown()
-            proposal_endpoint.server_close()
-        if proposal_thread is not None:
-            proposal_thread.join(timeout=5)
-        if continuation_endpoint is not None:
-            continuation_endpoint.shutdown()
-            continuation_endpoint.server_close()
-        if continuation_thread is not None:
-            continuation_thread.join(timeout=5)
-        if proposal_gate_keeper is not None:
-            os.close(proposal_gate_keeper)
-        if completed:
-            shutil.rmtree(state)
-        else:
-            print(f"retained dispatch integration failure state: {state}", file=sys.stderr)
-        if collector_error is not None:
-            preserve_failure_metadata(state / "successor-collector-failure.json", lambda: {
-                "original_error": type(incoming_error).__name__ if incoming_error else None,
-                "collector_error": type(collector_error).__name__})
-            if incoming_error is None:
-                raise collector_error
-            print("Successor diagnostic collection failed; original failure retained", file=sys.stderr)
+            except BaseException as error:
+                preserve_failure_metadata(state / "successor-collector-failure.json", lambda error=error: {
+                    "original_error": type(incoming_error).__name__ if incoming_error else None,
+                    "collector_error": type(error).__name__})
+                raise
+
+        try:
+            dispose_all(
+                collect_successor,
+                lambda: dispose_dispatch(
+                    processes, endpoints, releases,
+                    lambda: os.close(proposal_gate_keeper) if proposal_gate_keeper is not None else None,
+                ),
+            )
+        except BaseException:
+            completed = False
+            raise
+        finally:
+            dispose_all(lambda: shutil.rmtree(state) if completed and incoming_error is None else
+                        print(f"retained dispatch integration failure state: {state}", file=sys.stderr))
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from conversation_page_integration import host_resources, idle_resources
 from model_fixture import sse_tool_calls
 from host_process import TestHTTPServer, canonical_fixture_root, stop_process
 from proposal_integration import digest
+from one_reply import one_reply
 
 CALLER = pathlib.Path(sys.argv[2]).resolve()
 SESSION = "direct/activity"
@@ -27,11 +28,11 @@ CALLS = [("bash", "exact-call", '{"cmd":"exit 0","timeout_ms":null,"description"
 CALLS += [("unknown", f"rejected-{i}", TEXT if i == 1 else "{}") for i in range(1, 18)]
 
 
-def caller(store, mode, *args, session=SESSION, ok=True):
+def caller(store, mode, *args, session=SESSION, ok=True, timeout=10):
     argv = [str(CALLER), mode, str(store), session, *map(str, args)]
     measured = os.environ.get("RUI_ACTIVITY_MEASURE") == "1" and ok
     if measured: argv = ["/usr/bin/time", "-f", "native maxrss_kib=%M", *argv]
-    result = subprocess.run(argv, capture_output=True, timeout=10)
+    result = subprocess.run(argv, capture_output=True, timeout=timeout)
     assert (result.returncode == 0) == ok, (mode, result.returncode, result.stderr)
     if measured: print(mode, len(result.stdout), result.stderr.decode().strip())
     return result.stdout
@@ -58,31 +59,14 @@ def kind(row):
 
 
 def mock_reply(path, store, mode, body, advertised=None, ok=False):
-    path = pathlib.Path(path)
-    path.unlink(missing_ok=True)
-    with socket.socket(socket.AF_UNIX) as listener:
-        listener.bind(str(path))
-        listener.listen(1)
-        def serve():
-            with listener.accept()[0] as peer:
-                data = b""
-                while b"\r\n\r\n" not in data: data += peer.recv(4096)
-                head, received = data.split(b"\r\n\r\n", 1)
-                length = int(next(line.split(b": ")[1] for line in head.split(b"\r\n") if line.startswith(b"Content-Length:")))
-                while len(received) < length: received += peer.recv(4096)
-                size = len(body) if advertised is None else advertised
-                headers = b"" if mode == "page" else f"X-Rui-Content-Bytes: {size}\r\nX-Rui-Next-Offset: {size}\r\n".encode()
-                content_type = b"application/json" if mode == "page" else b"application/octet-stream"
-                peer.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: " + content_type + f"\r\nContent-Length: {size}\r\n".encode() +
-                    headers + b"X-Rui-Wire-Version: 1\r\nConnection: close\r\n\r\n" + body)
-        worker = threading.Thread(target=serve)
-        worker.start()
+    size = len(body) if advertised is None else advertised
+    headers = b"" if mode == "page" else f"X-Rui-Content-Bytes: {size}\r\nX-Rui-Next-Offset: {size}\r\n".encode()
+    content_type = b"application/json" if mode == "page" else b"application/octet-stream"
+    response = (b"HTTP/1.1 200 OK\r\nContent-Type: " + content_type + f"\r\nContent-Length: {size}\r\n".encode() +
+        headers + b"X-Rui-Wire-Version: 1\r\nConnection: close\r\n\r\n" + body)
+    with one_reply(path, response) as deadline:
         args = ("null", 0, "null", "forward") if mode == "page" else (1, 0)
-        result = caller(store, mode, *args, ok=ok)
-        worker.join(timeout=5)
-        assert not worker.is_alive()
-    path.unlink()
-    return result
+        return caller(store, mode, *args, ok=ok, timeout=max(0, deadline - time.monotonic()))
 
 
 def main():

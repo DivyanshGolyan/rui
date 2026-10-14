@@ -35,6 +35,9 @@ live: View.Live = .{},
 observed_live: View.Live = .{},
 cursor: client.ActivityCursor = .{},
 next_cursor: client.ActivityCursor = .{},
+// UI commits layout alongside delivered Activity; workers borrow a snapshot.
+compact_tools: bool = false,
+next_compact_tools: bool = false,
 history_cursor: ?client.ConversationCursor = null,
 next_history_cursor: ?client.ConversationCursor = null,
 history_requested: ?enum { older, latest } = null,
@@ -238,6 +241,10 @@ fn driveActive(self: *Self) !void {
         if (admission.failure()) |err| if (err == error.CanonicalStoreFailure) return err;
         if (self.reader.take()) |bytes| {
             if (bytes.len != 0) {
+                // A notice can end the group while a read is still silent.
+                // Restore its separator before the first compact heading.
+                if (!self.reader_output_started and (self.read_phase == .activity or self.read_phase == .permission) and !self.opening and !self.compact_tools and bytes[0] != '\n')
+                    try self.terminal.permanent("\n");
                 self.reader_output_started = true;
                 try self.terminal.permanent(bytes);
             }
@@ -261,11 +268,13 @@ fn driveActive(self: *Self) !void {
             } else if (std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at) {
                 self.read_phase = .activity;
                 self.reader_output_started = false;
+                self.next_compact_tools = self.compact_tools;
                 try self.reader.start(self.init.io, self, scan);
             } else if (!self.opening and self.submission.view() == null and self.current.first_action != null and self.input.pending() == .none) {
                 self.read_phase = .permission;
                 self.prepared_action = null;
                 self.reader_output_started = false;
+                self.next_compact_tools = self.compact_tools;
                 try self.reader.start(self.init.io, self, permission);
             }
         }
@@ -273,6 +282,7 @@ fn driveActive(self: *Self) !void {
         if (self.notice != null and !self.opening and (self.reader.thread == null or !self.reader_output_started)) {
             const notice = self.notice.?;
             self.notice = null;
+            self.compact_tools = false;
             try self.terminal.permanent("\n");
             try self.terminal.permanent((if (std.mem.startsWith(u8, notice, "!")) View.Style.failure else View.Style.normal).code(self.colour));
             try self.terminal.permanent(notice);
@@ -477,6 +487,7 @@ fn writePendingDiagnostic(self: *const Self, out: *std.Io.Writer) !void {
 
 fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
     const pending = self.pending_diagnostic.?;
+    self.compact_tools = false;
     var bytes: [1024]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
     try out.writeAll(if (pending.phase == .details) "! Details unavailable; draft retained. " else "! History unavailable; older cursor and draft retained. ");
@@ -554,6 +565,8 @@ fn applyReader(self: *Self, end: ReadEnd) void {
         return;
     }
     if (end != .complete) return;
+    if (self.reader_output_started)
+        self.compact_tools = if (self.read_phase == .activity or self.read_phase == .permission) self.next_compact_tools else false;
     if (self.read_phase == .history) {
         self.history_cursor = self.next_history_cursor;
         self.notice = "  History page complete.";
@@ -575,6 +588,42 @@ fn applyReader(self: *Self, end: ReadEnd) void {
     self.dirty = true;
 }
 
+test "frontend commits spacing only for completed visible reads" {
+    const progress: ReadEnd.Progress = .{ .phase = .activity, .rendering = false, .output_owned = true };
+    const Case = struct { end: ReadEnd = .complete, output: bool, prior: bool, next: bool, expected: bool };
+    for ([_]Case{
+        // A notice may clear UI grouping after a worker snapshots it.
+        .{ .output = false, .prior = false, .next = true, .expected = false },
+        .{ .output = false, .prior = true, .next = false, .expected = true },
+        .{ .output = true, .prior = false, .next = true, .expected = true },
+        .{ .output = true, .prior = true, .next = false, .expected = false },
+        .{ .end = .{ .cancelled = progress }, .output = true, .prior = false, .next = true, .expected = false },
+        .{ .end = .{ .failed = .{ .err = error.Cancelled, .progress = progress } }, .output = true, .prior = true, .next = false, .expected = true },
+    }) |case| {
+        var self: Self = .{
+            .init = undefined,
+            .store = "unused",
+            .session = "unused",
+            .directory = "unused",
+            .scratch = undefined,
+            .command = undefined,
+            .terminal = undefined,
+            .colour = false,
+            .opening = false,
+            .observed = std.mem.zeroes(client.Current),
+            .cursor = .{ .position = 7 },
+            .next_cursor = .{ .position = 12 },
+            .compact_tools = case.prior,
+            .next_compact_tools = case.next,
+            .reader_output_started = case.output,
+        };
+        self.init.io = std.testing.io;
+        self.applyReader(case.end);
+        try std.testing.expectEqual(case.expected, self.compact_tools);
+        try std.testing.expectEqual(@as(u64, if (case.end == .complete) 12 else 7), self.cursor.position);
+    }
+}
+
 fn handoff(self: *Self) !void {
     const settled = self.quiesce();
     self.applyReader(settled.reader);
@@ -588,6 +637,7 @@ fn handoff(self: *Self) !void {
 }
 
 fn dispatchCommand(self: *Self) !void {
+    self.compact_tools = false;
     try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
     {
         const text = self.input.command_buffer[0..self.input.command_length.?];
@@ -630,6 +680,7 @@ fn permission(raw: *anyopaque, task: *Task) !void {
     try scan(raw, task);
     if (self.observed.first_action) |action| {
         try View.permission(task.requests(), self.store, self.session, action, self.observed.settings.workspace.slice(), self.scratch, task, self.read_columns, self.colour);
+        self.next_compact_tools = false;
         self.prepared_action = action;
     }
 }
@@ -655,7 +706,7 @@ fn scan(raw: *anyopaque, task: *Task) !void {
         const pending = try View.pending(requests, self.store, self.session, page.facts.end);
         try pending.render(requests, self.store, self.session, task);
     }
-    try View.render(requests, self.store, self.session, &page, task, self.read_columns, self.colour);
+    try View.render(requests, self.store, self.session, &page, task, self.read_columns, self.colour, &self.next_compact_tools);
     if (self.opening) {
         self.next_cursor = .{ .position = page.facts.end };
     } else {
