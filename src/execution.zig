@@ -1,6 +1,65 @@
 const std = @import("std");
 const attempt = @import("attempt.zig");
 
+/// One model owner's next work, derived from native owner facts, never stored
+/// as a second lifecycle. Decisions grant neither Store settlement authority
+/// nor permission to reuse custody before the indicated disposal succeeds.
+pub const ModelObservation = union(enum) {
+    preparing: struct { launch_allowed: bool },
+    prepared: struct { authentication_required: bool },
+    preparation_failed: struct {
+        retained_scratch: bool,
+        canonical_fenced: bool,
+        superseded: bool,
+    },
+    authenticating: struct {
+        cancelled: bool,
+        launch_allowed: bool,
+        result: enum { pending, ready, failed },
+    },
+    handoff_failed: enum { suppressed, superseded, unexpected },
+};
+
+pub const ModelDecision = enum {
+    wait,
+    advance_preparation,
+    authenticate,
+    launch,
+    settle_preparation_failure,
+    settle_authentication_failure,
+    abandon,
+    fence,
+    retain_cleanup,
+};
+
+pub fn modelDecision(observation: ModelObservation) ModelDecision {
+    return switch (observation) {
+        .preparing => |value| if (value.launch_allowed) .advance_preparation else .abandon,
+        .prepared => |value| if (value.authentication_required) .authenticate else .launch,
+        .preparation_failed => |value| if (value.retained_scratch)
+            .retain_cleanup
+        else if (value.canonical_fenced)
+            .fence
+        else if (value.superseded)
+            .abandon
+        else
+            .settle_preparation_failure,
+        .authenticating => |value| switch (value.result) {
+            // Cancellation cannot dispose a request still owned by this stage
+            // until the authentication worker has returned its result.
+            .pending => .wait,
+            .ready => if (!value.cancelled and value.launch_allowed) .launch else .abandon,
+            // Preserve known failure delivery even if local launch is fenced;
+            // Store still rechecks applicability. A control suppresses both.
+            .failed => if (value.cancelled) .abandon else .settle_authentication_failure,
+        },
+        .handoff_failed => |value| switch (value) {
+            .suppressed, .superseded => .abandon,
+            .unexpected => .fence,
+        },
+    };
+}
+
 pub const CustodyToken = struct {
     index: usize,
     generation: u64,
@@ -742,4 +801,75 @@ test "failed reclamation keeps custody occupied until the same owner succeeds" {
     try pool.checkFree(token);
     try std.testing.expectEqual(@as(usize, 0), pool.occupied());
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "model decisions preserve cancellation and known authentication failure precedence" {
+    try std.testing.expectEqual(ModelDecision.advance_preparation, modelDecision(.{ .preparing = .{ .launch_allowed = true } }));
+    try std.testing.expectEqual(ModelDecision.abandon, modelDecision(.{ .preparing = .{ .launch_allowed = false } }));
+    // Independent expected table: rows are no control/open, no control/fenced,
+    // control/open, control/fenced; columns are pending, ready, failed.
+    const expected = [4][3]ModelDecision{
+        .{ .wait, .launch, .settle_authentication_failure },
+        .{ .wait, .abandon, .settle_authentication_failure },
+        .{ .wait, .abandon, .abandon },
+        .{ .wait, .abandon, .abandon },
+    };
+    for (expected, 0..) |row, index| {
+        inline for (.{ .pending, .ready, .failed }, 0..) |result, column| {
+            try std.testing.expectEqual(row[column], modelDecision(.{ .authenticating = .{
+                .cancelled = index >= 2,
+                .launch_allowed = index % 2 == 0,
+                .result = result,
+            } }));
+        }
+    }
+}
+
+test "model preparation failure retains resources before considering semantic delivery" {
+    const expected = [_]ModelDecision{
+        .settle_preparation_failure, .retain_cleanup, .fence, .retain_cleanup,
+        .abandon,                    .retain_cleanup, .fence, .retain_cleanup,
+    };
+    for (expected, 0..) |decision, mask| {
+        try std.testing.expectEqual(decision, modelDecision(.{ .preparation_failed = .{
+            .retained_scratch = mask & 1 != 0,
+            .canonical_fenced = mask & 2 != 0,
+            .superseded = mask & 4 != 0,
+        } }));
+    }
+}
+
+test "model prepared routes preserve one shot handoff across rejection and reuse" {
+    inline for (.{ .suppressed, .superseded, .unexpected }) |failure| {
+        for ([_]bool{ false, true }) |authenticated| {
+            var records: [1]CustodyRecord = undefined;
+            var pool = CustodyPool.initialize(&records);
+            const token = pool.reserve().?;
+            var permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 7, .operation_id = 19, .attempt_ordinal = 3 } };
+            const binding = try pool.attach(token, &permit);
+            try std.testing.expectEqual(if (authenticated) ModelDecision.authenticate else .launch, modelDecision(.{ .prepared = .{
+                .authentication_required = authenticated,
+            } }));
+            if (authenticated) {
+                try std.testing.expectEqual(ModelDecision.launch, modelDecision(.{ .authenticating = .{
+                    .cancelled = false,
+                    .launch_allowed = true,
+                    .result = .ready,
+                } }));
+            }
+            // Canonical handoff can reject after local authority is consumed.
+            try pool.consumeLaunchAuthority(token, binding);
+            try std.testing.expectEqual(if (failure == .unexpected) ModelDecision.fence else .abandon, modelDecision(.{ .handoff_failed = failure }));
+            try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(token, binding));
+            try pool.detach(token);
+            try std.testing.expect(!pool.claimTerminalDelivery(token));
+            try std.testing.expect(pool.reserve() == null);
+            try pool.cleanupComplete(token);
+            const reused = pool.reserve().?;
+            try std.testing.expectError(error.StaleCustody, pool.consumeLaunchAuthority(token, binding));
+            try std.testing.expect(!pool.claimTerminalDelivery(token));
+            try pool.checkReserved(reused);
+            try pool.releaseUnused(reused);
+        }
+    }
 }
