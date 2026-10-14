@@ -240,6 +240,14 @@ const Intake = struct {
             }
         }
 
+        fn closeSocket(self: *Exchange) void {
+            // Only intake invalidates this descriptor, after local borrowers
+            // finish. Reclamation retries retain scratch, not a finished peer.
+            if (self.fd < 0) return;
+            _ = std.c.close(self.fd);
+            self.fd = -1;
+        }
+
         fn cleanup(self: *Exchange) bool {
             const host = self.host;
             if (self.reply) |reply| {
@@ -270,9 +278,9 @@ const Intake = struct {
         fn destroy(self: *Exchange) bool {
             const host = self.host;
             std.debug.assert(self.state != .working);
+            self.closeSocket();
             if (!self.cleanup()) return false;
             self.header_bytes.deinit(host.allocator);
-            _ = std.c.close(self.fd);
             if (self.number) |number|
                 traceRequest(host, "connection_resources_released", number, host.scratch_used.load(.acquire))
             else
@@ -480,6 +488,10 @@ const Intake = struct {
     }
 
     fn serviceWorkers(self: *Intake) void {
+        // Retire peers even when both workers are busy or cleanup is not due.
+        for (self.exchanges.items) |exchange| {
+            if (exchange.state == .retired) exchange.closeSocket();
+        }
         for (&self.workers) |*worker| {
             worker.mutex.lockUncancelable(self.host.io);
             defer worker.mutex.unlock(self.host.io);
@@ -495,6 +507,7 @@ const Intake = struct {
                     exchange.state = worker.next_state;
                     if (exchange.job == .receive and exchange.state == .ready) exchange.job = .prepare;
                 }
+                if (exchange.state == .retired) exchange.closeSocket();
                 worker.failure = null;
                 worker.exchange = null;
                 worker.state = .idle;
@@ -6580,18 +6593,34 @@ test "exchange retirement retains failed ingress cleanup through retry" {
         host.scratch_used.store(23, .release);
         try ingress.feed(prefix ++ payload);
         if (seal) try std.testing.expectError(error.AccessDenied, ingress.feed(suffix));
+        var intake: Intake = .{ .host = &host };
+        defer intake.exchanges.deinit(std.testing.allocator);
+        for (&intake.workers) |*worker| worker.* = .{ .owner = &intake };
+        try intake.exchanges.append(std.testing.allocator, exchange);
+        exchange.cleanup_retry_at = @as(i128, nowNs(&host)) + std.time.ns_per_s;
+        intake.serviceWorkers();
+        try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(sockets[0], std.c.F.GETFL));
         try std.testing.expect(!exchange.destroy());
         try std.testing.expect(!exchange.destroy());
         try std.testing.expectEqual(@as(u64, 8215), host.scratch_used.load(.acquire));
-        try std.testing.expect(std.c.fcntl(sockets[0], std.c.F.GETFL) >= 0);
+        try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(sockets[0], std.c.F.GETFL));
+        var byte: [1]u8 = undefined;
+        try std.testing.expectEqual(@as(isize, 0), std.c.read(sockets[1], &byte, 1));
         const retained_fd = exchange.retained_scratch.?.resources.?.primary.handle;
         try std.testing.expect(std.c.fcntl(retained_fd, std.c.F.GETFL) >= 0);
+        // A later cleanup retry must not close a new owner's reused fd.
+        const recycled = @import("posix").dup2(sockets[1], sockets[0]);
+        try std.testing.expectEqual(sockets[0], recycled);
+        defer _ = std.c.close(recycled);
+        exchange.cleanup_retry_at = 0;
+        try std.testing.expect(!exchange.destroy());
+        try std.testing.expect(std.c.fcntl(recycled, std.c.F.GETFL) >= 0);
         vtable.dirDeleteFile = std.testing.io.vtable.dirDeleteFile;
         exchange.cleanup_retry_at = 0;
         try std.testing.expect(exchange.destroy());
         destroyed = true;
         try std.testing.expectEqual(@as(u64, 23), host.scratch_used.load(.acquire));
-        try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(sockets[0], std.c.F.GETFL));
+        try std.testing.expect(std.c.fcntl(recycled, std.c.F.GETFL) >= 0);
         try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(retained_fd, std.c.F.GETFL));
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "request-7-1.tmp", .{}));
     }
