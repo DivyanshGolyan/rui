@@ -222,11 +222,11 @@ class ManagedDescriptorTests(unittest.TestCase):
                             return SimpleNamespace(returncode=0)
                         if args[0] == "sh":
                             fixed, authentication = (11, 10) if codex_h2.sys.platform == "darwin" else (9, 8)
-                            required = 3 + fixed + 42 + 10 + authentication + 1
+                            required = 3 + fixed + 403 + 10 + authentication + 2
                             return SimpleNamespace(returncode=1, stdout="", stderr=(
                                 "descriptor capacity insufficient: active_capacity=1 "
                                 f"required={required} soft_limit={required - 1} inherited=3 fixed_host={fixed} "
-                                f"clients=42 execution=10 authentication={authentication} self_wake=1"))
+                                f"clients=403 execution=10 authentication={authentication} self_wake=2"))
                         clock[0] += 5.2 if late == "read" else 4.95
                         key = args[-1]
                         text = "managed-federal" if key == "federal" else f"managed-{key[-1]}"
@@ -259,26 +259,26 @@ class ManagedDescriptorTests(unittest.TestCase):
                                 codex_h2.run(observed=observed)
 
     def test_inherited_allocator_descriptor_preserves_exact_managed_boundary(self):
-        for inherited, required in ((3, 77), (4, 78)):
+        for inherited, required in ((3, 439), (4, 440)):
             with self.subTest(inherited=inherited):
                 rejected = SimpleNamespace(returncode=1, stdout="", stderr=(
                     "rui: descriptor capacity insufficient: active_capacity=1 "
-                    f"required={required} soft_limit=76 inherited={inherited} "
-                    "fixed_host=11 clients=42 execution=10 authentication=10 self_wake=1\n"))
+                    f"required={required} soft_limit=438 inherited={inherited} "
+                    "fixed_host=11 clients=403 execution=10 authentication=10 self_wake=2\n"))
                 with patch.object(codex_h2.sys, "platform", "darwin"):
-                    self.assertEqual(codex_h2.assert_managed_descriptor_rejection(rejected, 76), required)
+                    self.assertEqual(codex_h2.assert_managed_descriptor_rejection(rejected, 438), required)
 
     def test_wrong_owner_populations_cannot_be_accepted_as_inherited_variation(self):
         correct = ("rui: descriptor capacity insufficient: active_capacity=1 "
-                   "required=78 soft_limit=77 inherited=4 fixed_host=11 clients=42 "
-                   "execution=10 authentication=10 self_wake=1\n")
-        for before, after in (("required=78", "required=77"), ("authentication=10", "authentication=9"),
-                              ("inherited=4", "inherited=5"), ("soft_limit=77", "soft_limit=76")):
+                   "required=440 soft_limit=439 inherited=4 fixed_host=11 clients=403 "
+                   "execution=10 authentication=10 self_wake=2\n")
+        for before, after in (("required=440", "required=439"), ("authentication=10", "authentication=9"),
+                              ("inherited=4", "inherited=5"), ("soft_limit=439", "soft_limit=438")):
             with self.subTest(before=before):
                 rejected = SimpleNamespace(returncode=1, stdout="", stderr=correct.replace(before, after))
                 with patch.object(codex_h2.sys, "platform", "darwin"):
                     with self.assertRaises(AssertionError):
-                        codex_h2.assert_managed_descriptor_rejection(rejected, 77)
+                        codex_h2.assert_managed_descriptor_rejection(rejected, 439)
 
 
 class H1ResponseBoundaryTests(unittest.TestCase):
