@@ -173,6 +173,25 @@ class SelectionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "absent"):
             select(["src/bash.zig"], "review", AVAILABLE - {"bash-recovery-integration"})
 
+    def test_new_session_policy_paths_keep_portable_and_original_native_gates(self):
+        # Select each path alone: a simultaneous CLI or logic-root edit must not
+        # mask missing coverage when a later change touches only the new owner.
+        cases = {
+            "src/new_session_selection.zig": ["admission-debug-integration", "check", "test-logic"],
+            "src/preference_values.zig": ["admission-debug-integration", "check", "test-logic"],
+            "src/provider_selection.zig": ["admission-debug-integration", "check", "test-logic"],
+            "src/model_capability.zig": ["dispatch-integration", "test", "test-logic", "transport-h2-integration"],
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    self.assertEqual(result[family], expected)
+                combined = select([path, "src/server.zig"], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    self.assertIn("test-logic", combined[family])
+                    self.assertIn("check", combined[family])
+
     def test_preference_owner_and_fixture_use_canonical_membership(self):
         result = select(["src/preferences.zig"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["admission-debug-integration", "check"])
