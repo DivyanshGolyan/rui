@@ -8,6 +8,7 @@ const client = @import("client.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
 const model_adapter = @import("model_adapter.zig");
+const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
 const preferences = @import("preferences.zig");
 const provider = @import("provider.zig");
@@ -818,9 +819,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
 }
 
 fn createSession(init: std.process.Init, options: NewSessionOptions, interactive_login: bool) !?client.CapturedIdentity {
-    const store = options.store;
-    const explicit_provider = options.provider;
-    const explicit_model = options.model;
+    const intent: new_session_selection.Intent = .{ .store = options.store, .provider = options.provider, .model = options.model };
     var cwd = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
     defer cwd.close(init.io);
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -828,60 +827,55 @@ fn createSession(init: std.process.Init, options: NewSessionOptions, interactive
     const workspace = workspace_buffer[0..workspace_length];
 
     const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
-    // Fully explicit selection never reads or locks unused preferences.
-    var defaults: preferences.Values = if (store != null and explicit_provider != null and explicit_model != null) .{} else preferences.load(home) catch |err| {
-        TerminalText.diagnostic("rui: private setup defaults unreadable ({s}); inspect rui setup before creating a Session.\n", .{@errorName(err)});
-        return err;
-    };
+    var snapshot: new_session_selection.Snapshot = undefined;
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var selected_store = store orelse (if (defaults.store.len != 0) defaults.store.slice() else try preferences.defaultStore(home, &fallback));
-    try preflightNewSession(init.io, selected_store, store == null and defaults.store.len != 0);
     var credential_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const credential = try credentialPath(init, &credential_buffer, false);
-    const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
-    const readiness: provider_selection.Readiness = if (codex_auth.localStatus(credential, now)) |state| switch (state) {
-        .missing => .missing,
-        .configured => .configured,
-        .renewal_due => .renewal_due,
-        .refresh_required => .refresh_required,
-    } else |_| .credential_error;
-    var selection = provider_selection.resolve(&.{provider_selection.codex(readiness)}, explicit_provider, explicit_model, if (defaults.provider.len == 0) null else defaults.provider.slice(), if (defaults.model.len == 0) null else defaults.model.slice()) catch |err| {
-        TerminalText.diagnostic("rui: unsupported prospective provider/model ({s}); inspect rui setup or select codex / gpt-6-luna. No Session created.\n", .{@errorName(err)});
-        return err;
-    };
-    if (selection == .chooser or !selection.selected.readiness.usable()) {
+    var credential: ?[]const u8 = null;
+    var selected_store: []const u8 = undefined;
+    var after_choice = false;
+    const selected = while (true) {
+        // Rebuild in stable storage on every pass; fully explicit intent never
+        // reads preferences, even after login's independent default-save failure.
+        snapshot = .{ .intent = intent, .defaults = if (intent.needsPreferences()) preferences.load(home) catch |err| {
+            if (!after_choice) TerminalText.diagnostic("rui: private setup defaults unreadable ({s}); inspect rui setup before creating a Session.\n", .{@errorName(err)});
+            return err;
+        } else .{} };
+        const destination = try snapshot.destination(home, &fallback);
+        selected_store = destination.path;
+        try preflightNewSession(init.io, selected_store, destination.saved);
+        if (credential == null) credential = try credentialPath(init, &credential_buffer, false);
+        const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
+        const readiness: provider_selection.Readiness = if (codex_auth.localStatus(credential.?, now)) |state| switch (state) {
+            .missing => .missing,
+            .configured => .configured,
+            .renewal_due => .renewal_due,
+            .refresh_required => .refresh_required,
+        } else |err| blk: {
+            if (after_choice) {
+                TerminalText.diagnostic("rui: credential still unreadable ({s}); inspect rui setup. No Session created.\n", .{@errorName(err)});
+                return err;
+            }
+            break :blk .credential_error;
+        };
+        const selection = snapshot.resolve(readiness) catch |err| {
+            if (after_choice) {
+                TerminalText.diagnostic("rui: unsupported prospective provider/model after login ({s}); inspect rui setup. No Session created.\n", .{@errorName(err)});
+            } else TerminalText.diagnostic("rui: unsupported prospective provider/model ({s}); inspect rui setup or select codex / gpt-6-luna. No Session created.\n", .{@errorName(err)});
+            return err;
+        };
+        if (selection) |binding| break binding;
+        if (after_choice) {
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No new Session created. Use rui setup or rui login codex when ready; existing work is unchanged.\n");
+            return null;
+        }
         if (!interactive_login) {
             TerminalText.diagnostic("rui: no locally ready provider. Run `rui login codex`, then inspect `rui setup`. No Session created.\n", .{});
             return error.ProviderLoginRequired;
         }
         try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No locally ready provider for a new Session. Choose Codex login or defer; saved work remains inspectable.\n");
         try guideProviderLogin(init);
-        // Explicit destination and binding never depend on the preference file,
-        // including after a login whose future-default save failed.
-        if (store == null or explicit_provider == null or explicit_model == null)
-            defaults = try preferences.load(home);
-        selected_store = store orelse (if (defaults.store.len != 0) defaults.store.slice() else try preferences.defaultStore(home, &fallback));
-        try preflightNewSession(init.io, selected_store, store == null and defaults.store.len != 0);
-        const after_choice: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
-        const updated = codex_auth.localStatus(credential, after_choice) catch |err| {
-            TerminalText.diagnostic("rui: credential still unreadable ({s}); inspect rui setup. No Session created.\n", .{@errorName(err)});
-            return err;
-        };
-        selection = provider_selection.resolve(&.{provider_selection.codex(switch (updated) {
-            .missing => .missing,
-            .configured => .configured,
-            .renewal_due => .renewal_due,
-            .refresh_required => .refresh_required,
-        })}, explicit_provider, explicit_model, if (defaults.provider.len == 0) null else defaults.provider.slice(), if (defaults.model.len == 0) null else defaults.model.slice()) catch |err| {
-            TerminalText.diagnostic("rui: unsupported prospective provider/model after login ({s}); inspect rui setup. No Session created.\n", .{@errorName(err)});
-            return err;
-        };
-        if (selection == .chooser or !selection.selected.readiness.usable()) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No new Session created. Use rui setup or rui login codex when ready; existing work is unchanged.\n");
-            return null;
-        }
-    }
-    const selected = selection.selected;
+        after_choice = true;
+    };
     try startHost(init, selected_store, true);
     const paths = try platform.resolveClientPaths(init.io, selected_store);
     const destination = paths.store.slice();
@@ -899,8 +893,8 @@ fn createSession(init: std.process.Init, options: NewSessionOptions, interactive
         .session = .from_capture_key,
         .require_model = true,
         .workspace = .{ .present = true, .value = workspace },
-        .provider = .{ .present = true, .value = selected.provider },
-        .model = .{ .present = true, .value = selected.model },
+        .provider = .{ .present = true, .value = selected.provider.slice() },
+        .model = .{ .present = true, .value = selected.model.slice() },
         .tools = "bash",
         .permission_mode = .{ .present = true, .value = "bypass" },
     }, .{ .generated = try requestDirectory(init, &directory_buffer) });
