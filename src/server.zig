@@ -1131,14 +1131,12 @@ fn executionMain(host: *Host) void {
     defer if (reactor) |*active| active.deinit();
     var bash_preparation: ?bash.Preparation = null;
     var model_preparation: model_adapter.Preparation = undefined;
-    var model_preparation_active = false;
     defer shutdownExecution(
         host,
         if (reactor) |*active| active else null,
         slots,
         &bash_preparation,
         &model_preparation,
-        &model_preparation_active,
     );
 
     var turn_state = execution_turn.State{ .capacity_was_full = slots.len == 0 };
@@ -1153,7 +1151,6 @@ fn executionMain(host: *Host) void {
             .next_receive_slot = &next_receive_slot,
             .bash_preparation = &bash_preparation,
             .model_preparation = &model_preparation,
-            .model_preparation_active = &model_preparation_active,
             .bash_window = &bash_window,
             .measurement = &measurement,
             .fenced = false,
@@ -1200,7 +1197,6 @@ const NativeTurn = struct {
     next_receive_slot: *usize,
     bash_preparation: *?bash.Preparation,
     model_preparation: *model_adapter.Preparation,
-    model_preparation_active: *bool,
     bash_window: []u8,
     measurement: *LifecycleMeasurement,
     fenced: bool,
@@ -1245,7 +1241,6 @@ const NativeTurn = struct {
             self.reactor,
             self.slots,
             self.model_preparation,
-            self.model_preparation_active,
         );
         stopSupersededBash(self.host, self.slots, self.bash_preparation);
     }
@@ -1283,8 +1278,10 @@ const NativeTurn = struct {
     }
 
     pub fn modelPreparationOpen(self: *const NativeTurn) bool {
-        if (self.model_preparation_active.*) return false;
-        for (self.slots) |slot| if (slot == .model_authenticating) return false;
+        for (self.slots) |slot| switch (slot) {
+            .model_preparing, .model_authenticating => return false,
+            else => {},
+        };
         return true;
     }
 
@@ -1353,7 +1350,6 @@ const NativeTurn = struct {
             slot,
             active_filter,
             self.model_preparation,
-            self.model_preparation_active,
         )) {
             .admitted => .admitted,
             .no_work => .no_work,
@@ -1376,7 +1372,6 @@ const NativeTurn = struct {
             slot,
             kind,
             self.model_preparation,
-            self.model_preparation_active,
         )) {
             .admitted => .admitted,
             .no_work => .no_work,
@@ -1410,7 +1405,6 @@ const NativeTurn = struct {
             self.reactor,
             self.slots,
             self.model_preparation,
-            self.model_preparation_active,
             byte_allowance,
             item_allowance,
         );
@@ -1427,21 +1421,7 @@ const slotsHaveBash = hasBash;
 fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot, next_receive_slot: *usize) bool {
     const active_reactor = reactor orelse return false;
     for (slots) |*slot| switch (slot.*) {
-        .provider => |*active| {
-            switch (active.transfer.advanceFinalization(host.faults.response_seal)) {
-                .pending => {},
-                .discarded => {
-                    const owner = active.owner;
-                    active.transfer.deinit();
-                    beginCleanup(host, slot, owner);
-                    return true;
-                },
-                .ready => |finished| {
-                    completeTransfer(host, slot, finished);
-                    return true;
-                },
-            }
-        },
+        .provider => if (advanceModelFinalization(host, slot, host.faults.response_seal)) return true,
         else => {},
     };
     const active_transfers = ActiveSlots{ .slots = slots };
@@ -1537,12 +1517,25 @@ test "receive advancement serves paused siblings across recurring queue pressure
     try std.testing.expect(!advanceOneTransfer(&host, &reactor, &.{}, &next));
 }
 
+fn advanceModelFinalization(host: *Host, slot: *ExecutionSlot, fail_seal: bool) bool {
+    const active = &slot.provider;
+    switch (active.transfer.advanceFinalization(fail_seal)) {
+        .pending => return false,
+        .discarded => {
+            const owner = active.owner;
+            active.transfer.deinit();
+            beginCleanup(host, slot, owner);
+        },
+        .ready => |finished| completeTransfer(host, slot, finished),
+    }
+    return true;
+}
+
 fn cancelSupersededTransfers(
     host: *Host,
     reactor: ?*provider.Reactor,
     slots: []ExecutionSlot,
     preparation: *model_adapter.Preparation,
-    preparation_active: *bool,
 ) void {
     for (slots) |*slot| switch (slot.*) {
         .model_preparing => |active| {
@@ -1553,7 +1546,6 @@ fn cancelSupersededTransfers(
             const control = superseded orelse continue;
             traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
             preparation.cancel();
-            preparation_active.* = false;
             finishCustodyNow(host, slot, active.token);
         },
         .model_authenticating => |*active| {
@@ -1577,10 +1569,7 @@ fn cancelSupersededTransfers(
             const owner = active.owner;
             traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), owner.binding);
             reactor.?.discard(&active.transfer);
-            if (active.transfer.advanceFinalization(false) == .discarded) {
-                active.transfer.deinit();
-                beginCleanup(host, slot, owner);
-            }
+            _ = advanceModelFinalization(host, slot, false);
         },
         .free, .bash_preparing, .bash, .bash_prepared_cleanup, .cleanup, .named_scratch => {},
     };
@@ -2053,7 +2042,6 @@ fn admitNewAttempt(
     slot: *ExecutionSlot,
     kind: store_module.ModelAdmissionKind,
     preparation: *model_adapter.Preparation,
-    preparation_active: *bool,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
     var admission = host.store.admitModelAttempt(kind, .{
@@ -2070,7 +2058,7 @@ fn admitNewAttempt(
         host.custody.releaseUnused(token) catch unreachable;
         return .no_work;
     };
-    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation, preparation_active);
+    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation);
 }
 
 fn admitRetryAttempt(
@@ -2078,7 +2066,6 @@ fn admitRetryAttempt(
     slot: *ExecutionSlot,
     active: store_module.ActiveOperationFilter,
     preparation: *model_adapter.Preparation,
-    preparation_active: *bool,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
     var admission = host.store.tryAdmitNextModelRetry(
@@ -2094,7 +2081,7 @@ fn admitRetryAttempt(
         host.custody.releaseUnused(token) catch unreachable;
         return .no_work;
     };
-    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation, preparation_active);
+    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation);
 }
 
 fn beginAdmittedAttempt(
@@ -2103,9 +2090,8 @@ fn beginAdmittedAttempt(
     token: execution.CustodyToken,
     permit: *store_module.DispatchPermit,
     preparation: *model_adapter.Preparation,
-    preparation_active: *bool,
 ) AdmissionProgress {
-    std.debug.assert(!preparation_active.*);
+    std.debug.assert(slot.* == .free);
     const binding = host.custody.attach(token, permit) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "custody attachment", err);
@@ -2139,29 +2125,9 @@ fn beginAdmittedAttempt(
         },
         &retained_scratch,
     ) catch |err| {
-        if (retained_scratch) |retained| {
-            host.custody.detach(token) catch unreachable;
-            slot.* = .{ .named_scratch = .{
-                .token = token,
-                .owner = retained,
-            } };
-            retainDispatchFence(host, "request scratch unlink", err);
-            return .admitted;
-        }
-        if (host.store.isFenced()) {
-            fenceDispatch(host, "canonical request read", err);
-            finishCustodyNow(host, slot, token);
-            return .admitted;
-        }
-        if (err == error.SupersededByControl) {
-            finishCustodyNow(host, slot, token);
-            return .admitted;
-        }
-        settleAttemptFailure(host, token, binding, model_adapter.preparationFailureCode(err), .terminal);
-        finishCustodyNow(host, slot, token);
+        finishModelPreparationFailure(host, slot, slot.model_preparing, err, retained_scratch);
         return .admitted;
     };
-    preparation_active.* = true;
     traceOperation(host, "preparation_started", binding);
     return .admitted;
 }
@@ -2171,7 +2137,6 @@ fn advanceModelPreparation(
     reactor: ?*provider.Reactor,
     slots: []ExecutionSlot,
     preparation: *model_adapter.Preparation,
-    preparation_active: *bool,
     byte_allowance: usize,
     item_allowance: usize,
 ) bool {
@@ -2179,15 +2144,13 @@ fn advanceModelPreparation(
         for (slots) |*slot| if (slot.* == .model_authenticating)
             return advanceAuthentication(host, reactor.?, slot);
     }
-    if (!preparation_active.*) return false;
     const slot = for (slots) |*candidate| switch (candidate.*) {
         .model_preparing => break candidate,
         else => {},
-    } else unreachable;
+    } else return false;
     const owner = slot.model_preparing;
-    if (!host.launchAllowed()) {
+    if (execution.modelDecision(.{ .preparing = .{ .launch_allowed = host.launchAllowed() } }) == .abandon) {
         preparation.cancel();
-        preparation_active.* = false;
         // Infrastructure fencing does not invent a user stop or a Resolution.
         finishCustodyNow(host, slot, owner.token);
         return true;
@@ -2205,18 +2168,20 @@ fn advanceModelPreparation(
         .failed => |err| {
             tracePreparationAdvanceError(host, "preparation_advance_failed", err, stats, owner.binding);
             preparation.cancel();
-            preparation_active.* = false;
-            finishModelPreparationFailure(host, slot, owner, err);
+            finishModelPreparationFailure(host, slot, owner, err, null);
         },
         .prepared => |value| {
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
             traceOperation(host, "preparation_completed", owner.binding);
-            preparation_active.* = false;
             var request = value;
-            if (host.auth_worker) |worker| {
-                slot.* = .{ .model_authenticating = .{ .owner = owner, .request = request } };
-                worker.request();
-            } else launchPreparedRequest(host, reactor.?, slot, owner, &request, null);
+            switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = host.auth_worker != null } })) {
+                .authenticate => {
+                    slot.* = .{ .model_authenticating = .{ .owner = owner, .request = request } };
+                    host.auth_worker.?.request();
+                },
+                .launch => launchPreparedRequest(host, reactor.?, slot, owner, &request, null),
+                else => unreachable,
+            }
         },
     }
     return true;
@@ -2224,23 +2189,26 @@ fn advanceModelPreparation(
 
 fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *ExecutionSlot) bool {
     const worker = host.auth_worker.?;
-    const result = worker.take() orelse return false;
+    const result = worker.take();
     const active = &slot.model_authenticating;
+    const decision = execution.modelDecision(.{ .authenticating = .{
+        .cancelled = active.cancelled,
+        .launch_allowed = host.launchAllowed(),
+        .result = if (result) |value| (if (value == .ready) .ready else .failed) else .pending,
+    } });
+    if (decision == .wait) return false;
+    defer if (result.? == .ready) worker.finish();
     const owner = active.owner;
     var request = active.request;
-    if (result == .ready) {
-        defer worker.finish();
-        if (!active.cancelled and host.launchAllowed()) {
-            launchPreparedRequest(host, reactor, slot, owner, &request, result.ready);
-        } else {
+    switch (decision) {
+        .launch => launchPreparedRequest(host, reactor, slot, owner, &request, result.?.ready),
+        .abandon, .settle_authentication_failure => {
             request.deinit();
+            if (decision == .settle_authentication_failure)
+                settleAttemptFailure(host, owner.token, owner.binding, model_adapter.authenticationFailureCode(result.?.failed), .terminal);
             finishCustodyNow(host, slot, owner.token);
-        }
-    } else {
-        request.deinit();
-        if (!active.cancelled)
-            settleAttemptFailure(host, owner.token, owner.binding, model_adapter.authenticationFailureCode(result.failed), .terminal);
-        finishCustodyNow(host, slot, owner.token);
+        },
+        else => unreachable,
     }
     return true;
 }
@@ -2250,11 +2218,23 @@ fn finishModelPreparationFailure(
     slot: *ExecutionSlot,
     owner: ModelPreparingSlot,
     err: anyerror,
+    retained_scratch: ?named_scratch.Owner,
 ) void {
-    if (host.store.isFenced()) {
-        fenceDispatch(host, "canonical request read", err);
-    } else if (err != error.SupersededByControl) {
-        settleAttemptFailure(host, owner.token, owner.binding, model_adapter.preparationFailureCode(err), .terminal);
+    switch (execution.modelDecision(.{ .preparation_failed = .{
+        .retained_scratch = retained_scratch != null,
+        .canonical_fenced = retained_scratch == null and host.store.isFenced(),
+        .superseded = err == error.SupersededByControl,
+    } })) {
+        .retain_cleanup => {
+            host.custody.detach(owner.token) catch unreachable;
+            slot.* = .{ .named_scratch = .{ .token = owner.token, .owner = retained_scratch.? } };
+            retainDispatchFence(host, "request scratch unlink", err);
+            return;
+        },
+        .fence => fenceDispatch(host, "canonical request read", err),
+        .settle_preparation_failure => settleAttemptFailure(host, owner.token, owner.binding, model_adapter.preparationFailureCode(err), .terminal),
+        .abandon => {},
+        else => unreachable,
     }
     finishCustodyNow(host, slot, owner.token);
 }
@@ -2358,17 +2338,21 @@ fn launchPreparedRequest(
         }.handoff,
     ) catch |err| {
         active.transfer.deinit();
-        if (err == error.HostDispatchSuppressed) {
-            finishCustodyNow(host, slot, token);
-            return;
+        switch (execution.modelDecision(.{ .handoff_failed = if (err == error.HostDispatchSuppressed)
+            .suppressed
+        else if (err == error.SupersededByControl)
+            .superseded
+        else
+            .unexpected })) {
+            .abandon => if (err == error.SupersededByControl) {
+                traceOperation(host, "canonical_handoff_superseded", binding);
+            },
+            .fence => {
+                stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
+                fenceDispatch(host, "dispatch handoff", err);
+            },
+            else => unreachable,
         }
-        if (err == error.SupersededByControl) {
-            traceOperation(host, "canonical_handoff_superseded", binding);
-            finishCustodyNow(host, slot, token);
-            return;
-        }
-        stderr.print("rui: provider launch failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
-        fenceDispatch(host, "dispatch handoff", err);
         finishCustodyNow(host, slot, token);
         return;
     };
@@ -2688,7 +2672,6 @@ fn shutdownExecution(
     slots: []ExecutionSlot,
     preparation: *?bash.Preparation,
     model_preparation: *model_adapter.Preparation,
-    model_preparation_active: *bool,
 ) void {
     // Initiate every effect's shutdown before waiting for any retirement.
     // Discarded transfers retain their pointer-stable capture storage until
@@ -2696,9 +2679,7 @@ fn shutdownExecution(
     for (slots) |*slot| switch (slot.*) {
         .free => {},
         .model_preparing => |active| {
-            std.debug.assert(model_preparation_active.*);
             model_preparation.cancel();
-            model_preparation_active.* = false;
             finishCustodyNow(host, slot, active.token);
         },
         .model_authenticating => |*active| {
@@ -2719,15 +2700,10 @@ fn shutdownExecution(
     while (hasOwnedSlots(slots)) {
         var made_progress = false;
         for (slots) |*slot| switch (slot.*) {
-            .provider => |*active| {
+            .provider => {
                 // Shutdown discards transport evidence rather than invoking
                 // ordinary model completion or saving a semantic failure.
-                if (active.transfer.advanceFinalization(false) == .discarded) {
-                    const owner = active.owner;
-                    active.transfer.deinit();
-                    beginCleanup(host, slot, owner);
-                    made_progress = true;
-                }
+                if (advanceModelFinalization(host, slot, false)) made_progress = true;
             },
             else => {},
         };
@@ -4921,6 +4897,71 @@ test "authentication handoff borrows the sole credential lease and releases it o
     var next: credentials.Lease = undefined;
     try credentials.leaseInto(path, &next);
     next.release();
+
+    // Exercise the production model owner after cancellation, both before
+    // the worker publishes and with either actual result. No Store or reactor
+    // may be touched; the request and credential lease remain native owners.
+    for ([_]bool{ false, true }) |ready| {
+        var records: [1]execution.CustodyRecord = undefined;
+        var host = Host{
+            .io = io,
+            .allocator = std.testing.allocator,
+            .lease = undefined,
+            .store = undefined,
+            .faults = .{},
+            .custody = execution.CustodyPool.initialize(&records),
+            .auth_worker = &worker,
+        };
+        const token = host.custody.reserve().?;
+        var permit = store_module.DispatchPermit{ .binding = .{
+            .turn_id = 7,
+            .operation_id = 19,
+            .attempt_ordinal = 3,
+        } };
+        const binding = try host.custody.attach(token, &permit);
+        const output = try tmp.dir.createFile(io, "request", .{});
+        try output.writeStreamingAll(io, "body");
+        output.close(io);
+        const input = try tmp.dir.openFile(io, "request", .{});
+        try tmp.dir.deleteFile(io, "request");
+        host.scratch_used.store(4, .release);
+        var slot = ExecutionSlot{ .model_authenticating = .{
+            .owner = .{ .token = token, .binding = binding },
+            .cancelled = true,
+            .request = .{
+                .io = io,
+                .file = input,
+                .length = 4,
+                .charged = 4,
+                .budget = .{ .used = &host.scratch_used, .limit = 4 },
+                .structured_output = false,
+                .session_affinity = @splat(0),
+            },
+        } };
+        defer if (slot == .model_authenticating) slot.model_authenticating.request.deinit();
+        var reactor: provider.Reactor = undefined;
+        worker.state = .requested;
+        try std.testing.expect(!advanceAuthentication(&host, &reactor, &slot));
+        try std.testing.expect(slot == .model_authenticating);
+        try std.testing.expectEqual(@as(u64, 4), host.scratch_used.load(.acquire));
+        try std.testing.expect(host.custody.reserve() == null);
+        if (ready) {
+            try credentials.leaseInto(path, &worker.credential);
+            worker.state = .ready;
+        } else {
+            worker.failure = error.AuthenticationFailed;
+            worker.state = .failed;
+        }
+        try std.testing.expect(advanceAuthentication(&host, &reactor, &slot));
+        try std.testing.expect(slot == .free);
+        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+        try std.testing.expect(worker.state == .idle);
+        const reused = host.custody.reserve().?;
+        try std.testing.expect(reused.generation != token.generation);
+        try std.testing.expect(!host.custody.claimTerminalDelivery(token));
+        try host.custody.releaseUnused(reused);
+    }
 }
 
 test "cleanup delay follows elapsed time and preserves custody reuse" {
@@ -5272,11 +5313,15 @@ test "named scratch retry releases custody through the shutdown owner path" {
         .operation_id = 1,
         .attempt_ordinal = 1,
     } };
-    _ = try host.custody.attach(token, &permit);
-    try host.custody.detach(token);
-    var slots = [_]ExecutionSlot{.{ .named_scratch = .{
-        .token = token,
-        .owner = .init(
+    const binding = try host.custody.attach(token, &permit);
+    const owner = ModelPreparingSlot{ .token = token, .binding = binding };
+    var slots = [_]ExecutionSlot{.{ .model_preparing = owner }};
+    finishModelPreparationFailure(
+        &host,
+        &slots[0],
+        owner,
+        error.InjectedScratchRemovalFailure,
+        .init(
             std.testing.io,
             primary,
             secondary,
@@ -5285,7 +5330,10 @@ test "named scratch retry releases custody through the shutdown owner path" {
             9,
             .{ .gated = &removal_gate },
         ),
-    } }};
+    );
+    try std.testing.expect(slots[0] == .named_scratch);
+    try std.testing.expect(host.dispatch_fenced.load(.acquire));
+    try host.custody.checkDetachedModel(token, binding);
 
     const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
     var retry_at = now;
@@ -5302,14 +5350,12 @@ test "named scratch retry releases custody through the shutdown owner path" {
             test_preparation: *?bash.Preparation,
         ) void {
             var model_preparation: model_adapter.Preparation = undefined;
-            var model_preparation_active = false;
             shutdownExecution(
                 test_host,
                 null,
                 test_slots,
                 test_preparation,
                 &model_preparation,
-                &model_preparation_active,
             );
         }
     };
@@ -6283,7 +6329,6 @@ test "Host fences dispose admitted preparation without touching canonical state"
         );
         // Real file aliases and a real reservation are owned before fencing.
         try preparation.writer.write("partial request");
-        var active = true;
         var slots = [_]ExecutionSlot{.{ .model_preparing = .{
             .token = token,
             .binding = binding,
@@ -6294,11 +6339,10 @@ test "Host fences dispose admitted preparation without touching canonical state"
             null,
             &slots,
             &preparation,
-            &active,
             host.faults.request_preparation_byte_allowance,
             host.faults.request_preparation_item_allowance,
         ));
-        try std.testing.expect(!active and !preparation.active and !preparation.view.active);
+        try std.testing.expect(!preparation.active and !preparation.view.active);
         try std.testing.expect(slots[0] == .free);
         try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());

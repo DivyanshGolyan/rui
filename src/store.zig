@@ -8304,6 +8304,68 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     }
 }
 
+test "allow once survives mode changes and reopen without granting another Attempt" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    var storage_open = true;
+    defer if (storage_open) storage.close() catch unreachable;
+    try configureTestSessionAsk(&storage, "allow-config", "direct/allow", false);
+    try submitTestMessage(&storage, &tmp, "allow-input", "allow-message", "direct/allow", "propose");
+    const model_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleTwoActionsForTesting(&storage, &tmp, model_binding, "allow-metadata");
+    try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+    const action_id = try queryU64(storage.database, "SELECT min(action_id) FROM action_operation");
+    const sibling_id = try queryU64(storage.database, "SELECT max(action_id) FROM action_operation");
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
+    try allow.key.set("allow-first");
+    try allow.session.set("direct/allow");
+    const accepted = storage.decidePermission(&allow, .{});
+    try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
+
+    var changed = allow;
+    changed.decision = .deny;
+    try std.testing.expect(storage.decidePermission(&changed, .{}) == .conflict);
+    changed = allow;
+    changed.action_id = sibling_id;
+    try std.testing.expect(storage.decidePermission(&changed, .{}) == .conflict);
+    changed = allow;
+    try changed.key.set("allow-again");
+    const fresh = storage.decidePermission(&changed, .{});
+    try std.testing.expect(fresh == .rejected and !fresh.rejected.replayed);
+    try std.testing.expectEqual(PermissionDecisionRejection.action_not_pending, fresh.rejected.code);
+
+    var update: protocol.ConfigureCommand = .{};
+    try update.key.set("allow-mode-change");
+    try update.session.set("direct/allow");
+    update.configuration.permission_mode.state = .value;
+    try update.configuration.permission_mode.value.set("bypass");
+    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    for (0..2) |pass| {
+        if (pass == 1) {
+            try storage.close();
+            storage_open = false;
+            storage = try testingStore(&tmp, std.testing.io);
+            storage_open = true;
+        }
+        const replay = storage.decidePermission(&allow, .{});
+        try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+        const bytes = try testingSessionReport(&storage, &tmp, "direct/allow", 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        const report = try std.json.parseFromSlice(TestingSessionReport, std.testing.allocator, bytes, .{ .ignore_unknown_fields = true });
+        defer report.deinit();
+        try std.testing.expectEqual(@as(usize, 2), report.value.actions.unresolved.len);
+        try std.testing.expectEqualStrings("allow_once", report.value.actions.unresolved[0].authorization);
+        for (report.value.actions.unresolved) |action| try std.testing.expectEqualStrings("1", action.permission_revision);
+    }
+    const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    try std.testing.expectEqual(action_id, action.action_id);
+    try std.testing.expectEqual(@as(u64, 1), action.attempt_ordinal);
+    try std.testing.expect(storage.decidePermission(&allow, .{}).accepted.replayed);
+    // The admitted Action cannot be reissued; its unapproved sibling remains pending.
+    try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+}
+
 test "Current reports progress alongside an actionable sibling" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -9827,16 +9889,19 @@ test "idle Session stop excludes queued work but not later admissions" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
-    defer storage.close() catch unreachable;
+    var storage_open = true;
+    defer if (storage_open) storage.close() catch unreachable;
 
     try configureTestSession(&storage, "configure-idle-stop", "direct/idle-stop");
     try submitTestMessage(&storage, &tmp, "idle-stop-a", "idle-message-a", "direct/idle-stop", "before");
     var stop = try completeSessionStop("idle-stop", "direct/idle-stop");
     const accepted = storage.stopSession(&stop, .{});
     try std.testing.expect(accepted == .accepted);
+    try std.testing.expect(!accepted.accepted.replayed);
     try std.testing.expectEqual(@as(?u64, null), accepted.accepted.selection.selected_turn_id);
     try std.testing.expectEqual(@as(u64, 1), accepted.accepted.selection.admission_cutoff);
     try std.testing.expectEqual(SessionStopCompletion.completed, accepted.accepted.completion);
+    try std.testing.expectEqual(@as(?u64, null), accepted.accepted.interrupted_operation_id);
     const excluded = (try storage.observeCommand("idle-message-a")).message.?.queue.?;
     try std.testing.expect(excluded.state == .excluded);
     try std.testing.expectEqualStrings("session_stopped", excluded.state.excluded.code.slice());
@@ -9852,6 +9917,34 @@ test "idle Session stop excludes queued work but not later admissions" {
     try submitTestMessage(&storage, &tmp, "idle-stop-b", "idle-message-b", "direct/idle-stop", "after");
     const later = (try storage.admitNextModelAttempt(.{})).?;
     try std.testing.expectEqual(@as(u64, 1), later.permit.binding.turn_id);
+
+    // Replay before and after a real database reopen while newer work is live.
+    for (0..2) |pass| {
+        if (pass == 1) {
+            try storage.close();
+            storage_open = false;
+            storage = try testingStore(&tmp, std.testing.io);
+            storage_open = true;
+        }
+        const replay = storage.stopSession(&stop, .{});
+        try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+        try std.testing.expectEqual(accepted.accepted.selection, replay.accepted.selection);
+        try std.testing.expectEqual(SessionStopCompletion.completed, replay.accepted.completion);
+        try std.testing.expectEqual(@as(?u64, null), replay.accepted.interrupted_operation_id);
+        const newer = (try storage.observeCommand("idle-message-b")).message.?.queue.?.state;
+        try std.testing.expect(newer == .processing);
+        try std.testing.expectEqual(later.permit.binding, newer.processing);
+        const original = (try storage.observeCommand("idle-message-a")).message.?.queue.?.state;
+        try std.testing.expect(original == .excluded);
+        try std.testing.expectEqualStrings("session_stopped", original.excluded.code.slice());
+    }
+    var fresh = try completeSessionStop("idle-stop-newer", "direct/idle-stop");
+    const stopped = storage.stopSession(&fresh, .{});
+    try std.testing.expect(stopped == .accepted and !stopped.accepted.replayed);
+    try std.testing.expectEqual(later.permit.binding.turn_id, stopped.accepted.selection.selected_turn_id.?);
+    try std.testing.expectEqual(@as(u64, 2), stopped.accepted.selection.admission_cutoff);
+    try std.testing.expectEqual(later.permit.binding.operation_id, stopped.accepted.interrupted_operation_id.?);
+    try std.testing.expect((try storage.observeCommand("idle-message-b")).message.?.queue.?.state == .cancelled);
 }
 
 test "exact model interruption continues only with applicable pending input" {
@@ -10193,27 +10286,77 @@ test "controls wait behind an active model settlement transaction" {
     );
 }
 
-test "model interruption removes a scheduled retry from admission" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage = try testingStore(&tmp, std.testing.io);
-    defer storage.close() catch unreachable;
+test "controls remove scheduled retries and replay without cancelling newer work after reopen" {
+    const Control = enum { none, stop, interruption };
+    for ([_]Control{ .none, .stop, .interruption }) |control| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        var storage_open = true;
+        defer if (storage_open) storage.close() catch unreachable;
 
-    try configureTestSession(&storage, "configure-retry-interrupt", "direct/retry-interrupt");
-    try submitTestMessage(&storage, &tmp, "retry-interrupt-a", "retry-interrupt-message", "direct/retry-interrupt", "first");
-    const admitted = (try storage.admitNextModelAttempt(.{})).?;
-    try storage.settleModelAttemptFailure(admitted.permit.binding, "temporary", .{ .retryable = .{
-        .waits_ms = .{ 1, 1, 1 },
-    } }, .{});
+        try configureTestSession(&storage, "retry-config", "direct/retry-control");
+        try submitTestMessage(&storage, &tmp, "retry-first", "retry-message", "direct/retry-control", "first");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try storage.settleModelAttemptFailure(binding, "temporary", .{ .retryable = .{
+            .waits_ms = .{ 60_000, 60_000, 60_000 },
+        } }, .{});
+        // Make the saved retry due without depending on wall-clock scheduling.
+        try exec(storage.database, "UPDATE model_operation SET retry_due_at_ms=1 WHERE resolution_code IS NULL");
 
-    var interrupt = try completeModelInterruption(
-        "retry-interrupt",
-        "direct/retry-interrupt",
-        admitted.permit.binding,
-    );
-    try std.testing.expect(storage.interruptModel(&interrupt, .{}) == .accepted);
-    try std.testing.expect((try admitRetryForTesting(&storage)) == null);
-    try expectActivityOutcome(&storage, "direct/retry-interrupt", admitted.permit.binding, "cancelled");
+        if (control == .none) {
+            const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
+            try std.testing.expectEqual(binding.turn_id, retry.turn_id);
+            try std.testing.expectEqual(binding.operation_id, retry.operation_id);
+            try std.testing.expectEqual(@as(u64, 2), retry.attempt_ordinal);
+            continue;
+        }
+        const is_stop = control == .stop;
+        var stop = try completeSessionStop("retry-control", "direct/retry-control");
+        var interrupt = try completeModelInterruption("retry-control", "direct/retry-control", binding);
+        if (is_stop) {
+            const accepted = storage.stopSession(&stop, .{});
+            try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
+        } else {
+            const accepted = storage.interruptModel(&interrupt, .{});
+            try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
+        }
+        try std.testing.expect((try admitRetryForTesting(&storage)) == null);
+        try expectActivityOutcome(&storage, "direct/retry-control", binding, "cancelled");
+
+        try submitTestMessage(&storage, &tmp, "retry-newer", "retry-newer-message", "direct/retry-control", "newer");
+        const newer_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try std.testing.expect(newer_binding.turn_id != binding.turn_id);
+        for (0..2) |pass| {
+            if (pass == 1) {
+                try storage.close();
+                storage_open = false;
+                storage = try testingStore(&tmp, std.testing.io);
+                storage_open = true;
+            }
+            if (is_stop) {
+                const replay = storage.stopSession(&stop, .{});
+                try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+                try std.testing.expectEqual(binding.turn_id, replay.accepted.selection.selected_turn_id.?);
+                try std.testing.expectEqual(@as(u64, 1), replay.accepted.selection.admission_cutoff);
+                try std.testing.expectEqual(SessionStopCompletion.completed, replay.accepted.completion);
+                try std.testing.expectEqual(binding.operation_id, replay.accepted.interrupted_operation_id.?);
+            } else {
+                const replay = storage.interruptModel(&interrupt, .{});
+                try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+                const target = (try storage.observeCommand("retry-control")).model_interruption.?;
+                try std.testing.expectEqualStrings("direct/retry-control", target.session.slice());
+                try std.testing.expectEqual(binding.turn_id, target.turn_id);
+                try std.testing.expectEqual(binding.operation_id, target.operation_id);
+            }
+            const original = (try storage.observeCommand("retry-message")).message.?.queue.?.state;
+            try std.testing.expect(original == .cancelled);
+            try std.testing.expectEqual(binding, original.cancelled.binding);
+            const newer = (try storage.observeCommand("retry-newer-message")).message.?.queue.?.state;
+            try std.testing.expect(newer == .processing);
+            try std.testing.expectEqual(newer_binding, newer.processing);
+        }
+    }
 }
 
 test "accepted stop remains discoverable without a control hint" {

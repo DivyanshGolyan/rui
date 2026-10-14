@@ -573,6 +573,15 @@ For every state-changing core command (configuration, message, Session stop, Per
 
 Prepare and inspect the production SQLite schema from an empty Store. Accepted stops retain only command key, Session, optional selected Turn and admission cutoff. Exact-interruption rows retain the supplied Session/Turn/Operation even when rejected. An interrupted model Operation has exactly one causal command-key field; absence and non-interrupted Resolutions have none. Assert that no stop Operation, stop ID, completion bit, duplicate Turn-outcome key or per-message exclusion flag was introduced. Derive observation and queue eligibility from the canonical relations after reopen.
 
+Exercise policy permutations through the production Store with real SQLite; use native integrations for transport, process and resource-lifetime claims. The existing `test` target owns the Store cases, with `-Dtest-filter` for focused development. Database close/reopen proves persisted semantics, not process-crash recovery.
+
+| Behavior | Store evidence | Retained native evidence |
+| --- | --- | --- |
+| Idle stop replay | Original null Turn, cutoff and exclusion survive newer active work and reopen; a fresh stop selects that newer work. | Control loses the reply and recovers the saved record across Host restart, preserving explicit null selection and cancellation without invented processing. |
+| Stop/interruption during retry waiting | Both controls prevent due retry admission and preserve the original target and newer work on replay/reopen. | Both Control routes receive a real temporary HTTP failure, lose the committed control reply, restart, recover the record and observe beyond retry eligibility with no second POST or output. |
+| Allow-once permission | Changed decision/Action conflicts, fresh-key rejection, original authorization after mode change/reopen and no duplicate Attempt on replay. | Bash retains wire replay/conflict, capacity-zero authorization without an Attempt, held prelaunch crash, post-effect recovery and physical cleanup. |
+| Initial configuration | All eight required-field combinations plus immutable binding and atomic mixed-update rejection. | Admission retains partial/missing-field wire rejection, saved rejection recovery, unsupported-provider scratch cleanup and current/full report projections. |
+
 ### Control races and acknowledgement
 
 | Scenario | Intervention | Required observable evidence |
