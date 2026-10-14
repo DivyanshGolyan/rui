@@ -9,6 +9,7 @@ esac
 root=$(pwd -P)
 state=$(mktemp -d "${TMPDIR:-/tmp}/rui-admission.XXXXXX")
 chmod 700 "$state"
+state=$(PYTHONPATH="$root/tests/integration" python3 -c 'import sys; from host_process import canonical_fixture_root; print(canonical_fixture_root(sys.argv[1]))' "$state")
 store="$state/store"
 records="$state/records"
 mkdir -m 700 "$records"
@@ -240,64 +241,22 @@ header = (
     f"Content-Length: {len(body)}\r\n"
     "X-Rui-Wire-Version: 1\r\n\r\n"
 ).encode()
-competitor = None
-released = False
 response = bytearray()
 try:
-    # This owner withholds the remainder through the refusal assertion. Elapsed
-    # time alone cannot establish that an incomplete connection is still held.
-    client.sendall(header + body[:1])
-    deadline = time.monotonic() + 1.0
-    while True:
-        remaining = deadline - time.monotonic()
-        assert remaining > 0, "connection remained stranded after listener shutdown"
-        probe = socket.socket(socket.AF_UNIX)
-        probe.settimeout(min(0.2, remaining))
-        try:
-            probe.connect(socket_path)
-            if not probe.recv(1):
-                break
-        except (ConnectionRefusedError, FileNotFoundError, ConnectionResetError, BrokenPipeError):
-            break
-        except socket.timeout:
-            pass
-        finally:
-            probe.close()
-    with (state / "drain-competing.out").open("wb") as out, (state / "drain-competing.err").open("wb") as err:
-        competitor = subprocess.Popen([rui, "serve", "--store", store], stdout=out, stderr=err)
-        competitor.wait(timeout=3)
-    assert competitor.returncode != 0 and b"StoreAlreadyOwned" in (state / "drain-competing.err").read_bytes(), "draining Host released its Store lock early"
-    released = True
-    client.sendall(body[1:])
-    deadline = time.monotonic() + 3
-    while True:
-        remaining = deadline - time.monotonic()
-        assert remaining > 0, "transferred request did not finish during drain"
-        client.settimeout(remaining)
-        chunk = client.recv(4096)
-        if not chunk:
-            break
-        response.extend(chunk)
-        assert len(response) <= 16384, "drain response exceeded fixture bound"
-    assert response.startswith(b"HTTP/1.1 200 "), "transferred request did not finish during drain"
+    try:
+        client.sendall(header + body)
+        while chunk := client.recv(4096):
+            response.extend(chunk)
+            assert len(response) <= 16384, "drain response exceeded fixture bound"
+    except (BrokenPipeError, ConnectionResetError):
+        pass  # Intake shutdown may win before or after the first upload byte.
     (state / "drain-response.bin").write_bytes(response)
-    head, payload = response.split(b"\r\n\r\n", 1)
-    lengths = [line.split(b":", 1)[1].strip() for line in head.split(b"\r\n")[1:]
-        if line.lower().startswith(b"content-length:")]
-    assert len(lengths) == 1 and lengths[0].isdigit() and len(payload) == int(lengths[0]), "incomplete drain reply"
-    reply = json.loads(payload)
-    assert reply["version"] == "1" and reply["type"] == "configuration_reply", reply
-    assert reply["answer"] == {"status": "accepted", "replayed": False,
-        "session": "direct/draining", "revision": "1", "created": True}, reply
+    assert b'"status":"accepted"' not in response, response
 finally:
     if sys.exc_info()[0] is not None:
         preserve_failure_metadata(state / "drain-failure.json", lambda: {
-            "body_released": released, "response_bytes": len(response),
-            "competitor_pid": competitor.pid if competitor else None,
-            "competitor_returncode": competitor.poll() if competitor else None})
+            "response_bytes": len(response)})
     client.close()
-    if competitor is not None:
-        stop_process(competitor, timeout=3)
 PY
 # Use the existing bounded failure wait for this second Host as well.
 drain_pid=$extra_pid
@@ -307,11 +266,20 @@ wait_host_failure
 host_pid=$extra_pid
 extra_pid=
 contains "$(cat "$drain_error")" "InjectedListenerFailure"
+PYTHONPATH="$root/tests/integration" python3 - "$rui" "$drain_store" <<'PY'
+import pathlib, sys
+import model_fixture as fixture
+fixture.RUI = pathlib.Path(sys.argv[1])
+store = pathlib.Path(sys.argv[2])
+host = fixture.start_host(store, None)
+try:
+    assert fixture.observe(store, "draining-request") == {"status": "absent"}
+finally:
+    fixture.stop_host(host)
+PY
 
-# Fill all ordinary places with sealed headers and incomplete bodies. A short
-# control classification still receives its explicit development response; two
-# additional classifiers bring the exact total to 12, and the next
-# connection is rejected without displacing existing custody.
+# Incomplete bodies and unclassified sockets retain their own custody without
+# filling a fixed connection quota or blocking a complete control request.
 stop_host
 python3 - "$rui" "$store" <<'PY'
 import json, pathlib, select, socket, sys, time
@@ -326,22 +294,21 @@ socket_path = fields["socket"]
 ordinary = []
 classification = []
 try:
-    ordinary = control.fill_ordinary_capacity(socket_path, peers, route="/v1/configure", kind="configure")
-    head, body = peers.release_place("control", lambda: control.raw_request(
-        socket_path, "/v1/control/stop", b""), timeout=5)
-    assert head.startswith(b"HTTP/1.1 501 "), (head, body)
+    for _ in range(100):
+        ordinary.append(peers.open("configure", lambda: control.open_partial(
+            socket_path, "/v1/configure"), timeout=3))
     for _ in range(3):
         client = socket.socket(socket.AF_UNIX)
         client.settimeout(3)
         classification.append(client)
         client.connect(socket_path)
-    ready, _, _ = select.select(classification, [], [], 3)
-    assert ready, "13th connection did not receive a capacity response"
-    overflow = ready[0]
-    control.assert_capacity_busy_reply(overflow, b"connection_capacity_exhausted")
-    overflow.close()
-    classification.remove(overflow)
+    head, body = peers.release_place("classification", lambda: control.raw_request(
+        socket_path, "/v1/control/stop", b""), timeout=5)
+    assert head.startswith(b"HTTP/1.1 501 "), (head, body)
+    control.assert_intake_progress(socket_path, store, peers)
     peers.held(peers.borrowers.values())
+    ready, _, _ = select.select(classification + ordinary, [], [], 0)
+    assert not ready, "incomplete exchange was displaced by concurrent intake"
     for client in classification:
         peers.release_place("classification", client.close)
     classification.clear()

@@ -217,19 +217,19 @@ def protected_saturation(root):
         held.append(held_request(store, "host-info"))
         pending = correlated_phase(diagnostics, "connection_request_host_info", began_ns)
         assert not diagnostics.matching("connection_resources_released", subject=pending["subject"])
-        busy_started = time.monotonic()
+        competing_started = time.monotonic()
         began_ns = time.monotonic_ns()
-        busy = raw_info(socket_path(store), store)
-        assert busy.startswith(b"HTTP/1.1 503") and b"discovery_capacity_exhausted" in busy, busy
-        assert time.monotonic() - busy_started < 2, "discovery busy reply exceeded bound"
-        busy_release = correlated_phase(diagnostics, "connection_place_released", began_ns,
-                                        subject_kind="place", subject="classification")
+        competing = raw_info(socket_path(store), store)
+        assert competing.startswith(b"HTTP/1.1 200") and b'"type":"host_info"' in competing, competing
+        assert time.monotonic() - competing_started < 2, "competing discovery exceeded bound"
+        discovery_released(diagnostics, began_ns)
         began_ns = time.monotonic_ns()
-        assert status(store) == "owned_unavailable", "discovery saturation is not wire incompatibility"
-        status_release = correlated_phase(diagnostics, "connection_place_released", began_ns,
-                                          subject_kind="place", subject="classification")
-        print("discovery rejection cleanup:", json.dumps([busy_release, status_release]), flush=True)
+        assert status(store) == initial, "incomplete discovery blocked complete discovery"
+        discovery_released(diagnostics, began_ns)
         assert time.monotonic() - began < 5, "fixture consumed ordinary borrowers' acceptance budget"
+        if baseline is not None:
+            snapshot = wait_for_descriptors(host.pid)
+            assert len(snapshot) <= len(baseline) + 11, (baseline, snapshot)
         ack = raw_info(socket_path(store), store, identity,
                        kind="host_stop", route="control/host-stop")
         assert ack.startswith(b"HTTP/1.1 200") and json.loads(ack.split(b"\r\n\r\n", 1)[1]) == {
@@ -238,31 +238,28 @@ def protected_saturation(root):
         while socket_path(store).exists():
             assert time.monotonic() < deadline, "stop did not close listener"
             time.sleep(.01)
-        assert host.poll() is None, "Host exited with borrowers held"
-        with (store / "host.lock").open("rb") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                pass
-            else:
-                raise AssertionError("lease released with borrowers held")
-        if baseline is not None:
-            snapshot = wait_for_descriptors(host.pid)
-            assert len(snapshot) <= len(baseline) + 11, (baseline, snapshot)
+        # These peers never handed a complete request to a worker. They must
+        # retire without requiring peer close, unlike an already-owned reply.
         for stream in held:
-            stream.close()
-        held.clear()
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, "unhanded intake did not retire after stop"
+            stream.settimeout(remaining)
+            try:
+                assert stream.recv(1) == b"", "unhanded intake produced a reply"
+            except ConnectionResetError:
+                pass
         host.wait(timeout=5)
         stop_process(host)
         assert host.returncode != 0, diagnostics.tail()  # EffectAwareShutdown, not a forced kill.
-        # Resource release is before the final drain unlock, not thread retirement.
+        # The per-exchange receipt is after physical close; process reap also
+        # establishes that both shared workers have retired before lease reuse.
         release = diagnostics.matching("connection_resources_released", subject=pending["subject"])
         assert len(release) == 1 and release[0]["scratch_used_bytes"] == "0", release
         assert release[0]["run"] == pending["run"] and int(release[0]["sequence"]) > int(pending["sequence"]), release
         assert status(store) == "unavailable"
         with (store / "host.lock").open("rb") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        print("protected discovery passed: ten ordinary + one discovery, competing busy, exact stop, listener closure, held lease, correlated release")
+        print("protected discovery passed: ten ordinary + incomplete discovery, competing ready, exact stop, unhanded peer retirement, correlated release and lease reuse")
     finally:
         for stream in held:
             stream.close()

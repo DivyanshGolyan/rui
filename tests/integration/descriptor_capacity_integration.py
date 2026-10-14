@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import errno
 import http.server
 import io
 import json
@@ -18,13 +19,65 @@ from types import SimpleNamespace
 import bash_integration as bash
 import control_integration as control
 import model_fixture as fixture
-from host_process import HostDiagnostics, TestHTTPServer, start_ready_process, stop_process
+from host_process import HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, start_ready_process, stop_process
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
 ROOT = pathlib.Path.cwd()
 fixture.RUI = RUI
 control.RUI = RUI
+
+
+# Observe actual EMFILE as well as inject system-wide resource errors without
+# exhausting the runner. This descriptor belongs to the fixture from startup.
+ACCEPT_PROBE = r"""
+#include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/socket.h>
+#include <time.h>
+#include <unistd.h>
+static int log_fd;
+__attribute__((constructor)) static void setup(void) {
+    log_fd = open(getenv("RUI_ACCEPT_LOG"), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (log_fd < 0) _exit(90);
+}
+static int probe_accept(int fd, struct sockaddr *address, socklen_t *length) {
+#ifdef __APPLE__
+    int (*original)(int, struct sockaddr *, socklen_t *) = accept;
+#else
+    int (*original)(int, struct sockaddr *, socklen_t *) = dlsym(RTLD_NEXT, "accept");
+#endif
+    if (!original || original == probe_accept) _exit(91);
+    int result;
+    if (!access(getenv("RUI_ACCEPT_ARM"), F_OK)) {
+        errno = atoi(getenv("RUI_ACCEPT_ERRNO"));
+        result = -1;
+    } else result = original(fd, address, length);
+    int saved = errno;
+    if (result >= 0 || (saved != EAGAIN && saved != EINTR && saved != ECONNABORTED)) {
+        static unsigned failures;
+        if (result < 0 && ++failures > 128) _exit(92); // Fail closed on a retry spin.
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now)) _exit(93);
+        char record[96];
+        int count = snprintf(record, sizeof(record), "%d %lld\n", result >= 0 ? 0 : saved,
+            (long long)now.tv_sec * 1000000000LL + now.tv_nsec);
+        if (count <= 0 || count >= sizeof(record) || write(log_fd, record, count) != count) _exit(94);
+    }
+    errno = saved;
+    return result;
+}
+#ifdef __APPLE__
+__attribute__((used, section("__DATA,__interpose"))) static struct {
+    const void *replacement; const void *original;
+} interpose_accept = { (const void *)probe_accept, (const void *)accept };
+#else
+int accept(int fd, struct sockaddr *address, socklen_t *length) { return probe_accept(fd, address, length); }
+#endif
+"""
 
 
 class HeldEndpoint(TestHTTPServer):
@@ -334,7 +387,8 @@ def prove_bash_spawn_with_full_client_population(state, required):
             connection.sendall(b"POST /v1/")
             held.append(connection)
         assert len(held) == 12
-        control.assert_ordinary_capacity_busy(socket_path, b"connection_capacity_exhausted")
+        expected_routes.extend(("observe", "host_info"))
+        control.assert_intake_progress(socket_path, store)
         assert_connections_live(held)
         for started in starts:
             assert not diagnostics.matching("connection_resources_released", subject=started["subject"]), started
@@ -430,10 +484,122 @@ def prove_bash_spawn_with_full_client_population(state, required):
             incoming_error.add_note("Descriptor cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
 
 
+def prove_accept_pressure(state):
+    source, library = state / "accept.c", state / "accept.so"
+    source.write_text(ACCEPT_PROBE)
+    subprocess.run(["cc", "-dynamiclib" if sys.platform == "darwin" else "-shared", "-fPIC",
+                    str(source), *(["-ldl"] if sys.platform == "linux" else []), "-o", str(library)], check=True)
+    for label, injected in (("mfile", errno.EMFILE), ("nfile", errno.ENFILE),
+                            ("nobufs", errno.ENOBUFS), ("nomem", errno.ENOMEM),
+                            ("real-mfile", None), ("shutdown-mfile", errno.EMFILE)):
+        root = state / label
+        root.mkdir(mode=0o700)
+        store, arm, log = root / "store", root / "arm", root / "accept.log"
+        endpoint = HeldEndpoint()
+        worker = threading.Thread(target=endpoint.serve_forever)
+        worker.start()
+        host = None
+        connections = []
+
+        def records():
+            return [tuple(map(int, line.split())) for line in log.read_text().splitlines()]
+
+        def connect(path):
+            peer = socket.socket(socket.AF_UNIX)
+            connections.append(peer)
+            peer.settimeout(1)
+            peer.connect(path)
+            return peer
+
+        try:
+            env = {**os.environ, "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+                   "RUI_ACCEPT_LOG": str(log), "RUI_ACCEPT_ARM": str(arm), "RUI_ACCEPT_ERRNO": str(injected or 0)}
+            # A system shell on macOS can strip DYLD_INSERT_LIBRARIES. Use
+            # the selected fixture Python to set this child's limit and exec.
+            host, ready = start_ready_process([sys.executable, "-c",
+                "import os, resource, sys; resource.setrlimit(resource.RLIMIT_NOFILE, (512, 512)); os.execv(sys.argv[1], sys.argv[1:])",
+                str(RUI), "serve", "--store", str(store), "--active-capacity", "2",
+                "--provider-endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses"], env=env)
+            diagnostics = HostDiagnostics(host)
+            session = configure(root, store, 0)
+            if label != "shutdown-mfile":
+                message(root, store, session, 0)
+                endpoint.wait_for("requests", 1)
+            baseline = sum(code == 0 for code, _ in records())
+            held = connect(ready["socket"])
+            held.sendall(b"POST /v1/host-info HTTP/1.1\r\n")
+            wait_for(lambda: sum(code == 0 for code, _ in records()) > baseline, "preexisting accepted peer")
+            if label == "shutdown-mfile":
+                baseline = sum(code == 0 for code, _ in records())
+                stopping = connect(ready["socket"])
+                stopping.sendall(b"POST /v1/control/host-stop HTTP/1.1\r\n")
+                wait_for(lambda: sum(code == 0 for code, _ in records()) > baseline, "preexisting stop peer")
+            if injected is not None:
+                arm.touch()
+                pending = connect(ready["socket"])
+            else:
+                # Real per-process exhaustion, isolated to this 512-FD Host.
+                # Incomplete headers require sockets but no content handles.
+                for _ in range(600):
+                    try:
+                        pending = connect(ready["socket"])
+                    except (TimeoutError, BlockingIOError):
+                        break
+                    if any(code == errno.EMFILE for code, _ in records()):
+                        break
+            expected = injected or errno.EMFILE
+            wait_for(lambda: any(code == expected for code, _ in records()), "accept resource exhaustion")
+            # Existing accepted peers still progress during pressure.
+            body = json.dumps({"version": "1", "kind": "host_info", "store": str(store)}).encode()
+            held.sendall(f"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+            head, response = control.read_http_response(held)
+            assert head.startswith(b"HTTP/1.1 200 "), (label, head, diagnostics.tail())
+            identity = json.loads(response)["instance"]
+            if injected is not None:
+                wait_for(lambda: len([at for code, at in records() if code == expected]) >= 4, "bounded retry samples")
+                attempts = [at for code, at in records() if code == expected]
+                assert all(b - a >= 50_000_000 for a, b in zip(attempts, attempts[1:])), (label, attempts)
+                if label == "shutdown-mfile":
+                    stop_body = json.dumps({"version": "1", "kind": "host_stop", "store": str(store)}).encode()
+                    stopping.sendall(f"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nX-Rui-Host-Instance: {identity}\r\nContent-Length: {len(stop_body)}\r\n\r\n".encode() + stop_body)
+                    head, response = control.read_http_response(stopping)
+                    assert head.startswith(b"HTTP/1.1 200 "), head
+                    assert json.loads(response) == {"version": "1", "type": "host_stop_reply", "status": "acknowledged"}, response
+                    # Keep acquisition pressure armed through physical shutdown.
+                    for peer in connections:
+                        peer.close()
+                    host.wait(timeout=8)
+                    assert not pathlib.Path(ready["socket"]).exists(), diagnostics.tail()
+                    print("accept pressure: guarded shutdown during cooldown passed", flush=True)
+                    continue
+                arm.unlink()
+            else:
+                # Releasing sockets restores the actual descriptor supply.
+                for peer in connections:
+                    peer.close()
+            if injected is not None:
+                pending.sendall(b"POST /v1/host-info HTTP/1.1\r\n" +
+                    f"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+                head, response = control.read_http_response(pending)
+                assert head.startswith(b"HTTP/1.1 200 ") and json.loads(response)["instance"] == identity
+            endpoint.release.set()
+            endpoint.wait_for("completed", 1)
+            wait_for(lambda: failed_result(root, store, 0), "original admitted work without interruption")
+            wait_for(lambda: execution_idle(root, store, session), "recovered execution drainage")
+            head, response = control.raw_request(ready["socket"], "/v1/host-info", body)
+            assert head.startswith(b"HTTP/1.1 200 ") and json.loads(response)["instance"] == identity
+            assert host.poll() is None, diagnostics.tail()
+            print(f"accept pressure: {label}, existing peer, admitted work, same-Host recovery and bounded retry passed", flush=True)
+        finally:
+            endpoint.release.set()
+            dispose_all(*(peer.close for peer in connections),
+                        lambda: stop_process(host) if host is not None else None,
+                        endpoint.shutdown, endpoint.server_close, lambda: worker.join(timeout=3))
+
+
 def main():
     prove_borrower_oracle()
-    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-descriptor-capacity-"))
-    state.chmod(0o700)
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-descriptor-capacity-"))
     endpoint = HeldEndpoint()
     endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     endpoint_thread.start()
@@ -448,12 +614,17 @@ def main():
             assert os.environ.get("RUI_HOST_MALLOC_DEFAULTS") != "0"
             for name in ("MallocMaxMagazines", "MallocSpaceEfficient"):
                 assert os.environ.get(name, "1") == "1", (name, os.environ.get(name))
+        prove_accept_pressure(state)
         # Lease(2), SQLite(4), listener(1), and curl wake objects: two
         # pipes on macOS, two eventfds on Linux. Two execution slots need
         # one steady population(5) plus the serial Bash spawn peak(10).
         fixed_host = 2 + 4 + 1 + (4 if sys.platform == "darwin" else 2)
         execution = 5 + 10
-        fixed = fixed_host + 42 + execution + 0 + 1
+        # The supported burst is 100 ordinary exchanges (socket + up to
+        # three content aliases each), two controls and one discovery.
+        # This preflight is a resource estimate, not a runtime admission cap.
+        clients = 100 * 4 + 3
+        fixed = fixed_host + clients + execution + 0 + 2
         minimum_required = fixed + 3
         rejected_store = state / "rejected-store"
         rejected = subprocess.run(
@@ -479,8 +650,8 @@ def main():
         assert fields["inherited"] in ({3, 4} if sys.platform == "darwin" else {3}), fields
         required = fixed + fields["inherited"]
         expected = dict(active_capacity=2, required=required, soft_limit=minimum_required - 1,
-            inherited=fields["inherited"], fixed_host=fixed_host, clients=42, execution=execution,
-            authentication=0, self_wake=1)
+            inherited=fields["inherited"], fixed_host=fixed_host, clients=clients, execution=execution,
+            authentication=0, self_wake=2)
         assert fields == expected, (fields, expected)
         assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
         if required != minimum_required:
@@ -544,14 +715,14 @@ def main():
         documented_store = state / "documented-store"
         documented, _ = start_ready_process(
             limited_host(
-                256,
+                1024,
                 "serve",
                 "--store",
                 documented_store,
                 "--active-capacity",
                 "8",
             ),
-            required_fields={"active_capacity": "8", "descriptor_limit": "256"},
+            required_fields={"active_capacity": "8", "descriptor_limit": "1024"},
         )
         stop_process(documented)
         documented = None

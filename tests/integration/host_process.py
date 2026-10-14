@@ -27,15 +27,16 @@ STDERR_TAIL_LIMIT = 16 * 1024
 # status: 12 simultaneous clients + 40 repeated status calls + at most 20
 # setup/guard probes, three phases per connection, two boundaries and two Bash admissions.
 # stop: at most 321 Action probes (8 seconds / 25ms interval + final probe)
-# plus twenty non-poll numbered exchanges, each with a release; five stop
+# plus twenty-three non-poll numbered exchanges, each with a release; five stop
 # issuers, twelve observe classifications, three two-phase cleanup owners,
-# capture entry and Bash handoff. No release is filtered out by request kind.
+# capture entry, Bash handoff, three Message classification/header pairs and
+# one owned report gate. No release is filtered out by request kind.
 # control: at most 50 inspection attempts (capture + gate), four model owners
 # (ten selected phases), three controls (hint + timing), two boundaries.
 # control_peers: gated contention owns four 8s/25ms observation polls (321 each,
 # conservatively including a boundary probe), fifty total inspections, and six
-# setup/control exchanges. This exceeds real contention (2*321+38), delivery
-# (321+21), capacity (37), admission (11), and delivery restart (2).
+# setup/control exchanges. This also covers the smaller capacity and delivery
+# populations and admission's 103 numbered exchanges.
 # Each exchange has start/release and at most two inspection/control phases;
 # four model owners have ten phases, plus two lifecycle boundaries and eight
 # separately issued unnumbered releases. These are test-only retained records.
@@ -52,7 +53,7 @@ STDERR_TAIL_LIMIT = 16 * 1024
 # bash_pipes: one held leader observation, one permission and one Session stop.
 PEER_EXCHANGE_LIMIT = 4 * 321 + 50 + 6
 OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2 + 2,
-                      "stop": 321 + 20 + 5 + 12 + 3 * 2 + 1 + 1,
+                      "stop": 321 + 23 + 5 + 12 + 3 * 2 + 1 + 1 + 3 * 2 + 1,
                       "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 3 + 1,
                       "control_peers": 4 * PEER_EXCHANGE_LIMIT + 4 * 10 + 2 + 8,
                       "capture": 3, "recovery": 2 * 4 + 2, "managed": 9,

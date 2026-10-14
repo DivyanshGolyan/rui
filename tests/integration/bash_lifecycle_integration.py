@@ -156,7 +156,7 @@ def hold_incomplete_connection(host, store):
     )
     fixture.wait_for(
         lambda: list((store / "scratch").glob("request-*-*.tmp")),
-        "shutdown drain transferred connection custody",
+        "incomplete upload acquired ingress scratch",
     )
     return connection
 
@@ -362,9 +362,9 @@ def main():
             endpoint.server_close()
             thread.join(timeout=5)
 
-        # One real lifecycle owner, connection handler, Store and lease share
-        # the production shutdown boundary. Neither completed semantics nor a
-        # closed listener can release the lease while either owner remains.
+        # Shutdown retires an unhanded upload independently of Bash cleanup.
+        # The lifecycle owner still retains Store and lease until safe cleanup;
+        # the Host-stop fixture separately holds an already-owned reply.
         name = "lifecycle-store-lease-drain"
         state = root / name
         state.mkdir(mode=0o700)
@@ -396,6 +396,14 @@ def main():
                 "lease witness entered effect-aware shutdown",
                 timeout=12,
             )
+            try:
+                assert draining.recv(1) == b"", "unhanded upload produced a reply"
+            except ConnectionResetError:
+                pass
+            fixture.wait_for(
+                lambda: not list((store / "scratch").glob("request-*-*.tmp")),
+                "unhanded upload released ingress scratch while Bash cleanup is held",
+            )
             assert host.poll() is None
             competing_host_is_rejected(store)
 
@@ -410,14 +418,9 @@ def main():
                 "lease witness production cleanup",
                 timeout=12,
             )
-            assert host.poll() is None, "Host skipped connection drain"
-            competing_host_is_rejected(store)
-
-            draining.close()
-            draining = None
             fixture.wait_for(
                 lambda: host.poll() is not None,
-                "lease witness orderly shutdown after connection drain",
+                "lease witness orderly shutdown with unhanded peer still open",
                 timeout=12,
             )
             host.communicate(timeout=5)
@@ -425,6 +428,9 @@ def main():
             host = None
 
             host = fixture.start_host(store, endpoint_url)
+            observation = fixture.command("observe-command", "--store", store,
+                                          "--key", "shutdown-drain")["observation"]
+            assert observation["status"] == "absent", observation
             fixture.wait_for(
                 lambda: bash_fixture.resolution(store, session) == "indeterminate",
                 "lease witness fresh Host acquisition and recovery",
