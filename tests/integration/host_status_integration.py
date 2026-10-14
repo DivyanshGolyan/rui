@@ -227,6 +227,9 @@ def protected_saturation(root):
         assert status(store) == initial, "incomplete discovery blocked complete discovery"
         discovery_released(diagnostics, began_ns)
         assert time.monotonic() - began < 5, "fixture consumed ordinary borrowers' acceptance budget"
+        if baseline is not None:
+            snapshot = wait_for_descriptors(host.pid)
+            assert len(snapshot) <= len(baseline) + 11, (baseline, snapshot)
         ack = raw_info(socket_path(store), store, identity,
                        kind="host_stop", route="control/host-stop")
         assert ack.startswith(b"HTTP/1.1 200") and json.loads(ack.split(b"\r\n\r\n", 1)[1]) == {
@@ -235,20 +238,16 @@ def protected_saturation(root):
         while socket_path(store).exists():
             assert time.monotonic() < deadline, "stop did not close listener"
             time.sleep(.01)
-        assert host.poll() is None, "Host exited with borrowers held"
-        with (store / "host.lock").open("rb") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                pass
-            else:
-                raise AssertionError("lease released with borrowers held")
-        if baseline is not None:
-            snapshot = wait_for_descriptors(host.pid)
-            assert len(snapshot) <= len(baseline) + 11, (baseline, snapshot)
+        # These peers never handed a complete request to a worker. They must
+        # retire without requiring peer close, unlike an already-owned reply.
         for stream in held:
-            stream.close()
-        held.clear()
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, "unhanded intake did not retire after stop"
+            stream.settimeout(remaining)
+            try:
+                assert stream.recv(1) == b"", "unhanded intake produced a reply"
+            except ConnectionResetError:
+                pass
         host.wait(timeout=5)
         stop_process(host)
         assert host.returncode != 0, diagnostics.tail()  # EffectAwareShutdown, not a forced kill.
@@ -260,7 +259,7 @@ def protected_saturation(root):
         assert status(store) == "unavailable"
         with (store / "host.lock").open("rb") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        print("protected discovery passed: ten ordinary + incomplete discovery, competing ready, exact stop, listener closure, held lease, correlated release")
+        print("protected discovery passed: ten ordinary + incomplete discovery, competing ready, exact stop, unhanded peer retirement, correlated release and lease reuse")
     finally:
         for stream in held:
             stream.close()
