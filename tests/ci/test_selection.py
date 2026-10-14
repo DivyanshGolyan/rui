@@ -301,15 +301,23 @@ class SelectionTest(unittest.TestCase):
 
 
 class FullCheckPartitionTest(unittest.TestCase):
-    def run_part(self, part, fail="", overlap=False, hold=""):
+    def run_part(self, part, fail="", overlap=False, hold="", timing=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             # Exercise the shell gate's public commands without launching product
-            # fixtures. This checks membership and failure propagation, not timing.
+            # fixtures. A controlled clock checks elapsed reporting, not speed.
             command = '''#!/bin/sh
 if [ "$1" = - ]; then exec "$TEST_PYTHON" "$@"; fi
 fixture=$(basename "${1:-$0}")
 identity="$fixture.$2"
+if [ "$CHECK_TIMING" = 1 ]; then
+    case "$fixture" in
+        human_cli_integration.py|preference_policy_integration.py)
+            touch "$GATE_DIR/$fixture.started"
+            read -r release < "$GATE_DIR/$fixture.release"
+            test "$release" = r || exit 45 ;;
+    esac
+fi
 if [ "$CHECK_OVERLAP" = 1 ]; then
     touch "$GATE_DIR/$identity.started"
     if [ "$fixture" = human_cli_integration.py ]; then
@@ -354,14 +362,57 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
             invocations.touch()
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", FAIL_FIXTURE=fail,
                        CHECK_OVERLAP=str(int(overlap)), GATE_DIR=str(root), TEST_PYTHON=sys.executable,
-                       HOLD_FIXTURE=hold, TEST_PART=part)
+                       HOLD_FIXTURE=hold, TEST_PART=part, CHECK_TIMING=str(int(timing)))
             arguments = (["parallel", str(root / "native"), "status", "sessions", "proposal", "activity", "preferences"]
                          if part == "parallel" else
                          ["status", "sessions", "proposal", "activity", "preferences", part])
             command = [
                 "/bin/sh", "tests/integration/check.sh", "release", "debug", *arguments,
             ]
-            if hold:
+            if timing:
+                clock = root / "clock"
+                clock.write_text("10000000000")
+                (root / "sitecustomize.py").write_text(
+                    "import os, time\nfrom pathlib import Path\n"
+                    "time.monotonic_ns = lambda: int(Path(os.environ['GATE_DIR'], 'clock').read_text())\n")
+                env.update(PYTHONPATH=str(root), TMPDIR=str(root))
+                fixtures = ("human_cli_integration.py", "preference_policy_integration.py")
+                releases = []
+                process = None
+                try:
+                    for fixture in fixtures:
+                        fifo = root / f"{fixture}.release"
+                        os.mkfifo(fifo)
+                        releases.append(os.open(fifo, os.O_RDWR | os.O_NONBLOCK))
+                    process = subprocess.Popen(command, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    deadline = time.monotonic() + 5
+                    while not all((root / f"{fixture}.started").exists() for fixture in fixtures):
+                        self.assertIsNone(process.poll())
+                        self.assertLess(time.monotonic(), deadline, "both timed fixtures must start")
+                        time.sleep(.005)
+                    clock.with_suffix(".next").write_text("13000000000")
+                    clock.with_suffix(".next").replace(clock)
+                    os.write(releases[1], b"r\n")
+                    # The later inventory entry must save its own elapsed time
+                    # while the earlier entry still prevents batch printing.
+                    deadline = time.monotonic() + 5
+                    while not any(path.read_text().strip() for path in root.glob("rui-check.*/preference-policy.status")):
+                        self.assertIsNone(process.poll())
+                        self.assertLess(time.monotonic(), deadline, "completed peer must record timing before inventory wait")
+                        time.sleep(.005)
+                    clock.with_suffix(".next").write_text("30000000000")
+                    clock.with_suffix(".next").replace(clock)
+                finally:
+                    for release in releases:
+                        os.write(release, b"r\n")
+                    try:
+                        if process is not None:
+                            stdout, stderr = process.communicate(timeout=10)
+                    finally:
+                        for release in releases:
+                            os.close(release)
+                result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            elif hold:
                 os.mkfifo(root / "release")
                 # Own release before launch, including assertion-failure disposal.
                 release = os.open(root / "release", os.O_RDWR | os.O_NONBLOCK)
@@ -397,6 +448,20 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                     raise
             return result, invocations.read_text().splitlines()
 
+    def records(self, result):
+        return re.findall(r"^([a-z-]+) (?:passed|failed): exit=(\d+) elapsed=(\d+\.\d{3})s$",
+                          result.stdout + result.stderr, re.MULTILINE)
+
+    def test_elapsed_belongs_to_invocation_not_inventory_wait(self):
+        for part in ("callers", "parallel"):
+            for fail in ("", "preference_policy_integration.py"):
+                with self.subTest(part=part, fail=fail):
+                    result, _ = self.run_part(part, fail=fail, timing=True)
+                    self.assertEqual(result.returncode, int(bool(fail)), result.stdout + result.stderr)
+                    records = {name: (status, elapsed) for name, status, elapsed in self.records(result)}
+                    self.assertEqual(records["preference-policy"], ("42" if fail else "0", "3.000"))
+                    self.assertEqual(records["human-cli"], ("0", "20.000"))
+
     def test_parts_are_disjoint_and_cover_the_unchanged_full_gate(self):
         expected = {
             "admission_integration.sh release", "dispatch_integration.py release",
@@ -416,6 +481,10 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
             result, lines = self.run_part(part)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(len(lines), len(set(lines)), lines)
+            records = self.records(result)
+            self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
+            self.assertEqual(len({name for name, _, _ in records}), len(lines))
+            self.assertTrue(all(status == "0" for _, status, _ in records))
             outputs[part] = set(lines)
         self.assertEqual(outputs["all"], expected)
         # The ordinary driver also owns the native binary; the full gate runs
@@ -448,15 +517,22 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                         "host_launch_integration.py", "host_process_test.py",
                         "host_allocator_test.py", "admission_integration.sh"):
             for part in ("callers", "parallel", "all"):
-                result, _ = self.run_part(part, fixture)
-                self.assertNotEqual(result.returncode, 0, (part, fixture))
+                result, lines = self.run_part(part, fixture)
+                self.assertEqual(result.returncode, 42 if part == "all" else 1, (part, fixture))
+                records = self.records(result)
+                self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
+                self.assertIn("42", [status for _, status, _ in records])
+                if part == "all":
+                    self.assertEqual(lines[-1].split()[0], fixture)
         for part in ("execution", "parallel", "all"):
             result, _ = self.run_part(part, "dispatch_integration.py")
             self.assertNotEqual(result.returncode, 0, part)
         result, _ = self.run_part("parallel", "native")
         self.assertNotEqual(result.returncode, 0)
-        result, _ = self.run_part("not-a-part")
+        result, lines = self.run_part("not-a-part")
         self.assertEqual(result.returncode, 2)
+        self.assertEqual(lines, [])
+        self.assertEqual(self.records(result), [])
 
 
 if __name__ == "__main__":
