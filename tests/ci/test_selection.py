@@ -301,7 +301,7 @@ class SelectionTest(unittest.TestCase):
 
 
 class FullCheckPartitionTest(unittest.TestCase):
-    def run_part(self, part, fail="", overlap=False, hold="", timing=False):
+    def run_part(self, part, fail="", overlap=False, hold="", timing=False, clock_error=""):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             # Exercise the shell gate's public commands without launching product
@@ -363,6 +363,13 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", FAIL_FIXTURE=fail,
                        CHECK_OVERLAP=str(int(overlap)), GATE_DIR=str(root), TEST_PYTHON=sys.executable,
                        HOLD_FIXTURE=hold, TEST_PART=part, CHECK_TIMING=str(int(timing)))
+            if clock_error:
+                (root / "sitecustomize.py").write_text(
+                    "import sys, time\n"
+                    "def fail_clock():\n    raise OSError('injected clock failure')\n"
+                    f"if (len(sys.argv) == 1) == {clock_error == 'start'!r}:\n"
+                    "    time.monotonic_ns = fail_clock\n")
+                env["PYTHONPATH"] = str(root)
             arguments = (["parallel", str(root / "native"), "status", "sessions", "proposal", "activity", "preferences"]
                          if part == "parallel" else
                          ["status", "sessions", "proposal", "activity", "preferences", part])
@@ -510,6 +517,11 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_failure_or_invalid_part_cannot_report_success(self):
+        complete = {}
+        for part in ("callers", "parallel"):
+            result, lines = self.run_part(part)
+            self.assertEqual(result.returncode, 0)
+            complete[part] = set(lines)
         for fixture in ("human_cli_integration.py", "preference_policy_integration.py",
                         "session_list_integration.py", "conversation_page_integration.py",
                         "proposal_integration.py", "activity_integration.py",
@@ -524,6 +536,8 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                 self.assertIn("42", [status for _, status, _ in records])
                 if part == "all":
                     self.assertEqual(lines[-1].split()[0], fixture)
+                else:
+                    self.assertEqual(set(lines), complete[part])
         for part in ("execution", "parallel", "all"):
             result, _ = self.run_part(part, "dispatch_integration.py")
             self.assertNotEqual(result.returncode, 0, part)
@@ -533,6 +547,31 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
         self.assertEqual(result.returncode, 2)
         self.assertEqual(lines, [])
         self.assertEqual(self.records(result), [])
+
+    def test_failure_still_drains_a_held_peer_before_isolated_cases(self):
+        for part in ("callers", "parallel"):
+            result, _ = self.run_part(part, fail="preference_policy_integration.py",
+                                      overlap=True, hold="host_stop_integration.py")
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            records = {name: status for name, status, _ in self.records(result)}
+            self.assertEqual(records["preference-policy"], "42")
+            self.assertEqual(records["host-stop"], "0")
+            self.assertEqual(records["host-launch"], "0")
+
+    def test_clock_failure_preserves_fixture_results(self):
+        for clock_error in ("start", "finish"):
+            for part in ("all", "execution", "callers", "parallel"):
+                fixture = "dispatch_integration.py" if part == "execution" else "preference_policy_integration.py"
+                failures = ("", fixture, "host_launch_integration.py") if part in ("callers", "parallel") else ("", fixture)
+                for fail in failures:
+                    with self.subTest(clock_error=clock_error, part=part, fail=fail):
+                        result, lines = self.run_part(part, fail=fail, clock_error=clock_error)
+                        expected = (42 if part in ("all", "execution") else 1) if fail else 0
+                        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                        records = re.findall(r"^([a-z-]+) (?:passed|failed): exit=(\d+) elapsed=unavailable$",
+                                             result.stdout + result.stderr, re.MULTILINE)
+                        self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
+                        self.assertEqual({status for _, status in records}, {"0", "42"} if fail else {"0"})
 
 
 if __name__ == "__main__":
