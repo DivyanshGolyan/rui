@@ -2568,10 +2568,9 @@ def main(selected="all"):
             selected = listing.split(f"Session: {warning_ref}\n", 1)[1].split("Session: ", 1)[0]
             assert "Bash runs without approval" not in selected, selected
             assert f"Permission: {mode}\n" in selected, selected
-            master, slave = pty.openpty()
-            caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store), "--session", warning_ref],
-                env={**os.environ, "HOME": str(preferences_home)}, stdin=slave, stdout=slave, stderr=slave)
-            try:
+            with terminal_process([str(fixture.RUI), "session", "--store", str(store), "--session", warning_ref],
+                env={**os.environ, "HOME": str(preferences_home)},
+            ) as (caller, master):
                 welcome = read_terminal(master, "› ")
                 assert "Permission:" not in welcome, welcome
                 assert ("Bash runs without approval" in welcome) == warning, welcome
@@ -2582,9 +2581,6 @@ def main(selected="all"):
                 assert "Bash runs without approval" not in status, status
                 terminal_step(master, "/exit", "Detached.")
                 assert caller.wait(timeout=5) == 0
-            finally:
-                dispose_all(lambda: stop_process(caller, timeout=5),
-                            lambda: os.close(master), lambda: os.close(slave))
         created = []
         records = preferences_home / ".config/rui/requests"
         for persistent in (False, True):
@@ -3018,11 +3014,9 @@ def main(selected="all"):
         assert run(home, "result", failed_key) == "admitted: accepted\nresult: failed\ncode: provider_http_422\n"
         fixture.wait_for(lambda: fixture.completed_observation(store, queued_key), "queued successor")
         assert run(home, "result", queued_key) == "admitted: accepted\nresult: completed\nsuccessor done\n"
-        master, slave = pty.openpty()
-        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+        with terminal_process([str(fixture.RUI), "session", "--store", str(store),
             "--session", failure_session], env={**os.environ, "HOME": str(home)},
-            stdin=slave, stdout=slave, stderr=slave)
-        try:
+        ) as (entered, master):
             read_terminal(master, "› ")
             failed = terminal_step(master, f"/result {failed_key}", "result: failed", composer=True)
             assert "result: failed" in failed, failed
@@ -3031,9 +3025,6 @@ def main(selected="all"):
             assert "result: completed\nsuccessor done" in result, result
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
-        finally:
-            dispose_all(lambda: stop_process(entered, timeout=5),
-                        lambda: os.close(master), lambda: os.close(slave))
 
         stop_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("stopped-answer", "stopped-reason",
@@ -3246,11 +3237,9 @@ def main(selected="all"):
         control_session = "human/name\n\x1b[2J\u202e"
         run(home, "configure", "--store", store, "--session", control_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
-        master, slave = pty.openpty()
-        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+        with terminal_process([str(fixture.RUI), "session", "--store", str(store),
             "--session", control_session], env={**os.environ, "HOME": str(home)},
-            stdin=slave, stdout=slave, stderr=slave)
-        try:
+        ) as (entered, master):
             greeting = read_terminal(master, "› ")
             assert "Session:" not in greeting, greeting
             assert "\x1b[2J" not in greeting and "\u202e" not in greeting, greeting
@@ -3261,21 +3250,18 @@ def main(selected="all"):
             assert entered.wait(timeout=5) == 0
             resume = farewell.split("Resume: ", 1)[1].split("\n", 1)[0]
             assert "\x1b" not in resume and "\u202e" not in resume, resume
-            # Execute the printed command, not a reconstructed equivalent. Both
-            # exact selectors must survive shell quoting and changed defaults.
-            other_store = workspace / "unused-store"
-            other_store.mkdir(mode=0o700)
-            run(home, "setup", "--store", other_store)
-            resume_bin = state / "resume-bin"
-            resume_bin.mkdir()
-            (resume_bin / "rui").symlink_to(fixture.RUI)
-            os.close(master)
-            os.close(slave)
-            master, slave = pty.openpty()
-            entered = subprocess.Popen(["bash", "-c", "exec " + resume],
-                env={**os.environ, "HOME": str(home),
-                     "PATH": str(resume_bin) + os.pathsep + os.environ["PATH"]},
-                stdin=slave, stdout=slave, stderr=slave)
+        # Execute the printed command, not a reconstructed equivalent. Both
+        # exact selectors must survive shell quoting and changed defaults.
+        other_store = workspace / "unused-store"
+        other_store.mkdir(mode=0o700)
+        run(home, "setup", "--store", other_store)
+        resume_bin = state / "resume-bin"
+        resume_bin.mkdir()
+        (resume_bin / "rui").symlink_to(fixture.RUI)
+        with terminal_process(["bash", "-c", "exec " + resume],
+            env={**os.environ, "HOME": str(home),
+                 "PATH": str(resume_bin) + os.pathsep + os.environ["PATH"]},
+        ) as (entered, master):
             read_terminal(master, "› ")
             resumed = terminal_step(master, "/status", "Session: ", composer=True)
             assert "Session: human/name\\n\\x1b[2J\\u202e" in resumed, resumed
@@ -3283,9 +3269,6 @@ def main(selected="all"):
             terminal_step(master, "/exit", "Resume: ")
             assert entered.wait(timeout=5) == 0
             run(home, "setup", "--store", store)
-        finally:
-            dispose_all(lambda: stop_process(entered, timeout=5),
-                        lambda: os.close(master), lambda: os.close(slave))
         unsafe_session = "human/unsafe-key"
         unsafe_key = "message\n\x1b[2J\u202e"
         unsafe_release = threading.Event()
@@ -3304,20 +3287,15 @@ def main(selected="all"):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             assert waiter.stdout.readline() == "selected message: message\\n\\x1b[2J\\u202e\n"
-            master, slave = pty.openpty()
-            entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+            with terminal_process([str(fixture.RUI), "session", "--store", str(store),
                 "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
-                stdin=slave, stdout=slave, stderr=slave)
-            try:
+            ) as (entered, master):
                 read_terminal(master, "› ")
                 status = terminal_step(master, "/status", "Session: ", composer=True)
                 assert "Current message: message\\n\\x1b[2J\\u202e" in status, status
                 assert "\x1b[2J" not in status and "\u202e" not in status, status
                 assert "Detached." in terminal_step(master, "/exit", "Detached.")
                 assert entered.wait(timeout=5) == 0
-            finally:
-                dispose_all(lambda: stop_process(entered, timeout=5),
-                            lambda: os.close(master), lambda: os.close(slave))
         finally:
             waiter_deadline = time.monotonic() + 10
             dispose_all(unsafe_release.set,
@@ -3326,11 +3304,9 @@ def main(selected="all"):
         fixture.wait_for(lambda: fixture.completed_observation(store, unsafe_key), "unsafe key result")
         assert fixture.command("inspect-session", "--store", store,
             "--session", unsafe_session)["recent_messages"][0]["message"] == unsafe_key
-        master, slave = pty.openpty()
-        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+        with terminal_process([str(fixture.RUI), "session", "--store", str(store),
             "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
-            stdin=slave, stdout=slave, stderr=slave)
-        try:
+        ) as (entered, master):
             greeting = read_terminal(master, "› ")
             assert "Session:" not in greeting and "\n  safe result" in greeting, greeting
             status = terminal_step(master, "/status", "Session: ", composer=True)
@@ -3339,9 +3315,6 @@ def main(selected="all"):
             assert "\x1b[2J" not in status and "\u202e" not in status, status
             assert "Detached." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
-        finally:
-            dispose_all(lambda: stop_process(entered, timeout=5),
-                        lambda: os.close(master), lambda: os.close(slave))
         empty_session = "human/empty-key"
         run(home, "configure", "--store", store, "--session", empty_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
