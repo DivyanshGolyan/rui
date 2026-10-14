@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import pathlib
+import select
 import shutil
 import signal
 import sqlite3
@@ -61,6 +62,30 @@ def dispose_dispatch(processes, endpoints, releases, *after):
         *(lambda endpoint=endpoint: stop_endpoint(endpoint, endpoints) for endpoint in tuple(endpoints)),
         *after,
     )
+
+
+def fail_result_destination(args, *, timeout=15):
+    """Close a result destination after a bounded prefix and reap its caller."""
+    deadline = time.monotonic() + timeout
+    read_fd, write_fd = os.pipe()
+    process = None
+    try:
+        process = subprocess.Popen(args, stdout=write_fd, stderr=subprocess.PIPE)
+        os.close(write_fd)
+        write_fd = None
+        remaining = deadline - time.monotonic()
+        assert remaining > 0 and select.select([read_fd], [], [], remaining)[0], "result prefix deadline exceeded"
+        prefix = os.read(read_fd, 4096)
+        os.close(read_fd)
+        read_fd = None
+        _, errors = process.communicate(timeout=max(0, deadline - time.monotonic()))
+        return prefix, process.returncode, errors
+    finally:
+        dispose_all(
+            lambda: os.close(write_fd) if write_fd is not None else None,
+            lambda: os.close(read_fd) if read_fd is not None else None,
+            lambda: stop_process(process) if process is not None else None,
+        )
 
 
 def main():
@@ -1812,27 +1837,10 @@ def main():
         # A failed caller destination may retain a prefix, but it cannot make
         # the read successful or consume the saved keyed answer. A fresh read
         # streams the complete bytes again without inventing a newline.
-        read_fd, write_fd = os.pipe()
-        failed_destination = None
-        try:
-            failed_destination = subprocess.Popen(
-                [str(RUI), "request", "read-result", "--store", str(growth_store), "--key", "growth-bytes"],
-                stdout=write_fd,
-                stderr=subprocess.PIPE,
-            )
-            os.close(write_fd)
-            write_fd = None
-            prefix = os.read(read_fd, 4096)
-            os.close(read_fd)
-            read_fd = None
-            _, failure_stderr = failed_destination.communicate(timeout=15)
-        finally:
-            dispose_all(
-                lambda: os.close(write_fd) if write_fd is not None else None,
-                lambda: os.close(read_fd) if read_fd is not None else None,
-                lambda: stop_process(failed_destination) if failed_destination is not None else None,
-            )
-        assert failed_destination.returncode != 0, failure_stderr
+        prefix, failed_status, failure_stderr = fail_result_destination(
+            [str(RUI), "request", "read-result", "--store", str(growth_store), "--key", "growth-bytes"],
+        )
+        assert failed_status != 0, failure_stderr
         assert 0 < len(prefix) < len(large_answer), len(prefix)
         complete_path = state / "growth-answer.bin"
         with complete_path.open("wb") as complete_destination:

@@ -74,6 +74,7 @@ def main():
     prove_required_capture_receipts()
     prove_peer_setup_disposal()
     prove_caller_disposal()
+    prove_failed_result_destination()
     assert_reaped("time.sleep(10)", "silent alive")
     assert_reaped("sys.stdout.write('rea'); sys.stdout.flush(); time.sleep(10)", "partial line")
     assert_reaped("print('not-ready'); time.sleep(10)", "malformed readiness")
@@ -1147,6 +1148,45 @@ def prove_terminal_capture_budget():
                 assert late_stage is None, f"accepted late {late_stage} at {clock[0]}"
                 assert reached == ["read", "release"], reached
     print("Terminal capture caller clock: timely exact read/release accepted; late exact read and release rejected")
+
+
+def prove_failed_result_destination():
+    with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
+        import dispatch_integration as dispatch
+    launch = subprocess.Popen
+    processes = []
+
+    def start(*args, **kwargs):
+        process = launch(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    try:
+        with patch.object(dispatch.subprocess, "Popen", start):
+            # The late first byte distinguishes a bounded prefix wait from a
+            # fresh communicate timeout that starts only after blocking read.
+            try:
+                dispatch.fail_result_destination(child(
+                    "time.sleep(0.75); print('late', flush=True); time.sleep(0.75)"), timeout=0.1)
+            except AssertionError as error:
+                assert "result prefix deadline exceeded" in str(error), error
+            else:
+                raise AssertionError("accepted a prefix after its original deadline")
+            prefix, status, _ = dispatch.fail_result_destination(child(
+                "import os\nfor _ in range(1024): os.write(1, b'partial-result:' + b'x' * 1024)"))
+            assert prefix.startswith(b"partial-result:") and 0 < len(prefix) <= 4096, prefix
+            assert status != 0, "closed destination was reported successful"
+        for process in processes:
+            assert process.poll() is not None and process.stderr.closed
+            try:
+                os.waitpid(process.pid, os.WNOHANG)
+            except ChildProcessError:
+                pass
+            else:
+                raise AssertionError("result caller was not reaped")
+    finally:
+        dispose_all(*(lambda process=process: stop_process(process) for process in processes))
+    print("Result destination: first-byte deadline, bounded prefix and caller retirement passed")
 
 
 def prove_caller_disposal():
