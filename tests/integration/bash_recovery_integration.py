@@ -4,9 +4,7 @@
 import json
 import os
 import pathlib
-import pty
 import signal
-import subprocess
 import sys
 import tempfile
 import threading
@@ -15,6 +13,7 @@ import bash_integration as bash
 import model_fixture as fixture
 import human_cli_integration as human
 from host_process import HostDiagnostics
+from terminal_process import terminal_process
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -124,22 +123,15 @@ def prove_effect_without_result_becomes_indeterminate(state):
         result = bash.result_text(store, session)
         home = state / "effect-before-result-home"
         home.mkdir()
-        master, slave = pty.openpty()
-        entered = subprocess.Popen([str(RUI), "session", "resume", "--store", str(store), "--session", session],
-            env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
-        try:
+        with terminal_process([str(RUI), "session", "resume", "--store", str(store), "--session", session],
+            env={**os.environ, "HOME": str(home)},
+        ) as (entered, master):
             human.read_terminal(master, "› ")
             status = human.terminal_step(master, "/status", "Session: ", composer=True)
             assert "Indeterminate Action: 1" in status, status
             assert "The command may have run; Rui did not replay it." in status, status
             human.terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
-        finally:
-            if entered.poll() is None:
-                entered.kill()
-                entered.wait(timeout=5)
-            os.close(master)
-            os.close(slave)
         continuation_release.set()
         fixture.wait_for(lambda: fixture.completed_observation(store, "effect-before-result-message"), "continuation")
         assert marker.read_text() == "x"

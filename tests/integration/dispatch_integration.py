@@ -126,7 +126,9 @@ def main():
             "--kind", "permission-decision",
         )
         assert replay["answer"]["status"] == "accepted" and replay["answer"]["replayed"] is True, replay
-        recovered = command("session", "inspect", "--store", proposal_store, "--session", "direct/proposal", "--profile", "full")
+        release_deadline = time.monotonic() + 8
+        recovered = command("session", "inspect", "--store", proposal_store, "--session", "direct/proposal", "--profile", "full",
+                            timeout=release_deadline - time.monotonic())
         assert len([
             call for call in recovered["full"]["tool_calls"] if call["rejection"] is not None
         ]) == 2, recovered
@@ -138,7 +140,13 @@ def main():
                 "SELECT permission_state,resolution_code FROM action_operation WHERE action_id=?",
                 (int(first_request["action"]),),
             ).fetchone() == (2, "denied")
-        assert recovered["execution"]["custody_occupied"] == "0", recovered
+        # Eligibility discovery may briefly reserve unused custody even while
+        # permission blocks work. Observe release, not permanent idleness.
+        wait_for_execution_release(
+            lambda remaining: command("session", "inspect", "--store", proposal_store,
+                "--session", "direct/proposal", timeout=remaining)["execution"],
+            release_deadline,
+        )
         second = recovered["actions"]["unresolved"][0]
         assert second["call_ordinal"] == "3", second
         assert read_action(proposal_store, "direct/proposal", second["action"], "call-id") == calls[3][1].encode()
@@ -1071,15 +1079,11 @@ def main():
             assert observation["queue"]["status"] == "processing", observation
             assert observation["processing"]["attempt"] == "1", observation
             assert "result" not in observation, observation
-            resources = command(
-                "session", "inspect",
-                "--store",
-                identity_store,
-                "--session",
-                f"direct/{fault}",
-            )["execution"]
-            assert resources["custody_occupied"] == "0", resources
-            assert resources["scratch_used_bytes"] == "0", resources
+            wait_for_execution_release(
+                lambda remaining: command("session", "inspect", "--store", identity_store,
+                    "--session", f"direct/{fault}", timeout=remaining)["execution"],
+                time.monotonic() + 8,
+            )
             stop_host(offline)
             processes.remove(offline)
         identity_endpoint.shutdown()
@@ -4025,11 +4029,11 @@ def main():
             cleanup_host = start_host(owned_store, None)
             processes.append(cleanup_host)
             assert not list((owned_store / "scratch").glob(pattern))
-            resources = command(
-                "session", "inspect", "--store", owned_store, "--session", f"direct/{fault}"
-            )["execution"]
-            assert resources["custody_occupied"] == "0", resources
-            assert resources["scratch_used_bytes"] == "0", resources
+            wait_for_execution_release(
+                lambda remaining: command("session", "inspect", "--store", owned_store,
+                    "--session", f"direct/{fault}", timeout=remaining)["execution"],
+                time.monotonic() + 8,
+            )
             stop_host(cleanup_host)
             processes.remove(cleanup_host)
         assert not unlink_effect.exists()
@@ -4069,11 +4073,11 @@ def main():
         offline = start_host(unlink_store, None)
         processes.append(offline)
         assert not list(unlink_store.rglob("request-*"))
-        resources = command(
-            "session", "inspect", "--store", unlink_store, "--session", "direct/unlink"
-        )["execution"]
-        assert resources["custody_occupied"] == "0", resources
-        assert resources["scratch_used_bytes"] == "0", resources
+        wait_for_execution_release(
+            lambda remaining: command("session", "inspect", "--store", unlink_store,
+                "--session", "direct/unlink", timeout=remaining)["execution"],
+            time.monotonic() + 8,
+        )
         stop_host(offline)
         processes.remove(offline)
         completed = True
