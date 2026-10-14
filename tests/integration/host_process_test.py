@@ -1195,13 +1195,16 @@ def prove_terminal_capture_budget():
             for name, replacement in replacements.items():
                 patches.enter_context(patch.object(terminal, name, replacement))
             for name, replacement in {
-                "SuccessEndpoint": MagicMock(), "configure": MagicMock(), "message": MagicMock(),
+                "SuccessEndpoint": MagicMock(return_value=MagicMock(requests=[object()])),
+                "configure": MagicMock(), "message": MagicMock(),
                 "start_command": start_inspector, "observe": observe, "command": inspect,
             }.items():
                 patches.enter_context(patch.object(terminal.fixture, name, replacement))
             patches.enter_context(patch.object(terminal.threading, "Thread", MagicMock()))
             terminal.threading.Thread.return_value.is_alive.return_value = False
             patches.enter_context(patch.object(time, "monotonic", lambda: clock[0]))
+            patches.enter_context(patch.object(time, "sleep", side_effect=AssertionError(
+                "terminal capture clock witness waited for unmodeled external work")))
             patches.enter_context(patch.object(terminal.fixture.subprocess, "run", read))
             patches.enter_context(contextlib.redirect_stdout(io.StringIO()))
             try:
