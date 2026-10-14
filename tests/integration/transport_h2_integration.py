@@ -23,7 +23,7 @@ import h2.settings
 
 import control_integration as control
 import model_fixture as dispatch
-from host_process import HostDiagnostics, ReleaseGate, wait_for_execution_release as wait_for_drain
+from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, wait_for_execution_release as wait_for_drain
 
 
 class Endpoint(socketserver.ThreadingTCPServer):
@@ -61,9 +61,11 @@ class Endpoint(socketserver.ThreadingTCPServer):
         return self.tls.wrap_socket(sock, server_side=True), address
 
 
-class H1Endpoint(http.server.ThreadingHTTPServer):
+class H1Endpoint(TestHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
+    # Share DNS-free binding without changing this witness's polling cadence.
+    serve_forever = http.server.ThreadingHTTPServer.serve_forever
 
     def __init__(self, trickle_first=False):
         super().__init__(("127.0.0.1", 0), H1Handler)

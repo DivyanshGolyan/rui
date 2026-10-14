@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, preserve_failure_metadata, start_ready_process, stop_process, wait_for_execution_release
+from host_process import HostDiagnostics, PeerCensus, ReleaseGate, TestHTTPServer, preserve_failure_metadata, start_ready_process, stop_process, wait_for_execution_release
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -277,7 +277,7 @@ def command(*args, expect=0, timeout=15):
     return json.loads(completed.stdout)
 
 
-def start_host(store, endpoint=None, *extra, active_capacity=2):
+def start_host(store, endpoint=None, *extra, active_capacity=2, observations=None):
     args = [
         str(RUI),
         "host",
@@ -292,8 +292,10 @@ def start_host(store, endpoint=None, *extra, active_capacity=2):
         args += ["--provider-endpoint", endpoint]
         required = {"execution": "enabled", "curl": "8.22.0"}
     args += extra
+    if observations is not None and "--test-phase-trace" not in args:
+        args.append("--test-phase-trace")
     return start_ready_process(args, required_fields=required,
-                               observations="control" if "--test-phase-trace" in extra else None)
+                               observations=observations or ("control" if "--test-phase-trace" in extra else None))
 
 
 def configure(state, store, key, session):
@@ -518,28 +520,18 @@ def open_complete_inspection(socket_path, store, session, profile):
     return connection
 
 
-def fill_complete_inspections(socket_path, store, session, diagnostics):
+def fill_complete_inspections(socket_path, store, session, peers):
     held = []
     try:
         for index in range(ORDINARY_CLIENTS):
-            diagnostics.claim_inspection()
-            candidate = open_complete_inspection(
-                socket_path, store, session, "current" if index % 2 == 0 else "full"
-            )
-            held.append(candidate)
-            time.sleep(0.01)
-            candidate.settimeout(0.001)
-            try:
-                early = candidate.recv(1, socket.MSG_PEEK)
-            except TimeoutError:
-                candidate.settimeout(15)
-            else:
-                raise AssertionError(f"held inspection replied or closed early: {early!r}")
+            peers.diagnostics.claim_inspection()
+            held.append(peers.open("inspect", lambda: open_complete_inspection(
+                socket_path, store, session, "current" if index % 2 == 0 else "full")))
+        return held
     except BaseException:
         for connection in held:
             connection.close()
         raise
-    return held
 
 
 def inspect_execution(store, session, *, timeout=15):
@@ -553,13 +545,14 @@ def inspect_execution(store, session, *, timeout=15):
     )["execution"]
 
 
-def wait_execution_release(diagnostics, store, session, deadline):
+def wait_execution_release(diagnostics, store, session, deadline, *, peers=None):
     execution = None
 
     def inspect(remaining):
         nonlocal execution
         diagnostics.claim_inspection()
-        execution = inspect_execution(store, session, timeout=remaining)
+        invoke = lambda: inspect_execution(store, session, timeout=remaining)
+        execution = invoke() if peers is None else peers.call("inspect", invoke, deadline=deadline)
         return execution
 
     try:
@@ -723,36 +716,29 @@ def check_schema(database_path):
         database.close()
 
 
-def open_held_population(socket_path):
-    """Open each member of the finite held-upload fixture exactly once."""
+def open_held_population(socket_path, peers):
+    """Open each fixture member once and witness its native borrower."""
     held = []
     try:
         for _ in range(ORDINARY_CLIENTS):
-            held.append(open_partial(socket_path, "/v1/inspect-session"))
-        time.sleep(1)
-        for connection in held:
-            connection.settimeout(0.001)
-            try:
-                early = connection.recv(1, socket.MSG_PEEK)
-            except TimeoutError:
-                connection.settimeout(3)
-            else:
-                raise AssertionError(f"held upload replied or closed early: {early!r}")
+            held.append(peers.open("inspect", lambda: open_partial(socket_path, "/v1/inspect-session"), timeout=3))
+        peers.held(peers.borrowers.values())
         return held
     except BaseException:
-        for connection in held:
-            connection.close()
+        for candidate in held:
+            candidate.close()
         raise
 
 
-def assert_intake_progress(socket_path, store):
+def assert_intake_progress(socket_path, store, peers):
     """Both Store observation and protected discovery progress beside borrowers."""
     for kind, route in (("observe_command", "/v1/observe-command"),
                         ("host_info", "/v1/host-info")):
         request = {"version": "1", "kind": kind, "store": str(store)}
         if kind == "observe_command":
             request["key"] = "intake-progress-absent"
-        head, body = raw_request(socket_path, route, json.dumps(request).encode())
+        head, body = peers.call("observe" if kind == "observe_command" else kind,
+                                lambda: raw_request(socket_path, route, json.dumps(request).encode()))
         assert head.startswith(b"HTTP/1.1 200 "), (head, body)
         value = json.loads(body)
         if kind == "observe_command":
@@ -828,27 +814,29 @@ def prove_pre_handoff_stop(state):
             "--test-before-launch-delay-ms",
             "3000",
             "--test-suppress-first-control-hint",
+            observations="control_peers",
         )
         milestones = HostDiagnostics(process)
-        configure(state, store, "pre-handoff-config", "phase/pre-handoff")
-        message(
+        peers = PeerCensus(milestones)
+        peers.call("configure", lambda: configure(state, store, "pre-handoff-config", "phase/pre-handoff"))
+        peers.call("message", lambda: message(
             state,
             store,
             "pre-handoff-message",
             "phase/pre-handoff",
             "must never launch",
-        )
+        ))
         prepared = milestones.wait("prepared_before_handoff")[0]
-        stopped = stop_session(
+        stopped = peers.call("session_stop", lambda: stop_session(
             state, store, "pre-handoff-stop", "phase/pre-handoff"
-        )
+        ))
         assert stopped["answer"]["status"] == "accepted", stopped
         milestones.wait(
             "control_hint_suppressed", subject="pre-handoff-stop"
         )
-        semantic = observe(store, "pre-handoff-message")
+        semantic = peers.call("observe", lambda: observe(store, "pre-handoff-message"))
         assert semantic["result"]["status"] == "cancelled", semantic
-        replayed = retry(state, store, "pre-handoff-stop", "session-stop")
+        replayed = peers.call("session_stop", lambda: retry(state, store, "pre-handoff-stop", "session-stop"))
         assert replayed["answer"]["status"] == "accepted", replayed
         assert replayed["answer"]["replayed"] is True, replayed
         milestones.wait("control_hint_published", subject="pre-handoff-stop")
@@ -884,7 +872,9 @@ def prove_pre_handoff_stop(state):
         while True:
             remaining = release_deadline - time.monotonic()
             assert remaining > 0, ("superseded custody did not release within 8s", execution, boundary)
-            execution = inspect_execution(store, "phase/pre-handoff", timeout=remaining)
+            execution = peers.call("inspect", lambda: inspect_execution(
+                store, "phase/pre-handoff", timeout=remaining,
+            ), deadline=release_deadline)
             assert execution["dispatch_fenced"] is False, execution
             assert execution["scratch_used_bytes"] == "0", execution
             if execution["custody_occupied"] == "0":
@@ -903,6 +893,7 @@ def prove_pre_handoff_stop(state):
         }), flush=True)
     finally:
         stop_control_case(process, milestones, endpoint, endpoint_thread)
+    peers.finish(time.monotonic() + 5)
 
 
 def prove_sealed_interruption_and_cleanup(state):
@@ -1043,37 +1034,38 @@ def prove_delivery_and_settlement_contention(
             extra += ["--test-cleanup-delay-ms", str(cleanup_delay_ms)]
         # H1 now has ceil(C/100) connections. Keep two independently held
         # fixture responses while exercising the two client control places.
-        process, fields = start_host(store, url, *extra, active_capacity=101)
+        process, fields = start_host(store, url, *extra, active_capacity=101, observations="control_peers")
         milestones = HostDiagnostics(process)
+        peers = PeerCensus(milestones)
         resource_samples = {}
         if sample_host is not None:
             resource_samples["idle"] = sample_host(process.pid, "idle")
         sessions = [f"contention/{index}" for index in range(CONTROL_HEADROOM)]
         for index, session in enumerate(sessions):
-            configure(state, store, f"contention-config-{index}", session)
-            message(
+            peers.call("configure", lambda: configure(state, store, f"contention-config-{index}", session))
+            peers.call("message", lambda: message(
                 state,
                 store,
                 f"contention-message-{index}",
                 session,
                 f"contention {index}",
-            )
+            ))
         wait_for(
             lambda: endpoint.count() == CONTROL_HEADROOM,
             "held successful responses for both control places",
         )
-        processings = [
-            wait_for(
-                lambda index=index: observe(
-                    store, f"contention-message-{index}"
-                ).get("processing"),
-                f"contention processing identity {index}",
-            )
-            for index in range(CONTROL_HEADROOM)
-        ]
+        processings = []
+        for index in range(CONTROL_HEADROOM):
+            deadline = time.monotonic() + 8
+            processings.append(wait_for(
+                lambda index=index: peers.call("observe", lambda: observe(
+                    store, f"contention-message-{index}", deadline=deadline
+                ), deadline=deadline).get("processing"),
+                f"contention processing identity {index}", deadline=deadline,
+            ))
 
         inspections = fill_complete_inspections(
-            fields["socket"], fields["store"], sessions[0], milestones
+            fields["socket"], fields["store"], sessions[0], peers
         )
         milestones.wait(
             "inspection_captured",
@@ -1085,7 +1077,7 @@ def prove_delivery_and_settlement_contention(
             "test_gate_waiting", count=ORDINARY_CLIENTS, timeout=10,
             subject=str(inspection_gate.path),
         )
-        assert_intake_progress(fields["socket"], store)
+        assert_intake_progress(fields["socket"], store, peers)
         if sample_host is not None:
             resource_samples["reports_captured_and_responses_held"] = sample_host(
                 process.pid, "reports_captured_and_responses_held"
@@ -1093,6 +1085,8 @@ def prove_delivery_and_settlement_contention(
 
         endpoint.release.set()
         milestones.wait("sealed_before_settlement", timeout=8)
+        control_requests = [peers.expect("session_stop") for _ in range(CONTROL_HEADROOM)]
+        control_deadline = time.monotonic() + 10
         barrier = threading.Barrier(CONTROL_HEADROOM + 1, timeout=10)
 
         def run_stop(index):
@@ -1124,6 +1118,8 @@ def prove_delivery_and_settlement_contention(
         # Accepted controls establish the race. Evidence collection must not
         # extend the workload's deliberate settlement gate.
         settlement_gate.release()
+        for request in control_requests:
+            peers.release(request, control_deadline)
         timings = milestones.wait(
             "control_timing", count=CONTROL_HEADROOM, timeout=8
         )
@@ -1148,22 +1144,23 @@ def prove_delivery_and_settlement_contention(
                 process.pid, "controls_acknowledged"
             )
 
+        inspection_deadline = time.monotonic() + 12
         inspection_gate.release()
         with concurrent.futures.ThreadPoolExecutor(max_workers=24) as pool:
             responses = list(
-                pool.map(lambda connection: read_http_response(connection, 12), inspections)
+                pool.map(lambda connection: read_http_response(connection, 12, deadline=inspection_deadline), inspections)
             )
         for head, body in responses:
             assert b" 200 " in head, (head, body)
-        for connection in inspections:
-            connection.close()
+        peers.close(inspections, inspection_deadline)
         inspections.clear()
         for index in range(CONTROL_HEADROOM):
+            deadline = time.monotonic() + 8
             result = wait_for(
-                lambda index=index: observe(
-                    store, f"contention-message-{index}"
-                ).get("result"),
-                f"contention result {index}",
+                lambda index=index: peers.call("observe", lambda: observe(
+                    store, f"contention-message-{index}", deadline=deadline
+                ), deadline=deadline).get("result"),
+                f"contention result {index}", deadline=deadline,
             )
             assert result["status"] == "cancelled", result
         release_deadline = time.monotonic() + 8
@@ -1172,7 +1169,7 @@ def prove_delivery_and_settlement_contention(
             for processing in processings
         ]
         wait_execution_release(
-            milestones, store, sessions[0], release_deadline,
+            milestones, store, sessions[0], release_deadline, peers=peers,
         )
         if sample_host is not None:
             resource_samples["physically_released"] = sample_host(
@@ -1206,6 +1203,7 @@ def prove_delivery_and_settlement_contention(
         )
         if milestones is not None and sys.exc_info()[1] is None:
             milestones.assert_model_cleanup_census(*processings)
+            peers.finish(time.monotonic())
 
 
 def prove_real_settlement_contention(
@@ -1235,28 +1233,31 @@ def prove_real_settlement_contention(
         ]
         if cleanup_delay_ms:
             extra += ["--test-cleanup-delay-ms", str(cleanup_delay_ms)]
-        process, fields = start_host(store, url, *extra, active_capacity=1)
+        process, fields = start_host(store, url, *extra, active_capacity=1, observations="control_peers")
         milestones = HostDiagnostics(process)
+        peers = PeerCensus(milestones)
         resource_samples = {}
         if sample_host is not None:
             resource_samples["idle"] = sample_host(process.pid, "idle")
 
         session = "contention/real-settlement"
-        configure(state, store, "real-settlement-config", session)
-        message(
+        peers.call("configure", lambda: configure(state, store, "real-settlement-config", session))
+        peers.call("message", lambda: message(
             state,
             store,
             "real-settlement-message",
             session,
             "large committed output",
-        )
+        ))
         wait_for(lambda: endpoint.count() == 1, "large provider request")
+        deadline = time.monotonic() + 8
         processing = wait_for(
-            lambda: observe(store, "real-settlement-message").get("processing"),
-            "large-output processing identity",
+            lambda: peers.call("observe", lambda: observe(store, "real-settlement-message", deadline=deadline),
+                               deadline=deadline).get("processing"),
+            "large-output processing identity", deadline=deadline,
         )
         inspections = fill_complete_inspections(
-            fields["socket"], fields["store"], session, milestones
+            fields["socket"], fields["store"], session, peers
         )
         milestones.wait(
             "inspection_captured",
@@ -1273,6 +1274,7 @@ def prove_real_settlement_contention(
                 process.pid, "reports_captured_before_settlement"
             )
 
+        control_requests = []
         for index in range(CONTROL_HEADROOM):
             if index == 0:
                 route = "/v1/control/model-interruption"
@@ -1302,10 +1304,13 @@ def prove_real_settlement_contention(
                     },
                     separators=(",", ":"),
                 ).encode()
+            deadline = time.monotonic() + 20
+            control_requests.append(peers.expect("model_interruption" if index == 0 else "session_stop"))
             prepared_controls.append(
                 prepare_raw_request(fields["socket"], route, body)
             )
-        assert_intake_progress(fields["socket"], store)
+            peers.started(control_requests[-1], deadline)
+        assert_intake_progress(fields["socket"], store, peers)
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=CONTROL_HEADROOM
@@ -1324,9 +1329,12 @@ def prove_real_settlement_contention(
                 operation=processing["operation"],
                 timeout=15,
             )[0]
+            control_deadline = time.monotonic() + 20
             controls_start.set()
             results = [future.result(timeout=20) for future in futures]
         prepared_controls.clear()
+        for request in control_requests:
+            peers.release(request, control_deadline)
 
         settlement_complete = milestones.wait(
             "settlement_complete",
@@ -1360,48 +1368,51 @@ def prove_real_settlement_contention(
             resource_samples["controls_acknowledged"] = sample_host(
                 process.pid, "controls_acknowledged"
             )
+        inspection_deadline = time.monotonic() + 10
         inspection_gate.release()
         with concurrent.futures.ThreadPoolExecutor(max_workers=24) as pool:
             responses = list(
                 pool.map(
-                    lambda connection: read_http_response(connection, 10),
+                    lambda connection: read_http_response(connection, 10, deadline=inspection_deadline),
                     inspections,
                 )
             )
         for head, body in responses:
             assert b" 200 " in head, (head, body)
-        for connection in inspections:
-            connection.close()
+        peers.close(inspections, inspection_deadline)
         inspections.clear()
 
+        deadline = time.monotonic() + 8
         message_result = wait_for(
-            lambda: observe(store, "real-settlement-message").get("result"),
-            "committed large result",
+            lambda: peers.call("observe", lambda: observe(store, "real-settlement-message", deadline=deadline),
+                               deadline=deadline).get("result"),
+            "committed large result", deadline=deadline,
         )
         assert message_result["status"] == "completed", message_result
         blocked_session = "contention/blocked-result-control"
-        configure(
+        peers.call("configure", lambda: configure(
             state,
             store,
             "blocked-result-config",
             blocked_session,
-        )
+        ))
         try:
             for _ in range(ORDINARY_CLIENTS):
                 blocked_results.append(
-                    open_blocked_result(
+                    peers.open("read_result", lambda: open_blocked_result(
                         fields["socket"],
                         fields["store"],
                         "real-settlement-message",
-                    )
+                    ), timeout=5)
                 )
-            assert_intake_progress(fields["socket"], store)
-            time.sleep(0.1)
+            peers.held(peers.borrowers.values())
+            assert_intake_progress(fields["socket"], store, peers)
             if sample_host is not None:
                 resource_samples["blocked_result_delivery"] = sample_host(
                     process.pid, "blocked_result_delivery"
                 )
             blocked_control_started = time.monotonic_ns()
+            blocked_control_request = peers.expect("session_stop")
             blocked_control = stop_session(
                 state,
                 store,
@@ -1413,29 +1424,31 @@ def prove_real_settlement_contention(
             ) / 1_000_000
             assert blocked_control["answer"]["status"] == "accepted", blocked_control
             assert blocked_control_ms <= 1000, blocked_control_ms
+            peers.release(blocked_control_request, blocked_control_started / 1e9 + 15)
             partial_result = blocked_results[0].recv(4096)
             assert partial_result.startswith(b"HTTP/1.1 200 "), partial_result
-        finally:
+        except BaseException:
             for blocked_result in blocked_results:
                 blocked_result.close()
-            blocked_results.clear()
-        replacement_ordinary = open_held_population(fields["socket"])
-        assert_intake_progress(fields["socket"], store)
-        for connection in replacement_ordinary:
-            connection.close()
+            raise
+        peers.close(blocked_results, time.monotonic() + 3)
+        blocked_results.clear()
+        replacement_ordinary = open_held_population(fields["socket"], peers)
+        assert_intake_progress(fields["socket"], store, peers)
+        peers.close(replacement_ordinary, time.monotonic() + 3)
         replacement_ordinary.clear()
-        size, digest = result_digest(
+        size, digest = peers.call("read_result", lambda: result_digest(
             store,
             "real-settlement-message",
             state / "real-settlement-answer.txt",
-        )
+        ), timeout=30)
         assert size == large_answer_bytes, size
         assert digest == repeated_byte_digest(b"x", large_answer_bytes), digest
-        post_disconnect_execution = inspect_execution(
+        post_disconnect_execution = peers.call("inspect", lambda: inspect_execution(
             store,
             session,
             timeout=10,
-        )
+        ), timeout=10)
         assert post_disconnect_execution["dispatch_fenced"] is False
 
         cleanup = milestones.wait(
@@ -1497,6 +1510,8 @@ def prove_real_settlement_contention(
         if milestones is not None:
             milestones.close()
         stop_success_endpoint(endpoint, endpoint_thread)
+        if milestones is not None and sys.exc_info()[1] is None:
+            peers.finish(time.monotonic())
 
 
 def prove_queued_stop_reuse_after_newer_work(state):
@@ -1846,42 +1861,9 @@ def prove_partial_setup_cleanup():
                     connection.settimeout.assert_called_once_with(3)
                     connection.close.assert_not_called()
 
-    accepted = [Mock() for _ in range(ORDINARY_CLIENTS)]
-    for candidate in accepted:
-        candidate.recv.side_effect = TimeoutError
-    with patch.object(sys.modules[__name__], "open_partial", side_effect=accepted) as opened, \
-            patch.object(time, "sleep"):
-        held = open_held_population("unused")
-    assert held == accepted and opened.call_count == ORDINARY_CLIENTS
-    for candidate in accepted:
-        candidate.close.assert_not_called()
-
-    setup_failure = TimeoutError("population setup failed")
-    with patch.object(sys.modules[__name__], "open_partial", side_effect=[accepted[0], setup_failure]) as opened:
-        try:
-            open_held_population("unused")
-        except TimeoutError as error:
-            assert error is setup_failure
-        else:
-            raise AssertionError("population setup failure was hidden")
-    assert opened.call_count == 2
-    accepted[0].close.assert_called_once()
-
-    for early in (b"H", b""):
-        candidates = [Mock() for _ in range(ORDINARY_CLIENTS)]
-        candidates[0].recv.return_value = early
-        with patch.object(sys.modules[__name__], "open_partial", side_effect=candidates) as opened, \
-                patch.object(time, "sleep"):
-            try:
-                open_held_population("unused")
-            except AssertionError:
-                pass
-            else:
-                raise AssertionError("accepted early reply/closure as held upload")
-        assert opened.call_count == ORDINARY_CLIENTS
-        for candidate in candidates:
-            candidate.close.assert_called_once()
-    print("Partial fixtures: single-attempt population, early reply/closure rejection and setup cleanup passed")
+    # The native population cases require each exact classification and release;
+    # silence and repeated saturation attempts no longer establish membership.
+    print("Partial callers: both write failures and setup cleanup passed; native census owns membership")
 
 
 def main():
@@ -2014,12 +1996,20 @@ def main():
         assert recovered_stop["answer"]["status"] == "accepted", recovered_stop
         assert recovered_stop["answer"]["replayed"] is True, recovered_stop
         assert recovered_stop["answer"]["selection"]["turn"] is None, recovered_stop
-        held = open_held_population(socket_path)
-        assert_intake_progress(socket_path, store)
+        # The intake witness owns a separate bounded native census. Earlier
+        # cancellation/replay traffic is not an uncounted admission baseline.
+        stop_process(process)
+        process, fields = start_host(store, observations="control_peers")
+        milestones = HostDiagnostics(process)
+        peers = PeerCensus(milestones)
+        socket_path = fields["socket"]
+        held = open_held_population(socket_path, peers)
+        assert_intake_progress(socket_path, store, peers)
 
         latencies = []
         for index in range(25):
             started = time.monotonic()
+            request = peers.expect("session_stop")
             reply = stop_session(
                 state,
                 store,
@@ -2028,23 +2018,21 @@ def main():
             )
             latencies.append((time.monotonic() - started) * 1000)
             assert reply["answer"]["status"] == "accepted", reply
+            peers.release(request, started + 15)
         p95_ms = statistics.quantiles(latencies, n=20)[18]
         assert p95_ms < 1000, p95_ms
 
-        for connection in held:
-            connection.close()
+        peers.close(held, time.monotonic() + 3)
         held.clear()
-        time.sleep(1)
 
         classification = [
             open_partial(socket_path, "/v1/control/session-stop", complete_headers=False)
             for _ in range(CONTROL_HEADROOM + 1)
         ]
-        assert_intake_progress(socket_path, store)
+        assert_intake_progress(socket_path, store, peers)
         assert not select.select(classification, [], [], 0)[0], "incomplete headers were refused"
         for connection in classification:
-            connection.close()
-        time.sleep(1)
+            peers.release_place("classification", connection.close)
 
         for kind, route, limit in (
             ("session_stop", "/v1/control/session-stop", MAX_SESSION_STOP_REQUEST_BYTES),
@@ -2055,12 +2043,12 @@ def main():
             ),
         ):
             body = maximum_body(kind)
-            max_head, max_response = raw_request(socket_path, route, body)
+            max_head, max_response = peers.call(kind, lambda: raw_request(socket_path, route, body), timeout=5)
             assert b" 409 " in max_head, (kind, max_head, max_response)
             assert b"wrong_store_identity" in max_response, (kind, max_response)
-            oversized_head, oversized_response = raw_request(
+            oversized_head, oversized_response = peers.call(kind, lambda: raw_request(
                 socket_path, route, b"", declared_length=limit + 1
-            )
+            ), timeout=5)
             assert b" 400 " in oversized_head, (kind, oversized_head)
             assert b"control_request_too_large" in oversized_response, (
                 kind,
@@ -2069,6 +2057,7 @@ def main():
 
         stop_process(process)
         process = None
+        peers.finish(time.monotonic())
         check_schema(store / "rui.sqlite3")
 
         process, _ = start_host(store)

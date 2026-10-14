@@ -310,75 +310,65 @@ contains "$(cat "$drain_error")" "InjectedListenerFailure"
 
 # Incomplete bodies and unclassified sockets retain their own custody without
 # filling a fixed connection quota or blocking a complete control request.
-socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$ready")
-python3 - "$socket" <<'PY'
-import select, socket, sys
-
-socket_path = sys.argv[1]
-ordinary = []
-
-def read_response(client):
-    client.settimeout(3)
-    chunks = []
-    while True:
-        chunk = client.recv(4096)
-        if not chunk:
-            return b"".join(chunks)
-        chunks.append(chunk)
-
-for _ in range(100):
-    client = socket.socket(socket.AF_UNIX)
-    client.connect(socket_path)
-    client.sendall(
-        b"POST /v1/configure HTTP/1.1\r\n"
-        b"Host: local\r\n"
-        b"Content-Type: application/json\r\n"
-        b"Content-Length: 1024\r\n"
-        b"X-Rui-Wire-Version: 1\r\n\r\n{"
-    )
-    ordinary.append(client)
-
-classification = []
-for _ in range(3):
-    client = socket.socket(socket.AF_UNIX)
-    client.connect(socket_path)
-    classification.append(client)
-
-control = socket.socket(socket.AF_UNIX)
-control.connect(socket_path)
-control.sendall(
-    b"POST /v1/control/stop HTTP/1.1\r\n"
-    b"Host: local\r\n"
-    b"Content-Type: application/json\r\n"
-    b"Content-Length: 0\r\n"
-    b"X-Rui-Wire-Version: 1\r\n\r\n"
-)
-control_response = read_response(control)
-control.close()
-if not control_response.startswith(b"HTTP/1.1 501 "):
-    raise SystemExit("control headroom was not serviceable")
-
-ready, _, _ = select.select(classification + ordinary, [], [], 0)
-assert not ready, "incomplete exchange was displaced by concurrent intake"
-
-for client in classification + ordinary:
-    client.close()
-PY
-sleep 0.1
-
-# Partial ingress has a usable-looking key but never seals, so it mutates nothing.
-socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$ready")
-python3 - "$socket" "$store" <<'PY'
-import json, socket, sys
-sock_path, store = sys.argv[1:]
-body = json.dumps({"version":"1","kind":"configure","store":store,"key":"partial-key"}, separators=(",", ":")).encode()
-s = socket.socket(socket.AF_UNIX)
-s.connect(sock_path)
-s.sendall(("POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 1\r\n\r\n" % (len(body) + 50)).encode())
-s.sendall(body)
-s.close()
-PY
 stop_host
+python3 - "$rui" "$store" <<'PY'
+import json, pathlib, select, socket, sys, time
+sys.path.insert(0, "tests/integration")
+import control_integration as control
+from host_process import HostDiagnostics, PeerCensus, dispose_all, stop_process
+
+store = pathlib.Path(sys.argv[2])
+host, fields = control.start_host(store, observations="control_peers")
+peers = PeerCensus(HostDiagnostics(host))
+socket_path = fields["socket"]
+ordinary = []
+classification = []
+try:
+    for _ in range(100):
+        ordinary.append(peers.open("configure", lambda: control.open_partial(
+            socket_path, "/v1/configure"), timeout=3))
+    for _ in range(3):
+        client = socket.socket(socket.AF_UNIX)
+        client.settimeout(3)
+        classification.append(client)
+        client.connect(socket_path)
+    head, body = peers.release_place("classification", lambda: control.raw_request(
+        socket_path, "/v1/control/stop", b""), timeout=5)
+    assert head.startswith(b"HTTP/1.1 501 "), (head, body)
+    control.assert_intake_progress(socket_path, store, peers)
+    peers.held(peers.borrowers.values())
+    ready, _, _ = select.select(classification + ordinary, [], [], 0)
+    assert not ready, "incomplete exchange was displaced by concurrent intake"
+    for client in classification:
+        peers.release_place("classification", client.close)
+    classification.clear()
+    peers.close(ordinary, time.monotonic() + 3)
+    ordinary.clear()
+
+    # Prove the usable-looking partial key reached ingress after retirement;
+    # absence after restart alone would also pass if this request were refused.
+    body = json.dumps({"version":"1","kind":"configure","store":str(store),"key":"partial-key"}, separators=(",", ":")).encode()
+    # A closed object is already invalid without the required Session fields.
+    # Leave the next field unfinished so the streaming parser must await input.
+    body = body[:-1] + b","
+    def partial():
+        client = socket.socket(socket.AF_UNIX)
+        try:
+            client.settimeout(3)
+            client.connect(socket_path)
+            client.sendall(("POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: %d\r\nX-Rui-Wire-Version: 1\r\n\r\n" % (len(body) + 50)).encode() + body)
+            return client
+        except BaseException:
+            client.close()
+            raise
+    ordinary.append(peers.open("configure", partial, timeout=3))
+    peers.close(ordinary, time.monotonic() + 3)
+    ordinary.clear()
+    stop_process(host)
+    peers.finish(time.monotonic())
+finally:
+    dispose_all(*(client.close for client in classification + ordinary), lambda: stop_process(host))
+PY
 start_host
 partial=$($rui request inspect --store "$store" --key partial-key)
 contains "$partial" '"status":"absent"'

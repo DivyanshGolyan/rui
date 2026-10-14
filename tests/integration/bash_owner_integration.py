@@ -37,10 +37,10 @@ def dispose_owner_case(host, endpoint, thread):
     )
 
 
-def execution_idle(store, session):
+def execution_idle(store, session, retained_bytes=0):
     report = fixture.command("session", "inspect", "--store", store, "--session", session)
     execution = report["execution"]
-    return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0" else None
+    return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == str(retained_bytes) else None
 
 
 def continuation_endpoint(names):
@@ -365,12 +365,15 @@ def main():
             if line.startswith(("Full stdout: ", "Full stderr: "))
         ]
         assert len(retained_paths) == 2 and all(path.exists() for path in retained_paths)
-        before = fixture.wait_for(
-            lambda: bash_fixture.execution_custody_idle(
-                retention_store, "direct/retention-first"
+        # Completed inspection replies may still own charged report scratch.
+        # Only the retained files belong in this scenario's idle accounting.
+        retained_bytes = sum(path.stat().st_size for path in retained_paths)
+        fixture.wait_for(
+            lambda: execution_idle(
+                retention_store, "direct/retention-first", retained_bytes
             ),
             "first retained-output cleanup",
-        )["execution"]
+        )
 
         bash_fixture.allow(
             state,
@@ -419,13 +422,12 @@ def main():
         assert head.startswith(b"HTTP/1.1 200 "), (head, body)
         assert body == second_result.encode(), (body, second_result)
         after = fixture.wait_for(
-            lambda: bash_fixture.execution_custody_idle(
-                retention_store, "direct/retention-second"
+            lambda: execution_idle(
+                retention_store, "direct/retention-second", retained_bytes
             ),
             "retention-unavailable cleanup",
         )["execution"]
         assert after["dispatch_fenced"] is False, after
-        assert after["scratch_used_bytes"] == before["scratch_used_bytes"], (before, after)
         assert all(path.exists() for path in retained_paths)
         fixture.stop_host(host)
         host = None
