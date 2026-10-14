@@ -60,6 +60,37 @@ cases() {
     run_case isolated host-allocator python3 "$directory/host_allocator_test.py" "$release_safe"
 }
 
+# Keep launch/wait in the shell, not a Python subprocess supervisor. The batch
+# shell remains alive through its fixture's status write; no traps, deadlines,
+# process groups or signal forwarding are added. Clock helpers exit immediately.
+run_timed() (
+    started=$(python3 - <<'PY'
+import time
+print(time.monotonic_ns())
+PY
+    ) || started=unavailable
+    status=0
+    "$@" || status=$?
+    verdict=passed
+    if [ "$status" -ne 0 ]; then verdict=failed; fi
+    # A failed diagnostic must not replace the fixture's original exit status.
+    record=$(python3 - "$name" "$verdict" "$status" "$started" <<'PY'
+import sys
+import time
+finished = time.monotonic_ns()
+name, verdict, status, started = sys.argv[1:]
+elapsed = "unavailable" if started == "unavailable" else f"{(finished - int(started)) / 1_000_000_000:.3f}s"
+print(f"{name} {verdict}: exit={status} elapsed={elapsed}")
+PY
+    ) || record="$name $verdict: exit=$status elapsed=unavailable"
+    if [ "$phase" = serial ]; then
+        printf '%s\n' "$record" >&2 || :
+    else
+        printf '%s\n' "$record" >"$output/$name.status" || :
+    fi
+    exit "$status"
+)
+
 run_case() {
     group=$1
     name=$2
@@ -71,17 +102,17 @@ run_case() {
         batch:isolated|isolated:execution|isolated:callers) return ;;
     esac
     if [ "$phase" = serial ]; then
-        "$@"
+        run_timed "$@"
     elif [ "$phase" = batch ]; then
-        "$@" >"$output/$name.log" 2>&1 &
+        run_timed "$@" >"$output/$name.log" 2>&1 &
         pids="$pids $!"
         names="$names $name"
     else
-        if "$@" >"$output/$name.log" 2>&1; then
-            printf '%s passed\n' "$name"
+        if run_timed "$@" >"$output/$name.log" 2>&1; then
+            cat "$output/$name.status" || :
             cat "$output/$name.log"
         else
-            printf '%s failed:\n' "$name" >&2
+            cat "$output/$name.status" >&2 || :
             cat "$output/$name.log" >&2
             failed=1
         fi
@@ -104,10 +135,10 @@ if [ "$part" = parallel ] || [ "$part" = callers ]; then
         pid=$1
         shift
         if wait "$pid"; then
-            printf '%s passed\n' "$name"
+            cat "$output/$name.status" || :
             cat "$output/$name.log"
         else
-            printf '%s failed:\n' "$name" >&2
+            cat "$output/$name.status" >&2 || :
             cat "$output/$name.log" >&2
             failed=1
         fi
