@@ -62,11 +62,11 @@ def assert_reaped(source, description, *, timeout=0.2, required_fields=None, obs
 
 def main():
     prove_dispose_all()
-    prove_caller_disposal()
     prove_terminal_capture_budget()
     prove_execution_release_oracles()
     prove_bash_cleanup_population()
     prove_required_capture_receipts()
+    prove_caller_disposal()
     assert_reaped("time.sleep(10)", "silent alive")
     assert_reaped("sys.stdout.write('rea'); sys.stdout.flush(); time.sleep(10)", "partial line")
     assert_reaped("print('not-ready'); time.sleep(10)", "malformed readiness")
@@ -1086,60 +1086,6 @@ def prove_terminal_capture_budget():
     print("Terminal capture caller clock: timely exact read/release accepted; late exact read and release rejected")
 
 
-def prove_dispose_all():
-    for body_failed in (True, False):
-        body_error = AssertionError("original body failure")
-        cleanup_error = RuntimeError("first cleanup failure")
-        later_error = OSError("later cleanup failure; release gate manually: " + "x" * 2000)
-        reader, writer = os.pipe()
-        process = subprocess.Popen(child("time.sleep(10)"))
-        attempted = []
-
-        def fail(error):
-            attempted.append(error)
-            raise error
-
-        try:
-            try:
-                if body_failed:
-                    raise body_error
-            finally:
-                dispose_all(lambda: fail(cleanup_error),
-                            lambda: os.close(reader),
-                            lambda: fail(later_error),
-                            lambda: stop_process(process, timeout=5),
-                            lambda: os.close(writer))
-        except BaseException as error:
-            assert error is (body_error if body_failed else cleanup_error), error
-            assert attempted == [cleanup_error, later_error], attempted
-            assert len(error.__notes__) == 2, error.__notes__
-            assert "disposal 1" in error.__notes__[0] and "first cleanup failure" in error.__notes__[0], error.__notes__
-            assert "disposal 3" in error.__notes__[1] and "release gate manually" in error.__notes__[1], error.__notes__
-            assert "[truncated]" not in error.__notes__[0], error.__notes__
-            assert error.__notes__[1].endswith("[truncated]"), "cleanup detail was silently truncated"
-            assert all(len(note) < 1024 for note in error.__notes__), "unbounded cleanup diagnostic"
-            assert process.poll() is not None, "later child disposal skipped"
-            for fd in (reader, writer):
-                try:
-                    os.fstat(fd)
-                except OSError:
-                    pass
-                else:
-                    raise AssertionError("later descriptor disposal skipped")
-        else:
-            raise AssertionError("cleanup failure suppressed on successful body")
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=5)
-            for fd in (reader, writer):
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-    print("Fixture disposal: primary failure retained, all resources attempted")
-
-
 def prove_caller_disposal():
     with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
         import dispatch_integration as dispatch
@@ -1273,6 +1219,60 @@ def prove_caller_disposal():
         else:
             raise AssertionError("live endpoint thread accepted as retired")
     print("Caller disposal: dispatch/page/Bash body and cleanup faults, multiple children/endpoints, startup refusal and live-thread rejection passed")
+
+
+def prove_dispose_all():
+    for body_failed in (True, False):
+        body_error = AssertionError("original body failure")
+        cleanup_error = RuntimeError("first cleanup failure")
+        later_error = OSError("later cleanup failure; release gate manually: " + "x" * 2000)
+        reader, writer = os.pipe()
+        process = subprocess.Popen(child("time.sleep(10)"))
+        attempted = []
+
+        def fail(error):
+            attempted.append(error)
+            raise error
+
+        try:
+            try:
+                if body_failed:
+                    raise body_error
+            finally:
+                dispose_all(lambda: fail(cleanup_error),
+                            lambda: os.close(reader),
+                            lambda: fail(later_error),
+                            lambda: stop_process(process, timeout=5),
+                            lambda: os.close(writer))
+        except BaseException as error:
+            assert error is (body_error if body_failed else cleanup_error), error
+            assert attempted == [cleanup_error, later_error], attempted
+            assert len(error.__notes__) == 2, error.__notes__
+            assert "disposal 1" in error.__notes__[0] and "first cleanup failure" in error.__notes__[0], error.__notes__
+            assert "disposal 3" in error.__notes__[1] and "release gate manually" in error.__notes__[1], error.__notes__
+            assert "[truncated]" not in error.__notes__[0], error.__notes__
+            assert error.__notes__[1].endswith("[truncated]"), "cleanup detail was silently truncated"
+            assert all(len(note) < 1024 for note in error.__notes__), "unbounded cleanup diagnostic"
+            assert process.poll() is not None, "later child disposal skipped"
+            for fd in (reader, writer):
+                try:
+                    os.fstat(fd)
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError("later descriptor disposal skipped")
+        else:
+            raise AssertionError("cleanup failure suppressed on successful body")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            for fd in (reader, writer):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+    print("Fixture disposal: primary failure retained, all resources attempted")
 
 
 if __name__ == "__main__":
