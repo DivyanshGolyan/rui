@@ -1568,7 +1568,10 @@ def prove_one_reply():
                 with one_reply(path, b"must not be sent"):
                     with connect(path) as client:
                         client.sendall(supplied)
-                        client.shutdown(socket.SHUT_WR)
+                        # Malformed bytes reject without EOF and may already
+                        # have closed the peer. Only truncation needs half-close.
+                        if error_type is EOFError:
+                            client.shutdown(socket.SHUT_WR)
                         assert client.recv(1) == b"", "invalid request received a response"
             except error_type as error:
                 assert message in str(error), error
