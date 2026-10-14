@@ -23,6 +23,7 @@ from host_process import (
     HostDiagnostics,
     HostStartError,
     ReleaseGate,
+    TestHTTPServer,
     _Observations,
     dispose_all,
     start_ready_process,
@@ -108,6 +109,24 @@ def main():
     prove_intentional_crash_retirement()
     prove_short_optional_receipt()
     prove_gate_broadcast()
+    prove_numeric_listener()
+
+
+def prove_numeric_listener():
+    # Binding a numeric fixture endpoint must work even when the machine's
+    # descriptive reverse-DNS service is unavailable. No serving thread needed.
+    with patch.object(socket, "getfqdn", side_effect=OSError("reverse DNS unavailable")):
+        with TestHTTPServer(("127.0.0.1", 0), lambda *_: None) as endpoint:
+            assert endpoint.server_name == "127.0.0.1", endpoint.server_name
+            assert endpoint.server_port == endpoint.server_address[1] > 0
+            endpoint.socket.settimeout(2)
+            with socket.create_connection(endpoint.server_address, timeout=2) as client:
+                peer, _ = endpoint.get_request()
+                with peer:
+                    peer.sendall(b"x")
+                    assert client.recv(1) == b"x", "numeric fixture listener is not usable"
+    assert endpoint.fileno() == -1, "numeric fixture listener was not closed"
+    print("Numeric HTTP fixture: usable bound listener and exact port without reverse DNS")
 
 
 def prove_private_environment():
