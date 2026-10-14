@@ -499,7 +499,7 @@ Canonical relations are the source of truth, not a second lifecycle image. Relat
 
 One meaningful mutation owns one cohesive function. It validates bounded syntax/content, reserves custody if admitting execution, then enters `BEGIN IMMEDIATE`. Inside the transaction it performs bounded current-state checks and guarded writes, then verifies affected rows. State-dependent checks stay inside. Only after commit may it release the consequence. Rollback releases unused reservation and grants no dispatch. Private helpers may simplify calculation/query mechanics without a mandatory classifier framework.
 
-Unreleased databases/fixtures are recreated: no migration, compatibility reader, dual-write or alias layer. Schema version 21 requires recreating earlier development Stores and associated configure captures. The unreleased wire label remains `1`, with one canonical configure shape including the omission-aware provider field; pre-provider captures are not accepted or defaulted to Codex.
+Unreleased databases/fixtures are recreated: no migration, compatibility reader, dual-write or alias layer. Schema version 22 requires recreating earlier development Stores and associated configure captures. The unreleased wire label remains `1`, with one canonical configure shape including the omission-aware provider field; pre-provider captures are not accepted or defaulted to Codex.
 
 ### Admitting an attempt
 

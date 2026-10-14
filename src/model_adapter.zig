@@ -550,6 +550,7 @@ pub const Preparation = struct {
                         },
                         error.SyntaxError,
                         error.UnexpectedEndOfInput,
+                        error.UnexpectedJsonDelimiter,
                         error.InvalidJsonUtf8,
                         error.JsonTooDeep,
                         error.DuplicateJsonField,
@@ -1857,6 +1858,13 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
 
 test "request preparation rejects unsupported saved meaning and fences malformed canonical items" {
     for ([_]struct { item: []const u8, kind: store.OutputItemKind = .reasoning, failure: anyerror }{
+        .{ .item = "null", .failure = error.CorruptStore },
+        .{ .item = "true", .failure = error.CorruptStore },
+        .{ .item = "false", .failure = error.CorruptStore },
+        .{ .item = "42", .failure = error.CorruptStore },
+        .{ .item = "\"opaque\"", .failure = error.CorruptStore },
+        .{ .item = "[]", .failure = error.CorruptStore },
+        .{ .item = "[{\"type\":\"message\",\"id\":\"r\"}]", .kind = .message, .failure = error.CorruptStore },
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\"}", .failure = error.ContinuationUnavailable },
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"\"}", .failure = error.ContinuationUnavailable },
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"status\":\"future\"}", .failure = error.ContinuationUnavailable },
