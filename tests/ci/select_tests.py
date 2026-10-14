@@ -85,12 +85,12 @@ RULES = (
     (("tests/integration/model_fixture.py", "tests/integration/host_process.py",
       "tests/integration/control_integration.py"),
      ("server-delivery-integration",), ("server-delivery-integration",), "Delivery oracle's imported fixture owners"),
-    (("build.zig", "build.zig.zon", "install.sh", "src/build_*", "src/*.patch", ".agents/setup",
+    (("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_*", "src/*.patch", ".agents/setup",
       ".github/actions/setup/action.yml"),
      ("check-full", "admission-debug-integration", "test-full", "evaluator-churn"),
      ("check-full", "admission-debug-integration", "test-full", "evaluator-churn"),
      "Build, dependency or bootstrap inputs"),
-    (("build.zig", "build.zig.zon", "install.sh", "src/build_transport.sh", "src/curl*.patch", ".agents/setup",
+    (("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_transport.sh", "src/curl*.patch", ".agents/setup",
       ".github/actions/setup/action.yml"),
      ("transport-h2-integration", "codex-h2-integration"),
      ("transport-h2-integration", "codex-h2-integration"), "Transport build and managed TLS/H2 bootstrap"),
@@ -104,6 +104,7 @@ CHECK_COVERS = {
     "descriptor-capacity-integration", "workflow-check", "evaluator-host-integration",
     "proposal-integration", "activity-integration", "preference-policy-integration",
     "canonical-failure-integration",  # human_cli_integration.main executes all cases.
+    "terminal-restoration-integration",  # Same full fixture in the human CLI gate.
 }
 
 

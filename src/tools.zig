@@ -403,11 +403,11 @@ test "Bash descriptions are required and bounded by decoded UTF-8 bytes" {
         var source = TestSource{ .bytes = try std.fmt.bufPrint(&buffer, "{{\"cmd\":\"true\",\"timeout_ms\":null,\"description\":{s}}}", .{description}) };
         try std.testing.expect(!try validBashArguments(&source));
     }
-    for ([_][]const u8{ "a" ** 98 ++ "é", "\\u00e9" ** 50 }) |description| {
+    for ([_][]const u8{ @as([98]u8, @splat('a')) ++ "é", &@as([50 * 6]u8, @bitCast(@as([50][6]u8, @splat("\\u00e9".*)))) }) |description| {
         var source = TestSource{ .bytes = try std.fmt.bufPrint(&buffer, "{{\"description\":\"{s}\",\"cmd\":\"printf ok\",\"timeout_ms\":null}}", .{description}) };
         try std.testing.expect(try validBashArguments(&source));
     }
-    for ([_][]const u8{ "a" ** 99 ++ "é", "\\u00e9" ** 51 }) |description| {
+    for ([_][]const u8{ @as([99]u8, @splat('a')) ++ "é", &@as([51 * 6]u8, @bitCast(@as([51][6]u8, @splat("\\u00e9".*)))) }) |description| {
         var source = TestSource{ .bytes = try std.fmt.bufPrint(&buffer, "{{\"cmd\":\"true\",\"description\":\"{s}\",\"timeout_ms\":null}}", .{description}) };
         try std.testing.expect(!try validBashArguments(&source));
     }

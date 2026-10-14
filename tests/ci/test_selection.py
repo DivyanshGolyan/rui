@@ -89,7 +89,7 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn("codex-h2-integration", result[family])
 
     def test_bootstrap_action_is_not_cheap_ci_policy(self):
-        for path in (".github/actions/setup/action.yml", "install.sh"):
+        for path in (".github/actions/setup/action.yml", "install.sh", "src/fetch_dependencies.sh"):
             result = select([path], "review", AVAILABLE)
             for family in ("targets", "native_targets"):
                 self.assertTrue({"check-full", "admission-debug-integration", "test-full",
@@ -99,11 +99,13 @@ class SelectionTest(unittest.TestCase):
     def test_shared_driver_selects_one_native_inventory(self):
         for paths in (["tests/integration/check.sh"],
                       ["tests/integration/check.sh", "build.zig"],
-                      ["tests/integration/check.sh", "src/server.zig"]):
+                      ["tests/integration/check.sh", "src/server.zig"],
+                      ["tests/integration/check.sh", "tests/integration/terminal_restoration_integration.py"]):
             result = select(paths, "review", AVAILABLE)
             for family in ("targets", "native_targets"):
                 self.assertIn("check-full", result[family])
                 self.assertNotIn("check", result[family])
+                self.assertNotIn("terminal-restoration-integration", result[family])
 
     def test_standalone_oracles_have_executable_platform_routes(self):
         for owner in ("login-signal", "current-facts", "server-delivery"):
@@ -329,6 +331,9 @@ class FullCheckPartitionTest(unittest.TestCase):
 if [ "$1" = - ]; then exec "$TEST_PYTHON" "$@"; fi
 fixture=$(basename "${1:-$0}")
 identity="$fixture.$2"
+if [ "$fixture" = human_cli_integration.py ]; then
+    test "$RUI_TEST_TERMINAL_NOTICE" = notice || exit 46
+fi
 if [ "$CHECK_TIMING" = 1 ]; then
     case "$fixture" in
         human_cli_integration.py|preference_policy_integration.py)
@@ -389,9 +394,9 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                     f"if (len(sys.argv) == 1) == {clock_error == 'start'!r}:\n"
                     "    time.monotonic_ns = fail_clock\n")
                 env["PYTHONPATH"] = str(root)
-            arguments = (["parallel", str(root / "native"), "status", "sessions", "proposal", "activity", "preferences"]
+            arguments = (["parallel", str(root / "native"), "status", "sessions", "proposal", "activity", "preferences", "notice"]
                          if part == "parallel" else
-                         ["status", "sessions", "proposal", "activity", "preferences", part])
+                         ["status", "sessions", "proposal", "activity", "preferences", part, "notice"])
             command = [
                 "/bin/sh", "tests/integration/check.sh", "release", "debug", *arguments,
             ]

@@ -5,12 +5,12 @@ const Text = @import("TerminalText.zig");
 const View = @import("session_view.zig");
 const Style = View.Style;
 const protocol = @import("protocol.zig");
-const termios = @cImport(@cInclude("termios.h"));
+const termios = @import("posix");
 const Self = @This();
 extern fn utf8proc_grapheme_break_stateful(c_int, c_int, *c_int) c_int;
 extern fn utf8proc_charwidth(c_int) c_int;
 
-original: std.posix.termios,
+original: Editor.Attributes,
 flags: [2]c_int,
 colour: bool,
 active: bool = true,
@@ -22,15 +22,12 @@ pending_at: i96 = 0,
 pump: ?struct { context: *anyopaque, step: *const fn (*anyopaque) anyerror!void } = null,
 
 pub fn begin(colour: bool) !Self {
-    const original = try std.posix.tcgetattr(0);
+    const original = try Editor.getAttributes();
     var mode = original;
-    mode.lflag.ICANON = false;
-    mode.lflag.ECHO = false;
-    mode.lflag.ISIG = false;
-    mode.lflag.IEXTEN = false;
-    mode.iflag.IXON = false;
-    mode.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-    mode.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+    mode.c_lflag &= ~@as(termios.tcflag_t, termios.ICANON | termios.ECHO | termios.ISIG | termios.IEXTEN);
+    mode.c_iflag &= ~@as(termios.tcflag_t, termios.IXON);
+    mode.c_cc[termios.VMIN] = 1;
+    mode.c_cc[termios.VTIME] = 0;
     const flags = [2]c_int{ std.c.fcntl(0, std.c.F.GETFL), std.c.fcntl(1, std.c.F.GETFL) };
     if (flags[0] < 0 or flags[1] < 0) return error.TerminalCleanupFailed;
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
@@ -40,7 +37,7 @@ pub fn begin(colour: bool) !Self {
     if (std.c.fcntl(0, std.c.F.SETFL, flags[0] | nonblock) < 0) return error.TerminalCleanupFailed;
     errdefer _ = std.c.fcntl(1, std.c.F.SETFL, flags[1]);
     if (std.c.fcntl(1, std.c.F.SETFL, flags[1] | nonblock) < 0) return error.TerminalCleanupFailed;
-    try std.posix.tcsetattr(0, .FLUSH, mode);
+    try Editor.setAttributes(.FLUSH, mode);
     var self: Self = .{ .original = original, .flags = flags, .colour = colour };
     if (std.c.write(1, "\x1b[?2004h", 8) != 8) {
         try self.finish();
@@ -67,7 +64,7 @@ pub fn finish(self: *Self) !void {
     // Input discard is independent of output credit. TCSAFLUSH can drain the
     // same terminal's output and keep it raw while an output peer is absent.
     const flushed = termios.tcflush(0, termios.TCIFLUSH) == 0;
-    const restored = std.posix.tcsetattr(0, .NOW, self.original);
+    const restored = Editor.setAttributes(.NOW, self.original);
     var flags_ok = true;
     for (self.flags, 0..) |flags, fd| {
         if (std.c.fcntl(@intCast(fd), std.c.F.SETFL, flags) < 0) flags_ok = false;

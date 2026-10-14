@@ -2418,12 +2418,7 @@ def host_diagnostic_cases(state, library):
 
 def native_notice_cases(state):
     """Exercise the public notice's libc adapter without a Host or interposer."""
-    repo = pathlib.Path(__file__).resolve().parents[2]
-    binary = state / "terminal-notice"
-    subprocess.run(["zig", "build-exe", "-O", "ReleaseSafe", "-lc", "--dep", "terminal",
-        f"-Mroot={repo / 'tests/integration/terminal_notice.zig'}",
-        f"-Mterminal={repo / 'src/SessionTerminal.zig'}", f"-femit-bin={binary}"],
-        check=True, timeout=120)
+    binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
     expected = b"\nDetached. Host work continues.\nResume: rui session resume --store $'/tmp/a\\' path' -- $'--session'\n"
     for transport, full in (("pipe", False), ("pipe", True), ("pty", False)):
         # PTY EAGAIN is not persistent: internal delivery can make space without

@@ -1,6 +1,6 @@
 const std = @import("std");
 const Editor = @This();
-const termios = @cImport(@cInclude("termios.h"));
+const termios = @import("posix");
 
 extern fn utf8proc_grapheme_break_stateful(c_int, c_int, *c_int) c_int;
 extern fn utf8proc_category(c_int) c_int;
@@ -31,6 +31,32 @@ pub fn pending(self: *const Editor) Pending {
     return if (self.escape == .esc) .escape else .none;
 }
 
+// libc's termios is not the Linux kernel ABI used by std.posix.termios.
+// Keep the native type at this boundary, including speeds and all cc entries.
+pub const Attributes = termios.struct_termios;
+
+pub fn getAttributes() std.posix.TermiosGetError!Attributes {
+    var attributes: Attributes = undefined;
+    while (true) switch (std.posix.errno(termios.tcgetattr(0, &attributes))) {
+        .SUCCESS => return attributes,
+        .INTR => {},
+        .BADF => unreachable,
+        .NOTTY => return error.NotATerminal,
+        else => |err| return std.posix.unexpectedErrno(err),
+    };
+}
+
+pub fn setAttributes(action: std.posix.TCSA, attributes: Attributes) std.posix.TermiosSetError!void {
+    while (true) switch (std.posix.errno(termios.tcsetattr(0, @intCast(@backingInt(action)), &attributes))) {
+        .SUCCESS => return,
+        .INTR => {},
+        .BADF, .INVAL => unreachable,
+        .NOTTY => return error.NotATerminal,
+        .IO => return error.ProcessOrphaned,
+        else => |err| return std.posix.unexpectedErrno(err),
+    };
+}
+
 pub fn expire(self: *Editor) !void {
     switch (self.pending()) {
         .none => {},
@@ -56,16 +82,13 @@ fn validScalar(point: u21, multiline: bool) bool {
 /// Returns a slice borrowed from buffer until its caller next reuses it.
 /// No draft, terminal mode or buffered input survives a prompt.
 pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]const u8 {
-    const original = try std.posix.tcgetattr(0);
+    const original = try getAttributes();
     var mode = original;
-    mode.lflag.ICANON = false;
-    mode.lflag.ECHO = false;
-    mode.lflag.ISIG = false;
-    mode.lflag.IEXTEN = false;
-    mode.iflag.IXON = false;
-    mode.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-    mode.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-    try std.posix.tcsetattr(0, .FLUSH, mode);
+    mode.c_lflag &= ~@as(termios.tcflag_t, termios.ICANON | termios.ECHO | termios.ISIG | termios.IEXTEN);
+    mode.c_iflag &= ~@as(termios.tcflag_t, termios.IXON);
+    mode.c_cc[termios.VMIN] = 1;
+    mode.c_cc[termios.VTIME] = 0;
+    try setAttributes(.FLUSH, mode);
 
     // Always attempt both effects, even when rendering or input fails. Do
     // not return an accepted line if either cleanup step is unconfirmed.
@@ -82,7 +105,7 @@ pub fn readLine(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool)
     };
     // Discard this prompt's queued input before restoring exact attributes.
     // NOW also leaves Darwin's PENDIN set when re-entering canonical mode.
-    const restored = std.posix.tcsetattr(0, .FLUSH, original);
+    const restored = setAttributes(.FLUSH, original);
     restored catch return error.TerminalRestoreFailed;
     disabled catch return error.TerminalCleanupFailed;
     return try result;

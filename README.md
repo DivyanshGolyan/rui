@@ -19,7 +19,7 @@ Before using Rui on a project:
 
 ## Install from source
 
-Requires Zig 0.16.0, Python 3.11 or newer, Git, Perl, `patch`, a C toolchain and Make. On macOS, install the Xcode command-line tools with `xcode-select --install` if needed. Ensure `python3` on PATH selects the newer interpreter, not Apple's Python 3.9. The build pins native dependencies.
+Requires Zig 0.17.0, Python 3.11 or newer, Git, curl, Perl, `patch`, a C toolchain and Make. On macOS, install the Xcode command-line tools with `xcode-select --install` if needed. Ensure `python3` on PATH selects the newer interpreter, not Apple's Python 3.9. The build pins native dependencies.
 
 From the checkout you want to install, run:
 
@@ -42,6 +42,10 @@ After [installation](#install-from-source) has prepared the dependencies, build 
 zig build
 zig build test-logic
 ```
+
+The build uses stock Zig 0.17.0 and the pinned official `translate-c` package for C bindings. Compiler objects use `ZIG_GLOBAL_CACHE_DIR`; extracted dependencies use `zig-pkg` or `ZIG_LOCAL_PKG_DIR`. Zig 0.17 removed `--global-cache-dir` from `zig build` and `zig fetch`.
+
+ZLS project integration is not supported for this toolchain yet. As of October 14, 2026, upstream master targets Zig 0.17 but disables build-configuration loading with a compile error tracked in [ZLS #3208](https://github.com/zigtools/zls/issues/3208). The latest ZLS release targets Zig 0.16. Use `zig fmt`, `zig build` and the selected test targets for compiler-backed feedback. The experimental ZLS workaround requires a forked compiler and is not part of Rui's supported setup.
 
 The development executable is `zig-out/bin/rui`. Use `rui --help` for command usage. The examples below use the installed command; set `RUI="$PWD/zig-out/bin/rui"` instead to try a development build.
 

@@ -431,7 +431,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
     if (length == executable_buffer.len) return error.ExecutablePathTooLong;
     executable_buffer[length] = 0;
     var store_buffer: [protocol.max_store_bytes + 1]u8 = undefined;
-    const store_z = try std.fmt.bufPrintZ(&store_buffer, "{s}", .{paths.store.slice()});
+    const store_z = try std.fmt.bufPrintSentinel(&store_buffer, "{s}", .{paths.store.slice()}, 0);
     // Application policy lives here. The synchronous native launcher borrows
     // these terminated strings and pointer framing through exec/error handoff;
     // all storage is prepared before any detach fork.
@@ -1207,22 +1207,29 @@ fn configure(init: std.process.Init, requester: client.Requests, args: []const [
     var captured = try client.captureConfigure(io, input, target);
     const saved = captured.identity().*;
     var admitted: ?bool = null;
-    errdefer |err| if (human and interactive) {
-        const status = if (admitted) |accepted| if (accepted) "accepted; do not resubmit it" else "rejected" else "not confirmed; do not replace uncertain work";
-        TerminalText.diagnostic("rui: Configuration {s} ({s}). Use rui request inspect {s} to inspect the same saved request. Recover only its original intent if unconfirmed.\n", .{ status, @errorName(err), saved.key.slice() });
-    };
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(io);
         if (human and !interactive) try announceCapture(io, saved.key.slice());
-        break :blk try requester.sendCaptured(&captured, drop_reply, &reply_buffer);
+        break :blk requester.sendCaptured(&captured, drop_reply, &reply_buffer);
+    } catch |err| {
+        if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
+        return err;
     };
     // Record framed admission before presentation; writeMutationReply owns errors.
     if (human and interactive) admitted = if (reply.answer) |_| reply.isAccepted() else |_| null;
-    try writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .json);
+    writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .json) catch |err| {
+        if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
+        return err;
+    };
     if (human and interactive) if (requester.cancellation) |token| if (token.stopped.load(.acquire)) {
         TerminalText.diagnostic("rui: Configuration {s}; use rui request inspect {s} to inspect the same saved admission.\n", .{ if (admitted.?) "accepted; do not resubmit it" else "rejected", saved.key.slice() });
     };
+}
+
+fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) void {
+    const status = if (admitted) |accepted| if (accepted) "accepted; do not resubmit it" else "rejected" else "not confirmed; do not replace uncertain work";
+    TerminalText.diagnostic("rui: Configuration {s} ({s}). Use rui request inspect {s} to inspect the same saved request. Recover only its original intent if unconfirmed.\n", .{ status, @errorName(err), key });
 }
 
 fn message(init: std.process.Init, args: []const []const u8) !void {
@@ -1333,27 +1340,32 @@ fn writeSafeText(io: std.Io, value: []const u8) !void {
 
 fn runSession(init: std.process.Init, destination: []const u8, reference: []const u8, initial_text: ?[]const u8) anyerror!void {
     // Callers own canonical Store resolution and complete Session selection.
-    errdefer |err| notice: {
-        // Four bytes per escaped selector byte, plus labels and hex syntax.
-        var bytes: [4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 256]u8 = undefined;
-        var notice = std.Io.Writer.fixed(&bytes);
-        if (err == error.InvalidTemporaryDirectory)
-            notice.writeAll("rui: Fix or unset TMPDIR before resuming.\n") catch break :notice;
-        notice.writeAll("\nResume: rui session resume --store ") catch break :notice;
-        TerminalText.writeShellWord(&notice, destination) catch break :notice;
-        TerminalText.writeShellSession(&notice, reference, true) catch break :notice;
-        notice.writeByte('\n') catch break :notice;
-        _ = @import("stderr.zig").write(notice.buffered());
-    }
-    showSessionStatus(init, .{ .io = init.io }, destination, reference, .opening) catch |err| {
-        if (err == error.SessionNotConfigured) TerminalText.diagnostic("rui: configure this Session before entering it\n", .{});
-        return @as(anyerror!void, err);
+    const outcome: anyerror!void = run: {
+        showSessionStatus(init, .{ .io = init.io }, destination, reference, .opening) catch |err| {
+            if (err == error.SessionNotConfigured) TerminalText.diagnostic("rui: configure this Session before entering it\n", .{});
+            break :run err;
+        };
+        var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const directory = requestDirectory(init, &directory_buffer) catch |err| break :run err;
+        const scratch = renderScratch(init) catch |err| break :run err;
+        defer scratch.close(init.io);
+        break :run SessionFrontend.run(init, destination, reference, directory, scratch, sessionCommand, initial_text);
     };
-    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const directory = try requestDirectory(init, &directory_buffer);
-    const scratch = try renderScratch(init);
-    defer scratch.close(init.io);
-    return SessionFrontend.run(init, destination, reference, directory, scratch, sessionCommand, initial_text);
+    return outcome catch |err| {
+        notice: {
+            // Four bytes per escaped selector byte, plus labels and hex syntax.
+            var bytes: [4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 256]u8 = undefined;
+            var notice = std.Io.Writer.fixed(&bytes);
+            if (err == error.InvalidTemporaryDirectory)
+                notice.writeAll("rui: Fix or unset TMPDIR before resuming.\n") catch break :notice;
+            notice.writeAll("\nResume: rui session resume --store ") catch break :notice;
+            TerminalText.writeShellWord(&notice, destination) catch break :notice;
+            TerminalText.writeShellSession(&notice, reference, true) catch break :notice;
+            notice.writeByte('\n') catch break :notice;
+            _ = @import("stderr.zig").write(notice.buffered());
+        }
+        return err;
+    };
 }
 
 fn resumeSession(init: std.process.Init, args: []const []const u8) !void {

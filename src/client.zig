@@ -89,7 +89,7 @@ pub const Requests = struct {
         var body: protocol.RequestBuffer = .{};
         try renderReadRequest(&body, "inspect_session", paths.store.slice(), "session", session, null, profile);
         const fd = try openRead(self, &paths, "/v1/inspect-session", body.slice());
-        defer self.io.vtable.netClose(self.io.userdata, &.{fd});
+        defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);
     }
 
@@ -106,7 +106,7 @@ pub const Requests = struct {
         var body: protocol.RequestBuffer = .{};
         try renderSessionListRequest(&body, paths.store.slice(), workspace, cursor);
         const fd = try openRead(self, &paths, "/v1/list-sessions", body.slice());
-        defer self.io.vtable.netClose(self.io.userdata, &.{fd});
+        defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);
     }
 
@@ -128,7 +128,7 @@ pub const Requests = struct {
         body.len -= 1;
         try body.appendFmt(",\"end\":\"{d}\",\"before_position\":\"{d}\",\"before_ordinal\":\"{d}\"}}", .{ cursor.end, cursor.before_position, cursor.before_ordinal });
         const fd = try openRead(self, &paths, "/v1/conversation-page", body.slice());
-        defer self.io.vtable.netClose(self.io.userdata, &.{fd});
+        defer closeSocket(self.io, fd);
         const Sink = struct {
             buffer: protocol.FixedJsonBuffer(protocol.max_conversation_page_response_bytes) = .{},
             pub fn feed(s: *@This(), bytes: []const u8) !void {
@@ -155,7 +155,7 @@ pub const Requests = struct {
         body.len -= 1;
         try body.appendFmt(",\"position\":\"{d}\",\"ordinal\":\"{d}\",\"start\":\"0\",\"stream\":true}}", .{ position, ordinal });
         const fd = try openRead(self, &paths, "/v1/conversation-content", body.slice());
-        defer self.io.vtable.netClose(self.io.userdata, &.{fd});
+        defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
     }
 
@@ -172,7 +172,7 @@ pub const Requests = struct {
         if (cursor.end) |end| try body.appendFmt("\"{d}\"", .{end}) else try body.append("null");
         try body.appendFmt(",\"after\":\"{d}\"}}", .{cursor.after});
         const fd = try openRead(self, &paths, "/v1/proposal-page", body.slice());
-        defer self.io.vtable.netClose(self.io.userdata, &.{fd});
+        defer closeSocket(self.io, fd);
         const Sink = struct {
             buffer: protocol.FixedJsonBuffer(protocol.max_proposal_page_response_bytes) = .{},
             pub fn feed(s: *@This(), bytes: []const u8) !void {
@@ -199,7 +199,7 @@ pub const Requests = struct {
         body.len -= 1;
         try body.appendFmt(",\"position\":\"{d}\",\"field\":\"{s}\"}}", .{ position, @tagName(field) });
         const fd = try openRead(self, &paths, "/v1/proposal-field", body.slice());
-        defer self.io.vtable.netClose(self.io.userdata, &.{fd});
+        defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
     }
 
@@ -217,7 +217,7 @@ pub const Requests = struct {
         if (cursor.ordinal) |ordinal| try body.appendFmt("\"{d}\"", .{ordinal}) else try body.append("null");
         try body.appendFmt(",\"direction\":\"{s}\"}}", .{@tagName(cursor.direction)});
         const fd = try openRead(self, &paths, "/v1/activity-page", body.slice());
-        defer self.io.vtable.netClose(self.io.userdata, &.{fd});
+        defer closeSocket(self.io, fd);
         const Sink = struct {
             buffer: protocol.FixedJsonBuffer(protocol.max_activity_page_response_bytes) = .{},
             pub fn feed(s: *@This(), bytes: []const u8) !void {
@@ -243,7 +243,7 @@ pub const Requests = struct {
         body.len -= 1;
         try body.appendFmt(",\"position\":\"{d}\",\"ordinal\":\"{d}\"}}", .{ position, ordinal });
         const fd = try openRead(self, &paths, "/v1/activity-content", body.slice());
-        defer self.io.vtable.netClose(self.io.userdata, &.{fd});
+        defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
     }
 };
@@ -1042,11 +1042,11 @@ pub const Current = struct {
 
     fn writeObject(value: anytype, jw: anytype) !void {
         try jw.beginObject();
-        inline for (@typeInfo(@TypeOf(value)).@"struct".fields) |field| {
-            const item = @field(value, field.name);
+        inline for (comptime std.meta.fieldNames(@TypeOf(value))) |name| {
+            const item = @field(value, name);
             const present = if (comptime std.meta.hasFn(@TypeOf(item), "isPresent")) item.isPresent() else true;
             if (present) {
-                try jw.objectField(field.name);
+                try jw.objectField(name);
                 try jw.write(item);
             }
         }
@@ -1277,8 +1277,8 @@ fn AttentionRows(comptime tag: std.meta.Tag(Current.Attention)) type {
             var result: @This() = .{};
             while (try source.peekNextTokenType() != .array_end) {
                 const row = try std.json.innerParse(@FieldType(Current.Attention, @tagName(tag)), allocator, source, options);
-                inline for (@typeInfo(@TypeOf(row)).@"struct".fields) |field| {
-                    if (field.type == Current.Reference and @field(row, field.name).type.value == null) return error.InvalidObservation;
+                inline for (comptime std.meta.fieldNames(@TypeOf(row))) |name| {
+                    if (@FieldType(@TypeOf(row), name) == Current.Reference and @field(row, name).type.value == null) return error.InvalidObservation;
                 }
                 if ((tag == .resolved or tag == .rejected) and row.code.slice().len == 0) return error.InvalidObservation;
                 if (tag == .unresolved) {
@@ -1836,7 +1836,7 @@ fn readResultWithSink(
     var body: protocol.RequestBuffer = .{};
     try renderReadRequest(&body, "read_result", paths.store.slice(), "key", key, null, null);
     const fd = try openRead(requests, &paths, "/v1/read-result", body.slice());
-    defer io.vtable.netClose(io.userdata, &.{fd});
+    defer closeSocket(io, fd);
     return switch (try readResultResponseSink(requests, fd, sink, reply_buffer)) {
         .answer => |answer| .{ .answer = .{ .bytes = answer.bytes } },
         .command => |reply| .{ .failure = try decodeReadFailure(reply, true) },
@@ -1909,7 +1909,7 @@ fn readActionContent(
     var body: protocol.RequestBuffer = .{};
     try renderReadRequest(&body, kind, paths.store.slice(), "session", session, action_id, null);
     const fd = try openRead(requests, &paths, route, body.slice());
-    defer io.vtable.netClose(io.userdata, &.{fd});
+    defer closeSocket(io, fd);
     return readResultResponseSink(requests, fd, destination, reply_buffer);
 }
 
@@ -2055,7 +2055,7 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         "{\"description\":null,\"code\":\"pending_permission\",\"publication_position\":\"1\"}",
         "{\"code\":\"succeeded\",\"publication_position\":null}",
         "{\"description\":null,\"code\":\"succeeded\",\"code\":\"failed\",\"publication_position\":null}",
-        "{\"description\":\"" ++ "x" ** 101 ++ "\",\"code\":\"succeeded\",\"publication_position\":null}",
+        "{\"description\":\"" ++ @as([101]u8, @splat('x')) ++ "\",\"code\":\"succeeded\",\"publication_position\":null}",
     }) |invalid| {
         if (std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, invalid, .{})) |unexpected| {
             unexpected.deinit();
@@ -2063,7 +2063,7 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         } else |_| {}
     }
     // Worst JSON escaping is six bytes per decoded byte, not the token bound.
-    const escaped = "{\"description\":\"" ++ "\\u0001" ** 100 ++ "\",\"code\":\"succeeded\",\"publication_position\":\"9223372036854775807\"}";
+    const escaped = "{\"description\":\"" ++ @as([100 * 6]u8, @bitCast(@as([100][6]u8, @splat("\\u0001".*)))) ++ "\",\"code\":\"succeeded\",\"publication_position\":\"9223372036854775807\"}";
     const maximum = try std.json.parseFromSlice(JsonToolPresentation, std.testing.allocator, escaped, .{});
     defer maximum.deinit();
     try std.testing.expectEqual(@as(usize, 100), maximum.value.value.description.?.slice().len);
@@ -2097,10 +2097,40 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     }
 }
 
+test "canonical presentation releases allocations on acceptance and late rejection" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator, invalid: bool) !void {
+            const bytes = "{\"description\":\"Read \\u20ac files\",\"code\":\"su\\u0063ceeded\",\"publication_position\":";
+            const result: anyerror!JsonToolPresentation = decode: {
+                var scanner = std.json.Scanner.initCompleteInput(allocator, if (invalid)
+                    bytes ++ "\"9223372036854775808\"}"
+                else
+                    bytes ++ "\"9223372036854775807\"}");
+                defer scanner.deinit();
+                // No outer arena may hide leaked temporary decoded tokens.
+                break :decode std.json.parseFromTokenSourceLeaky(JsonToolPresentation, allocator, &scanner, .{});
+            };
+            const value = (result catch |err| {
+                if (err == error.OutOfMemory) return err;
+                try std.testing.expect(invalid);
+                try std.testing.expectEqual(error.InvalidCharacter, err);
+                return;
+            }).value;
+            // Returned bounded facts must outlive the parser's allocations.
+            try std.testing.expect(!invalid);
+            try std.testing.expectEqualStrings("Read € files", value.description.?.slice());
+            try std.testing.expectEqual(protocol.ToolPresentation.Code.succeeded, value.code);
+            try std.testing.expectEqual(@as(?u64, 9223372036854775807), value.publication_position);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{false});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{true});
+}
+
 fn JsonEnum(comptime T: type) type {
     const limit = comptime blk: {
         var longest: usize = 0;
-        for (@typeInfo(T).@"enum".fields) |field| longest = @max(longest, field.name.len);
+        for (@typeInfo(T).@"enum".field_names) |name| longest = @max(longest, name.len);
         break :blk longest;
     };
     return struct {
@@ -2986,7 +3016,7 @@ const Utf8Validator = struct {
 fn openRead(requests: Requests, paths: *const platform.Paths, comptime route: []const u8, body: []const u8) !std.posix.fd_t {
     const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
     const fd = try connectRequest(requests, address, null);
-    errdefer requests.io.vtable.netClose(requests.io.userdata, &.{fd});
+    errdefer closeSocket(requests.io, fd);
     var header_buffer: [512]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buffer, "POST " ++ route ++ " HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{body.len});
     try writeAllRequest(requests, fd, header, null);
@@ -3010,7 +3040,7 @@ fn sendSource(
     const io = requests.io;
     const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
     const fd = try connectRequest(requests, address, until);
-    defer io.vtable.netClose(io.userdata, &.{fd});
+    defer closeSocket(io, fd);
     var header_buffer: [512]u8 = undefined;
     var used = (try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n", .{ route, length })).len;
     if (instance) |id| {
@@ -3037,6 +3067,12 @@ fn sendSource(
         .mutation => readMutationResponse(requests, fd, reply_buffer),
         .observation => readCommandResponseRequest(requests, fd, reply_buffer, until),
     };
+}
+
+fn closeSocket(io: std.Io, fd: std.posix.fd_t) void {
+    // Match UnixAddress.connect's placeholder address; Unix sockets have no IP.
+    const socket: std.Io.net.Socket = .{ .handle = fd, .address = .{ .ip4 = .loopback(0) } };
+    socket.close(io);
 }
 
 fn connectRequest(requests: Requests, address: std.Io.net.UnixAddress, until: ?i128) !std.posix.fd_t {
@@ -3083,7 +3119,7 @@ fn connectUntil(requests: Requests, path: []const u8, deadline: ?i128) !std.posi
                 var result: c_int = 0;
                 var result_len: std.posix.socklen_t = @sizeOf(c_int);
                 if (std.c.getsockopt(socket, std.posix.SOL.SOCKET, std.posix.SO.ERROR, &result, &result_len) < 0 or result_len != @sizeOf(c_int) or result < 0) return error.UnixConnectFailed;
-                if (result != 0) return connectFailure(@enumFromInt(result));
+                if (result != 0) return connectFailure(@fromBackingInt(@intCast(result)));
                 break;
             },
             .AGAIN => {
@@ -3928,7 +3964,7 @@ test "capture retransmits complete original bytes after a lost reply" {
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, "{s}/explicit", .{root});
-    const text = [_]u8{'q'} ** (2 * protocol.content_window_bytes + 3);
+    const text = @as([2 * protocol.content_window_bytes + 3]u8, @splat('q'));
     var captured = try captureMessage(io, .{ .store = root, .session = "original/session", .text_path = "", .text = &text }, .{ .explicit = .{ .record = path, .key = "owned-key" } });
     defer captured.close(io);
     var expected_buffer: [text.len + 1024]u8 = undefined;
@@ -4116,7 +4152,7 @@ test "capture batches escaped file output and flushes before publication" {
     var record_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const record_path = try std.fmt.bufPrint(&record_path_buffer, "{s}/record", .{root[0..root_len]});
     const source = try tmp.dir.createFile(std.testing.io, "source", .{});
-    const chunk = [_]u8{'x'} ** protocol.content_window_bytes;
+    const chunk = @as([protocol.content_window_bytes]u8, @splat('x'));
     const chunks = 8192;
     for (0..chunks) |_| try source.writeStreamingAll(std.testing.io, &chunk);
     source.close(std.testing.io);
@@ -4166,7 +4202,7 @@ test "capture validates split UTF8 and does not publish after final flush failur
     const source_path = try std.fmt.bufPrint(&source_path_buffer, "{s}/source", .{root[0..root_len]});
     var record_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const record_path = try std.fmt.bufPrint(&record_path_buffer, "{s}/record", .{root[0..root_len]});
-    var input = [_]u8{'x'} ** (protocol.content_window_bytes + 1);
+    var input = @as([protocol.content_window_bytes + 1]u8, @splat('x'));
     input[input.len - 2] = 0xc3;
     input[input.len - 1] = 0xa9;
     for ([_]bool{ false, true }) |truncated| {
@@ -4313,9 +4349,9 @@ test "command reply borrows the caller buffer" {
 }
 
 test "bounded read requests attain their independent worst-case capacities" {
-    const escaped_store = [_]u8{1} ** protocol.max_store_bytes;
-    const escaped_key = [_]u8{1} ** protocol.max_key_bytes;
-    const escaped_session = [_]u8{1} ** protocol.max_session_bytes;
+    const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
+    const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
+    const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
     const cases = .{
         .{ "observe_command", "key", &escaped_key, null, null, protocol.max_observe_command_request_bytes },
         .{ "read_result", "key", &escaped_key, null, null, protocol.max_read_result_request_bytes },
@@ -4340,8 +4376,8 @@ test "Session list client renders exact cursor and maximum escaped workspace wit
         "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":\"/store\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"}",
         empty.slice(),
     );
-    const escaped_store = [_]u8{1} ** protocol.max_store_bytes;
-    const escaped_workspace = [_]u8{1} ** protocol.max_workspace_bytes;
+    const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
+    const escaped_workspace = @as([protocol.max_workspace_bytes]u8, @splat(1));
     var maximum: protocol.RequestBuffer = .{};
     try renderSessionListRequest(&maximum, &escaped_store, &escaped_workspace, .{
         .after = std.math.maxInt(i64),
@@ -4361,7 +4397,7 @@ test "Session list facts own complete rows and render semantic output after scra
     try file.writePositionalAll(io, wire, 0);
     const decoded = try SessionListReply.decode(io, file, "/w\nµ", .{}, .{ .report = .{ .bytes = wire.len } });
     const page = &decoded.page;
-    try file.writePositionalAll(io, &([_]u8{'x'} ** wire.len), 0);
+    try file.writePositionalAll(io, &@as([wire.len]u8, @splat('x')), 0);
     try std.testing.expectEqual(@as(usize, 1), page.count);
     try std.testing.expectEqualStrings("s/µ", page.rows[0].reference.slice());
     try std.testing.expectEqualStrings("/w\nµ", page.rows[0].workspace.slice());
@@ -4523,16 +4559,16 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "maximum", .{ .read = true });
     defer file.close(io);
-    var workspace = [_]u8{1} ** protocol.max_workspace_bytes;
+    var workspace = @as([protocol.max_workspace_bytes]u8, @splat(1));
     workspace[0] = '/';
-    const model = [_]u8{1} ** protocol.max_model_bytes;
+    const model = @as([protocol.max_model_bytes]u8, @splat(1));
     var bytes: [protocol.content_window_bytes]u8 = undefined;
     var output = file.writerStreaming(io, &bytes);
     const writer = &output.interface;
     try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
     for (0..8) |index| {
         if (index != 0) try writer.writeAll(",");
-        var reference = [_]u8{1} ** protocol.max_session_bytes;
+        var reference = @as([protocol.max_session_bytes]u8, @splat(1));
         reference[0] = @intCast(index + 16);
         try writer.writeAll("{\"reference\":");
         try std.json.Stringify.value(&reference, .{}, writer);
@@ -4584,9 +4620,9 @@ test "control captures attain their exact worst-case request bounds" {
     });
     records.close(std.testing.io);
 
-    const escaped_store = [_]u8{1} ** protocol.max_store_bytes;
-    const escaped_key = [_]u8{1} ** protocol.max_key_bytes;
-    const escaped_session = [_]u8{1} ** protocol.max_session_bytes;
+    const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
+    const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
+    const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
     var paths: platform.Paths = .{};
     try paths.store.set(&escaped_store);
 
@@ -4821,10 +4857,10 @@ test "truncated result body leaves only an unsuccessful destination prefix" {
 
 test "keyed observation retains request acceptance independently of later work" {
     const address = try MessageAddress.init("/store", "s", "k");
-    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"s\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ "ab" ** 32 ++ "\"},\"queue\":{\"status\":\"processing\",\"admission\":\"23\"},\"processing\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"s\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))) ++ "\"},\"queue\":{\"status\":\"processing\",\"admission\":\"23\"},\"processing\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
     inline for (.{
         .{ "}}", CommandObservation.State.processing },
-        .{ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"19\",\"sha256\":\"" ++ "cd" ** 32 ++ "\"}},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"91\"}}}", CommandObservation.State.completed },
+        .{ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"19\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("cd".*)))) ++ "\"}},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"91\"}}}", CommandObservation.State.completed },
         .{ ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}}}", CommandObservation.State.failed },
         .{ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}}}", CommandObservation.State.cancelled },
     }) |case| {
@@ -4858,7 +4894,7 @@ test "keyed observation validates all five operation shapes and binding" {
     const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"target\":\"s\",";
     inline for (.{
         .{ "configure", ",\"revision\":\"31\",\"created\":true", "" },
-        .{ "message", ",\"input\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ "00" ** 32 ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"13\"}", "" },
+        .{ "message", ",\"input\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"13\"}", "" },
         .{ "session_stop", ",\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"},\"completion\":{\"status\":\"completed\"}", "" },
         .{ "model_interruption", ",\"interruption_target\":{\"session\":\"s\",\"turn\":\"3\",\"operation\":\"7\"}", ",\"interruption_target\":{\"session\":\"s\",\"turn\":\"0\",\"operation\":\"0\"}" },
         .{ "permission_decision", ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}", ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}" },
@@ -4890,7 +4926,7 @@ test "keyed observation validates all five operation shapes and binding" {
 }
 
 test "keyed observation rejects malformed consequential fields before outcome interpretation" {
-    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"s\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ "ab" ** 32 ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}";
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"s\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}";
     inline for (.{
         ",\"processing\":null}}",                              ",\"processing\":{}}}",                                      ",\"processing\":{\"turn\":7}}}",
         ",\"result\":{\"status\":\"processing\"}}}",           ",\"result\":{\"status\":\"completed\"}}}",                  ",\"result\":{\"status\":\"failed\",\"code\":17}}}",
@@ -4968,7 +5004,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
-    const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ "0123456789abcdef" ** 4 ++ "\"}";
+    const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
     try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[\"edit\"],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null},\"pending_messages\":\"2\",\"work\":{\"status\":\"runnable\",\"turn\":\"37\",\"operation\":\"91\",\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"selected_message\":\"\",\"recent_messages\":[");
     for (0..10) |i| {
         if (i != 0) try writer.writeAll(",");
@@ -5007,11 +5043,11 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     defer file.close(io);
     const rendered = try tmp.dir.createFile(io, "rendered", .{ .read = true });
     defer rendered.close(io);
-    const reference = "{\"type\":\"text\",\"bytes\":\"13\",\"sha256\":\"" ++ "ab" ** 32 ++ "\"}";
+    const reference = "{\"type\":\"text\",\"bytes\":\"13\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))) ++ "\"}";
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\",\"edit\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ "00" ** 32 ++ "\"},\"output_schema\":null,\"reasoning_effort\":null},\"pending_messages\":\"0\",\"work\":{\"status\":\"waiting_for_permission\",\"turn\":\"7\",\"operation\":\"19\",\"latest_outcome\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\",\"edit\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null},\"pending_messages\":\"0\",\"work\":{\"status\":\"waiting_for_permission\",\"turn\":\"7\",\"operation\":\"19\",\"latest_outcome\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i });
@@ -5048,7 +5084,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     const Sink = struct {
         counts: [4]usize = @splat(0),
         pub fn visit(self: *@This(), attention: Current.Attention) !void {
-            const kind = @intFromEnum(attention);
+            const kind = @backingInt(attention);
             const i = self.counts[kind];
             switch (attention) {
                 .unresolved => |row| {
@@ -5056,7 +5092,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
                     try std.testing.expectEqual(@as(u64, 19), row.parent_operation.value);
                     try std.testing.expectEqual(@as(u64, i), row.call_ordinal.value);
                     try std.testing.expectEqual(@as(u64, 13), row.arguments.bytes.value);
-                    try std.testing.expectEqualStrings("ab" ** 32, row.call_id.sha256.slice());
+                    try std.testing.expectEqualStrings(&@as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))), row.call_id.sha256.slice());
                     try std.testing.expectEqualStrings("Run parser tests", row.presentation.value.description.?.slice());
                     try std.testing.expectEqual(protocol.ToolPresentation.Code.pending_permission, row.presentation.value.code);
                 },
@@ -5107,7 +5143,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
         .{ "\"operation\":\"19\"", "\"operation\":\"00\"" },
         .{ "\"selected_message\"", "\"ignored__message\"" },
         .{ "\"type\":\"text\"", "\"meta\":\"text\"" },
-        .{ "ab" ** 32, "xz" ** 32 },
+        .{ &@as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))), &@as([64]u8, @bitCast(@as([32][2]u8, @splat("xz".*)))) },
     }) |case| {
         const offset = std.mem.indexOf(u8, &prefix, case[0]).?;
         try file.writePositionalAll(io, case[1], offset);

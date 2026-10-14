@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo=$(cd -- "$(dirname -- "$0")/.." && pwd)
+packages=${ZIG_LOCAL_PKG_DIR:-$repo/zig-pkg}
+mkdir -p "$packages"
+packages=$(cd -- "$packages" && pwd)
+export ZIG_LOCAL_PKG_DIR="$packages"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/rui-dependencies.XXXXXX")
+cleanup() {
+    status=$?
+    if ! rm -rf "$scratch"; then
+        printf 'Could not remove dependency scratch: %s\n' "$scratch" >&2
+        if (( status == 0 )); then status=1; fi
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+cp "$repo/build.zig.zon" "$scratch/build.zig.zon"
+cp "$repo/build.zig" "$scratch/build.zig"
+
+# Stock Zig 0.17 no-save fetch caches the archive's outer directory and ignores
+# --pkg-dir. Save into a disposable manifest to install correctly rooted trees.
+# Retain native archive downloads before the complete graph fetch.
+for name in openssl sqlite curl nghttp2 utf8proc quickjs; do
+    url=$(sed -n "/\.$name = /,/},/s/.*\.url = \"\([^\"]*\)\".*/\1/p" "$repo/build.zig.zon")
+    expected=$(sed -n "/\.$name = /,/},/s/.*\.hash = \"\([^\"]*\)\".*/\1/p" "$repo/build.zig.zon")
+    [[ -n $url && -n $expected ]]
+    if [[ -d "$packages/$expected" ]]; then continue; fi
+    archive="$scratch/${url##*/}"
+    printf 'Preparing pinned %s dependency ...\n' "$name"
+    curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
+        --retry 1 --retry-delay 1 --retry-max-time 95 "$url" -o "$archive"
+    (cd -- "$scratch" && zig fetch --pkg-dir "$packages" "--save=$name" "$archive")
+    actual=$(sed -n "/\.$name = /,/},/s/.*\.hash = \"\([^\"]*\)\".*/\1/p" "$scratch/build.zig.zon")
+    if [[ $actual != "$expected" ]]; then
+        printf 'Pinned %s dependency hash mismatch. Source manifest unchanged.\n' "$name" >&2
+        exit 1
+    fi
+    test -d "$packages/$expected"
+done
+
+# Keep the complete graph authoritative, including translate-c and its parser.
+(cd -- "$repo" && zig build --fetch=all)

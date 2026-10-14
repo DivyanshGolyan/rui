@@ -896,7 +896,7 @@ test "request encoding json output failure cannot report completion" {
         }
     };
     // Both a small final tail and failure after a complete output window.
-    const inputs = .{ "é\n", "x" ** (window_bytes + 1) };
+    const inputs = .{ "é\n", &@as([window_bytes + 1]u8, @splat('x')) };
     inline for (inputs, 0..) |input, index| {
         var cursor: JsonCursor = .{};
         const source: MemorySource = .{ .bytes = input };
@@ -959,8 +959,8 @@ test "request encoding json window boundaries preserve bytes" {
 
     // Repeated escapes cross both encoded chunk and source-window boundaries;
     // expectations are independent literal JSON, not this encoder's output.
-    const mixed = "é中🙂\n\\\"/\x01" ** 700;
-    const mixed_expected = "é中🙂\\n\\\\\\\"/\\u0001" ** 700;
+    const mixed = &@as([700 * "é中🙂\n\\\"/\x01".len]u8, @bitCast(@as([700]["é中🙂\n\\\"/\x01".len]u8, @splat("é中🙂\n\\\"/\x01".*))));
+    const mixed_expected = &@as([700 * "é中🙂\\n\\\\\\\"/\\u0001".len]u8, @bitCast(@as([700]["é中🙂\\n\\\\\\\"/\\u0001".len]u8, @splat("é中🙂\\n\\\\\\\"/\\u0001".*))));
     const mixed_cuts = [_]u64{ 1, 4, window_bytes - 1, window_bytes, window_bytes + 1, mixed.len - 1 };
     for ([_][]const usize{ &.{1}, &.{ 2, 7 }, &.{4095}, &.{4096}, &.{4097}, &.{16384} }) |seq| {
         try runJsonCase("json repeated escape windows", mixed, &mixed_cuts, seq, mixed_expected, mixed.len + mixed_expected.len);
@@ -1005,7 +1005,7 @@ test "request encoding plain runs batch writes and conserve allowance" {
             self.bytes += value.len;
         }
     };
-    const text = "x" ** (256 * 1024);
+    const text = &@as([256 * 1024]u8, @splat('x'));
     var sink: Sink = .{};
     var position: usize = 0;
     const production_allowance = 16 * 1024;

@@ -8,15 +8,23 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 FAKE_ZIG = '''#!/usr/bin/env python3
-import os, pathlib, sys
+import os, pathlib, re, sys
 args = sys.argv[1:]
 if args == ["version"]:
-    print(os.environ.get("TEST_ZIG_VERSION", "0.16.0"))
+    print(os.environ.get("TEST_ZIG_VERSION", "0.17.0"))
     sys.exit(0)
-cache = pathlib.Path(args[args.index("--global-cache-dir") + 1])
+assert "--global-cache-dir" not in args, "removed Zig 0.17 option"
+cache = pathlib.Path(os.environ["ZIG_GLOBAL_CACHE_DIR"])
 assert (cache / "tmp").is_dir(), "installer did not prepare the selected cache"
 if args[0] == "fetch":
-    print("test-openssl-hash")
+    name = next(arg.split("=", 1)[1] for arg in args if arg.startswith("--save="))
+    manifest = pathlib.Path("build.zig.zon")
+    value = manifest.read_text()
+    package_hash = re.search(r"\\." + name + r" = .*?\\.hash = \\\"([^\\\"]+)\\\"", value, re.S)[1]
+    if os.environ.get("TEST_HASH_FAILURE"):
+        manifest.write_text(value.replace(package_hash, "incorrect-package-hash"))
+    else:
+        (pathlib.Path(args[args.index("--pkg-dir") + 1]) / package_hash).mkdir()
     sys.exit(0)
 if "--fetch=all" in args:
     sys.exit(0)
@@ -44,14 +52,18 @@ class InstallTest(unittest.TestCase):
         self.repo = self.root / "source checkout"
         self.repo.mkdir()
         shutil.copy2(ROOT / "install.sh", self.repo / "install.sh")
-        (self.repo / "build.zig.zon").write_text('''.{
-    .minimum_zig_version = "0.16.0",
-    .openssl = .{
-        .url = "https://example.invalid/openssl.tar.gz",
-        .hash = "test-openssl-hash",
-    },
-}
-''')
+        (self.repo / "src").mkdir()
+        shutil.copy2(ROOT / "src/fetch_dependencies.sh", self.repo / "src/fetch_dependencies.sh")
+        self.manifest = '.{\n    .minimum_zig_version = "0.17.0",\n    .dependencies = .{\n'
+        for name in ("openssl", "sqlite", "curl", "nghttp2", "utf8proc", "quickjs"):
+            self.manifest += f'''        .{name} = .{{
+            .url = "https://example.invalid/{name}.tar.gz",
+            .hash = "test-{name}-hash",
+        }},
+'''
+        self.manifest += '    },\n}\n'
+        (self.repo / "build.zig.zon").write_text(self.manifest)
+        (self.repo / "build.zig").write_text("fixture build root\n")
         self.home = self.root / "home"
         self.bin = self.home / ".local/bin"
         self.bin.mkdir(parents=True)
@@ -59,10 +71,16 @@ class InstallTest(unittest.TestCase):
         self.tools.mkdir()
         (self.tools / "zig").write_text(FAKE_ZIG)
         (self.tools / "zig").chmod(0o755)
+        (self.tools / "curl").write_text('''#!/usr/bin/env python3
+import pathlib, sys
+pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
+''')
+        (self.tools / "curl").chmod(0o755)
         self.cache = self.root / "selected cache"
         self.environment = {
             **os.environ, "HOME": str(self.home), "ZIG_GLOBAL_CACHE_DIR": str(self.cache),
             "PATH": f"{self.tools}:{self.bin}:{os.environ['PATH']}",
+            "ZIG_LOCAL_PKG_DIR": str(self.root / "selected packages"),
         }
 
     def install(self, *args, **environment):
@@ -88,11 +106,12 @@ class InstallTest(unittest.TestCase):
         self.assertTrue(((self.bin / "rui").resolve().parent.parent / "THIRD_PARTY_NOTICES.md").exists())
         self.assertEqual([path.read_text() for path in sentinels], ["keep"] * 3)
         self.assertIn("running Host keeps its old executable", second.stdout)
+        self.assertEqual((self.repo / "build.zig.zon").read_text(), self.manifest)
 
     def test_failed_build_or_validation_preserves_installed_commands(self):
         for name in ("rui", "rui-evaluator"):
             (self.bin / name).write_text("previous " + name)
-        for failure in ({"TEST_BUILD_FAILURE": "1"}, {"TEST_INVALID_BUILD": "1"},
+        for failure in ({"TEST_HASH_FAILURE": "1"}, {"TEST_BUILD_FAILURE": "1"}, {"TEST_INVALID_BUILD": "1"},
                         {"TEST_ZIG_VERSION": "0.15.2"}):
             with self.subTest(failure=failure):
                 result = self.install(**failure)
@@ -100,6 +119,7 @@ class InstallTest(unittest.TestCase):
                 for name in ("rui", "rui-evaluator"):
                     self.assertEqual((self.bin / name).read_text(), "previous " + name)
                 self.assertEqual(list((self.home / ".local/lib/rui").glob("install.*")), [])
+                self.assertEqual((self.repo / "build.zig.zon").read_text(), self.manifest)
 
     def test_help_is_read_only_and_bad_arguments_fail(self):
         result = self.install("--help")

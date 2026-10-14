@@ -1,8 +1,5 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("sys/stat.h");
-    @cInclude("unistd.h");
-});
+const c = @import("posix");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const provider_selection = @import("provider_selection.zig");

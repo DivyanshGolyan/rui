@@ -6,10 +6,7 @@ const protocol = @import("protocol.zig");
 const store = @import("store.zig");
 const transport_options = @import("transport_options");
 
-const c = @cImport({
-    @cInclude("curl/curl.h");
-    @cInclude("time.h");
-});
+const c = @import("curl");
 
 pub const curl_version = "8.22.0";
 pub const openssl_version = "OpenSSL/3.6.3";
@@ -625,7 +622,7 @@ pub const Transfer = struct {
         ) catch return error.InvalidTransportTimeout;
         try validateEndpoint(endpoint);
         var endpoint_buffer: [max_endpoint_bytes + 1:0]u8 = undefined;
-        const endpoint_z = try std.fmt.bufPrintZ(&endpoint_buffer, "{s}", .{endpoint});
+        const endpoint_z = try std.fmt.bufPrintSentinel(&endpoint_buffer, "{s}", .{endpoint}, 0);
         const easy = c.curl_easy_init() orelse return error.TransportAllocationFailed;
         errdefer c.curl_easy_cleanup(easy);
         var headers: ?*c.curl_slist = null;
@@ -683,7 +680,7 @@ pub const Transfer = struct {
         try setOpt(easy, c.CURLOPT_NOSIGNAL, @as(c_long, 1));
         if (options.ca_file) |path| {
             var ca_buffer: [std.posix.PATH_MAX + 1:0]u8 = undefined;
-            const ca_z = std.fmt.bufPrintZ(&ca_buffer, "{s}", .{path}) catch return error.InvalidProviderCaFile;
+            const ca_z = std.fmt.bufPrintSentinel(&ca_buffer, "{s}", .{path}, 0) catch return error.InvalidProviderCaFile;
             if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidProviderCaFile;
             try setOpt(easy, c.CURLOPT_CAINFO, ca_z.ptr);
         }
@@ -1000,7 +997,7 @@ fn parseRetryAfter(value: []const u8, now_seconds: c.time_t) ?RetryAfter {
         return .{ .delay_ms = delay_ms };
     } else |_| {}
     var buffer: [129:0]u8 = undefined;
-    const value_z = std.fmt.bufPrintZ(&buffer, "{s}", .{value}) catch return null;
+    const value_z = std.fmt.bufPrintSentinel(&buffer, "{s}", .{value}, 0) catch return null;
     const due_seconds = c.curl_getdate(value_z.ptr, null);
     if (due_seconds < 0) return null;
     const deadline_ms = std.math.mul(i64, @intCast(due_seconds), 1000) catch return null;
@@ -1033,7 +1030,8 @@ pub fn validateEndpoint(endpoint: []const u8) !void {
     const uri = std.Uri.parse(endpoint) catch return error.InvalidProviderEndpoint;
     if (uri.user != null or uri.password != null or uri.fragment != null) return error.InvalidProviderEndpoint;
     var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = (uri.getHost(&host_buffer) catch return error.InvalidProviderEndpoint).bytes;
+    const component = uri.host orelse return error.InvalidProviderEndpoint;
+    const host = component.toRaw(&host_buffer) catch return error.InvalidProviderEndpoint;
     if (host.len == 0) return error.InvalidProviderEndpoint;
     if (std.mem.eql(u8, uri.scheme, "https")) return;
     if (!std.mem.eql(u8, uri.scheme, "http")) return error.InvalidProviderEndpoint;

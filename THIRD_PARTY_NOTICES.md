@@ -1,6 +1,40 @@
 # Third-party notices
 
-This file lists runtime-linked dependencies, evaluator-boundary test dependencies and measurement-only components distributed or used with Rui. Versions and source hashes are pinned in `build.zig.zon`; measurement-only Go modules are pinned in `tests/qualification/go.mod`.
+This file lists build-time and runtime-linked dependencies, evaluator-boundary test dependencies and measurement-only components distributed or used with Rui. Versions and source hashes are pinned in `build.zig.zon`; measurement-only Go modules are pinned in `tests/qualification/go.mod`.
+
+## translate-c 2.0.1
+
+The build uses the official translator at commit
+`f978dca0f2b2a782d06591989e80aae7c74d0183` from its Zig 0.17 maintenance branch.
+Generated bindings import its `c_builtins.zig` and `helpers.zig` support code.
+Its pinned Aro C parser is build-time only.
+
+- Source: `https://codeberg.org/ziglang/translate-c`
+- Zig package content hash: `translate_c-2.0.1-Q_BUWmVOBwDWdxpDb7n6-LpMznKteZvXbL_4r6DxB2_d`
+- Aro source: `https://codeberg.org/ziglang/arocc` at `ffddc972f7a208bd6e254c27465407270fd8b60c`
+- Aro package content hash: `aro-0.0.0-JSD1QqKGNwALqBes402gHE7CP3Ga6xHS1J4mjThB3ro4`
+- License: MIT for both packages. Aro's Unicode data has the Unicode License V3, reproduced in its source distribution.
+
+Copyright (c) Zig contributors
+Copyright (c) 2021 Veikka Tuominen
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 
 ## QuickJS-NG (commit 1ab8676f4b6d6d669baeb5f21790fb9734636a20)
 

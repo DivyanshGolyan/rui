@@ -2,9 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const credentials = @import("codex_credentials.zig");
 
-const c = @cImport({
-    @cInclude("curl/curl.h");
-});
+const c = @import("curl");
 
 pub const issuer = "https://auth.openai.com";
 pub const client_id = "app_EMoamEEZ73f0CkXaXp7hrann";

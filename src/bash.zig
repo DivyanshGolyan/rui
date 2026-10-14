@@ -1439,11 +1439,11 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
         stderr_read_owned = false;
         defer execution.closePipe(&execution.stdout_pipe, .failed);
         defer execution.closePipe(&execution.stderr_pipe, .failed);
-        execution.stdout_capture = try createOwnedFile(std.testing.io, root, budget, "deadline-stdout", @intFromEnum(phase), @intFromBool(observation.cutoff), .none);
+        execution.stdout_capture = try createOwnedFile(std.testing.io, root, budget, "deadline-stdout", @backingInt(phase), @intFromBool(observation.cutoff), .none);
         defer execution.stdout_capture.cleanup(root) catch {};
-        execution.stderr_capture = try createOwnedFile(std.testing.io, root, budget, "deadline-stderr", @intFromEnum(phase), @intFromBool(observation.cutoff), .none);
+        execution.stderr_capture = try createOwnedFile(std.testing.io, root, budget, "deadline-stderr", @backingInt(phase), @intFromBool(observation.cutoff), .none);
         defer execution.stderr_capture.cleanup(root) catch {};
-        execution.script = try createOwnedFile(std.testing.io, root, budget, "deadline-script", @intFromEnum(phase), @intFromBool(observation.cutoff), .none);
+        execution.script = try createOwnedFile(std.testing.io, root, budget, "deadline-script", @backingInt(phase), @intFromBool(observation.cutoff), .none);
         defer execution.script.cleanup(root) catch {};
         switch (phase) {
             .grace => execution.process = .{ .grace = .{
@@ -1456,6 +1456,8 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
                     .owner = .{ .child = undefined, .pgid = 1, .observed = null },
                     .cleanup_deadline = deadline,
                 } };
+                // The reap gate suppresses the syscall, not reading its PID.
+                execution.process.reaping.owner.child.id = 1;
                 execution.faults.lifecycle = .reap_watchdog;
             },
             .checking_group => {

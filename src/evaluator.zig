@@ -2,10 +2,7 @@ const std = @import("std");
 const ScratchBudget = @import("ScratchBudget.zig");
 const named_scratch = @import("named_scratch.zig");
 
-const c = @cImport({
-    @cInclude("evaluator_parent.h");
-    @cInclude("unistd.h");
-});
+const c = @import("evaluator_native");
 
 pub const Cancellation = struct {
     context: ?*anyopaque,
@@ -154,9 +151,9 @@ pub const Owner = struct {
         const executable_dir = std.fs.path.dirname(executable_buffer[0..executable_length]) orelse return error.InvalidExecutablePath;
         var child_buffer: [std.fs.max_path_bytes:0]u8 = undefined;
         const child = if (std.fs.path.isAbsolute(self.child_name))
-            try std.fmt.bufPrintZ(&child_buffer, "{s}", .{self.child_name})
+            try std.fmt.bufPrintSentinel(&child_buffer, "{s}", .{self.child_name}, 0)
         else
-            try std.fmt.bufPrintZ(&child_buffer, "{s}/{s}", .{ executable_dir, self.child_name });
+            try std.fmt.bufPrintSentinel(&child_buffer, "{s}/{s}", .{ executable_dir, self.child_name }, 0);
 
         var scratch: ?std.Io.Dir = null;
         defer if (scratch) |*dir| dir.close(self.io);
