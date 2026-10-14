@@ -643,6 +643,14 @@ pub const ReplayValidationCursor = struct {
     call_fields: @FieldType(protocol.ProposalMetadata, "fields") = undefined,
     call_fields_seen: u4 = 0,
 
+    /// Bind every retained item to its admission-certified type and ID.
+    /// Compatibility errors are deferred until these canonical facts agree.
+    pub fn authenticateIdentity(self: *const ReplayValidationCursor, kind: store.OutputItemKind, id_digest: [32]u8) !void {
+        const actual = try self.frames[0].get("type");
+        if (!actual.is(@tagName(kind)) or self.call_fields_seen & 1 == 0 or
+            !std.mem.eql(u8, &self.call_fields[0].digest, &id_digest)) return error.CorruptStore;
+    }
+
     /// After advance completes, bind admission-certified fields to the exact
     /// decoded top-level strings. One token hasher and four results suffice;
     /// nested/open fields never acquire per-frame hashes or payload copies.

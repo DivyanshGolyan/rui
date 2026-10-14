@@ -194,7 +194,7 @@ const HistoricalSource = struct {
     }
 
     pub fn readContent(self: HistoricalSource, offset: u64, destination: []u8) !usize {
-        if (self.ranged) return self.reader.reader.readRange(offset, destination);
+        if (self.ranged) return self.reader.readRange(offset, destination);
         return self.reader.read(offset, destination);
     }
 
@@ -542,7 +542,12 @@ pub const Preparation = struct {
             .replay => |*replay| {
                 if (!replay.validated) {
                     const sequential = HistoricalSource{ .reader = &replay.reader };
+                    var incompatible = false;
                     const complete = replay.validation.advance(sequential, bytes_left, items_left) catch |err| switch (err) {
+                        error.ContinuationUnavailable => done: {
+                            incompatible = true;
+                            break :done true;
+                        },
                         error.SyntaxError,
                         error.UnexpectedEndOfInput,
                         error.InvalidJsonUtf8,
@@ -552,6 +557,8 @@ pub const Preparation = struct {
                         else => return err,
                     };
                     if (!complete) return false;
+                    try replay.reader.authenticateItem(&replay.validation);
+                    if (incompatible) return error.ContinuationUnavailable;
                     replay.validated = true;
                 }
                 const source = HistoricalSource{ .reader = &replay.reader, .ranged = true };
@@ -1081,6 +1088,7 @@ fn settleComposedForTesting(
     binding: store.AttemptBinding,
     file_prefix: []const u8,
     reasoning_json: []const u8,
+    reasoning_id: []const u8,
     calls: []const ComposedCall,
 ) !void {
     const decoded_arguments = "{\"cmd\":\"true\",\"description\":\"Run no-op command\",\"timeout_ms\":null}";
@@ -1105,6 +1113,7 @@ fn settleComposedForTesting(
         .ordinal = 0,
         .start = 0,
         .length = reasoning_json.len,
+        .id_digest = protocol.contentDigest(reasoning_id),
         .content_digest = protocol.contentDigest(reasoning_json),
     });
     var offset: u64 = reasoning_json.len;
@@ -1242,7 +1251,7 @@ fn establishComposedHistory(setup: *PreparationTestSetup, session: []const u8) !
         .{ .item_id = "order-item-a", .call_id = "order-call-a" },
         .{ .item_id = "order-item-b", .call_id = "order-call-b" },
     };
-    try settleComposedForTesting(setup, source_binding, "composed-metadata", reasoning_json, &calls);
+    try settleComposedForTesting(setup, source_binding, "composed-metadata", reasoning_json, "r1", &calls);
     var second_deny: protocol.PermissionDecisionCommand = .{ .action_id = 2 };
     try second_deny.key.set("composed-deny-second");
     try second_deny.session.set(session);
@@ -1861,7 +1870,7 @@ test "request preparation rejects unsupported saved reasoning and fences malform
         var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
         const first = try admitted.permit.consume();
         try setup.submit("saved-next", "saved-next-key", "direct/saved", "next");
-        try settleComposedForTesting(&setup, first, "saved-metadata", case.item, &.{});
+        try settleComposedForTesting(&setup, first, "saved-metadata", case.item, "r", &.{});
         var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
         const binding = try successor.permit.consume();
         const view = try setup.storage.openHistoricalView(binding);
@@ -1905,7 +1914,7 @@ test "request preparation resumes large private replay validation before emissio
             "\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}"
         else
             "\"id\":\"r\",\"type\":\"reasoning\",\"status\":true}");
-        try settleComposedForTesting(&setup, first, "large-metadata", item.buffered(), &.{});
+        try settleComposedForTesting(&setup, first, "large-metadata", item.buffered(), "r", &.{});
         var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
         const binding = try successor.permit.consume();
         const view = try setup.storage.openHistoricalView(binding);
@@ -1960,12 +1969,12 @@ test "request preparation authenticates the historical requested model binding" 
     try setup.configure("binding-config", session);
     try setup.submit("binding-one", "binding-one", session, "original");
     const source = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try settleComposedForTesting(&setup, source, "binding-output", "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}", &.{});
+    try setup.submit("binding-two", "binding-two", session, "next");
+    try settleComposedForTesting(&setup, source, "binding-output", "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}", "r", &.{});
     var revision: protocol.ConfigureCommand = .{};
     try revision.key.set("binding-revision");
     try revision.session.set(session);
     try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
-    try setup.submit("binding-two", "binding-two", session, "next");
     const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;

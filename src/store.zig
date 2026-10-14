@@ -380,6 +380,7 @@ pub const HistoricalContent = struct {
     length: u64,
     digest: [32]u8,
     private: bool = false,
+    item_identity: ?struct { kind: OutputItemKind, id_digest: [32]u8 } = null,
 
     fn belongsTo(self: HistoricalContent, view: *HistoricalView) bool {
         return self.view == view and view.active;
@@ -628,6 +629,18 @@ pub const HistoricalReader = struct {
             }
         }
         return count;
+    }
+
+    pub fn authenticateItem(self: *HistoricalReader, validation: *const @import("provider_output.zig").ReplayValidationCursor) !void {
+        std.debug.assert(self.usable() and self.verified);
+        const identity = self.reference.item_identity orelse unreachable;
+        validation.authenticateIdentity(identity.kind, identity.id_digest) catch return self.malformed();
+    }
+
+    /// Reread only after the complete canonical content digest was verified.
+    pub fn readRange(self: *HistoricalReader, start: u64, destination: []u8) !usize {
+        std.debug.assert(self.usable() and self.verified);
+        return self.reader.readRange(start, destination);
     }
 
     /// Canonical documents passed syntax validation before acceptance.
@@ -5080,7 +5093,7 @@ pub const Store = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return .{ .ready = self.readHistoricalEntryLocked(view, after_position, bytes_left, items_left) catch |err| switch (err) {
-            error.StaleAttemptBinding, error.SupersededByControl, error.HistoricalPending => return err,
+            error.StaleAttemptBinding, error.SupersededByControl, error.HistoricalPending, error.ContinuationUnavailable => return err,
             else => return self.fenceReadFailure(err),
         } };
     }
@@ -5185,12 +5198,12 @@ pub const Store = struct {
         view.tool_group_scan_after = after_position;
         const statement = try prepare(
             self.database,
-            "SELECT position,kind,content_id,model,provider FROM (" ++
-                "SELECT * FROM (SELECT e.session_position AS position,e.entry_kind AS kind,e.content_id AS content_id,NULL AS model,NULL AS provider " ++
+            "SELECT position,kind,content_id,model,provider,item_kind,item_id_digest FROM (" ++
+                "SELECT * FROM (SELECT e.session_position AS position,e.entry_kind AS kind,e.content_id AS content_id,NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest " ++
                 "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
                 "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
                 "AND e.entry_kind IN (1,2) ORDER BY e.session_position LIMIT 1) UNION ALL " ++
-                "SELECT * FROM (SELECT item.session_position AS position,3 AS kind,item.content_id AS content_id,r.model AS model,r.provider AS provider " ++
+                "SELECT * FROM (SELECT item.session_position AS position,3 AS kind,item.content_id AS content_id,r.model AS model,r.provider AS provider,item.item_kind,item.item_id_digest " ++
                 "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
                 "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
                 "LEFT JOIN session_revision r ON r.session_ref=owner.session_ref AND r.revision=owner.settings_revision " ++
@@ -5231,6 +5244,10 @@ pub const Store = struct {
                 .length = metadata.length,
                 .digest = metadata.digest,
                 .private = kind == .provider_output,
+                .item_identity = if (kind == .provider_output) .{
+                    .kind = std.enums.fromInt(OutputItemKind, c.sqlite3_column_int(statement, 5)) orelse return error.CorruptStore,
+                    .id_digest = try readDigest(statement, 6),
+                } else null,
             },
         };
         if (view.next_tool_group) |group| {
@@ -5278,12 +5295,21 @@ pub const Store = struct {
                     return count;
                 }
             };
-            const authenticated = scan.validation.advance(Source{ .storage = self, .scan = scan }, bytes_left, items_left) catch return error.CorruptStore;
+            var incompatible = false;
+            const authenticated = scan.validation.advance(Source{ .storage = self, .scan = scan }, bytes_left, items_left) catch |err| switch (err) {
+                error.ContinuationUnavailable => complete: {
+                    incompatible = true;
+                    break :complete true;
+                },
+                else => return error.CorruptStore,
+            };
             if (!authenticated)
                 return error.HistoricalPending;
+            try scan.validation.authenticateIdentity(.function_call, scan.fields[0].digest);
             try scan.validation.authenticate(scan.fields);
             reader.close();
             scan.reader = null;
+            if (incompatible) return error.ContinuationUnavailable;
             return error.HistoricalPending;
         }
         if (scan.source != 0) {
@@ -7701,6 +7727,7 @@ const TestingCall = struct {
     decoded_call_id: []const u8,
     encoded_arguments: []const u8,
     decoded_arguments: []const u8,
+    controls: []const u8 = "",
 };
 
 fn settleCallsForTesting(
@@ -7790,7 +7817,9 @@ fn settleCallsForTestingWithFaults(
             .decoded_length = call.decoded_arguments.len,
             .content_digest = protocol.contentDigest(call.decoded_arguments),
         });
-        try source_writer.writeAll("\"}");
+        try source_writer.writeAll("\"");
+        try source_writer.writeAll(call.controls);
+        try source_writer.writeAll("}");
         offset = source_writer.end;
         try metadata.append(.{
             .tag = .item,
@@ -9647,6 +9676,12 @@ test "historical accepted assistant output completeness and provenance fence rea
         "UPDATE model_output_item SET attempt_ordinal=attempt_ordinal+1",
         "UPDATE model_output_item SET session_ref='foreign'",
         "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1",
+        "UPDATE model_output_item SET content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=1) WHERE item_ordinal=0",
+        "UPDATE model_output_item SET content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=0) WHERE item_ordinal=1",
+        "UPDATE model_output_item SET item_kind=2 WHERE item_ordinal=0",
+        "UPDATE model_output_item SET item_kind=1 WHERE item_ordinal=1",
+        "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=0",
+        "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=1",
     }) |fault| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -9689,31 +9724,74 @@ test "historical accepted assistant output completeness and provenance fence rea
         try exec(storage.database, "PRAGMA foreign_keys=OFF");
         try exec(storage.database, fault);
         try exec(storage.database, "PRAGMA foreign_keys=ON");
-        var view = try storage.openHistoricalView(binding);
-        defer view.close();
-        var position: u64 = 0;
+        var preparation: @import("model_adapter.zig").Preparation = undefined;
+        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        defer if (preparation.active) preparation.cancel();
         while (true) {
-            const entry = view.nextEntry(position) catch |err| {
-                try std.testing.expectEqual(error.CorruptStore, err);
-                break;
-            } orelse return error.MissingCorruptionFailure;
-            position = entry.position;
-            if (entry.content) |content| {
-                var reader = try view.openContent(content);
-                defer reader.close();
-                var bytes: [protocol.content_window_bytes]u8 = undefined;
-                var offset: u64 = 0;
-                while (offset < content.length) {
-                    const count = reader.read(offset, &bytes) catch |err| {
-                        try std.testing.expectEqual(error.CorruptStore, err);
-                        break;
-                    };
-                    offset += count;
-                }
+            var progress = preparation.advance(7, 2);
+            switch (progress) {
+                .pending => {},
+                .failed => |err| {
+                    try std.testing.expectEqual(error.CorruptStore, err);
+                    break;
+                },
+                .prepared => |*request| {
+                    request.deinit();
+                    return error.MissingCorruptionFailure;
+                },
             }
-            if (storage.isFenced()) break;
         }
         try std.testing.expect(storage.isFenced());
+        preparation.cancel();
+        try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+    }
+}
+
+test "historical preparation keeps incompatible authenticated calls distinct from corruption" {
+    for ([_]struct { controls: []const u8, fault: ?[:0]const u8 = null, failure: anyerror }{
+        .{ .controls = ",\"caller\":{\"type\":\"future\"}", .failure = error.ContinuationUnavailable },
+        .{ .controls = ",\"namespace\":\"future\"", .failure = error.ContinuationUnavailable },
+        .{ .controls = ",\"caller\":{\"type\":\"future\"},\"late\":[0,]", .failure = error.CorruptStore },
+        .{ .controls = ",\"caller\":{\"type\":\"future\"}", .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1", .failure = error.CorruptStore },
+        .{ .controls = ",\"namespace\":\"future\"", .fault = "UPDATE model_tool_call SET arguments_content_id=name_content_id,field_metadata=CAST(substr(field_metadata,1,120)||substr(field_metadata,41,40) AS BLOB)", .failure = error.CorruptStore },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try configureTestSession(&storage, "incompatible-config", "direct/incompatible");
+        try submitTestMessage(&storage, &tmp, "incompatible-input", "incompatible-input", "direct/incompatible", "tools");
+        const source = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = [_]TestingCall{.{ .item_id = "a", .name = "unknown", .encoded_call_id = "a", .decoded_call_id = "a", .encoded_arguments = "{}", .decoded_arguments = "{}", .controls = case.controls }};
+        try settleCallsForTesting(&storage, &tmp, source, "incompatible-output", &calls);
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        if (case.fault) |fault| try exec(storage.database, fault);
+        var root: [protocol.max_store_bytes]u8 = undefined;
+        const length = try tmp.dir.realPath(std.testing.io, &root);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: @import("model_adapter.zig").Preparation = undefined;
+        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        defer if (preparation.active) preparation.cancel();
+        while (true) {
+            var progress = preparation.advance(1, 1);
+            switch (progress) {
+                .pending => {},
+                .failed => |err| {
+                    try std.testing.expectEqual(case.failure, err);
+                    break;
+                },
+                .prepared => |*request| {
+                    request.deinit();
+                    return error.MissingCompatibilityFailure;
+                },
+            }
+        }
+        try std.testing.expectEqual(case.failure == error.CorruptStore, storage.isFenced());
+        preparation.cancel();
+        try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
     }
 }
 
