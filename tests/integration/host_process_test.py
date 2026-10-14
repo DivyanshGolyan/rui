@@ -1248,7 +1248,10 @@ def prove_caller_disposal():
 
     # Run the actual whole-stream caller in a fresh interpreter. A non-daemon
     # serving thread would hang after the preserved failure, despite the join.
-    exit_probe = subprocess.run([sys.executable, "-c", """
+    try:
+        exit_probe = subprocess.run([sys.executable, "-c", """
+import faulthandler
+faulthandler.dump_traceback_later(8)
 import sys
 from unittest.mock import patch
 sys.path.insert(0, sys.argv[1])
@@ -1266,6 +1269,9 @@ with patch.object(page, "start_host", side_effect=primary), \
         raise AssertionError("whole-stream failure suppressed")
 print("whole-stream failure survived teardown and interpreter exit")
 """, str(pathlib.Path(__file__).resolve().parent)], capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired as error:
+        error.add_note(f"whole-stream exit probe stdout={error.stdout!r}; stderr={error.stderr!r}")
+        raise
     assert exit_probe.returncode == 0, exit_probe.stderr
     assert exit_probe.stdout.strip() == "whole-stream failure survived teardown and interpreter exit", exit_probe.stdout
 
