@@ -139,8 +139,9 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
 
 def permanent_tool_count(output, heading):
     # These short headings fit one row. Permanent results have a blank
-    # separator or hanging-indented summary; live snapshots have neither.
-    return len(re.findall(r"(?m)^" + re.escape(heading) + r"\n(?=\n|  )", output))
+    # separator, hanging-indented summary or adjacent success heading;
+    # live snapshots use CRLF rather than the permanent heading's LF.
+    return len(re.findall(r"(?m)^" + re.escape(heading) + r"\n(?=\n|  |✓ )", output))
 
 
 def terminal_redraw(output, composer):
@@ -258,8 +259,9 @@ def terminal_wait_oracles():
     collect([], "after decision", initial=b"x" * (1024 * 1024), error="unexpected unbounded terminal output")
     collect([b"distinctive prefix"], "required cursor", close_output=True, error="closed")
     heading = "✓ Wait for bypass café"
-    redraw = f"\nWorking…\n{heading}\n{heading}\n+1 more calls · /status\n› draft\r\x1b[7C"
-    for summary in ("", "  Process retirement confirmed.\n"):
+    # Match the PTY's ONLCR expansion of the renderer's explicit CRLF.
+    redraw = f"\r\r\nWorking…\r\r\n{heading}\r\r\n{heading}\r\r\n+1 more calls · /status\r\r\n› draft\r\x1b[7C"
+    for summary in ("", "  Process retirement confirmed.\n", "✓ Adjacent success\n"):
         result = f"\n{heading}\n{summary}"
         for repeats in (0, 1, 7):
             for count in (1, 2, 3):
@@ -1316,6 +1318,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         elif exit_code:
             assert f"! {description} — Failed" in settled, ("quiet view hid tool failure", settled)
             assert f"Exit code: {exit_code}." in settled, settled
+            assert "Bash failed." not in settled, ("failure status repeated below its heading", settled)
             assert "/details for output." in settled, settled
         elif decision == "allow-action":
             assert f"✓ {description}" in settled, ("quiet view hid tool outcome", settled)
@@ -1446,12 +1449,71 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 assert permanent_tool_count(outcome, f"✓ {bypass_description}") == 2, outcome
                 assert "! Inspect application settings" in outcome and "— Failed" in outcome and "Exit code: 7." in outcome, outcome
                 assert "✓ Check final sibling" in outcome, outcome
+                assert f"✓ {bypass_description}\n✓ Check final sibling\n" in outcome, ("adjacent successful calls kept a blank line", outcome)
                 assert "Bash succeeded." not in outcome and "Tool result:" not in outcome, outcome
                 assert "Process retirement confirmed" not in outcome, ("sibling retirement diagnostics leaked", outcome)
                 assert "› live cafXé!" in outcome, outcome
                 refreshed = terminal_step(master, "\x01\x0b/status", "Session: ", composer=True)
                 assert f"✓ {bypass_description}" not in refreshed, ("presented bypass result repeated", refreshed)
                 assert len(endpoint.requests) == 5, "bypass refresh repeated provider work"
+                # Eighteen results cross the 16-item Activity page. A second
+                # group is held until the first is permanently presented,
+                # exercising compaction across polling reads as well.
+                compact_labels = [f"Compact item {index}" for index in range(18)]
+                compact_release = state / "compact-release"
+                notice_release = state / "notice-release"
+                notice_held = threading.Event()
+                notice_reply_release = threading.Event()
+                endpoint.responses.extend([
+                    fixture.sse_tool_calls("compact-call", [("bash", f"compact-id-{index}", json.dumps({
+                        "cmd": "exit 0", "description": label, "timeout_ms": 30000}))
+                        for index, label in enumerate(compact_labels)]),
+                    fixture.sse_tool_calls("compact-tail", [("bash", "compact-tail-id", json.dumps({
+                        "cmd": "while [ ! -e compact-release ]; do sleep 0.05; done",
+                        "description": "Wait for compact tail", "timeout_ms": 30000}))]),
+                    fixture.sse_tool_calls("notice-call", [("bash", "notice-call-id", json.dumps({
+                        "cmd": "while [ ! -e notice-release ]; do sleep 0.05; done",
+                        "description": "Check after notice", "timeout_ms": 30000}))]),
+                    fixture.sse_answer("compact-answer", "compact-reason", "compact-message", "compact complete")[0],
+                ])
+                try:
+                    compact_deadline = time.monotonic() + 15
+                    os.write(master, b"\x01\x0brun compact group\n")
+                    compact = read_terminal(master, "• Wait for compact tail", composer=True)
+                    compact_release.touch()
+                    compact += read_terminal(master, "• Check after notice", composer=True)
+                    while "✓ Wait for compact tail\n" not in compact:
+                        remaining = compact_deadline - time.monotonic()
+                        assert remaining > 0, ("compact tail never permanently presented", compact)
+                        compact += read_terminal(master, "› ", timeout=remaining, composer=True)
+                    headings = list(re.finditer(r"✓ (Compact item [0-9]+|Wait for compact tail)\n", compact))
+                    assert [match[1] for match in headings] == compact_labels + ["Wait for compact tail"], compact
+                    for match in headings[1:]:
+                        assert compact[match.start() - 2:match.start()] not in ("\n\n", "\r\n"), (
+                            "successful group gained a separator across reads", compact)
+                    def hold_notice_result(response):
+                        page = json.loads(response.split(b"\r\n\r\n", 1)[1])
+                        if any("tool_result" in item["value"] for item in page["items"]):
+                            notice_held.set()
+                            assert notice_reply_release.wait(15), "notice result gate was not released"
+                        return response
+                    proxy.rewrite = hold_notice_result
+                    proxy.route = "/v1/activity-page"
+                    notice_release.touch()
+                    fixture.wait_for(notice_held.is_set, "silent Activity result before notice")
+                    os.write(master, b"\x00\n")
+                    read_terminal(master, "! Input rejected; nothing sent.", composer=True)
+                    notice_reply_release.set()
+                    after_notice = read_terminal(master, "compact complete", composer=True)
+                    heading = "✓ Check after notice\n"
+                    start = after_notice.index(heading)
+                    assert after_notice[start - 1] == "\n", ("notice lost its following block separator", after_notice)
+                    proxy.route = "/v1/message"
+                    proxy.rewrite = lambda response: response
+                finally:
+                    compact_release.touch()
+                    notice_release.touch()
+                    notice_reply_release.set()
             finally:
                 for release in bypass_releases:
                     release.touch()
@@ -1485,6 +1547,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         reopened = read_terminal(master, "› ", composer=True)
         assert "Process retirement confirmed" not in reopened and "macOS group signaling returned EPERM" not in reopened, (
             "routine retirement diagnostics leaked on reopening", reopened)
+        if decision == "allow-action" and not any((exit_code, signal_failure, lost_reply, timed_out)):
+            assert "✓ Wait for compact tail\n✓ Check after notice\n" in reopened, ("reopening lost compact successes", reopened)
         if signal_failure:
             assert "Process-group signaling reported a failure." in reopened, ("reopening hid cleanup warning", reopened)
         assert not hidden_reads, ("label-only opening read undisplayed proposal bytes", hidden_reads)
