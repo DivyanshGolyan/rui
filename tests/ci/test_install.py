@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import shutil
@@ -8,7 +9,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 FAKE_ZIG = '''#!/usr/bin/env python3
-import os, pathlib, re, sys
+import json, os, pathlib, re, sys
 args = sys.argv[1:]
 if args == ["version"]:
     print(os.environ.get("TEST_ZIG_VERSION", "0.17.0"))
@@ -21,12 +22,19 @@ if args[0] == "fetch":
     manifest = pathlib.Path("build.zig.zon")
     value = manifest.read_text()
     package_hash = re.search(r"\\." + name + r" = .*?\\.hash = \\\"([^\\\"]+)\\\"", value, re.S)[1]
-    if os.environ.get("TEST_HASH_FAILURE"):
+    if os.environ.get("TEST_HASH_FAILURE") in ("1", name):
         manifest.write_text(value.replace(package_hash, "incorrect-package-hash"))
     else:
-        (pathlib.Path(args[args.index("--pkg-dir") + 1]) / package_hash).mkdir()
+        package = pathlib.Path(args[args.index("--pkg-dir") + 1]) / package_hash
+        package.mkdir()
+        contents = json.loads(os.environ.get("TEST_PACKAGE_MANIFESTS", "{}"))
+        if package_hash in contents:
+            (package / "build.zig.zon").write_text(contents[package_hash])
     sys.exit(0)
 if "--fetch=all" in args:
+    for package_hash in json.loads(os.environ.get("TEST_PACKAGE_MANIFESTS", "{}")):
+        if not (pathlib.Path(os.environ["ZIG_LOCAL_PKG_DIR"]) / package_hash).is_dir():
+            sys.exit("ResolvConfParseFailed: dependency not prepared: " + package_hash)
     sys.exit(0)
 if os.environ.get("TEST_BUILD_FAILURE"):
     sys.exit(42)
@@ -73,6 +81,13 @@ class InstallTest(unittest.TestCase):
         (self.tools / "zig").chmod(0o755)
         (self.tools / "curl").write_text('''#!/usr/bin/env python3
 import pathlib, sys
+url = next(arg for arg in sys.argv if "://" in arg)
+assert url.startswith("https://"), "curl requires an HTTPS archive URL"
+if "codeberg.org/" in url:
+    assert url in {
+        "https://codeberg.org/ziglang/translate-c/archive/f978dca0f2b2a782d06591989e80aae7c74d0183.tar.gz",
+        "https://codeberg.org/ziglang/arocc/archive/ffddc972f7a208bd6e254c27465407270fd8b60c.tar.gz",
+    }, "archive URL must preserve the exact commit, without Git query or fragment"
 pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
 ''')
         (self.tools / "curl").chmod(0o755)
@@ -128,6 +143,40 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
         self.assertFalse(self.cache.exists())
         self.assertFalse((self.home / ".local/lib").exists())
         self.assertNotEqual(self.install("--unknown").returncode, 0)
+
+    def test_git_dependency_graph_is_prepared_and_hash_checked(self):
+        translator = '''        .translate_c = .{
+            .url = "git+https://codeberg.org/ziglang/translate-c#f978dca0f2b2a782d06591989e80aae7c74d0183",
+            .hash = "test-translator-hash",
+        },
+'''
+        manifest = self.manifest.replace('    .dependencies = .{\n', '    .dependencies = .{\n' + translator)
+        (self.repo / "build.zig.zon").write_text(manifest)
+        manifests = {
+            "test-translator-hash": '''.{
+    .dependencies = .{
+        .aro = .{
+            .url = "git+https://codeberg.org/ziglang/arocc?ref=zig-0.17.x#ffddc972f7a208bd6e254c27465407270fd8b60c",
+            .hash = "test-parser-hash",
+        },
+    },
+}
+''',
+            "test-parser-hash": '.{\n    .dependencies = .{},\n}\n',
+        }
+        environment = {"TEST_PACKAGE_MANIFESTS": json.dumps(manifests)}
+        failed = self.install(**environment, TEST_HASH_FAILURE="aro")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("Pinned aro dependency hash mismatch", failed.stderr)
+        self.assertFalse((self.bin / "rui").exists())
+        # The translator is already cached; its missing child still needs preparation.
+        result = self.install(**environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.repo / "build.zig.zon").read_text(), manifest)
+        cached_manifest = self.root / "selected packages/test-translator-hash/build.zig.zon"
+        self.assertEqual(cached_manifest.read_text(), manifests["test-translator-hash"])
+        repeated = self.install(**environment, TEST_HASH_FAILURE="1")
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
 
     def test_path_conflict_is_actionable(self):
         shadow = self.tools / "rui"
