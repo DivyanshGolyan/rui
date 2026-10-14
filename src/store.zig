@@ -4740,19 +4740,6 @@ pub const Store = struct {
         if (c.sqlite3_changes(self.database) == 1) try self.recordTurnOutcomePosition(turn_id);
     }
 
-    fn nextModelOperationKind(self: *Store, session_ref: []const u8) !ModelOperationKind {
-        const last = try prepare(self.database, "SELECT resolution_code FROM model_operation WHERE session_ref=?1 ORDER BY admission_position DESC,operation_id DESC LIMIT 1");
-        defer _ = c.sqlite3_finalize(last);
-        try bindText(last, 1, session_ref);
-        const result = c.sqlite3_step(last);
-        if (result == c.SQLITE_DONE) return .assistant_response;
-        if (result != c.SQLITE_ROW) return error.CorruptStore;
-        var resolution: protocol.Bounded(96) = .{};
-        try readText(last, 0, &resolution);
-        if (resolution.eql("context_overflow")) return .compaction;
-        return .assistant_response;
-    }
-
     fn overflowCanCompact(self: *Store, binding: AttemptBinding) !bool {
         if (try self.readModelOperationKind(binding.operation_id) == .compaction) return false;
         const statement = try prepare(self.database, "SELECT session_ref,admission_position FROM model_operation WHERE operation_id=?1");
@@ -4805,7 +4792,17 @@ pub const Store = struct {
         if (first_admission <= 0 or cutoff < first_admission or selected < 0 or revision <= 0 or initial_position <= 0) {
             return error.CorruptStore;
         }
-        const purpose = try self.nextModelOperationKind(session_ref.slice());
+        const purpose: ModelOperationKind = blk: {
+            const value = existing_turn orelse break :blk .assistant_response;
+            const previous = try prepare(self.database, "SELECT current.resolution_code FROM turn active " ++
+                "JOIN model_operation current ON current.operation_id=active.operation_id WHERE active.turn_id=?1");
+            defer _ = c.sqlite3_finalize(previous);
+            try bindI64(previous, 1, value);
+            if (c.sqlite3_step(previous) != c.SQLITE_ROW) return error.CorruptStore;
+            var resolution: protocol.Bounded(96) = .{};
+            try readText(previous, 0, &resolution);
+            break :blk if (resolution.eql("context_overflow")) .compaction else .assistant_response;
+        };
         if (purpose == .compaction) selected = 0;
 
         const turn_id = if (existing_turn) |value| @as(u64, @intCast(value)) else try nextIdentity(self.database, "turn", "turn_id");
@@ -15534,6 +15531,57 @@ test "historical context selection work excludes nonmatching Operation populatio
     for ([_]bool{ false, true }) |with_base| {
         const small = try Measure.run(8, with_base);
         const large = try Measure.run(1024, with_base);
+        try std.testing.expect(large <= small + 100);
+    }
+}
+
+test "model admission work excludes failed historical Operation population" {
+    const Measure = struct {
+        steps: u64 = 0,
+
+        fn progress(context: ?*anyopaque) callconv(.c) c_int {
+            const counter: *@This() = @ptrCast(@alignCast(context orelse return 1));
+            counter.steps += 1;
+            return 0;
+        }
+
+        fn run(population: usize, overflow: bool) !u64 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "config", "direct/admission-work");
+            try submitTestMessage(&storage, &tmp, "input", "input", "direct/admission-work", "retain");
+            const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            // Keep the actual current Operation newer than all injected history.
+            try exec(storage.database, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL; UPDATE session SET next_position=100001");
+            const insert = try prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
+                "SELECT value+1 FROM sequence WHERE value<?1) " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
+                "attempt_ordinal,allowance_used,uncertain,resolution_code) " ++
+                "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
+                "1,1,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+            defer _ = c.sqlite3_finalize(insert);
+            try bindU64(insert, 1, population);
+            try bindU64(insert, 2, current.operation_id);
+            try expectDone(insert);
+            try storage.settleModelAttemptFailure(current, if (overflow) "overflow" else "provider_http_422", if (overflow) .context_overflow else .terminal, .{});
+            try submitTestMessage(&storage, &tmp, "pending", "pending", "direct/admission-work", "pending input");
+
+            var measured: @This() = .{};
+            const admitted = blk: {
+                c.sqlite3_progress_handler(storage.database, 1, progress, &measured);
+                defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+                break :blk (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            };
+            try std.testing.expectEqual(if (overflow) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(admitted));
+            try std.testing.expectEqual(@as(u64, if (overflow) 1 else 0), (try storage.inspectSession("direct/admission-work")).pending_messages);
+            return measured.steps;
+        }
+    };
+    for ([_]bool{ false, true }) |overflow| {
+        const small = try Measure.run(8, overflow);
+        const large = try Measure.run(1024, overflow);
         try std.testing.expect(large <= small + 100);
     }
 }
