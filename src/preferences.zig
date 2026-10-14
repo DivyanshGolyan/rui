@@ -4,6 +4,7 @@ const c = @cImport({
     @cInclude("unistd.h");
 });
 const platform = @import("platform.zig");
+const protocol = @import("protocol.zig");
 const provider_selection = @import("provider_selection.zig");
 
 const io = std.Io.Threaded.global_single_threaded.io();
