@@ -30,6 +30,12 @@ class SelectionTest(unittest.TestCase):
         result = select(["src/logic_tests.zig"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["test-logic"])
 
+    def test_frontend_departure_keeps_value_and_native_handoff_checks(self):
+        for path in ("src/SessionFrontend.zig", "src/session_departure.zig"):
+            result = select([path], "review", AVAILABLE)
+            for family in ("targets", "native_targets"):
+                self.assertEqual(result[family], ["admission-debug-integration", "check", "test-logic"])
+
     def test_composed_gates_do_not_cover_the_separate_logic_root(self):
         for logic in ("src/logic_tests.zig", "src/AnswerRenderer.zig",
                       "src/request_encoding.zig", "src/execution_turn.zig"):

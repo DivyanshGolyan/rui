@@ -96,7 +96,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | --- | --- |
 | Durable admission, settings, results and recovery | `src/store.zig`: `Store` owns SQLite transactions and canonical facts. |
 | Caller request capture and recovery | `src/client.zig`: typed capture, generated/explicit identity, durable records and original-byte transmission. `src/cli.zig` selects HOME/preferences and presentation. |
-| Interactive submission lifetime | `src/SessionSubmission.zig`: original Message or Decision, capture facts, same-original retries, joined Admission and release. `SessionInput` owns editing storage and loan tickets; `SessionFrontend` owns consent, presentation, reads and coordinated shutdown. |
+| Interactive submission lifetime | `src/SessionSubmission.zig`: original Message or Decision, capture facts, same-original retries, joined Admission and release. `SessionInput` owns editing storage and loan tickets; `SessionFrontend` owns consent, presentation, reads and coordinated shutdown. `src/session_departure.zig` selects handoff, re-entry and exit policy from completed cleanup facts and freshly observed interruption. |
 | Host lifetime and effect handoffs | `src/server.zig`: Host, execution slots and native orchestration. `src/execution_turn.zig` owns the shared service-turn policy. |
 | Attempt bindings, launch permits and cleanup custody | `src/attempt.zig` and `src/execution.zig`: one-shot permits and generation-checked `CustodyPool` records. |
 | Model request preparation, transport and interpretation | `src/model_adapter.zig` prepares requests; `src/provider.zig` owns curl and capture lifetimes; `src/provider_output.zig` validates sealed output. |

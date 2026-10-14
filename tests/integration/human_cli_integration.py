@@ -19,7 +19,7 @@ import termios
 import threading
 import time
 
-from host_process import canonical_fixture_root, preserve_failure_metadata, stop_process
+from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, stop_process
 import model_fixture as fixture
 import codex_integration as codex_fixture
 
@@ -167,7 +167,7 @@ def terminal_wait_oracles():
             except BrokenPipeError:
                 pass  # The expected collector refusal closes its reader.
             finally:
-                os.close(writer)
+                dispose_all(lambda: os.close(writer))
 
         thread = threading.Thread(target=produce)
         thread.start()
@@ -189,10 +189,11 @@ def terminal_wait_oracles():
                 assert error is None, "incomplete terminal boundary was accepted"
                 return output
         finally:
-            os.close(reader)
-            stopped.set()
-            thread.join(timeout=2)
-            assert not thread.is_alive(), "terminal oracle producer did not retire"
+            def join_producer():
+                thread.join(timeout=2)
+                assert not thread.is_alive(), "terminal oracle producer did not retire"
+
+            dispose_all(lambda: os.close(reader), stopped.set, join_producer)
 
     draft = "ab" + "\u0301" * 32767
     marker = draft + "\r\x1b[4C"
@@ -522,11 +523,8 @@ def command_entry_cases():
                 assert select.select([input_read], [], [], 0)[0], "literal consumed stdin"
                 assert os.read(input_read, len(unrelated)) == unrelated
             finally:
-                if executor is not None and executor.poll() is None:
-                    executor.kill()
-                    executor.communicate(timeout=5)
-                os.close(input_read)
-                os.close(input_write)
+                dispose_all(lambda: stop_process(executor, timeout=5) if executor is not None else None,
+                            lambda: os.close(input_read), lambda: os.close(input_write))
         lookalike_store = state / "lookalike-store"
         lookalike_host = fixture.start_host(lookalike_store, None)
         pages = [json.loads(line) for line in run(home, "sessions", "--all", "--json").splitlines()]
@@ -593,26 +591,16 @@ def command_entry_cases():
         completed = True
         print("CLI entry/resume/exec: literal prompt, canonical scoped paginated last vs older activity, exact resume, colour/NO_COLOR, waited escaped answer, stdin, escaped dash/option with untouched held stdin, failure, exact lost-reply recovery, permission block, missing-login and accepted-entry recovery controls passed", flush=True)
     finally:
-        exec_release.set()
-        permission_release.set()
-        if proxy is not None:
-            proxy.close()
-        if executor is not None and executor.poll() is None:
-            executor.kill()
-            executor.communicate(timeout=5)
-        if caller is not None and caller.poll() is None:
-            caller.kill()
-            caller.wait(timeout=5)
-        if master is not None:
-            os.close(master)
-            os.close(slave)
-        if lookalike_host is not None:
-            fixture.stop_host(lookalike_host)
-        if host is not None:
-            fixture.stop_host(host)
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=5)
+        dispose_all(
+            exec_release.set, permission_release.set,
+            lambda: proxy.close() if proxy is not None else None,
+            lambda: stop_process(executor, timeout=5) if executor is not None else None,
+            lambda: stop_process(caller, timeout=5) if caller is not None else None,
+            *(lambda fd=fd: os.close(fd) for fd in (master, slave) if fd is not None),
+            lambda: fixture.stop_host(lookalike_host) if lookalike_host is not None else None,
+            lambda: fixture.stop_host(host) if host is not None else None,
+            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+        )
         if completed:
             shutil.rmtree(state)
         else:
@@ -847,21 +835,14 @@ def persistent_opening_case():
         completed = True
         print("persistent opening/history: exact chronological frozen replay, assistant-only Markdown, whole-page failure/retry, no cursor loss/late append/repeated work passed", flush=True)
     finally:
-        history_release.set()
-        opening_release.set()
-        if caller is not None and caller.poll() is None:
-            caller.kill()
-            caller.wait(timeout=5)
-        if master is not None:
-            os.close(master)
-            os.close(slave)
-        if proxy is not None:
-            proxy.close()
-        if host is not None:
-            fixture.stop_host(host)
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=5)
+        dispose_all(
+            history_release.set, opening_release.set,
+            lambda: stop_process(caller, timeout=5) if caller is not None else None,
+            *(lambda fd=fd: os.close(fd) for fd in (master, slave) if fd is not None),
+            lambda: proxy.close() if proxy is not None else None,
+            lambda: fixture.stop_host(host) if host is not None else None,
+            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+        )
         if completed:
             shutil.rmtree(state)
         else:
@@ -919,21 +900,14 @@ def persistent_pending_case():
         completed = True
         print("persistent pending: exact frozen 24 beyond newest 16, oldest four previews, late admission excluded passed", flush=True)
     finally:
-        opening_release.set()
-        if caller is not None and caller.poll() is None:
-            caller.kill()
-            caller.wait(timeout=5)
-        if master is not None:
-            os.close(master)
-            os.close(slave)
-        if proxy is not None:
-            proxy.close()
-        if host is not None:
-            fixture.stop_host(host)
-        release.set()
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=5)
+        dispose_all(
+            opening_release.set,
+            lambda: stop_process(caller, timeout=5) if caller is not None else None,
+            *(lambda fd=fd: os.close(fd) for fd in (master, slave) if fd is not None),
+            lambda: proxy.close() if proxy is not None else None,
+            lambda: fixture.stop_host(host) if host is not None else None,
+            release.set, endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+        )
         if completed:
             shutil.rmtree(state)
         else:
@@ -1100,26 +1074,22 @@ def persistent_input_cases():
         completed = True
         print("persistent public Session: exact original replay, joined acceptance, next Unicode cursor, malformed→valid, prepublication repair, restoration passed", flush=True)
     finally:
-        first_release.set()
-        next_admission_release.set()
         records = home / ".config/rui/requests"
-        if records.exists():
-            records.chmod(0o700)
-        if not completed and caller is not None and caller.poll() is not None:
-            print(f"persistent caller exited {caller.returncode}: {caller.stderr.read().decode(errors='replace')}", file=sys.stderr)
-        if caller is not None and caller.poll() is None:
-            caller.kill()
-            caller.wait(timeout=5)
-        if proxy is not None:
-            proxy.close()
-        if master is not None:
-            os.close(master)
-            os.close(slave)
-        if host is not None:
-            fixture.stop_host(host)
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=5)
+
+        def report_caller():
+            if not completed and caller is not None and caller.poll() is not None:
+                print(f"persistent caller exited {caller.returncode}: {caller.stderr.read().decode(errors='replace')}", file=sys.stderr)
+
+        dispose_all(
+            first_release.set, next_admission_release.set,
+            lambda: records.chmod(0o700) if records.exists() else None,
+            report_caller,
+            lambda: stop_process(caller, timeout=5) if caller is not None else None,
+            lambda: proxy.close() if proxy is not None else None,
+            *(lambda fd=fd: os.close(fd) for fd in (master, slave) if fd is not None),
+            lambda: fixture.stop_host(host) if host is not None else None,
+            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+        )
         if completed:
             shutil.rmtree(state)
         else:
@@ -1520,22 +1490,14 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 "ready_pending": bool(select.select([ready_read], [], [], 0)[0]),
                 "terminal_pending": bool(select.select([master], [], [], 0)[0]) if master is not None else None,
             })
-        arguments_release.set()
-        if caller is not None and caller.poll() is None:
-            caller.kill()
-            caller.wait(timeout=5)
-        if proxy is not None:
-            proxy.close()
-        if master is not None:
-            os.close(master)
-            os.close(slave)
-        os.close(ready_read)
-        os.close(ready_write)
-        if host is not None:
-            fixture.stop_host(host)
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=5)
+        dispose_all(
+            arguments_release.set,
+            lambda: stop_process(caller, timeout=5) if caller is not None else None,
+            lambda: proxy.close() if proxy is not None else None,
+            *(lambda fd=fd: os.close(fd) for fd in (master, slave, ready_read, ready_write) if fd is not None),
+            lambda: fixture.stop_host(host) if host is not None else None,
+            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+        )
         if completed:
             shutil.rmtree(state)
         else:
@@ -1595,15 +1557,14 @@ def store_selection_cases(state, workspace, valid_store):
                 assert binding["store"] == str(explicit.resolve()) and binding["require_model"] is True
             print("Store provenance:", case, "passed", flush=True)
         finally:
-            if caller.poll() is None:
-                caller.kill()
-                caller.wait(timeout=5)
-            os.close(ready_read)
-            os.close(master)
-            os.close(slave)
-            if case in ("explicit-create", "home-create") and destination.exists():
-                run(home, "host", "stop", "--store", destination)
-                fixture.wait_for(lambda: "Host: unavailable" in run(home, "host", "status", "--store", destination), "created Host stopped")
+            def stop_created_host():
+                if case in ("explicit-create", "home-create") and destination.exists():
+                    run(home, "host", "stop", "--store", destination)
+                    fixture.wait_for(lambda: "Host: unavailable" in run(home, "host", "status", "--store", destination), "created Host stopped")
+
+            dispose_all(lambda: stop_process(caller, timeout=5),
+                        lambda: os.close(ready_read), lambda: os.close(master),
+                        lambda: os.close(slave), stop_created_host)
 
 
 def action_ready(descriptor, master, timeout=15):
@@ -1701,11 +1662,8 @@ def saved_capture_cases(state, store, workspace):
         observed = fixture.command("observe-command", "--store", store, "--key", handle)["observation"]
         assert observed["target"] == "capture/original", ("captured owner transmitted a replaced pathname", observed)
     finally:
-        if caller.poll() is None:
-            caller.kill()
-            caller.communicate(timeout=5)
-        if original is not None:
-            record.write_bytes(original)
+        dispose_all(lambda: stop_process(caller, timeout=5),
+                    lambda: record.write_bytes(original) if original is not None else None)
 
     # Recovery must ignore a newly selected, nonexistent preference Store.
     run(home, "setup", "--store", store)
@@ -1776,11 +1734,8 @@ int fsync(int fd) {
         terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
     finally:
-        if entered.poll() is None:
-            entered.kill()
-            entered.wait(timeout=5)
-        os.close(master)
-        os.close(slave)
+        dispose_all(lambda: stop_process(entered, timeout=5),
+                    lambda: os.close(master), lambda: os.close(slave))
     print("saved capture owner: pinned original bytes, preference-independent recovery, failed announcement, "
         "sync uncertainty, listing asymmetry", flush=True)
 
@@ -1833,15 +1788,11 @@ def silent_read_edit_cases():
                 assert actual == original
                 print(f"silent observation: {route} visible Unicode edit and exact capture passed", flush=True)
             finally:
-                release.set()
-                if caller is not None and caller.poll() is None:
-                    caller.kill()
-                    caller.wait(timeout=5)
-                if proxy is not None:
-                    proxy.close()
-                    proxy = None
-                os.close(master)
-                os.close(slave)
+                dispose_all(release.set,
+                            lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                            lambda: proxy.close() if proxy is not None else None,
+                            lambda: os.close(master), lambda: os.close(slave))
+                proxy = None
         completed = True
     finally:
         if host is not None:
@@ -1951,17 +1902,12 @@ def opaque_session_commands_case():
                 "ready_pending": bool(select.select([ready_read], [], [], 0)[0]) if ready_read is not None else None,
                 "terminal_pending": bool(select.select([master], [], [], 0)[0]) if master is not None else None,
             })
-        if entered is not None and entered.poll() is None:
-            entered.kill()
-            entered.wait(timeout=5)
-        for fd in (master, slave, ready_read, ready_write):
-            if fd is not None:
-                os.close(fd)
-        if host is not None:
-            fixture.stop_host(host)
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=5)
+        dispose_all(
+            lambda: stop_process(entered, timeout=5) if entered is not None else None,
+            *(lambda fd=fd: os.close(fd) for fd in (master, slave, ready_read, ready_write) if fd is not None),
+            lambda: fixture.stop_host(host) if host is not None else None,
+            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+        )
         if completed:
             shutil.rmtree(state)
         else:
@@ -2082,22 +2028,10 @@ def long_input_case(home, store, workspace, endpoint, host):
                 "provider_requests": len(endpoint.requests),
                 "request_records": len(list((home / ".config/rui/requests").glob("*.json"))),
             })
-        errors = []
         disposals = ([lambda: stop_process(entered, timeout=5)] if entered is not None else [])
         disposals += [lambda fd=fd: os.close(fd) for fd in (master, slave) if fd is not None]
         disposals.append(proxy.close)
-        for dispose in disposals:
-            try:
-                dispose()
-            except BaseException as error:
-                errors.append(error)
-        for error in errors:
-            try:
-                print(f"long-input disposal failure: {type(error).__name__}", file=sys.stderr)
-            except Exception:
-                pass  # Optional reporting cannot replace the primary failure.
-        if incoming is None and errors:
-            raise errors[0]
+        dispose_all(*disposals)
 
 
 def incomplete_input_case(home, store, session, endpoint, host):
@@ -2117,8 +2051,7 @@ def incomplete_input_case(home, store, session, endpoint, host):
                     "--session", session], env={**os.environ, "HOME": str(home)},
                     stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             except BaseException:
-                os.close(master)
-                os.close(slave)
+                dispose_all(lambda: os.close(master), lambda: os.close(slave))
                 raise
             deadline = time.monotonic() + 7
             callers.append((master, slave, entered, original, deadline))
@@ -2137,23 +2070,11 @@ def incomplete_input_case(home, store, session, endpoint, host):
                 original[3] &= ~mask
             assert actual == original, (actual, original)
     finally:
-        incoming = sys.exc_info()[1]
-        errors = []
+        disposals = []
         for master, slave, entered, _, _ in callers:
-            for dispose in (lambda: stop_process(entered, timeout=5),
-                            lambda: os.close(master), lambda: os.close(slave)):
-                try:
-                    dispose()
-                except BaseException as error:
-                    errors.append(error)
-        try:
-            proxy.close()
-        except BaseException as error:
-            errors.append(error)
-        if incoming is not None and errors:
-            incoming.add_note("incomplete-input disposal failed: " + ", ".join(type(error).__name__ for error in errors))
-        if incoming is None and errors:
-            raise errors[0]
+            disposals.extend((lambda process=entered: stop_process(process, timeout=5),
+                              lambda fd=master: os.close(fd), lambda fd=slave: os.close(fd)))
+        dispose_all(*disposals, proxy.close)
     assert not proxy.mutations, "incomplete terminal input transmitted a Message or Decision"
     assert {path: path.read_bytes() for path in records.glob("*.json")} == before_records, "incomplete input published a capture"
     assert len(endpoint.requests) == before, "incomplete terminal input reached provider"
@@ -2316,8 +2237,7 @@ def main(selected="all"):
                 capture_output=True, text=True, timeout=2)
             assert blocked.returncode != 0, blocked
         finally:
-            saved.unlink()
-            backup.rename(saved)
+            dispose_all(saved.unlink, lambda: backup.rename(saved))
         retired_store = state / "retired-store"
         retired_store.mkdir(mode=0o700)
         assert "Saved defaults" in run(preferences_home, "setup", "--store", retired_store)
@@ -2352,7 +2272,7 @@ def main(selected="all"):
                 capture_output=True, text=True, timeout=2)
             assert blocked.returncode == 0 and "credential: error" in blocked.stdout, blocked
         finally:
-            credential.unlink()
+            dispose_all(credential.unlink)
         codex_fixture.credentials(credential, state="refresh_pending")
         assert "credential: refresh required" in run(preferences_home, "setup")
         assert "state=refresh_pending" in credential.read_text(), "status must not refresh"
@@ -2384,7 +2304,7 @@ def main(selected="all"):
             assert blocked.returncode != 0, blocked
             assert saved.read_text().endswith("model=gpt-6-luna\n")
         finally:
-            temp.unlink()
+            dispose_all(temp.unlink)
         codex_fixture.credentials(credential)
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
         stale = run(preferences_home, "setup")
@@ -2441,11 +2361,8 @@ def main(selected="all"):
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
-            if entered.poll() is None:
-                entered.kill()
-                entered.wait(timeout=5)
-            os.close(master)
-            os.close(slave)
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
         saved.unlink()
         fallback.parent.mkdir(parents=True)
         fallback.symlink_to(store, target_is_directory=True)
@@ -2459,11 +2376,8 @@ def main(selected="all"):
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
-            if entered.poll() is None:
-                entered.kill()
-                entered.wait(timeout=5)
-            os.close(master)
-            os.close(slave)
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
         fallback.unlink()
         saved.write_text(f"version=1\nstore={state / 'missing'}\nprovider=codex\nmodel=gpt-6-luna\n")
         saved.chmod(0o600)
@@ -2502,12 +2416,10 @@ def main(selected="all"):
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            os.close(master)
-            os.close(slave)
-            os.close(ready_read)
+            dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
             raise
         finally:
-            os.close(ready_write)
+            dispose_all(lambda: os.close(ready_write))
         try:
             offered = provider_prompt(master, ready_read)
             assert "No locally ready provider" in offered and "Codex login" in offered, offered
@@ -2515,12 +2427,8 @@ def main(selected="all"):
             assert deferred.wait(timeout=5) == 0
             assert set(run(preferences_home, "requests").splitlines()) == before_missing
         finally:
-            if deferred.poll() is None:
-                deferred.kill()
-                deferred.wait(timeout=5)
-            os.close(ready_read)
-            os.close(master)
-            os.close(slave)
+            dispose_all(lambda: stop_process(deferred, timeout=5),
+                        lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         explicit_home = state / "explicit-home"
         explicit_config = explicit_home / ".config/rui"
         explicit_config.mkdir(parents=True, mode=0o700)
@@ -2536,12 +2444,10 @@ def main(selected="all"):
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            os.close(master)
-            os.close(slave)
-            os.close(ready_read)
+            dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
             raise
         finally:
-            os.close(ready_write)
+            dispose_all(lambda: os.close(ready_write))
         try:
             assert "No locally ready provider" in provider_prompt(master, ready_read)
             # Another client installs a fixture credential while this caller
@@ -2560,12 +2466,8 @@ def main(selected="all"):
             assert "Detached." in terminal_step(master, "/exit", "Detached.")
             assert explicit.wait(timeout=5) == 0
         finally:
-            if explicit.poll() is None:
-                explicit.kill()
-                explicit.wait(timeout=5)
-            os.close(ready_read)
-            os.close(master)
-            os.close(slave)
+            dispose_all(lambda: stop_process(explicit, timeout=5),
+                        lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         # A valid opaque credential arrives while the prompt is open, then
         # becomes renewal-due before the choice. It remains usable for creation.
         (explicit_config / "codex.json").unlink()
@@ -2578,12 +2480,10 @@ def main(selected="all"):
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            os.close(master)
-            os.close(slave)
-            os.close(ready_read)
+            dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
             raise
         finally:
-            os.close(ready_write)
+            dispose_all(lambda: os.close(ready_write))
         try:
             assert "No locally ready provider" in provider_prompt(master, ready_read)
             expiry = int(time.time()) + 2
@@ -2604,12 +2504,8 @@ def main(selected="all"):
             assert expiring.wait(timeout=5) == 0
             assert malformed.read_text() == "version=9\n"
         finally:
-            if expiring.poll() is None:
-                expiring.kill()
-                expiring.wait(timeout=5)
-            os.close(ready_read)
-            os.close(master)
-            os.close(slave)
+            dispose_all(lambda: stop_process(expiring, timeout=5),
+                        lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         longer_store = state / "another-longer-store-selector"
         other_host = fixture.start_host(longer_store, url)
         try:
@@ -2626,12 +2522,10 @@ def main(selected="all"):
                             "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                         pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
                 except BaseException:
-                    os.close(master)
-                    os.close(slave)
-                    os.close(ready_read)
+                    dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
                     raise
                 finally:
-                    os.close(ready_write)
+                    dispose_all(lambda: os.close(ready_write))
                 try:
                     assert "No locally ready provider" in provider_prompt(master, ready_read)
                     assert "Saved defaults" in run(changing_home, "setup", "--store", after)
@@ -2648,12 +2542,8 @@ def main(selected="all"):
                     assert "Detached." in terminal_step(master, "/exit", "Detached.")
                     assert changing.wait(timeout=5) == 0
                 finally:
-                    if changing.poll() is None:
-                        changing.kill()
-                        changing.wait(timeout=5)
-                    os.close(ready_read)
-                    os.close(master)
-                    os.close(slave)
+                    dispose_all(lambda: stop_process(changing, timeout=5),
+                                lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         finally:
             fixture.stop_host(other_host)
         codex_fixture.credentials(credential)
@@ -2682,11 +2572,8 @@ def main(selected="all"):
                 terminal_step(master, "/exit", "Detached.")
                 assert caller.wait(timeout=5) == 0
             finally:
-                if caller.poll() is None:
-                    caller.kill()
-                    caller.wait(timeout=5)
-                os.close(master)
-                os.close(slave)
+                dispose_all(lambda: stop_process(caller, timeout=5),
+                            lambda: os.close(master), lambda: os.close(slave))
         created = []
         records = preferences_home / ".config/rui/requests"
         for persistent in (False, True):
@@ -2721,11 +2608,8 @@ def main(selected="all"):
                 assert "Detached." in terminal_step(master, "/exit", "Detached.")
                 assert caller.wait(timeout=5) == 0
             finally:
-                if caller.poll() is None:
-                    caller.kill()
-                    caller.wait(timeout=5)
-                os.close(master)
-                os.close(slave)
+                dispose_all(lambda: stop_process(caller, timeout=5),
+                            lambda: os.close(master), lambda: os.close(slave))
         assert len(set(created)) == 2, "independent new intent reused a reference"
         blocked_home = state / "blocked-capture-home"
         blocked_config = blocked_home / ".config/rui"
@@ -2753,13 +2637,8 @@ def main(selected="all"):
             assert (blocked_config / "requests").read_text() == "not a directory"
             assert run(preferences_home, "sessions", "--store", store, "--all", "--json") == sessions_before
         finally:
-            if blocked is not None:
-                if blocked.poll() is None:
-                    blocked.kill()
-                    blocked.wait(timeout=5)
-                blocked.stderr.close()
-            os.close(master)
-            os.close(slave)
+            dispose_all(lambda: stop_process(blocked, timeout=5) if blocked is not None else None,
+                        lambda: os.close(master), lambda: os.close(slave))
         before = set(run(preferences_home, "requests").splitlines())
         gate = state / "new-session-capture"
         master, slave = pty.openpty()
@@ -2784,11 +2663,8 @@ def main(selected="all"):
             assert fixture.command("inspect-session", "--store", store,
                 "--session", f"rui/{handle}")["session"]["permission_mode"] == "bypass"
         finally:
-            if interrupted.poll() is None:
-                interrupted.kill()
-                interrupted.wait(timeout=5)
-            os.close(master)
-            os.close(slave)
+            dispose_all(lambda: stop_process(interrupted, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
         credential.unlink()
         initial = fixture.command("inspect-session", "--store", store, "--session", session)
         assert initial["selected_message"] is None and initial["recent_messages"] == [], initial
@@ -2893,12 +2769,10 @@ def main(selected="all"):
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            os.close(master)
-            os.close(slave)
-            os.close(ready_read)
+            dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
             raise
         finally:
-            os.close(ready_write)
+            dispose_all(lambda: os.close(ready_write))
         try:
             greeting = read_terminal(master, "› ")
             assert all(noise not in greeting for noise in ("Session:", "Workspace:", "Provider:", "Model:", "Permission:", "Store:", queued)), greeting
@@ -2964,12 +2838,8 @@ def main(selected="all"):
             assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
-            if entered.poll() is None:
-                entered.kill()
-                entered.wait(timeout=5)
-            os.close(ready_read)
-            os.close(master)
-            os.close(slave)
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         assert run(home, "follow", queued) == "return: outcome\nadmitted: accepted\nstatus: completed\n"
         assert run(home, "recover", stale["request"]) == (
             f"Store: {store}\nSession: {session}\nkey: {stale['request']}\n"
@@ -3059,13 +2929,8 @@ def main(selected="all"):
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
-            if entered.poll() is None:
-                entered.kill()
-                entered.wait(timeout=5)
-            os.close(master)
-            os.close(ready_read)
-            os.close(ready_write)
-            os.close(slave)
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        *(lambda fd=fd: os.close(fd) for fd in (master, ready_read, ready_write, slave)))
         run(home, "allow-action", "--store", store, "--session", sibling_session,
             "--action", running)
         fixture.wait_for(lambda: sibling_started.exists(), "approved sibling in flight")
@@ -3110,14 +2975,8 @@ def main(selected="all"):
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
-            sibling_release.touch()
-            if entered.poll() is None:
-                entered.kill()
-                entered.wait(timeout=5)
-            os.close(master)
-            os.close(ready_read)
-            os.close(ready_write)
-            os.close(slave)
+            dispose_all(sibling_release.touch, lambda: stop_process(entered, timeout=5),
+                        *(lambda fd=fd: os.close(fd) for fd in (master, ready_read, ready_write, slave)))
         fixture.wait_for(lambda: fixture.completed_observation(store, sibling_key), "sibling outcome")
         assert run(home, "result", sibling_key) == "admitted: accepted\nresult: completed\nsiblings done\n"
         assert sibling_effect.read_text() == "y" and counter.read_text() == "x"
@@ -3161,11 +3020,8 @@ def main(selected="all"):
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
-            if entered.poll() is None:
-                entered.kill()
-                entered.wait(timeout=5)
-            os.close(master)
-            os.close(slave)
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
 
         stop_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("stopped-answer", "stopped-reason",
@@ -3213,9 +3069,7 @@ def main(selected="all"):
             assert reader.poll() is None, "large result should block on unread stdout"
             assert list(scratch.iterdir()) == [], "rendering must not leave a named payload"
         finally:
-            if reader.poll() is None:
-                reader.kill()
-            reader.communicate(timeout=5)
+            stop_process(reader, timeout=5)
         assert reader.returncode == -signal.SIGKILL and list(scratch.iterdir()) == []
         assert json.loads(run(home, "result", large_key, "--json", environment=render_environment))["answer"] == large_answer
 
@@ -3315,12 +3169,10 @@ def main(selected="all"):
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            os.close(master)
-            os.close(slave)
-            os.close(ready_read)
+            dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
             raise
         finally:
-            os.close(ready_write)
+            dispose_all(lambda: os.close(ready_write))
         try:
             assert "Permission:" not in read_terminal(master, "› ")
             os.write(master, b"interactive request\na\n")
@@ -3376,12 +3228,8 @@ def main(selected="all"):
             assert termios.tcgetattr(master)[3] & termios.ICANON, "terminal mode not restored"
             assert counter.read_text() == "xx", counter.read_text()
         finally:
-            if entered.poll() is None:
-                entered.kill()
-                entered.wait(timeout=5)
-            os.close(ready_read)
-            os.close(master)
-            os.close(slave)
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         control_session = "human/name\n\x1b[2J\u202e"
         run(home, "configure", "--store", store, "--session", control_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
@@ -3423,11 +3271,8 @@ def main(selected="all"):
             assert entered.wait(timeout=5) == 0
             run(home, "setup", "--store", store)
         finally:
-            if entered.poll() is None:
-                entered.kill()
-                entered.wait(timeout=5)
-            os.close(master)
-            os.close(slave)
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
         unsafe_session = "human/unsafe-key"
         unsafe_key = "message\n\x1b[2J\u202e"
         unsafe_release = threading.Event()
@@ -3458,14 +3303,13 @@ def main(selected="all"):
                 assert "Detached." in terminal_step(master, "/exit", "Detached.")
                 assert entered.wait(timeout=5) == 0
             finally:
-                if entered.poll() is None:
-                    entered.kill()
-                    entered.wait(timeout=5)
-                os.close(master)
-                os.close(slave)
+                dispose_all(lambda: stop_process(entered, timeout=5),
+                            lambda: os.close(master), lambda: os.close(slave))
         finally:
-            unsafe_release.set()
-            waiter.communicate(timeout=10)
+            waiter_deadline = time.monotonic() + 10
+            dispose_all(unsafe_release.set,
+                        lambda: waiter.communicate(timeout=max(0, waiter_deadline - time.monotonic())),
+                        lambda: stop_process(waiter, timeout=max(0, waiter_deadline - time.monotonic())))
         fixture.wait_for(lambda: fixture.completed_observation(store, unsafe_key), "unsafe key result")
         assert fixture.command("inspect-session", "--store", store,
             "--session", unsafe_session)["recent_messages"][0]["message"] == unsafe_key
@@ -3483,11 +3327,8 @@ def main(selected="all"):
             assert "Detached." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
-            if entered.poll() is None:
-                entered.kill()
-                entered.wait(timeout=5)
-            os.close(master)
-            os.close(slave)
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
         empty_session = "human/empty-key"
         run(home, "configure", "--store", store, "--session", empty_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
@@ -3512,10 +3353,7 @@ def main(selected="all"):
             assert json.loads(empty_wait.stdout.readline())["observation"]["result"]["status"] == "completed"
             assert empty_wait.wait(timeout=10) == 0
         finally:
-            empty_release.set()
-            if empty_wait.poll() is None:
-                empty_wait.kill()
-                empty_wait.communicate(timeout=5)
+            dispose_all(empty_release.set, lambda: stop_process(empty_wait, timeout=5))
         current = fixture.command("inspect-session", "--store", store, "--session", empty_session)
         assert current["selected_message"] is None and current["recent_messages"][0]["message"] == "", current
         long_input_case(home, store, workspace, endpoint, host)
@@ -3631,11 +3469,8 @@ def main(selected="all"):
             assert entered.wait(timeout=5) == 0
             assert termios.tcgetattr(master)[3] & termios.ICANON
         finally:
-            if entered.poll() is None:
-                entered.kill()
-                entered.wait(timeout=5)
-            os.close(master)
-            os.close(slave)
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
         master, slave = pty.openpty()
         entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
             "--session", empty_session], env={**os.environ, "HOME": str(fresh_home)},
@@ -3649,11 +3484,8 @@ def main(selected="all"):
             assert entered.wait(timeout=5) == 0
             assert termios.tcgetattr(master)[3] & termios.ICANON
         finally:
-            if entered.poll() is None:
-                entered.kill()
-                entered.wait(timeout=5)
-            os.close(master)
-            os.close(slave)
+            dispose_all(lambda: stop_process(entered, timeout=5),
+                        lambda: os.close(master), lambda: os.close(slave))
         for columns in (7, 8):
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
@@ -3678,12 +3510,9 @@ def main(selected="all"):
                 assert actual == original_terminal
                 assert set((fresh_home / ".config/rui/requests").glob("*.json")) == before
             finally:
-                if entered.poll() is None:
-                    entered.kill()
-                    entered.wait(timeout=5)
-                entered.stderr.close()
-                os.close(master)
-                os.close(slave)
+                dispose_all(lambda: stop_process(entered, timeout=5),
+                            entered.stderr.close,
+                            lambda: os.close(master), lambda: os.close(slave))
         incomplete_input_case(fresh_home, store, empty_session, endpoint, host)
         observation_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("observed-later", "observed-later-reason",
@@ -3745,42 +3574,25 @@ def main(selected="all"):
             assert json.loads(run(home, "recover", saved_key, "--json"))["answer"]["replayed"] is True
             assert record.read_bytes() == original, "activity failure replaced accepted original"
         finally:
-            observation_continue.set()
-            observation_release.set()
-            if entered.poll() is None:
-                entered.kill()
-                entered.wait(timeout=5)
-            if proxy is not None:
-                proxy.close()
-            entered.stderr.close()
-            os.close(master)
-            os.close(slave)
+            dispose_all(observation_continue.set, observation_release.set,
+                        lambda: stop_process(entered, timeout=5),
+                        lambda: proxy.close() if proxy is not None else None,
+                        lambda: os.close(master), lambda: os.close(slave))
         completed = True
         print("human CLI: saved recovery, Session wait/re-entry, exact PTY approval, bounded input and Host restart passed")
     finally:
-        sibling_release.touch()
-        if failure_release is not None:
-            failure_release.set()
-        if stop_release is not None:
-            stop_release.set()
-        if observation_release is not None:
-            observation_release.set()
-        race_predecessor_release.set()
-        race_message_release.set()
-        if terminal_waiter is not None and terminal_waiter.poll() is None:
-            terminal_waiter.kill()
-            terminal_waiter.communicate(timeout=5)
-        if race_follower is not None and race_follower.poll() is None:
-            race_follower.kill()
-            race_follower.communicate(timeout=5)
-        if race_waiter is not None and race_waiter.poll() is None:
-            race_waiter.kill()
-            race_waiter.communicate(timeout=5)
-        if host is not None:
-            fixture.stop_host(host)
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=5)
+        dispose_all(
+            sibling_release.touch,
+            lambda: failure_release.set() if failure_release is not None else None,
+            lambda: stop_release.set() if stop_release is not None else None,
+            lambda: observation_release.set() if observation_release is not None else None,
+            race_predecessor_release.set, race_message_release.set,
+            lambda: stop_process(terminal_waiter, timeout=5) if terminal_waiter is not None else None,
+            lambda: stop_process(race_follower, timeout=5) if race_follower is not None else None,
+            lambda: stop_process(race_waiter, timeout=5) if race_waiter is not None else None,
+            lambda: fixture.stop_host(host) if host is not None else None,
+            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+        )
         if completed:
             shutil.rmtree(state)
         else:

@@ -9,51 +9,14 @@ const Terminal = @import("SessionTerminal.zig");
 const Editor = @import("TerminalEditor.zig");
 const View = @import("session_view.zig");
 const History = @import("session_history.zig");
+const departure = @import("session_departure.zig");
 const Self = @This();
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
-const ReadPhase = enum { activity, history, details, permission };
-const SettlementMode = enum { active, handoff, final_exit };
-const ReadEnd = union(enum) {
-    absent,
-    complete,
-    cancelled: Progress,
-    failed: struct { err: anyerror, progress: Progress },
-
-    const Progress = struct { phase: ReadPhase, rendering: bool, output_owned: bool };
-
-    fn preparationFailure(self: ReadEnd) bool {
-        return self == .failed and self.failed.err != error.CanonicalStoreFailure and
-            (self.failed.progress.phase == .history or self.failed.progress.phase == .details) and
-            !self.failed.progress.rendering;
-    }
-
-    fn failure(self: ReadEnd, mode: SettlementMode) ?anyerror {
-        return switch (self) {
-            .absent, .complete => null,
-            .cancelled => |progress| if (mode == .active or mode == .handoff and progress.output_owned) error.Cancelled else null,
-            .failed => |failed| if (mode != .final_exit and self.preparationFailure()) null else failed.err,
-        };
-    }
-};
+const ReadPhase = departure.ReadPhase;
+const ReadEnd = departure.ReadEnd;
 const AdmissionEnd = Submission.End;
-const Settled = struct {
-    restored: anyerror!void,
-    reader: ReadEnd,
-    admission: AdmissionEnd,
-
-    fn failure(self: Settled, mode: SettlementMode, cause: ?anyerror) ?anyerror {
-        self.restored catch |err| return err;
-        const reader_error = self.reader.failure(mode);
-        const admission_error = self.admission.failure();
-        if (reader_error) |err| if (err == error.CanonicalStoreFailure) return err;
-        if (admission_error) |err| if (err == error.CanonicalStoreFailure) return err;
-        if (cause) |err| if (err != error.InteractiveInterrupted) return err;
-        if (reader_error) |err| return err;
-        if (mode == .final_exit) if (admission_error) |err| if (err != error.Cancelled) return err;
-        return null;
-    }
-};
+const Settled = departure.Settled;
 init: std.process.Init,
 store: []const u8,
 session: []const u8,
@@ -127,13 +90,11 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
         @import("TerminalText.zig").diagnostic("rui: Read failed: {s}\n", .{out.buffered()});
     }
     const cause: ?anyerror = if (result) |_| null else |err| err;
-    if (settled.failure(.final_exit, cause)) |err| {
-        self.recoveryGuide();
-        return err;
-    }
-    if (self.submission.view() != null) self.recoveryGuide();
+    const plan = departure.exit(settled, cause, self.submission.view() != null);
+    if (plan.recovery_before_notice) self.recoveryGuide();
+    if (plan.failure) |err| return err;
     self.terminal.detached(store, session) catch |err| {
-        if (self.submission.view() == null) self.recoveryGuide();
+        if (!plan.recovery_before_notice) self.recoveryGuide();
         return err;
     };
 }
@@ -145,7 +106,7 @@ fn quiesce(self: *Self) Settled {
     const reader = self.joinReader();
     const admission = self.joinAdmission();
     if (self.reader.take() != null) self.reader.acknowledge();
-    return .{ .restored = restored, .reader = reader, .admission = admission };
+    return .{ .restored = restored, .reader = reader, .admission_error = admission.failure() };
 }
 
 fn recoveryGuide(self: *const Self) void {
@@ -173,19 +134,38 @@ fn writeRecoveryGuide(self: *const Self, out: *std.Io.Writer) !void {
     }
 }
 
+test "frontend exit guidance preserves accepted identity and never substitutes it for current intent" {
+    const key = "01234567-89ab-4cde-8012-0123456789ab";
+    const cases = .{
+        .{ Submission.Kind.message, "rui: Message accepted; do not resubmit it. Use rui result " ++ key ++ " to inspect the same Message.\n" },
+        .{ Submission.Kind.decision, "rui: Decision accepted; do not repeat it. Use rui recover " ++ key ++ " to inspect the same saved admission.\n" },
+    };
+    inline for (cases) |case| {
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false };
+        self.input.init();
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .accepted = .{ .kind = case[0], .key = key.* } };
+        self.submission.close(); // Releasing capture custody cannot erase acceptance.
+        var bytes: [512]u8 = undefined;
+        var out = std.Io.Writer.fixed(&bytes);
+        try self.writeRecoveryGuide(&out);
+        try std.testing.expectEqualStrings(case[1], out.buffered());
+        // A newer unsent original outranks an older accepted identity.
+        self.submission.intent = .{ .message = self.input.submitText("new original") };
+        out = .fixed(&bytes);
+        try self.writeRecoveryGuide(&out);
+        try std.testing.expectEqualStrings("rui: Message was not sent: capture did not begin. You may submit it again; no recovery record was published for this attempt.\n", out.buffered());
+    }
+}
+
 fn drive(self: *Self, initial_text: ?[]const u8) !void {
     if (initial_text) |text| try self.submission.begin(.{ .message = self.input.submitText(text) });
     while (!self.detached) {
         self.driveActive() catch |err| {
-            const failure = driveFailure(err, interrupted.stopped.load(.acquire));
+            const failure = departure.activeFailure(err, interrupted.stopped.load(.acquire));
             if (failure != error.CommandHandoff) return failure;
             try self.handoff();
         };
     }
-}
-
-fn driveFailure(err: anyerror, signalled: bool) anyerror {
-    return if (signalled and err == error.CommandHandoff) error.InteractiveInterrupted else err;
 }
 
 fn pendingHandoff(self: *Self) bool {
@@ -215,34 +195,7 @@ test "frontend consumed canonical reader and admission failures survive external
             return error.TestUnexpectedResult;
         };
         try std.testing.expectEqual(error.CanonicalStoreFailure, failure);
-        try std.testing.expectEqual(error.CanonicalStoreFailure, driveFailure(failure, true));
-    }
-}
-
-test "frontend settlement precedence and reader exit policies retain independent facts" {
-    const admission: AdmissionEnd = .{ .failed = .{ .err = error.CanonicalStoreFailure } };
-    for ([_]SettlementMode{ .active, .handoff, .final_exit }) |mode| {
-        const settled: Settled = .{ .restored = error.TerminalRestoreFailed, .reader = .absent, .admission = admission };
-        try std.testing.expectEqual(error.TerminalRestoreFailed, settled.failure(mode, error.InteractiveInterrupted).?);
-        const restored: Settled = .{ .restored = {}, .reader = .absent, .admission = admission };
-        try std.testing.expectEqual(error.CanonicalStoreFailure, restored.failure(mode, error.InteractiveInterrupted).?);
-    }
-    for ([_]ReadPhase{ .history, .details }) |phase| {
-        const preparation: ReadEnd = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = phase, .rendering = false, .output_owned = false } } };
-        try std.testing.expect(preparation.failure(.active) == null);
-        try std.testing.expect(preparation.failure(.handoff) == null);
-        try std.testing.expectEqual(error.ConnectionResetByPeer, preparation.failure(.final_exit).?);
-        var rendering = preparation;
-        rendering.failed.progress.rendering = true;
-        try std.testing.expectEqual(error.ConnectionResetByPeer, rendering.failure(.handoff).?);
-    }
-    for ([_]ReadPhase{ .activity, .permission, .history, .details }) |phase| {
-        for ([_]bool{ false, true }) |output_owned| {
-            const cancelled: ReadEnd = .{ .cancelled = .{ .phase = phase, .rendering = true, .output_owned = output_owned } };
-            try std.testing.expectEqual(if (output_owned) @as(?anyerror, error.Cancelled) else null, cancelled.failure(.handoff));
-            // Deliberate exit retires the invocation; it never resumes/replays.
-            try std.testing.expect(cancelled.failure(.final_exit) == null);
-        }
+        try std.testing.expectEqual(error.CanonicalStoreFailure, departure.activeFailure(failure, true));
     }
 }
 
@@ -266,13 +219,13 @@ test "frontend cleanup joins both borrowers and retires output before reporting 
         self.reader_output_started = true;
         const settled = self.quiesce();
         try std.testing.expectEqual(error.TerminalRestoreFailed, settled.failure(.handoff, error.InteractiveInterrupted).?);
-        try std.testing.expectEqual(error.CanonicalStoreFailure, settled.admission.failed.err);
+        try std.testing.expectEqual(error.CanonicalStoreFailure, settled.admission_error.?);
         try std.testing.expect(settled.reader.cancelled.output_owned);
         try std.testing.expect(self.reader.thread == null and self.submission.task.thread == null);
         try std.testing.expect(self.reader.take() == null);
         // A second cleanup cannot reconstruct or consume the errors again.
         const repeated = self.quiesce();
-        try std.testing.expect(repeated.reader == .absent and repeated.admission == .absent);
+        try std.testing.expect(repeated.reader == .absent and repeated.admission_error == null);
     }
 }
 
@@ -624,8 +577,16 @@ fn applyReader(self: *Self, end: ReadEnd) void {
 fn handoff(self: *Self) !void {
     const settled = self.quiesce();
     self.applyReader(settled.reader);
-    if (settled.failure(.handoff, null)) |err| return err;
-    if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
+    try departure.handoff(settled, interrupted.stopped.load(.acquire));
+    const result = self.dispatchCommand();
+    try departure.commandReturn(result, interrupted.stopped.load(.acquire));
+    self.terminal = try Terminal.begin(self.colour);
+    self.terminal.pump = .{ .context = self, .step = pump };
+    self.choice_ready = false;
+    self.dirty = true;
+}
+
+fn dispatchCommand(self: *Self) !void {
     try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
     {
         const text = self.input.command_buffer[0..self.input.command_length.?];
@@ -661,11 +622,6 @@ fn handoff(self: *Self) !void {
             };
         }
     }
-    if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-    self.terminal = try Terminal.begin(self.colour);
-    self.terminal.pump = .{ .context = self, .step = pump };
-    self.choice_ready = false;
-    self.dirty = true;
 }
 
 fn permission(raw: *anyopaque, task: *Task) !void {

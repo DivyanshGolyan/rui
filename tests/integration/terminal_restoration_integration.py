@@ -20,7 +20,7 @@ from collections import Counter
 import canonical_failure_integration as canonical
 import model_fixture as fixture
 import human_cli_integration as human
-from host_process import HostDiagnostics, HostStartError, ReleaseGate, canonical_fixture_root, preserve_failure_metadata, start_ready_process, stop_process
+from host_process import HostDiagnostics, HostStartError, ReleaseGate, canonical_fixture_root, cleanup_failure, dispose_all, preserve_failure_metadata, start_ready_process, stop_process
 
 
 def assert_file_flags(actual, expected):
@@ -674,15 +674,12 @@ def check_forwarding(state, library):
         assert termios.tcgetattr(slave) == original, "fixture forwarder did not restore attributes"
         print("terminal fixture forwarding: write/writev/tcdrain/tcsetattr/fcntl passed", flush=True)
     finally:
-        if caller is not None:
-            if caller.poll() is None:
-                caller.kill()
-                caller.wait(timeout=5)
-            caller.stderr.close()
-        termios.tcflush(slave, termios.TCOFLUSH)
-        termios.tcsetattr(slave, termios.TCSAFLUSH, original)
-        os.close(master)
-        os.close(slave)
+        dispose_all(
+            lambda: stop_process(caller, timeout=5) if caller is not None else None,
+            lambda: termios.tcflush(slave, termios.TCOFLUSH),
+            lambda: termios.tcsetattr(slave, termios.TCSAFLUSH, original),
+            lambda: os.close(master), lambda: os.close(slave),
+        )
 
     for fault in ("configure-admitted", "configure-presentation", "configure-rejected", "configure-canonical"):
         for shape in ("coalesced", "split-writev"):
@@ -736,12 +733,7 @@ def check_forwarding(state, library):
         assert "diagnostic-restored\n" in log.read_text()
         print("terminal fixture contention: wrong phase/Session/kind/fragment forwarded; exact write held, released and flags restored", flush=True)
     finally:
-        release.touch()
-        if caller.poll() is None:
-            caller.kill()
-            caller.wait(timeout=5)
-        caller.stdout.close()
-        caller.stderr.close()
+        dispose_all(release.touch, lambda: stop_process(caller, timeout=5))
 
 
 def capture_receipt_case(state, library):
@@ -816,14 +808,19 @@ def capture_receipt_case(state, library):
         if errors:
             if incoming_error is None:
                 raise errors[0]
-            incoming_error.add_note("Capture cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
+            try:
+                incoming_error.add_note("Capture cleanup failed: " + ", ".join(cleanup_failure(error) for error in errors))
+            except BaseException:
+                pass  # Secondary reporting cannot replace the primary failure.
 
 
 def persistent_cases(state, library, home, store, host):
     """Real synchronous capture custody and actual nonblocking output credit."""
     records = home / ".config/rui/requests"
     records.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for case in ("sync-exit", "sync-handoff", "sync-command-int", "sync-command-term",
+    # The departure owner covers interruption at every decision cut. Keep a
+    # real INT during join here; configure-commit-term covers the TERM adapter.
+    for case in ("sync-exit", "sync-handoff", "sync-command-int",
                  "admission-interrupt", "backpressure", "backpressure-command", "disable", "restore", "both",
                  "incomplete-disable", "incomplete-restore", "incomplete-both"):
         master, slave = pty.openpty()
@@ -862,7 +859,7 @@ def persistent_cases(state, library, home, store, host):
                 fixture.wait_for(lambda: termios.tcgetattr(slave)[3] & termios.ICANON, "restoration before synchronous capture join")
                 assert caller.poll() is None, "synchronous capture was reported reaped before its gate released"
                 if case.startswith("sync-command-"):
-                    caller.send_signal(signal.SIGINT if case.endswith("-int") else signal.SIGTERM)
+                    caller.send_signal(signal.SIGINT)
                 release.touch()
                 if case == "sync-handoff":
                     resumed = human.read_terminal(output_master, "Not confirmed")
@@ -947,17 +944,14 @@ def persistent_cases(state, library, home, store, host):
             assert answer["admission"]["answer"]["status"] == "accepted", answer
             print(f"persistent terminal: {case} passed", flush=True)
         finally:
-            release.touch()
-            reply_release.set()
-            if caller is not None and caller.poll() is None:
-                caller.kill()
-                caller.wait(timeout=5)
-            if proxy is not None:
-                proxy.close()
-            termios.tcflush(output_slave, termios.TCOFLUSH)
-            termios.tcsetattr(slave, termios.TCSAFLUSH, original)
-            for fd in (master, slave, output_master, output_slave):
-                os.close(fd)
+            dispose_all(
+                release.touch, reply_release.set,
+                lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                lambda: proxy.close() if proxy is not None else None,
+                lambda: termios.tcflush(output_slave, termios.TCOFLUSH),
+                lambda: termios.tcsetattr(slave, termios.TCSAFLUSH, original),
+                *(lambda fd=fd: os.close(fd) for fd in (master, slave, output_master, output_slave)),
+            )
 
 
 def consent_boundary_cases(state, library):
@@ -1051,20 +1045,15 @@ def consent_boundary_cases(state, library):
                     "terminal_pending": bool(select.select([master], [], [], 0)[0]),
                     "drain_released": drain.exists(),
                 })
-            release.touch()
-            drain.touch()
-            if caller is not None and caller.poll() is None:
-                caller.kill()
-                caller.wait(timeout=5)
-            if host is not None:
-                fixture.stop_host(host)
-            endpoint.shutdown()
-            endpoint.server_close()
-            thread.join(timeout=5)
-            termios.tcflush(slave, termios.TCOFLUSH)
-            termios.tcsetattr(slave, termios.TCSAFLUSH, original)
-            for fd in (master, slave, read_ready, write_ready):
-                os.close(fd)
+            dispose_all(
+                release.touch, drain.touch,
+                lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                lambda: fixture.stop_host(host) if host is not None else None,
+                endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+                lambda: termios.tcflush(slave, termios.TCOFLUSH),
+                lambda: termios.tcsetattr(slave, termios.TCSAFLUSH, original),
+                *(lambda fd=fd: os.close(fd) for fd in (master, slave, read_ready, write_ready)),
+            )
 
 
 def command_interruption_cases(state, library):
@@ -1197,24 +1186,18 @@ def command_interruption_cases(state, library):
                 assert len(endpoint.requests) == 2, "command signal replaced provider work"
                 print(f"synchronous command interruption: {case} passed", flush=True)
             finally:
-                release.touch()
-                reply_release.set()
-                if caller is not None and caller.poll() is None:
-                    caller.kill()
-                    caller.wait(timeout=5)
-                if caller is not None:
-                    caller.stderr.close()
-                if proxy is not None:
-                    proxy.close()
-                    proxy = None
-                for fd in (master, slave, ready_read, ready_write):
-                    os.close(fd)
+                dispose_all(
+                    release.touch, reply_release.set,
+                    lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                    lambda: proxy.close() if proxy is not None else None,
+                    *(lambda fd=fd: os.close(fd) for fd in (master, slave, ready_read, ready_write)),
+                )
+                proxy = None
     finally:
-        if host is not None:
-            fixture.stop_host(host)
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=5)
+        dispose_all(
+            lambda: fixture.stop_host(host) if host is not None else None,
+            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+        )
 
 
 def fatal_reporting_cases(state):
@@ -1257,12 +1240,11 @@ def fatal_reporting_cases(state):
                     assert error in os.read(error_master, 65536)
                 print(f"fatal reporting: {error.decode()} stopped stderr={stopped} passed", flush=True)
             finally:
-                if caller is not None and caller.poll() is None:
-                    caller.kill()
-                    caller.wait(timeout=5)
-                termios.tcflow(error_slave, termios.TCOON)
-                for fd in (master, slave, error_master, error_slave):
-                    os.close(fd)
+                dispose_all(
+                    lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                    lambda: termios.tcflow(error_slave, termios.TCOON),
+                    *(lambda fd=fd: os.close(fd) for fd in (master, slave, error_master, error_slave)),
+                )
         # Popen restores default SIGPIPE before exec. Rui's initialized IO
         # runtime must still preserve the real error when stderr disconnects.
         for args, error in diagnostics:
@@ -1279,11 +1261,10 @@ def fatal_reporting_cases(state):
                 assert_file_flags(fcntl.fcntl(write_error, fcntl.F_GETFL), error_flags)
                 print(f"fatal reporting: {error.decode()} disconnected stderr passed", flush=True)
             finally:
-                if caller is not None and caller.poll() is None:
-                    caller.kill()
-                    caller.wait(timeout=5)
-                for fd in (master, slave, write_error):
-                    os.close(fd)
+                dispose_all(
+                    lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                    *(lambda fd=fd: os.close(fd) for fd in (master, slave, write_error)),
+                )
         master, slave = pty.openpty()
         original = termios.tcgetattr(slave)
         try:
@@ -1319,11 +1300,10 @@ def fatal_reporting_cases(state):
             assert actual == original
             print("fatal reporting: current unconfirmed original passed", flush=True)
         finally:
-            if caller is not None and caller.poll() is None:
-                caller.kill()
-                caller.wait(timeout=5)
-            os.close(master)
-            os.close(slave)
+            dispose_all(
+                lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                lambda: os.close(master), lambda: os.close(slave),
+            )
         master, slave = pty.openpty()
         read_error, write_error = os.pipe()
         os.close(read_error)
@@ -1347,19 +1327,16 @@ def fatal_reporting_cases(state):
             assert fixture.command("inspect-session", "--store", store, "--session", "fatal/original")["session"]
             print("fatal reporting: acquired terminal disconnected stderr passed", flush=True)
         finally:
-            if caller is not None and caller.poll() is None:
-                caller.kill()
-                caller.wait(timeout=5)
-            for fd in (master, slave, write_error):
-                os.close(fd)
+            dispose_all(
+                lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                *(lambda fd=fd: os.close(fd) for fd in (master, slave, write_error)),
+            )
     finally:
-        if proxy is not None:
-            proxy.close()
-        if host is not None:
-            fixture.stop_host(host)
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=5)
+        dispose_all(
+            lambda: proxy.close() if proxy is not None else None,
+            lambda: fixture.stop_host(host) if host is not None else None,
+            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+        )
 
 
 def decision_reporting_cases(state):
@@ -1466,21 +1443,18 @@ def decision_reporting_cases(state):
                         "reply_released": reply_release.is_set(),
                         "exchanges": len(proxy.exchanges) if proxy is not None else 0,
                     })
-                reply_release.set()
-                if caller is not None and caller.poll() is None:
-                    caller.kill()
-                    caller.wait(timeout=5)
-                if proxy is not None:
-                    proxy.close()
-                    proxy = None
-                for fd in (master, slave, read_ready, write_ready):
-                    os.close(fd)
+                dispose_all(
+                    reply_release.set,
+                    lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                    lambda: proxy.close() if proxy is not None else None,
+                    *(lambda fd=fd: os.close(fd) for fd in (master, slave, read_ready, write_ready)),
+                )
+                proxy = None
     finally:
-        if host is not None:
-            fixture.stop_host(host)
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=5)
+        dispose_all(
+            lambda: fixture.stop_host(host) if host is not None else None,
+            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+        )
 
 
 def entry_enable_cases(state, library):
@@ -1529,11 +1503,10 @@ def entry_enable_cases(state, library):
                             "case": name, "caller_returncode": caller.poll() if caller else None,
                             "flags": [fcntl.fcntl(fd, fcntl.F_GETFL) for fd in slaves],
                             "saved_flags": flags, "termios_unchanged": termios.tcgetattr(input_slave) == original})
-                    if caller is not None and caller.poll() is None:
-                        caller.kill()
-                        caller.wait(timeout=5)
-                    for fd in (input_master, input_slave, output_master, output_slave):
-                        os.close(fd)
+                    dispose_all(
+                        lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                        *(lambda fd=fd: os.close(fd) for fd in (input_master, input_slave, output_master, output_slave)),
+                    )
     finally:
         fixture.stop_host(host)
 
@@ -1546,8 +1519,11 @@ def detach_reporting_cases(state, library):
     home.mkdir(mode=0o700)
     # Syscall permutations live with SessionTerminal. These cases own the
     # frontend handoff: exact accepted identity, no resend and saved recovery.
-    cases = [(kind, fault) for kind in ("message", "allow_once", "deny") for fault in
-        ("detach-enable-mutated-reset", "detach-write-full")]
+    # Departure and guide tests cover reporting policy for both intent kinds.
+    # Retain both notice outcomes, both guide kinds and both actual decisions,
+    # without repeating their Cartesian product through a Host and PTY.
+    cases = [("message", "detach-enable-mutated-reset"), ("message", "detach-write-full"),
+             ("allow_once", "detach-enable-mutated-reset"), ("deny", "detach-write-full")]
     responses = []
     for kind, fault in cases:
         name = f"{kind}-{fault}"
@@ -1638,20 +1614,17 @@ def detach_reporting_cases(state, library):
                         "flags": fcntl.fcntl(slave, fcntl.F_GETFL), "saved_flags": flags,
                         "exchanges": len(proxy.exchanges) if proxy is not None else 0,
                     })
-                if caller is not None and caller.poll() is None:
-                    caller.kill()
-                    caller.wait(timeout=5)
-                if proxy is not None:
-                    proxy.close()
-                    proxy = None
-                for fd in (master, slave, read_ready, write_ready):
-                    os.close(fd)
+                dispose_all(
+                    lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                    lambda: proxy.close() if proxy is not None else None,
+                    *(lambda fd=fd: os.close(fd) for fd in (master, slave, read_ready, write_ready)),
+                )
+                proxy = None
     finally:
-        if host is not None:
-            fixture.stop_host(host)
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=5)
+        dispose_all(
+            lambda: fixture.stop_host(host) if host is not None else None,
+            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+        )
 
 
 def startup_reporting_cases(state, library):
@@ -1755,20 +1728,15 @@ def startup_reporting_cases(state, library):
                     "reply_released": release.is_set(),
                     "exchanges": len(proxy.exchanges) if proxy is not None else 0,
                 })
-            release.set()
-            if caller is not None and caller.poll() is None:
-                caller.kill()
-                caller.wait(timeout=5)
-            if proxy is not None:
-                proxy.close()
-            termios.tcsetattr(slave, termios.TCSANOW, original)
-            for fd in (master, slave, ready_read, ready_write):
-                os.close(fd)
-            if host is not None:
-                fixture.stop_host(host)
-            endpoint.shutdown()
-            endpoint.server_close()
-            thread.join(timeout=5)
+            dispose_all(
+                release.set,
+                lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                lambda: proxy.close() if proxy is not None else None,
+                lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
+                *(lambda fd=fd: os.close(fd) for fd in (master, slave, ready_read, ready_write)),
+                lambda: fixture.stop_host(host) if host is not None else None,
+                endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+            )
 
 
 def visible_stream_handoff_cases(state, library):
@@ -1854,18 +1822,17 @@ def visible_stream_handoff_cases(state, library):
             print(f"visible {phase}: " + ("joined completion permits one command without suffix capture" if phase == "completion"
                 else "command cancellation restores/joins and retires without dispatch or prefix replay"), flush=True)
         finally:
-            if caller is not None and caller.poll() is None:
-                caller.kill()
-                caller.wait(timeout=5)
-            if caller is not None: caller.stderr.close()
-            termios.tcsetattr(slave, termios.TCSANOW, original)
-            os.close(master)
-            os.close(slave)
-            if host is not None: fixture.stop_host(host)
-            endpoint.shutdown()
-            endpoint.server_close()
-            thread.join(timeout=5)
-            assert not thread.is_alive()
+            def join_endpoint():
+                thread.join(timeout=5)
+                assert not thread.is_alive()
+
+            dispose_all(
+                lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
+                lambda: os.close(master), lambda: os.close(slave),
+                lambda: fixture.stop_host(host) if host is not None else None,
+                endpoint.shutdown, endpoint.server_close, join_endpoint,
+            )
 
 
 def host_diagnostic_cases(state, library):
@@ -1931,20 +1898,19 @@ def host_diagnostic_cases(state, library):
         (root / "host-status.stdout").write_text(status.stdout)
         print("Host diagnostics: aliased full stdout, startup warning and failed restore: required readiness blocks until exact filler release; Host usable", flush=True)
     finally:
-        if host is not None:
-            if host.poll() is None: host.kill()
-            host.wait(timeout=8)
-        os.set_blocking(read_fd, False)
-        while True:
-            try:
-                chunk = os.read(read_fd, 65536)
-            except BlockingIOError:
-                break
-            if not chunk: break
-            output.extend(chunk)
-        (root / "stdout-stderr.log").write_bytes(output)
-        os.close(read_fd)
-        os.close(write_fd)
+        def save_output():
+            os.set_blocking(read_fd, False)
+            while True:
+                try:
+                    chunk = os.read(read_fd, 65536)
+                except BlockingIOError:
+                    break
+                if not chunk: break
+                output.extend(chunk)
+            (root / "stdout-stderr.log").write_bytes(output)
+
+        dispose_all(lambda: stop_process(host, timeout=8) if host is not None else None,
+                    save_output, lambda: os.close(read_fd), lambda: os.close(write_fd))
     root = state / "startup-record-failure"
     root.mkdir(mode=0o700)
     store = root / "store"
@@ -1982,9 +1948,8 @@ def host_diagnostic_cases(state, library):
         assert status.returncode == 0 and "Instance: " in status.stdout, status
         print("Host diagnostics: record-time failure retained under exclusion; one notice follows required readiness; Host usable", flush=True)
     finally:
-        (root / "stdout-stderr.log").write_bytes(output)
-        if host is not None:
-            fixture.stop_host(host)
+        dispose_all(lambda: (root / "stdout-stderr.log").write_bytes(output),
+                    lambda: fixture.stop_host(host) if host is not None else None)
     for kind in ("readiness-held", "readiness-held-error"):
         root = state / kind
         root.mkdir(mode=0o700)
@@ -2047,14 +2012,17 @@ def host_diagnostic_cases(state, library):
                 assert fixture.read_result(store, "queued") == b"READY-ANSWER"
             print(f"Host diagnostics: {kind}: execution traces attempted under exclusion; no fd2 borrow/write; required outcome checked", flush=True)
         finally:
-            release.touch()
-            starter.join(timeout=10)
-            if host is None and result and isinstance(result[0], tuple): host = result[0][0]
-            if host is not None: fixture.stop_host(host)
-            endpoint.shutdown()
-            endpoint.server_close()
-            server.join(timeout=5)
-            assert not server.is_alive() and not starter.is_alive()
+            def retire_started_host():
+                nonlocal host
+                if host is None and result and isinstance(result[0], tuple): host = result[0][0]
+                if host is not None: fixture.stop_host(host)
+
+            def join_server():
+                server.join(timeout=5)
+                assert not server.is_alive() and not starter.is_alive()
+
+            dispose_all(release.touch, lambda: starter.join(timeout=10), retire_started_host,
+                        endpoint.shutdown, endpoint.server_close, join_server)
     for kind in ("readiness-alias", "readiness-error"):
         root = state / kind
         root.mkdir(mode=0o700)
@@ -2165,7 +2133,7 @@ def host_diagnostic_cases(state, library):
                     except BlockingIOError:
                         pass
                 finally:
-                    fcntl.fcntl(write_fd, fcntl.F_SETFL, flags)
+                    dispose_all(lambda: fcntl.fcntl(write_fd, fcntl.F_SETFL, flags))
                 assert filled > 0
             if credit == "closed":
                 reader.close()
@@ -2422,12 +2390,12 @@ def host_diagnostic_cases(state, library):
             if cleanup_errors:
                 preserve_failure_metadata(root / "contention-cleanup.json", lambda: {
                     "original_error": type(incoming_error).__name__ if incoming_error else None,
-                    "cleanup_errors": [type(error).__name__ for error in cleanup_errors]})
+                    "cleanup_errors": [cleanup_failure(error) for error in cleanup_errors]})
                 if incoming_error is None:
                     raise cleanup_errors[0]
                 try:
-                    print("Fixture diagnostic cleanup failed; original failure retained", file=sys.stderr)
-                except Exception:
+                    incoming_error.add_note("Fixture diagnostic cleanup failed: " + ", ".join(cleanup_failure(error) for error in cleanup_errors))
+                except BaseException:
                     pass  # Optional reporting cannot replace the original failure.
 
 
@@ -2483,8 +2451,7 @@ def native_notice_cases(state):
             assert actual == (b"x" * filled if full else expected), actual
             print(f"native notice: {transport} full={full}, exact bytes and restored flags passed", flush=True)
         finally:
-            os.close(reader)
-            os.close(writer)
+            dispose_all(lambda: os.close(reader), lambda: os.close(writer))
 
 
 def main(selected=None):
