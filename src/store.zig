@@ -5,9 +5,7 @@ const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const tool_catalog = @import("tools.zig");
 
-const c = @cImport({
-    @cInclude("sqlite3.h");
-});
+const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
 pub const schema_version: u32 = 21;
@@ -586,8 +584,8 @@ pub const OutputMetadataRecord = struct {
     start: u64,
     length: u64,
     decoded_length: u64 = 0,
-    id_digest: [32]u8 = [_]u8{0} ** 32,
-    content_digest: [32]u8 = [_]u8{0} ** 32,
+    id_digest: [32]u8 = @splat(0),
+    content_digest: [32]u8 = @splat(0),
 };
 
 const output_metadata_record_bytes = 104;
@@ -646,9 +644,9 @@ pub const OutputMetadataWriter = struct {
         // A failed write ends validation; retain the complete fixed-record
         // reservation until deinit so a partial OS write is never uncharged.
         self.charged += output_metadata_record_bytes;
-        var bytes: [output_metadata_record_bytes]u8 = [_]u8{0} ** output_metadata_record_bytes;
-        bytes[0] = @intFromEnum(record.tag);
-        bytes[1] = @intFromEnum(record.kind);
+        var bytes: [output_metadata_record_bytes]u8 = @splat(0);
+        bytes[0] = @backingInt(record.tag);
+        bytes[1] = @backingInt(record.kind);
         std.mem.writeInt(u64, bytes[8..16], record.ordinal, .little);
         std.mem.writeInt(u64, bytes[16..24], record.start, .little);
         std.mem.writeInt(u64, bytes[24..32], record.length, .little);
@@ -961,7 +959,7 @@ pub const SessionObservation = struct {
     revision: u64 = 0,
     tools_mask: u8 = 0,
     permission_mode: protocol.Bounded(16) = .{},
-    instructions: ContentReference = .{ .length = 0, .digest = [_]u8{0} ** 32 },
+    instructions: ContentReference = .{ .length = 0, .digest = @splat(0) },
     output_schema: ?ContentReference = null,
     pending_messages: u64 = 0,
     action_count: u64 = 0,
@@ -1423,7 +1421,7 @@ pub const Store = struct {
         };
 
         var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buffer, "{s}", .{database_path});
+        const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database_path}, 0);
         var database: ?*c.sqlite3 = null;
         const open_result = c.sqlite3_open_v2(
             path,
@@ -1462,7 +1460,7 @@ pub const Store = struct {
         try exec(database.?, "PRAGMA mmap_size=0");
         try exec(database.?, "PRAGMA temp_store=FILE");
         var cache_size_buffer: [64:0]u8 = undefined;
-        const cache_size = try std.fmt.bufPrintZ(&cache_size_buffer, "PRAGMA cache_size=-{d}", .{options.cache_kib});
+        const cache_size = try std.fmt.bufPrintSentinel(&cache_size_buffer, "PRAGMA cache_size=-{d}", .{options.cache_kib}, 0);
         try exec(database.?, cache_size);
         try exec(database.?, if (options.cache_spill) "PRAGMA cache_spill=ON" else "PRAGMA cache_spill=OFF");
         try exec(database.?, "PRAGMA synchronous=EXTRA");
@@ -2832,7 +2830,7 @@ pub const Store = struct {
         try bindU64(statement, 2, end);
         try bindU64(statement, 3, request.position);
         try bindNullableU64(statement, 4, request.ordinal);
-        try bindU64(statement, 5, @intFromEnum(request.direction));
+        try bindU64(statement, 5, @backingInt(request.direction));
         while (true) {
             const result = c.sqlite3_step(statement);
             if (result == c.SQLITE_DONE) break;
@@ -3137,7 +3135,7 @@ pub const Store = struct {
             error.ContentNotFound => return err,
             else => return self.fenceReadFailure(err),
         };
-        const index = @intFromEnum(request.field);
+        const index = @backingInt(request.field);
         const field = identity.metadata.fields[index];
         const raw = self.contentIsRaw(identity.content_ids[index], field.length) catch |err| return self.fenceReadFailure(err);
         return .{ .store = self, .content_id = identity.content_ids[index], .reference = .{ .length = field.length, .digest = field.digest }, .representation = if (raw) .raw else .{ .projection = .{} } };
@@ -3748,7 +3746,7 @@ pub const Store = struct {
             1 => .output_schema,
             else => return error.CorruptStore,
         };
-        if (owner_revision == revision and @intFromEnum(owner_field) > @intFromEnum(field)) return error.CorruptStore;
+        if (owner_revision == revision and @backingInt(owner_field) > @backingInt(field)) return error.CorruptStore;
         if (owner_revision == revision and owner_field == field) return self.appendInlineContent(content_id, capture);
         const metadata = try self.readContentMetadata(content_id);
         try capture.appendOwnedContentReference(
@@ -5509,7 +5507,7 @@ pub const Store = struct {
             try bindU64(insert, 2, record.ordinal);
             try bindText(insert, 3, session_ref.slice());
             try bindU64(insert, 4, current.next_position);
-            try bindI64(insert, 5, @intFromEnum(record.kind));
+            try bindI64(insert, 5, @backingInt(record.kind));
             try bindI64(insert, 6, content_id);
             try bindU64(insert, 7, binding.attempt_ordinal);
             try bindBlob(insert, 8, &record.id_digest);
@@ -8668,7 +8666,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
         .{ .item_id = "item-3", .name = "bash", .encoded_call_id = "call-3", .decoded_call_id = "call-3", .encoded_arguments = "{", .decoded_arguments = "{" },
         .{ .item_id = "item-4", .name = "bash", .encoded_call_id = "call-4", .decoded_call_id = "call-4", .encoded_arguments = "{\\\"command\\\":\\\"wrong\\\"}", .decoded_arguments = "{\"command\":\"wrong\"}" },
         .{ .item_id = "item-5", .name = "edit", .encoded_call_id = "call-5", .decoded_call_id = "call-5", .encoded_arguments = "{}", .decoded_arguments = "{}" },
-        .{ .item_id = "item-6", .name = "x" ** 300, .encoded_call_id = "call-6", .decoded_call_id = "call-6", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        .{ .item_id = "item-6", .name = &@as([300]u8, @splat('x')), .encoded_call_id = "call-6", .decoded_call_id = "call-6", .encoded_arguments = "{}", .decoded_arguments = "{}" },
         .{ .item_id = "item-7", .name = "bash", .encoded_call_id = "call-7", .decoded_call_id = "call-7", .encoded_arguments = "{\\\"description\\\":\\\"Run seventh command\\\",\\\"cmd\\\":\\\"seven\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run seventh command\",\"cmd\":\"seven\",\"timeout_ms\":null}" },
     };
     try settleCallsForTesting(&storage, &tmp, binding, "mixed-metadata", &calls);
@@ -9287,8 +9285,7 @@ test "Current pending count skips excluded Message history by indexed cutoff" {
     var costs: [2]i32 = undefined;
     for ([_]usize{ 100, 10_000 }, 0..) |history, index| {
         try exec(storage.database, "DELETE FROM message_admission; DELETE FROM session_stop");
-        const insert = try std.fmt.allocPrintSentinel(
-            std.testing.allocator,
+        const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id) " ++
                 "SELECT value,'direct/pending-cost',printf('excluded-%d',value),1,NULL FROM sequence; " ++
@@ -9341,8 +9338,7 @@ test "Full Message projection work does not multiply Messages by stops" {
             try exec(storage.database, "PRAGMA foreign_keys=OFF");
 
             for (1..message_count + 1) |index| {
-                const insert = try std.fmt.allocPrintSentinel(
-                    std.testing.allocator,
+                const insert = try std.testing.allocator.printSentinel(
                     "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id) " ++
                         "VALUES({0},'direct/full-scale','message-{0}',1,NULL)",
                     .{index},
@@ -9352,8 +9348,7 @@ test "Full Message projection work does not multiply Messages by stops" {
                 try exec(storage.database, insert);
             }
             for (1..stop_count + 1) |index| {
-                const insert = try std.fmt.allocPrintSentinel(
-                    std.testing.allocator,
+                const insert = try std.testing.allocator.printSentinel(
                     "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created) " ++
                         "VALUES('stop-{0}',3,'direct/full-scale',zeroblob(32),NULL,NULL,1,'accepted',0,0);" ++
                         "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff) " ++
@@ -10757,7 +10752,7 @@ test "real SQLite busy saves no answer and fences the connection" {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var database_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
-    const database = try std.fmt.bufPrintZ(&database_buffer, "{s}/store.sqlite3", .{root});
+    const database = try std.fmt.bufPrintSentinel(&database_buffer, "{s}/store.sqlite3", .{root}, 0);
     var storage = try Store.open(std.testing.io, database, root);
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
@@ -10821,7 +10816,7 @@ test "real SQLite full during import publishes no canonical prefix" {
 
     const page_count = try pragmaInt(storage.database, "PRAGMA page_count");
     var limit_buffer: [64:0]u8 = undefined;
-    const limit = try std.fmt.bufPrintZ(&limit_buffer, "PRAGMA max_page_count={d}", .{page_count});
+    const limit = try std.fmt.bufPrintSentinel(&limit_buffer, "PRAGMA max_page_count={d}", .{page_count}, 0);
     try exec(storage.database, limit);
     try std.testing.expectEqual(page_count, try pragmaInt(storage.database, "PRAGMA max_page_count"));
 
@@ -10876,7 +10871,7 @@ test "message admissions remain queued in order and retain bounded canonical con
     var configuration = try completeConfiguration("configure", "direct/messages", workspace, "model-a");
     try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
 
-    const first_text = "first message\n" ++ ("abcdef" ** 700) ++ "🙂";
+    const first_text = "first message\n" ++ @as([700 * 6]u8, @bitCast(@as([700][6]u8, @splat("abcdef".*)))) ++ "🙂";
     const first_file = try tmp.dir.createFile(std.testing.io, "first-message", .{ .read = true });
     try first_file.writeStreamingAll(std.testing.io, first_text);
     try first_file.sync(std.testing.io);
@@ -12189,7 +12184,7 @@ test "public projected content sequential work excludes repeated prefixes" {
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    const expected = "a" ** 32768;
+    const expected = &@as([32768]u8, @splat('a'));
     const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = expected, .decoded = expected }});
     storage.testing_content_work = .{};
     var window: [protocol.content_window_bytes]u8 = undefined;
@@ -12224,8 +12219,8 @@ test "public projected content equal-length repoint fences at complete-stream EO
         var storage = try testingStore(&tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const request = try testingPublicProjection(&storage, &tmp, &.{
-            .{ .encoded = "a" ** 2500, .decoded = "a" ** 2500 },
-            .{ .encoded = "b" ** 2500, .decoded = "b" ** 2500 },
+            .{ .encoded = &@as([2500]u8, @splat('a')), .decoded = &@as([2500]u8, @splat('a')) },
+            .{ .encoded = &@as([2500]u8, @splat('b')), .decoded = &@as([2500]u8, @splat('b')) },
         });
         // Repoint to another valid, equal-length field in the same private source.
         // Metadata/provenance stay valid, but the complete public identity differs.
@@ -12236,7 +12231,7 @@ test "public projected content equal-length repoint fences at complete-stream EO
         var bytes: [4096]u8 = undefined;
         // An earlier range is not authenticated by an eventual EOF comparison.
         try std.testing.expectEqual(@as(usize, 4096), try reader.read(0, &bytes));
-        try std.testing.expectEqualStrings("b" ** 4096, &bytes);
+        try std.testing.expectEqualStrings(&@as([4096]u8, @splat('b')), &bytes);
         try std.testing.expect(!storage.isFenced());
         // Both serial consumption and a range that discards the middle must
         // include every decoded byte in complete-stream consistency checking.
@@ -12315,9 +12310,9 @@ test "public projected content ranges own positioning across windows and scalar 
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    const expected = "x" ** 4094 ++ "é中🙂\n\\\"/tail";
+    const expected = @as([4094]u8, @splat('x')) ++ "é中🙂\n\\\"/tail";
     const request = try testingPublicProjection(&storage, &tmp, &.{
-        .{ .encoded = "x" ** 4094 ++ "\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/", .decoded = "x" ** 4094 ++ "é中🙂\n\\\"/" },
+        .{ .encoded = @as([4094]u8, @splat('x')) ++ "\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/", .decoded = @as([4094]u8, @splat('x')) ++ "é中🙂\n\\\"/" },
         .{ .encoded = "", .decoded = "" },
         .{ .encoded = "tail", .decoded = "tail" },
     });
@@ -13193,8 +13188,7 @@ test "runnable discovery measures eligible ineligible and history populations in
                     "INSERT INTO session(session_ref,workspace,provider,model,instructions_content_id,tools_mask,permission_mode," ++
                         "output_schema_content_id,revision,next_position) VALUES('stopped','/','codex','model-a',1,0,0,NULL,1,1)",
                 );
-                const insert = try std.fmt.allocPrintSentinel(
-                    std.testing.allocator,
+                const insert = try std.testing.allocator.printSentinel(
                     "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                         "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id) " ++
                         "SELECT value,'stopped',printf('stopped-%d',value),1,NULL FROM sequence; " ++
@@ -13206,8 +13200,7 @@ test "runnable discovery measures eligible ineligible and history populations in
                 defer std.testing.allocator.free(insert);
                 try exec(database, insert);
             }
-            const eligible_insert = try std.fmt.allocPrintSentinel(
-                std.testing.allocator,
+            const eligible_insert = try std.testing.allocator.printSentinel(
                 "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
                     "INSERT INTO session(session_ref,workspace,provider,model,instructions_content_id,tools_mask,permission_mode," ++
                     "output_schema_content_id,revision,next_position) " ++
@@ -13221,8 +13214,7 @@ test "runnable discovery measures eligible ineligible and history populations in
             defer std.testing.allocator.free(eligible_insert);
             try exec(database, eligible_insert);
             if (history != 0) {
-                const history_insert = try std.fmt.allocPrintSentinel(
-                    std.testing.allocator,
+                const history_insert = try std.testing.allocator.printSentinel(
                     "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                         "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id) " ++
                         "SELECT {1}+value,'history',printf('history-%d',value),1,value FROM sequence",
@@ -13409,8 +13401,7 @@ test "retry due index excludes future population and preserves age ordering" {
         "AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2";
     for ([_]usize{ 100, 1_000, 10_000 }, 0..) |future_count, index| {
         try exec(storage.database, "DELETE FROM model_operation");
-        const insert = try std.fmt.allocPrintSentinel(
-            std.testing.allocator,
+        const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
                 "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) " ++
@@ -13434,8 +13425,7 @@ test "retry due index excludes future population and preserves age ordering" {
     var due_costs: [3]i32 = undefined;
     for ([_]usize{ 10, 100, 1_000 }, 0..) |due_count, index| {
         try exec(storage.database, "DELETE FROM model_operation");
-        const insert = try std.fmt.allocPrintSentinel(
-            std.testing.allocator,
+        const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
                 "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) " ++
@@ -13755,7 +13745,7 @@ test "persisted tool label corruption fences every publication route" {
                 try std.testing.expectEqual(@as(usize, 3), (try storage.publicConversationPage(.{ .session = request.session })).count);
             }
             var sql: [256]u8 = undefined;
-            try exec(storage.database, try std.fmt.bufPrintZ(&sql, "UPDATE model_tool_call SET description={s} WHERE call_ordinal=0", .{description.sql}));
+            try exec(storage.database, try std.fmt.bufPrintSentinel(&sql, "UPDATE model_tool_call SET description={s} WHERE call_ordinal=0", .{description.sql}, 0));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
             const result: anyerror!void = switch (route) {
                 .current, .full => if (testingSessionReportWithProfile(&storage, &tmp, "direct/label", 1024 * 1024, if (route == .full) .full else .current)) |bytes| blk: {

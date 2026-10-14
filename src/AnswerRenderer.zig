@@ -23,8 +23,8 @@ span_len: usize = 0,
 inline_count: u3 = 0,
 // These bounded annotations are produced by the same bytewise recognizer that
 // finds the outer closer. Formatting consumes them; it does not parse again.
-code_bytes: [span_limit / 8]u8 = [_]u8{0} ** (span_limit / 8),
-syntax_bytes: [span_limit / 8]u8 = [_]u8{0} ** (span_limit / 8),
+code_bytes: [span_limit / 8]u8 = @splat(0),
+syntax_bytes: [span_limit / 8]u8 = @splat(0),
 inline_kind: InlineKind = .none,
 inline_retention: InlineRetention = .candidate,
 code_open: bool = false,
@@ -967,7 +967,7 @@ test "oversized fence candidate is literal and does not enter code state" {
     for (0..128) |_| try renderer.feed("x");
     try renderer.feed("\n# heading\n");
     try renderer.finish();
-    const expected = "```zig" ++ ("x" ** 128) ++ "\n\x1b[1mheading\x1b[0m\n";
+    const expected = "```zig" ++ @as([128]u8, @splat('x')) ++ "\n\x1b[1mheading\x1b[0m\n";
     try std.testing.expectEqualStrings(expected, output.written());
 }
 
@@ -1000,7 +1000,7 @@ test "unclosed and oversized fences remain literal and later headings still rend
     for (0..fence_limit) |_| try second.feed("x");
     try second.feed("\n```\n# next\n");
     try second.finish();
-    const expected = "```sh\n" ++ ("x" ** fence_limit) ++ "\n```\n\x1b[1mnext\x1b[0m\n";
+    const expected = "```sh\n" ++ @as([fence_limit]u8, @splat('x')) ++ "\n```\n\x1b[1mnext\x1b[0m\n";
     try std.testing.expectEqualStrings(expected, overflow.written());
 }
 
@@ -1012,7 +1012,7 @@ test "fence overflow mid-line cannot reinterpret a suffix as the closing line" {
     for (0..fence_limit - "```sh\n".len) |_| try renderer.feed("x");
     try renderer.feed("```\n# still code\n```\n# next\n");
     try renderer.finish();
-    const expected = "```sh\n" ++ ("x" ** (fence_limit - "```sh\n".len)) ++ "```\n# still code\n```\n\x1b[1mnext\x1b[0m\n";
+    const expected = "```sh\n" ++ @as([fence_limit - "```sh\n".len]u8, @splat('x')) ++ "```\n# still code\n```\n\x1b[1mnext\x1b[0m\n";
     try std.testing.expectEqualStrings(expected, output.written());
 }
 
@@ -1055,7 +1055,7 @@ test "sixteen MiB answer uses fixed parser and output storage" {
     var buffer: [4096]u8 = undefined;
     var discard = std.Io.Writer.Discarding.init(&buffer);
     var renderer: Renderer = .{ .out = &discard.writer };
-    const chunk = [_]u8{'a'} ** 4096;
+    const chunk = @as([4096]u8, @splat('a'));
     for (0..4096) |_| try renderer.feed(&chunk);
     try renderer.finish();
     try std.testing.expectEqual(@as(u64, 16 * 1024 * 1024), discard.fullCount());

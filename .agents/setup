@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-zig_version=0.16.0
+zig_version=0.17.0
 go_version=1.27.1
 local_bin="$HOME/.local/bin"
 local_opt="$HOME/.local/opt"
@@ -78,23 +78,6 @@ download_verified() {
     printf 'SHA-256 verified: %s\n' "$url"
 }
 
-fetch_zig_dependency() {
-    local url=$1
-    local expected=$2
-    local filename=$3
-    if [[ -f "$zig_cache/p/$expected.tar.gz" ]]; then
-        printf 'Zig dependency %s already cached.\n' "$filename"
-        return
-    fi
-
-    download "$url" "$dependency_downloads/$filename"
-    local actual started=$SECONDS
-    printf 'Importing and verifying Zig dependency %s\n' "$filename"
-    actual="$(zig fetch --global-cache-dir "$zig_cache" "$dependency_downloads/$filename")"
-    [[ "$actual" == "$expected" ]]
-    printf 'Zig dependency %s verified in %ss.\n' "$filename" "$((SECONDS - started))"
-}
-
 install_zig() (
     if [[ -x "$local_bin/zig" ]] && [[ "$($local_bin/zig version)" == "$zig_version" ]]; then
         printf 'Zig %s already installed.\n' "$zig_version"
@@ -105,11 +88,11 @@ install_zig() (
     case "$(uname -m)" in
         x86_64)
             archive_arch=x86_64
-            checksum=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+            checksum=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
             ;;
         aarch64 | arm64)
             archive_arch=aarch64
-            checksum=ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
+            checksum=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
             ;;
         *)
             printf 'Unsupported Linux architecture for Zig: %s\n' "$(uname -m)" >&2
@@ -274,37 +257,10 @@ persist_path
 export PATH="$local_bin:$PATH"
 
 step 'Fetching pinned Zig dependencies'
-zig_cache="$HOME/.cache/zig"
-dependency_downloads="$(mktemp -d)"
-trap 'rm -rf "$dependency_downloads"' EXIT
-mkdir -p "$zig_cache/tmp"
-fetch_zig_dependency \
-    https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz \
-    N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM \
-    openssl-3.6.3.tar.gz
-fetch_zig_dependency \
-    https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip \
-    N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8 \
-    sqlite-amalgamation-3530400.zip
-fetch_zig_dependency \
-    https://curl.se/download/curl-8.22.0.tar.xz \
-    N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM \
-    curl-8.22.0.tar.xz
-fetch_zig_dependency \
-    https://github.com/nghttp2/nghttp2/releases/download/v1.70.0/nghttp2-1.70.0.tar.xz \
-    N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb \
-    nghttp2-1.70.0.tar.xz
-fetch_zig_dependency \
-    https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v2.11.3.tar.gz \
-    N-V-__8AACywKABFCj0r_Y-jIWsk9ahy10zlk78hjn6S-39g \
-    utf8proc-2.11.3.tar.gz
-fetch_zig_dependency \
-    https://github.com/quickjs-ng/quickjs/archive/1ab8676f4b6d6d669baeb5f21790fb9734636a20.tar.gz \
-    N-V-__8AAC-eRACa__taXkae9pRIZde7nn8oQSxb9n9rhkFp \
-    quickjs-1ab8676f4b6d6d669baeb5f21790fb9734636a20.tar.gz
-printf 'Checking complete pinned Zig dependency graph\n'
+export ZIG_GLOBAL_CACHE_DIR="$HOME/.cache/zig"
+mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
 started=$SECONDS
-(cd "$repo_root" && zig build --global-cache-dir "$zig_cache" --fetch=all)
+bash "$repo_root/src/fetch_dependencies.sh"
 printf 'Zig dependency graph ready in %ss.\n' "$((SECONDS - started))"
 
 step 'Fetching pinned Go measurement dependencies'

@@ -1,18 +1,7 @@
 //! Private integration-only owner observations. No retries, reader acknowledgments,
 //! or diagnostic custody: a lost observation fails evidence, never semantic work.
 const std = @import("std");
-const c = @cImport({
-    // The glibc fortified variadic open wrappers cannot be translated by Zig.
-    @cUndef("_FORTIFY_SOURCE");
-    @cInclude("unistd.h");
-    @cInclude("fcntl.h");
-    @cInclude("sys/stat.h");
-    @cInclude("sys/mman.h");
-    @cInclude("sys/wait.h");
-    @cInclude("signal.h");
-    @cInclude("stdio.h");
-    @cInclude("poll.h");
-});
+const c = @import("posix");
 const Self = @This();
 const TestHold = struct {
     var before_retirement: ?*const fn () void = null;
@@ -224,12 +213,12 @@ fn record(self: *Self, json: []const u8) void {
     defer parsed.deinit();
     var bytes: [record_bytes]u8 = undefined;
     var length: usize = header_bytes;
-    inline for (@typeInfo(Record).@"struct".fields, 0..) |field, index| {
+    inline for (comptime std.meta.fieldNames(Record), 0..) |name, index| {
         var number_buffer: [20]u8 = undefined;
-        const value: ?[]const u8 = if (field.type == ?i64)
-            if (@field(parsed.value, field.name)) |number| std.fmt.bufPrint(&number_buffer, "{d}", .{number}) catch unreachable else null
+        const value: ?[]const u8 = if (@FieldType(Record, name) == ?i64)
+            if (@field(parsed.value, name)) |number| std.fmt.bufPrint(&number_buffer, "{d}", .{number}) catch unreachable else null
         else
-            @field(parsed.value, field.name);
+            @field(parsed.value, name);
         if (value) |text| {
             if (length + 3 + text.len > bytes.len) {
                 _ = self.shared.state.fetchOr(1, .acq_rel);
@@ -292,7 +281,7 @@ test "private owner observations remain bounded under full and closed credit" {
     publication.record("{"); // Encoding loss reserves no event and sends no later frame.
     try std.testing.expectEqual(@as(isize, state_bytes), c.pread(c.fileno(backing), &bytes, state_bytes, 0));
     try std.testing.expectEqual(@as(u64, 3), std.mem.readInt(u64, bytes[24..32], .little));
-    const filler = [_]u8{'F'} ** record_bytes;
+    const filler = @as([record_bytes]u8, @splat('F'));
     var filled: usize = 0;
     while (c.write(descriptors[1], &filler, filler.len) > 0) filled += filler.len;
     try std.testing.expect(filled > 0);
@@ -328,8 +317,7 @@ test "private owner observations remain bounded under full and closed credit" {
 }
 
 test "private owner observations preserve selected custody through SIGKILL" {
-    inline for (@typeInfo(Plan).@"enum".fields) |field| {
-        const plan: Plan = @enumFromInt(field.value);
+    inline for (comptime std.meta.tags(Plan)) |plan| {
         const phase = switch (plan) {
             .control, .control_peers => "cleanup_completed",
             .bash_cleanup => "cleanup_release_observed",
@@ -397,8 +385,7 @@ test "private owner observations seal admission without forgiving held or late p
             if (c.read(release, &byte, 1) != 1) c._exit(92);
         }
     };
-    inline for (@typeInfo(Plan).@"enum".fields) |field| {
-        const plan: Plan = @enumFromInt(field.value);
+    inline for (comptime std.meta.tags(Plan)) |plan| {
         const phase = switch (plan) {
             .control, .control_peers => "cleanup_completed",
             .bash_cleanup => "cleanup_release_observed",

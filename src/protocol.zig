@@ -61,7 +61,7 @@ pub const ContentField = struct {
     scratch_budget: ?ScratchBudget = null,
     charged: u64 = 0,
     length: u64 = 0,
-    digest: [32]u8 = [_]u8{0} ** 32,
+    digest: [32]u8 = @splat(0),
 
     pub fn hasFile(self: *const ContentField) bool {
         return self.file != null;
@@ -132,7 +132,7 @@ pub const ConfigureCommand = struct {
         hashOptional(&hash, &self.configuration.provider);
         hashOptional(&hash, &self.configuration.model);
         hashContent(&hash, &self.configuration.instructions);
-        hash.update(&.{@intFromEnum(self.configuration.tools.state)});
+        hash.update(&.{@backingInt(self.configuration.tools.state)});
         if (self.configuration.tools.state == .value) {
             hash.update(&.{self.configuration.tools.count});
             for (self.configuration.tools.values[0..self.configuration.tools.count]) |tool| {
@@ -521,12 +521,12 @@ fn hashField(hash: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
 }
 
 fn hashOptional(hash: *std.crypto.hash.sha2.Sha256, field: anytype) void {
-    hash.update(&.{@intFromEnum(field.state)});
+    hash.update(&.{@backingInt(field.state)});
     if (field.state == .value) hashField(hash, field.value.slice());
 }
 
 fn hashContent(hash: *std.crypto.hash.sha2.Sha256, field: *const ContentField) void {
-    hash.update(&.{@intFromEnum(field.state)});
+    hash.update(&.{@backingInt(field.state)});
     if (field.state == .value) {
         var length: [8]u8 = undefined;
         std.mem.writeInt(u64, &length, field.length, .big);
@@ -1617,7 +1617,7 @@ test "semantic digest distinguishes omission, null, and value" {
     null_schema.configuration.output_schema.state = .explicit_null;
     var value_schema = omitted;
     value_schema.configuration.output_schema.state = .value;
-    value_schema.configuration.output_schema.digest = [_]u8{1} ** 32;
+    value_schema.configuration.output_schema.digest = @splat(1);
     try std.testing.expect(!std.mem.eql(u8, &omitted.semanticDigest(), &null_schema.semanticDigest()));
     try std.testing.expect(!std.mem.eql(u8, &null_schema.semanticDigest(), &value_schema.semanticDigest()));
 }

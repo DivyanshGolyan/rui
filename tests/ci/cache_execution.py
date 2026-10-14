@@ -10,7 +10,7 @@ def main():
     for target in ("test-logic", "test", "test-full"):
         for attempt in range(2):
             result = subprocess.run(
-                ["zig", "build", target, "-Dtest-filter=TerminalText", "--seed", "0", "--summary", "all"],
+                ["zig", "build", target, "-Dtest-filter=TerminalText", "--seed=0", "--summary", "all"],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             )
             print(result.stdout, end="", flush=True)

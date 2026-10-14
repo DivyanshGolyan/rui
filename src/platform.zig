@@ -1,10 +1,7 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const named_scratch = @import("named_scratch.zig");
-const c = @cImport({
-    @cInclude("unistd.h");
-    @cInclude("sys/stat.h");
-});
+const c = @import("posix");
 
 pub const database_suffix = "/rui.sqlite3";
 pub const scratch_suffix = "/scratch";
@@ -432,12 +429,12 @@ test "absent destination preflight checks components but bounds canonical aliase
     const root_len = try tmp.dir.realPath(std.testing.io, &root_buffer);
     const root = root_buffer[0..root_len];
     var path_buffer: [2048]u8 = undefined;
-    const overlong = try std.fmt.bufPrint(&path_buffer, "{s}/missing/{s}", .{ root, &([_]u8{'x'} ** 256) });
+    const overlong = try std.fmt.bufPrint(&path_buffer, "{s}/missing/{s}", .{ root, &@as([256]u8, @splat('x')) });
     try std.testing.expectError(error.NameTooLong, validateStoreDestination(std.testing.io, overlong));
-    const canceled = try std.fmt.bufPrint(&path_buffer, "{s}/missing/{s}/../../store", .{ root, &([_]u8{'x'} ** 256) });
+    const canceled = try std.fmt.bufPrint(&path_buffer, "{s}/missing/{s}/../../store", .{ root, &@as([256]u8, @splat('x')) });
     try std.testing.expectError(error.NameTooLong, validateStoreDestination(std.testing.io, canceled));
     try std.testing.expectError(error.FileNotFound, tmp.dir.openDir(std.testing.io, "missing", .{}));
-    const alias = try std.fmt.bufPrint(&path_buffer, "{s}/new/{s}store", .{ root, "./" ** 260 });
+    const alias = try std.fmt.bufPrint(&path_buffer, "{s}/new/{s}store", .{ root, &@as([520]u8, @bitCast(@as([260][2]u8, @splat("./".*)))) });
     try validateStoreDestination(std.testing.io, alias);
     try std.testing.expectError(error.FileNotFound, tmp.dir.openDir(std.testing.io, "new", .{}));
     var lease = try StoreLease.acquire(std.testing.io, alias);
@@ -594,7 +591,7 @@ test "long raw Store aliases remain usable when their canonical path fits" {
 
 test "invalid UTF-8 Store path remains distinct from path overflow" {
     try std.testing.expectError(error.InvalidStorePath, validateCanonicalPath(&.{0xff}));
-    const overlong = [_]u8{'a'} ** (protocol.max_store_bytes + 1);
+    const overlong = @as([protocol.max_store_bytes + 1]u8, @splat('a'));
     try std.testing.expectError(error.StorePathTooLong, validateCanonicalPath(&overlong));
 }
 

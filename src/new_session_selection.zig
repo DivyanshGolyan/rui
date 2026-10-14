@@ -145,7 +145,7 @@ test "new Session explicit choices bypass stale defaults without destination fal
 
     // Destination validation belongs to native preflight, even when the same
     // invocation also has an unsupported provider/model or an invalid HOME.
-    const long_raw_path = [_]u8{'x'} ** (std.Io.Dir.max_path_bytes + 1);
+    const long_raw_path = @as([std.Io.Dir.max_path_bytes + 1]u8, @splat('x'));
     snapshot.intent.store = &long_raw_path;
     try std.testing.expectEqualStrings(&long_raw_path, (try snapshot.destination("relative-home", &fallback)).path);
     snapshot.intent.store = null;

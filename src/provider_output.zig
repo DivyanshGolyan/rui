@@ -626,7 +626,7 @@ const Added = struct {
     active: bool = false,
     index: u64 = 0,
     kind: store.OutputItemKind = .reasoning,
-    id_digest: [32]u8 = [_]u8{0} ** 32,
+    id_digest: [32]u8 = @splat(0),
 };
 
 fn itemIdentity(io: std.Io, file: std.Io.File, item: Range) !struct {
@@ -968,8 +968,7 @@ fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limi
 
 fn testingReasoningSse(reasoning: []const u8, terminal_reasoning: []const u8) ![]u8 {
     const answer = "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}";
-    return std.fmt.allocPrint(
-        std.testing.allocator,
+    return std.testing.allocator.print(
         "data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s}}}\n\n" ++
             "data: {{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{s}}}\n\n" ++
             "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"response\",\"status\":\"completed\",\"output\":[{s},{s}]}}}}\n\n",
@@ -990,14 +989,13 @@ test "provider proposal identity uses decoded content domain" {
 
 test "provider reasoning strings preserve raw items across evidence and file window boundaries" {
     const values = .{
-        "a" ** 255,
-        "b" ** 256,
-        "c" ** 257,
-        "\\u0041" ** 8192 ++ "\\u00e9\\u4e2d\\uD83D\\uDE42",
+        &@as([255]u8, @splat('a')),
+        &@as([256]u8, @splat('b')),
+        &@as([257]u8, @splat('c')),
+        @as([8192 * 6]u8, @bitCast(@as([8192][6]u8, @splat("\\u0041".*)))) ++ "\\u00e9\\u4e2d\\uD83D\\uDE42",
     };
     inline for (values) |value| {
-        const reasoning = try std.fmt.allocPrint(
-            std.testing.allocator,
+        const reasoning = try std.testing.allocator.print(
             "{{\"type\":\"reasoning\",\"id\":\"r1\",\"encrypted_content\":\"{s}\",\"summary\":[{{\"type\":\"summary_text\",\"text\":\"{s}\"}}]," ++
                 "\"content\":[{{\"type\":\"reasoning_text\",\"text\":\"{s}\"}}],\"created_by\":\"kept\",\"future\":{{\"raw\":null}}}}",
             .{ value, value, value },
@@ -1024,7 +1022,7 @@ test "provider reasoning strings preserve raw items across evidence and file win
 }
 
 test "provider reasoning validation rejects wrong types duplicates and malformed suffixes" {
-    const prefix = "a" ** 257;
+    const prefix = &@as([257]u8, @splat('a'));
     const cases = .{
         .{ "\"summary\":[]", error.ContinuationUnavailable },
         .{ "\"encrypted_content\":\"\"", error.ContinuationUnavailable },
@@ -1050,7 +1048,7 @@ test "provider reasoning validation rejects wrong types duplicates and malformed
         .{ "\"encrypted_content\":\"opaque\",\"future\":[1,]", error.InvalidJsonValue },
     };
     inline for (cases) |case| {
-        const reasoning = try std.fmt.allocPrint(std.testing.allocator, "{{\"type\":\"reasoning\",\"id\":\"r1\",{s}}}", .{case[0]});
+        const reasoning = try std.testing.allocator.print("{{\"type\":\"reasoning\",\"id\":\"r1\",{s}}}", .{case[0]});
         defer std.testing.allocator.free(reasoning);
         const sse = try testingReasoningSse(reasoning, reasoning);
         defer std.testing.allocator.free(sse);
@@ -1079,8 +1077,7 @@ test "provider added identity permits incomplete content but terminal agreement 
     const tail = try testingReasoningSse(done, done);
     defer std.testing.allocator.free(tail);
     inline for (added_items) |case| {
-        const sse = try std.fmt.allocPrint(
-            std.testing.allocator,
+        const sse = try std.testing.allocator.print(
             "data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{s}}}\n\n{s}",
             .{ case[0], tail },
         );
@@ -1195,8 +1192,7 @@ test "provider rejects unsupported consequential function call controls" {
         .{ "{\"type\":\"function_call\",\"id\":\"item-1\",\"name\":\"bash\",\"call_id\":\"call-1\",\"arguments\":\"{}\",\"encrypted_function_args\":\"opaque\"}", true },
     };
     inline for (cases) |case| {
-        const sse = try std.fmt.allocPrint(
-            std.testing.allocator,
+        const sse = try std.testing.allocator.print(
             "data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s}}}\n\n" ++
                 "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"response-1\",\"status\":\"completed\",\"output\":[{s}]}}}}\n\n",
             .{ case[0], case[0] },
@@ -1254,7 +1250,7 @@ test "Bash proposal metadata growth is linear and disk-backed" {
 }
 
 test "provider field collection traverses large open values once for all lookups" {
-    const input = "{\"unknown\":\"" ++ "x" ** (protocol.content_window_bytes * 4) ++
+    const input = "{\"unknown\":\"" ++ @as([protocol.content_window_bytes * 4]u8, @splat('x')) ++
         "\",\"type\":\"message\",\"id\":\"m1\",\"status\":\"completed\",\"role\":\"assistant\"," ++
         "\"phase\":\"final_answer\",\"content\":[],\"internal_chat_message_metadata_passthrough\":{}}";
     const names = &.{ "type", "id", "status", "role", "phase", "content", "internal_chat_message_metadata_passthrough" };
@@ -1295,7 +1291,7 @@ test "provider field collection validates unknown and late syntax" {
         .{ "{\"type\":1,\"unknown\":[1,]}", error.InvalidJsonValue },
         .{ "{\"type\":1} false", error.TrailingJson },
         .{ "{\"type\":1,\"unknown\":01}", error.InvalidJsonNumber },
-        .{ "{\"type\":1,\"unknown\":" ++ "[" ** (protocol.max_json_depth + 1) ++ "0" ++ "]" ** (protocol.max_json_depth + 1) ++ "}", error.JsonTooDeep },
+        .{ "{\"type\":1,\"unknown\":" ++ @as([protocol.max_json_depth + 1]u8, @splat('[')) ++ "0" ++ @as([protocol.max_json_depth + 1]u8, @splat(']')) ++ "}", error.JsonTooDeep },
     };
     inline for (cases) |case| {
         var tmp = std.testing.tmpDir(.{});
@@ -1316,4 +1312,57 @@ test "provider field collection cannot grant authority through escaped metadata 
         source.file,
         .{ .start = 0, .length = source.end },
     ));
+}
+
+test "fuzz provider decoded answers and rejection across file windows" {
+    try std.testing.fuzz({}, fuzzAnswer, .{ .corpus = &.{
+        "\xfd\x0f\x00\x00\x00\x00\x00\x00",
+        "\xfe\x0f\x00\x00\x00\x00\x00\x00",
+        "\xff\x0f\x00\x00\x00\x00\x00\x00",
+        "\x00\x10\x00\x00\x00\x00\x00\x00",
+        "\xff\x1f\x00\x00\x00\x00\x00\x00",
+    } });
+}
+
+fn fuzzAnswer(_: void, smith: *std.testing.Smith) !void {
+    var text_buffer: [2 * protocol.content_window_bytes + 128]u8 = undefined;
+    var text = std.Io.Writer.fixed(&text_buffer);
+    const padding = smith.valueRangeAtMost(u16, 0, 2 * protocol.content_window_bytes);
+    try text.splatByteAll('p', padding);
+    // Always exercise controls, multibyte UTF-8 and surrogate-pair escaping;
+    // generated scalars vary their positions around the file-window boundary.
+    try text.writeAll("\x00\"\n\\€𐀀");
+    const count = smith.valueRangeAtMost(u8, 0, 16);
+    for (0..count) |_| {
+        var scalar = smith.valueRangeAtMost(u21, 0, 0x10f7ff);
+        if (scalar >= 0xd800) scalar += 0x800;
+        var encoded: [4]u8 = undefined;
+        const length = try std.unicode.utf8Encode(scalar, &encoded);
+        try text.writeAll(encoded[0..length]);
+    }
+    const expected_digest = protocol.contentDigest(text.buffered());
+    inline for (.{ false, true }) |escape_unicode| {
+        var item_buffer: [2 * protocol.content_window_bytes + 512]u8 = undefined;
+        var item = std.Io.Writer.fixed(&item_buffer);
+        try item.writeAll("{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":");
+        try std.json.Stringify.value(text.buffered(), .{ .escape_unicode = escape_unicode }, &item);
+        try item.writeAll("}]}");
+
+        var stream_buffer: [2 * (2 * protocol.content_window_bytes + 512) + 512]u8 = undefined;
+        var stream = std.Io.Writer.fixed(&stream_buffer);
+        try stream.print("data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s}}}\n\n" ++
+            "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"response\",\"status\":\"completed\",\"output\":[{s}]}}}}\n\n", .{ item.buffered(), item.buffered() });
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const accepted = try validateTestingSse(&tmp, stream.buffered(), 4096);
+        try std.testing.expectEqual(@as(u64, 1), accepted.output.item_count);
+        try std.testing.expectEqual(@as(u64, 0), accepted.output.call_count);
+        try std.testing.expectEqual(@as(u64, text.buffered().len), accepted.output.answer_length);
+        try std.testing.expectEqualSlices(u8, &expected_digest, &accepted.output.answer_digest);
+        // Syntax errors after valid content cannot become accepted prefixes.
+        try std.testing.expectError(error.IncompleteSseEvent, validateTestingSse(&tmp, stream.buffered()[0 .. stream.buffered().len - 2], 4096));
+        stream = .fixed(&stream_buffer);
+        try stream.print("data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s},\"late\":\"\xff\"}}\n\n", .{item.buffered()});
+        try std.testing.expectError(error.InvalidJsonUtf8, validateTestingSse(&tmp, stream.buffered(), 4096));
+    }
 }

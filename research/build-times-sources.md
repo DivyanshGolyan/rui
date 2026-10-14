@@ -1,6 +1,6 @@
-# Zig 0.16 development build latency: source-backed options
+# Zig development build latency: measurements and source-backed options
 
-Research note, initially 2026-09-23. Scope: Zig **0.16.0**, `build.zig`, `src/build_transport.sh`, and the [canonical gates](../VERIFICATION.md#canonical-gates). The original source-backed options and timings below remain historical evidence, not measured compiler/cache improvements. The [first gate comparison](#routine-versus-long-qualification-2026-09-29) measures separation of long witnesses; the [verification-design follow-up](#owner-boundaries-instead-of-elapsed-holds-2026-09-29) measures explicit synchronization and narrower duplicate artifact coverage.
+Research note, initially 2026-09-23. The original options and gate comparisons below describe Zig **0.16.0** and remain historical evidence. [Zig 0.17 feedback](#zig-017-feedback-2026-10-14) records current edit-rebuild measurements and the failed incremental experiment. The [canonical gates](../VERIFICATION.md#canonical-gates) still own qualification; no development-loop experiment replaces them.
 
 ## Graph at the original measurement
 
@@ -121,3 +121,26 @@ Final Linux warm `check` passed **20/20 in 88.86 s** and `check-full` passed **2
 Mac's corrected broad `check` passed 20/20 in **208.61 s including recompilation**, and warm `check-full` passed 23/23 in **431.51 s**, both with 285 native passes and one skip. Those broad runs predate the final Linux-only descriptor oracle edit; the final changed fixture separately passed Mac Host-status 6/6 in 5.53 s with cached compilation. The final executable-input manifest matches Linux exactly (SHA-256 `721f66e8aff4785183dd11ebdbe2c522179f048cd7dd34105920ed2a078117b6`). These observations do not supply a Mac baseline percentage, final-revision long-witness rerun, live-provider qualification or power-loss evidence.
 
 The [Linux/Mac portability evidence archive](../tests/qualification/build-feedback-portability-linux-macos-2026-09-29.tar.gz) retains raw successes and failures, native probes, mutations, independent opinions, source/binary manifests and reproduction commands (SHA-256 `c80f9fc7a41597fd7b47844b68eb6aa204e129ba6034de0e0b6e67ffc8015b65`). Its provenance separates the original candidate, merged suite, owner-boundary correction and final descriptor oracle; earlier long-witness and clean-build results remain attributed to their actual revisions above.
+
+## Zig 0.17 feedback, 2026-10-14
+
+Measured in the migrated Linux x86-64 orb: stock Zig 0.17.0, Linux 6.1.158+, two available CPUs and 3.8 GiB RAM. The checkout was local baseline `cfd7621` with the separately reviewed client/provider test additions. Production, dependency and build inputs were otherwise unchanged. Packages and compiler caches were warm; no other builds or runtime gates ran during these measurements.
+
+Three consecutive, distinct one-byte changes capitalized successive letters of the CLI help heading. Each rebuilt the same Debug CLI and executed `zig-out/bin/rui --help`; observed headings and source/binary hashes confirmed the edits reached the actual executable. None reused an earlier source state. The edits were then removed byte-for-byte before nonincremental qualification.
+
+```sh
+/usr/bin/time -f 'wall=%e user=%U system=%S maxrss_kb=%M' \
+  zig build -Doptimize=Debug --seed=0 --summary all -j2
+```
+
+| Edit | Wall | Result |
+| --- | ---: | --- |
+| `usage:` → `Usage:` | 2.31 s | 38/38 steps; observed `Usage:` |
+| `Usage:` → `USage:` | 2.30 s | 38/38 steps; observed `USage:` |
+| `USage:` → `USAge:` | 2.34 s | 38/38 steps; observed `USAge:` |
+
+Median **2.31 s** is a small warm help-text edit on this machine, not a clean build, optimized-build benchmark, general edit latency or comparison with Zig 0.16. The warm-up took 2.48 s. `--summary all` identified CLI compilation as the only uncached production step; native transport stayed cached. `--time-report` was deliberately not used because it forces rebuilding rather than measuring this ordinary loop.
+
+`zig build -Doptimize=Debug -fincremental --watch --seed=0 --summary all -j2` failed on its initial build: 35/38 steps, undefined `OPENSSL_ia32cap_P`. The unchanged pinned `libcrypto.a` defines it as a common symbol, verified with `nm`. No watched edit completed; a watcher panic during termination is also retained. A linker-override control failed because the stock build CLI rejects `-flld`; no build options, compiler patches or native-library flags were added to bypass either result. Incremental mode is therefore **not recommended for this Rui configuration**, and no incremental speedup is claimed. Ordinary compilation, supported targets and qualification remain unchanged.
+
+Source assessment found no production `ArrayList` whose element address needs a new pointer-stability lock: current production occurrences calculate capacities or use fixed allocators. No `BufferFirstAllocator` fallback was introduced; the existing fixed-buffer hard bounds remain hard bounds. The [migration evidence](../VERIFICATION.md#zig-017-migration-2026-10-14) retains raw measurements, failures and source identity alongside the separate cold-build results.

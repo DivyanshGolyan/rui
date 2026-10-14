@@ -21,7 +21,7 @@ pub const os = struct {
 pub fn main() !void {
     var buffer: [4096]u8 = undefined;
     var discard = std.Io.Writer.Discarding.init(&buffer);
-    const chunk = [_]u8{'a'} ** 4096;
+    const chunk = @as([4096]u8, @splat('a'));
     const allocated_before = accounting.allocated_bytes;
     const allocations_before = accounting.allocations;
     const live_before = accounting.allocated_bytes - accounting.freed_bytes;
