@@ -4103,7 +4103,7 @@ def main():
                     continuation_diagnostics.close()
                     (state / "successor-failure.stderr").write_bytes(continuation_diagnostics.tail())
             except BaseException as error:
-                preserve_failure_metadata(state / "successor-collector-failure.json", lambda: {
+                preserve_failure_metadata(state / "successor-collector-failure.json", lambda error=error: {
                     "original_error": type(incoming_error).__name__ if incoming_error else None,
                     "collector_error": type(error).__name__})
                 raise
