@@ -62,6 +62,7 @@ def assert_reaped(source, description, *, timeout=0.2, required_fields=None, obs
 
 def main():
     prove_dispose_all()
+    prove_one_reply()
     prove_terminal_capture_budget()
     prove_execution_release_oracles()
     prove_bash_cleanup_population()
@@ -1137,6 +1138,150 @@ def prove_dispose_all():
                 except OSError:
                     pass
     print("Fixture disposal: primary failure retained, all resources attempted")
+
+
+def prove_one_reply():
+    from one_reply import BODY_LIMIT, HEADER_LIMIT, one_reply
+
+    original_socket = socket.socket
+    sockets = []
+    accepted = threading.Event()
+
+    class TrackedSocket(original_socket):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            sockets.append(self)
+
+        def accept(self):
+            result = super().accept()
+            accepted.set()
+            return result
+
+    def request(length, padding=0):
+        return (f"POST /fixture HTTP/1.1\r\nContent-Length: {length}\r\nX-Pad: ".encode()
+                + b"x" * padding + b"\r\n\r\n")
+
+    def connect(path):
+        client = socket.socket(socket.AF_UNIX)
+        client.settimeout(2)
+        client.connect(str(path))
+        assert accepted.wait(2), "one-reply worker never accepted"
+        return client
+
+    @contextlib.contextmanager
+    def case():
+        sockets.clear()
+        accepted.clear()
+        threads = set(threading.enumerate())
+        with tempfile.TemporaryDirectory(prefix="rui-reply-") as root:
+            path = pathlib.Path(root) / "peer"
+            try:
+                with patch("socket.socket", TrackedSocket):
+                    yield path
+            finally:
+                assert set(threading.enumerate()) == threads, "one-reply worker survived disposal"
+                assert sockets and all(sock.fileno() == -1 for sock in sockets), "one-reply socket leaked"
+                assert not path.exists(), "one-reply path survived disposal"
+
+    # Asymmetric binary response, split request, exact header/body limits and reuse.
+    response = b"deliberately not HTTP\x00\xff" * 4000
+    for length in (0, BODY_LIMIT):
+        with case() as path:
+            with one_reply(path, response):
+                with connect(path) as client:
+                    header = request(length)
+                    header = request(length, HEADER_LIMIT - len(header))
+                    client.sendall(header[:-1])
+                    client.sendall(header[-1:] + b"b" * length)
+                    received = bytearray()
+                    while chunk := client.recv(4096):
+                        received.extend(chunk)
+                    assert received == response, "one-reply changed caller-owned bytes"
+
+    for supplied, error_type, message in (
+        (b"POST /fixture", EOFError, "header"),
+        (request(4) + b"abc", EOFError, "body"),
+        (b"x" * HEADER_LIMIT, ValueError, "header exceeds"),
+        (request(BODY_LIMIT + 1), ValueError, "body exceeds"),
+        (request(-1), ValueError, "one decimal"),
+        (b"POST / HTTP/1.1\r\n\r\n", ValueError, "one decimal"),
+        (b"POST / HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n", ValueError, "one decimal"),
+    ):
+        with case() as path:
+            try:
+                with one_reply(path, b"must not be sent"):
+                    with connect(path) as client:
+                        client.sendall(supplied)
+                        client.shutdown(socket.SHUT_WR)
+                        assert client.recv(1) == b"", "invalid request received a response"
+            except error_type as error:
+                assert message in str(error), error
+            else:
+                raise AssertionError("one-reply worker error was lost")
+
+    # Silent accept/header/body and response backpressure all spend the same budget.
+    for supplied in (None, b"POST /", request(4) + b"abc", request(0)):
+        with case() as path:
+            with contextlib.ExitStack() as clients:
+                started = time.monotonic()
+                try:
+                    with one_reply(path, b"r" * (4 * 1024 * 1024), timeout=0.2):
+                        if supplied is not None:
+                            client = clients.enter_context(connect(path))
+                            client.sendall(supplied)
+                except TimeoutError:
+                    elapsed = time.monotonic() - started
+                    assert 0.15 <= elapsed < 2, elapsed
+                else:
+                    raise AssertionError("one-reply deadline was restarted or ignored")
+
+    # Client failure before accept, during header/body, and during blocked send.
+    for supplied in (None, b"POST /", request(4) + b"abc", request(0)):
+        with case() as path:
+            with contextlib.ExitStack() as clients:
+                primary = RuntimeError("original client failure")
+                started = time.monotonic()
+                try:
+                    with one_reply(path, b"r" * (4 * 1024 * 1024)):
+                        if supplied is not None:
+                            client = clients.enter_context(connect(path))
+                            client.sendall(supplied)
+                            if supplied == request(0):
+                                assert client.recv(1) == b"r", "worker did not reach send"
+                        raise primary
+                except RuntimeError as error:
+                    assert error is primary
+                else:
+                    raise AssertionError("client failure was suppressed")
+                assert time.monotonic() - started < 2, "cancellation waited for exchange timeout"
+
+    # A completed worker failure and failed unlink remain secondary to the client.
+    with tempfile.TemporaryDirectory(prefix="rui-reply-failure-") as root:
+        path = pathlib.Path(root) / "peer"
+        primary = RuntimeError("original client failure")
+        sockets.clear()
+        accepted.clear()
+        threads = set(threading.enumerate())
+        with contextlib.ExitStack() as faults:
+            try:
+                with patch("socket.socket", TrackedSocket):
+                    with one_reply(path, b"unused"):
+                        with connect(path) as client:
+                            client.shutdown(socket.SHUT_WR)
+                            assert client.recv(1) == b""
+                        faults.enter_context(patch.object(pathlib.Path, "unlink", side_effect=OSError("unlink fault")))
+                        raise primary
+            except RuntimeError as error:
+                assert error is primary
+                assert any("EOFError" in note for note in error.__notes__), error.__notes__
+                assert any("unlink fault" in note for note in error.__notes__), error.__notes__
+            else:
+                raise AssertionError("client failure was suppressed during disposal")
+        assert set(threading.enumerate()) == threads
+        assert all(sock.fileno() == -1 for sock in sockets)
+        assert path.exists(), "failed unlink was reported as removal"
+        path.unlink()
+    print("One-reply peer: exact bytes, EOF/limits/deadlines, primary errors, sockets/path and worker retirement")
 
 
 if __name__ == "__main__":
