@@ -90,10 +90,13 @@ def retained(state, binary, label):
         samples = [sample(process.pid)]
         for _ in range(3):
             for _ in range(10):
-                assert "Configured." in cli.terminal_step(master, "/configure --model model-a", prompt)
-                listing = cli.terminal_step(master, "/requests", prompt)
+                assert "Configured." in cli.terminal_step(master, "/configure --model model-a",
+                    prompt if label == "baseline" else "Configured.", composer=label != "baseline")
+                listing = cli.terminal_step(master, "/requests",
+                    prompt if label == "baseline" else "Local recovery handles", composer=label != "baseline")
                 assert "01234567-89ab-4cde-8012-" not in listing
-                cli.terminal_step(master, "/status", prompt)
+                cli.terminal_step(master, "/status",
+                    prompt if label == "baseline" else "Session: ", composer=label != "baseline")
             samples.append(sample(process.pid))
         cli.terminal_step(master, "/exit", "Detached.")
         assert process.wait(timeout=5) == 0

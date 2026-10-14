@@ -10,6 +10,7 @@ const Editor = @import("TerminalEditor.zig");
 const View = @import("session_view.zig");
 const History = @import("session_history.zig");
 const departure = @import("session_departure.zig");
+const ConsentPolicy = @import("session_consent.zig");
 const Self = @This();
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
@@ -43,10 +44,9 @@ read_columns: usize = 0,
 history_render_started: bool = false,
 prepared_action: ?u64 = null,
 reader_output_started: bool = false,
-choice_action: ?u64 = null,
+consent: ConsentPolicy.Consent = .{},
 choice_buffer: [64]u8 = undefined,
 choice: Editor = undefined,
-choice_ready: bool = false,
 opening: bool = true,
 poll_at: i96 = 0,
 dirty: bool = true,
@@ -247,7 +247,7 @@ fn driveActive(self: *Self) !void {
         if (self.pending_diagnostic) |pending| {
             if (pending.recoverable) try self.presentReadDiagnostic(&self.terminal);
         }
-        if (self.reader.thread == null and (self.choice_action == null or self.history_requested != null) and self.prepared_action == null) {
+        if (self.reader.thread == null and (!self.consent.active() or self.history_requested != null) and self.prepared_action == null) {
             self.read_columns = Terminal.geometry().col;
             if (self.history_requested != null and !self.opening) {
                 const requested = self.history_requested.?;
@@ -281,23 +281,22 @@ fn driveActive(self: *Self) !void {
             self.dirty = true;
         }
         for (0..1024) |_| {
-            if (!try self.step(0)) break;
+            if (try self.step(0) != .byte) break;
             if (self.detached) break;
         }
         if (self.detached) break;
         if (self.pendingHandoff()) return error.CommandHandoff;
         // Finish chat paste/UTF-8 under its original decoder before consent.
         if (self.reader.thread == null and self.prepared_action != null and self.input.pending() == .none) {
-            self.choice_action = self.prepared_action;
+            self.consent.adopt(self.prepared_action.?);
             self.prepared_action = null;
             self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
-            self.choice_ready = false;
             self.read_phase = .activity;
             self.dirty = true;
         }
         if (self.dirty and !self.opening and (self.reader.thread == null or !self.reader_output_started)) {
-            const view: Input.View = if (self.choice_action != null) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
-            const status = if (self.choice_action != null) "a: Allow once / d: Deny (Enter)" else if (self.submission.view()) |submission| switch (submission.state) {
+            const view: Input.View = if (self.consent.active()) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
+            const status = if (self.consent.active()) "a: Allow once / d: Deny (Enter)" else if (self.submission.view()) |submission| switch (submission.state) {
                 .not_started => "Not sent · Ctrl-R retries original",
                 .submitting => "Sending…",
                 .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
@@ -310,23 +309,21 @@ fn driveActive(self: *Self) !void {
                 .idle, .completed => "",
             };
             self.dirty = false;
-            try self.terminal.redraw(view.bytes, view.cursor, status, if (self.choice_action != null) "> " else "› ", &self.live);
-            if (self.choice_action != null and !self.choice_ready and self.choice.pending() == .none) {
+            try self.terminal.redraw(view.bytes, view.cursor, status, if (self.consent.active()) "> " else "› ", &self.live);
+            if (self.consent.active() and !self.consent.acceptsInput() and self.choice.pending() == .none) {
                 // Every prompt byte was accepted by stdout. Discard input
                 // through its decoder, not tcflush: a paste prefix or Ctrl-C
                 // arriving during the final write must retain its meaning.
-                var empty = false;
+                var service: ConsentPolicy.Service = .budget_exhausted;
                 for (0..1024) |_| {
-                    if (!try self.step(0)) {
-                        empty = true;
-                        break;
-                    }
+                    service = try self.step(0);
+                    if (service != .byte) break;
+                    service = .budget_exhausted;
                     if (self.detached) break;
                 }
                 if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
                 if (self.detached) break;
-                if (empty and self.choice.pending() == .none) {
-                    self.choice_ready = true;
+                if (self.consent.promptCompleted(service, self.choice.pending() != .none, self.pendingHandoff())) {
                     try Editor.testChoiceReady(self.init.io);
                 }
             }
@@ -343,35 +340,37 @@ fn pump(raw: *anyopaque) !void {
     if (self.pendingHandoff()) return error.CommandHandoff;
 }
 
-fn step(self: *Self, wait: i32) !bool {
+fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     // The selected handoff owns the next transition, including queued bytes.
-    if (self.pendingHandoff()) return false;
-    const pending = if (self.choice_action != null) self.choice.pending() else self.input.pending();
+    if (self.pendingHandoff()) return .handoff;
+    const pending = if (self.consent.active()) self.choice.pending() else self.input.pending();
     const byte = (self.terminal.next(self.init.io, pending, wait) catch |err| switch (err) {
         error.InputDeadline => {
-            if (self.choice_action != null) try self.choice.expire() else try self.input.expire();
+            if (self.consent.active()) try self.choice.expire() else try self.input.expire();
             // Successful expiry releases decoder custody. Revisit redraw and
             // its drained-input readiness gate, just as after ordinary input.
             self.dirty = true;
-            return false;
+            return .decoder_expired;
         },
         else => return err,
-    }) orelse return false;
-    if (self.choice_action) |action| {
-        if (!self.choice_ready) {
+    }) orelse return if (pending == .none) .empty else .decoder_pending;
+    if (self.consent.active()) {
+        if (!self.consent.acceptsInput()) {
             // Discard text but retain fragmented input's decoder custody.
             const event = self.choice.feed(byte);
-            if (event == .interrupt or event == .eof) self.detached = true;
+            if (event == .interrupt or event == .eof) {
+                self.consent.interrupt();
+                self.detached = true;
+            }
             if (self.choice.pending() == .none) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
             self.dirty = true;
-            return true;
+            return .byte;
         }
         switch (self.choice.feed(byte)) {
             .submit => {
                 const text = self.choice.buffer[0..self.choice.length];
-                if (std.mem.eql(u8, text, "a") or std.mem.eql(u8, text, "d")) {
-                    self.choice_action = null;
-                    try self.submission.begin(.{ .decision = .{ .action = action, .decision = if (text[0] == 'a') .allow_once else .deny } });
+                if (self.consent.submit(text)) |decision| {
+                    try self.submission.begin(.{ .decision = .{ .action = decision.action, .decision = if (decision.choice == .allow_once) .allow_once else .deny } });
                 } else if (std.mem.eql(u8, text, "/exit")) self.detached = true else if (std.mem.eql(u8, text, "/details") or std.mem.eql(u8, text, "/history")) {
                     self.history_requested = if (std.mem.eql(u8, text, "/details")) .latest else .older;
                 } else if (std.mem.startsWith(u8, text, "/")) {
@@ -379,23 +378,25 @@ fn step(self: *Self, wait: i32) !bool {
                     self.input.command_length = text.len;
                 } else self.notice = "! Choose a or d. Nothing authorized.";
                 self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
-                self.choice_ready = false;
             },
             .invalid, .overflow => {
                 self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
-                self.choice_ready = false;
+                self.consent.invalidate();
                 self.notice = "! Decision input rejected. Type a or d; pasted text cannot authorize.";
             },
-            .interrupt, .eof => self.detached = true,
+            .interrupt, .eof => {
+                self.consent.interrupt();
+                self.detached = true;
+            },
             else => {},
         }
         self.dirty = true;
-        return true;
+        return .byte;
     }
     if (self.input.pending() == .none) switch (byte) {
         18 => {
             try self.submission.requestRecovery(null);
-            return true;
+            return .byte;
         },
         else => {},
     };
@@ -421,7 +422,7 @@ fn step(self: *Self, wait: i32) !bool {
         },
     }
     self.dirty = true;
-    return true;
+    return .byte;
 }
 
 fn joinAdmission(self: *Self) AdmissionEnd {
@@ -582,7 +583,7 @@ fn handoff(self: *Self) !void {
     try departure.commandReturn(result, interrupted.stopped.load(.acquire));
     self.terminal = try Terminal.begin(self.colour);
     self.terminal.pump = .{ .context = self, .step = pump };
-    self.choice_ready = false;
+    self.consent.invalidate();
     self.dirty = true;
 }
 

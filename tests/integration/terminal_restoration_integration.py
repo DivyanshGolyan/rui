@@ -862,9 +862,7 @@ def persistent_cases(state, library, home, store, host):
                     caller.send_signal(signal.SIGINT)
                 release.touch()
                 if case == "sync-handoff":
-                    resumed = human.read_terminal(output_master, "Not confirmed")
-                    if "› " not in resumed.split("Not confirmed", 1)[1]:
-                        resumed += human.read_terminal(output_master, "› ")
+                    resumed = human.read_terminal(output_master, "Not confirmed", composer=True)
                     assert "STALE" not in resumed, resumed
                     assert "No actionable permission" in resumed, resumed
                     os.write(master, "next café!\x1b[D\x1b[DX".encode())
@@ -1277,7 +1275,7 @@ def fatal_reporting_cases(state):
             before = {path: path.read_bytes() for path in records.glob("*.json")}
             os.write(master, b"accepted A\n")
             human.read_terminal(master, "ACCEPTED-A", composer=True)
-            human.terminal_step(master, "/status")
+            human.terminal_step(master, "/status", "Session: ", composer=True)
             os.write(master, b"uncertain B\n")
             human.read_terminal(master, "Not confirmed")
             first, second = [json.loads(body) for body, _ in proxy.exchanges]
@@ -1391,7 +1389,7 @@ def decision_reporting_cases(state):
                     caller.send_signal(signal.SIGINT)
                 else:
                     human.read_terminal(master, f"SETTLED-{name}", composer=True)
-                    status = human.terminal_step(master, "/status")
+                    status = human.terminal_step(master, "/status", "Session: ", composer=True)
                     assert "Original reserved request:" not in status, status
                     os.write(master, b"\x1b[")
                 output, errors = human.terminal_exit(caller, master, timeout=6)
@@ -1559,7 +1557,7 @@ def detach_reporting_cases(state, library):
                     proposal += human.action_ready(read_ready, master)
                     os.write(master, b"a\n" if kind == "allow_once" else b"d\n")
                 human.read_terminal(master, f"SETTLED-{name}", composer=True)
-                status = human.terminal_step(master, "/status")
+                status = human.terminal_step(master, "/status", "Session: ", composer=True)
                 assert "Original reserved request:" not in status, status
                 before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
                 records = [path for path in before if json.loads(before[path]).get("session") == session]
@@ -1661,7 +1659,7 @@ def startup_reporting_cases(state, library):
             human.read_terminal(master, "› ")
             os.write(master, b"seed accepted original\n")
             human.read_terminal(master, "SEED-ACCEPTED", composer=True)
-            assert "Original reserved request:" not in human.terminal_step(master, "/status")
+            assert "Original reserved request:" not in human.terminal_step(master, "/status", "Session: ", composer=True)
             if kind in ("allow_once", "deny"):
                 os.write(master, b"propose exact Action\n")
                 proposal = human.read_terminal(master, "a: Allow once / d: Deny (Enter)")

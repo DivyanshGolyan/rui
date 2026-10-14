@@ -30,8 +30,9 @@ class SelectionTest(unittest.TestCase):
         result = select(["src/logic_tests.zig"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["test-logic"])
 
-    def test_frontend_departure_keeps_value_and_native_handoff_checks(self):
-        for path in ("src/SessionFrontend.zig", "src/session_departure.zig"):
+    def test_frontend_policy_keeps_value_and_native_handoff_checks(self):
+        for path in ("src/SessionFrontend.zig", "src/SessionSubmission.zig",
+                     "src/session_consent.zig", "src/session_departure.zig"):
             result = select([path], "review", AVAILABLE)
             for family in ("targets", "native_targets"):
                 self.assertEqual(result[family], ["admission-debug-integration", "check", "test-logic"])
@@ -387,7 +388,13 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                         os.close(release)
                 result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
             else:
-                result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=10)
+                try:
+                    result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=10)
+                except subprocess.TimeoutExpired as failure:
+                    failure.add_note(f"part={part!r}, failing fixture={fail!r}, overlap={overlap!r}")
+                    failure.add_note(f"completed invocations: {invocations.read_text()!r}")
+                    failure.add_note(f"stdout: {failure.stdout!r}\nstderr: {failure.stderr!r}")
+                    raise
             return result, invocations.read_text().splitlines()
 
     def test_parts_are_disjoint_and_cover_the_unchanged_full_gate(self):

@@ -89,18 +89,176 @@ pub fn begin(self: *Self, intent: Intent) !void {
 pub fn requestRecovery(self: *Self, key: ?[]const u8) !void {
     if (self.intent == null) return;
     if (key) |requested| if (!std.mem.eql(u8, requested, &self.key)) return error.OriginalBindingMismatch;
-    self.retry = if (self.state != .rejected) self.key else null;
+    self.retry = if (self.canRetry(self.key)) self.key else null;
 }
 
 /// Join a completed Admission before scheduling a pending same-original retry.
 pub fn advance(self: *Self) !End {
+    return self.advanceWithLaunch(launchRetry);
+}
+
+// The launch seam changes only the effect, not thread/completion authority.
+fn advanceWithLaunch(self: *Self, launch: *const fn (*Self) anyerror!void) !End {
     if (self.task.thread != null and self.task.completed()) return self.join();
     if (self.task.thread == null) if (self.retry) |requested| {
+        // Consume before launch: a failed start needs another explicit gesture.
         self.retry = null;
-        if (self.intent != null and self.state != .rejected and std.mem.eql(u8, &requested, &self.key))
-            try self.task.start(self.io, self, resend);
+        if (self.canRetry(requested)) try launch(self);
     };
     return .absent;
+}
+
+fn canRetry(self: *const Self, requested: [36]u8) bool {
+    return self.intent != null and self.state != .rejected and std.mem.eql(u8, &requested, &self.key);
+}
+
+fn launchRetry(self: *Self) !void {
+    try self.task.start(self.io, self, resend);
+}
+
+test "submission bounded gestures consume only the original and do not requeue failed launch" {
+    const Launch = struct {
+        fn fail(owner: *Self) !void {
+            try std.testing.expectEqual(State.unconfirmed, owner.view().?.state);
+            return error.LaunchFailed;
+        }
+    };
+    for (0..3) |kind| {
+        for (1..4) |gestures| {
+            errdefer std.debug.print("submission gestures: kind={d}, gestures={d}\n", .{ kind, gestures });
+            var input: Input = undefined;
+            input.init();
+            var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = "unused", .input = &input };
+            // An idle gesture has no authority over a future original.
+            try self.requestRecovery(null);
+            self.intent = if (kind == 0) .{ .message = input.submitText("B") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
+            self.key = @splat('B');
+            self.state = .unconfirmed;
+            self.publication = .published;
+            self.accepted = .{ .kind = .message, .key = @splat('A') };
+            try std.testing.expect(try self.advanceWithLaunch(Launch.fail) == .absent);
+            try std.testing.expectEqualSlices(u8, &@as([36]u8, @splat('B')), &self.recovery().saved.original.key);
+            for (0..gestures) |_| try self.requestRecovery(null);
+            try std.testing.expectError(error.OriginalBindingMismatch, self.requestRecovery(&self.accepted.?.key));
+            try std.testing.expectError(error.LaunchFailed, self.advanceWithLaunch(Launch.fail));
+            try std.testing.expect(try self.advanceWithLaunch(Launch.fail) == .absent);
+            try std.testing.expectEqual(State.unconfirmed, self.view().?.state);
+            // A stale queued B must not select replacement C, even if C is
+            // otherwise eligible. This injects stale authority, not a worker.
+            try self.requestRecovery(null);
+            self.key = @splat('C');
+            try std.testing.expect(try self.advanceWithLaunch(Launch.fail) == .absent);
+            try self.requestRecovery(&self.key);
+            try std.testing.expectError(error.LaunchFailed, self.advanceWithLaunch(Launch.fail));
+            self.state = .rejected;
+            try self.discardRejected();
+        }
+    }
+}
+
+test "submission bounded joined outcomes precede retry and retire original authority" {
+    const Worker = struct {
+        fn done(_: *anyopaque, _: *Task) !void {}
+        fn lost(_: *anyopaque, _: *Task) !void {
+            return error.ConnectionResetByPeer;
+        }
+        fn cancelled(_: *anyopaque, task: *Task) !void {
+            const deadline = std.Io.Clock.awake.now(task.io).nanoseconds + 5_000_000_000;
+            while (!task.cancellation.stopped.load(.acquire)) {
+                if (std.Io.Clock.awake.now(task.io).nanoseconds >= deadline) return error.TestCancellationDeadline;
+                std.Thread.yield() catch {};
+            }
+            return error.Cancelled;
+        }
+        fn forbidden(_: *Self) !void {
+            return error.UnexpectedRetry;
+        }
+    };
+    const Outcome = enum { accepted, rejected, conflict, lost, cancelled };
+    for (0..3) |kind| {
+        for (std.enums.values(Outcome)) |outcome| {
+            for (1..4) |gestures| {
+                errdefer std.debug.print("submission join: kind={d}, outcome={s}, gestures={d}\n", .{ kind, @tagName(outcome), gestures });
+                var input: Input = undefined;
+                input.init();
+                var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = "unused", .input = &input, .key = @splat('B'), .state = .unconfirmed, .publication = .published };
+                self.intent = if (kind == 0) .{ .message = input.submitText("original B") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
+                self.reply = .{ .status = 200, .target = if (kind == 0) .{ .message = .{ .bytes = 10, .digest = protocol.contentDigest("original B") } } else .{ .permission_decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } }, .answer = .{ .replayed = false, .result = switch (outcome) {
+                    .accepted => .{ .accepted = if (kind == 0) .{ .message = .{ .admission = 37 } } else .permission_decision },
+                    .rejected => .{ .rejected = .{} },
+                    else => .conflict,
+                } } };
+                try self.task.start(self.io, &self, switch (outcome) {
+                    .lost => Worker.lost,
+                    .cancelled => Worker.cancelled,
+                    else => Worker.done,
+                });
+                defer {
+                    self.cancel();
+                    _ = self.join();
+                    self.close();
+                }
+                for (0..gestures) |_| try self.requestRecovery(null);
+                if (outcome == .cancelled) {
+                    try std.testing.expect(try self.advanceWithLaunch(Worker.forbidden) == .absent);
+                    try std.testing.expect(self.retry != null);
+                }
+                self.cancel();
+                const deadline = std.Io.Clock.awake.now(self.io).nanoseconds + 6_000_000_000;
+                while (!self.task.completed()) {
+                    if (std.Io.Clock.awake.now(self.io).nanoseconds >= deadline) return error.TestCompletionDeadline;
+                    std.Thread.yield() catch {};
+                }
+                // advance must return the joined outcome, never launch first.
+                const end = try self.advanceWithLaunch(Worker.forbidden);
+                try std.testing.expect(self.task.thread == null);
+                try std.testing.expect(self.join() == .absent);
+                switch (outcome) {
+                    .accepted => {
+                        try std.testing.expect(end.accepted.confirmed);
+                        try std.testing.expect(self.view() == null);
+                        try std.testing.expect(self.retry == null);
+                        try std.testing.expectEqualSlices(u8, &@as([36]u8, @splat('B')), &self.recovery().accepted.key);
+                    },
+                    .rejected, .conflict => {
+                        try std.testing.expect(end == .rejected);
+                        // Rejection may retain the gesture until advance, but
+                        // must never launch or silently discard the original.
+                        try std.testing.expect(self.recovery().saved.rejected);
+                        try std.testing.expect(try self.advanceWithLaunch(Worker.forbidden) == .absent);
+                        try self.requestRecovery(null);
+                        try std.testing.expect(try self.advanceWithLaunch(Worker.forbidden) == .absent);
+                        try self.discardRejected();
+                        try std.testing.expect(self.retry == null);
+                    },
+                    .lost, .cancelled => {
+                        try std.testing.expectEqual(if (outcome == .lost) error.ConnectionResetByPeer else error.Cancelled, end.failed.err);
+                        try std.testing.expectEqual(State.unconfirmed, self.view().?.state);
+                        try std.testing.expect(self.retry != null);
+                        try std.testing.expectError(error.SubmissionUnresolved, self.discardRejected());
+                        try std.testing.expectError(error.UnexpectedRetry, self.advanceWithLaunch(Worker.forbidden));
+                        // Explicitly settle for replacement; failure itself is
+                        // not nonadmission and cannot release this original.
+                        self.state = .rejected;
+                        try self.discardRejected();
+                    },
+                }
+                // Release then replacement C: neither history nor B's gesture
+                // can cause a launch; fresh C recovery is still available.
+                self.intent = if (kind == 0) .{ .message = input.submitText("replacement C") } else .{ .decision = .{ .action = 20, .decision = if (kind == 1) .allow_once else .deny } };
+                self.key = @splat('C');
+                self.state = .unconfirmed;
+                self.publication = .published;
+                try std.testing.expect(try self.advanceWithLaunch(Worker.forbidden) == .absent);
+                try std.testing.expectEqualSlices(u8, &@as([36]u8, @splat('C')), &self.recovery().saved.original.key);
+                try std.testing.expectError(error.OriginalBindingMismatch, self.requestRecovery(&@as([36]u8, @splat('B'))));
+                try self.requestRecovery(null);
+                try std.testing.expectError(error.UnexpectedRetry, self.advanceWithLaunch(Worker.forbidden));
+                self.state = .rejected;
+                try self.discardRejected();
+            }
+        }
+    }
 }
 
 /// Local cancellation never sends a Host control or releases original intent.
