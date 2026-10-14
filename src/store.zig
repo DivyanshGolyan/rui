@@ -8,7 +8,7 @@ const tool_catalog = @import("tools.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 21;
+pub const schema_version: u32 = 22;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
@@ -381,6 +381,7 @@ pub const HistoricalContent = struct {
     length: u64,
     digest: [32]u8,
     private: bool = false,
+    item_identity: ?struct { kind: OutputItemKind, id_digest: [32]u8 } = null,
 
     fn belongsTo(self: HistoricalContent, view: *HistoricalView) bool {
         return self.view == view and view.active;
@@ -443,6 +444,7 @@ pub const HistoricalEntry = struct {
     position: u64,
     kind: HistoricalEntryKind,
     content: ?HistoricalContent = null,
+    requested_model: ?protocol.Bounded(protocol.max_model_bytes) = null,
 };
 
 pub const HistoricalToolResult = struct {
@@ -465,16 +467,73 @@ pub const HistoricalView = struct {
     active_tool_group_source_id: ?u64 = null,
     active_tool_group_after_ordinal: ?u64 = null,
     active_tool_group_count: u64 = 0,
+    outputs_validated: bool = false,
+    output_boundary: u64 = 0,
+    output_cursor: u64 = 0,
+    output_cursor_id: u64 = 0,
+    output_source: u64 = 0,
+    output_expected: u64 = 0,
+    output_count: u64 = 0,
+    output_previous_position: u64 = 0,
+    group_scan: GroupScan = .{},
+    next_tool_group_count: u64 = 0,
+    active_tool_group_expected: u64 = 0,
+
+    // One population cursor and one private-item validator, independent of
+    // group/call counts. No statement, blob handle or transaction survives a step.
+    const GroupScan = struct {
+        source: u64 = 0,
+        boundary: u64 = 0,
+        admission: u64 = 0,
+        expected_items: u64 = 0,
+        previous_position: u64 = 0,
+        item: u64 = 0,
+        calls: u64 = 0,
+        position: u64 = 0,
+        reader: ?ContentReader = null,
+        hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
+        validation: @import("provider_output.zig").ReplayValidationCursor = .{},
+        fields: @FieldType(protocol.ProposalMetadata, "fields") = undefined,
+    };
+
+    pub const EntryProgress = union(enum) { pending, ready: ?HistoricalEntry };
+
+    /// Charge discovery/classification items and private authentication bytes
+    /// to the same caller allowance. Pending exposes no storage-level state.
+    pub fn nextEntryStep(self: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !EntryProgress {
+        std.debug.assert(self.active and self.outputs_validated and self.active_tool_group_source_id == null);
+        if (bytes_left.* == 0 or items_left.* == 0) return .pending;
+        if (self.group_scan.reader == null) items_left.* -= 1;
+        return self.store.readHistoricalEntry(self, after_position, bytes_left, items_left) catch |err| switch (err) {
+            error.HistoricalPending => .pending,
+            else => return err,
+        };
+    }
 
     pub fn settings(self: *HistoricalView) !HistoricalSettings {
         std.debug.assert(self.active);
         return self.store.readHistoricalSettings(self);
     }
 
+    /// Validate at most one producing Operation or output item, releasing
+    /// Store custody between steps. Returns true after the complete population.
+    pub fn validateOutputsStep(self: *HistoricalView) !bool {
+        std.debug.assert(self.active);
+        return self.store.validateHistoricalOutputsStep(self);
+    }
+
     pub fn nextEntry(self: *HistoricalView, after_position: u64) !?HistoricalEntry {
         std.debug.assert(self.active);
         std.debug.assert(self.active_tool_group_source_id == null);
-        return self.store.readHistoricalEntry(self, after_position);
+        while (!try self.validateOutputsStep()) {}
+        while (true) {
+            var bytes: usize = 64 * 1024;
+            var items: usize = 1024;
+            switch (try self.nextEntryStep(after_position, &bytes, &items)) {
+                .pending => {},
+                .ready => |entry| return entry,
+            }
+        }
     }
 
     /// A tool-results entry activates one canonical group. Consume it fully
@@ -493,6 +552,7 @@ pub const HistoricalView = struct {
 
     pub fn close(self: *HistoricalView) void {
         std.debug.assert(self.active and self.readers == 0);
+        if (self.group_scan.reader) |*reader| reader.close();
         self.active = false;
     }
 
@@ -542,6 +602,9 @@ pub const HistoricalReader = struct {
     view: *HistoricalView,
     reference: HistoricalContent,
     active: bool = true,
+    hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
+    verified_position: u64 = 0,
+    verified: bool = false,
 
     fn usable(self: *const HistoricalReader) bool {
         return self.active and self.reference.belongsTo(self.view);
@@ -556,7 +619,36 @@ pub const HistoricalReader = struct {
 
     pub fn read(self: *HistoricalReader, start: u64, destination: []u8) !usize {
         std.debug.assert(self.usable());
-        return self.reader.read(start, destination);
+        const count = try self.reader.read(start, destination);
+        if (!self.verified) {
+            std.debug.assert(start == self.verified_position);
+            self.hash.update(destination[0..count]);
+            self.verified_position += count;
+            if (self.verified_position == self.reference.length) {
+                if (!std.mem.eql(u8, &self.hash.finalResult(), &self.reference.digest))
+                    return self.view.store.fenceReadFailure(error.CorruptStore);
+                self.verified = true;
+            }
+        }
+        return count;
+    }
+
+    pub fn authenticateItem(self: *HistoricalReader, validation: *const @import("provider_output.zig").ReplayValidationCursor) !void {
+        std.debug.assert(self.usable() and self.verified);
+        const identity = self.reference.item_identity orelse unreachable;
+        validation.authenticateIdentity(identity.kind, identity.id_digest) catch return self.malformed();
+    }
+
+    /// Reread only after the complete canonical content digest was verified.
+    pub fn readRange(self: *HistoricalReader, start: u64, destination: []u8) !usize {
+        std.debug.assert(self.usable() and self.verified);
+        return self.reader.readRange(start, destination);
+    }
+
+    /// Canonical documents passed syntax validation before acceptance.
+    pub fn malformed(self: *HistoricalReader) anyerror {
+        std.debug.assert(self.usable());
+        return self.view.store.fenceReadFailure(error.CorruptStore);
     }
 
     pub fn close(self: *HistoricalReader) void {
@@ -1398,6 +1490,24 @@ pub const Store = struct {
 
     pub fn open(io: std.Io, database_path: []const u8, selector: []const u8) !Store {
         return openWithOptions(io, database_path, selector, .{});
+    }
+
+    /// Test fixture for a historical producing binding unavailable through
+    /// today's immutable Session configuration admission. Requires a newer
+    /// current revision, leaving that revision and its frozen inputs intact.
+    pub fn setHistoricalModelForTesting(self: *Store, binding: AttemptBinding, model: []const u8) !void {
+        if (!@import("builtin").is_test) @compileError("test-only Store fixture");
+        var bounded: protocol.Bounded(protocol.max_model_bytes) = .{};
+        try bounded.set(model);
+        if (bounded.len == 0) return error.InvalidModel;
+        const statement = try prepare(self.database, "UPDATE session_revision SET model=?2 " ++
+            "WHERE (session_ref,revision)=(SELECT o.session_ref,o.settings_revision FROM model_operation o " ++
+            "JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1 AND o.settings_revision<s.revision)");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, binding.operation_id);
+        try bindText(statement, 2, model);
+        try expectDone(statement);
+        if (c.sqlite3_changes(self.database) != 1) return error.InvalidTestingRevision;
     }
 
     pub fn openWithOptions(
@@ -4987,18 +5097,91 @@ pub const Store = struct {
         };
     }
 
-    fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !?HistoricalEntry {
+    fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !HistoricalView.EntryProgress {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.readHistoricalEntryLocked(view, after_position) catch |err| switch (err) {
+        return .{ .ready = self.readHistoricalEntryLocked(view, after_position, bytes_left, items_left) catch |err| switch (err) {
+            error.StaleAttemptBinding, error.SupersededByControl, error.HistoricalPending => return err,
+            else => return self.fenceReadFailure(err),
+        } };
+    }
+
+    fn validateHistoricalOutputsStep(self: *Store, view: *HistoricalView) !bool {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.validateHistoricalOutputsStepLocked(view) catch |err| switch (err) {
             error.StaleAttemptBinding, error.SupersededByControl => err,
             else => self.fenceReadFailure(err),
         };
     }
 
-    fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64) !?HistoricalEntry {
+    // Select the producing Operation before its items, so even a completely
+    // missing output is detected. No statement or lock survives this one step.
+    fn validateHistoricalOutputsStepLocked(self: *Store, view: *HistoricalView) !bool {
         try self.validateCurrentAttempt(view.binding);
+        if (view.outputs_validated) return true;
+        if (view.output_boundary == 0) {
+            const boundary = try prepare(self.database, "SELECT current.admission_position " ++
+                "FROM model_operation current WHERE current.operation_id=?1");
+            defer _ = c.sqlite3_finalize(boundary);
+            try bindU64(boundary, 1, view.binding.operation_id);
+            if (c.sqlite3_step(boundary) != c.SQLITE_ROW) return error.CorruptStore;
+            view.output_boundary = try readNullableTokens(boundary, 0, false) orelse return error.CorruptStore;
+            return false;
+        }
+        if (view.output_source == 0) {
+            const source = try prepare(self.database, "SELECT source.operation_id,source.admission_position,source.output_item_count " ++
+                "FROM model_operation current JOIN model_operation source INDEXED BY model_operation_context_history ON source.session_ref=current.session_ref " ++
+                "WHERE current.operation_id=?1 AND (source.admission_position,source.operation_id)>(?2,?4) " ++
+                "AND source.admission_position<?3 AND source.resolution_code IN ('completed','continued','tool_calls') " ++
+                "ORDER BY source.admission_position,source.operation_id LIMIT 1");
+            defer _ = c.sqlite3_finalize(source);
+            try bindU64(source, 1, view.binding.operation_id);
+            try bindU64(source, 2, view.output_cursor);
+            try bindU64(source, 3, view.output_boundary);
+            try bindU64(source, 4, view.output_cursor_id);
+            const result = c.sqlite3_step(source);
+            if (result == c.SQLITE_DONE) {
+                view.outputs_validated = true;
+                return true;
+            }
+            if (result != c.SQLITE_ROW) return error.CorruptStore;
+            view.output_source = try readNullableTokens(source, 0, false) orelse return error.CorruptStore;
+            view.output_cursor = try readNullableTokens(source, 1, false) orelse return error.CorruptStore;
+            view.output_cursor_id = view.output_source;
+            view.output_expected = try readNullableTokens(source, 2, true) orelse return error.CorruptStore;
+            view.output_count = 0;
+            view.output_previous_position = 0;
+            return false;
+        }
+        const item = try prepare(self.database, "SELECT item.item_ordinal,item.session_position," ++
+            "item.session_ref=source.session_ref AND item.attempt_ordinal=source.attempt_ordinal " ++
+            "FROM model_operation source JOIN model_output_item item ON item.operation_id=source.operation_id " ++
+            "WHERE source.operation_id=?1 AND item.item_ordinal>=?2 ORDER BY item.item_ordinal LIMIT 1");
+        defer _ = c.sqlite3_finalize(item);
+        try bindU64(item, 1, view.output_source);
+        try bindU64(item, 2, view.output_count);
+        const result = c.sqlite3_step(item);
+        if (result == c.SQLITE_DONE) {
+            if (view.output_count != view.output_expected) return error.CorruptStore;
+            view.output_source = 0;
+            return false;
+        }
+        if (result != c.SQLITE_ROW) return error.CorruptStore;
+        const position = try readNullableTokens(item, 1, false) orelse return error.CorruptStore;
+        if (view.output_count >= view.output_expected or c.sqlite3_column_int64(item, 0) != view.output_count or
+            c.sqlite3_column_int(item, 2) != 1 or position <= view.output_cursor or position >= view.output_boundary or
+            (view.output_count != 0 and position != view.output_previous_position + 1)) return error.CorruptStore;
+        view.output_count += 1;
+        view.output_previous_position = position;
+        return false;
+    }
+
+    fn readHistoricalEntryLocked(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !?HistoricalEntry {
+        try self.validateCurrentAttempt(view.binding);
+        std.debug.assert(view.outputs_validated);
         var scan_tool_groups = !view.tool_group_initialized;
         if (view.tool_group_initialized and after_position < view.tool_group_scan_after) {
             view.tool_group_source_cursor = 0;
@@ -5013,27 +5196,36 @@ pub const Store = struct {
             }
         }
         if (scan_tool_groups) {
-            while (try self.readNextHistoricalToolGroup(view)) |group| {
+            view.tool_group_initialized = false;
+            if (try self.readNextHistoricalToolGroup(view, bytes_left, items_left)) |group| {
                 view.tool_group_source_cursor = group.source_operation_id;
                 if (group.entry.position > after_position) {
                     view.next_tool_group = group.entry;
                     view.next_tool_group_source_id = group.source_operation_id;
-                    break;
-                }
+                } else return error.HistoricalPending;
             }
             view.tool_group_initialized = true;
         }
         view.tool_group_scan_after = after_position;
         const statement = try prepare(
             self.database,
-            "SELECT position,kind,content_id FROM (" ++
-                "SELECT e.session_position AS position,e.entry_kind AS kind,e.content_id AS content_id " ++
+            "SELECT position,kind,content_id,model,provider,item_kind,item_id_digest,valid_owner FROM (" ++
+                "SELECT * FROM (SELECT e.session_position AS position,e.entry_kind AS kind,e.content_id AS content_id,NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,NULL AS valid_owner " ++
                 "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
                 "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
-                "AND e.entry_kind IN (1,2) UNION ALL " ++
-                "SELECT item.session_position AS position,3 AS kind,item.content_id AS content_id " ++
+                "AND e.entry_kind IN (1,2) ORDER BY e.session_position LIMIT 1) UNION ALL " ++
+                "SELECT * FROM (SELECT item.session_position AS position,3 AS kind,item.content_id AS content_id,r.model AS model,r.provider AS provider,item.item_kind,item.item_id_digest," ++
+                "owner.resolution_code IN ('completed','continued','tool_calls') AND owner.session_ref=item.session_ref " ++
+                "AND owner_turn.session_ref=item.session_ref " ++
+                "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
+                "AND owner.admission_position<current.admission_position AND " ++
+                "(item.item_kind!=3 OR owner.resolution_code='tool_calls') AND " ++
+                "((owner.resolution_code='tool_calls')=EXISTS(SELECT 1 FROM model_tool_call call WHERE call.operation_id=owner.operation_id)) AS valid_owner " ++
                 "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
-                "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position" ++
+                "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
+                "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
+                "LEFT JOIN session_revision r ON r.session_ref=owner.session_ref AND r.revision=owner.settings_revision " ++
+                "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position ORDER BY item.session_position LIMIT 1)" ++
                 ") ORDER BY position LIMIT 1",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -5053,14 +5245,31 @@ pub const Store = struct {
             else => return error.CorruptStore,
         };
         const metadata = try self.readContentMetadata(content_id);
+        var requested_model: ?protocol.Bounded(protocol.max_model_bytes) = null;
+        if (kind == .provider_output) {
+            // Keep contradictory owners visible instead of filtering their
+            // output away. Accepted-population validation cannot see failed
+            // owners; every selected item must independently certify one.
+            if (c.sqlite3_column_int(statement, 7) != 1) return error.CorruptStore;
+            var model: protocol.Bounded(protocol.max_model_bytes) = .{};
+            try readText(statement, 3, &model);
+            if (model.len == 0) return error.CorruptStore;
+            _ = try readProvider(statement, 4);
+            requested_model = model;
+        }
         const ordinary = HistoricalEntry{
             .position = @intCast(position),
             .kind = kind,
+            .requested_model = requested_model,
             .content = .{
                 .view = view,
                 .length = metadata.length,
                 .digest = metadata.digest,
                 .private = kind == .provider_output,
+                .item_identity = if (kind == .provider_output) .{
+                    .kind = std.enums.fromInt(OutputItemKind, c.sqlite3_column_int(statement, 5)) orelse return error.CorruptStore,
+                    .id_digest = try readDigest(statement, 6),
+                } else null,
             },
         };
         if (view.next_tool_group) |group| {
@@ -5075,6 +5284,7 @@ pub const Store = struct {
         view.active_tool_group_source_id = view.next_tool_group_source_id orelse return error.CorruptStore;
         view.active_tool_group_after_ordinal = null;
         view.active_tool_group_count = 0;
+        view.active_tool_group_expected = view.next_tool_group_count;
         return entry;
     }
 
@@ -5086,14 +5296,105 @@ pub const Store = struct {
     fn readNextHistoricalToolGroup(
         self: *Store,
         view: *HistoricalView,
+        bytes_left: *usize,
+        items_left: *usize,
     ) !?HistoricalToolGroup {
+        const scan = &view.group_scan;
+        if (scan.reader) |*reader| {
+            const Source = struct {
+                storage: *Store,
+                scan: *HistoricalView.GroupScan,
+
+                pub fn contentLength(source: @This()) u64 {
+                    return source.scan.reader.?.reference.length;
+                }
+
+                pub fn readContent(source: @This(), offset: u64, destination: []u8) !usize {
+                    const count = try source.storage.readOwnedContentLocked(&source.scan.reader.?, offset, destination);
+                    source.scan.hash.update(destination[0..count]);
+                    if (offset + count == source.contentLength() and
+                        !std.mem.eql(u8, &source.scan.hash.finalResult(), &source.scan.reader.?.reference.digest)) return error.CorruptStore;
+                    return count;
+                }
+            };
+            const authenticated = scan.validation.advance(Source{ .storage = self, .scan = scan }, bytes_left, items_left) catch |err| switch (err) {
+                // This scan authenticates canonical calls. Preparation owns
+                // compatibility of the complete selected provider recipe.
+                error.ContinuationUnavailable => true,
+                else => return error.CorruptStore,
+            };
+            if (!authenticated)
+                return error.HistoricalPending;
+            try scan.validation.authenticateIdentity(.function_call, scan.fields[0].digest);
+            try scan.validation.authenticate(scan.fields);
+            reader.close();
+            scan.reader = null;
+            return error.HistoricalPending;
+        }
+        if (scan.source != 0) {
+            // Walk the immutable item population, not just surviving call rows.
+            // One item/classification per step also detects wholly missing calls.
+            const item = try prepare(self.database, "SELECT item.item_ordinal,item.item_kind,item.session_ref,item.session_position,item.content_id," ++
+                "item.session_ref=source.session_ref AND item.attempt_ordinal=source.attempt_ordinal " ++
+                "FROM model_output_item item JOIN model_operation source ON source.operation_id=item.operation_id " ++
+                "WHERE item.operation_id=?1 AND item.item_ordinal>=?2 ORDER BY item.item_ordinal LIMIT 1");
+            defer _ = c.sqlite3_finalize(item);
+            try bindU64(item, 1, scan.source);
+            try bindU64(item, 2, scan.item);
+            const result = c.sqlite3_step(item);
+            if (result == c.SQLITE_DONE) {
+                const extra = try prepare(self.database, "SELECT call_ordinal FROM model_tool_call WHERE operation_id=?1 AND call_ordinal>=?2 ORDER BY call_ordinal LIMIT 1");
+                defer _ = c.sqlite3_finalize(extra);
+                try bindU64(extra, 1, scan.source);
+                try bindU64(extra, 2, scan.calls);
+                if (scan.item != scan.expected_items or scan.calls == 0 or scan.position == 0 or scan.position >= scan.boundary or c.sqlite3_step(extra) != c.SQLITE_DONE)
+                    return error.CorruptStore;
+                const group = HistoricalToolGroup{ .entry = .{ .position = scan.position, .kind = .tool_results }, .source_operation_id = scan.source };
+                view.next_tool_group_count = scan.calls;
+                scan.source = 0;
+                return group;
+            }
+            if (result != c.SQLITE_ROW or c.sqlite3_column_int64(item, 0) != scan.item) return error.CorruptStore;
+            const position = try readNullableTokens(item, 3, false) orelse return error.CorruptStore;
+            if (scan.item >= scan.expected_items or c.sqlite3_column_int(item, 5) != 1 or
+                position <= scan.admission or position >= scan.boundary or
+                (scan.item != 0 and position != scan.previous_position + 1)) return error.CorruptStore;
+            scan.previous_position = position;
+            scan.item += 1;
+            if (c.sqlite3_column_int(item, 1) != 3) return error.HistoricalPending;
+            var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+            try readText(item, 2, &session);
+            const proposal = try self.proposalLocked(session.slice(), position, false);
+            if (proposal.metadata.operation != scan.source or proposal.metadata.call_ordinal != scan.calls) return error.CorruptStore;
+            const outcome = try prepare(self.database, "SELECT coalesce(call.acceptance_position,action.acceptance_position)," ++
+                "coalesce(call.rejection_content_id,action.resolution_content_id)," ++
+                "CASE WHEN call.rejection_code IS NOT NULL OR (action.resolution_code IS NOT NULL AND " ++
+                "action.session_ref=source.session_ref AND action.tool_kind=call.action_kind) THEN 1 ELSE 0 END " ++
+                "FROM model_tool_call call JOIN model_operation source ON source.operation_id=call.operation_id " ++
+                "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
+                "WHERE call.operation_id=?1 AND call.call_ordinal=?2");
+            defer _ = c.sqlite3_finalize(outcome);
+            try bindU64(outcome, 1, scan.source);
+            try bindU64(outcome, 2, scan.calls);
+            if (c.sqlite3_step(outcome) != c.SQLITE_ROW or c.sqlite3_column_int(outcome, 2) != 1) return error.CorruptStore;
+            const accepted = try readNullablePositiveI64(outcome, 0) orelse return error.CorruptStore;
+            _ = try self.readPublicContentMetadata(try readNullablePositiveI64(outcome, 1) orelse return error.CorruptStore);
+            scan.position = @max(scan.position, @as(u64, @intCast(accepted)));
+            scan.calls += 1;
+            scan.fields = proposal.metadata.fields;
+            scan.validation = .{};
+            scan.hash = protocol.contentHasher();
+            const metadata = try self.readContentMetadata(try readNullablePositiveI64(item, 4) orelse return error.CorruptStore);
+            scan.reader = try self.openContentIdentityLocked(.{ .length = metadata.length, .digest = metadata.digest }, true);
+            return error.HistoricalPending;
+        }
         const statement = try prepare(
             self.database,
-            "SELECT source.operation_id,current.admission_position FROM model_operation current " ++
+            "SELECT source.operation_id,current.admission_position,source.resolution_code='tool_calls',source.admission_position,source.output_item_count FROM model_operation current " ++
                 "JOIN model_operation source INDEXED BY model_operation_session_history " ++
                 "ON source.session_ref=current.session_ref WHERE current.operation_id=?1 " ++
                 "AND source.operation_id>?2 AND source.operation_id<current.operation_id " ++
-                "AND source.resolution_code='tool_calls' ORDER BY source.operation_id LIMIT 1",
+                "ORDER BY source.operation_id LIMIT 1",
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, view.binding.operation_id);
@@ -5104,16 +5405,19 @@ pub const Store = struct {
         const source_operation_id = c.sqlite3_column_int64(statement, 0);
         const admission_position = c.sqlite3_column_int64(statement, 1);
         if (source_operation_id <= 0 or admission_position <= 0) return error.CorruptStore;
-        const facts = try self.readToolOutcomeFacts(@intCast(source_operation_id), true, true);
-        const position = facts.position orelse return error.CorruptStore;
-        if (position >= admission_position) return error.CorruptStore;
-        return .{
-            .entry = .{
-                .position = position,
-                .kind = .tool_results,
-            },
-            .source_operation_id = @intCast(source_operation_id),
-        };
+        if (c.sqlite3_column_int(statement, 2) != 1) {
+            view.tool_group_source_cursor = @intCast(source_operation_id);
+            return error.HistoricalPending;
+        }
+        scan.source = @intCast(source_operation_id);
+        scan.boundary = @intCast(admission_position);
+        scan.admission = try readNullableTokens(statement, 3, false) orelse return error.CorruptStore;
+        scan.expected_items = try readNullableTokens(statement, 4, false) orelse return error.CorruptStore;
+        scan.previous_position = 0;
+        scan.item = 0;
+        scan.calls = 0;
+        scan.position = 0;
+        return error.HistoricalPending;
     }
 
     fn readHistoricalToolResult(
@@ -5158,8 +5462,7 @@ pub const Store = struct {
         if (after_call_ordinal) |ordinal| try bindU64(statement, 3, ordinal);
         const result = c.sqlite3_step(statement);
         if (result == c.SQLITE_DONE) {
-            const facts = try self.readToolOutcomeFacts(source_operation_id, true, true);
-            if (view.active_tool_group_count != facts.call_count) return error.CorruptStore;
+            if (view.active_tool_group_count != view.active_tool_group_expected) return error.CorruptStore;
             view.active_tool_group_source_id = null;
             view.active_tool_group_after_ordinal = null;
             view.active_tool_group_count = 0;
@@ -5171,6 +5474,8 @@ pub const Store = struct {
         const output_content_id = c.sqlite3_column_int64(statement, 2);
         const admission_position = c.sqlite3_column_int64(statement, 3);
         if (call_ordinal < 0 or call_id_content_id <= 0 or output_content_id <= 0 or admission_position <= 0)
+            return error.CorruptStore;
+        if (call_ordinal != view.active_tool_group_count or view.active_tool_group_count >= view.active_tool_group_expected)
             return error.CorruptStore;
         const call_id = try self.readContentMetadata(call_id_content_id);
         const output = try self.readContentMetadata(output_content_id);
@@ -5667,7 +5972,7 @@ pub const Store = struct {
         {
             const update = try prepare(
                 self.database,
-                "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,body_model=?5,openai_model=?6,x_openai_model=?7,request_id=?8,usage_content_id=?9 " ++
+                "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,body_model=?5,openai_model=?6,x_openai_model=?7,request_id=?8,usage_content_id=?9,output_item_count=?11 " ++
                     "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?10",
             );
             defer _ = c.sqlite3_finalize(update);
@@ -5681,6 +5986,7 @@ pub const Store = struct {
             try bindOptionalText(update, 8, output.request_id.slice());
             try bindNullableI64(update, 9, usage_id);
             try bindU64(update, 10, binding.attempt_ordinal);
+            try bindU64(update, 11, output.item_count);
             try expectDone(update);
             if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
         }
@@ -6763,6 +7069,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ settings_revision INTEGER NOT NULL CHECK(settings_revision>0),
         \\ input_cutoff INTEGER NOT NULL CHECK(input_cutoff>0),
         \\ admission_position INTEGER NOT NULL CHECK(admission_position>0),
+        \\ output_item_count INTEGER CHECK(output_item_count IS NULL OR output_item_count>=0),
         \\ attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal>0),
         \\ allowance_used INTEGER NOT NULL CHECK(allowance_used BETWEEN 1 AND 4),
         \\ uncertain INTEGER NOT NULL CHECK(uncertain IN (0,1)),
@@ -6887,6 +7194,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0;
         \\CREATE INDEX model_operation_session_history ON model_operation(session_ref,operation_id);
         \\CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id);
+        \\CREATE INDEX model_operation_context_history ON model_operation(session_ref,admission_position) WHERE resolution_code IN ('completed','continued','tool_calls');
         \\CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position);
         \\CREATE INDEX model_output_history ON model_output_item(session_ref,session_position);
         \\CREATE INDEX turn_session_latest ON turn(session_ref,turn_id DESC);
@@ -6909,7 +7217,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','session_stop_exclusion','action_operation_session_order','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','conversation_entry_history','model_output_history','turn_session_latest')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','session_stop_exclusion','action_operation_session_order','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','model_operation_context_history','conversation_entry_history','model_output_history','turn_session_latest')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -7211,6 +7519,14 @@ fn readNullablePositiveI64(statement: *c.sqlite3_stmt, index: c_int) !?i64 {
     return value;
 }
 
+fn readNullableTokens(statement: *c.sqlite3_stmt, index: c_int, allow_zero: bool) !?u64 {
+    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return null;
+    if (c.sqlite3_column_type(statement, index) != c.SQLITE_INTEGER) return error.CorruptStore;
+    const value = c.sqlite3_column_int64(statement, index);
+    if (value < 0 or (!allow_zero and value == 0)) return error.CorruptStore;
+    return @intCast(value);
+}
+
 fn testingStore(tmp: *std.testing.TmpDir, io: std.Io) !Store {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(io, &root_buffer);
@@ -7430,6 +7746,7 @@ const TestingCall = struct {
     decoded_call_id: []const u8,
     encoded_arguments: []const u8,
     decoded_arguments: []const u8,
+    controls: []const u8 = "",
 };
 
 fn settleCallsForTesting(
@@ -7519,7 +7836,9 @@ fn settleCallsForTestingWithFaults(
             .decoded_length = call.decoded_arguments.len,
             .content_digest = protocol.contentDigest(call.decoded_arguments),
         });
-        try source_writer.writeAll("\"}");
+        try source_writer.writeAll("\"");
+        try source_writer.writeAll(call.controls);
+        try source_writer.writeAll("}");
         offset = source_writer.end;
         try metadata.append(.{
             .tag = .item,
@@ -9476,6 +9795,347 @@ test "complete historical tool-result traversal scales with groups and calls" {
     try std.testing.expect(more_groups < baseline * 7);
     try std.testing.expect(more_calls > call_baseline);
     try std.testing.expect(more_calls < call_baseline * 8);
+}
+
+test "historical preparation yields group populations and cancels proposal authentication" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "bounded-config", "direct/bounded");
+    try submitTestMessage(&storage, &tmp, "bounded-input", "bounded-input", "direct/bounded", "tools");
+    var binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var calls: [16]TestingCall = undefined;
+    var ids: [16][32]u8 = undefined;
+    const arguments: [3072]u8 = @splat('x');
+    for (&calls, 0..) |*call, i| {
+        const id = try std.fmt.bufPrint(&ids[i], "bounded-{d}", .{i});
+        call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = &arguments, .decoded_arguments = &arguments };
+    }
+    for (0..8) |i| {
+        var prefix: [32]u8 = undefined;
+        try settleCallsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&prefix, "bounded-{d}", .{i}), &calls);
+        binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    }
+    // An after-position covering every group must not drain discovery in one
+    // call. Closing in the middle of private validation releases its reader.
+    {
+        var view = try storage.openHistoricalView(binding);
+        while (!try view.validateOutputsStep()) {}
+        while (view.group_scan.reader == null) {
+            var bytes: usize = 7;
+            var items: usize = 1;
+            try std.testing.expect(try view.nextEntryStep(view.output_boundary, &bytes, &items) == .pending);
+        }
+        var bytes: usize = 7;
+        var items: usize = 1;
+        try std.testing.expect(try view.nextEntryStep(view.output_boundary, &bytes, &items) == .pending);
+        const closes = storage.testing_content_work.closes.load(.monotonic);
+        view.close();
+        try std.testing.expectEqual(closes + 1, storage.testing_content_work.closes.load(.monotonic));
+    }
+    var view = try storage.openHistoricalView(binding);
+    defer view.close();
+    while (!try view.validateOutputsStep()) {}
+    var charged: u64 = 0;
+    var turns: usize = 0;
+    while (true) {
+        turns += 1;
+        try std.testing.expect(turns < 200000);
+        const closes = storage.testing_content_work.closes.load(.monotonic);
+        var bytes: usize = 127;
+        var items: usize = 3;
+        const progress = try view.nextEntryStep(view.output_boundary, &bytes, &items);
+        charged += 127 - bytes;
+        try std.testing.expect(storage.testing_content_work.closes.load(.monotonic) - closes <= 1);
+        switch (progress) {
+            .pending => {},
+            .ready => |entry| {
+                try std.testing.expect(entry == null);
+                break;
+            },
+        }
+    }
+    try std.testing.expect(charged >= 8 * calls.len * arguments.len);
+    try std.testing.expect(turns > charged / 127);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "historical preparation rejects missing extra and reordered sibling classifications incrementally" {
+    {
+        cases: for ([_][:0]const u8{
+            "UPDATE model_tool_call SET call_ordinal=99 WHERE call_ordinal=0; UPDATE model_tool_call SET call_ordinal=0 WHERE call_ordinal=1; UPDATE model_tool_call SET call_ordinal=1 WHERE call_ordinal=99",
+            "DELETE FROM model_tool_call WHERE call_ordinal=1",
+            "UPDATE model_output_item SET item_kind=1 WHERE item_ordinal=1",
+            "DELETE FROM model_output_item WHERE item_ordinal=1; DELETE FROM model_tool_call WHERE call_ordinal=1",
+            "DELETE FROM model_output_item WHERE operation_id IN (SELECT operation_id FROM model_tool_call); DELETE FROM model_tool_call",
+            "UPDATE model_tool_call SET arguments_content_id=name_content_id,field_metadata=CAST(substr(field_metadata,1,120)||substr(field_metadata,41,40) AS BLOB)",
+            "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1",
+        }) |fault| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "sibling-config", "direct/sibling");
+            try submitTestMessage(&storage, &tmp, "sibling-input", "sibling-input", "direct/sibling", "tools");
+            const source = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{
+                .{ .item_id = "a", .name = "unknown", .encoded_call_id = "a", .decoded_call_id = "a", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                .{ .item_id = "b", .name = "unknown", .encoded_call_id = "b", .decoded_call_id = "b", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            };
+            try settleCallsForTesting(&storage, &tmp, source, "sibling-output", &calls);
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try exec(storage.database, "PRAGMA foreign_keys=OFF");
+            try exec(storage.database, fault);
+            try exec(storage.database, "PRAGMA foreign_keys=ON");
+            var view = try storage.openHistoricalView(next);
+            defer view.close();
+            while (!(view.validateOutputsStep() catch |err| {
+                try std.testing.expectEqual(error.CorruptStore, err);
+                try std.testing.expect(storage.isFenced());
+                continue :cases;
+            })) {}
+            while (true) {
+                var bytes: usize = 1;
+                var items: usize = 1;
+                _ = view.nextEntryStep(0, &bytes, &items) catch |err| {
+                    try std.testing.expectEqual(error.CorruptStore, err);
+                    break;
+                };
+                if (view.tool_group_initialized) return error.MissingCorruptionFailure;
+            }
+            try std.testing.expect(storage.isFenced());
+        }
+    }
+}
+
+test "historical accepted assistant output completeness and provenance fence reads" {
+    const Incompatibility = enum { none, model, reasoning, answer };
+    for ([_]struct { fault: ?[:0]const u8 = null, incompatible: Incompatibility = .none, tied_owners: bool = false, failure: anyerror = error.CorruptStore }{
+        .{ .tied_owners = true, .fault = "DELETE FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item)" },
+        .{ .tied_owners = true, .fault = "UPDATE model_operation SET output_item_count=output_item_count+1 WHERE operation_id=(SELECT max(operation_id) FROM model_output_item)" },
+        .{ .tied_owners = true, .fault = "UPDATE model_operation SET output_item_count=output_item_count-1 WHERE operation_id=(SELECT max(operation_id) FROM model_output_item)" },
+        .{ .tied_owners = true, .fault = "DELETE FROM model_output_item WHERE operation_id=(SELECT min(operation_id) FROM model_output_item)" },
+        .{ .tied_owners = true, .fault = "UPDATE model_operation SET output_item_count=output_item_count+1 WHERE operation_id=(SELECT min(operation_id) FROM model_output_item)" },
+        .{ .tied_owners = true, .fault = "UPDATE model_operation SET output_item_count=output_item_count-1 WHERE operation_id=(SELECT min(operation_id) FROM model_output_item)" },
+        .{ .fault = "DELETE FROM model_output_item" },
+        .{ .fault = "DELETE FROM model_output_item WHERE item_ordinal=1" },
+        .{ .fault = "UPDATE model_output_item SET item_ordinal=9 WHERE item_ordinal=1" },
+        .{ .fault = "UPDATE model_output_item SET session_position=session_position+100 WHERE item_ordinal=1" },
+        .{ .fault = "UPDATE model_output_item SET attempt_ordinal=attempt_ordinal+1" },
+        .{ .fault = "UPDATE model_output_item SET session_ref='foreign'" },
+        .{ .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1" },
+        .{ .fault = "UPDATE model_output_item SET content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=1) WHERE item_ordinal=0" },
+        .{ .fault = "UPDATE model_output_item SET content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=0) WHERE item_ordinal=1" },
+        .{ .fault = "UPDATE model_output_item SET item_kind=2 WHERE item_ordinal=0" },
+        .{ .fault = "UPDATE model_output_item SET item_kind=1 WHERE item_ordinal=1" },
+        .{ .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=0" },
+        .{ .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=1" },
+        .{ .incompatible = .reasoning, .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=1)" },
+        .{ .incompatible = .reasoning, .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=1" },
+        .{ .incompatible = .answer, .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=0" },
+        .{ .incompatible = .model, .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=0)" },
+        .{ .fault = "UPDATE model_operation SET resolution_code='failed' WHERE output_item_count IS NOT NULL" },
+        .{ .fault = "UPDATE model_operation SET resolution_code='future' WHERE output_item_count IS NOT NULL" },
+        .{ .fault = "UPDATE model_operation SET resolution_code='tool_calls' WHERE output_item_count IS NOT NULL" },
+        .{ .fault = "UPDATE turn SET session_ref='foreign' WHERE turn_id=(SELECT turn_id FROM model_operation WHERE output_item_count IS NOT NULL)" },
+        .{ .incompatible = .reasoning, .failure = error.ContinuationUnavailable },
+        .{ .incompatible = .answer, .failure = error.ContinuationUnavailable },
+        .{ .incompatible = .model, .failure = error.ContinuationUnavailable },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try configureTestSession(&storage, "output-config", "direct/output");
+        try submitTestMessage(&storage, &tmp, "output-input", "output-input", "direct/output", "first");
+        var source_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const reasoning = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}";
+        const answer = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}";
+        const sse = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ reasoning ++ "}\n\n" ++
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ answer ++ "}\n\n" ++
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n";
+        const source = try tmp.dir.createFile(std.testing.io, "output-source", .{ .read = true });
+        defer source.close(std.testing.io);
+        try source.writeStreamingAll(std.testing.io, sse);
+        var root: [protocol.max_store_bytes]u8 = undefined;
+        const length = try tmp.dir.realPath(std.testing.io, &root);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..length], "output-metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
+        defer metadata.deinit();
+        const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, .{});
+        for (0..@as(usize, if (case.tied_owners) 2 else 1)) |index| {
+            if (index != 0) {
+                try submitTestMessage(&storage, &tmp, "output-second", "output-second", "direct/output", "second");
+                source_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            }
+            try storage.settleModelSuccess(source_binding, &.{
+                .source = source,
+                .source_length = sse.len,
+                .metadata = metadata.file,
+                .item_count = validated.item_count,
+                .call_count = validated.call_count,
+                .answer_length = validated.answer_length,
+                .answer_digest = validated.answer_digest,
+                .response_id = validated.evidence.response_id,
+                .body_model = .{},
+                .openai_model = .{},
+                .x_openai_model = .{},
+                .request_id = .{},
+            }, .{});
+        }
+        try configureTestSession(&storage, "output-reconfigure", "direct/output");
+        try submitTestMessage(&storage, &tmp, "output-next", "output-next", "direct/output", "next");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        switch (case.incompatible) {
+            .none => {},
+            .model => try storage.setHistoricalModelForTesting(source_binding, "different-model"),
+            .reasoning, .answer => {
+                // Preserve canonical content integrity and certified identity;
+                // only current adapter compatibility changes in this sibling.
+                const bytes = if (case.incompatible == .reasoning)
+                    "{\"type\":\"reasoning\",\"id\":\"r\"}"
+                else
+                    "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"}]}";
+                const update = try prepare(storage.database, "UPDATE content SET payload=?1,byte_length=?2,digest=?3 " ++
+                    "WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=?4)");
+                defer _ = c.sqlite3_finalize(update);
+                try bindBlob(update, 1, bytes);
+                try bindU64(update, 2, bytes.len);
+                try bindBlob(update, 3, &protocol.contentDigest(bytes));
+                try bindU64(update, 4, if (case.incompatible == .reasoning) 0 else 1);
+                try expectDone(update);
+            },
+        }
+        try exec(storage.database, "PRAGMA foreign_keys=OFF");
+        if (case.tied_owners) try exec(storage.database, "UPDATE model_operation SET admission_position=" ++
+            "(SELECT min(admission_position) FROM model_operation WHERE output_item_count IS NOT NULL) WHERE output_item_count IS NOT NULL");
+        if (case.fault) |fault| try exec(storage.database, fault);
+        try exec(storage.database, "PRAGMA foreign_keys=ON");
+        var preparation: @import("model_adapter.zig").Preparation = undefined;
+        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        defer if (preparation.active) preparation.cancel();
+        while (true) {
+            var progress = preparation.advance(7, 2);
+            switch (progress) {
+                .pending => {},
+                .failed => |err| {
+                    try std.testing.expectEqual(case.failure, err);
+                    break;
+                },
+                .prepared => |*request| {
+                    request.deinit();
+                    return error.MissingCorruptionFailure;
+                },
+            }
+        }
+        try std.testing.expectEqual(case.failure == error.CorruptStore, storage.isFenced());
+        preparation.cancel();
+        try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+    }
+}
+
+test "historical preparation keeps incompatible authenticated calls distinct from corruption" {
+    for ([_]struct { controls: []const u8, fault: ?[:0]const u8 = null, failure: anyerror, incompatible_last: bool = false }{
+        .{ .controls = ",\"caller\":{\"type\":\"future\"}", .failure = error.ContinuationUnavailable },
+        .{ .controls = ",\"namespace\":\"future\"", .failure = error.ContinuationUnavailable },
+        .{ .controls = ",\"caller\":{\"type\":\"future\"},\"late\":[0,]", .failure = error.CorruptStore },
+        .{ .controls = ",\"caller\":{\"type\":\"future\"}", .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1", .failure = error.CorruptStore },
+        .{ .controls = ",\"namespace\":\"future\"", .fault = "UPDATE model_tool_call SET arguments_content_id=name_content_id,field_metadata=CAST(substr(field_metadata,1,120)||substr(field_metadata,41,40) AS BLOB)", .failure = error.CorruptStore },
+        .{ .controls = ",\"status\":\"future\",\"arguments\":\"{}\"", .failure = error.CorruptStore },
+        .{ .controls = ",\"status\":\"future\",\"name\":\"unknown\"", .failure = error.CorruptStore },
+        .{ .controls = ",\"namespace\":\"future\"", .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=1)", .failure = error.CorruptStore },
+        .{ .controls = ",\"namespace\":\"future\"", .fault = "UPDATE model_tool_call SET arguments_content_id=name_content_id,field_metadata=CAST(substr(field_metadata,1,120)||substr(field_metadata,41,40) AS BLOB) WHERE call_ordinal=1", .failure = error.CorruptStore },
+        .{ .controls = ",\"namespace\":\"future\"", .incompatible_last = true, .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=0", .failure = error.CorruptStore },
+        .{ .controls = "", .fault = "UPDATE model_operation SET resolution_code='completed' WHERE output_item_count IS NOT NULL", .failure = error.CorruptStore },
+        .{ .controls = "", .fault = "UPDATE model_operation SET resolution_code='continued' WHERE output_item_count IS NOT NULL", .failure = error.CorruptStore },
+        .{ .controls = "", .fault = "UPDATE model_operation SET resolution_code='failed' WHERE output_item_count IS NOT NULL", .failure = error.CorruptStore },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try configureTestSession(&storage, "incompatible-config", "direct/incompatible");
+        try submitTestMessage(&storage, &tmp, "incompatible-input", "incompatible-input", "direct/incompatible", "tools");
+        const source = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = [_]TestingCall{
+            .{ .item_id = "a", .name = "unknown", .encoded_call_id = "a", .decoded_call_id = "a", .encoded_arguments = "{}", .decoded_arguments = "{}", .controls = if (case.incompatible_last) "" else case.controls },
+            .{ .item_id = "b", .name = "unknown", .encoded_call_id = "b", .decoded_call_id = "b", .encoded_arguments = "{}", .decoded_arguments = "{}", .controls = if (case.incompatible_last) case.controls else "" },
+        };
+        try settleCallsForTesting(&storage, &tmp, source, "incompatible-output", &calls);
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        if (case.fault) |fault| try exec(storage.database, fault);
+        var root: [protocol.max_store_bytes]u8 = undefined;
+        const length = try tmp.dir.realPath(std.testing.io, &root);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: @import("model_adapter.zig").Preparation = undefined;
+        try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        defer if (preparation.active) preparation.cancel();
+        while (true) {
+            var progress = preparation.advance(1, 1);
+            switch (progress) {
+                .pending => {},
+                .failed => |err| {
+                    try std.testing.expectEqual(case.failure, err);
+                    break;
+                },
+                .prepared => |*request| {
+                    request.deinit();
+                    return error.MissingCompatibilityFailure;
+                },
+            }
+        }
+        try std.testing.expectEqual(case.failure == error.CorruptStore, storage.isFenced());
+        preparation.cancel();
+        try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+}
+
+test "historical accepted output selection work excludes failed Operation population" {
+    const Measure = struct {
+        steps: u64 = 0,
+
+        fn progress(context: ?*anyopaque) callconv(.c) c_int {
+            const counter: *@This() = @ptrCast(@alignCast(context orelse return 1));
+            counter.steps += 1;
+            return 0;
+        }
+
+        fn run(population: usize) !u64 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "selection-config", "direct/selection");
+            try submitTestMessage(&storage, &tmp, "selection-input", "selection-input", "direct/selection", "retain");
+            const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try exec(storage.database, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL");
+            const insert = try prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
+                "SELECT value+1 FROM sequence WHERE value<?1) " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position," ++
+                "attempt_ordinal,allowance_used,uncertain,resolution_code) " ++
+                "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value," ++
+                "1,1,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+            defer _ = c.sqlite3_finalize(insert);
+            try bindU64(insert, 1, population);
+            try bindU64(insert, 2, current.operation_id);
+            try expectDone(insert);
+            var view = try storage.openHistoricalView(current);
+            defer view.close();
+            var measured: @This() = .{};
+            c.sqlite3_progress_handler(storage.database, 1, progress, &measured);
+            defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+            while (!try view.validateOutputsStep()) {}
+            return measured.steps;
+        }
+    };
+    const small = try Measure.run(8);
+    const large = try Measure.run(1024);
+    try std.testing.expect(large <= small + 100);
 }
 
 test "Current report work is independent of terminal tool history" {
