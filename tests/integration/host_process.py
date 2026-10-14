@@ -32,9 +32,13 @@ STDERR_TAIL_LIMIT = 16 * 1024
 # capture entry and Bash handoff. No release is filtered out by request kind.
 # control: at most 50 inspection attempts (capture + gate), four model owners
 # (ten selected phases), three controls (hint + timing), two boundaries.
-# control_peers: 100 caller-issued numbered exchanges, each with start/release
-# and at most two inspection/control phases; four model owners with ten phases,
-# two lifecycle boundaries, and eight separately issued unnumbered releases.
+# control_peers: gated contention owns four 8s/25ms observation polls (321 each,
+# conservatively including a boundary probe), fifty total inspections, and six
+# setup/control exchanges. This exceeds real contention (2*321+38), delivery
+# (321+21), capacity (37), admission (11), and delivery restart (2).
+# Each exchange has start/release and at most two inspection/control phases;
+# four model owners have ten phases, plus two lifecycle boundaries and eight
+# separately issued unnumbered releases. These are test-only retained records.
 # PeerCensus enforces issuance bounds before traffic, not on received records.
 # dispatch: seven controls with queued/acquired/released endpoints; the first
 # rollback or preparation advance per separately observed Host, not retry history.
@@ -46,10 +50,11 @@ STDERR_TAIL_LIMIT = 16 * 1024
 # endpoints each. Inspections: three 8s polls, one 15s drain, one 5s
 # emergency drain (25ms intervals, including final probes), six fixed reads.
 # bash_pipes: one held leader observation, one permission and one Session stop.
+PEER_EXCHANGE_LIMIT = 4 * 321 + 50 + 6
 OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2 + 2,
                       "stop": 321 + 20 + 5 + 12 + 3 * 2 + 1 + 1,
                       "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 3 + 1,
-                      "control_peers": 4 * 100 + 4 * 10 + 2 + 8,
+                      "control_peers": 4 * PEER_EXCHANGE_LIMIT + 4 * 10 + 2 + 8,
                       "capture": 3, "recovery": 2 * 4 + 2, "managed": 9,
                       "bash_cleanup": 6 * 3 + 3 * 321 + 601 + 201 + 6,
                       "bash_pipes": 1 + 2}
@@ -605,7 +610,7 @@ class PeerCensus:
         self.borrowers = {}
 
     def expect(self, route):
-        assert len(self.routes) < 100, "peer fixture exhausted numbered exchange population"
+        assert len(self.routes) < PEER_EXCHANGE_LIMIT, "peer fixture exhausted numbered exchange population"
         request = len(self.routes)
         self.routes.append(route)
         return request
