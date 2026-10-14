@@ -21,6 +21,7 @@ import threading
 import time
 
 from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, stop_process
+from terminal_process import terminal_process
 import model_fixture as fixture
 import codex_integration as codex_fixture
 
@@ -1745,20 +1746,15 @@ int fsync(int fd) {
     assert invalid in listed and unsupported in listed and "not-a-handle" not in listed, listed
     assert run(home, "recover", invalid, success=False) == ""
     assert run(home, "recover", unsupported, success=False) == ""
-    master, slave = pty.openpty()
-    entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+    with terminal_process([str(fixture.RUI), "session", "--store", str(store),
         "--session", "capture/original"], env={**os.environ, "HOME": str(home)},
-        stdin=slave, stdout=slave, stderr=slave)
-    try:
+    ) as (entered, master):
         read_terminal(master, "› ")
         listing = terminal_step(master, "/requests", "Local recovery handles", composer=True)
         assert handle in listing and failed_notice in listing, listing
         assert invalid not in listing and unsupported not in listing, listing
         terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
-    finally:
-        dispose_all(lambda: stop_process(entered, timeout=5),
-                    lambda: os.close(master), lambda: os.close(slave))
     print("saved capture owner: pinned original bytes, preference-independent recovery, failed announcement, "
         "sync uncertainty, listing asymmetry", flush=True)
 
@@ -2107,10 +2103,12 @@ def incomplete_input_case(home, store, session, endpoint, host):
 def main(selected="all"):
     import canonical_failure_integration
     import terminal_restoration_integration
+    from terminal_process_test import prove_terminal_process
     assert selected in ("all", "long-input", "terminal-waits", "persistent-permission", "incomplete-input"), selected
     if selected == "all":
         help_case()
     if selected in ("all", "terminal-waits"):
+        prove_terminal_process()
         terminal_wait_oracles()
     if selected == "terminal-waits":
         return
@@ -2374,33 +2372,23 @@ def main(selected="all"):
             "--json", success=False) == ""
         assert json.loads(run(preferences_home, "wait-session", "--store", store,
             "--session", session, "--json")) == {"return": "idle"}
-        master, slave = pty.openpty()
-        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
+        with terminal_process([str(fixture.RUI), "session", "--store", str(store),
             "--session", session], env={**os.environ, "HOME": str(preferences_home)},
-            stdin=slave, stdout=slave, stderr=slave)
-        try:
+        ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
             assert f"Session: {session}" in terminal_step(master, "/status", "Session: ", composer=True)
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
-        finally:
-            dispose_all(lambda: stop_process(entered, timeout=5),
-                        lambda: os.close(master), lambda: os.close(slave))
         saved.unlink()
         fallback.parent.mkdir(parents=True)
         fallback.symlink_to(store, target_is_directory=True)
-        master, slave = pty.openpty()
-        entered = subprocess.Popen([str(fixture.RUI), "session", "--session", session],
+        with terminal_process([str(fixture.RUI), "session", "--session", session],
             env={**os.environ, "HOME": str(preferences_home)},
-            stdin=slave, stdout=slave, stderr=slave)
-        try:
+        ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
             assert f"Session: {session}" in terminal_step(master, "/status", "Session: ", composer=True)
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
-        finally:
-            dispose_all(lambda: stop_process(entered, timeout=5),
-                        lambda: os.close(master), lambda: os.close(slave))
         fallback.unlink()
         saved.write_text(f"version=1\nstore={state / 'missing'}\nprovider=codex\nmodel=gpt-6-luna\n")
         saved.chmod(0o600)
