@@ -826,9 +826,12 @@ def persistent_cases(state, library, home, store, host):
     records.mkdir(mode=0o700, parents=True, exist_ok=True)
     # The departure owner covers interruption at every decision cut. Keep a
     # real INT during join here; configure-commit-term covers the TERM adapter.
+    # Deliberate large backpressure inputs stay last: unrelated decoder and
+    # restoration cases must not inherit their opening-transcript workload.
     for case in ("sync-exit", "sync-handoff", "sync-command-int",
-                 "admission-interrupt", "backpressure", "backpressure-command", "disable", "restore", "both",
-                 "incomplete-disable", "incomplete-restore", "incomplete-both"):
+                 "admission-interrupt", "disable", "restore", "both",
+                 "incomplete-disable", "incomplete-restore", "incomplete-both",
+                 "backpressure", "backpressure-command"):
         master, slave = pty.openpty()
         output_master, output_slave = pty.openpty()
         original = termios.tcgetattr(slave)
