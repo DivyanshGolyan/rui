@@ -20,7 +20,7 @@ pub const Capability = struct {
 };
 
 pub fn codex(readiness: Readiness) Capability {
-    return @import("model_adapter.zig").capability(readiness);
+    return @import("model_capability.zig").capability(readiness);
 }
 
 pub const Selection = union(enum) {

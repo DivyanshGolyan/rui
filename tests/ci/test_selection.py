@@ -175,6 +175,25 @@ class SelectionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "absent"):
             select(["src/bash.zig"], "review", AVAILABLE - {"bash-recovery-integration"})
 
+    def test_new_session_policy_paths_keep_portable_and_original_native_gates(self):
+        # Select each path alone: a simultaneous CLI or logic-root edit must not
+        # mask missing coverage when a later change touches only the new owner.
+        cases = {
+            "src/new_session_selection.zig": ["admission-debug-integration", "check", "test-logic"],
+            "src/preference_values.zig": ["admission-debug-integration", "check", "test-logic"],
+            "src/provider_selection.zig": ["admission-debug-integration", "check", "test-logic"],
+            "src/model_capability.zig": ["dispatch-integration", "test", "test-logic", "transport-h2-integration"],
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    self.assertEqual(result[family], expected)
+                combined = select([path, "src/server.zig"], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    self.assertIn("test-logic", combined[family])
+                    self.assertIn("check", combined[family])
+
     def test_preference_owner_and_fixture_use_canonical_membership(self):
         result = select(["src/preferences.zig"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["admission-debug-integration", "check"])
@@ -303,17 +322,25 @@ class SelectionTest(unittest.TestCase):
 
 
 class FullCheckPartitionTest(unittest.TestCase):
-    def run_part(self, part, fail="", overlap=False, hold=""):
+    def run_part(self, part, fail="", overlap=False, hold="", timing=False, clock_error=""):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             # Exercise the shell gate's public commands without launching product
-            # fixtures. This checks membership and failure propagation, not timing.
+            # fixtures. A controlled clock checks elapsed reporting, not speed.
             command = '''#!/bin/sh
 if [ "$1" = - ]; then exec "$TEST_PYTHON" "$@"; fi
 fixture=$(basename "${1:-$0}")
 identity="$fixture.$2"
 if [ "$fixture" = human_cli_integration.py ]; then
     test "$RUI_TEST_TERMINAL_NOTICE" = notice || exit 46
+fi
+if [ "$CHECK_TIMING" = 1 ]; then
+    case "$fixture" in
+        human_cli_integration.py|preference_policy_integration.py)
+            touch "$GATE_DIR/$fixture.started"
+            read -r release < "$GATE_DIR/$fixture.release"
+            test "$release" = r || exit 45 ;;
+    esac
 fi
 if [ "$CHECK_OVERLAP" = 1 ]; then
     touch "$GATE_DIR/$identity.started"
@@ -359,14 +386,64 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
             invocations.touch()
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", FAIL_FIXTURE=fail,
                        CHECK_OVERLAP=str(int(overlap)), GATE_DIR=str(root), TEST_PYTHON=sys.executable,
-                       HOLD_FIXTURE=hold, TEST_PART=part)
+                       HOLD_FIXTURE=hold, TEST_PART=part, CHECK_TIMING=str(int(timing)))
+            if clock_error:
+                (root / "sitecustomize.py").write_text(
+                    "import sys, time\n"
+                    "def fail_clock():\n    raise OSError('injected clock failure')\n"
+                    f"if (len(sys.argv) == 1) == {clock_error == 'start'!r}:\n"
+                    "    time.monotonic_ns = fail_clock\n")
+                env["PYTHONPATH"] = str(root)
             arguments = (["parallel", str(root / "native"), "status", "sessions", "proposal", "activity", "preferences", "notice"]
                          if part == "parallel" else
                          ["status", "sessions", "proposal", "activity", "preferences", part, "notice"])
             command = [
                 "/bin/sh", "tests/integration/check.sh", "release", "debug", *arguments,
             ]
-            if hold:
+            if timing:
+                clock = root / "clock"
+                clock.write_text("10000000000")
+                (root / "sitecustomize.py").write_text(
+                    "import os, time\nfrom pathlib import Path\n"
+                    "time.monotonic_ns = lambda: int(Path(os.environ['GATE_DIR'], 'clock').read_text())\n")
+                env.update(PYTHONPATH=str(root), TMPDIR=str(root))
+                fixtures = ("human_cli_integration.py", "preference_policy_integration.py")
+                releases = []
+                process = None
+                try:
+                    for fixture in fixtures:
+                        fifo = root / f"{fixture}.release"
+                        os.mkfifo(fifo)
+                        releases.append(os.open(fifo, os.O_RDWR | os.O_NONBLOCK))
+                    process = subprocess.Popen(command, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    deadline = time.monotonic() + 5
+                    while not all((root / f"{fixture}.started").exists() for fixture in fixtures):
+                        self.assertIsNone(process.poll())
+                        self.assertLess(time.monotonic(), deadline, "both timed fixtures must start")
+                        time.sleep(.005)
+                    clock.with_suffix(".next").write_text("13000000000")
+                    clock.with_suffix(".next").replace(clock)
+                    os.write(releases[1], b"r\n")
+                    # The later inventory entry must save its own elapsed time
+                    # while the earlier entry still prevents batch printing.
+                    deadline = time.monotonic() + 5
+                    while not any(path.read_text().strip() for path in root.glob("rui-check.*/preference-policy.status")):
+                        self.assertIsNone(process.poll())
+                        self.assertLess(time.monotonic(), deadline, "completed peer must record timing before inventory wait")
+                        time.sleep(.005)
+                    clock.with_suffix(".next").write_text("30000000000")
+                    clock.with_suffix(".next").replace(clock)
+                finally:
+                    for release in releases:
+                        os.write(release, b"r\n")
+                    try:
+                        if process is not None:
+                            stdout, stderr = process.communicate(timeout=10)
+                    finally:
+                        for release in releases:
+                            os.close(release)
+                result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            elif hold:
                 os.mkfifo(root / "release")
                 # Own release before launch, including assertion-failure disposal.
                 release = os.open(root / "release", os.O_RDWR | os.O_NONBLOCK)
@@ -402,6 +479,20 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                     raise
             return result, invocations.read_text().splitlines()
 
+    def records(self, result):
+        return re.findall(r"^([a-z-]+) (?:passed|failed): exit=(\d+) elapsed=(\d+\.\d{3})s$",
+                          result.stdout + result.stderr, re.MULTILINE)
+
+    def test_elapsed_belongs_to_invocation_not_inventory_wait(self):
+        for part in ("callers", "parallel"):
+            for fail in ("", "preference_policy_integration.py"):
+                with self.subTest(part=part, fail=fail):
+                    result, _ = self.run_part(part, fail=fail, timing=True)
+                    self.assertEqual(result.returncode, int(bool(fail)), result.stdout + result.stderr)
+                    records = {name: (status, elapsed) for name, status, elapsed in self.records(result)}
+                    self.assertEqual(records["preference-policy"], ("42" if fail else "0", "3.000"))
+                    self.assertEqual(records["human-cli"], ("0", "20.000"))
+
     def test_parts_are_disjoint_and_cover_the_unchanged_full_gate(self):
         expected = {
             "admission_integration.sh release", "dispatch_integration.py release",
@@ -421,6 +512,10 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
             result, lines = self.run_part(part)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(len(lines), len(set(lines)), lines)
+            records = self.records(result)
+            self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
+            self.assertEqual(len({name for name, _, _ in records}), len(lines))
+            self.assertTrue(all(status == "0" for _, status, _ in records))
             outputs[part] = set(lines)
         self.assertEqual(outputs["all"], expected)
         # The ordinary driver also owns the native binary; the full gate runs
@@ -446,6 +541,11 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_failure_or_invalid_part_cannot_report_success(self):
+        complete = {}
+        for part in ("callers", "parallel"):
+            result, lines = self.run_part(part)
+            self.assertEqual(result.returncode, 0)
+            complete[part] = set(lines)
         for fixture in ("human_cli_integration.py", "preference_policy_integration.py",
                         "session_list_integration.py", "conversation_page_integration.py",
                         "proposal_integration.py", "activity_integration.py",
@@ -453,15 +553,49 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                         "host_launch_integration.py", "host_process_test.py",
                         "host_allocator_test.py", "admission_integration.sh"):
             for part in ("callers", "parallel", "all"):
-                result, _ = self.run_part(part, fixture)
-                self.assertNotEqual(result.returncode, 0, (part, fixture))
+                result, lines = self.run_part(part, fixture)
+                self.assertEqual(result.returncode, 42 if part == "all" else 1, (part, fixture))
+                records = self.records(result)
+                self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
+                self.assertIn("42", [status for _, status, _ in records])
+                if part == "all":
+                    self.assertEqual(lines[-1].split()[0], fixture)
+                else:
+                    self.assertEqual(set(lines), complete[part])
         for part in ("execution", "parallel", "all"):
             result, _ = self.run_part(part, "dispatch_integration.py")
             self.assertNotEqual(result.returncode, 0, part)
         result, _ = self.run_part("parallel", "native")
         self.assertNotEqual(result.returncode, 0)
-        result, _ = self.run_part("not-a-part")
+        result, lines = self.run_part("not-a-part")
         self.assertEqual(result.returncode, 2)
+        self.assertEqual(lines, [])
+        self.assertEqual(self.records(result), [])
+
+    def test_failure_still_drains_a_held_peer_before_isolated_cases(self):
+        for part in ("callers", "parallel"):
+            result, _ = self.run_part(part, fail="preference_policy_integration.py",
+                                      overlap=True, hold="host_stop_integration.py")
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            records = {name: status for name, status, _ in self.records(result)}
+            self.assertEqual(records["preference-policy"], "42")
+            self.assertEqual(records["host-stop"], "0")
+            self.assertEqual(records["host-launch"], "0")
+
+    def test_clock_failure_preserves_fixture_results(self):
+        for clock_error in ("start", "finish"):
+            for part in ("all", "execution", "callers", "parallel"):
+                fixture = "dispatch_integration.py" if part == "execution" else "preference_policy_integration.py"
+                failures = ("", fixture, "host_launch_integration.py") if part in ("callers", "parallel") else ("", fixture)
+                for fail in failures:
+                    with self.subTest(clock_error=clock_error, part=part, fail=fail):
+                        result, lines = self.run_part(part, fail=fail, clock_error=clock_error)
+                        expected = (42 if part in ("all", "execution") else 1) if fail else 0
+                        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                        records = re.findall(r"^([a-z-]+) (?:passed|failed): exit=(\d+) elapsed=unavailable$",
+                                             result.stdout + result.stderr, re.MULTILINE)
+                        self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
+                        self.assertEqual({status for _, status in records}, {"0", "42"} if fail else {"0"})
 
 
 if __name__ == "__main__":
