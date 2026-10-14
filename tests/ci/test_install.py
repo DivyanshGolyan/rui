@@ -216,30 +216,45 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
         self.assertEqual((self.repo / "build.zig.zon").read_text(), manifest)
 
     def test_cached_git_dependencies_still_require_full_commits(self):
-        first = self.install()
-        self.assertEqual(first.returncode, 0, first.stderr)
-        previous = {name: (self.bin / name).resolve() for name in ("rui", "rui-evaluator")}
+        cached_manifest = self.root / "selected packages/test-openssl-hash/build.zig.zon"
         for host in ("github.com", "codeberg.org"):
-            for duplicate in (False, True):
-                with self.subTest(host=host, duplicate=duplicate):
-                    url = f"git+https://{host}/ziglang/translate-c.git#f978dca"
-                    if duplicate:
+            for fragment in ("#f978dca", "", "#", "#ignored#f978dca0f2b2a782d06591989e80aae7c74d0183"):
+                for route in ("cached", "deduplicated", "transitive"):
+                    with self.subTest(host=host, fragment=fragment, route=route):
+                        (self.repo / "build.zig.zon").write_text(self.manifest)
+                        first = self.install()
+                        self.assertEqual(first.returncode, 0, first.stderr)
+                        previous = {name: (self.bin / name).resolve() for name in ("rui", "rui-evaluator")}
+                        url = f"git+https://{host}/ziglang/translate-c.git{fragment}"
                         alias = f'''        .alias = .{{
             .url = "{url}",
             .hash = "test-openssl-hash",
         }},
 '''
-                        manifest = self.manifest.replace('    },\n}\n', alias + '    },\n}\n')
-                    else:
-                        manifest = self.manifest.replace("https://example.invalid/openssl.tar.gz", url)
-                    (self.repo / "build.zig.zon").write_text(manifest)
-                    result = self.install(TEST_GENERATION="rejected")
-                    self.assertNotEqual(result.returncode, 0, result.stdout)
-                    self.assertNotIn("Preparing pinned", result.stdout)
-                    for name, target in previous.items():
-                        self.assertEqual((self.bin / name).resolve(), target)
-                        self.assertEqual(subprocess.check_output([self.bin / name], text=True), "first\n")
-                    self.assertEqual((self.repo / "build.zig.zon").read_text(), manifest)
+                        manifest = self.manifest
+                        if route == "cached":
+                            manifest = manifest.replace("https://example.invalid/openssl.tar.gz", url)
+                        elif route == "deduplicated":
+                            manifest = manifest.replace('    },\n}\n', alias + '    },\n}\n')
+                        else:
+                            cached_manifest.write_text('.{\n    .dependencies = .{\n' + alias + '    },\n}\n')
+                        try:
+                            (self.repo / "build.zig.zon").write_text(manifest)
+                            result = self.install(TEST_GENERATION="rejected")
+                            self.assertNotEqual(result.returncode, 0, result.stdout)
+                            self.assertNotIn("Preparing pinned", result.stdout)
+                            name = "openssl" if route == "cached" else "alias"
+                            self.assertIn(f"Pinned {name} Git dependency", result.stderr)
+                            self.assertIn(str(cached_manifest if route == "transitive" else self.repo / "build.zig.zon"), result.stderr)
+                            self.assertIn("40-character hexadecimal commit ID", result.stderr)
+                            for name, target in previous.items():
+                                self.assertEqual((self.bin / name).resolve(), target)
+                                self.assertEqual(subprocess.check_output([self.bin / name], text=True), "first\n")
+                            self.assertEqual((self.repo / "build.zig.zon").read_text(), manifest)
+                            if route == "transitive":
+                                self.assertEqual(cached_manifest.read_text(), '.{\n    .dependencies = .{\n' + alias + '    },\n}\n')
+                        finally:
+                            cached_manifest.unlink(missing_ok=True)
 
     def test_path_conflict_is_actionable(self):
         shadow = self.tools / "rui"

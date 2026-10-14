@@ -31,9 +31,12 @@ prepare_dependencies() {
         expected=$(sed -n "/\.$name = /,/},/s/.*\.hash = \"\([^\"]*\)\".*/\1/p" "$manifest")
         [[ -n $url && -n $expected ]]
         case "$url" in
-            git+https://codeberg.org/*\#*|git+https://github.com/*\#*)
-                revision=${url##*#}
-                [[ $revision =~ ^[[:xdigit:]]{40}$ ]]
+            git+https://codeberg.org/*|git+https://github.com/*)
+                revision=${url#*#}
+                if [[ ! $revision =~ ^[[:xdigit:]]{40}$ ]]; then
+                    printf 'Pinned %s Git dependency in %s requires # followed by a full 40-character hexadecimal commit ID.\n' "$name" "$manifest" >&2
+                    exit 1
+                fi
                 remote=${url#git+}
                 remote=${remote%%#*}
                 remote=${remote%%\?*}
