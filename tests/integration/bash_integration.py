@@ -1035,6 +1035,7 @@ def main():
         )
     )
     sibling_marker = state / "sibling-marker"
+    sibling_release = state / "sibling-release"
     responses.append(
         fixture.sse_tool_calls(
             "sibling-calls",
@@ -1043,7 +1044,7 @@ def main():
                     "bash",
                     "sibling-call-0",
                     json.dumps(
-                        {"cmd": f"sleep 0.2; printf a >> {sibling_marker}", "timeout_ms": None, "description": "Append first sibling marker"},
+                        {"cmd": f"while [ ! -e {shlex.quote(str(sibling_release))} ]; do sleep 0.01; done; printf a >> {shlex.quote(str(sibling_marker))}", "timeout_ms": None, "description": "Append first sibling marker"},
                         separators=(",", ":"),
                     ),
                 ),
@@ -2024,6 +2025,17 @@ def main():
         host = fixture.start_host(store, endpoint_url, active_capacity=2)
         configure(state, store, "sibling-config", "direct/sibling", "bypass")
         fixture.message(state, store, "sibling-message", "direct/sibling", "execute")
+        # Observe the second sibling's durable result before releasing the first;
+        # command duration alone cannot establish canonical acceptance order.
+        def second_sibling_settled():
+            actions = list(action_rows_by_id(store, "direct/sibling").values())
+            return len(actions) == 2 and {
+                row["call_ordinal"]: row["resolution"] for row in actions
+            } == {"0": None, "1": "succeeded"}
+
+        fixture.wait_for(second_sibling_settled, "second sibling accepted while first is held")
+        assert sibling_marker.read_text() == "b"
+        sibling_release.touch()
         fixture.wait_for(
             lambda: fixture.completed_observation(store, "sibling-message"),
             "independent sibling continuation",
@@ -2095,6 +2107,7 @@ def main():
         if settlement_gate is not None:
             cleanups.append(settlement_gate.release)
         cleanups.append(lambda: settlement_cleanup_gate.unlink(missing_ok=True))
+        cleanups.append(sibling_release.touch)
         if host is not None:
             cleanups.append(lambda: fixture.stop_host(host))
         if detached_process is not None and process_exists(detached_process):

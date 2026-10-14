@@ -1100,7 +1100,7 @@ def prove_delivery_and_settlement_contention(
         milestones.wait("sealed_before_settlement", timeout=8)
         control_requests = [peers.expect("session_stop") for _ in range(CONTROL_HEADROOM)]
         control_deadline = time.monotonic() + 10
-        barrier = threading.Barrier(CONTROL_HEADROOM + 1)
+        barrier = threading.Barrier(CONTROL_HEADROOM + 1, timeout=10)
 
         def run_stop(index):
             barrier.wait()
@@ -1116,10 +1116,15 @@ def prove_delivery_and_settlement_contention(
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=CONTROL_HEADROOM
         ) as pool:
-            futures = [
-                pool.submit(run_stop, index) for index in range(CONTROL_HEADROOM)
-            ]
-            barrier.wait()
+            try:
+                futures = [
+                    pool.submit(run_stop, index) for index in range(CONTROL_HEADROOM)
+                ]
+                barrier.wait()
+            except BaseException:
+                # Wake submitted workers before the executor waits for them.
+                barrier.abort()
+                raise
             results = [future.result(timeout=10) for future in futures]
         for reply, _ in results:
             assert reply["answer"]["status"] == "accepted", reply

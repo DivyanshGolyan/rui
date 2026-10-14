@@ -49,9 +49,9 @@ fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, s
     };
 }
 
-pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, columns: usize, colour: bool) !void {
+pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, columns: usize, colour: bool, separate: bool) !void {
     const state = toolState(presentation.code);
-    try sink.feed("\n");
+    if (separate) try sink.feed("\n");
     try sink.feed(state.style.code(colour));
     try sink.feed(state.glyph);
     try sink.feed(Style.normal.code(colour));
@@ -229,8 +229,9 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     var source: Source = .{ .reader = &reader.interface };
     const arguments = try tools.inspectBashArguments(&source) orelse return error.InvalidBashArguments;
     try reader.seekTo(0);
+    try sink.feed("\n");
     try sink.feed(Style.attention.code(colour));
-    try sink.feed("\n? Run Bash:");
+    try sink.feed("? Run Bash:");
     try sink.feed(Style.normal.code(colour));
     try sink.feed("\n  ");
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };
@@ -426,6 +427,7 @@ fn content(requests: client.Requests, store: []const u8, session: []const u8, it
 fn Summary(comptime Sink: type) type {
     return struct {
         escaped: Escaped(Sink),
+        code: protocol.ToolPresentation.Code,
         line: [256]u8 = undefined,
         length: usize = 0,
         emitted: bool = false,
@@ -457,8 +459,14 @@ fn Summary(comptime Sink: type) type {
             if (!self.omitted and (std.mem.eql(u8, line, "stdout tail:") or std.mem.eql(u8, line, "stderr tail:"))) {
                 self.ended = true;
             } else if (line.len != 0 and !routine) {
+                var prefix_buffer: [64]u8 = undefined;
+                const prefix = switch (self.code) {
+                    .failed, .timed_out, .indeterminate, .storage_failed, .spawn_failed, .cancelled, .infrastructure_shutdown => try std.fmt.bufPrint(&prefix_buffer, "Bash {s}. ", .{@tagName(self.code)}),
+                    else => "",
+                };
+                const detail = if (!self.omitted and prefix.len != 0 and std.mem.startsWith(u8, line, prefix)) line[prefix.len..] else line;
                 try self.escaped.feed(if (self.emitted) "\n  " else "  ");
-                try self.escaped.feed(line);
+                try self.escaped.feed(detail);
                 if (self.omitted) try self.escaped.feed(" [summary shortened; /details]");
                 self.emitted = true;
             }
@@ -486,38 +494,41 @@ test "tool summary hides only complete routine metadata and retains warnings" {
     const incomplete = "Capture may be incomplete because writers outlived process-group termination.";
     const capture_failure = "Capture failure: read; output may be incomplete.";
     const cases = .{
-        .{ "Bash succeeded. Exit code: 0.\n" ++ retirement ++ "\nstdout tail:\nhidden", "" },
-        .{ retirement, "" },
-        .{ "Bash succeeded. Exit code: 0.\n" ++ incomplete ++ "\n" ++ retirement ++ "\n" ++ warning ++ "\nstderr tail:\nhidden", "  " ++ incomplete ++ "\n  " ++ warning },
-        .{ "Bash failed. Exit code: 7.\n" ++ retirement ++ "\n" ++ capture_failure, "  Bash failed. Exit code: 7.\n  " ++ capture_failure },
-        .{ "Bash timed_out. Signal: 15.\n" ++ retirement ++ "\n" ++ warning, "  Bash timed_out. Signal: 15.\n  " ++ warning },
-        .{ "Bash cancelled. Signal: 15.\n" ++ retirement, "  Bash cancelled. Signal: 15." },
-        .{ "Bash indeterminate. Unknown process status: 0.\n" ++ warning, "  Bash indeterminate. Unknown process status: 0.\n  " ++ warning },
-        .{ retirement ++ " Additional warning.", "  " ++ retirement ++ " Additional warning." },
-        .{ "Process retirement unconfirmed.\n" ++ warning, "  Process retirement unconfirmed.\n  " ++ warning },
-        .{ "Bash succeeded. Exit code: 0. Additional warning.", "  Bash succeeded. Exit code: 0. Additional warning." },
-        .{ retirement ++ ("x" ** 256) ++ "\n" ++ warning, "  " ++ (retirement ++ ("x" ** 256))[0..256] ++ " [summary shortened; /details]\n  " ++ warning },
-        .{ "stdout tail: unavailable\n" ++ warning, "  stdout tail: unavailable\n  " ++ warning },
+        .{ .succeeded, "Bash succeeded. Exit code: 0.\n" ++ retirement ++ "\nstdout tail:\nhidden", "" },
+        .{ .succeeded, retirement, "" },
+        .{ .succeeded, "Bash succeeded. Exit code: 0.\n" ++ incomplete ++ "\n" ++ retirement ++ "\n" ++ warning ++ "\nstderr tail:\nhidden", "  " ++ incomplete ++ "\n  " ++ warning },
+        .{ .failed, "Bash failed. Exit code: 7.\n" ++ retirement ++ "\n" ++ capture_failure, "  Exit code: 7.\n  " ++ capture_failure },
+        .{ .timed_out, "Bash timed_out. Signal: 15.\n" ++ retirement ++ "\n" ++ warning, "  Signal: 15.\n  " ++ warning },
+        .{ .cancelled, "Bash cancelled. Signal: 15.\n" ++ retirement, "  Signal: 15." },
+        .{ .indeterminate, "Bash indeterminate. Unknown process status: 0.\n" ++ warning, "  Unknown process status: 0.\n  " ++ warning },
+        .{ .failed, "Bash succeeded. Exit code: 0. Additional warning.", "  Bash succeeded. Exit code: 0. Additional warning." },
+        .{ .succeeded, "Bash failed. Exit code: 7.", "  Bash failed. Exit code: 7." },
+        .{ .succeeded, retirement ++ " Additional warning.", "  " ++ retirement ++ " Additional warning." },
+        .{ .succeeded, "Process retirement unconfirmed.\n" ++ warning, "  Process retirement unconfirmed.\n  " ++ warning },
+        .{ .succeeded, "Bash succeeded. Exit code: 0. Additional warning.", "  Bash succeeded. Exit code: 0. Additional warning." },
+        .{ .succeeded, retirement ++ ("x" ** 256) ++ "\n" ++ warning, "  " ++ (retirement ++ ("x" ** 256))[0..256] ++ " [summary shortened; /details]\n  " ++ warning },
+        .{ .succeeded, "stdout tail: unavailable\n" ++ warning, "  stdout tail: unavailable\n  " ++ warning },
     };
     inline for (cases) |case| {
-        for (0..case[0].len + 1) |split| {
+        for (0..case[1].len + 1) |split| {
             var sink: Sink = .{};
-            var summary: Summary(*Sink) = .{ .escaped = .{ .sink = &sink, .text = .{ .mode = .multiline } } };
-            try summary.feed(case[0][0..split]);
-            try summary.feed(case[0][split..]);
+            var summary: Summary(*Sink) = .{ .code = case[0], .escaped = .{ .sink = &sink, .text = .{ .mode = .multiline } } };
+            try summary.feed(case[1][0..split]);
+            try summary.feed(case[1][split..]);
             try summary.finish();
-            try std.testing.expectEqualStrings(case[1], sink.bytes[0..sink.length]);
+            try std.testing.expectEqualStrings(case[2], sink.bytes[0..sink.length]);
         }
     }
 }
 
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const client.ActivityPage, sink: anytype, columns: usize, colour: bool) !void {
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const client.ActivityPage, sink: anytype, columns: usize, colour: bool, compact_tools: *bool) !void {
     const historical = page.facts.direction == .backward;
     for (0..page.facts.count) |index| {
         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
         switch (item.value) {
             .admission => |message| {
                 if (historical and message.state == .applied) continue;
+                compact_tools.* = false;
                 if (historical) try sink.feed("\n! Unapplied input:");
                 try sink.feed("\n");
                 try sink.feed(Style.user.code(colour));
@@ -528,6 +539,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             },
             .user => |message| {
                 if (!historical) continue; // Live Admission already showed it.
+                compact_tools.* = false;
                 try sink.feed("\n");
                 try sink.feed(Style.user.code(colour));
                 try sink.feed("›");
@@ -536,6 +548,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 try content(requests, store, session, item, message.content, sink, columns);
             },
             .assistant => |reference| {
+                compact_tools.* = false;
                 try sink.feed("\n  ");
                 try content(requests, store, session, item, reference, sink, columns);
             },
@@ -543,10 +556,12 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 // Keep outcomes and warnings, not routine zero exit codes or
                 // output tails. This affects presentation only, never execution,
                 // permission or outcome classification; /details stays exact.
-                try toolHeading(result.presentation, sink, columns, colour);
+                const succeeded = result.presentation.code == .succeeded;
+                try toolHeading(result.presentation, sink, columns, colour, !compact_tools.* or !succeeded);
                 const failed = toolState(result.presentation.code).style == .failure;
                 var summary: Summary(@TypeOf(sink)) = .{
                     .escaped = .{ .sink = sink, .text = .{ .mode = .multiline } },
+                    .code = result.presentation.code,
                     .ended = switch (result.presentation.code) {
                         .denied, .unknown_tool, .invalid_arguments, .tool_unavailable => true,
                         else => false,
@@ -557,6 +572,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 try summary.finish();
                 if (failed) try sink.feed("\n  /details for output.");
                 if (summary.emitted or failed) try sink.feed("\n");
+                compact_tools.* = succeeded and !summary.emitted;
             },
             // Hidden call rows use admission-certified page metadata. Exact
             // proposal and permission inspection authenticate originals instead.
@@ -564,9 +580,13 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             .outcome => |outcome| {
                 // Successful content aggregates assistant rows, never a second answer.
                 if (outcome.code.eql("completed")) continue;
+                compact_tools.* = false;
                 try print(sink, "\n! Work ended: {s}. /status for details.\n", .{outcome.code.slice()});
             },
-            .stop => try sink.feed("\n! Session stopped.\n"),
+            .stop => {
+                compact_tools.* = false;
+                try sink.feed("\n! Session stopped.\n");
+            },
         }
     }
 }
