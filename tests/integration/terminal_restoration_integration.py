@@ -2208,8 +2208,10 @@ def host_diagnostic_cases(state, library):
                     break
                 if fault == "response-unlink":
                     resources = fixture.wait_for(lambda: (value if (value := fixture.command(
-                        "inspect-session", "--store", store, "--session", session)["execution"])["dispatch_fenced"] else None),
-                        "retained response cleanup")
+                        "inspect-session", "--store", store, "--session", session,
+                        timeout=max(0, retirement_deadline - time.monotonic()))["execution"])["dispatch_fenced"]
+                        and value["custody_occupied"] == "1" and value["scratch_used_bytes"] == "0" else None),
+                        "retained response cleanup", deadline=retirement_deadline)
                     assert resources["custody_occupied"] == "1", resources
                     leftovers = list((store / "scratch").glob("response-[0-9]*.tmp"))
                     assert len(leftovers) == 1, leftovers

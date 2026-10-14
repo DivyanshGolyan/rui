@@ -22,6 +22,7 @@ from host_process import (
     STDERR_TAIL_LIMIT,
     HostDiagnostics,
     HostStartError,
+    PeerCensus,
     ReleaseGate,
     _Observations,
     dispose_all,
@@ -62,6 +63,7 @@ def assert_reaped(source, description, *, timeout=0.2, required_fields=None, obs
 
 def main():
     prove_dispose_all()
+    prove_peer_census()
     prove_one_reply()
     prove_terminal_capture_budget()
     prove_execution_release_oracles()
@@ -266,6 +268,114 @@ def prove_short_optional_receipt():
     print("Host optional receipt: short write visible with writer open and no filler, no native evidence")
 
 
+def prove_peer_census():
+    def record(phase, sequence, subject="0"):
+        return dict(rui_test_phase=phase, process=str(os.getpid()), run="37", clock="awake_ns",
+                    sequence=str(sequence), at_ns=str(time.monotonic_ns()), trace_lost=False,
+                    subject_kind="request_number", subject=subject)
+
+    observations = SimpleNamespace(plan="control_peers", records=[], condition=threading.Condition(), error=None)
+    process = SimpleNamespace(pid=os.getpid(), stderr=io.BytesIO(), poll=lambda: 0, rui_observations=observations)
+    diagnostics = HostDiagnostics(process)
+    peers = PeerCensus(diagnostics)
+    waiting = threading.Event()
+    original_wait = diagnostics.condition.wait
+    def wait(timeout=None):
+        waiting.set()
+        return original_wait(timeout)
+    diagnostics.condition.wait = wait
+    result = []
+    def invoke():
+        observations.records.append(record("connection_request_inspect", 1))
+        return b"complete reply"
+    def call():
+        try:
+            result.append(peers.call("inspect", invoke, timeout=1))
+        except BaseException as error:
+            result.append(error)
+    worker = threading.Thread(target=call)
+    worker.start()
+    try:
+        assert waiting.wait(1), "reply bypassed native retirement"
+        with diagnostics.condition:
+            assert not result, "complete reply supplied admission retirement"
+            observations.records.append(record("connection_resources_released", 2))
+            diagnostics.condition.notify_all()
+        worker.join(1)
+        assert not worker.is_alive() and result == [b"complete reply"], result
+        peers.finish(time.monotonic())
+    finally:
+        worker.join(2)
+        diagnostics.condition.wait = original_wait
+        diagnostics.close()
+
+    # Another owner's release, a duplicate or an endpoint beyond the original
+    # deadline cannot supply this invocation's admission retirement.
+    for fault in ("missing", "wrong-owner", "duplicate", "late"):
+        observations.records.clear()
+        peers = PeerCensus(diagnostics)
+        def faulty_reply():
+            observations.records.append(record("connection_request_inspect", 1))
+            if fault != "missing":
+                release = record("connection_resources_released", 2, "1" if fault == "wrong-owner" else "0")
+                if fault == "late":
+                    release["at_ns"] = str(time.monotonic_ns() + 1_000_000_000)
+                observations.records.append(release)
+                if fault == "duplicate":
+                    observations.records.append(dict(release, sequence="3"))
+            return b"complete reply"
+        try:
+            peers.call("inspect", faulty_reply, timeout=.02)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"{fault} release accepted as retirement")
+    observations.records[:] = [record("connection_request_inspect", 1),
+                              dict(record("connection_resources_released", 2),
+                                   at_ns=str(time.monotonic_ns() + 1_000_000_000))]
+    peers = PeerCensus(diagnostics)
+    peers.expect("inspect")
+    try:
+        peers.finish(time.monotonic())
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("final census accepted a late retirement")
+    observations.records[:] = [record("connection_request_inspect", 1), record("connection_resources_released", 2)]
+    peers = PeerCensus(diagnostics)
+    try:
+        peers.finish(time.monotonic())
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("unissued peer population accepted")
+    # One Host owns four eight-second polls at 25ms intervals, fifty total
+    # inspections, and six setup/control exchanges. Include a boundary probe
+    # per poll; a cumulative census must not shorten any existing wait.
+    observations.records.clear()
+    peers = PeerCensus(diagnostics)
+    deadline = time.monotonic() + 10
+    routes = ["configure"] * 4 + ["session_stop"] * 2 + ["inspect"] * 50 + ["observe"] * (4 * 321)
+    for request, route in enumerate(routes):
+        def reply():
+            observations.records.extend([
+                record("connection_request_" + route, 2 * request + 1, str(request)),
+                record("connection_resources_released", 2 * request + 2, str(request)),
+            ])
+            return b"complete reply"
+        assert peers.call(route, reply, deadline=deadline) == b"complete reply"
+    peers.finish(deadline)
+    def unexpected_call():
+        raise RuntimeError("overflow issued an uncounted exchange")
+    try:
+        peers.call("observe", unexpected_call, deadline=deadline)
+    except AssertionError as error:
+        assert "exhausted numbered exchange population" in str(error), error
+    else:
+        raise AssertionError("unbounded peer population accepted")
+    print("Peer census: reply waits for exact retirement; missing, wrong, duplicate, late and extra owners refuse")
+
+
 def observation_frame(sequence, *, phase="ordinary_classification_released", subject="message", action=None, process=None, lost=0):
     # Independent native codec golden: phase=0, timestamp=1, subject kind=2,
     # subject=3, action=7. Keep the asymmetric route/subject distinct.
@@ -308,10 +418,10 @@ def prove_required_capture_receipts():
     # Complete optional records and wrong native plans must both fail at the
     # authority boundary, for positive waits and negative/exact censuses.
     required = {
-        "cleanup_started": ("control", "stop", "bash_cleanup"),
-        "cleanup_completed": ("control", "stop", "bash_cleanup"),
+        "cleanup_started": ("control", "control_peers", "stop", "bash_cleanup"),
+        "cleanup_completed": ("control", "control_peers", "stop", "bash_cleanup"),
         "cleanup_release_observed": ("bash_cleanup",),
-        "inspection_captured": ("control", "bash_cleanup"),
+        "inspection_captured": ("control", "control_peers", "bash_cleanup"),
         "bash_leader_observed_with_open_pipes": ("bash_pipes",),
         "control_store_complete": ("bash_pipes",),
     }
@@ -589,7 +699,7 @@ def prove_observation_disposal():
                     try:
                         diagnostics.wait("cleanup_completed", operation="7", timeout=.02)
                     except AssertionError as error:
-                        expected = "timed out waiting" if plan in ("control", "stop", "bash_cleanup") else "native observation authority"
+                        expected = "timed out waiting" if plan in ("control", "control_peers", "stop", "bash_cleanup") else "native observation authority"
                         assert expected in str(error), error
                     else:
                         raise AssertionError("sealed zero-active channel invented a required endpoint")
@@ -1439,7 +1549,10 @@ def prove_one_reply():
                 with one_reply(path, b"must not be sent"):
                     with connect(path) as client:
                         client.sendall(supplied)
-                        client.shutdown(socket.SHUT_WR)
+                        # Malformed bytes reject without EOF and may already
+                        # have closed the peer. Only truncation needs half-close.
+                        if error_type is EOFError:
+                            client.shutdown(socket.SHUT_WR)
                         assert client.recv(1) == b"", "invalid request received a response"
             except error_type as error:
                 assert message in str(error), error

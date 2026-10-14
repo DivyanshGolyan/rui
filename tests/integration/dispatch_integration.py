@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, dispose_all, preserve_failure_metadata, stop_process, wait_for_execution_release
+from host_process import HostDiagnostics, PeerCensus, dispose_all, preserve_failure_metadata, stop_process, wait_for_execution_release
 from model_fixture import (
     ROOT, RUI, FailureEndpoint, ResponseSpec, SuccessEndpoint,
     assert_model_cleanup_census, classification_population, command,
@@ -1775,38 +1775,51 @@ def main():
         growth_store = state / "growth-store"
         growth_host = start_host(
             growth_store, f"http://127.0.0.1:{growth_endpoint.server_port}/responses",
-            "--test-phase-trace", observations="control",
+            "--test-phase-trace", observations="control_peers",
         )
         processes.append(growth_host)
         growth_diagnostics = HostDiagnostics(growth_host)
-        configure(state, growth_store, "growth-config-a", "direct/growth-a", "model-a")
-        configure(state, growth_store, "growth-config-b", "direct/growth-b", "model-a")
-        message(state, growth_store, "growth-count", "direct/growth-a", "count")
+        growth_peers = PeerCensus(growth_diagnostics)
+        growth_peers.call("configure", lambda: configure(state, growth_store, "growth-config-a", "direct/growth-a", "model-a"))
+        growth_peers.call("configure", lambda: configure(state, growth_store, "growth-config-b", "direct/growth-b", "model-a"))
+        growth_peers.call("message", lambda: message(state, growth_store, "growth-count", "direct/growth-a", "count"))
         count_deadline = time.monotonic() + 8
         counted = wait_for(
-            lambda: completed_observation(growth_store, "growth-count", deadline=count_deadline),
+            lambda: growth_peers.call("observe", lambda: completed_observation(
+                growth_store, "growth-count", deadline=count_deadline,
+            ), deadline=count_deadline),
             "many item output", deadline=count_deadline,
         )
-        assert read_result(growth_store, "growth-count", deadline=count_deadline) == b"count answer"
+        assert growth_peers.call("read_result", lambda: read_result(
+            growth_store, "growth-count", deadline=count_deadline,
+        ), deadline=count_deadline) == b"count answer"
         wait_model_cleanup(
             growth_diagnostics, growth_store, "direct/growth-a", counted, count_deadline,
+            peers=growth_peers,
         )
-        message(state, growth_store, "growth-bytes", "direct/growth-b", "bytes")
+        growth_peers.call("message", lambda: message(state, growth_store, "growth-bytes", "direct/growth-b", "bytes"))
         bytes_deadline = time.monotonic() + 20
         imported = wait_for(
-            lambda: completed_observation(growth_store, "growth-bytes", deadline=bytes_deadline),
+            lambda: growth_peers.call("observe", lambda: completed_observation(
+                growth_store, "growth-bytes", deadline=bytes_deadline,
+            ), deadline=bytes_deadline),
             "large output import",
             deadline=bytes_deadline,
         )
-        assert read_result(growth_store, "growth-bytes", deadline=bytes_deadline) == large_answer.encode()
+        assert growth_peers.call("read_result", lambda: read_result(
+            growth_store, "growth-bytes", deadline=bytes_deadline,
+        ), deadline=bytes_deadline) == large_answer.encode()
         wait_model_cleanup(
             growth_diagnostics, growth_store, "direct/growth-b", imported, bytes_deadline,
+            peers=growth_peers,
         )
         # A failed caller destination may retain a prefix, but it cannot make
         # the read successful or consume the saved keyed answer. A fresh read
         # streams the complete bytes again without inventing a newline.
         read_fd, write_fd = os.pipe()
         failed_destination = None
+        failed_read_deadline = time.monotonic() + 15
+        failed_read_request = growth_peers.expect("read_result")
         try:
             failed_destination = subprocess.Popen(
                 [str(RUI), "read-result", "--store", str(growth_store), "--key", "growth-bytes"],
@@ -1818,7 +1831,8 @@ def main():
             prefix = os.read(read_fd, 4096)
             os.close(read_fd)
             read_fd = None
-            _, failure_stderr = failed_destination.communicate(timeout=15)
+            _, failure_stderr = failed_destination.communicate(timeout=max(0, failed_read_deadline - time.monotonic()))
+            growth_peers.release(failed_read_request, failed_read_deadline)
         finally:
             dispose_all(
                 lambda: os.close(write_fd) if write_fd is not None else None,
@@ -1828,6 +1842,8 @@ def main():
         assert failed_destination.returncode != 0, failure_stderr
         assert 0 < len(prefix) < len(large_answer), len(prefix)
         complete_path = state / "growth-answer.bin"
+        complete_read_deadline = time.monotonic() + 15
+        complete_read_request = growth_peers.expect("read_result")
         with complete_path.open("wb") as complete_destination:
             completed_read = subprocess.run(
                 [
@@ -1840,8 +1856,9 @@ def main():
                 ],
                 stdout=complete_destination,
                 stderr=subprocess.PIPE,
-                timeout=15,
+                timeout=max(0, complete_read_deadline - time.monotonic()),
             )
+        growth_peers.release(complete_read_request, complete_read_deadline)
         assert completed_read.returncode == 0, completed_read.stderr
         assert complete_path.stat().st_size == len(large_answer)
         with complete_path.open("rb") as complete_source:
@@ -1854,11 +1871,12 @@ def main():
         assert database.execute("SELECT payload IS NULL,byte_length FROM content WHERE byte_length=? AND private=0", (len(large_answer),)).fetchall() == [(1, len(large_answer))]
         assert database.execute("SELECT coalesce(sum(length(payload)),0) FROM content WHERE private=0").fetchone()[0] < 1024
         database.close()
-        resources = command(
+        resources = growth_peers.call("inspect", lambda: command(
             "inspect-session", "--store", growth_store, "--session", "direct/growth-b"
-        )["execution"]
+        ))["execution"]
         assert resources["scratch_used_bytes"] == "0", resources
         stop_host(growth_host)
+        growth_peers.finish(time.monotonic() + 5)
         assert_model_cleanup_census(growth_diagnostics, counted, imported)
         processes.remove(growth_host)
         stop_endpoint(growth_endpoint, endpoints)
@@ -1914,22 +1932,24 @@ def main():
             url,
             "--test-cleanup-delay-ms",
             "3000",
+            "--test-phase-trace", observations="control_peers",
         )
         processes.append(host)
+        frozen_peers = PeerCensus(HostDiagnostics(host))
         output_schema = {
             "type": "object",
             "properties": {"answer": {"type": "string"}},
             "required": ["answer"],
             "additionalProperties": False,
         }
-        configure(state, store, "config-a", "direct/main", "model-a", output_schema, "A")
-        configure(state, store, "instructions-b", "direct/main", "model-a", instructions="B")
-        configure(state, store, "instructions-a", "direct/main", "model-a", instructions="A")
-        configure(state, store, "instructions-a-again", "direct/main", "model-a", instructions="A")
-        message(state, store, "message-a", "direct/main", 'first "message"\n')
+        frozen_peers.call("configure", lambda: configure(state, store, "config-a", "direct/main", "model-a", output_schema, "A"))
+        frozen_peers.call("configure", lambda: configure(state, store, "instructions-b", "direct/main", "model-a", instructions="B"))
+        frozen_peers.call("configure", lambda: configure(state, store, "instructions-a", "direct/main", "model-a", instructions="A"))
+        frozen_peers.call("configure", lambda: configure(state, store, "instructions-a-again", "direct/main", "model-a", instructions="A"))
+        frozen_peers.call("message", lambda: message(state, store, "message-a", "direct/main", 'first "message"\n'))
         if not endpoint.received.wait(8):
             raise AssertionError("endpoint did not receive committed request")
-        active_model_change = command(
+        active_model_change = frozen_peers.call("configure", lambda: command(
             "configure",
             "--store",
             store,
@@ -1943,30 +1963,33 @@ def main():
             "model-b",
             "--tools",
             "none",
-        )
+        ))
         assert active_model_change["answer"]["status"] == "rejected", active_model_change
         assert active_model_change["answer"]["code"] == "model_is_immutable"
-        active_settings = command(
+        active_settings = frozen_peers.call("inspect", lambda: command(
             "inspect-session", "--store", store, "--session", "direct/main"
-        )["session"]
+        ))["session"]
         assert active_settings["model"] == "model-a", active_settings
         assert active_settings["tools"] == ["bash", "edit"], active_settings
-        message(state, store, "message-b", "direct/main", "later message")
+        frozen_peers.call("message", lambda: message(state, store, "message-b", "direct/main", "later message"))
         assert len(endpoint.requests) == 1
-        resources = command(
+        resources = frozen_peers.call("inspect", lambda: command(
             "inspect-session", "--store", store, "--session", "direct/main"
-        )["execution"]
+        ))["execution"]
         assert int(resources["scratch_used_bytes"]) == len(endpoint.requests[0]), resources
         endpoint.release.set()
+        frozen_deadline = time.monotonic() + 8
         failed = wait_for(
-            lambda: (value := observe(store, "message-a"))["status"] == "accepted"
+            lambda: (value := frozen_peers.call("observe", lambda: observe(
+                store, "message-a", deadline=frozen_deadline,
+            ), deadline=frozen_deadline))["status"] == "accepted"
             and value.get("result", {}).get("code") == "provider_http_422"
             and value,
-            "saved permanent failure",
+            "saved permanent failure", deadline=frozen_deadline,
         )
         assert failed["queue"]["status"] == "failed", failed
         assert failed["processing"]["attempt"] == "1", failed
-        post_failure_model_change = command(
+        post_failure_model_change = frozen_peers.call("configure", lambda: command(
             "configure",
             "--store",
             store,
@@ -1980,10 +2003,10 @@ def main():
             "model-b",
             "--permission-mode",
             "bypass",
-        )
+        ))
         assert post_failure_model_change["answer"]["status"] == "rejected"
         assert post_failure_model_change["answer"]["code"] == "model_is_immutable"
-        mutable_update = command(
+        mutable_update = frozen_peers.call("configure", lambda: command(
             "configure",
             "--store",
             store,
@@ -1996,9 +2019,9 @@ def main():
             "--tools",
             "none",
             "--text-output",
-        )
+        ))
         assert mutable_update["answer"]["status"] == "accepted", mutable_update
-        later = observe(store, "message-b")
+        later = frozen_peers.call("observe", lambda: observe(store, "message-b"))
         assert later["queue"]["status"] == "queued", later
         assert len(endpoint.requests) == 1, "a permit launched more than once"
 
@@ -2056,6 +2079,7 @@ def main():
         }
         assert observed == expected, (observed, expected)
         stop_host(host)
+        frozen_peers.finish(time.monotonic() + 5)
         processes.remove(host)
 
         # Killing the execution owner cannot erase the saved result or admit
@@ -2485,53 +2509,57 @@ def main():
             f"http://127.0.0.1:{capacity_endpoint.server_port}/responses",
             "--test-cleanup-delay-ms",
             "1500",
+            "--test-phase-trace", observations="control_peers",
         )
         processes.append(durable_wait_host)
-        configure(
+        capacity_peers = PeerCensus(HostDiagnostics(durable_wait_host))
+        capacity_peers.call("configure", lambda: configure(
             state,
             durable_wait_store,
             "capacity-wait-config-a",
             "direct/capacity-wait-a",
             "model-a",
-        )
-        configure(
+        ))
+        capacity_peers.call("configure", lambda: configure(
             state,
             durable_wait_store,
             "capacity-wait-config-b",
             "direct/capacity-wait-b",
             "model-a",
-        )
-        message(
+        ))
+        capacity_peers.call("message", lambda: message(
             state,
             durable_wait_store,
             "capacity-wait-message-a",
             "direct/capacity-wait-a",
             "occupy capacity",
-        )
+        ))
         wait_for(lambda: len(capacity_endpoint.requests) == 1, "occupied capacity")
-        scratch_before = command(
+        # The provider gate holds model scratch, not preceding ingress/report
+        # owners. Retire each exchange before either accounting snapshot.
+        scratch_before = capacity_peers.call("inspect", lambda: command(
             "inspect-session",
             "--store",
             durable_wait_store,
             "--session",
             "direct/capacity-wait-a",
-        )["execution"]["scratch_used_bytes"]
-        message(
+        ))["execution"]["scratch_used_bytes"]
+        capacity_peers.call("message", lambda: message(
             state,
             durable_wait_store,
             "capacity-wait-message-b",
             "direct/capacity-wait-b",
             "wait durably",
-        )
-        scratch_after = command(
+        ))
+        scratch_after = capacity_peers.call("inspect", lambda: command(
             "inspect-session",
             "--store",
             durable_wait_store,
             "--session",
             "direct/capacity-wait-b",
-        )["execution"]["scratch_used_bytes"]
-        assert scratch_after == scratch_before
-        queued_observation = observe(durable_wait_store, "capacity-wait-message-b")
+        ))["execution"]["scratch_used_bytes"]
+        assert scratch_after == scratch_before, (scratch_before, scratch_after)
+        queued_observation = capacity_peers.call("observe", lambda: observe(durable_wait_store, "capacity-wait-message-b"))
         assert queued_observation["queue"]["status"] == "queued" and "processing" not in queued_observation, queued_observation
         assert len(capacity_endpoint.requests) == 1
         capacity_release_started = time.monotonic()
@@ -2544,22 +2572,24 @@ def main():
         capacity_release_discovery_ms = (
             time.monotonic() - capacity_release_started
         ) * 1000
+        capacity_deadline = time.monotonic() + 8
         wait_for(
-            lambda: completed_observation(
-                durable_wait_store, "capacity-wait-message-b"
-            ),
+            lambda: capacity_peers.call("observe", lambda: completed_observation(
+                durable_wait_store, "capacity-wait-message-b", deadline=capacity_deadline,
+            ), deadline=capacity_deadline),
             "capacity release progress without notification",
-            timeout=8,
+            deadline=capacity_deadline,
         )
-        assert read_result(
+        assert capacity_peers.call("read_result", lambda: read_result(
             durable_wait_store, "capacity-wait-message-b"
-        ) == b"capacity released"
+        )) == b"capacity released"
         assert len(capacity_endpoint.requests) == 2
         print(
             "queued capacity-release discovery (diagnostic): "
             f"{capacity_release_discovery_ms:.1f} ms"
         )
         stop_host(durable_wait_host)
+        capacity_peers.finish(time.monotonic() + 5)
         processes.remove(durable_wait_host)
         stop_endpoint(capacity_endpoint, endpoints)
 
@@ -3789,13 +3819,13 @@ def main():
             )["execution"]["custody_occupied"] == "1",
             "stalled response takes custody",
         )
-        stalled_resources = wait_for(
-            lambda: (lambda value: value if value["execution"]["custody_occupied"] == "0" else None)(
-                command("inspect-session", "--store", stall_store, "--session", "direct/stall")
-            ),
-            "stalled response releases custody into retry wait",
+        stalled_resources = wait_for_execution_release(
+            lambda remaining: command(
+                "inspect-session", "--store", stall_store, "--session", "direct/stall", timeout=remaining,
+            )["execution"],
+            time.monotonic() + 8,
         )
-        assert stalled_resources["execution"]["scratch_used_bytes"] == "0", stalled_resources
+        assert stalled_resources["scratch_used_bytes"] == "0", stalled_resources
         stalled = observe(stall_store, "stall-message")
         assert stalled["queue"]["status"] == "processing" and "result" not in stalled, stalled
         assert stalled["processing"]["attempt"] == "1", stalled
@@ -3826,11 +3856,13 @@ def main():
             configure(case_state, transient_store, "config", "direct/transient", "model-a")
             message(case_state, transient_store, "message", "direct/transient", "input")
             wait_for(lambda: len(endpoint.requests) == 1, "one endpoint request")
-            wait_for(lambda: command(
-                "inspect-session", "--store", transient_store, "--session", "direct/transient"
-            )["execution"]["custody_occupied"] == "0", "response cleanup")
+            resources = wait_for_execution_release(
+                lambda remaining: command(
+                    "inspect-session", "--store", transient_store, "--session", "direct/transient", timeout=remaining,
+                )["execution"],
+                time.monotonic() + 8,
+            )
             observation = observe(transient_store, "message")
-            resources = command("inspect-session", "--store", transient_store, "--session", "direct/transient")["execution"]
             assert resources["scratch_used_bytes"] == "0", resources
             if path == "/large-422":
                 assert observation["result"]["code"] == "provider_http_422", observation
@@ -4066,16 +4098,20 @@ def main():
         processes.append(host)
         configure(state, unlink_store, "unlink-config", "direct/unlink", "model-a")
         message(state, unlink_store, "unlink-message", "direct/unlink", "unlink")
+        unlink_deadline = time.monotonic() + 20
         resources = wait_for(
             lambda: (
-                report["execution"]
-                if (report := command(
-                    "inspect-session", "--store", unlink_store, "--session", "direct/unlink"
-                ))["execution"]["dispatch_fenced"]
+                execution
+                if (execution := command(
+                    "inspect-session", "--store", unlink_store, "--session", "direct/unlink",
+                    timeout=min(15, max(0, unlink_deadline - time.monotonic())),
+                )["execution"])["dispatch_fenced"]
+                and execution["custody_occupied"] == "1"
+                and execution["scratch_used_bytes"] == "0"
                 else None
             ),
             "request-unlink cleanup ownership",
-            timeout=20,
+            deadline=unlink_deadline,
         )
         assert resources["custody_occupied"] == "1", resources
         assert resources["scratch_used_bytes"] == "0", resources
