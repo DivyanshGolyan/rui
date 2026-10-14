@@ -743,7 +743,9 @@ def capture_receipt_case(state, library):
     store = root / "store"
     arm, release, log = (root / name for name in ("arm", "release", "probe.log"))
     answer = b"exact capture answer"
-    endpoint = fixture.SuccessEndpoint([fixture.sse_answer("capture", "reason", "message", answer.decode())[0]])
+    provider_release = threading.Event()
+    endpoint = fixture.SuccessEndpoint([
+        (fixture.sse_answer("capture", "reason", "message", answer.decode())[0], provider_release)])
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
     gate = ReleaseGate(root / "capture-gate")
@@ -757,13 +759,17 @@ def capture_receipt_case(state, library):
             "RUI_DIAGNOSTIC_ARM": str(arm), "RUI_DIAGNOSTIC_RELEASE": str(release)})
         diagnostics = HostDiagnostics(host)
         fixture.configure(root, store, "capture-config", "diagnostic/session", "model-a")
+        # Admission uses the ordinary worker; complete it before that worker
+        # holds optional stderr. Only provider capture must progress under hold.
+        fixture.message(root, store, "capture-message", "diagnostic/session", "hello")
+        fixture.wait_for(lambda: len(endpoint.requests) == 1, "held provider request", timeout=3)
         arm.touch()
         inspector = fixture.start_command("inspect-session", "--store", store, "--session", "diagnostic/session")
         fixture.wait_for(lambda: log.exists() and "diagnostic-held-inspection\n" in log.read_text(),
                          "actual optional inspection custody", timeout=3)
         held = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
         assert len(held) == 1 and held[0]["process"] == str(host.pid) and held[0]["subject"] == "diagnostic/session", held
-        fixture.message(root, store, "capture-message", "diagnostic/session", "hello")
+        provider_release.set()
         event = diagnostics.wait("capture_write_gate_entered", timeout=15)[0]
         assert event["process"] == held[0]["process"] and event["run"] == held[0]["run"], (event, held)
         assert event["written_bytes"] == "0" and gate.path.exists() and not release.exists(), event
@@ -794,7 +800,7 @@ def capture_receipt_case(state, library):
                     raise  # Mandatory reap does not accept the timed-out caller.
 
         errors = []
-        for dispose in (release.touch, retire_inspector,
+        for dispose in (provider_release.set, release.touch, retire_inspector,
                         lambda: diagnostics.dispose_capture(gate, lambda: {"case": "capture-receipt",
                             "capture_gate_exists": gate.path.exists(), "optional_released": release.exists()})
                             if diagnostics is not None else gate.release(),

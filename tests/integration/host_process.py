@@ -41,7 +41,7 @@ STDERR_TAIL_LIMIT = 16 * 1024
 # four model owners have ten phases, plus two lifecycle boundaries and eight
 # separately issued unnumbered releases. These are test-only retained records.
 # PeerCensus enforces issuance bounds before traffic, not on received records.
-# dispatch: seven controls with queued/acquired/released endpoints; the first
+# dispatch: seven routed controls with queued/acquired/released endpoints; the first
 # rollback or preparation advance per separately observed Host, not retry history.
 # capture: one gate, one exact cancellation and one injected resume failure.
 # No cleanup or polling history; public drainage remains its separate oracle.
@@ -54,7 +54,7 @@ STDERR_TAIL_LIMIT = 16 * 1024
 PEER_EXCHANGE_LIMIT = 4 * 321 + 50 + 6
 OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2 + 2,
                       "stop": 321 + 23 + 5 + 12 + 3 * 2 + 1 + 1 + 3 * 2 + 1,
-                      "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 3 + 1,
+                      "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 4 + 1,
                       "control_peers": 4 * PEER_EXCHANGE_LIMIT + 4 * 10 + 2 + 8,
                       "capture": 3, "recovery": 2 * 4 + 2, "managed": 9,
                       "bash_cleanup": 6 * 3 + 3 * 321 + 601 + 201 + 6,
@@ -513,6 +513,8 @@ class HostDiagnostics:
             plans = ("control", "control_peers", "bash_cleanup")
         elif phase in ("bash_leader_observed_with_open_pipes", "control_store_complete"):
             plans = ("bash_pipes",)
+        elif phase in ("connection_request_session_stop", "connection_request_permission_decision"):
+            plans = ("dispatch", "status", "list", "control_peers")
         if plans is not None:
             assert self.observations is not None and self.observations.plan in plans, (
                 "required receipt needs native observation authority", phase)

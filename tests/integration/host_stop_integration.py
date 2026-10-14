@@ -319,7 +319,7 @@ def main():
             # connects and header writes alone do not establish classification.
             deadline = time.monotonic() + 10
             began_ns = time.monotonic_ns()
-            pending, pending_body = request(sock, store, target)
+            pending, _ = request(sock, store, target)
             pending_phase = exchange_phase(diagnostics, "connection_request_host_stop", began_ns, deadline,
                                            subject_kind="request_number")
             assert not diagnostics.matching("connection_resources_released", subject=pending_phase["subject"])
@@ -330,8 +330,10 @@ def main():
             transferred.sendall(b"POST /v1/observe-command HTTP/1.1\r\n")
             first = actor_after_classification(diagnostics, began_ns, deadline, pending_phase, store, target)
             assert first == "TruncatedResponse", first
-            retry = finish(pending, pending_body)
-            assert retry.startswith(b"HTTP/1.1 200") and b'"status":"acknowledged"' in retry, retry
+            # Routed headers are still incomplete input, not a guarded retry.
+            # The complete-retry owner test separately requires acknowledgment.
+            assert pending.recv(1) == b"", "incomplete Host stop survived shutdown"
+            pending.close()
             pending = None
             for upload, remainder in uploads:
                 try:
@@ -398,7 +400,7 @@ def main():
             replacement.stderr.close()
             replacement = None
             assert actor("stop", store, newer) == "unavailable", "retry may not select a replacement"
-            print(f"host-stop passed: guarded rejection, acknowledged retry, held cleanup/connection lease, replacement; Linux fd={held_fds}->{drained_fds}, scratch=0")
+            print(f"host-stop passed: guarded rejection, incomplete-stop retirement, held cleanup/connection lease, replacement; Linux fd={held_fds}->{drained_fds}, scratch=0")
         finally:
             dispose_all(
                 lambda: gate.unlink(missing_ok=True),

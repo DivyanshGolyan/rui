@@ -223,11 +223,14 @@ const Intake = struct {
         cleanup_retry_at: i128 = 0,
 
         fn retireUnhanded(self: *Exchange) void {
-            // Matching in-flight stop retries still need their guarded ack.
             // Capture handoff retains files, but grants no admission authority.
-            if (self.route == .host_stop or self.job == .fill or self.job == .cleanup) return;
+            if (self.job == .fill or self.job == .cleanup) return;
             switch (self.state) {
-                .header, .body, .ready => self.state = .retired,
+                .header, .body => self.state = .retired,
+                // Only complete stop retries can still earn their guarded ack.
+                .ready => if (self.route != .host_stop) {
+                    self.state = .retired;
+                },
                 .working, .reply, .retired, .closed => {},
             }
         }
@@ -3341,7 +3344,7 @@ const ControlTiming = struct {
         while (candidates.next()) |candidate| {
             if (!std.mem.eql(u8, candidate, self.command_key.slice())) continue;
             // Integration tests deliberately hold this acquired Store mutex
-            // until a competing control reaches lock_requested. Their keeper
+            // until intake routes a competing control. Their keeper
             // descriptor prevents FIFO-open deadlock; process teardown bounds
             // a missing release without granting this gate semantic authority.
             var gate = std.Io.Dir.cwd().openFile(self.host.io, path, .{}) catch return;
@@ -6354,7 +6357,7 @@ test "shutdown fences every unhanded route while preserving request and reply cu
             exchange.route = route;
             exchange.state = states[0];
             exchange.retireUnhanded();
-            try std.testing.expectEqual(if (route == .host_stop) states[0] else states[1], exchange.state);
+            try std.testing.expectEqual(if (route == .host_stop and states[0] == .ready) .ready else states[1], exchange.state);
         }
     }
     exchange.route = null;
@@ -6371,6 +6374,15 @@ test "shutdown fences every unhanded route while preserving request and reply cu
     exchange.route = .configure;
     exchange.state = .ready;
     host.effect_shutdown.store(true, .release);
+    intake.serviceWorkers();
+    try std.testing.expectEqual(.retired, exchange.state);
+    try std.testing.expectEqual(.prepare, exchange.job);
+    for (&intake.workers) |*worker| {
+        try std.testing.expectEqual(.idle, worker.state);
+        try std.testing.expectEqual(null, worker.exchange);
+    }
+    // The next owner pass schedules reclamation in the ordinary lane;
+    // control cannot borrow that job merely because shutdown won handoff.
     intake.serviceWorkers();
     try std.testing.expectEqual(.cleanup, exchange.job);
     for (&intake.workers) |*worker| {
@@ -6389,6 +6401,50 @@ test "shutdown fences every unhanded route while preserving request and reply cu
     try std.testing.expectEqual(.working, exchange.state);
     try std.testing.expectEqual(.requested, intake.workers[0].state);
     try std.testing.expectEqual(&exchange, intake.workers[0].exchange.?);
+
+    // Complete retries already in intake must still validate their instance
+    // and deliver the same acknowledgment after the shutdown fence.
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.store.set("s");
+    host.lease = &lease;
+    host.instance = @splat(17);
+    for ([_]?protocol.InstanceId{ @splat(0), host.instance, host.instance, null }, [_][]const u8{
+        "host_instance_changed", protocol.host_stop_ack, protocol.host_stop_ack, "host_instance_required",
+    }) |instance_id, expected| {
+        var sockets: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &sockets));
+        defer _ = std.c.close(sockets[0]);
+        defer _ = std.c.close(sockets[1]);
+        var retry = Intake.Exchange{
+            .host = &host,
+            .fd = sockets[0],
+            .accepted_at_ns = nowNs(&host),
+            .deadline = 0,
+            .route = .host_stop,
+            .state = .ready,
+            .number = 1,
+            .header = .{ .route = .host_stop, .content_length = 0, .instance = instance_id },
+        };
+        defer std.debug.assert(retry.cleanup());
+        retry.request = try std.testing.allocator.create(protocol.Request);
+        retry.request.?.* = .{ .host_stop = .{ .store = lease.paths.store } };
+        retry.retireUnhanded();
+        try std.testing.expectEqual(.ready, retry.state);
+        try retry.prepare();
+        try retry.reply.?.deliver(sockets[0]);
+        try std.testing.expectEqual(@as(c_int, 0), std.c.shutdown(sockets[0], std.c.SHUT.WR));
+        var response: [1024]u8 = undefined;
+        var length: usize = 0;
+        while (true) {
+            try std.testing.expect(length < response.len);
+            const count = std.c.read(sockets[1], response[length..].ptr, response.len - length);
+            try std.testing.expect(count >= 0);
+            if (count == 0) break;
+            length += @intCast(count);
+        }
+        try std.testing.expect(std.mem.indexOf(u8, response[0..length], expected) != null);
+    }
 }
 
 test "intake accepts and physically retires a hundred incomplete exchanges" {
@@ -6538,6 +6594,29 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         defer intake.deinit();
         host.intake = &intake;
         var listener = try address.listen(std.testing.io, .{ .kernel_backlog = 8 });
+        const partial_header = try address.connect(std.testing.io);
+        defer partial_header.socket.close(std.testing.io);
+        const partial_body = try address.connect(std.testing.io);
+        defer partial_body.socket.close(std.testing.io);
+        // Establish both actual owner states before the reactor starts, so
+        // EOF later proves retirement rather than unconsumed input.
+        for ([_]c_int{ partial_header.socket.handle, partial_body.socket.handle }, [_][]const u8{
+            "POST /v1/control/host-stop HTTP/1.1\r\nContent-Type: application/json\r\n",
+            "POST /v1/control/host-stop HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 1024\r\n\r\n{",
+        }, [_]Intake.Exchange.State{ .header, .body }) |peer, bytes, state| {
+            try writeAll(std.testing.io, peer, bytes);
+            const accepted = std.c.accept(listener.socket.handle, null, null);
+            try std.testing.expect(accepted >= 0);
+            intake.accept(accepted) catch |err| {
+                _ = std.c.close(accepted);
+                return err;
+            };
+            const exchange = intake.exchanges.items[intake.exchanges.items.len - 1];
+            try exchange.read();
+            try std.testing.expectEqual(state, exchange.state);
+            try std.testing.expectEqual(.host_stop, exchange.route.?);
+        }
+        const before_uploads = host.request_counter.load(.acquire);
         const thread = try std.Thread.spawn(.{}, Probe.run, .{ &intake, &listener });
         var joined = false;
         defer if (!joined) {
@@ -6558,9 +6637,9 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try Probe.send(sibling.socket.handle, "/v1/message", message, false);
         // Classification occurs in the socket pass before its worker handoff
         // and before that pass can read a subsequently issued control.
-        while (host.request_counter.load(.acquire) < 2 and nowNs(&host) < deadline)
+        while (host.request_counter.load(.acquire) < before_uploads + 2 and nowNs(&host) < deadline)
             try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-        try std.testing.expectEqual(@as(u64, 2), host.request_counter.load(.acquire));
+        try std.testing.expectEqual(before_uploads + 2, host.request_counter.load(.acquire));
         for ([_]struct { route: []const u8, body: []const u8, key: []const u8, kind: store_module.CommandKind, status: @FieldType(store_module.CommandObservation, "status") }{
             .{ .route = "/v1/control/session-stop", .body = "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":\"s\",\"key\":\"stop\",\"session\":\"peer\"}", .key = "stop", .kind = .session_stop, .status = .accepted },
             .{ .route = "/v1/control/model-interruption", .body = "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":\"s\",\"key\":\"interrupt\",\"target\":{\"session\":\"peer\",\"turn\":\"1\",\"operation\":\"1\"}}", .key = "interrupt", .kind = .model_interruption, .status = .rejected },
@@ -6585,6 +6664,12 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try Probe.response(stop.socket.handle);
         try std.testing.expect(host.effect_shutdown.load(.acquire));
         try std.testing.expect(!Probe.released.load(.acquire));
+        for ([_]c_int{ partial_header.socket.handle, partial_body.socket.handle }) |peer| {
+            var polls = [_]std.c.pollfd{.{ .fd = peer, .events = std.posix.POLL.IN, .revents = 0 }};
+            try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&polls, 1, 3000));
+            var byte: [1]u8 = undefined;
+            try std.testing.expectEqual(@as(isize, 0), std.c.read(peer, &byte, 1));
+        }
         Probe.released.store(true, .release);
         thread.join();
         joined = true;
