@@ -21,6 +21,7 @@ if [ "${3:-}" = parallel ]; then
     proposal_client=$7
     activity_client=$8
     preference_policy_actor=$9
+    terminal_notice=${10}
 else
     host_status_actor=$3
     session_list_client=$4
@@ -28,6 +29,7 @@ else
     activity_client=$6
     preference_policy_actor=$7
     part=${8:-all}
+    terminal_notice=${9}
     case "$part" in
         all|execution|callers) ;;
         *) printf 'Unknown full-check part: %s\n' "$part" >&2; exit 2 ;;
@@ -41,7 +43,7 @@ cases() {
     run_case execution dispatch python3 "$directory/dispatch_integration.py" "$release_safe"
     run_case execution bash-owner python3 "$directory/bash_owner_integration.py" "$release_safe"
     run_case execution bash python3 "$directory/bash_integration.py" "$release_safe"
-    run_case callers human-cli python3 "$directory/human_cli_integration.py" "$release_safe"
+    run_case callers human-cli env RUI_TEST_TERMINAL_NOTICE="$terminal_notice" python3 "$directory/human_cli_integration.py" "$release_safe"
     run_case callers preference-policy python3 "$directory/preference_policy_integration.py" "$preference_policy_actor"
     run_case execution bash-lifecycle python3 "$directory/bash_lifecycle_integration.py" "$release_safe"
     run_case execution bash-recovery python3 "$directory/bash_recovery_integration.py" "$release_safe"

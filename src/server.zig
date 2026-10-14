@@ -2,9 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const HostDiagnostics = @import("HostDiagnostics.zig");
 const TestObservation = @import("TestObservation.zig");
-const trace_native = @cImport({
-    @cInclude("unistd.h");
-});
+const trace_native = @import("posix");
 const bash = @import("bash.zig");
 const descriptor_capacity = @import("descriptor_capacity.zig");
 const descriptor_limit = @import("descriptor_limit.zig");
@@ -348,7 +346,7 @@ pub fn serve(
         };
     }
     var socket_path: [257:0]u8 = undefined;
-    const socket_z = try std.fmt.bufPrintZ(&socket_path, "{s}", .{lease.paths.socket.slice()});
+    const socket_z = try std.fmt.bufPrintSentinel(&socket_path, "{s}", .{lease.paths.socket.slice()}, 0);
     if (std.c.chmod(socket_z, 0o600) != 0) return error.SocketProtectionFailed;
 
     const custody_records = try allocator.alloc(execution.CustodyRecord, active_capacity);
@@ -3781,8 +3779,8 @@ test "mutation decoder validates all five actual producers and preserved domain 
     const session = "original/é\n";
     const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
     inline for (.{ renderConfigureReply, renderMessageReply, renderSessionStopReply, renderModelInterruptionReply, renderPermissionDecisionReply }, 0..) |render, index| {
-        const Command = @typeInfo(@typeInfo(@TypeOf(render)).@"fn".params[1].type.?).pointer.child;
-        const Reply = @typeInfo(@TypeOf(render)).@"fn".params[2].type.?;
+        const Command = @typeInfo(@typeInfo(@TypeOf(render)).@"fn".param_types[1].?).pointer.child;
+        const Reply = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
         var command: Command = .{};
         try command.session.set(session);
         if (index == 3) {
@@ -4249,10 +4247,10 @@ test "Conversation stream native delivery decodes once and closes on failed hand
     const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite", .{root});
     var storage = try store_module.Store.open(std.testing.io, path, root);
     defer storage.close() catch unreachable;
-    const expected = "x" ** 8189 ++ "é中🙂\n\\\"/" ** 257 ++ "tail";
+    const expected = @as([8189]u8, @splat('x')) ++ @as([257 * "é中🙂\n\\\"/".len]u8, @bitCast(@as([257]["é中🙂\n\\\"/".len]u8, @splat("é中🙂\n\\\"/".*)))) ++ "tail";
     var command = try store_module.testingPublicProjection(&storage, &tmp, &.{
-        .{ .encoded = "x" ** 8189, .decoded = "x" ** 8189 },
-        .{ .encoded = "\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/" ** 257 ++ "tail", .decoded = "é中🙂\n\\\"/" ** 257 ++ "tail" },
+        .{ .encoded = &@as([8189]u8, @splat('x')), .decoded = &@as([8189]u8, @splat('x')) },
+        .{ .encoded = @as([257 * "\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/".len]u8, @bitCast(@as([257]["\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/".len]u8, @splat("\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/".*)))) ++ "tail", .decoded = @as([257 * "é中🙂\n\\\"/".len]u8, @bitCast(@as([257]["é中🙂\n\\\"/".len]u8, @splat("é中🙂\n\\\"/".*)))) ++ "tail" },
     });
     command.stream = true;
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .faults = .{} };
@@ -4473,7 +4471,7 @@ test "reply delivery retries actual AGAIN without renewing inactivity" {
                 // socket before the production write. It must return AGAIN.
                 const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
                 std.debug.assert(std.c.fcntl(self.fd, std.c.F.GETFL) & nonblocking != 0);
-                const bytes = [_]u8{0x69} ** 1024;
+                const bytes = @as([1024]u8, @splat(0x69));
                 while (true) {
                     const count = std.c.write(self.fd, &bytes, bytes.len);
                     if (count < 0) {
@@ -4536,7 +4534,7 @@ test "reply delivery interrupted poll consumes the existing inactivity budget" {
     defer _ = std.c.close(sockets[1]);
     const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
     try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(sockets[0], std.c.F.SETFL, nonblocking));
-    const bytes = [_]u8{0x53} ** 1024;
+    const bytes = @as([1024]u8, @splat(0x53));
     while (std.c.write(sockets[0], &bytes, bytes.len) >= 0) {}
     try std.testing.expectEqual(std.posix.E.AGAIN, std.posix.errno(@as(isize, -1)));
     var old_action: std.posix.Sigaction = undefined;
@@ -4741,12 +4739,7 @@ test "cleanup delay follows elapsed time and preserves custody reuse" {
 }
 
 test "required Bash observations publish while optional stderr custody is held" {
-    const native = @cImport({
-        @cUndef("_FORTIFY_SOURCE");
-        @cInclude("unistd.h");
-        @cInclude("fcntl.h");
-        @cInclude("stdio.h");
-    });
+    const native = @import("posix");
     inline for (.{ TestObservation.Plan.bash_cleanup, TestObservation.Plan.bash_pipes }) |plan| {
         var descriptors: [2]c_int = undefined;
         try std.testing.expectEqual(@as(c_int, 0), native.pipe(&descriptors));
@@ -5637,7 +5630,7 @@ test "message observation renders every closed queue state without fabricated re
         }
     };
 
-    const content = store_module.ContentReference{ .length = 3, .digest = [_]u8{0} ** 32 };
+    const content = store_module.ContentReference{ .length = 3, .digest = @splat(0) };
     const processing = store_module.AttemptBinding{
         .turn_id = 2,
         .operation_id = 3,
@@ -5674,7 +5667,7 @@ test "message observation renders every closed queue state without fabricated re
 
     observation.message.?.queue.?.state = .{ .completed = .{
         .binding = processing,
-        .answer = .{ .length = 6, .digest = [_]u8{0xff} ** 32 },
+        .answer = .{ .length = 6, .digest = @splat(0xff) },
     } };
     observation.message.?.progress = null;
     try Expect.rendered(
@@ -5699,12 +5692,12 @@ test "message observation renders every closed queue state without fabricated re
 }
 
 test "Message observation progress fits the resident response bound with escaped identities" {
-    const escaped_key = [_]u8{1} ** protocol.max_key_bytes;
-    const escaped_session = [_]u8{1} ** protocol.max_session_bytes;
+    const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
+    const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
     var observation = store_module.CommandObservation{ .status = .accepted, .kind = .message };
     try observation.target.set(&escaped_session);
     observation.message = .{
-        .content = .{ .length = std.math.maxInt(u64), .digest = [_]u8{0xff} ** 32 },
+        .content = .{ .length = std.math.maxInt(u64), .digest = @splat(0xff) },
         .queue = .{ .admission_id = std.math.maxInt(u64), .state = .queued },
         .progress = .{ .status = .waiting_for_permission, .action_id = std.math.maxInt(u64) },
     };
@@ -5714,8 +5707,8 @@ test "Message observation progress fits the resident response bound with escaped
 }
 
 test "control response variants fit exact worst-case JSON bounds" {
-    const escaped_session = [_]u8{1} ** protocol.max_session_bytes;
-    const escaped_key = [_]u8{1} ** protocol.max_key_bytes;
+    const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
+    const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
     var stop_command: protocol.SessionStopCommand = .{};
     try stop_command.session.set(&escaped_session);
     var interruption_command: protocol.ModelInterruptionCommand = .{
@@ -6040,7 +6033,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
             .charged = 2,
             .budget = .{ .used = &host.scratch_used, .limit = 2 },
             .structured_output = false,
-            .session_affinity = .{0} ** 16,
+            .session_affinity = @splat(0),
         };
         const owner = ModelPreparingSlot{ .token = token, .binding = binding };
         var slot = ExecutionSlot{ .model_preparing = owner };

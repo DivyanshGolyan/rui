@@ -156,7 +156,7 @@ test "history body limit preserves contextual tool outcomes" {
     defer tmp.cleanup();
     const scratch = try tmp.dir.createFile(io, "history", .{ .read = true });
     defer scratch.close(io);
-    const body = "x" ** 8192;
+    const body = &@as([8192]u8, @splat('x'));
     var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
     try description.set("Compile package");
     const Case = struct { code: protocol.ToolPresentation.Code, heading: []const u8, fallback: bool = false };
@@ -194,7 +194,7 @@ test "history preparation binds wire and staged bytes before exposure" {
         var clients: [2]std.posix.fd_t = undefined;
         var fault_offset: u64 = 0;
         var fault_hits: usize = 0;
-        const large_body = "a" ** 4096 ++ "Z";
+        const large_body = @as([4096]u8, @splat('a')) ++ "Z";
         var connected: usize = 0;
         var mode: enum { intact, corrupt, missing, short_wire, wrong_domain, extra_wire } = .intact;
         var failure: ?anyerror = null;

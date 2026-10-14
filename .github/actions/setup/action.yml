@@ -56,7 +56,7 @@ runs:
     - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: ${{ runner.temp }}/rui-zig
-        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.16.0
+        key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.0
     - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       id: build-cache
       with:
@@ -65,22 +65,23 @@ runs:
         path: |
           ~/.cache/zig
           .zig-cache
-        key: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.16.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-${{ inputs.check-part }}
+          zig-pkg
+        key: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-${{ inputs.check-part }}
         restore-keys: |
-          rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.16.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-
-          rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.16.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-
+          rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-
+          rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-
     - name: Install pinned compiler
       shell: bash
       run: |
         set -euo pipefail
         case "$(uname -s)/$(uname -m)" in
           Linux/x86_64)
-            archive=zig-x86_64-linux-0.16.0
-            checksum=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+            archive=zig-x86_64-linux-0.17.0
+            checksum=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
             ;;
           Darwin/arm64)
-            archive=zig-aarch64-macos-0.16.0
-            checksum=b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
+            archive=zig-aarch64-macos-0.17.0
+            checksum=b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a
             ;;
           *) echo "Unsupported actual native architecture" >&2; exit 1 ;;
         esac
@@ -92,7 +93,7 @@ runs:
           mkdir -p "$RUNNER_TEMP/rui-zig"
           tar -xJf "$RUNNER_TEMP/zig.tar.xz" --strip-components=1 -C "$RUNNER_TEMP/rui-zig"
         fi
-        test "$("$RUNNER_TEMP/rui-zig/zig" version)" = 0.16.0
+        test "$("$RUNNER_TEMP/rui-zig/zig" version)" = 0.17.0
         echo "$RUNNER_TEMP/rui-zig" >> "$GITHUB_PATH"
         echo "ZIG_GLOBAL_CACHE_DIR=$HOME/.cache/zig" >> "$GITHUB_ENV"
     - name: Install the selected H2 fixture dependency
@@ -109,5 +110,4 @@ runs:
       run: |
         set -euo pipefail
         mkdir -p "$HOME/.cache/zig/tmp"
-        test "$(zig fetch --global-cache-dir "$HOME/.cache/zig" https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz)" = N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM
-        zig build --global-cache-dir "$HOME/.cache/zig" --fetch=all
+        bash src/fetch_dependencies.sh

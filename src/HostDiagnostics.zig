@@ -1,9 +1,6 @@
 const std = @import("std");
 const stderr = @import("stderr.zig");
-const c = @cImport({
-    @cInclude("sys/stat.h");
-    @cInclude("unistd.h");
-});
+const c = @import("posix");
 
 const Self = @This();
 pub const default_cap_bytes: u64 = 128 * 1024 * 1024;
@@ -157,7 +154,7 @@ test "startup diagnostics rotate before growth, repair tails and retain failures
     defer tmp.cleanup();
     var writer = try open(io, tmp.dir, 16 * 4096);
     defer writer.close();
-    const long_detail = [_]u8{'x'} ** 3900;
+    const long_detail = @as([3900]u8, @splat('x'));
     for (0..17) |_| writer.record("ready", &long_detail);
     try std.testing.expectEqual(null, writer.failure);
     try std.testing.expectEqual(@as(usize, 16), writer.count);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Translator = @import("translate_c").Translator;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -67,7 +68,10 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
     });
     evaluator_module.addIncludePath(b.path("src"));
+    const evaluator_bindings = addBindings(b, evaluator_module, "evaluator_native", "#include <evaluator_parent.h>\n#include <unistd.h>\n");
+    evaluator_bindings.addIncludePath(b.path("src"));
     evaluator_host.root_module.addImport("evaluator", evaluator_module);
+    configurePosix(b, evaluator_host.root_module);
     configureEvaluatorParent(b, evaluator_host);
     const run_evaluator_host = b.addRunArtifact(evaluator_host);
     run_evaluator_host.addArtifactArg(evaluator);
@@ -137,7 +141,34 @@ pub fn build(b: *std.Build) void {
     logic_test_step.dependOn(&run_renderer_allocation.step);
     test_step.dependOn(&run_renderer_allocation.step);
 
+    const terminal_notice = b.addExecutable(.{
+        .name = "rui-terminal-notice-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/terminal_notice.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const terminal_module = b.createModule(.{
+        .root_source_file = b.path("src/SessionTerminal.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+    });
+    configurePosix(b, terminal_module);
+    terminal_notice.root_module.addImport("terminal", terminal_module);
+    terminal_notice.root_module.link_libc = true;
+
     const release_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
+    const terminal_restoration = b.addSystemCommand(&.{"env"});
+    terminal_restoration.addPrefixedArtifactArg("RUI_TEST_TERMINAL_NOTICE=", terminal_notice);
+    terminal_restoration.addArg("python3");
+    terminal_restoration.addFileArg(b.path("tests/integration/terminal_restoration_integration.py"));
+    terminal_restoration.addArtifactArg(release_safe);
+    terminal_restoration.addPassthruArgs();
+    const terminal_restoration_step = b.step("terminal-restoration-integration", "Run native terminal restoration with build-owned bindings");
+    terminal_restoration_step.dependOn(&terminal_restoration.step);
+
     const session_list_client = b.addExecutable(.{
         .name = "rui-session-list-client-test",
         .root_module = b.createModule(.{
@@ -152,6 +183,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseSafe,
     });
+    configurePosix(b, read_client);
     session_list_client.root_module.addImport("rui_client", read_client);
     const proposal_client = b.addExecutable(.{
         .name = "rui-proposal-client-test",
@@ -298,11 +330,13 @@ pub fn build(b: *std.Build) void {
         }),
     });
     credential_actor.root_module.link_libc = true;
-    credential_actor.root_module.addImport("codex_credentials", b.createModule(.{
+    const credentials_module = b.createModule(.{
         .root_source_file = b.path("src/codex_credentials.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
-    }));
+    });
+    configurePosix(b, credentials_module);
+    credential_actor.root_module.addImport("codex_credentials", credentials_module);
     const credential_integration = b.addSystemCommand(&.{"python3"});
     credential_integration.addFileArg(b.path("tests/integration/codex_credential_integration.py"));
     credential_integration.addArtifactArg(credential_actor);
@@ -321,11 +355,13 @@ pub fn build(b: *std.Build) void {
         }),
     });
     preference_policy_actor.root_module.link_libc = true;
-    preference_policy_actor.root_module.addImport("preferences", b.createModule(.{
+    const preferences_module = b.createModule(.{
         .root_source_file = b.path("src/preferences.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
-    }));
+    });
+    configurePosix(b, preferences_module);
+    preference_policy_actor.root_module.addImport("preferences", preferences_module);
     const preference_policy_integration = b.addSystemCommand(&.{"python3"});
     preference_policy_integration.addFileArg(b.path("tests/integration/preference_policy_integration.py"));
     preference_policy_integration.addArtifactArg(preference_policy_actor);
@@ -368,11 +404,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     host_status_actor.root_module.link_libc = true;
-    host_status_actor.root_module.addImport("client", b.createModule(.{
-        .root_source_file = b.path("src/client.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-    }));
+    host_status_actor.root_module.addImport("client", read_client);
     const host_status_integration = b.addSystemCommand(&.{"python3"});
     host_status_integration.addFileArg(b.path("tests/integration/host_status_integration.py"));
     host_status_integration.addArtifactArg(release_safe);
@@ -412,9 +444,9 @@ pub fn build(b: *std.Build) void {
         "fmt",
         "--check",
         "--ast-check",
-        b.pathFromRoot("build.zig"),
-        b.pathFromRoot("src"),
     });
+    format.addFileArg(b.path("build.zig"));
+    format.addDirectoryArg(b.path("src"));
     const release = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
     const fast_integrations = b.addSystemCommand(&.{"sh"});
     fast_integrations.addFileArg(b.path("tests/integration/check.sh"));
@@ -427,6 +459,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addArtifactArg(proposal_client);
     fast_integrations.addArtifactArg(activity_client);
     fast_integrations.addArtifactArg(preference_policy_actor);
+    fast_integrations.addArtifactArg(terminal_notice);
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.step.dependOn(&release.step);
     fast_integrations.step.dependOn(&run_evaluator_host.step);
@@ -448,6 +481,7 @@ pub fn build(b: *std.Build) void {
     process_integrations.addArtifactArg(activity_client);
     process_integrations.addArtifactArg(preference_policy_actor);
     process_integrations.addArg(@tagName(check_part));
+    process_integrations.addArtifactArg(terminal_notice);
     const full_evaluator = b.addSystemCommand(&.{"python3"});
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
     full_evaluator.addArtifactArg(evaluator);
@@ -650,7 +684,7 @@ pub fn build(b: *std.Build) void {
     });
     measure_call_classification.setCwd(b.path("tests/qualification"));
     measure_call_classification.setEnvironmentVariable("GOTOOLCHAIN", "local");
-    if (b.args) |args| measure_call_classification.addArgs(args);
+    measure_call_classification.addPassthruArgs();
     measure_call_classification.addArtifactArg(release);
     measure_call_classification.addArtifactArg(addSqliteShell(b, target, .ReleaseSmall));
     const measure_call_classification_step = b.step(
@@ -664,7 +698,7 @@ pub fn build(b: *std.Build) void {
     });
     measure_execution_service.setCwd(b.path("tests/qualification"));
     measure_execution_service.setEnvironmentVariable("GOTOOLCHAIN", "local");
-    if (b.args) |args| measure_execution_service.addArgs(args);
+    measure_execution_service.addPassthruArgs();
     measure_execution_service.addArtifactArg(release);
     const measure_execution_service_step = b.step(
         "measure-execution-service",
@@ -766,15 +800,16 @@ fn addPinnedTransport(b: *std.Build, target: std.Build.ResolvedTarget) PinnedTra
     const nghttp2 = b.dependency("nghttp2", .{});
     const build_transport = b.addSystemCommand(&.{"sh"});
     build_transport.addFileArg(b.path("src/build_transport.sh"));
-    build_transport.addDirectoryArg(openssl.path("."));
-    build_transport.addDirectoryArg(curl.path("."));
-    build_transport.addDirectoryArg(nghttp2.path("."));
-    build_transport.addFileArg(b.path("src/curl-post-retry.patch"));
+    // Configure scripts change cwd and embed the installation prefix in Makefiles.
+    build_transport.addDirectoryArg2(openssl.path("."), .{ .make_absolute = true });
+    build_transport.addDirectoryArg2(curl.path("."), .{ .make_absolute = true });
+    build_transport.addDirectoryArg2(nghttp2.path("."), .{ .make_absolute = true });
+    build_transport.addFileArg2(b.path("src/curl-post-retry.patch"), .{ .make_absolute = true });
     const target_name = b.fmt("{s}-{s}", .{
         @tagName(target.result.cpu.arch),
         @tagName(target.result.os.tag),
     });
-    const output = build_transport.addOutputDirectoryArg(b.fmt("pinned-transport-{s}", .{target_name}));
+    const output = build_transport.addOutputDirectoryArg2(b.fmt("pinned-transport-{s}", .{target_name}), .{ .make_absolute = true });
     build_transport.addArg(target_name);
     build_transport.addArg(b.graph.zig_exe);
     return .{ .output = output };
@@ -791,7 +826,8 @@ fn configureTransport(
     const options = b.addOptions();
     options.addOption(bool, "enabled", enabled);
     compile.root_module.addOptions("transport_options", options);
-    compile.root_module.addIncludePath(if (enabled)
+    const bindings = addBindings(b, compile.root_module, "curl", "#include <curl/curl.h>\n#include <time.h>\n");
+    bindings.addIncludePath(if (enabled)
         pinned.output.path(b, "include")
     else
         b.dependency("curl", .{}).path("include"));
@@ -807,6 +843,8 @@ fn configureTransport(
         compile.root_module.addSystemFrameworkPath(pinned.output.path(b, "sdk/System/Library/Frameworks"));
         compile.root_module.addSystemIncludePath(pinned.output.path(b, "sdk/usr/include"));
         compile.root_module.addLibraryPath(pinned.output.path(b, "sdk/usr/lib"));
+        bindings.addSystemFrameworkPath(pinned.output.path(b, "sdk/System/Library/Frameworks"));
+        bindings.addSystemIncludePath(pinned.output.path(b, "sdk/usr/include"));
         compile.root_module.linkFramework("Security", .{});
         compile.root_module.linkFramework("CoreFoundation", .{});
         compile.root_module.linkFramework("CoreServices", .{});
@@ -820,6 +858,8 @@ fn configureTransport(
 fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     const sqlite = b.dependency("sqlite", .{});
     const module = compile.root_module;
+    const bindings = addBindings(b, module, "sqlite", "#include <sqlite3.h>\n");
+    bindings.addIncludePath(sqlite.path("."));
     module.link_libc = true;
     module.addIncludePath(sqlite.path("."));
     module.addCSourceFile(.{
@@ -861,6 +901,7 @@ fn configureHostLaunch(b: *std.Build, compile: *std.Build.Step.Compile) void {
 
 fn configureTerminalEditor(b: *std.Build, compile: *std.Build.Step.Compile) void {
     const utf8proc = b.dependency("utf8proc", .{});
+    configurePosix(b, compile.root_module);
     compile.root_module.link_libc = true;
     compile.root_module.addIncludePath(utf8proc.path("."));
     compile.root_module.addCSourceFile(.{
@@ -875,6 +916,35 @@ fn configureEvaluatorParent(b: *std.Build, compile: *std.Build.Step.Compile) voi
         .file = b.path("src/evaluator_parent.c"),
         .flags = &.{"-std=gnu11"},
     });
+}
+
+fn addBindings(b: *std.Build, module: *std.Build.Module, name: []const u8, header: []const u8) Translator {
+    const bindings: Translator = .init(b.dependency("translate_c", .{ .optimize = std.builtin.OptimizeMode.ReleaseFast }), .{
+        .name = name,
+        .c_source_file = b.addWriteFiles().add(b.fmt("{s}.h", .{name}), header),
+        .target = module.resolved_target.?,
+        .optimize = module.optimize.?,
+    });
+    module.addImport(name, bindings.mod);
+    return bindings;
+}
+
+fn configurePosix(b: *std.Build, module: *std.Build.Module) void {
+    _ = addBindings(b, module, "posix",
+        // Fortified variadic open wrappers are not needed by these bindings.
+        \\#undef _FORTIFY_SOURCE
+        \\#include <unistd.h>
+        \\#include <sys/stat.h>
+        \\#include <sys/resource.h>
+        \\#include <termios.h>
+        \\#include <fcntl.h>
+        \\#include <sys/mman.h>
+        \\#include <sys/wait.h>
+        \\#include <signal.h>
+        \\#include <stdio.h>
+        \\#include <poll.h>
+        \\
+    );
 }
 
 fn addSqliteShell(

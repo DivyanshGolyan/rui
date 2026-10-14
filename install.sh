@@ -16,7 +16,7 @@ fi
 
 repo=$(cd -- "$(dirname -- "$0")" && pwd)
 cd "$repo"
-for tool in zig python3 git make perl patch cc; do
+for tool in zig python3 git make perl patch cc curl; do
     if ! command -v "$tool" >/dev/null; then
         printf 'Missing prerequisite: %s. See README.md, Build from source.\n' "$tool" >&2
         exit 1
@@ -44,6 +44,7 @@ done
 cache=${ZIG_GLOBAL_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/zig}
 mkdir -p "$cache/tmp" "$prefix/lib/rui" "$prefix/bin"
 cache=$(cd "$cache" && pwd)
+export ZIG_GLOBAL_CACHE_DIR="$cache"
 release=$(mktemp -d "$prefix/lib/rui/install.XXXXXX")
 published=0
 cleanup() {
@@ -71,24 +72,17 @@ if [[ $(git rev-parse --show-toplevel 2>/dev/null) == "$repo" ]]; then
 fi
 printf 'Building %s with Zig %s.\n' "$revision" "$actual_zig"
 printf 'Preparing dependencies in %s ...\n' "$cache"
-openssl_url=$(sed -n '/\.openssl = /,/},/s/.*\.url = "\([^"]*\)".*/\1/p' build.zig.zon)
-openssl_hash=$(sed -n '/\.openssl = /,/},/s/.*\.hash = "\([^"]*\)".*/\1/p' build.zig.zon)
-actual_hash=$(zig fetch --global-cache-dir "$cache" "$openssl_url")
-if [[ -z $openssl_hash || $actual_hash != "$openssl_hash" ]]; then
-    printf 'OpenSSL dependency hash mismatch. No installation changed.\n' >&2
-    exit 1
-fi
-zig build --global-cache-dir "$cache" --fetch=all
+bash src/fetch_dependencies.sh
 printf 'Building Rui and its native dependencies. A first build can take several minutes.\n'
-python3 - "$cache" "$release" <<'PY'
+python3 - "$release" <<'PY'
 import signal
 import subprocess
 import sys
 import time
 
 started = time.monotonic()
-with subprocess.Popen(["zig", "build", "-Doptimize=ReleaseSafe", "--global-cache-dir", sys.argv[1],
-                       "--prefix", sys.argv[2], "--summary", "all"]) as build:
+with subprocess.Popen(["zig", "build", "-Doptimize=ReleaseSafe",
+                       "--prefix", sys.argv[1], "--summary", "all"]) as build:
     for number in (signal.SIGINT, signal.SIGTERM):
         signal.signal(number, lambda number, frame: build.send_signal(number))
     while True:

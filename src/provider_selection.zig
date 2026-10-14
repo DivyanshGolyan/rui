@@ -89,9 +89,9 @@ test "prospective selection does not fall back from a stale or unavailable prefe
 test "Codex selection accepts identifiers without claiming model qualification" {
     const capability = codex(.configured);
     try std.testing.expectEqualStrings("family=variant", (try resolve(&.{capability}, null, "family=variant", null, null)).selected.model);
-    const maximum = [_]u8{'x'} ** 256;
+    const maximum = @as([256]u8, @splat('x'));
     try std.testing.expectEqualStrings(&maximum, (try resolve(&.{capability}, null, &maximum, null, null)).selected.model);
-    for ([_][]const u8{ "", "bad model", "bad\nmodel", "\x7f", "\xc3\xa9", &([_]u8{'x'} ** 257) }) |invalid|
+    for ([_][]const u8{ "", "bad model", "bad\nmodel", "\x7f", "\xc3\xa9", &@as([257]u8, @splat('x')) }) |invalid|
         try std.testing.expectError(error.UnsupportedSelectionModel, resolve(&.{capability}, null, invalid, null, null));
 }
 

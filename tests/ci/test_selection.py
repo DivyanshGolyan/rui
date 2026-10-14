@@ -89,7 +89,7 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn("codex-h2-integration", result[family])
 
     def test_bootstrap_action_is_not_cheap_ci_policy(self):
-        for path in (".github/actions/setup/action.yml", "install.sh"):
+        for path in (".github/actions/setup/action.yml", "install.sh", "src/fetch_dependencies.sh"):
             result = select([path], "review", AVAILABLE)
             for family in ("targets", "native_targets"):
                 self.assertTrue({"check-full", "admission-debug-integration", "test-full",
@@ -99,11 +99,13 @@ class SelectionTest(unittest.TestCase):
     def test_shared_driver_selects_one_native_inventory(self):
         for paths in (["tests/integration/check.sh"],
                       ["tests/integration/check.sh", "build.zig"],
-                      ["tests/integration/check.sh", "src/server.zig"]):
+                      ["tests/integration/check.sh", "src/server.zig"],
+                      ["tests/integration/check.sh", "tests/integration/terminal_restoration_integration.py"]):
             result = select(paths, "review", AVAILABLE)
             for family in ("targets", "native_targets"):
                 self.assertIn("check-full", result[family])
                 self.assertNotIn("check", result[family])
+                self.assertNotIn("terminal-restoration-integration", result[family])
 
     def test_standalone_oracles_have_executable_platform_routes(self):
         for owner in ("login-signal", "current-facts", "server-delivery"):
@@ -310,6 +312,9 @@ class FullCheckPartitionTest(unittest.TestCase):
 if [ "$1" = - ]; then exec "$TEST_PYTHON" "$@"; fi
 fixture=$(basename "${1:-$0}")
 identity="$fixture.$2"
+if [ "$fixture" = human_cli_integration.py ]; then
+    test "$RUI_TEST_TERMINAL_NOTICE" = notice || exit 46
+fi
 if [ "$CHECK_OVERLAP" = 1 ]; then
     touch "$GATE_DIR/$identity.started"
     if [ "$fixture" = human_cli_integration.py ]; then
@@ -355,9 +360,9 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", FAIL_FIXTURE=fail,
                        CHECK_OVERLAP=str(int(overlap)), GATE_DIR=str(root), TEST_PYTHON=sys.executable,
                        HOLD_FIXTURE=hold, TEST_PART=part)
-            arguments = (["parallel", str(root / "native"), "status", "sessions", "proposal", "activity", "preferences"]
+            arguments = (["parallel", str(root / "native"), "status", "sessions", "proposal", "activity", "preferences", "notice"]
                          if part == "parallel" else
-                         ["status", "sessions", "proposal", "activity", "preferences", part])
+                         ["status", "sessions", "proposal", "activity", "preferences", part, "notice"])
             command = [
                 "/bin/sh", "tests/integration/check.sh", "release", "debug", *arguments,
             ]

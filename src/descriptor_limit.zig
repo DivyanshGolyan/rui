@@ -1,8 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const native = @cImport({
-    @cInclude("sys/resource.h");
-});
+const native = @import("posix");
 
 pub const Observation = struct {
     open_descriptors: usize,

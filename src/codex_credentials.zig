@@ -1,9 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const c = @cImport({
-    @cInclude("sys/stat.h");
-    @cInclude("unistd.h");
-});
+const c = @import("posix");
 
 const io = std.Io.Threaded.global_single_threaded.io();
 

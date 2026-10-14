@@ -129,7 +129,7 @@ test "socket fixture validates complete native byte paths without truncation" {
 // UnixAddress.init pattern in the native fixture owners, not arbitrary aliases
 // or delegated path computation. AST tokens exclude comments and string text.
 fn unsafeSocketTest(source: [:0]const u8) !?[]const u8 {
-    var tree = try std.zig.Ast.parse(std.testing.allocator, source, .zig);
+    var tree = try std.zig.Ast.parse(std.testing.allocator, source, .{ .mode = .zig });
     defer tree.deinit(std.testing.allocator);
     if (tree.errors.len != 0) return error.InvalidFixtureSource;
     for (tree.rootDecls()) |decl| {

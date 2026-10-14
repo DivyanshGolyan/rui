@@ -1,8 +1,6 @@
 const std = @import("std");
 const evaluator = @import("evaluator");
-const c = @cImport({
-    @cInclude("unistd.h");
-});
+const c = @import("posix");
 
 fn replaceSource(dir: std.Io.Dir, io: std.Io, bytes: []const u8) !std.Io.File {
     var writer = try dir.createFile(io, "source", .{ .truncate = true });
@@ -142,8 +140,7 @@ pub fn main(init: std.process.Init) !void {
     owner.output_removal = .native;
 
     source.close(io);
-    source = try replaceSource(tmp, io,
-        "export default async function workflow(capabilities) { return arguments.length === 1 && Object.keys(capabilities).length === 0; }");
+    source = try replaceSource(tmp, io, "export default async function workflow(capabilities) { return arguments.length === 1 && Object.keys(capabilities).length === 0; }");
     var input_writer = try tmp.createFile(io, "input", .{});
     // Nonempty prepared input is reserved for saved results, not entry arguments.
     try input_writer.writeStreamingAll(io, &.{ 5, 1, 0, 0, 0, 2 });
@@ -220,8 +217,7 @@ pub fn main(init: std.process.Init) !void {
         return error.MissingCompilerDiagnostic;
     }
     source.close(io);
-    source = try replaceSource(tmp, io,
-        "export default async function workflow(capabilities) { return arguments.length === 1 && Object.keys(capabilities).length === 0; }");
+    source = try replaceSource(tmp, io, "export default async function workflow(capabilities) { return arguments.length === 1 && Object.keys(capabilities).length === 0; }");
     try owner.validate(source, evaluator.Cancellation.never(), &diagnostic);
     if (diagnostic.text().len != 0) return error.StaleCompilerDiagnostic;
     owner.budget.limit = 3; // JSON true needs four bytes, with no partial delivery.
@@ -294,9 +290,14 @@ pub fn main(init: std.process.Init) !void {
     owner.budget.limit = 32 * 1024 * 1024;
     owner.output_removal = .injected_failure;
     try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.evaluate(
-        source, prepared, evaluator.Cancellation.never(), &partial_delivered,
+        source,
+        prepared,
+        evaluator.Cancellation.never(),
+        &partial_delivered,
         struct {
-            fn consume(observed: *bool, _: *std.Io.File) !void { observed.* = true; }
+            fn consume(observed: *bool, _: *std.Io.File) !void {
+                observed.* = true;
+            }
         }.consume,
     ));
     if (scratch_used.load(.acquire) != 0) return error.EvaluatorPrelaunchChargeLeaked;
@@ -311,9 +312,14 @@ pub fn main(init: std.process.Init) !void {
     if (output_names != 1) return error.EvaluatorOutputCustodyDropped;
     try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.finish());
     try std.testing.expectError(error.InjectedScratchRemovalFailure, owner.evaluate(
-        source, prepared, evaluator.Cancellation.never(), &partial_delivered,
+        source,
+        prepared,
+        evaluator.Cancellation.never(),
+        &partial_delivered,
         struct {
-            fn consume(observed: *bool, _: *std.Io.File) !void { observed.* = true; }
+            fn consume(observed: *bool, _: *std.Io.File) !void {
+                observed.* = true;
+            }
         }.consume,
     ));
     owner.output_removal = .native;

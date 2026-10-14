@@ -49,7 +49,7 @@ test "opaque Session shell selectors preserve NUL position and maximum length" {
             .{ .value = "\x00A", .hex = "0041" },
             .{ .value = "A\x00Z", .hex = "41005a" },
             .{ .value = "A\x00", .hex = "4100" },
-            .{ .value = "\x00" ** 128, .hex = "00" ** 128 },
+            .{ .value = &@as([128]u8, @splat(0)), .hex = &@as([256]u8, @bitCast(@as([128][2]u8, @splat("00".*)))) },
         }) |case| {
             var storage: [288]u8 = undefined;
             var out = std.Io.Writer.fixed(&storage);

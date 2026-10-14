@@ -496,7 +496,7 @@ test "tool summary hides only complete routine metadata and retains warnings" {
         .{ retirement ++ " Additional warning.", "  " ++ retirement ++ " Additional warning." },
         .{ "Process retirement unconfirmed.\n" ++ warning, "  Process retirement unconfirmed.\n  " ++ warning },
         .{ "Bash succeeded. Exit code: 0. Additional warning.", "  Bash succeeded. Exit code: 0. Additional warning." },
-        .{ retirement ++ ("x" ** 256) ++ "\n" ++ warning, "  " ++ (retirement ++ ("x" ** 256))[0..256] ++ " [summary shortened; /details]\n  " ++ warning },
+        .{ retirement ++ @as([256]u8, @splat('x')) ++ "\n" ++ warning, "  " ++ (retirement ++ @as([256]u8, @splat('x')))[0..256] ++ " [summary shortened; /details]\n  " ++ warning },
         .{ "stdout tail: unavailable\n" ++ warning, "  stdout tail: unavailable\n  " ++ warning },
     };
     inline for (cases) |case| {
