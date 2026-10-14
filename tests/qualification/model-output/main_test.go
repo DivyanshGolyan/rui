@@ -4,10 +4,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/shirou/gopsutil/v4/process"
 	"rui.local/qualification/measurement"
 	"rui.local/qualification/model-output/provider"
 )
@@ -683,5 +688,60 @@ func TestCleanupOnlyFailureChangesFinalVerdictAndJoinsErrors(t *testing.T) {
 	message, _ := result["error"].(string)
 	if !strings.Contains(message, "Host cleanup failed") || !strings.Contains(message, "fact log close failed") {
 		t.Fatalf("cleanup errors were not joined: %q", message)
+	}
+}
+
+func TestCapacityRoundReportsStoppedIncompleteOfferInsteadOfCaptureTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		events uint64
+		failed int
+	}{
+		{"short offer", 1, 0},
+		{"failed stream after full bytes", 2, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			binary := filepath.Join(directory, "rui")
+			// Admission succeeds, but capture cannot reach the expected total.
+			if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s\\n' '{\"answer\":{\"status\":\"accepted\"},\"execution\":{\"scratch_used_bytes\":\"0\"}}'\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			target, err := process.NewProcess(int32(os.Getpid()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Sample an owned live process; these observations are not qualification.
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				summary := provider.Summary{
+					ExpectedStreams: 1, ReadyStreams: 1, OfferFinished: 1,
+					CompletedBatches: test.events, CompletedEvents: test.events,
+					OfferBytes: test.events * 260, OfferFailedStreams: test.failed,
+					StartUnixNS: time.Now().Add(-time.Second).UnixNano(),
+				}
+				if err := json.NewEncoder(w).Encode(summary); err != nil {
+					t.Error(err)
+				}
+			}))
+			defer server.Close()
+			factsPath := filepath.Join(directory, "facts.jsonl")
+			facts, err := measurement.NewFactLog(factsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, runError := measureCapacityRound(binary, directory, "store", 1, 1, 2, time.Second, true,
+				measurement.NewDeadline(3*time.Second), &measurement.Host{Process: target},
+				&childFixture{Process: target, controlURL: server.URL}, facts)
+			if err := facts.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if runError == nil || !strings.Contains(runError.Error(), "incomplete provider offer") {
+				t.Fatalf("stopped offer was not reported as the primary failure: %v", runError)
+			}
+			recorded, err := os.ReadFile(factsPath)
+			if err != nil || !strings.Contains(string(recorded), fmt.Sprintf(`"completed_events":%d`, test.events)) {
+				t.Fatalf("partial provider evidence lost: %s, %v", recorded, err)
+			}
+		})
 	}
 }

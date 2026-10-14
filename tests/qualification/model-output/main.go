@@ -1321,6 +1321,11 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 	if err := facts.Write("cpu_window_and_offer", map[string]any{"round": round, "first": cpu10, "second": cpu50, "provider_offer": offer}); err != nil {
 		return nil, err
 	}
+	// Finished streams cannot supply missing bytes. Preserve their evidence and
+	// report that failure rather than waiting for an impossible capture total.
+	if !providerOfferWorkComplete(offer, capacity, expectedWork) {
+		return nil, fmt.Errorf("incomplete provider offer: expected/ready/finished streams %d/%d/%d (want %d each), failed streams %d, batches %d/%d, events %d/%d, bytes %d/%d", offer.ExpectedStreams, offer.ReadyStreams, offer.OfferFinished, capacity, offer.OfferFailedStreams, offer.CompletedBatches, expectedWork.Batches, offer.CompletedEvents, expectedWork.Events, offer.OfferBytes, expectedWork.Bytes)
+	}
 	responseScratch := expectedWork.Bytes
 	expectedScratch, err := checkedCapacityAdd(baselineScratch, responseScratch)
 	if err != nil {
