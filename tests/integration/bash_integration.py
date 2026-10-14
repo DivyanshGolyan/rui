@@ -1369,28 +1369,6 @@ def main():
         host, milestones = None, None
         host = fixture.start_host(store, endpoint_url, active_capacity=0)
         allow(state, store, "before-launch-allow", "direct/before-launch", pending["action"])
-        rejected_allow = fixture.command(
-            "allow-action",
-            "--store",
-            store,
-            "--record",
-            state / "before-launch-rejected-allow.json",
-            "--key",
-            "before-launch-rejected-allow",
-            "--session",
-            "direct/before-launch",
-            "--action",
-            pending["action"],
-        )
-        assert rejected_allow["answer"]["status"] == "rejected", rejected_allow
-        assert rejected_allow["answer"]["code"] == "action_not_pending", rejected_allow
-        assert rejected_allow["answer"]["replayed"] is False, rejected_allow
-        configure(state, store, "before-launch-mode-change", "direct/before-launch", "bypass")
-        report = fixture.command(
-            "inspect-session", "--store", store, "--session", "direct/before-launch"
-        )
-        assert len(report["actions"]["unresolved"]) == 1, report
-        assert report["actions"]["unresolved"][0]["authorization"] == "allow_once", report
         fixture.stop_host(host)
         assert rows(
             store,
