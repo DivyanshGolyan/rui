@@ -1218,6 +1218,33 @@ def prove_caller_disposal():
                                 *(endpoint.server_close for endpoint in endpoints[1:]),
                                 *(lambda thread=thread: thread.join(timeout=5) for thread in threads))
 
+    # A close refusal before its effect must leave the endpoint owned for the
+    # outer finalizer, including when an existing assertion stays primary.
+    for body_failed in (False, True):
+        endpoint = dispatch.SuccessEndpoint([])
+        thread = threading.Thread(target=endpoint.serve_forever)
+        thread.start()
+        endpoints = {endpoint: thread}
+        primary = AssertionError("body before endpoint close")
+        close_error = OSError("close refused before effect")
+        try:
+            with patch.object(endpoint, "server_close", side_effect=close_error):
+                try:
+                    try:
+                        if body_failed:
+                            raise primary
+                    finally:
+                        dispatch.stop_endpoint(endpoint, endpoints)
+                except BaseException as error:
+                    assert error is (primary if body_failed else close_error), error
+            assert endpoint in endpoints, "unclosed endpoint lost its disposal owner"
+            dispatch.dispose_dispatch([], endpoints, [])
+            assert endpoint.fileno() == -1 and endpoints == {}, "outer finalizer did not close retained endpoint"
+        finally:
+            endpoint.shutdown()
+            endpoint.server_close()
+            thread.join(timeout=5)
+
     # Execute stage_action's actual startup boundary, not just its disposer.
     endpoint = dispatch.SuccessEndpoint([])
     startup = RuntimeError("Host startup refused")

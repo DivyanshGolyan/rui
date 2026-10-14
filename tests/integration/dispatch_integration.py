@@ -25,7 +25,7 @@ from model_fixture import (
 
 
 def stop_endpoint(endpoint, endpoints):
-    thread = endpoints.pop(endpoint)
+    thread = endpoints[endpoint]
 
     def join():
         if thread.ident is not None:
@@ -38,6 +38,10 @@ def stop_endpoint(endpoint, endpoints):
         endpoint.server_close,
         join,
     )
+    # dispose_all retains an active body error; inspect retirement rather than
+    # treating its return as proof that every disposal succeeded.
+    if endpoint.fileno() == -1 and not thread.is_alive():
+        del endpoints[endpoint]
 
 
 def dispose_dispatch(processes, endpoints, releases, *after):
