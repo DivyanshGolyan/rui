@@ -27,6 +27,16 @@ from model_fixture import (
 def stop_endpoint(endpoint, endpoints):
     thread = endpoints[endpoint]
 
+    def shutdown():
+        if thread.ident is not None:
+            try:
+                endpoint.shutdown()
+            except BaseException:
+                # A pre-effect refusal leaves serve_forever alive. Retry once,
+                # retaining the first failure even if retirement then succeeds.
+                dispose_all(endpoint.shutdown)
+                raise
+
     def join():
         if thread.ident is not None:
             thread.join(timeout=5)
@@ -34,7 +44,7 @@ def stop_endpoint(endpoint, endpoints):
 
     # shutdown/server_close may block; the join timeout is not a shutdown bound.
     dispose_all(
-        endpoint.shutdown if thread.ident is not None else lambda: None,
+        shutdown,
         endpoint.server_close,
         join,
     )

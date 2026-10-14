@@ -13,6 +13,15 @@ from host_process import canonical_fixture_root, dispose_all, start_ready_proces
 
 
 def dispose_owner_case(host, endpoint, thread):
+    def shutdown():
+        if thread is not None and thread.ident is not None:
+            try:
+                endpoint.shutdown()
+            except BaseException:
+                # A pre-effect refusal still owns a live serving thread.
+                dispose_all(endpoint.shutdown)
+                raise
+
     def join():
         if thread is not None and thread.ident is not None:
             thread.join(timeout=5)
@@ -20,7 +29,7 @@ def dispose_owner_case(host, endpoint, thread):
 
     dispose_all(
         lambda: fixture.stop_host(host) if host is not None else None,
-        lambda: endpoint.shutdown() if thread is not None and thread.ident is not None else None,
+        shutdown,
         lambda: endpoint.server_close() if endpoint is not None else None,
         join,
     )

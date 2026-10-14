@@ -1094,7 +1094,7 @@ def prove_caller_disposal():
 
     for owner in (dispatch, page, bash):
         for body_failed in (False, True):
-            for fault in (None, "stop", "shutdown", "close"):
+            for fault in (None, "stop", "shutdown", "shutdown-before", "close"):
                 primary = AssertionError("original caller assertion")
                 cleanup = RuntimeError(f"injected {fault}")
                 processes = [subprocess.Popen(child("time.sleep(30)"), stdout=subprocess.PIPE,
@@ -1108,6 +1108,7 @@ def prove_caller_disposal():
                 retained = []
                 original_shutdown = endpoints[0].shutdown
                 original_close = endpoints[0].server_close
+                shutdown_attempts = 0
 
                 def stop(process):
                     stop_process(process)
@@ -1115,6 +1116,10 @@ def prove_caller_disposal():
                         raise cleanup
 
                 def shutdown():
+                    nonlocal shutdown_attempts
+                    shutdown_attempts += 1
+                    if fault == "shutdown-before" and shutdown_attempts == 1:
+                        raise cleanup
                     original_shutdown()
                     if fault == "shutdown":
                         raise cleanup
@@ -1205,6 +1210,64 @@ def prove_caller_disposal():
             endpoint.shutdown()
             endpoint.server_close()
         assert closed, "stage_action startup leaked endpoint"
+
+    # A permanent refusal remains a failure and reports unretired custody. Use
+    # a short join only for this deliberate leak, then release it ourselves.
+    for owner in (dispatch, page, bash):
+        for body_failed in (False, True):
+            endpoint = dispatch.SuccessEndpoint([])
+            thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+            thread.start()
+            primary = AssertionError("body before shutdown refusal")
+            shutdown_error = OSError("persistent shutdown refusal")
+            try:
+                with patch.object(endpoint, "shutdown", side_effect=shutdown_error), \
+                        patch.object(thread, "join", lambda timeout: threading.Thread.join(thread, .01)):
+                    try:
+                        try:
+                            if body_failed:
+                                raise primary
+                        finally:
+                            if owner is dispatch:
+                                dispatch.stop_endpoint(endpoint, {endpoint: thread})
+                            elif owner is page:
+                                page.dispose_page(None, endpoint, thread, 3)
+                            else:
+                                bash.dispose_owner_case(None, endpoint, thread)
+                    except BaseException as error:
+                        assert error is (primary if body_failed else shutdown_error), error
+                        assert any("thread did not retire" in note for note in error.__notes__), error
+                    else:
+                        raise AssertionError("persistent shutdown refusal accepted")
+                assert thread.is_alive() and endpoint.fileno() == -1
+            finally:
+                endpoint.shutdown()
+                endpoint.server_close()
+                thread.join(timeout=5)
+                assert not thread.is_alive()
+
+    # Run the actual whole-stream caller in a fresh interpreter. A non-daemon
+    # serving thread would hang after the preserved failure, despite the join.
+    exit_probe = subprocess.run([sys.executable, "-c", """
+import sys
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+sys.argv = [sys.argv[0], "unused-rui"]
+import conversation_page_integration as page
+primary = AssertionError("whole-stream startup failure")
+with patch.object(page, "start_host", side_effect=primary), \
+        patch.object(page.TestHTTPServer, "shutdown", side_effect=OSError("shutdown refused")):
+    try:
+        page.whole_stream_shape(0)
+    except AssertionError as error:
+        assert error is primary
+        assert any("thread did not retire" in note for note in error.__notes__)
+    else:
+        raise AssertionError("whole-stream failure suppressed")
+print("whole-stream failure survived teardown and interpreter exit")
+""", str(pathlib.Path(__file__).resolve().parent)], capture_output=True, text=True, timeout=10)
+    assert exit_probe.returncode == 0, exit_probe.stderr
+    assert exit_probe.stdout.strip() == "whole-stream failure survived teardown and interpreter exit", exit_probe.stdout
 
     # A timed join returning is not retirement, even with successful shutdown.
     endpoint = MagicMock()

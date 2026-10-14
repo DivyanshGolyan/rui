@@ -27,6 +27,15 @@ from host_process import TestHTTPServer, canonical_fixture_root, dispose_all, st
 
 
 def dispose_page(process, endpoint, thread, timeout):
+    def shutdown():
+        if thread.ident is not None:
+            try:
+                endpoint.shutdown()
+            except BaseException:
+                # Closing the listener does not signal serve_forever to retire.
+                dispose_all(endpoint.shutdown)
+                raise
+
     def join():
         if thread.ident is not None:
             thread.join(timeout=timeout)
@@ -34,7 +43,7 @@ def dispose_page(process, endpoint, thread, timeout):
 
     dispose_all(
         lambda: stop_process(process) if process is not None else None,
-        endpoint.shutdown if thread.ident is not None else lambda: None,
+        shutdown,
         endpoint.server_close,
         join,
     )
@@ -318,7 +327,9 @@ def whole_stream_shape(length):
         store = state / "store"
         store.mkdir(mode=0o700)
         endpoint = TestHTTPServer(("127.0.0.1", 0), Handler)
-        worker = threading.Thread(target=endpoint.serve_forever)
+        # Persistent shutdown refusal must fail the checked join, not hang the
+        # interpreter at exit. Daemon mode is not evidence of retirement.
+        worker = threading.Thread(target=endpoint.serve_forever, daemon=True)
         process = None
         try:
             worker.start()
