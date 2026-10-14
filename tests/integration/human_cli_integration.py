@@ -2628,19 +2628,18 @@ def main(selected="all"):
         saved.chmod(0o600)
         assert run(preferences_home, "wait-session", "--session", session,
             "--json", success=False) == ""
+        before_missing = run(preferences_home, "requests", "--json")
+        assert not (state / "missing").exists()
         master, slave = pty.openpty()
-        # Resume performs Host preflight. Own the empty selected destination's
-        # Host explicitly so this refusal cannot leave a detached process.
-        missing_host = None
         try:
-            missing_host = fixture.start_host(state / "missing", None)
             entered = subprocess.run([str(fixture.RUI), "resume", "--", session],
                 env={**os.environ, "HOME": str(preferences_home)}, stdin=slave,
                 stdout=slave, stderr=subprocess.PIPE, timeout=5)
         finally:
-            dispose_all(lambda: fixture.stop_host(missing_host) if missing_host is not None else None,
-                        lambda: os.close(slave), lambda: os.close(master))
-        assert entered.returncode != 0 and b"SessionNotConfigured" in entered.stderr, entered.stderr
+            dispose_all(lambda: os.close(slave), lambda: os.close(master))
+        assert entered.returncode != 0 and b"FileNotFound" in entered.stderr, entered.stderr
+        assert not (state / "missing").exists() and not fallback.exists()
+        assert run(preferences_home, "requests", "--json") == before_missing
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
         assert json.loads(run(home, "wait-session", "--store", store, "--session", session,
             "--json")) == {"return": "idle"}
