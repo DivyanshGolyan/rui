@@ -9,7 +9,21 @@ import threading
 import bash_integration as bash_fixture
 import model_fixture as fixture
 from control_integration import raw_request
-from host_process import canonical_fixture_root, start_ready_process
+from host_process import canonical_fixture_root, dispose_all, start_ready_process
+
+
+def dispose_owner_case(host, endpoint, thread):
+    def join():
+        if thread is not None and thread.ident is not None:
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "Bash owner endpoint thread did not retire"
+
+    dispose_all(
+        lambda: fixture.stop_host(host) if host is not None else None,
+        lambda: endpoint.shutdown() if thread is not None and thread.ident is not None else None,
+        lambda: endpoint.server_close() if endpoint is not None else None,
+        join,
+    )
 
 
 def execution_idle(store, session):
@@ -33,7 +47,11 @@ def continuation_endpoint(names):
     ]
     endpoint = fixture.SuccessEndpoint(specs)
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-    thread.start()
+    try:
+        thread.start()
+    except BaseException:
+        dispose_owner_case(None, endpoint, thread)
+        raise
     return endpoint, thread, specs
 
 
@@ -54,9 +72,10 @@ def stage_action(state, store, name, command):
     bash_fixture.add_exchange(responses, name, command)
     endpoint = fixture.SuccessEndpoint(responses)
     endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-    endpoint_thread.start()
-    host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+    host = None
     try:
+        endpoint_thread.start()
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         session = f"direct/{name}"
         bash_fixture.configure(state, store, f"{name}-config", session)
         fixture.message(state, store, f"{name}-message", session, "execute")
@@ -70,10 +89,7 @@ def stage_action(state, store, name, command):
         )
         return action
     finally:
-        fixture.stop_host(host)
-        endpoint.shutdown()
-        endpoint.server_close()
-        endpoint_thread.join(timeout=5)
+        dispose_owner_case(host, endpoint, endpoint_thread)
 
 
 def prove_timeout_feedback(state):
@@ -88,9 +104,9 @@ def prove_timeout_feedback(state):
         bash_fixture.add_exchange(responses, name, command, timeout_ms=override)
     endpoint = fixture.SuccessEndpoint(responses)
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-    thread.start()
     host = None
     try:
+        thread.start()
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", "--bash-timeout-ms", "500")
         for index, (name, _, effective) in enumerate(cases):
             session = f"direct/{name}"
@@ -127,13 +143,7 @@ def prove_timeout_feedback(state):
         print("Bash timeout feedback: default 500 ms, override 800 ms, saved/model result identity and success control passed")
         print("Workspace framing: quoted path round-trip, one instruction section and exact native Bash cwd passed")
     finally:
-        try:
-            if host is not None:
-                fixture.stop_host(host)
-        finally:
-            endpoint.shutdown()
-            endpoint.server_close()
-            thread.join(timeout=5)
+        dispose_owner_case(host, endpoint, thread)
 
 
 def main():
@@ -142,6 +152,7 @@ def main():
     state.mkdir(mode=0o700)
     store = root / "store"
     host = None
+    endpoint = endpoint_thread = None
     completed = False
     try:
         prove_timeout_feedback(state)
@@ -186,9 +197,8 @@ def main():
             fixture.wait_for(lambda name=name: bash_fixture.execution_custody_idle(store, f"direct/{name}"), f"{name} cleanup")
         fixture.stop_host(host)
         host = None
-        endpoint.shutdown()
-        endpoint.server_close()
-        endpoint_thread.join(timeout=5)
+        dispose_owner_case(None, endpoint, endpoint_thread)
+        endpoint = endpoint_thread = None
         assert resolution_after_stop(store, "direct/preparation-failure") == "storage_failed"
         assert resolution_after_stop(store, "direct/slot-reuse") == "succeeded"
 
@@ -219,9 +229,8 @@ def main():
             fixture.wait_for(lambda: bash_fixture.execution_custody_idle(isolated_store, f"direct/{name}"), f"{name} cleanup")
             fixture.stop_host(host)
             host = None
-            endpoint.shutdown()
-            endpoint.server_close()
-            endpoint_thread.join(timeout=5)
+            dispose_owner_case(None, endpoint, endpoint_thread)
+            endpoint = endpoint_thread = None
             assert resolution_after_stop(isolated_store, f"direct/{name}") == expected
 
         name = "self-unlink"
@@ -251,9 +260,8 @@ def main():
         assert resources["custody_occupied"] == "0", resources
         fixture.stop_host(host)
         host = None
-        endpoint.shutdown()
-        endpoint.server_close()
-        endpoint_thread.join(timeout=5)
+        dispose_owner_case(None, endpoint, endpoint_thread)
+        endpoint = endpoint_thread = None
         assert resolution_after_stop(isolated_store, f"direct/{name}") == "succeeded"
         assert not list((isolated_store / "scratch").glob("bash-script-*.tmp"))
 
@@ -363,17 +371,14 @@ def main():
         assert all(path.exists() for path in retained_paths)
         fixture.stop_host(host)
         host = None
-        endpoint.shutdown()
-        endpoint.server_close()
-        endpoint_thread.join(timeout=5)
+        dispose_owner_case(None, endpoint, endpoint_thread)
+        endpoint = endpoint_thread = None
         completed = True
     finally:
-        if host is not None:
-            fixture.stop_host(host)
-        if completed:
-            shutil.rmtree(root)
-        else:
-            print(f"retained Bash owner failure state: {root}")
+        dispose_all(
+            lambda: dispose_owner_case(host, endpoint, endpoint_thread),
+            lambda: shutil.rmtree(root) if completed else print(f"retained Bash owner failure state: {root}"),
+        )
 
 
 if __name__ == "__main__":

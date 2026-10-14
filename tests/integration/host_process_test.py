@@ -62,6 +62,7 @@ def assert_reaped(source, description, *, timeout=0.2, required_fields=None, obs
 
 def main():
     prove_dispose_all()
+    prove_caller_disposal()
     prove_terminal_capture_budget()
     prove_execution_release_oracles()
     prove_bash_cleanup_population()
@@ -1137,6 +1138,114 @@ def prove_dispose_all():
                 except OSError:
                     pass
     print("Fixture disposal: primary failure retained, all resources attempted")
+
+
+def prove_caller_disposal():
+    with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
+        import dispatch_integration as dispatch
+        import conversation_page_integration as page
+        import bash_owner_integration as bash
+
+    for owner in (dispatch, page, bash):
+        for body_failed in (False, True):
+            for fault in (None, "stop", "shutdown", "close"):
+                primary = AssertionError("original caller assertion")
+                cleanup = RuntimeError(f"injected {fault}")
+                processes = [subprocess.Popen(child("time.sleep(30)"), stdout=subprocess.PIPE,
+                                              stderr=subprocess.PIPE)
+                             for _ in range(2 if owner is dispatch else 1)]
+                endpoints = [dispatch.SuccessEndpoint([]) for _ in processes]
+                threads = [threading.Thread(target=endpoint.serve_forever) for endpoint in endpoints]
+                for thread in threads:
+                    thread.start()
+                release = threading.Event()
+                retained = []
+                original_shutdown = endpoints[0].shutdown
+                original_close = endpoints[0].server_close
+
+                def stop(process):
+                    stop_process(process)
+                    if process is processes[0] and fault == "stop":
+                        raise cleanup
+
+                def shutdown():
+                    original_shutdown()
+                    if fault == "shutdown":
+                        raise cleanup
+
+                def close():
+                    original_close()
+                    if fault == "close":
+                        raise cleanup
+
+                stop_module, stop_name = (bash.fixture, "stop_host") if owner is bash else (
+                    owner, "stop_host" if owner is dispatch else "stop_process")
+                try:
+                    with patch.object(stop_module, stop_name, stop), \
+                            patch.object(endpoints[0], "shutdown", shutdown), \
+                            patch.object(endpoints[0], "server_close", close):
+                        caught = None
+                        try:
+                            try:
+                                if body_failed:
+                                    raise primary
+                            finally:
+                                if owner is dispatch:
+                                    dispatch.dispose_dispatch(processes, dict(zip(endpoints, threads)),
+                                                              [release.set], lambda: retained.append(True))
+                                else:
+                                    dispose = (lambda: page.dispose_page(processes[0], endpoints[0], threads[0], 3)
+                                               if owner is page else
+                                               bash.dispose_owner_case(processes[0], endpoints[0], threads[0]))
+                                    dispose_all(release.set, dispose, lambda: retained.append(True))
+                        except BaseException as error:
+                            caught = error
+                        # Check retirement before exception identity so a grouped
+                        # process loop mutation fails at the skipped second child.
+                        assert all(process.poll() is not None for process in processes), "later child disposal skipped"
+                        assert all(process.stdout.closed and process.stderr.closed for process in processes)
+                        assert all(endpoint.fileno() == -1 for endpoint in endpoints), "endpoint close skipped"
+                        assert all(not thread.is_alive() for thread in threads), "endpoint retirement skipped"
+                        assert release.is_set() and retained == [True], "release or retention skipped"
+                        assert caught is (primary if body_failed else cleanup if fault else None), caught
+                        if fault:
+                            assert any(f"injected {fault}" in note for note in caught.__notes__), caught
+                finally:
+                    # Keep a deliberately broken candidate from leaking test resources.
+                    dispose_all(*(lambda process=process: stop_process(process) for process in processes),
+                                original_shutdown, original_close,
+                                *(endpoint.shutdown for endpoint in endpoints[1:]),
+                                *(endpoint.server_close for endpoint in endpoints[1:]),
+                                *(lambda thread=thread: thread.join(timeout=5) for thread in threads))
+
+    # Execute stage_action's actual startup boundary, not just its disposer.
+    endpoint = dispatch.SuccessEndpoint([])
+    startup = RuntimeError("Host startup refused")
+    with patch.object(bash.fixture, "SuccessEndpoint", return_value=endpoint), \
+            patch.object(bash.fixture, "start_host", side_effect=startup):
+        try:
+            bash.stage_action(pathlib.Path("unused"), pathlib.Path("unused"), "startup", "true")
+        except RuntimeError as error:
+            assert error is startup
+        finally:
+            closed = endpoint.fileno() == -1
+            endpoint.shutdown()
+            endpoint.server_close()
+        assert closed, "stage_action startup leaked endpoint"
+
+    # A timed join returning is not retirement, even with successful shutdown.
+    endpoint = MagicMock()
+    thread = SimpleNamespace(ident=1, join=lambda timeout: None, is_alive=lambda: True)
+    for dispose in (lambda: dispatch.stop_endpoint(endpoint, {endpoint: thread}),
+                    lambda: page.dispose_page(None, endpoint, thread, 3),
+                    lambda: bash.dispose_owner_case(None, endpoint, thread)):
+        try:
+            dispose()
+        except AssertionError as error:
+            assert "thread did not retire" in str(error), error
+        else:
+            raise AssertionError("live endpoint thread accepted as retired")
+    print("Caller disposal: dispatch/page/Bash body and cleanup faults, multiple children/endpoints, startup refusal and live-thread rejection passed")
 
 
 if __name__ == "__main__":

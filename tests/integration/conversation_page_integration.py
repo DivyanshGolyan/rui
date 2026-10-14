@@ -23,7 +23,21 @@ from control_integration import (
     successful_sse,
     wait_for,
 )
-from host_process import TestHTTPServer, canonical_fixture_root, stop_process
+from host_process import TestHTTPServer, canonical_fixture_root, dispose_all, stop_process
+
+
+def dispose_page(process, endpoint, thread, timeout):
+    def join():
+        if thread.ident is not None:
+            thread.join(timeout=timeout)
+            assert not thread.is_alive(), "Conversation endpoint thread did not retire"
+
+    dispose_all(
+        lambda: stop_process(process) if process is not None else None,
+        endpoint.shutdown if thread.ident is not None else lambda: None,
+        endpoint.server_close,
+        join,
+    )
 
 
 def request(socket_path, store, route, kind, session, **fields):
@@ -62,9 +76,9 @@ def main():
     store.mkdir(mode=0o700)
     endpoint = StreamingEndpoint()
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-    thread.start()
     process = None
     try:
+        thread.start()
         process, fields = start_host(store, f"http://127.0.0.1:{endpoint.server_address[1]}/responses")
         socket_path = fields["socket"]
         configure(state, store, "page-config", "direct/page")
@@ -167,13 +181,9 @@ def main():
         drained = host_resources(process.pid)
         print(f"conversation Host resource snapshots baseline={baseline} queued_2MiB={after} drained={drained} (RSS bytes, FDs; Linux only)")
     finally:
-        endpoint.release.set()
-        if process is not None:
-            stop_process(process)
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=3)
-        shutil.rmtree(state)
+        dispose_all(endpoint.release.set,
+                    lambda: dispose_page(process, endpoint, thread, 3),
+                    lambda: shutil.rmtree(state))
 
 
 def projected_ranges():
@@ -204,10 +214,10 @@ def projected_ranges():
     store.mkdir(mode=0o700)
     endpoint = TestHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-    thread.start()
     process = None
     expected = ("x" * 4094 + "é中🙂\n\\\"/tail").encode()
     try:
+        thread.start()
         provider = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
         process, fields = start_host(store, provider)
         configure(state, store, "projection-config", "direct/projection")
@@ -272,12 +282,8 @@ def projected_ranges():
         assert json.loads(body)["code"] == "canonical_store_failure", body
         print("projected Conversation ranges: exact escaped/multibyte bytes, healthy trailing empties, repeated EOF, tail and digest corruption fences passed")
     finally:
-        if process is not None:
-            stop_process(process)
-        endpoint.shutdown()
-        endpoint.server_close()
-        thread.join(timeout=3)
-        shutil.rmtree(state)
+        dispose_all(lambda: dispose_page(process, endpoint, thread, 3),
+                    lambda: shutil.rmtree(state))
 
 
 def whole_stream_shape(length):
@@ -313,9 +319,9 @@ def whole_stream_shape(length):
         store.mkdir(mode=0o700)
         endpoint = TestHTTPServer(("127.0.0.1", 0), Handler)
         worker = threading.Thread(target=endpoint.serve_forever)
-        worker.start()
         process = None
         try:
+            worker.start()
             provider = f"http://127.0.0.1:{endpoint.server_port}/responses"
             process, fields = start_host(store, provider)
             configure(state, store, "stream-config", "direct/stream")
@@ -386,12 +392,7 @@ def whole_stream_shape(length):
                             database.execute("INSERT INTO answer_text_projection VALUES(?,?,?,?,?,?)", (answer, 4, answer, 0, 0, 1))
             print(f"whole stream {length} bytes: exact escape-heavy framing, independent digest/tail no-false-success witnesses passed")
         finally:
-            if process is not None:
-                stop_process(process)
-            endpoint.shutdown()
-            endpoint.server_close()
-            worker.join(timeout=5)
-            assert not worker.is_alive()
+            dispose_page(process, endpoint, worker, 5)
 
 
 if __name__ == "__main__":
