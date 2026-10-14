@@ -9,6 +9,7 @@ import mmap
 import os
 import pathlib
 import selectors
+import socketserver
 import stat
 import struct
 import subprocess
@@ -340,6 +341,12 @@ def wait_for_execution_release(inspect, deadline):
 
 class TestHTTPServer(http.server.ThreadingHTTPServer):
     """Stop fixture accept loops promptly; response timing belongs to each case."""
+
+    def server_bind(self):
+        # HTTPServer resolves a descriptive hostname after TCP binding. These
+        # numeric loopback fixtures must not depend on the machine's resolver.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def serve_forever(self, poll_interval=0.01):
         super().serve_forever(poll_interval=poll_interval)
