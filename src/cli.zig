@@ -53,7 +53,7 @@ fn run(init: std.process.Init) !void {
     if (std.mem.eql(u8, command, "read-conversation")) return readConversation(init, args[2..]);
     if (std.mem.eql(u8, command, "resume")) return resumeSession(init, args[2..]);
     if (std.mem.eql(u8, command, "exec")) return exec(init, args[2..]);
-    if (std.mem.eql(u8, command, "setup")) try setup(init, args[2..]) else if (std.mem.eql(u8, command, "sessions")) try sessions(init, args[2..]) else if (std.mem.eql(u8, command, "session")) try enterSession(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, .{ .io = init.io }, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, .{ .io = init.io }, args[2..], false) else return newSession(init, args[1..]);
+    if (std.mem.eql(u8, command, "setup")) try setup(init, args[2..]) else if (std.mem.eql(u8, command, "sessions")) try sessions(init, args[2..]) else if (std.mem.eql(u8, command, "wait-session")) try waitSession(init, args[2..]) else if (std.mem.eql(u8, command, "configure")) try configure(init, .{ .io = init.io }, args[2..], false) else if (std.mem.eql(u8, command, "message")) try message(init, args[2..]) else if (std.mem.eql(u8, command, "stop-session")) try stopSession(init, args[2..]) else if (std.mem.eql(u8, command, "interrupt-model")) try interruptModel(init, args[2..]) else if (std.mem.eql(u8, command, "deny-action")) try decideAction(init, args[2..], .deny) else if (std.mem.eql(u8, command, "allow-action")) try decideAction(init, args[2..], .allow_once) else if (std.mem.eql(u8, command, "retry")) try retry(init.io, args[2..]) else if (std.mem.eql(u8, command, "observe-command")) try observe(init, args[2..]) else if (std.mem.eql(u8, command, "read-result")) try readResult(init, args[2..]) else if (std.mem.eql(u8, command, "read-action-call-id")) try readActionContent(init, args[2..], .call_id) else if (std.mem.eql(u8, command, "read-action-arguments")) try readActionArguments(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-session")) try inspect(init, args[2..]) else if (std.mem.eql(u8, command, "requests")) try requests(init, args[2..]) else if (std.mem.eql(u8, command, "recover")) try recover(init, args[2..]) else if (std.mem.eql(u8, command, "follow")) try follow(init, args[2..]) else if (std.mem.eql(u8, command, "result")) try result(init, args[2..]) else if (std.mem.eql(u8, command, "inspect-action")) try inspectAction(init, .{ .io = init.io }, args[2..], false) else return newSession(init, args[1..]);
     try postCommandHold(init);
 }
 
@@ -774,12 +774,11 @@ const NewSessionOptions = struct {
 
     fn parse(args: []const []const u8, interactive: bool) !NewSessionOptions {
         var options: NewSessionOptions = .{};
-        var persistent = false;
         var literal = false;
         var index: usize = 0;
         while (index < args.len) : (index += 1) {
             const arg = args[index];
-            if (!literal and std.mem.eql(u8, arg, "--store") and options.store == null) options.store = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--provider") and options.provider == null) options.provider = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--model") and options.model == null) options.model = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--persistent") and interactive and !persistent) persistent = true else if (!literal and std.mem.eql(u8, arg, "--")) literal = true else if (options.prompt == null and (literal or !std.mem.startsWith(u8, arg, "-"))) options.prompt = .{ .literal = arg } else if (!interactive and options.prompt == null and std.mem.eql(u8, arg, "-")) options.prompt = .stdin else return usage();
+            if (!literal and std.mem.eql(u8, arg, "--store") and options.store == null) options.store = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--provider") and options.provider == null) options.provider = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--model") and options.model == null) options.model = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--")) literal = true else if (options.prompt == null and (literal or !std.mem.startsWith(u8, arg, "-"))) options.prompt = .{ .literal = arg } else if (!interactive and options.prompt == null and std.mem.eql(u8, arg, "-")) options.prompt = .stdin else return usage();
         }
         if (options.prompt) |source| {
             switch (source) {
@@ -1142,7 +1141,7 @@ fn configure(init: std.process.Init, requester: client.Requests, args: []const [
     if (human and !json and !interactive) {
         var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "configuration: {s} in {s}\n", .{ saved.session.slice(), saved.store.slice() }));
-        if (reply.isAccepted()) try std.Io.File.stdout().writeStreamingAll(io, "next: rui session (same Store and Session)\n");
+        if (reply.isAccepted()) try writeResumeHint(io, saved.store.slice(), saved.session.slice());
     }
     if (human and interactive) if (requester.cancellation) |token| if (token.stopped.load(.acquire)) {
         TerminalText.diagnostic("rui: Configuration {s}; use rui recover {s} to inspect the same saved admission.\n", .{ if (admitted.?) "accepted; do not resubmit it" else "rejected", saved.key.slice() });
@@ -1196,8 +1195,18 @@ fn message(init: std.process.Init, args: []const []const u8) !void {
     if (human and !json) {
         var line: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "message: {s} in {s}\n", .{ input.session, input.store }));
-        if (reply.isAccepted()) try std.Io.File.stdout().writeStreamingAll(io, "next: rui session (same Store and Session)\n");
+        if (reply.isAccepted()) try writeResumeHint(io, saved.store.slice(), saved.session.slice());
     }
+}
+
+fn writeResumeHint(io: std.Io, store: []const u8, session_ref: []const u8) !void {
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
+    try writer.interface.writeAll("next: rui resume --store ");
+    try TerminalText.writeShellWord(&writer.interface, store);
+    try TerminalText.writeShellSession(&writer.interface, session_ref, true);
+    try writer.interface.writeByte('\n');
+    try writer.flush();
 }
 
 fn exec(init: std.process.Init, args: []const []const u8) !void {
@@ -1370,29 +1379,6 @@ fn writeSafeText(io: std.Io, value: []const u8) !void {
     try text.feed(&writer.interface, value);
     try text.finish(&writer.interface);
     try writer.flush();
-}
-
-fn enterSession(init: std.process.Init, args: []const []const u8) !void {
-    var store: ?[]const u8 = null;
-    var session_ref: ?[]const u8 = null;
-    var persistent = false;
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session")) session_ref = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--persistent") and !persistent) persistent = true else return error.UnknownArgument;
-    }
-    const reference = session_ref orelse return usage();
-    if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
-        TerminalText.diagnostic("rui session needs terminal input and output; use one-shot commands for scripts\n", .{});
-        return error.InteractiveTerminalRequired;
-    }
-    // Resolve aliases and enforce the Store's existing private/canonical selector
-    // before any Session request. Explicit --store does not read preferences.
-    var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const paths = platform.resolveClientPaths(init.io, try selectedStore(init, store, &fallback_buffer)) catch |err| {
-        TerminalText.diagnostic("rui: selected Store unavailable ({s}); check --store or rui setup; no alternate Store selected.\n", .{@errorName(err)});
-        return err;
-    };
-    return runSession(init, paths.store.slice(), reference, null);
 }
 
 fn runSession(init: std.process.Init, destination: []const u8, reference: []const u8, initial_text: ?[]const u8) anyerror!void {
@@ -2681,10 +2667,12 @@ const usage_text =
     \\    Print help without starting a Host or creating a Session.
     \\  rui [PROMPT] [--store PATH] [--provider codex] [--model gpt-6-luna]
     \\    On a terminal, attach/start a Host and create a fresh Session in the current Workspace.
-    \\    Bash runs without approval by default. --persistent is a compatibility alias for the same UI.
+    \\    Bash runs without approval by default.
     \\    Non-TTY calls must use explicit one-shot commands; use rui requests/recover after a lost reply.
     \\  rui resume [--store PATH] REF|--last
     \\    Re-enter an exact Session, or the newest created Session in the current Workspace.
+    \\    Type /help for in-Session commands (including /setup).
+    \\    Continuous drafting and in-session Allow once / Deny use the same frontend for every Session.
     \\  rui exec [--store PATH] [--provider codex] [--model gpt-6-luna] PROMPT|-
     \\    Create a fresh Session, wait for its answer, print only answer text to stdout.
     \\    Recovery receipts go to stderr; failures, unconfirmed work and approval blocks exit nonzero.
@@ -2704,10 +2692,7 @@ const usage_text =
     \\  rui serve [--store PATH] [--active-capacity N] [--codex | --provider-endpoint URL] [--provider-ca-file PATH] [--fault NAME]
     \\  rui configure [--store PATH] --session REF [settings] [--json]
     \\    First configuration requires --workspace PATH --provider codex --model MODEL.
-    \\  rui session [--store PATH] --session REF [--persistent]
     \\    All new commands use --store, then saved Store, then HOME/.local/share/rui/store.
-    \\    Type /help for in-Session commands (including /setup).
-    \\    Continuous drafting and in-session Allow once / Deny use the same frontend for every Session.
     \\  One-shot commands (never prompt or change meaning on redirection):
     \\  rui message [--store PATH] --session REF TEXT|- [--json]
     \\    --text FILE|- also captures a file or stdin before sending.
