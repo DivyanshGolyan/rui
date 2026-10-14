@@ -2099,6 +2099,36 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     }
 }
 
+test "canonical presentation releases allocations on acceptance and late rejection" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator, invalid: bool) !void {
+            const bytes = "{\"description\":\"Read \\u20ac files\",\"code\":\"su\\u0063ceeded\",\"publication_position\":";
+            const result: anyerror!JsonToolPresentation = decode: {
+                var scanner = std.json.Scanner.initCompleteInput(allocator, if (invalid)
+                    bytes ++ "\"9223372036854775808\"}"
+                else
+                    bytes ++ "\"9223372036854775807\"}");
+                defer scanner.deinit();
+                // No outer arena may hide leaked temporary decoded tokens.
+                break :decode std.json.parseFromTokenSourceLeaky(JsonToolPresentation, allocator, &scanner, .{});
+            };
+            const value = (result catch |err| {
+                if (err == error.OutOfMemory) return err;
+                try std.testing.expect(invalid);
+                try std.testing.expectEqual(error.InvalidCharacter, err);
+                return;
+            }).value;
+            // Returned bounded facts must outlive the parser's allocations.
+            try std.testing.expect(!invalid);
+            try std.testing.expectEqualStrings("Read € files", value.description.?.slice());
+            try std.testing.expectEqual(protocol.ToolPresentation.Code.succeeded, value.code);
+            try std.testing.expectEqual(@as(?u64, 9223372036854775807), value.publication_position);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{false});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{true});
+}
+
 fn JsonEnum(comptime T: type) type {
     const limit = comptime blk: {
         var longest: usize = 0;

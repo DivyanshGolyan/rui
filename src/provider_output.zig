@@ -1313,3 +1313,52 @@ test "provider field collection cannot grant authority through escaped metadata 
         .{ .start = 0, .length = source.end },
     ));
 }
+
+test "fuzz provider decoded answers and rejection across file windows" {
+    try std.testing.fuzz({}, fuzzAnswer, .{ .corpus = &.{
+        "\xfd\x0f", "\xfe\x0f", "\xff\x0f", "\x00\x10", "\xff\x1f",
+    } });
+}
+
+fn fuzzAnswer(_: void, smith: *std.testing.Smith) !void {
+    var text_buffer: [2 * protocol.content_window_bytes + 128]u8 = undefined;
+    var text = std.Io.Writer.fixed(&text_buffer);
+    const padding = smith.valueRangeAtMost(u16, 0, 2 * protocol.content_window_bytes);
+    try text.splatByteAll('p', padding);
+    // Always exercise controls, multibyte UTF-8 and surrogate-pair escaping;
+    // generated scalars vary their positions around the file-window boundary.
+    try text.writeAll("\x00\"\n\\€𐀀");
+    const count = smith.valueRangeAtMost(u8, 0, 16);
+    for (0..count) |_| {
+        var scalar = smith.valueRangeAtMost(u21, 0, 0x10f7ff);
+        if (scalar >= 0xd800) scalar += 0x800;
+        var encoded: [4]u8 = undefined;
+        const length = try std.unicode.utf8Encode(scalar, &encoded);
+        try text.writeAll(encoded[0..length]);
+    }
+    const expected_digest = protocol.contentDigest(text.buffered());
+    inline for (.{ false, true }) |escape_unicode| {
+        var item_buffer: [2 * protocol.content_window_bytes + 512]u8 = undefined;
+        var item = std.Io.Writer.fixed(&item_buffer);
+        try item.writeAll("{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":");
+        try std.json.Stringify.value(text.buffered(), .{ .escape_unicode = escape_unicode }, &item);
+        try item.writeAll("}]}");
+
+        var stream_buffer: [2 * (2 * protocol.content_window_bytes + 512) + 512]u8 = undefined;
+        var stream = std.Io.Writer.fixed(&stream_buffer);
+        try stream.print("data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s}}}\n\n" ++
+            "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"response\",\"status\":\"completed\",\"output\":[{s}]}}}}\n\n", .{ item.buffered(), item.buffered() });
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const accepted = try validateTestingSse(&tmp, stream.buffered(), 4096);
+        try std.testing.expectEqual(@as(u64, 1), accepted.output.item_count);
+        try std.testing.expectEqual(@as(u64, 0), accepted.output.call_count);
+        try std.testing.expectEqual(@as(u64, text.buffered().len), accepted.output.answer_length);
+        try std.testing.expectEqualSlices(u8, &expected_digest, &accepted.output.answer_digest);
+        // Syntax errors after valid content cannot become accepted prefixes.
+        try std.testing.expectError(error.IncompleteSseEvent, validateTestingSse(&tmp, stream.buffered()[0 .. stream.buffered().len - 2], 4096));
+        stream = .fixed(&stream_buffer);
+        try stream.print("data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s},\"late\":\"\xff\"}}\n\n", .{item.buffered()});
+        try std.testing.expectError(error.InvalidJsonUtf8, validateTestingSse(&tmp, stream.buffered(), 4096));
+    }
+}
