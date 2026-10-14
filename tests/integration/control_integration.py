@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, PeerCensus, ReleaseGate, TestHTTPServer, preserve_failure_metadata, start_ready_process, stop_process, wait_for_execution_release
+from host_process import HostDiagnostics, PeerCensus, ReleaseGate, TestHTTPServer, canonical_fixture_root, preserve_failure_metadata, start_ready_process, stop_process, wait_for_execution_release
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -1872,7 +1872,7 @@ def main():
     from host_process_test import prove_control_disposal_oracle
     prove_partial_setup_cleanup()
     prove_control_disposal_oracle(stop_control_case)
-    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-control-integration-"))
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-control-integration-"))
     store = state / "store"
     store.mkdir(mode=0o700)
     endpoint = StreamingEndpoint()

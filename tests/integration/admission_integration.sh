@@ -9,6 +9,7 @@ esac
 root=$(pwd -P)
 state=$(mktemp -d "${TMPDIR:-/tmp}/rui-admission.XXXXXX")
 chmod 700 "$state"
+state=$(PYTHONPATH="$root/tests/integration" python3 -c 'import sys; from host_process import canonical_fixture_root; print(canonical_fixture_root(sys.argv[1]))' "$state")
 store="$state/store"
 records="$state/records"
 mkdir -m 700 "$records"
@@ -188,8 +189,8 @@ PYSMOKE
     exit 0
 fi
 
-# A listener failure stops new dispatch but keeps the Store lock and Host stack
-# alive until a transferred client finishes its body read.
+# A listener failure fences the newly accepted, unhanded exchange. Already
+# owned request/reply drainage is exercised by host-stop-integration.
 drain_store="$state/drain-store"
 drain_ready="$state/drain-ready"
 drain_error="$state/drain-error"
@@ -210,8 +211,8 @@ while ! grep -q '^ready ' "$drain_ready"; do
 done
 drain_socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$drain_ready")
 PYTHONPATH="$root/tests/integration" python3 - "$rui" "$drain_socket" "$drain_store" "$root" "$state" <<'PY'
-import json, os, pathlib, socket, subprocess, sys, time
-from host_process import preserve_failure_metadata, stop_process
+import json, os, pathlib, socket, sys
+from host_process import preserve_failure_metadata
 rui, socket_path, store, workspace, state = sys.argv[1:]
 state = pathlib.Path(state)
 body = json.dumps({
@@ -240,64 +241,22 @@ header = (
     f"Content-Length: {len(body)}\r\n"
     "X-Rui-Wire-Version: 1\r\n\r\n"
 ).encode()
-competitor = None
-released = False
 response = bytearray()
 try:
-    # This owner withholds the remainder through the refusal assertion. Elapsed
-    # time alone cannot establish that an incomplete connection is still held.
-    client.sendall(header + body[:1])
-    deadline = time.monotonic() + 1.0
-    while True:
-        remaining = deadline - time.monotonic()
-        assert remaining > 0, "connection remained stranded after listener shutdown"
-        probe = socket.socket(socket.AF_UNIX)
-        probe.settimeout(min(0.2, remaining))
-        try:
-            probe.connect(socket_path)
-            if not probe.recv(1):
-                break
-        except (ConnectionRefusedError, FileNotFoundError, ConnectionResetError, BrokenPipeError):
-            break
-        except socket.timeout:
-            pass
-        finally:
-            probe.close()
-    with (state / "drain-competing.out").open("wb") as out, (state / "drain-competing.err").open("wb") as err:
-        competitor = subprocess.Popen([rui, "host", "serve", "--store", store, "--active-capacity", "1"], stdout=out, stderr=err)
-        competitor.wait(timeout=3)
-    assert competitor.returncode != 0 and b"StoreAlreadyOwned" in (state / "drain-competing.err").read_bytes(), "draining Host released its Store lock early"
-    released = True
-    client.sendall(body[1:])
-    deadline = time.monotonic() + 3
-    while True:
-        remaining = deadline - time.monotonic()
-        assert remaining > 0, "transferred request did not finish during drain"
-        client.settimeout(remaining)
-        chunk = client.recv(4096)
-        if not chunk:
-            break
-        response.extend(chunk)
-        assert len(response) <= 16384, "drain response exceeded fixture bound"
-    assert response.startswith(b"HTTP/1.1 200 "), "transferred request did not finish during drain"
+    try:
+        client.sendall(header + body)
+        while chunk := client.recv(4096):
+            response.extend(chunk)
+            assert len(response) <= 16384, "drain response exceeded fixture bound"
+    except (BrokenPipeError, ConnectionResetError):
+        pass  # Intake shutdown may win before or after the first upload byte.
     (state / "drain-response.bin").write_bytes(response)
-    head, payload = response.split(b"\r\n\r\n", 1)
-    lengths = [line.split(b":", 1)[1].strip() for line in head.split(b"\r\n")[1:]
-        if line.lower().startswith(b"content-length:")]
-    assert len(lengths) == 1 and lengths[0].isdigit() and len(payload) == int(lengths[0]), "incomplete drain reply"
-    reply = json.loads(payload)
-    assert reply["version"] == "1" and reply["type"] == "configuration_reply", reply
-    assert reply["answer"] == {"status": "accepted", "replayed": False,
-        "session": "direct/draining", "revision": "1", "created": True}, reply
+    assert b'"status":"accepted"' not in response, response
 finally:
     if sys.exc_info()[0] is not None:
         preserve_failure_metadata(state / "drain-failure.json", lambda: {
-            "body_released": released, "response_bytes": len(response),
-            "competitor_pid": competitor.pid if competitor else None,
-            "competitor_returncode": competitor.poll() if competitor else None})
+            "response_bytes": len(response)})
     client.close()
-    if competitor is not None:
-        stop_process(competitor, timeout=3)
 PY
 # Use the existing bounded failure wait for this second Host as well.
 drain_pid=$extra_pid
@@ -307,6 +266,17 @@ wait_host_failure
 host_pid=$extra_pid
 extra_pid=
 contains "$(cat "$drain_error")" "InjectedListenerFailure"
+PYTHONPATH="$root/tests/integration" python3 - "$rui" "$drain_store" <<'PY'
+import pathlib, sys
+import model_fixture as fixture
+fixture.RUI = pathlib.Path(sys.argv[1])
+store = pathlib.Path(sys.argv[2])
+host = fixture.start_host(store, None)
+try:
+    assert fixture.observe(store, "draining-request") == {"status": "absent"}
+finally:
+    fixture.stop_host(host)
+PY
 
 # Incomplete bodies and unclassified sockets retain their own custody without
 # filling a fixed connection quota or blocking a complete control request.

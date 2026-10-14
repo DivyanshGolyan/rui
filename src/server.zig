@@ -218,6 +218,16 @@ const Intake = struct {
         retained_scratch: ?named_scratch.Owner = null,
         cleanup_retry_at: i128 = 0,
 
+        fn retireUnhanded(self: *Exchange) void {
+            // Matching in-flight stop retries still need their guarded ack.
+            // A worker handoff, not a socket accept, transfers request custody.
+            if (self.route == .host_stop or self.job == .fill) return;
+            switch (self.state) {
+                .header, .body, .ready => self.state = .retired,
+                .working, .reply, .retired => {},
+            }
+        }
+
         fn destroy(self: *Exchange) bool {
             const host = self.host;
             std.debug.assert(self.state != .working);
@@ -456,6 +466,12 @@ const Intake = struct {
                 }
             }
             if (next) |exchange| {
+                // Share the shutdown/launch gate only through handoff. Never
+                // hold it across Store I/O or draining an already-owned reply.
+                self.host.launch_mutex.lockUncancelable(self.host.io);
+                defer self.host.launch_mutex.unlock(self.host.io);
+                if (self.host.effect_shutdown.load(.acquire)) exchange.retireUnhanded();
+                if (exchange.state == .retired) continue;
                 exchange.state = .working;
                 worker.exchange = exchange;
                 worker.state = .requested;
@@ -468,6 +484,9 @@ const Intake = struct {
         try setNonblocking(listener.socket.handle);
         var failure: ?anyerror = null;
         while (true) {
+            if (self.host.effect_shutdown.load(.acquire)) {
+                for (self.exchanges.items) |exchange| exchange.retireUnhanded();
+            }
             self.serviceWorkers();
             if (self.host.effect_shutdown.load(.acquire) and listener_open.*) {
                 listener.deinit(self.host.io);
@@ -6083,6 +6102,47 @@ test "control response variants fit exact worst-case JSON bounds" {
         interruption_rejected,
         protocol.max_model_interruption_rejected_observation_bytes,
     );
+}
+
+test "shutdown fences every unhanded route while preserving request and reply custody" {
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{} };
+    var exchange = Intake.Exchange{ .host = &host, .fd = -1, .accepted_at_ns = 0, .deadline = 0 };
+    const State = @TypeOf(exchange.state);
+    for (std.enums.values(Route)) |route| {
+        for ([_][2]State{
+            .{ .header, .retired },  .{ .body, .retired }, .{ .ready, .retired },
+            .{ .working, .working }, .{ .reply, .reply },  .{ .retired, .retired },
+        }) |states| {
+            exchange.route = route;
+            exchange.state = states[0];
+            exchange.retireUnhanded();
+            try std.testing.expectEqual(if (route == .host_stop) states[0] else states[1], exchange.state);
+        }
+    }
+    exchange.route = null;
+    exchange.state = .header;
+    exchange.retireUnhanded();
+    try std.testing.expectEqual(.retired, exchange.state);
+
+    // Exercise actual worker handoff, including the race where shutdown wins
+    // after the socket owner's earlier preflight. No worker may touch Store.
+    var intake: Intake = .{ .host = &host };
+    defer intake.exchanges.deinit(std.testing.allocator);
+    for (&intake.workers) |*worker| worker.* = .{ .owner = &intake };
+    try intake.exchanges.append(std.testing.allocator, &exchange);
+    exchange.route = .configure;
+    exchange.state = .ready;
+    host.effect_shutdown.store(true, .release);
+    intake.serviceWorkers();
+    try std.testing.expectEqual(.retired, exchange.state);
+    for (intake.workers) |worker| try std.testing.expectEqual(.idle, worker.state);
+    exchange.job = .fill;
+    exchange.state = .ready;
+    exchange.retireUnhanded();
+    intake.serviceWorkers();
+    try std.testing.expectEqual(.working, exchange.state);
+    try std.testing.expectEqual(.requested, intake.workers[0].state);
+    try std.testing.expectEqual(&exchange, intake.workers[0].exchange.?);
 }
 
 test "intake accepts and physically retires a hundred incomplete exchanges" {
