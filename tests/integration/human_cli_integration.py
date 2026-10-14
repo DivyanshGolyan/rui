@@ -22,6 +22,7 @@ import time
 
 from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, stop_process
 from terminal_process import terminal_process
+from terminal_screen import capture_for, ScreenCapture
 import model_fixture as fixture
 import codex_integration as codex_fixture
 
@@ -115,24 +116,35 @@ def read_pipe_output(stream, *, count=None, timeout=10):
 def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, initial=b""):
     output = initial
     received = 0
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
+    observer_seconds = 0
     limit = 1024 * 1024
     assert len(marker.encode()) < limit, "terminal marker exceeds retained output bound"
-    # Foreground styling is orthogonal to text/Markdown assertions. A transcript
-    # User shares the › marker, so an empty-composer wait also needs its final
-    # cursor placement, not merely the first saved User encountered on opening.
+    screen = capture_for(master)
+    first_generation = screen.generation
+    raw_exit = marker in ("Detached.", "Resume: ")
+    def feed(data):
+        nonlocal deadline, observer_seconds
+        # This is a collection budget, not a wall-response measurement. Pyte
+        # normalizes a long combining cell quadratically; its interpreter must
+        # not consume the time available to drain subsequent native output.
+        before = time.monotonic()
+        try:
+            screen.feed(data)
+        finally:
+            elapsed = time.monotonic() - before
+            observer_seconds += elapsed
+            deadline += elapsed
     def visible():
-        return re.sub(rb"\x1b\[(?:33|39|90|91|94)m", b"", output)
+        return output if raw_exit else screen.completed.encode()
     def reached():
-        shown = visible()
-        if marker != "› ":
-            if marker.encode() not in shown: return False
-            if not composer: return True
-            offset = shown.index(marker.encode())
-            shown = shown[offset if marker.startswith("› ") else offset + len(marker.encode()):]
-        return re.search("› [^\\r\\n]*(?:\\r\\n> [^\\r\\n]*)*(?:\\x1b\\[[0-9]+A)?\\r\\x1b\\[[0-9]+C".encode(), shown) is not None
+        if raw_exit:
+            return not screen.synchronized and marker.encode() in output
+        return (screen.generation > first_generation or bool(initial)) and screen.reached(marker, composer)
     try:
         assert len(output) < limit, "unexpected unbounded terminal output"
+        feed(initial)
         while not reached():
             remaining = deadline - time.monotonic()
             assert remaining > 0, (marker, output.decode(errors="replace"))
@@ -144,7 +156,9 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
                     raise
                 chunk = b""
             assert chunk, ("terminal closed before marker", marker, output.decode(errors="replace"))
+            assert time.monotonic() < deadline, (marker, output.decode(errors="replace"))
             received += len(chunk)
+            feed(chunk)
             output += chunk
             if redraw:
                 # Replaced composer frames are not a semantic transcript. Retain a
@@ -153,26 +167,21 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
             assert len(output) < limit, "unexpected unbounded terminal output"
     except AssertionError as error:
         error.terminal_metadata = {"received_bytes": received, "retained_bytes": len(output),
-            "marker_bytes": len(marker.encode()), "redraw": redraw, "composer": composer}
+            "marker_bytes": len(marker.encode()), "redraw": redraw, "composer": composer,
+            "elapsed_seconds": time.monotonic() - started, "observer_seconds": observer_seconds}
         raise
     return ((output if preserve_colour else visible()).decode(errors="replace").replace("\r\n", "\n")
         .replace("\x1b[?2004h", "").replace("\x1b[?2004l", ""))
 
 
 def permanent_tool_count(output, heading):
-    # These short headings fit one row. Permanent results have a blank
-    # separator, hanging-indented summary or adjacent success heading;
-    # live snapshots use CRLF rather than the permanent heading's LF.
-    return len(re.findall(r"(?m)^" + re.escape(heading) + r"\n(?=\n|  |✓ )", output))
+    # Count actual rows in the committed screen, not repaint occurrences.
+    return sum(line.strip() == heading for line in output.splitlines())
 
 
 def terminal_redraw(output, composer):
-    # A completed cursor placement ends each redraw. Erasure belongs to the
-    # following frame, whose heading and edited draft must be checked together.
-    for frame in reversed(re.split(r"\r\x1b\[[0-9]+C", output)[:-1]):
-        frame = frame.rsplit("\x1b[2K", 1)[-1]
-        if composer in frame:
-            return frame
+    if composer in output:
+        return output
     raise AssertionError(("no complete edited redraw", composer, output))
 
 
@@ -215,7 +224,7 @@ def pipe_wait_oracles():
     print("pipe wait oracles passed: exact records/prefix, unread suffix, EOF, partial deadline and byte bound", flush=True)
 
 
-def terminal_wait_oracles():
+def legacy_inline_terminal_wait_oracles():
     """Bound retained redraws; never confuse diagnostic text with readiness."""
     def collect(frames, marker, *, redraw=False, composer=False, error=None, close_output=False, initial=b""):
         reader, writer = os.pipe()
@@ -359,6 +368,203 @@ def terminal_wait_oracles():
     print("terminal wait oracles passed: bounded redraw suffix, exact cursor, strict transcript cap and returned composer", flush=True)
 
 
+def terminal_wait_oracles():
+    """Check complete synchronized screens, including differential updates."""
+    import pyte
+    start, end = b"\x1b[?2026h", b"\x1b[?2026l"
+    # Batched combining normalization must retain stock pyte's cell, cursor
+    # and attribute semantics, including its stop at other zero-width text.
+    for text in ("abcd\u0301\u0327Z", "中\u0301\u0327Z", "\u0301\u0327Z",
+                 "e\u0315\u0301\u0327Z", "A\u200d\u0301\u0327Z",
+                 "A\u0301\u0327\u200dZ", "\x1b[3;5He\u0301\u0327Z",
+                 "\x1b[?7labcde\u0301\u0327Z", "\x1b[4habcd\rAe\u0301\u0327Z",
+                 "\x1b[31mA\x1b[34m\u0301\u0327Z", "\x1b(0q\u0301\u0327Z"):
+        payload = text.encode()
+        for split in range(len(payload) + 1):
+            observed = ScreenCapture(columns=5, rows=3)
+            expected = pyte.Screen(5, 3)
+            pyte.Stream(expected).feed(text)
+            observed.feed(start + payload[:split])
+            observed.feed(payload[split:] + end)
+            assert observed.screen.display == expected.display, (text, split)
+            assert (observed.screen.cursor.x, observed.screen.cursor.y) == (expected.cursor.x, expected.cursor.y), (text, split)
+            assert all(observed.screen.buffer[y][x] == expected.buffer[y][x]
+                       for y in range(3) for x in range(5)), (text, split)
+    screen = ScreenCapture()
+    frame = start + "\x1b[2J\x1b[1;1HWorking…\x1b[3;1H› café\x1b[3;7H".encode()
+    for byte in frame:
+        screen.feed(bytes([byte]))
+    assert not screen.reached("Working…", composer=True), "uncommitted marker accepted"
+    for byte in end:
+        screen.feed(bytes([byte]))
+    assert screen.reached("Working…", composer=True)
+    # No heading bytes in the update: retained cells are screen state, not a
+    # required repetition of the old inline renderer's transcript.
+    screen.feed(start + b"\x1b[3;3Hfresh\x1b[K\x1b[3;8H" + end)
+    assert screen.reached("› fresh", composer=True)
+    assert "Working…" in terminal_redraw(screen.completed, "› fresh")
+    screen.feed(start + b"\x1b[1;1H\x1b[2K" + end)
+    assert "Working…" not in terminal_redraw(screen.completed, "› fresh")
+    screen.feed(start + b"\x1b[3;3H\x1b[K\x1b[3;3H" + end)
+    assert screen.reached("› ")
+    screen.feed(start + b"\x1b[3;3Hqueued" + end)
+    assert not screen.reached("› "), "nonempty draft became empty input readiness"
+    screen.feed(start + b"\x1b[1;1Hdiagnostic\x1b[1;11H" + end)
+    assert not screen.reached("diagnostic", composer=True), "inspection cursor became input readiness"
+    repeated = ScreenCapture()
+    repeated.feed(start + "\x1b[2;1H› repeated\x1b[23;1H› \x1b[23;3H".encode() + end)
+    assert not repeated.reached("› repeated"), "old User text became the current composer"
+    repeated.feed(start + b"\x1b[23;3Hrepeated\x1b[23;11H" + end)
+    assert repeated.reached("› repeated")
+    repeated.feed(start + "\x1b[23;1H› abcd\x1b[K\x1b[24;1H> Q\x1b[K\x1b[24;4H".encode() + end)
+    assert repeated.reached("› abcd\n> Q"), "wrapped composer lost its own marker"
+    # Repeated redraws exceed the old aggregate limit while the screen remains
+    # bounded; no transcript count may credit duplicate repaint bytes.
+    heading = "✓ completed"
+    update = start + ("\x1b[2;1H" + heading).encode() + end
+    for _ in range(40000):
+        screen.feed(update)
+    assert permanent_tool_count(screen.completed, heading) == 1
+    for malformed in (end + b"not restoration", start + start):
+        try:
+            ScreenCapture().feed(malformed)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("invalid frame boundary accepted")
+    opening = ScreenCapture()
+    opening.feed(start + "\x1b[1;1HOpening…\x1b[3;1H› \x1b[3;3H".encode() + end)
+    assert not opening.reached("› "), "opening composer permitted submission"
+    opening.feed(start + b"\x1b[1;1H\x1b[2K\x1b[3;3H" + end)
+    assert opening.reached("› ")
+    from terminal_screen import RESTORE
+    generation = opening.generation
+    for byte in RESTORE.encode():
+        opening.feed(bytes([byte]))
+    assert opening.generation == generation and not opening.reached("› "), "cleanup became readiness"
+    generation = screen.generation
+    for byte in b"\x1b[?1049h" + start + b"\x1b[1;1Hnew lifetime" + end:
+        screen.feed(bytes([byte]))
+    assert screen.generation > generation and screen.reached("new lifetime")
+    assert heading not in screen.completed, "new invocation inherited old PTY cells"
+    # A returned empty composer must be a new committed frame, not queued
+    # text from the preceding command or an unfinished synchronized update.
+    reader, writer = os.pipe()
+    try:
+        os.write(writer, start + "\x1b[1;1Hanswer\x1b[3;1H› ".encode())
+        os.close(writer)
+        writer = None
+        try:
+            read_terminal(reader, "answer", composer=True, timeout=0.5)
+        except AssertionError as error:
+            assert error.args[0][0] == "terminal closed before marker", error
+        else:
+            raise AssertionError("uncommitted returned composer accepted")
+    finally:
+        dispose_all(lambda: os.close(reader), lambda: os.close(writer) if writer is not None else None)
+    reader, writer = os.pipe()
+    try:
+        os.write(writer, start + b"marker")
+        os.close(writer)
+        writer = None
+        try:
+            read_terminal(reader, "marker", timeout=0.5)
+        except AssertionError as error:
+            assert error.args[0][0] == "terminal closed before marker", error
+        else:
+            raise AssertionError("EOF completed an open frame")
+    finally:
+        dispose_all(lambda: os.close(reader), lambda: os.close(writer) if writer is not None else None)
+    for title, complete in (("Rui · conversation", True), ("Action · review", True), ("Action · review", False)):
+        reader, peer = socket.socketpair()
+        confirmation = []
+
+        def command_output():
+            with peer:
+                peer.sendall(b"Rui: Configured.\r\n\r\nPress Enter to return to the Session.\r\n")
+                confirmation.append(peer.recv(1))
+                peer.sendall(start + (f"\x1b[1;1H{title}\x1b[3;1H› \x1b[3;3H").encode()
+                    + (end if complete else b""))
+
+        thread = threading.Thread(target=command_output)
+        thread.start()
+        try:
+            try:
+                output = terminal_return(reader.fileno(), "Configured.", composer=True)
+            except AssertionError as error:
+                assert not complete and error.args[0][0] == "terminal closed before marker", error
+            else:
+                assert complete and "Configured." in output and title in output, output
+        finally:
+            reader.close()
+            thread.join(timeout=2)
+            assert not thread.is_alive(), "command-return oracle did not retire"
+        assert confirmation == [b"\n"], "command return did not await explicit confirmation"
+    # Interpreter cost is not native waiting. A controlled clock distinguishes
+    # excluded observer work from silence, an incomplete commit and a cursor
+    # outside the composer; none may renew the original collection budget.
+    from unittest.mock import patch
+    original_feed = ScreenCapture.feed
+    for suffix, complete in (
+            (start + "\x1b[3;1H› \x1b[3;3H".encode() + end, True),
+            (start + "\x1b[3;1H› \x1b[3;3H".encode(), False),
+            (start + b"\x1b[1;1Hwrong cursor" + end, False),
+            (None, False)):
+        reader, peer = socket.socketpair()
+        clock = [0.0]
+        updates = [start + b"\x1b[1;1Hanswer" + end, suffix]
+
+        def slow_feed(capture, data):
+            clock[0] += 2
+            original_feed(capture, data)
+
+        def next_update(readers, writers, errors, timeout):
+            update = updates.pop(0) if updates else None
+            if update is None:
+                clock[0] += timeout
+                return [], [], []
+            peer.sendall(update)
+            return readers, [], []
+
+        try:
+            with patch.object(ScreenCapture, "feed", slow_feed), \
+                    patch.object(time, "monotonic", lambda: clock[0]), \
+                    patch.object(select, "select", next_update):
+                try:
+                    output = read_terminal(reader.fileno(), "answer", timeout=0.25, composer=True)
+                except AssertionError as error:
+                    assert not complete, error
+                    assert error.terminal_metadata["observer_seconds"] >= 4
+                    assert error.terminal_metadata["elapsed_seconds"] - error.terminal_metadata["observer_seconds"] == 0.25
+                else:
+                    assert complete and "answer" in output
+        finally:
+            reader.close()
+            peer.close()
+    from terminal_screen import LIMIT
+    oversized = ScreenCapture()
+    oversized.feed(start)
+    try:
+        for _ in range(LIMIT // 4096):
+            oversized.feed(b"x" * 4096)
+    except AssertionError as error:
+        assert str(error) == "unexpected unbounded terminal frame", error
+    else:
+        raise AssertionError("unbounded unfinished frame accepted")
+    reader, peer = socket.socketpair()
+    try:
+        try:
+            read_terminal(reader.fileno(), "missing", initial=b"x" * LIMIT)
+        except AssertionError as error:
+            assert str(error) == "unexpected unbounded terminal output", error
+        else:
+            raise AssertionError("unbounded transcript accepted")
+    finally:
+        reader.close()
+        peer.close()
+    print("terminal wait oracles passed: synchronized commits, split UTF-8/CUP, partial cells, empty input, bounded repaint and EOF", flush=True)
+
+
 def assert_permission_workspace(output, workspace, columns=80):
     """Join only hanging-indent layout breaks; retain every exact path byte."""
     shown = output.split("\n  Workspace: ", 1)[1].split("\n  Time limit:", 1)[0]
@@ -366,8 +572,23 @@ def assert_permission_workspace(output, workspace, columns=80):
     assert all(len(line) <= columns for line in ("  Workspace: " + shown).splitlines()), output
 
 
+def visible_raw_export(lines):
+    """Rejoin complete cell rows, retaining separators at a wrap boundary."""
+    first = next(index for index, line in enumerate(lines) if line.startswith("Raw export: "))
+    command = lines[first].removeprefix("Raw export: ")
+    pattern = r"rui read-conversation --store-hex [0-9a-f]+ --session-hex [0-9a-f]+ --position [0-9]+ --ordinal [0-9]+"
+    for line in lines[first + 1:]:
+        if re.fullmatch(pattern, command.rstrip()):
+            return command.rstrip()
+        assert line.strip(), ("incomplete visible raw export", command, lines)
+        command += line
+    assert re.fullmatch(pattern, command.rstrip()), ("incomplete visible raw export", command, lines)
+    return command.rstrip()
+
+
 def terminal_exit(caller, master, timeout=5):
     """Own both output streams until exit, including a late rendering prefix."""
+    screen = capture_for(master)
     errors_fd = caller.stderr.fileno()
     streams = {master: bytearray(), errors_fd: bytearray()}
     pending = set(streams)
@@ -390,6 +611,8 @@ def terminal_exit(caller, master, timeout=5):
             if chunk:
                 streams[fd].extend(chunk)
                 assert sum(map(len, streams.values())) < 1024 * 1024, "unexpected unbounded terminal output"
+                if fd == master:
+                    screen.feed(chunk)
             else:
                 pending.remove(fd)
 
@@ -412,6 +635,8 @@ def terminal_gate(caller, master, reached, context, timeout=10):
             if data:
                 streams[fd].extend(data)
                 assert sum(map(len, streams.values())) < 1024 * 1024, "unexpected unbounded startup output"
+                if fd == master:
+                    capture_for(master).feed(data)
             else:
                 pending.remove(fd)
         assert reached.is_set() or (caller.poll() is None and time.monotonic() < deadline), (
@@ -421,10 +646,36 @@ def terminal_gate(caller, master, reached, context, timeout=10):
     return bytes(streams[master])
 
 
+def terminal_return(master, marker, *, composer=False, input_master=None, timeout=15):
+    """Collect restored command output, confirm, then await a fresh screen."""
+    prompt = b"Press Enter to return to the Session.\r\n"
+    output = bytearray()
+    deadline = time.monotonic() + timeout
+    while prompt not in output:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0 and select.select([master], [], [], remaining)[0], (marker, bytes(output))
+        chunk = os.read(master, 65536)
+        assert chunk, ("terminal closed before return confirmation", marker, bytes(output))
+        output.extend(chunk)
+        capture_for(master).feed(chunk)
+        assert b"\x1b[?1049h" not in output, "command output hidden before confirmation"
+        assert len(output) < 1024 * 1024, "unexpected unbounded command output"
+    text = output.decode(errors="replace").replace("\r\n", "\n")
+    os.write(master if input_master is None else input_master, b"\n")
+    # The requested response may be command output or the returned Action.
+    # Neither substitutes for a newly committed screen after confirmation.
+    returned = read_terminal(master, "" if marker in text else marker,
+        composer=composer, timeout=deadline - time.monotonic())
+    assert marker in text + returned, (marker, text, returned)
+    return text + returned
+
+
 def terminal_step(master, command, marker, *, composer=False):
     # A redraw can precede this command's response. Callers choose the actual
-    # response boundary; continuing commands also require its returned composer.
+    # response boundary; synchronous commands retain output until confirmation.
     os.write(master, (command + "\n").encode())
+    if command.split(maxsplit=1)[:1] in (["/configure"], ["/setup"], ["/inspect-action"], ["/result"]):
+        return terminal_return(master, marker, composer=composer)
     return read_terminal(master, marker, composer=composer)
 
 
@@ -465,8 +716,10 @@ def command_entry_cases():
         caller = subprocess.Popen([str(fixture.RUI), prompt], cwd=workspace,
             env={**os.environ, "HOME": str(home), "TERM": "xterm-256color", "NO_COLOR": ""},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-        output = read_terminal(master, "Initial prompt answered.", preserve_colour=True)
-        assert "\x1b[94m›\x1b[39m " in output, output
+        output = read_terminal(master, "Initial prompt answered.", composer=True)
+        screen = capture_for(master).screen
+        assert screen.buffer[screen.cursor.y][0].data == "›" and screen.buffer[screen.cursor.y][0].fg == "brightblue"
+        assert screen.buffer[screen.cursor.y][2].fg == "default", "input style leaked into draft cells"
         assert "Provider:" not in output and "Assistant:" not in output, output
         assert len(endpoint.requests) == 1
         request = json.loads(endpoint.requests[0])
@@ -500,8 +753,10 @@ def command_entry_cases():
                 caller = subprocess.Popen([str(fixture.RUI), "resume", *flags], cwd=alias,
                     env={**os.environ, "HOME": str(home), "TERM": terminal, "NO_COLOR": no_colour},
                     stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-                opening = read_terminal(master, "› ", preserve_colour=True)
-                assert ("\x1b[94m" in opening) == (no_colour == "" and terminal != "dumb"), opening
+                opening = read_terminal(master, "› ")
+                screen = capture_for(master).screen
+                expected_colour = "brightblue" if no_colour == "" and terminal != "dumb" else "default"
+                assert screen.buffer[screen.cursor.y][0].fg == expected_colour, opening
                 status = terminal_step(master, "/status", "Session: ", composer=True)
                 assert f"Session: {expected}\n" in status, status
                 terminal_step(master, "/exit", "Resume: ")
@@ -708,6 +963,29 @@ def command_entry_cases():
 def persistent_opening_case():
     """Frozen replay uses real content once and assistant-only formatting."""
     import canonical_failure_integration as canonical
+
+    def browse_to(master, marker, *, down=False):
+        # Each wait owns a new synchronized frame, not cumulative ANSI output.
+        # The opening is 8 KiB and history is smaller; 256 KiB is the public
+        # retained-document bound, not a reason to enlarge the terminal.
+        output = capture_for(master).completed
+        deadline = time.monotonic() + 15
+        while marker not in output:
+            assert time.monotonic() < deadline, ("browse did not reach content", marker, output)
+            os.write(master, b"\x1b[6~" if down else b"\x1b[5~")
+            output = read_terminal(master, "", timeout=deadline - time.monotonic())
+        return output
+
+    def assert_cells(master, text, *, bold, suffix=None):
+        screen = capture_for(master).screen
+        matches = [(row, line.index(text)) for row, line in enumerate(screen.display) if text in line]
+        assert len(matches) == 1, (text, screen.display)
+        row, column = matches[0]
+        if suffix is not None:
+            column += len(text) - len(suffix)
+            text = suffix
+        assert all(screen.buffer[row][x].bold == bold for x in range(column, column + len(text))), (text, bold, screen.display)
+
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-opening."))
     home = state / "home"
     home.mkdir(mode=0o700)
@@ -743,14 +1021,22 @@ def persistent_opening_case():
             "--", "persistent/opening"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         output = read_terminal(master, "› ")
+        assert "OPENING-COMPLETE" in output, "opening applied the historical omission limit"
+        assert_cells(master, "OPENING-COMPLETE", bold=False)
+        output = browse_to(master, "literal **user** é")
         assert output.count("literal **user** é") == 1, ("opening lost or duplicated User", output)
         assert "\n› literal **user** é" in output, output
-        assert "\n  \x1b[1mSaved heading" in output, output
+        assert "\n  Saved heading" in output, output
         assert all(noise not in output for noise in ("You:", "Assistant:", "Rui:", "item_id:", "call_id:", "Capturing original", "Original reserved request")), output
-        assert output.count("\x1b[1mSaved heading\x1b[0m") == 1, ("opening bypassed assistant renderer", output)
-        assert output.count("\x1b[1msaved bold\x1b[0m é") == 1, output
+        assert_cells(master, "literal **user** é", bold=False)
+        assert_cells(master, "Saved heading", bold=True)
+        assert_cells(master, "saved bold", bold=True)
+        assert_cells(master, "saved bold é", suffix=" é", bold=False)
         assert "Provider:" not in output and "Workspace (Bash cwd):" not in output, ("opening is not compact", output)
-        assert "OPENING-COMPLETE" in output, "opening applied the historical omission limit"
+        output = browse_to(master, "OPENING-COMPLETE", down=True)
+        assert "literal **user** é" not in output, "opening did not use a bounded viewport"
+        os.write(master, b"\x07")
+        read_terminal(master, "OPENING-COMPLETE")
         assert len(endpoint.requests) == 1, "opening restarted saved work"
         os.write(master, b"\x03")
         read_terminal(master, "Detached.")
@@ -775,12 +1061,10 @@ def persistent_opening_case():
         caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
             "--", "persistent/opening"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-        prefix = read_terminal(master, "Saved heading")
         tail, errors = terminal_exit(caller, master)
         assert caller.returncode != 0 and b"TruncatedResponse" in errors, errors
-        assert "OPENING-COMPLETE" not in prefix and b"OPENING-COMPLETE" not in tail, "truncated opening exposed unverified completion"
-        styled = prefix.encode() + tail
-        assert styled.rfind(b"\x1b[0m") > styled.rfind(b"\x1b[1m"), "failed opening left renderer styling active"
+        assert b"OPENING-COMPLETE" not in tail, "truncated opening exposed unverified completion"
+        assert b"\x1b[0m" in tail and b"\x1b[?1049l" in tail, "failed opening did not restore the terminal display"
         actual = termios.tcgetattr(slave)
         if sys.platform == "darwin":
             mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
@@ -833,17 +1117,19 @@ def persistent_opening_case():
             caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
                 "--", "persistent/opening"], env={**os.environ, "HOME": str(home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-            startup = terminal_gate(caller, master, opening_held, ("queued opening", handoff, proxy.exchanges))
+            terminal_gate(caller, master, opening_held, ("queued opening", handoff, proxy.exchanges))
             os.write(master, b"/history\n" + handoff)
-            output = startup
-            deadline = time.monotonic() + 15
-            while b"No older Conversation rows" not in output and b"History page complete" not in output:
-                remaining = deadline - time.monotonic()
-                assert remaining > 0 and select.select([master], [], [], remaining)[0], output
-                output += os.read(master, 65536)
-                assert len(output) < 1024 * 1024
-            assert b"No older Conversation rows" not in output, ("queued history consumed an unestablished opening cursor", handoff, output)
-            assert b"literal **user**" in output and b"saved user 01" in output, output
+            if handoff == b"/inspect-action\n":
+                output = terminal_return(master, "")
+            else:
+                raw = read_terminal(master, "History page complete", preserve_colour=True)
+                assert "\x1b[?1049l" not in raw, "in-app status released the alternate screen"
+                output = capture_for(master).completed
+            if "History page complete" not in output:
+                output = read_terminal(master, "History page complete")
+            assert "No older Conversation rows" not in output, ("queued history consumed an unestablished opening cursor", handoff, output)
+            output = browse_to(master, "literal **user** é")
+            assert "saved user 01" in output, output
             assert len(endpoint.requests) == 10, "opening/history handoff restarted work"
             opening_release.set()
             os.write(master, b"\x03")
@@ -868,7 +1154,10 @@ def persistent_opening_case():
         # Explicit latest details cannot move the frozen older-history cursor.
         os.write(master, b"/details\n")
         details = read_terminal(master, "Details complete", composer=True)
+        details = browse_to(master, "late beyond captured end", down=True)
         assert "late beyond captured end" in details and "literal **user** é" not in details, details
+        os.write(master, b"\x07")
+        read_terminal(master, "late beyond captured end", composer=True)
 
         history_held = threading.Event()
 
@@ -890,20 +1179,23 @@ def persistent_opening_case():
         fixture.wait_for(lambda: fixture.completed_observation(store, record.stem), "Admission while history preparation is held")
         assert json.loads(record.read_text())["text"]["value"] == "during history é"
         composing = read_terminal(master, "› next cafXé!", timeout=5)
-        assert not history_release.is_set() and "saved answer" not in composing and "saved user" not in composing
+        staged = ("literal **user**", "Historical item omitted", "saved user 01", "saved answer 01")
+        assert not history_release.is_set() and all(text not in composing for text in staged), composing
         history_release.set()
         failed = read_terminal(master, "History unavailable; older cursor and draft retained")
-        assert "saved answer" not in failed and "saved user" not in failed, "failed history exposed a staged prefix"
+        assert all(text not in failed for text in staged), ("failed history exposed a staged prefix", failed)
         if "› next cafXé!" not in failed:
             read_terminal(master, "› next cafXé!")
         os.write(master, b"\x1b[CZ")
         read_terminal(master, "› next cafXéZ!")
         os.write(master, b"\x05\x15/history\n")
         recovered = read_terminal(master, "History page complete")
+        assert "late beyond captured end" not in recovered and "saved user 09" not in recovered, "history recaptured or replayed opening"
+        recovered = browse_to(master, "literal **user** é")
         assert recovered.count("literal **user** é") == 1 and "Historical item omitted" in recovered, recovered
         assert "Saved heading" not in recovered and "OPENING-COMPLETE" not in recovered, "oversized historical content leaked"
         assert recovered.index("literal **user** é") < recovered.index("Historical item omitted") < recovered.index("saved user 01"), recovered
-        export = next(line.removeprefix("Raw export: ") for line in recovered.splitlines() if line.startswith("Raw export: "))
+        export = visible_raw_export(capture_for(master).screen.display)
         command = shlex.split(export)
         assert command[0:3] == ["rui", "read-conversation", "--store-hex"] and bytes.fromhex(command[3]) == str(store).encode(), export
         assert all(32 <= ord(char) < 127 for char in export), "raw export printed terminal controls"
@@ -923,6 +1215,8 @@ def persistent_opening_case():
             assert b"InvalidHexIdentity" in rejected.stderr or b"DuplicateArgument" in rejected.stderr, rejected.stderr
         assert "late beyond captured end" not in recovered and "saved user 09" not in recovered, "history recaptured or replayed opening"
         assert proxy.exchanges[0][0] == proxy.exchanges[2][0], "history failure advanced its actual cursor"
+        os.write(master, b"\x07")
+        read_terminal(master, "› ", composer=True)
         os.write(master, b"/history\n")
         read_terminal(master, "No older Conversation rows")
         assert len(endpoint.requests) == 12, "history caused provider work"
@@ -981,10 +1275,14 @@ def persistent_pending_case():
         caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
             "--", "persistent/pending"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-        startup = terminal_gate(caller, master, captured, ("pending opening", proxy.exchanges, endpoint.requests))
+        terminal_gate(caller, master, captured, ("pending opening", proxy.exchanges, endpoint.requests))
         admit(home, "message", "--store", store, "--session", "persistent/pending", "late queued beyond snapshot")
         opening_release.set()
-        output = startup.decode(errors="replace").replace("\r\n", "\n") + read_terminal(master, "› ")
+        read_terminal(master, "› ")
+        # The alternate screen initially follows the newest rows, not the
+        # complete opening transcript. Browse its frozen summary and previews.
+        os.write(master, b"\x1b[5~" * 4)
+        output = read_terminal(master, "Queued: queued-04 é", composer=True)
         assert "24 queued messages" in output, ("opening counted only its newest page or fresh Current", output)
         previews = [line for line in output.splitlines() if "Queued: " in line]
         assert len(previews) == 4, previews
@@ -1074,13 +1372,15 @@ def persistent_input_cases():
         saved = proxy.exchanges[0][0]
         assert json.loads(saved)["text"]["value"] == "original éZ"
         # Cosmetic spacing must yield before actionable recovery guidance.
+        # Reserve the bypass warning too: one row at 80, two at 20 columns.
         # Fresh edits identify each resized frame, not an earlier status line.
-        for rows, columns, edit in ((2, 80, "Z"), (4, 20, "Q")):
+        for rows, columns, edit in ((3, 80, "Z"), (6, 20, "Q")):
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
             os.write(master, edit.encode())
             marker = f"› next cafX{edit}é!"
             narrow = terminal_redraw(read_terminal(master, marker, composer=True), marker)
-            shown = " ".join(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", narrow).split())
+            # Physical wrapping can divide a key name, not insert a space.
+            shown = narrow.replace("\n", "")
             assert "! Not confirmed · Ctrl-R retries original" in shown, (
                 "optional spacer hid actionable recovery", rows, columns, narrow)
             assert len(proxy.exchanges) == 1 and set(records.glob("*.json")) == before
@@ -1132,6 +1432,8 @@ def persistent_input_cases():
         diagnostic = read_terminal(master, "Ctrl-R retries this exact original.",
             timeout=diagnostic_deadline - time.monotonic(), composer=True)
         reserved = diagnostic.split("Original reserved request: ", 1)[1].splitlines()[0]
+        os.write(master, b"\x07")
+        read_terminal(master, "", composer=True)
         os.write(master, "next café!\x1b[D\x1b[DX".encode())
         failed += read_terminal(master, "› next cafXé!")
         assert set(records.glob("*.json")) == before_failure
@@ -1150,7 +1452,7 @@ def persistent_input_cases():
         # A command selects a handoff, not another input/submission window.
         before_command = set(records.glob("*.json"))
         os.write(master, b"/configure --permission-mode ask\nUNREAD suffix\n")
-        read_terminal(master, "Configured.", composer=True)
+        terminal_return(master, "Configured.", composer=True)
         added = [json.loads(path.read_text()) for path in set(records.glob("*.json")) - before_command]
         assert len(added) == 1 and "configuration" in added[0], "command suffix became captured Message intent"
         assert fixture.command("inspect-session", "--store", store,
@@ -1259,21 +1561,24 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         before_choice = set(records.glob("*.json"))
         os.write(master, b"a\n\x1b[200~" if fragmented_paste else b"a\n")
         arguments_release.set()
-        styled_transcript = read_terminal(master, json.loads(arguments)["cmd"], preserve_colour=True)
-        assert "\n\x1b[33m? Run Bash:\x1b[39m" in styled_transcript, styled_transcript
-        transcript = re.sub(r"\x1b\[(?:33|39|90|91|94)m", "", styled_transcript)
         if fragmented_paste:
-            assert not select.select([ready_read], [], [], 1)[0], "unfinished chat paste opened consent scope"
+            # Screen adoption waits for the chat decoder to finish its paste.
+            # There is no Action scope yet, and no prefix can authorize one.
+            assert not select.select([ready_read], [], [], 0.2)[0], "unfinished chat paste opened consent"
+            assert set(records.glob("*.json")) == before_choice and not (state / "effect-count").exists()
             os.write(master, b"\x1b[201~\n")
-        transcript += action_ready(ready_read, master)
+        styled_transcript = read_terminal(master, json.loads(arguments)["cmd"], preserve_colour=True)
+        assert "\x1b[33m" in styled_transcript, styled_transcript
+        transcript = capture_for(master).completed
+        action_ready(ready_read, master)
+        transcript = capture_for(master).completed
         if "a: Allow once / d: Deny (Enter)" not in transcript:
-            transcript += read_terminal(master, "a: Allow once / d: Deny (Enter)")
+            transcript = read_terminal(master, "a: Allow once / d: Deny (Enter)")
         assert "Capturing original" not in transcript and "Original reserved request" not in transcript, transcript
         assert "item_id:" not in transcript and "call_id:" not in transcript and "arguments:" not in transcript, transcript
         assert transcript.count("Workspace:") == 1 and transcript.count("Run Bash:") == 1, transcript
-        assert f"\n? Run Bash:\n  {json.loads(arguments)['cmd']}\n" in transcript, transcript
-        assert f"? {description}" in transcript, ("approval live row lost its description", transcript)
-        assert_permission_workspace(transcript, state, 100)
+        assert "? Run Bash:" in transcript and json.loads(arguments)['cmd'] in transcript, transcript
+        assert f"Workspace: {state}" in transcript, transcript
         assert transcript.count(f"Time limit: {timeout_ms} ms") == 1, transcript
         assert transcript.count(json.loads(arguments)["cmd"]) == 1, transcript
         assert all(noise not in transcript for noise in ("You:", "Assistant:", "Rui:", "persistent-call-id")), transcript
@@ -1283,21 +1588,27 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             for rows, columns in ((3, 80), (4, 20), (8, 8)):
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
                 os.write(master, b"\x01")  # Redraw an empty choice without granting authority.
-                narrow = read_terminal(master, "> \r\x1b[2C")
-                shown = narrow.replace("\r", "").replace("\n", "")
-                assert ("a: Allow once / d: Deny (Enter)" in " ".join(narrow.split())
-                        or "a Allow/d DenyEnter" in shown), narrow
-                if description not in shown:
-                    assert any(label in shown for label in ("+1 more calls · /status", "+1 · /status")), narrow
+                narrow = read_terminal(master, "")
+                screen = capture_for(master).screen
+                # Full cell rows preserve both mid-word wraps and separator
+                # spaces at the terminal edge; stripped lines cannot do both.
+                shown = "".join(screen.display)
+                assert ("a: Allow once / d: Deny (Enter)" in shown
+                        or ("a Allow / d Deny" in shown and "Enter" in shown)
+                        or "Approval paused" in shown), narrow
+                assert screen.display[screen.cursor.y].startswith(("> ", "› ")), narrow
                 assert caller.poll() is None and not (state / "effect-count").exists(), narrow
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
             os.write(master, b"\x01")
             read_terminal(master, "a: Allow once / d: Deny (Enter)")
-        for invalid in (b"Y\n", b"\x1b[200~a\x1b[201~\n"):
+        for invalid in (b"Y\n", b"\x1b[200~a\x1b[201~\n",
+                        b"\x1b[97;9;97u\n", b"\x1b[97;17;97u\n", b"\x1b[97;33;97u\n",
+                        b"a\x1b[0u\n", b"a\x1b\x00\n",
+                        b"\x1b[200~invalid\x1b\na\n\x1b[201~\n"):
             os.write(master, invalid)
             rejected = read_terminal(master, "a: Allow once / d: Deny (Enter)")
             rejected += action_ready(ready_read, master)
-            assert "Run Bash:" not in rejected, "invalid choice repeated command"
+            assert json.loads(arguments)["cmd"] in capture_for(master).completed
             assert set(records.glob("*.json")) == before_choice, "invalid choice captured authority"
             assert not (state / "effect-count").exists()
         for command, notice in (("/wait", "Work continues while you compose."),
@@ -1305,7 +1616,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             os.write(master, (command + "\n").encode())
             restricted = read_terminal(master, notice)
             restricted += action_ready(ready_read, master)
-            assert "Run Bash:" not in restricted, restricted
+            assert json.loads(arguments)["cmd"] in capture_for(master).completed
             assert set(records.glob("*.json")) == before_choice, "nested prompt created intent"
         current = fixture.command("inspect-session", "--store", store, "--session", reference)
         action = current["actionable_permissions"][0]["action"]
@@ -1348,6 +1659,17 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             os.write(master, b"/details\n")
             details = read_terminal(master, "Details complete")
             assert "\n› requires permission" in details, details
+            # Preparation can redraw the still-visible Action. Its earlier
+            # readiness notification is not authority in the committed Details.
+            while select.select([ready_read], [], [], 0)[0]:
+                assert os.read(ready_read, 1) == b"x"
+            os.write(master, b"a\n")
+            read_terminal(master, "Nothing authorized", composer=True)
+            assert not select.select([ready_read], [], [], 0)[0], "hidden Action reopened consent"
+            assert {path: path.read_bytes() for path in records.glob("*.json")} == before_rejected
+            assert len(proxy.exchanges) == 1 and not (state / "second-effect").exists()
+            os.write(master, b"\x07")
+            read_terminal(master, second_command)
             details += action_ready(ready_read, master)
             assert fixture.command("inspect-session", "--store", store, "--session", reference)["actionable_permissions"][0]["action"] == current["actionable_permissions"][1]["action"]
             os.write(master, b"/exit\n")
@@ -1362,7 +1684,11 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             assert not (state / "effect-count").exists() and not (state / "second-effect").exists()
             completed = True
             return
-        settled = read_terminal(master, answer, composer=True, initial=settled.encode())
+        # Prior reads return completed screen cells, not replayable ANSI bytes.
+        # Refeeding a snapshot would move the terminal cursor and corrupt the
+        # differential updates that follow the recovered decision.
+        settled = (capture_for(master).completed if capture_for(master).reached(answer, composer=True)
+                   else read_terminal(master, answer, composer=True))
         assert len(proxy.exchanges) == (2 if lost_reply else 1), proxy.exchanges
         if lost_reply:
             assert proxy.exchanges[0][0] == proxy.exchanges[1][0], "decision retry changed intent"
@@ -1429,7 +1755,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         if exit_code:
             assert f"! {description} — Failed\nRui: Historical item omitted:" in details, details
             assert "inspection-only-output" not in details and "Exit code:" not in details, details
-            export = next(line.removeprefix("Raw export: ") for line in details.splitlines() if line.startswith("Raw export: "))
+            export = visible_raw_export(capture_for(master).screen.display)
             exported = run(home, *shlex.split(export)[1:])
             assert len(exported.encode()) > 8192 and exported.startswith(f"Bash failed. Exit code: {exit_code}.\n"), exported[:200]
             assert "inspection-only-output" in exported
@@ -1462,6 +1788,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             run(home, "configure", "--store", store, "--session", reference,
                 "--workspace", state, "--provider", "codex", "--model", "model-a", "--permission-mode", "bypass")
             try:
+                os.write(master, b"\x07")
+                read_terminal(master, "", composer=True)
                 os.write(master, b"run without approval\n")
                 live = read_terminal(master, "+1 more calls · /status", composer=True)
                 fixture.wait_for(lambda: all((state / f"bypass-started-{index}").exists() for index in range(4)), "held bypass effects")
@@ -1483,7 +1811,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 short = read_terminal(master, "+3 more calls · /status", composer=True)
                 assert "› live cafXé!" in short, short
                 assert "Inspect application" not in short, ("a clipped call hid its failure", short)
-                for index, (rows, columns) in enumerate(((2, 80), (3, 20), (3, 8), (4, 20), (8, 8))):
+                for index, (rows, columns) in enumerate(((4, 80), (5, 20), (8, 8), (6, 20), (10, 8))):
                     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
                     edit = chr(ord("A") + index)
                     os.write(master, b"\x01" + edit.encode())
@@ -1491,8 +1819,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                     narrow = terminal_redraw(read_terminal(master, marker, composer=True), marker)
                     shown = narrow.replace("\r", "").replace("\n", "")
                     assert any(label in shown for label in ("+4 more calls · /status", "+4 · /status")), narrow
-                    if (rows, columns) in ((3, 20), (4, 20)):
-                        assert "Working…" in shown, ("optional spacing or wording hid status", narrow)
+                    assert "Working…" in shown, ("optional spacing or wording hid status", narrow)
+                    assert "Bash runs without approval." in "".join(capture_for(master).screen.display), narrow
                     assert caller.poll() is None, ("wrapped overflow displaced the composer", narrow)
                     os.write(master, b"\x7f")
                     read_terminal(master, "› live", composer=True)
@@ -1503,19 +1831,43 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 assert "› live cafXé!" in wrapped, wrapped
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
                 read_terminal(master, "+1 more calls · /status", composer=True)
-                terminal_step(master, "\x01\x0b/exit", "Detached.")
-                assert caller.wait(timeout=5) == 0, caller.stderr.read()
-                caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
-                    "--", reference], env={**os.environ, "HOME": str(home), "TERM": "xterm-256color", "NO_COLOR": ""},
-                    stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-                reopened = read_terminal(master, "+1 more calls · /status", composer=True)
-                assert f"✓ {bypass_description}" in reopened and f"• {bypass_description}" in reopened, reopened
-                assert "bypass complete" not in reopened and len(endpoint.requests) == 4, reopened
+                before_resize = {path: path.read_bytes() for path in records.glob("*.json")}
+                for rows, columns in ((2, 80), (3, 20), (3, 8)):
+                    # Required warning, work status, overflow and input cannot
+                    # fit. Preserve these geometries as fatal-restoration cases.
+                    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+                    _, errors = terminal_exit(caller, master)
+                    assert caller.returncode == 1 and b"TerminalTooSmall" in errors, (rows, columns, errors)
+                    actual = termios.tcgetattr(slave)
+                    expected = original.copy()
+                    if sys.platform == "darwin":
+                        mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                        actual[3] &= ~mask
+                        expected[3] &= ~mask
+                    assert actual == expected, (rows, columns, actual, expected)
+                    assert {path: path.read_bytes() for path in records.glob("*.json")} == before_resize
+                    assert len(endpoint.requests) == 4, "undersized departure dispatched new work"
+                    caller.stderr.close()
+                    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
+                    caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+                        "--", reference], env={**os.environ, "HOME": str(home), "TERM": "xterm-256color", "NO_COLOR": ""},
+                        stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                    reopened = read_terminal(master, "+1 more calls · /status", composer=True)
+                    assert f"✓ {bypass_description}" in reopened and f"• {bypass_description}" in reopened, reopened
+                    assert "bypass complete" not in reopened and len(endpoint.requests) == 4, reopened
                 os.write(master, "live café!\x1b[D\x1b[DX".encode())
                 read_terminal(master, "› live cafXé!")
                 for release in bypass_releases:
                     release.touch()
-                outcome = read_terminal(master, "bypass complete", composer=True)
+                outcome_deadline = time.monotonic() + 15
+                outcome = read_terminal(master, "bypass complete", composer=True,
+                    timeout=outcome_deadline - time.monotonic())
+                if not capture_for(master).completed.startswith("Rui ·"):
+                    # Delivered answer bytes can precede joined snapshot
+                    # retirement. Count permanent rows only after live calls
+                    # yield to the ordinary heading, under the original budget.
+                    outcome = read_terminal(master, "Rui · PgUp browse · /help", composer=True,
+                        timeout=outcome_deadline - time.monotonic())
                 assert permanent_tool_count(outcome, f"✓ {bypass_description}") == 2, outcome
                 assert "! Inspect application settings" in outcome and "— Failed" in outcome and "Exit code: 7." in outcome, outcome
                 assert "✓ Check final sibling" in outcome, outcome
@@ -1548,14 +1900,25 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 ])
                 try:
                     compact_deadline = time.monotonic() + 15
+                    os.write(master, b"\x07")
+                    read_terminal(master, "", composer=True, timeout=compact_deadline - time.monotonic())
                     os.write(master, b"\x01\x0brun compact group\n")
-                    compact = read_terminal(master, "• Wait for compact tail", composer=True)
+                    compact = read_terminal(master, "• Wait for compact tail", composer=True,
+                        timeout=compact_deadline - time.monotonic())
                     compact_release.touch()
-                    compact += read_terminal(master, "• Check after notice", composer=True)
-                    while "✓ Wait for compact tail\n" not in compact:
+                    # Each observation is a full committed screen, not a new
+                    # transcript suffix. Count the final visible rows once.
+                    compact = read_terminal(master, "• Check after notice", composer=True,
+                        timeout=compact_deadline - time.monotonic())
+                    # A settled live card has the same heading as its later
+                    # permanent row. Await its place beside the preceding
+                    # result and retirement of the previous live snapshot,
+                    # not the earlier transient card below a spacer.
+                    while (f"✓ {compact_labels[-1]}\n✓ Wait for compact tail\n" not in compact
+                           or compact.count("✓ Wait for compact tail\n") != 1):
                         remaining = compact_deadline - time.monotonic()
                         assert remaining > 0, ("compact tail never permanently presented", compact)
-                        compact += read_terminal(master, "› ", timeout=remaining, composer=True)
+                        compact = read_terminal(master, "› ", timeout=remaining, composer=True)
                     headings = list(re.finditer(r"✓ (Compact item [0-9]+|Wait for compact tail)\n", compact))
                     assert [match[1] for match in headings] == compact_labels + ["Wait for compact tail"], compact
                     for match in headings[1:]:
@@ -1631,7 +1994,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                         read_terminal(master, f"• {prior_label}", composer=True)
                         run(home, "configure", "--store", store, "--session", reference, "--permission-mode", "ask")
                         prior_release.touch()
-                        prefix = terminal_gate(caller, master, pending_held, "stale actionable Current and pending page")
+                        terminal_gate(caller, master, pending_held, "stale actionable Current and pending page")
                         assert len(selected) == 1, selected
                         requests_before = len(endpoint.requests)
                         run(home, "allow-action", "--store", store, "--session", reference, "--action", selected[0])
@@ -1639,14 +2002,13 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                         proxy.rewrite = hold_refreshed_current
                         proxy.route = "/v1/inspect-session"
                         pending_release.set()
-                        prefix += terminal_gate(caller, master, refreshed_held, "permission refresh without an Action")
+                        terminal_gate(caller, master, refreshed_held, "permission refresh without an Action")
                         if with_notice:
                             os.write(master, b"\x00\n")
-                            before_notice = read_terminal(master, "! Input rejected; nothing sent.", composer=True, initial=prefix)
+                            before_notice = read_terminal(master, "! Input rejected; nothing sent.", composer=True)
                             assert f"✓ {prior_label}\n" in before_notice, before_notice
-                            prefix = b""
                         refreshed_release.set()
-                        shown = read_terminal(master, f"✓ {label}", composer=True, initial=prefix)
+                        shown = read_terminal(master, f"✓ {label}", composer=True)
                         start = shown.index(f"✓ {label}\n")
                         if with_notice:
                             assert shown[start - 1] == "\n", ("permission scan crossed a visible notice", shown)
@@ -1699,7 +2061,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         if decision == "allow-action" and not any((exit_code, signal_failure, lost_reply, timed_out)):
             assert "✓ Prepare external approval 1\n✓ External approval 1\n" in reopened, ("reopening lost compact successes", reopened)
         if signal_failure:
-            assert "Process-group signaling reported a failure." in reopened, ("reopening hid cleanup warning", reopened)
+            # This reopening is 32 columns wide: the physical row boundary
+            # splits "reported", but every character must remain visible.
+            assert "Process-group signaling reported a failure." in reopened.replace("\n", ""), ("reopening hid cleanup warning", reopened)
         assert not hidden_reads, ("label-only opening read undisplayed proposal bytes", hidden_reads)
         os.write(master, b"/exit\n")
         _, errors = terminal_exit(caller, master)
@@ -1729,7 +2093,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             history = read_terminal(master, "History page complete", composer=True)
             assert f"! {description} — Failed\nRui: Historical item omitted:" in history, history
             assert "inspection-only-output" not in history
-            history_export = next(line.removeprefix("Raw export: ") for line in history.splitlines() if line.startswith("Raw export: "))
+            history_export = visible_raw_export(capture_for(master).screen.display)
             assert history_export == export and run(home, *shlex.split(history_export)[1:]) == exported
             assert len(endpoint.requests) == calls_before_history and effect.read_text() == "unsafe"
             os.write(master, b"/exit\n")
@@ -1759,6 +2123,215 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             shutil.rmtree(state)
         else:
             print(f"retained persistent permission failure state: {state}", file=sys.stderr)
+
+
+def screen_consent_case(case):
+    """Native screen consent, inspection suspension and export-only overflow."""
+    import canonical_failure_integration as canonical
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix=f"rui-screen-consent-{case}."))
+    home, store = state / "home", state / "store'quoted"
+    home.mkdir(mode=0o700)
+    reference = "screen/consent'quoted é"
+    command = "printf forbidden > effect"
+    if case == "oversized":
+        command += " # " + "x" * (256 * 1024)
+    elif case == "bounded":
+        command += " # " + "x" * (128 * 1024)
+    arguments = json.dumps({"cmd": command, "description": "Inspect screen consent", "timeout_ms": None})
+    release = threading.Event()
+    endpoint = fixture.SuccessEndpoint([
+        (fixture.sse_tool_calls("screen-call", [("bash", "screen-id", arguments)]), release),
+        fixture.sse_answer("screen-answer", "screen-reason", "screen-message", "screen denied")[0],
+    ])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = caller = proxy = None
+    content_held, content_release = threading.Event(), threading.Event()
+    master, slave = pty.openpty()
+    ready_read, ready_write = os.pipe()
+    original = termios.tcgetattr(slave)
+    completed = False
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 256, 0, 0))
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        run(home, "configure", "--store", store, "--session", reference,
+            "--workspace", state, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "--", reference],
+            env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
+            pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        read_terminal(master, "› ")
+        if case == "full":
+            def hold_content(response):
+                content_held.set()
+                assert content_release.wait(15), "owned Activity content was not released"
+                return response
+            proxy = canonical.ReplyProxy(host, "/v1/activity-content", hold_content)
+        os.write(master, b"propose screen action\n")
+        fixture.wait_for(lambda: endpoint.requests, "screen proposal request")
+        if case == "full":
+            # Rendering owns its User prefix before asking for content. Hold
+            # that real read while selecting inspection and editing the next
+            # draft: neither cancellation nor a raw-mode join may close input.
+            terminal_gate(caller, master, content_held, "owned Activity prefix")
+            os.write(master, "/status\nnext café!\x1b[D\x1b[DX".encode())
+            read_terminal(master, "› next cafXé!", composer=True)
+            assert not content_release.is_set() and caller.poll() is None
+            content_release.set()
+            status = read_terminal(master, "Inspection ready", composer=True)
+            assert reference in status and "Run Bash:" not in status, status
+        else:
+            os.write(master, "next café!\x1b[D\x1b[DX".encode())
+            read_terminal(master, "› next cafXé!", composer=True)
+        records = home / ".config/rui/requests"
+        before = set(records.glob("*.json"))
+        release.set()
+        if case == "full":
+            paused = read_terminal(master, "Approval paused")
+            assert reference in paused and "Run Bash:" not in paused, "prepared Action replaced inspection"
+            assert not select.select([ready_read], [], [], 0)[0], "hidden prepared Action opened consent"
+            os.write(master, b"a\n")
+            read_terminal(master, "Nothing authorized")
+            assert set(records.glob("*.json")) == before and not (state / "effect").exists()
+            os.write(master, b"\x07")
+        if case == "oversized":
+            read_terminal(master, "Approval disabled")
+            assert not select.select([ready_read], [], [], 0)[0], "oversized preview opened consent"
+            for invalid in (b"a\n", b"d\n"):
+                os.write(master, invalid)
+                read_terminal(master, "Approval disabled")
+                assert set(records.glob("*.json")) == before and not (state / "effect").exists()
+            help_text = terminal_step(master, "/help", "rui deny-action")
+            current = fixture.command("inspect-session", "--store", store, "--session", reference)
+            action = current["actionable_permissions"][0]["action"]
+            commands = {}
+            for line in help_text.splitlines():
+                if line.startswith("rui "):
+                    # Rui emits Bash ANSI-C shell words for quotes/Unicode.
+                    # shlex implements POSIX quotes, not $'...'; let the shell
+                    # decode its own syntax without executing the command.
+                    parsed = subprocess.run(["bash", "-c", 'eval "set -- $1"; printf "%s\\0" "$@"',
+                        "fixture", line], capture_output=True, timeout=5, check=True)
+                    words = parsed.stdout.decode().rstrip("\0").split("\0")
+                    commands[words[1]] = words
+                    assert words[2:] == ["--store", str(store), "--session", reference, "--action", str(action)], words
+            assert set(commands) == {"inspect-action", "allow-action", "deny-action"}, help_text
+            exact = json.loads(run(home, *commands["inspect-action"][1:], "--json"))
+            assert exact["arguments"] == arguments and exact["action"] == action, "shell export changed exact Action"
+            os.write(master, b"a\n\x07")
+            read_terminal(master, "Approval disabled")
+            assert not select.select([ready_read], [], [], 0)[0], "Ctrl-G enabled oversized approval"
+            assert set(records.glob("*.json")) == before and not (state / "effect").exists()
+            # The advertised workflow explicitly detaches before shell use;
+            # unsent draft loss on detachment is the ordinary exit contract.
+            os.write(master, b"\x03")
+            _, errors = terminal_exit(caller, master)
+            assert caller.wait(timeout=5) == 0 and termios.tcgetattr(slave) == original, errors
+            run(home, *commands["deny-action"][1:])
+            message = current["selected_message"]
+            fixture.wait_for(lambda: fixture.completed_observation(store, message), "export-only shell denial")
+            assert not (state / "effect").exists() and len(endpoint.requests) == 2
+            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "--", reference],
+                env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            settled = read_terminal(master, "screen denied", composer=True)
+            assert "› next cafXé!" not in settled and not (state / "effect").exists(), settled
+            os.write(master, b"\x03")
+            _, errors = terminal_exit(caller, master)
+            assert caller.wait(timeout=5) == 0 and termios.tcgetattr(slave) == original, errors
+            assert len(endpoint.requests) == 2, "preview recovery repeated provider work"
+            completed = True
+            print("screen consent oversized: disabled approval, exact quoted shell exports, shell denial and reopen passed", flush=True)
+            return
+        else:
+            read_terminal(master, "a: Allow once / d: Deny (Enter)")
+            action_ready(ready_read, master)
+            screen = capture_for(master)
+            if case == "bounded":
+                assert "printf forbidden > effect" in screen.completed and "Approval disabled" not in screen.completed
+                current = fixture.command("inspect-session", "--store", store, "--session", reference)
+                action = current["actionable_permissions"][0]["action"]
+                exact = json.loads(run(home, "inspect-action", "--store", store, "--session", reference,
+                    "--action", action, "--json"))
+                assert exact["arguments"] == arguments and exact["action"] == action
+            else:
+                assert command in screen.completed and f"Workspace: {state}" in screen.completed, screen.completed
+            if case == "narrow":
+                for rows, columns in ((12, 40), (8, 20), (3, 80), (4, 20), (8, 8)):
+                    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+                    try:
+                        narrow = read_terminal(master, "")
+                    except AssertionError as error:
+                        error.add_note(f"Action resize failed at {rows} rows by {columns} columns")
+                        raise
+                    assert caller.poll() is None, (rows, columns, narrow)
+                    cursor = screen.screen.cursor
+                    assert screen.screen.display[cursor.y].startswith(("> ", "› ")), (rows, columns, narrow)
+                    assert set(records.glob("*.json")) == before and not (state / "effect").exists()
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 160, 0, 0))
+                read_terminal(master, "a: Allow once / d: Deny (Enter)")
+            status = terminal_step(master, "/status", "Approval paused")
+            assert "Session:" in status and reference in status, status
+            # An invalidated Action can redraw before the asynchronous
+            # inspection replaces it. Retire those earlier readiness hints;
+            # the current committed inspection, not a queued byte, owns scope.
+            while select.select([ready_read], [], [], 0)[0]:
+                assert os.read(ready_read, 1) == b"x"
+            assert "Run Bash:" not in screen.completed, "inspection retained the approval document"
+            os.write(master, b"a\n")
+            read_terminal(master, "Nothing authorized")
+            assert not select.select([ready_read], [], [], 0)[0], "hidden Action opened fresh consent"
+            assert set(records.glob("*.json")) == before and not (state / "effect").exists()
+            os.write(master, b"\x07")
+            action_ready(ready_read, master)
+            assert "printf forbidden > effect" in screen.completed and "a: Allow once / d: Deny (Enter)" in screen.completed, screen.completed
+            assert set(records.glob("*.json")) == before, "inspection input captured a decision"
+            os.write(master, b"d\n")
+        settled = read_terminal(master, "screen denied", composer=True)
+        assert "› next cafXé!" in settled and not (state / "effect").exists(), settled
+        if case == "full":
+            assert settled.count("› propose screen action") == 1, "inspection lost or replayed owned Activity"
+        screen = capture_for(master)
+        cursor = screen.screen.cursor
+        assert cursor.x == len("› next cafX"), (cursor.x, settled)
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 60, 0, 0))
+        read_terminal(master, "› next cafXé!", composer=True)
+        assert screen.screen.cursor.x == len("› next cafX"), "resize moved non-tail draft caret"
+        os.write(master, b"Y")
+        read_terminal(master, "› next cafXYé!", composer=True)
+        os.write(master, b"\x03")
+        _, errors = terminal_exit(caller, master)
+        assert caller.wait(timeout=5) == 0, errors
+        assert termios.tcgetattr(slave) == original, "screen departure failed terminal restoration"
+        completed = True
+        print(f"screen consent {case}: exact target, no stale authority, retained Unicode caret and restoration passed", flush=True)
+    finally:
+        if not completed:
+            preserve_failure_metadata(state / "screen-failure.json", lambda: {
+                "case": case, "screen": capture_for(master).completed,
+                "cursor": [capture_for(master).screen.cursor.x, capture_for(master).screen.cursor.y],
+                "geometry": [capture_for(master).screen.lines, capture_for(master).screen.columns],
+                "returncode": caller.poll() if caller is not None else None,
+            })
+        def retire():
+            if caller is not None:
+                errors = caller.stderr
+                caller.stderr = None
+                try:
+                    stop_process(caller, timeout=5)
+                    if not completed and errors is not None and not errors.closed:
+                        (state / "caller-stderr.log").write_bytes(errors.read(65536))
+                finally:
+                    caller.stderr = errors
+                    if errors is not None:
+                        errors.close()
+        dispose_all(release.set, content_release.set, retire,
+            lambda: proxy.close() if proxy is not None else None,
+            lambda: fixture.stop_host(host) if host is not None else None,
+            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+            *(lambda fd=fd: os.close(fd) for fd in (master, slave, ready_read, ready_write)))
+        if completed:
+            shutil.rmtree(state)
+        else:
+            print(f"retained screen consent failure state: {state}", file=sys.stderr)
 
 
 def store_selection_cases(state, workspace, valid_store):
@@ -1833,13 +2406,17 @@ def action_ready(descriptor, master, timeout=15):
     """
     deadline = time.monotonic() + timeout
     output = bytearray()
+    screen = capture_for(master)
     while True:
         remaining = deadline - time.monotonic()
         assert remaining > 0, ("Action input flush did not finish", bytes(output))
         ready = select.select([descriptor, master], [], [], remaining)[0]
         assert ready, ("Action input flush did not finish", bytes(output))
         if master in ready:
-            output.extend(os.read(master, 65536))
+            chunk = os.read(master, 65536)
+            assert chunk, "Action terminal closed before readiness"
+            screen.feed(chunk)
+            output.extend(chunk)
             assert len(output) < 1024 * 1024, "unexpected unbounded terminal output"
         if descriptor in ready:
             assert os.read(descriptor, 1) == b"x", "Action caller exited before readiness"
@@ -1849,6 +2426,7 @@ def action_ready(descriptor, master, timeout=15):
                 assert time.monotonic() < deadline, "Action transcript exceeded readiness deadline"
                 chunk = os.read(master, 65536)
                 assert chunk, "Action terminal closed at readiness"
+                screen.feed(chunk)
                 output.extend(chunk)
                 assert len(output) < 1024 * 1024, "unexpected unbounded terminal output"
             return re.sub(rb"\x1b\[(?:33|39|90|91|94)m", b"", output).decode(errors="replace").replace("\r\n", "\n")
@@ -2103,6 +2681,8 @@ def opaque_session_commands_case():
         read_terminal(master, "› ")
         actual = terminal_step(master, "/status", "Session: ", composer=True)
         assert "Session: human/nul\\x00" in actual, (command, actual)
+        os.write(master, b"\x07")
+        read_terminal(master, "", composer=True)
         os.write(master, b"propose two distinct Actions\n")
         proposal = action_ready(ready_read, master)
         for label, decision in (("Deny: ", "deny"), ("Allow once: ", "allow_once")):
@@ -2168,6 +2748,7 @@ def opaque_session_commands_case():
 
 def long_input_case(home, store, workspace, endpoint, host):
     import canonical_failure_integration as canonical
+    import unicodedata
     endpoint.responses.append(fixture.sse_answer("long-answer", "long-reason", "long-message", "long input intact")[0])
     long_session = "human/long-input"
     run(home, "configure", "--store", store, "--session", long_session,
@@ -2186,6 +2767,8 @@ def long_input_case(home, store, workspace, endpoint, host):
         assert "Bash commands can run without asking you" not in greeting, greeting
         binding = terminal_step(master, "/status", "Session: ", composer=True)
         assert "Permission: bypass\n" in binding and "Provider: codex" in binding and "Model: model-a" in binding, binding
+        os.write(master, b"\x07")
+        read_terminal(master, "Rui ·", composer=True)
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
         before = len(endpoint.requests)
         long_text = "X" * 5000
@@ -2197,8 +2780,7 @@ def long_input_case(home, store, workspace, endpoint, host):
             if item.get("role") == "user") == long_text
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         long_cluster = "a" + "\u0301" * 2048
-        for index, draft in enumerate((long_cluster, ("e" + "\u0301" * 1024) * 3,
-                                       "ab" + "\u0301" * 32767)):
+        def encoded_draft(index, draft, caret):
             marker = f"encoded row accepted {index}"
             endpoint.responses.append(fixture.sse_answer(f"encoded-answer-{index}",
                 f"encoded-reason-{index}", f"encoded-message-{index}", marker)[0])
@@ -2207,19 +2789,36 @@ def long_input_case(home, store, workspace, endpoint, host):
             before_records = set((home / ".config/rui/requests").glob("*.json"))
             # Do not race Enter against redraw: the complete unsent draft
             # must remain renderable before any capture/transmission.
-            caret = (3, 5, 4)[index]  # Independent display-cell expectations.
-            terminal_bulk(master, "\x1b[200~" + draft + "\x1b[201~",
-                draft + f"\r\x1b[{caret}C", submit=False)
+            # Pyte composes combining scalars in cells; saved input below must
+            # still equal the original, unnormalized draft byte-for-byte.
+            drawn = "› " + unicodedata.normalize("NFC", draft)
+            output = terminal_bulk(master, "\x1b[200~" + draft + "\x1b[201~",
+                drawn, submit=False)
+            screen = capture_for(master).screen
+            assert drawn in output, output
+            assert (screen.cursor.x, screen.cursor.y) == (caret, 23), (
+                screen.cursor.x, screen.cursor.y, output)
             assert entered.poll() is None and len(endpoint.requests) == before_draft
             assert len(proxy.mutations) == before_messages, "unsent draft transmitted a Message"
             assert set((home / ".config/rui/requests").glob("*.json")) == before_records, "unsent draft published a capture"
-            terminal_step(master, "", marker, composer=True)
+            os.write(master, b"\n")
+            # Moving the submitted row through intermediate screens is repaint,
+            # not repeated semantic content. Bound both cells and raw suffix.
+            deadline = time.monotonic() + 15
+            read_terminal(master, marker, timeout=deadline - time.monotonic(), composer=True, redraw=True)
+            # Answer bytes and the ordinary heading can both precede joined
+            # completion. Drain the working frame in the same budget before
+            # testing clean departure rather than interruption of a repaint.
+            while "Working…" in capture_for(master).completed or "Sending…" in capture_for(master).completed:
+                read_terminal(master, marker, timeout=deadline - time.monotonic(), composer=True, redraw=True)
             body = json.loads(endpoint.requests[-1])
             assert next(item["content"][0]["text"] for item in reversed(body["input"])
                 if item.get("role") == "user") == draft
-        for index, (columns, draft, drawn) in enumerate((
-                (80, "A中e\u0301\tB", "A中e\u0301    B\r\x1b[11C"),
-                (8, "abcd\tQ", "› abcd\n>      \n> Q\r\x1b[3C"))):
+        encoded_draft(0, long_cluster, 3)
+        encoded_draft(1, ("e" + "\u0301" * 1024) * 3, 5)
+        for index, (columns, draft, drawn, caret) in enumerate((
+                (80, "A中e\u0301\tB", "› A中é    B", 11),
+                (8, "abcd\tQ", "› abcd\n>\n> Q", 3))):
             fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
             marker = f"tab row accepted {index}"
             endpoint.responses.append(fixture.sse_answer(f"tab-answer-{index}",
@@ -2228,8 +2827,16 @@ def long_input_case(home, store, workspace, endpoint, host):
             before_messages = len(proxy.mutations)
             before_records = set((home / ".config/rui/requests").glob("*.json"))
             output = terminal_bulk(master, "\x1b[200~" + draft + "\x1b[201~",
-                drawn.split("\n")[-1], submit=False)
-            assert drawn in output.replace("\r\n", "\n"), output
+                drawn, submit=False)
+            assert drawn in output, output
+            screen = capture_for(master).screen
+            assert (screen.cursor.x, screen.cursor.y) == (caret, 23), (
+                screen.cursor.x, screen.cursor.y, output)
+            if columns == 8:
+                # Six composer cells per row; the tab fills its own row.
+                assert screen.display[21] == "› abcd  ", screen.display
+                assert screen.display[22] == ">       ", screen.display
+                assert screen.display[23] == "> Q     ", screen.display
             assert entered.poll() is None and len(endpoint.requests) == before_draft
             assert len(proxy.mutations) == before_messages, "unsent draft transmitted a Message"
             assert set((home / ".config/rui/requests").glob("*.json")) == before_records, "unsent draft published a capture"
@@ -2242,7 +2849,10 @@ def long_input_case(home, store, workspace, endpoint, host):
         endpoint.responses.append(fixture.sse_answer("encoded-delete-answer", "encoded-delete-reason",
             "encoded-delete-message", "encoded deletion intact")[0])
         terminal_bulk(master, "\x1b[200~" + long_cluster + "\x1b[201~",
-            long_cluster + "\r\x1b[3C", submit=False)
+            "› " + unicodedata.normalize("NFC", long_cluster), submit=False)
+        screen = capture_for(master).screen
+        assert (screen.cursor.x, screen.cursor.y) == (3, 23), (
+            screen.cursor.x, screen.cursor.y, screen.display)
         terminal_step(master, "\x7fZ", "encoded deletion intact", composer=True)
         body = json.loads(endpoint.requests[-1])
         assert next(item["content"][0]["text"] for item in reversed(body["input"])
@@ -2251,9 +2861,12 @@ def long_input_case(home, store, workspace, endpoint, host):
         rejected = terminal_bulk(master, "Y" * (64 * 1024 + 1) + "\x7f", "input too long")
         assert "input too long" in rejected and "nothing sent" in rejected, rejected[-1000:]
         assert "Draft cleared. Enter a shorter message." in rejected, rejected[-1000:]
-        if "› \r\x1b[2C" not in rejected:
+        if not capture_for(master).reached("› ", composer=True):
             rejected += read_terminal(master, "› ")
-        assert "› \r\x1b[2C" in rejected, rejected[-1000:]
+        screen = capture_for(master).screen
+        assert screen.display[23] == "› " + " " * 78, screen.display
+        assert (screen.cursor.x, screen.cursor.y) == (2, 23), (
+            screen.cursor.x, screen.cursor.y, rejected[-1000:])
         assert len(endpoint.requests) == accepted_count, "oversized input reached Host"
         endpoint.responses.append(fixture.sse_answer("shorter-answer", "shorter-reason",
             "shorter-message", "shorter replacement intact")[0])
@@ -2262,10 +2875,9 @@ def long_input_case(home, store, workspace, endpoint, host):
         body = json.loads(endpoint.requests[-1])
         assert next(item["content"][0]["text"] for item in reversed(body["input"])
             if item.get("role") == "user") == "shorter replacement", body
-        accepted_count += 1
-        rejected = terminal_step(master, "invalid\x00x", "Input rejected; nothing sent.")
-        assert "Input rejected; nothing sent." in rejected and "--text FILE" not in rejected, rejected
-        assert len(endpoint.requests) == accepted_count, "unsupported control reached Host"
+        # Keep the most expensive observer cell last; later checks must not
+        # repeatedly interpret it as earlier conversation moves up the screen.
+        encoded_draft(2, "ab" + "\u0301" * 32767, 4)
         assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
         assert termios.tcgetattr(master)[3] & termios.ICANON
@@ -2284,6 +2896,57 @@ def long_input_case(home, store, workspace, endpoint, host):
         disposals += [lambda fd=fd: os.close(fd) for fd in (master, slave) if fd is not None]
         disposals.append(proxy.close)
         dispose_all(*disposals)
+
+
+def invalid_input_case(home, store, workspace, endpoint):
+    """Unsafe keyboard/paste bytes reject the whole attempt before capture."""
+    reference = "human/invalid-input"
+    run(home, "configure", "--store", store, "--session", reference,
+        "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+    master, slave = pty.openpty()
+    entered = None
+    original = termios.tcgetattr(slave)
+    try:
+        entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            "--", reference], env={**os.environ, "HOME": str(home)},
+            stdin=slave, stdout=slave, stderr=slave)
+        read_terminal(master, "› ")
+        records = home / ".config/rui/requests"
+        accepted_count = len(endpoint.requests)
+        before_records = set(records.glob("*.json"))
+        for invalid in ("invalid\x00x", "invalid\x1b[0ux", "invalid\x1b\x00x",
+                        "\x1b[200~invalid\x1b[123;4~x\x1b[201~",
+                        "\x1b[200~invalid\x1b[0;1:3ux\x1b[201~",
+                        "\x1b[200~invalid\x1b[97;1;98ux\x1b[201~",
+                        "\x1b[200~invalid\x1b\na\n\x1b[201~",
+                        "\x1b[200~invalid\x1b[201\ra\n\x1b[201~"):
+            rejected = terminal_step(master, invalid, "Input rejected; nothing sent.")
+            assert "Input rejected; nothing sent." in rejected and "--text FILE" not in rejected, rejected
+            assert len(endpoint.requests) == accepted_count, "unsupported control reached Host"
+            assert set(records.glob("*.json")) == before_records, "rejected input published a capture"
+        for index, (typed, expected) in enumerate((("left\tright", "left\tright"),
+                ("left\x1b[9uright", "left\tright"),
+                ("\x1b[200~café\tA\n中e\u0301\x1b[201~", "café\tA\n中e\u0301"))):
+            answer = f"literal input intact {index}"
+            endpoint.responses.append(fixture.sse_answer(f"literal-answer-{index}",
+                f"literal-reason-{index}", f"literal-message-{index}", answer)[0])
+            terminal_step(master, typed, answer, composer=True)
+            assert len(endpoint.requests) == accepted_count + index + 1
+            body = json.loads(endpoint.requests[-1])
+            assert next(item["content"][0]["text"] for item in reversed(body["input"])
+                if item.get("role") == "user") == expected, body
+        terminal_step(master, "/exit", "Detached.")
+        assert entered.wait(timeout=5) == 0
+        actual = termios.tcgetattr(slave)
+        if sys.platform == "darwin":
+            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+            actual[3] &= ~mask
+            original[3] &= ~mask
+        assert actual == original, (actual, original)
+    finally:
+        dispose_all(lambda: stop_process(entered, timeout=5) if entered is not None else None,
+                    lambda: os.close(master), lambda: os.close(slave))
+    print("invalid input: whole-attempt rejection without capture/dispatch, exact literal replacement and restoration passed", flush=True)
 
 
 def incomplete_input_case(home, store, session, endpoint, host):
@@ -2333,13 +2996,86 @@ def incomplete_input_case(home, store, session, endpoint, host):
     print("incomplete input: all four native deadlines, delayed output, exact restoration and no dispatch passed", flush=True)
 
 
+def draft_geometry_burst_case(home, store, workspace, endpoint):
+    """Validate sealed burst bytes before capture, independently of redraw."""
+    session = "human/draft-geometry-burst"
+    run(home, "configure", "--store", store, "--session", session,
+        "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+    records = home / ".config/rui/requests"
+    before_records = {path: path.read_bytes() for path in records.glob("*.json")}
+    before_dispatch = len(endpoint.requests)
+    # Eight columns leave six composer cells. Under the unnegotiated
+    # conventional width method this single family cluster occupies eight;
+    # the farmer control occupies four. Do not negotiate Unicode-width caps.
+    for draft in ("\u0301", "👨‍👩‍👧‍👦"):
+        master, slave = pty.openpty()
+        entered = None
+        try:
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 8, 0, 0))
+            original = termios.tcgetattr(slave)
+            entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+                "--", session], env={**os.environ, "HOME": str(home)},
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            read_terminal(master, "› ")
+            # One write: no intermediate edited-frame wait before Enter.
+            burst = (draft + "\n").encode()
+            assert os.write(master, burst) == len(burst)
+            output, errors = terminal_exit(entered, master)
+            assert entered.returncode != 0 and b"UnrepresentableTerminalGrapheme" in errors, (output, errors)
+            assert b"Detached." not in output and b"Message accepted" not in errors, (output, errors)
+            actual = termios.tcgetattr(slave)
+            if sys.platform == "darwin":
+                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                actual[3] &= ~mask
+                original[3] &= ~mask
+            assert actual == original, "geometry refusal did not restore terminal"
+            assert {path: path.read_bytes() for path in records.glob("*.json")} == before_records, "unsafe burst captured intent"
+            assert len(endpoint.requests) == before_dispatch, "unsafe burst reached provider"
+        finally:
+            dispose_all(lambda: stop_process(entered, timeout=5) if entered is not None else None,
+                        lambda: entered.stderr.close() if entered is not None else None,
+                        lambda: os.close(master), lambda: os.close(slave))
+
+    expected = "e\u0301🧑‍🌾"
+    endpoint.responses.append(fixture.sse_answer("geometry-answer", "geometry-reason",
+        "geometry-message", "geometry control accepted")[0])
+    with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+        "--", session], env={**os.environ, "HOME": str(home)},
+    ) as (entered, master):
+        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 8, 0, 0))
+        read_terminal(master, "› ")
+        burst = (expected + "\n").encode()
+        assert os.write(master, burst) == len(burst)
+        fixture.wait_for(lambda: len(endpoint.requests) == before_dispatch + 1, "fitting geometry dispatch")
+        body = json.loads(endpoint.requests[-1])
+        actual = next(item["content"][0]["text"] for item in reversed(body["input"])
+            if item.get("role") == "user")
+        assert actual.encode() == b"e\xcc\x81\xf0\x9f\xa7\x91\xe2\x80\x8d\xf0\x9f\x8c\xbe", actual
+        added = set(records.glob("*.json")) - set(before_records)
+        assert len(added) == 1, added
+        key = added.pop().stem
+        fixture.wait_for(lambda: fixture.completed_observation(store, key), "fitting geometry completion")
+        assert run(home, "result", key) == "admitted: accepted\nresult: completed\ngeometry control accepted\n"
+        os.write(master, b"\x03")
+        read_terminal(master, "Detached.")
+        assert entered.wait(timeout=5) == 0
+        assert termios.tcgetattr(master)[3] & termios.ICANON
+    print("draft geometry burst: typed refusal, restoration, no capture/dispatch and exact fitting bytes passed", flush=True)
+
+
 def main(selected="all"):
     import canonical_failure_integration
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
-    assert selected in ("all", "long-input", "terminal-waits", "persistent-permission", "incomplete-input"), selected
+    assert selected in ("all", "long-input", "invalid-input", "terminal-waits", "persistent-permission", "incomplete-input", "draft-geometry-burst",
+                        "screen-consent-full", "screen-consent-bounded", "screen-consent-narrow", "screen-consent-oversized"), selected
+    if selected.startswith("screen-consent-"):
+        screen_consent_case(selected.removeprefix("screen-consent-"))
+        return
     if selected == "all":
         help_case()
+        for case in ("full", "bounded", "oversized", "narrow"):
+            screen_consent_case(case)
     if selected in ("all", "terminal-waits"):
         prove_terminal_process()
         pipe_wait_oracles()
@@ -2409,6 +3145,10 @@ def main(selected="all"):
     completed = False
     try:
         host = fixture.start_host(store, url)
+        if selected == "draft-geometry-burst":
+            draft_geometry_burst_case(home, store, workspace, endpoint)
+            completed = True
+            return
         if selected == "incomplete-input":
             run(home, "configure", "--store", store, "--session", "incomplete/input",
                 "--workspace", workspace, "--provider", "codex", "--model", "model-a")
@@ -2419,6 +3159,10 @@ def main(selected="all"):
             long_input_case(home, store, workspace, endpoint, host)
             completed = True
             print("long-input selected case passed (partial human CLI suite)", flush=True)
+            return
+        if selected == "invalid-input":
+            invalid_input_case(home, store, workspace, endpoint)
+            completed = True
             return
         store_selection_cases(state, workspace, store)
         saved_capture_cases(state, store, workspace)
@@ -3166,11 +3910,22 @@ def main(selected="all"):
             opening = read_terminal(master, "a: Allow once / d: Deny (Enter)", timeout=deadline - time.monotonic())
             opening += action_ready(ready_read, master, timeout=deadline - time.monotonic())
             deadline = time.monotonic() + 15
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 64, 120, 0, 0))
             os.write(master, b"/status\n")
-            status = read_terminal(master, "a: Allow once / d: Deny (Enter)", timeout=deadline - time.monotonic())
-            status += action_ready(ready_read, master, timeout=deadline - time.monotonic())
+            status = read_terminal(master, f"Action requiring attention: {running}", timeout=deadline - time.monotonic(), composer=True)
             assert status.count("Action requiring attention: ") == 2, status
             assert f"Action requiring attention: {pending}" in status and f"Action requiring attention: {running}" in status, status
+            while select.select([ready_read], [], [], 0)[0]:
+                assert os.read(ready_read, 1) == b"x"
+            before_hidden = {path: path.read_bytes() for path in (fresh_home / ".config/rui/requests").glob("*.json")}
+            os.write(master, b"a\n")
+            read_terminal(master, "Nothing authorized", timeout=deadline - time.monotonic(), composer=True)
+            assert not select.select([ready_read], [], [], 0)[0], "status inspection reopened consent"
+            assert {path: path.read_bytes() for path in (fresh_home / ".config/rui/requests").glob("*.json")} == before_hidden
+            assert not sibling_started.exists() and counter.read_text() == "x"
+            os.write(master, b"\x07")
+            read_terminal(master, "a: Allow once / d: Deny (Enter)", timeout=deadline - time.monotonic())
+            action_ready(ready_read, master, timeout=deadline - time.monotonic())
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
@@ -3580,6 +4335,7 @@ def main(selected="all"):
             dispose_all(empty_release.set, lambda: stop_process(empty_wait, timeout=5))
         current = fixture.command("inspect-session", "--store", store, "--session", empty_session)
         assert current["selected_message"] is None and current["recent_messages"][0]["message"] == "", current
+        invalid_input_case(home, store, workspace, endpoint)
         long_input_case(home, store, workspace, endpoint, host)
         editor_session = "human/editor"
         run(home, "configure", "--store", store, "--session", editor_session,
@@ -3738,6 +4494,7 @@ def main(selected="all"):
                             entered.stderr.close,
                             lambda: os.close(master), lambda: os.close(slave))
         incomplete_input_case(fresh_home, store, empty_session, endpoint, host)
+        draft_geometry_burst_case(fresh_home, store, workspace, endpoint)
         observation_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("observed-later", "observed-later-reason",
             "observed-later-message", "observed later")[0], observation_release))

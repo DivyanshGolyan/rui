@@ -119,6 +119,16 @@ test "SessionInput malformed rejection resets only the active composition" {
     const ticket = input.feed('\r').message;
     for ("\xff") |byte| _ = input.feed(byte);
     try std.testing.expectEqual(.invalid, input.feed('\r').editor);
+    for ([_][]const u8{ "\x1b\n", "\x1b\r", "\x1b[20\n", "\x1b[201\r" }) |sequence| {
+        for ("\x1b[200~left") |byte| _ = input.feed(byte);
+        for (sequence) |byte| _ = input.feed(byte);
+        try std.testing.expectEqual(Editor.Pending.incomplete, input.pending());
+        for ("a\r") |byte| try std.testing.expectEqual(.none, input.feed(byte).editor);
+        for ("\x1b[201~") |byte| _ = input.feed(byte);
+        try std.testing.expectEqual(.invalid, input.feed('\r').editor);
+        try std.testing.expectEqual(Editor.Pending.none, input.pending());
+        try std.testing.expectEqualStrings("original", try input.message(ticket));
+    }
     for ("valid") |byte| _ = input.feed(byte);
     try std.testing.expectEqualStrings("valid", input.composition().bytes);
     try std.testing.expectEqualStrings("original", try input.message(ticket));

@@ -1,6 +1,8 @@
 const std = @import("std");
 const Editor = @This();
 const termios = @import("posix");
+const vaxis = @import("vaxis");
+const Input = @import("TerminalInput.zig");
 
 extern fn utf8proc_grapheme_break_stateful(c_int, c_int, *c_int) c_int;
 extern fn utf8proc_category(c_int) c_int;
@@ -11,24 +13,17 @@ cursor: usize = 0,
 partial: [4]u8 = undefined,
 partial_length: u3 = 0,
 partial_need: u3 = 0,
-escape: enum { none, esc, csi, ss3 } = .none,
-sequence: [24]u8 = undefined,
-sequence_length: usize = 0,
-paste: bool = false,
+input: Input = .{},
 allow_paste: bool = true,
-paste_prefix: [6]u8 = undefined,
-paste_prefix_length: usize = 0,
 rejected: ?Event = null,
 plain_ascii: bool = true,
 
-pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow };
-const paste_end = "\x1b[201~";
+pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow, page_up, page_down, latest, close_view, width_report };
 
-pub const Pending = enum { none, escape, incomplete };
+pub const Pending = Input.Pending;
 
 pub fn pending(self: *const Editor) Pending {
-    if (self.paste or self.partial_length != 0 or self.escape == .csi or self.escape == .ss3) return .incomplete;
-    return if (self.escape == .esc) .escape else .none;
+    return self.input.pending();
 }
 
 // libc's termios is not the Linux kernel ABI used by std.posix.termios.
@@ -58,11 +53,7 @@ pub fn setAttributes(action: std.posix.TCSA, attributes: Attributes) std.posix.T
 }
 
 pub fn expire(self: *Editor) !void {
-    switch (self.pending()) {
-        .none => {},
-        .escape => self.escape = .none,
-        .incomplete => return error.IncompleteTerminalInput,
-    }
+    try self.input.expire();
 }
 
 /// Literal command-line text is not keyboard input or a permission choice.
@@ -158,20 +149,12 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
                 continue;
             }
         }
-        if (editor.escape != .none or editor.paste or editor.partial_length != 0) {
+        if (editor.pending() != .none) {
             var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
             // Only bare ESC is ambiguous with a standalone key. Once CSI or
             // SS3 is recognized, allow a fragmented sequence to complete.
-            if (try std.posix.poll(&fds, if (editor.escape == .esc) 80 else 2000) == 0) {
-                if (editor.paste or editor.partial_length != 0) {
-                    try output.writeStreamingAll(io, "\n");
-                    return error.IncompleteTerminalInput;
-                }
-                if (editor.escape == .csi or editor.escape == .ss3) {
-                    try output.writeStreamingAll(io, "\n");
-                    return error.IncompleteTerminalInput;
-                }
-                editor.escape = .none;
+            if (try std.posix.poll(&fds, if (editor.pending() == .escape) 80 else 2000) == 0) {
+                try editor.expire();
                 continue;
             }
         }
@@ -180,7 +163,7 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
             if (backspaces != 0) try paintTailDeletion(io, &editor, backspaces, prompt, initial_size);
             return if (editor.length == 0) null else error.IncompleteTerminalLine;
         }
-        if ((byte[0] == 8 or byte[0] == 127) and editor.escape == .none and !editor.paste and
+        if ((byte[0] == 8 or byte[0] == 127) and editor.pending() == .none and
             editor.partial_length == 0 and editor.rejected == null and editor.cursor == editor.length and editor.length != 0)
         {
             // The last printable ASCII cell has a known width. Clear it in
@@ -202,13 +185,13 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
             try paintTailDeletion(io, &editor, backspaces, prompt, initial_size);
             backspaces = 0;
         }
-        const may_edit = editor.cursor != editor.length or editor.escape != .none or
+        const may_edit = editor.cursor != editor.length or editor.pending() != .none or
             std.mem.indexOfScalar(u8, "\x01\x04\x05\x08\x0b\x15\x17\x7f", byte[0]) != null;
         const old_row = if (may_edit) visibleRow(&editor, prompt.len, initial_size) else null;
         const old_length = editor.length;
         const event = editor.feed(byte[0]);
         switch (event) {
-            .none => {},
+            .none, .page_up, .page_down, .latest, .close_view, .width_report => {},
             .append => try output.writeStreamingAll(io, editor.buffer[old_length..editor.length]),
             .redraw => try redraw(io, &editor, prompt, initial_size, old_row),
             .submit => {
@@ -292,70 +275,23 @@ fn visibleRow(editor: *const Editor, prompt_size: usize, size: std.posix.winsize
 // This transition is also the production byte-ingress path. Its result is
 // observable through the accepted line; no escape parser reads past a prompt.
 pub fn feed(self: *Editor, byte: u8) Event {
-    if (self.paste) return self.pasted(byte);
-    if (self.escape != .none and (byte == 3 or byte == 4 or byte == '\r' or byte == '\n')) {
-        self.escape = .none;
-        return self.feed(byte);
-    }
-    switch (self.escape) {
-        .esc => {
-            self.escape = .none;
-            return switch (byte) {
-                '[' => blk: {
-                    self.escape = .csi;
-                    self.sequence_length = 0;
-                    break :blk .none;
-                },
-                'O' => blk: {
-                    self.escape = .ss3;
-                    break :blk .none;
-                },
-                8, 127 => self.backwardWord(false),
-                'b' => self.moveWord(false),
-                'f' => self.moveWord(true),
-                else => if (self.allow_paste) self.feed(byte) else blk: {
-                    self.reject(.invalid);
-                    break :blk .none;
-                },
-            };
-        },
-        .ss3 => {
-            self.escape = .none;
-            return switch (byte) {
-                'H' => self.move(self.lineStart()),
-                'F' => self.move(self.lineEnd()),
-                else => .none,
-            };
-        },
-        .csi => {
-            if (self.sequence_length == self.sequence.len) {
-                self.escape = .none;
-                self.reject(.invalid);
-                return .none;
-            }
-            self.sequence[self.sequence_length] = byte;
-            self.sequence_length += 1;
-            if (byte < 0x40 or byte > 0x7e) return .none;
-            self.escape = .none;
-            return self.csi(self.sequence[0..self.sequence_length]);
-        },
-        .none => {},
-    }
-    return switch (byte) {
-        0x1b => blk: {
-            self.escape = .esc;
+    const was_paste = self.input.paste;
+    const event = self.input.feed(byte) catch {
+        self.reject(.invalid);
+        return if (!was_paste and (byte == '\r' or byte == '\n')) .invalid else .none;
+    } orelse return .none;
+    return switch (event) {
+        .paste_start => blk: {
+            if (was_paste or !self.allow_paste) self.reject(.invalid);
             break :blk .none;
         },
-        '\r', '\n' => if (self.rejected) |reason| reason else if (self.partial_length != 0) .invalid else .submit,
-        3 => .interrupt,
-        4 => if (self.length == 0 and self.partial_length == 0) .eof else self.deleteNext(),
-        8, 127 => self.deletePrevious(),
-        1 => self.move(self.lineStart()),
-        5 => self.move(self.lineEnd()),
-        21 => self.deleteTo(self.lineStart()),
-        11 => self.deleteTo(self.lineEnd()),
-        23 => self.backwardWord(true),
-        else => self.insert(byte, false),
+        .paste_end => blk: {
+            if (!was_paste) self.reject(.invalid);
+            break :blk .none;
+        },
+        .cap_unicode => if (self.input.reported_width != null) .width_report else .none,
+        .key_press => |value| self.key(value, was_paste),
+        else => .none,
     };
 }
 
@@ -363,43 +299,101 @@ fn reject(self: *Editor, reason: Event) void {
     if (self.rejected == null) self.rejected = reason;
 }
 
-fn csi(self: *Editor, sequence: []const u8) Event {
-    if (std.mem.eql(u8, sequence, "200~")) {
-        self.paste = true;
-        if (!self.allow_paste) self.reject(.invalid);
-        return .none;
-    }
-    if (std.mem.eql(u8, sequence, "201~")) {
+fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
+    const Key = vaxis.Key;
+    if (pasted_input) {
+        if (value.matches('j', .{ .ctrl = true })) return self.insert('\n', true);
+        if (value.matches(Key.tab, .{})) return self.insert('\t', true);
+        if (value.text) |text| return self.insertText(text, true);
         self.reject(.invalid);
         return .none;
     }
+    if (value.matches('c', .{ .ctrl = true })) return .interrupt;
+    if (value.matches('d', .{ .ctrl = true })) return if (self.length == 0) .eof else self.deleteNext();
+    if (value.matches(Key.enter, .{}) or value.matches('j', .{ .ctrl = true })) return self.rejected orelse .submit;
     if (self.rejected != null) return .none;
-    if (std.mem.eql(u8, sequence, "D")) return self.move(self.previous(self.cursor));
-    if (std.mem.eql(u8, sequence, "C")) return self.move(self.next(self.cursor));
-    if (std.mem.eql(u8, sequence, "H") or std.mem.eql(u8, sequence, "1~") or std.mem.eql(u8, sequence, "7~")) return self.move(self.lineStart());
-    if (std.mem.eql(u8, sequence, "F") or std.mem.eql(u8, sequence, "4~") or std.mem.eql(u8, sequence, "8~")) return self.move(self.lineEnd());
-    if (std.mem.eql(u8, sequence, "3~")) return self.deleteNext();
-    if (std.mem.eql(u8, sequence, "A")) return self.vertical(false);
-    if (std.mem.eql(u8, sequence, "B")) return self.vertical(true);
-    if (std.mem.eql(u8, sequence, "1;3D")) return self.moveWord(false);
-    if (std.mem.eql(u8, sequence, "1;3C")) return self.moveWord(true);
+    if (value.matches(Key.escape, .{})) return .none;
+    if (value.matches(Key.tab, .{})) return self.insert('\t', false);
+    if (value.matches(Key.enter, .{ .shift = true }) or value.matches('j', .{ .alt = true })) return self.insert('\n', true);
+    if (value.matches(Key.page_up, .{})) return .page_up;
+    if (value.matches(Key.page_down, .{})) return .page_down;
+    if (value.matches(Key.end, .{ .ctrl = true })) return .latest;
+    if (value.matches('g', .{ .ctrl = true })) return .close_view;
+    if (value.matches(Key.left, .{})) return self.move(self.previous(self.cursor));
+    if (value.matches(Key.right, .{})) return self.move(self.next(self.cursor));
+    if (value.matches(Key.up, .{})) return self.vertical(false);
+    if (value.matches(Key.down, .{})) return self.vertical(true);
+    if (value.matches(Key.home, .{}) or value.matches('a', .{ .ctrl = true })) return self.move(self.lineStart());
+    if (value.matches(Key.end, .{}) or value.matches('e', .{ .ctrl = true })) return self.move(self.lineEnd());
+    if (value.matches(Key.delete, .{})) return self.deleteNext();
+    if (value.matches(Key.backspace, .{})) return self.deletePrevious();
+    if (value.matches('u', .{ .ctrl = true })) return self.deleteTo(self.lineStart());
+    if (value.matches('k', .{ .ctrl = true })) return self.deleteTo(self.lineEnd());
+    if (value.matches('w', .{ .ctrl = true })) return self.backwardWord(true);
+    if (value.matches(Key.backspace, .{ .alt = true }) or value.matches(127, .{ .alt = true })) return self.backwardWord(false);
+    if (value.matches('b', .{ .alt = true }) or value.matches(Key.left, .{ .alt = true })) return self.moveWord(false);
+    if (value.matches('f', .{ .alt = true }) or value.matches(Key.right, .{ .alt = true })) return self.moveWord(true);
+    // Vaxis represents C0 controls as Ctrl keys or textless Kitty codepoints.
+    // Only the bindings above may consume a control without rejecting input;
+    // silently ignoring another one would submit altered surrounding text.
+    if (value.mods.ctrl or value.mods.super or value.mods.hyper or value.mods.meta or
+        !validScalar(value.codepoint, false) or (!self.allow_paste and value.mods.alt))
+    {
+        self.reject(.invalid);
+        return .none;
+    }
+    if (value.text) |text| return self.insertText(text, false);
+    if (value.mods.alt) {
+        if (!self.allow_paste) self.reject(.invalid) else if (value.codepoint >= 32 and value.codepoint < 127) return self.insert(@intCast(value.codepoint), false);
+    }
     return .none;
 }
 
-fn pasted(self: *Editor, byte: u8) Event {
-    self.paste_prefix[self.paste_prefix_length] = byte;
-    self.paste_prefix_length += 1;
-    var event: Event = .none;
-    while (self.paste_prefix_length > 0 and !std.mem.startsWith(u8, paste_end, self.paste_prefix[0..self.paste_prefix_length])) {
-        const first = self.paste_prefix[0];
-        std.mem.copyForwards(u8, self.paste_prefix[0 .. self.paste_prefix_length - 1], self.paste_prefix[1..self.paste_prefix_length]);
-        self.paste_prefix_length -= 1;
-        const next_event = self.insert(first, true);
-        if (next_event == .redraw or (next_event == .append and event == .none)) event = next_event;
+test "modified kitty text cannot become an ordinary permission choice" {
+    var storage: [64]u8 = undefined;
+    for ([_]u8{ 3, 9, 17, 33, 57 }) |modifier| {
+        for ([_][]const u8{ "", ";97" }) |text| {
+            var sequence: [32]u8 = undefined;
+            const input = try std.fmt.bufPrint(&sequence, "\x1b[97;{d}{s}u", .{ modifier, text });
+            var editor: Editor = .{ .buffer = &storage, .allow_paste = false };
+            for (input) |byte| _ = editor.feed(byte);
+            try std.testing.expectEqual(Event.invalid, editor.feed('\r'));
+            try std.testing.expectEqual(@as(usize, 0), editor.length);
+        }
     }
-    if (self.paste_prefix_length == paste_end.len) {
-        self.paste = false;
-        self.paste_prefix_length = 0;
+    for ([_]u8{ 1, 2, 65, 129 }) |modifier| {
+        var sequence: [32]u8 = undefined;
+        const input = try std.fmt.bufPrint(&sequence, "\x1b[97;{d};97u", .{modifier});
+        var editor: Editor = .{ .buffer = &storage, .allow_paste = false };
+        for (input) |byte| _ = editor.feed(byte);
+        try std.testing.expectEqual(Event.submit, editor.feed('\r'));
+        try std.testing.expectEqualStrings("a", storage[0..editor.length]);
+    }
+}
+
+test "marked paste rejects encoded controls without releasing paste custody" {
+    var storage: [64]u8 = undefined;
+    for ([_][]const u8{
+        "\x1b[123;4~", "\x1b[0;1:3u", "\x1b[97;1;98u",  "\x1b[200~",
+        "\x1b[201x",   "\x1b[20~",    "\x1b]title\x07", "\x1bOQ",
+        "\x1b_print",  "\x1bx",
+    }) |sequence| {
+        var editor: Editor = .{ .buffer = &storage };
+        for ("\x1b[200~left") |byte| _ = editor.feed(byte);
+        for (sequence) |byte| _ = editor.feed(byte);
+        try std.testing.expectEqual(Pending.incomplete, editor.pending());
+        try std.testing.expectEqual(Event.none, editor.feed('\n'));
+        for ("right\x7f\x1b[201~") |byte| _ = editor.feed(byte);
+        try std.testing.expectEqual(Pending.none, editor.pending());
+        try std.testing.expectEqual(Event.invalid, editor.feed('\r'));
+    }
+}
+
+fn insertText(self: *Editor, text: []const u8, pasted_input: bool) Event {
+    var event: Event = .none;
+    for (text) |byte| {
+        const next_event = self.insert(byte, pasted_input);
+        if (next_event == .redraw or (next_event == .append and event == .none)) event = next_event;
     }
     return event;
 }
@@ -687,9 +681,19 @@ test "grapheme deletion, distinct word bindings and multiline paste" {
     editor = .{ .buffer = &storage };
     for ("\x1b[200~line1\nline2\x1b[201~\n") |byte| {
         const event = editor.feed(byte);
-        if (byte == '\n' and !editor.paste) try std.testing.expectEqual(Event.submit, event);
+        if (byte == '\n' and !editor.input.paste) try std.testing.expectEqual(Event.submit, event);
     }
     try std.testing.expectEqualStrings("line1\nline2", storage[0..editor.length]);
+    for ([_][]const u8{ "left\tright", "left\x1b[9uright" }) |input| {
+        editor = .{ .buffer = &storage };
+        for (input) |byte| _ = editor.feed(byte);
+        try std.testing.expectEqual(Event.submit, editor.feed('\n'));
+        try std.testing.expectEqualStrings("left\tright", storage[0..editor.length]);
+    }
+    editor = .{ .buffer = &storage };
+    for ("left\x1b[27uright") |byte| _ = editor.feed(byte);
+    try std.testing.expectEqual(Event.submit, editor.feed('\n'));
+    try std.testing.expectEqualStrings("leftright", storage[0..editor.length]);
 }
 
 test "batched tail deletion retains exact Unicode clusters and following input" {
@@ -749,10 +753,19 @@ test "unknown CSI retains following text; malformed input and marked choice reje
         const event = editor.feed(byte);
         if (byte == '\n') try std.testing.expectEqual(Event.invalid, event);
     }
+    for ([_][]const u8{
+        "invalid\x00x", "invalid\x12x", "invalid\x1cx",
+        "a\x1b[0u",     "a\x1b[28u",    "a\x1b[28;3u",
+        "a\x1b\x00",
+    }) |input| for ([_]bool{ true, false }) |allow_paste| {
+        editor = .{ .buffer = &storage, .allow_paste = allow_paste };
+        for (input) |byte| _ = editor.feed(byte);
+        try std.testing.expectEqual(Event.invalid, editor.feed('\n'));
+    };
     editor = .{ .buffer = &storage, .allow_paste = false };
     for ("\x1b[200~a\x1b[201~\n") |byte| {
         const event = editor.feed(byte);
-        if (byte == '\n' and !editor.paste) try std.testing.expectEqual(Event.invalid, event);
+        if (byte == '\n' and !editor.input.paste) try std.testing.expectEqual(Event.invalid, event);
     }
     editor = .{ .buffer = &storage, .allow_paste = false };
     for ("\x1ba\n") |byte| {

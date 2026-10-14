@@ -6,6 +6,7 @@ import pty
 import subprocess
 
 from host_process import dispose_all, stop_process
+from terminal_screen import release_capture
 
 
 @contextmanager
@@ -17,10 +18,12 @@ def terminal_process(args, *, env):
     and reap so Darwin does not discard unread output. Do not close borrowed handles.
     """
     master, slave = pty.openpty()
+    release_capture(master)
     process = None
     try:
         process = subprocess.Popen(args, env=env, stdin=slave, stdout=slave, stderr=slave)
         yield process, master
     finally:
         dispose_all(lambda: stop_process(process, timeout=5) if process is not None else None,
+                    lambda: release_capture(master),
                     lambda: os.close(master), lambda: os.close(slave))

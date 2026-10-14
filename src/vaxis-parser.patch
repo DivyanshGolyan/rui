@@ -1,0 +1,243 @@
+diff --git a/src/gwidth.zig b/src/gwidth.zig
+--- a/src/gwidth.zig
++++ b/src/gwidth.zig
+@@ -113,7 +113,7 @@ pub fn gwidth(str: []const u8, method: Method) u16 {
+                         width = @max(2, width);
+                     }
+ 
+-                    total += @max(0, width);
++                    total +|= @max(0, width);
+ 
+                     grapheme_start = grapheme_end;
+                 }
+@@ -134,7 +134,7 @@ pub fn gwidth(str: []const u8, method: Method) u16 {
+                         break :blk eawToWidth(cp, eaw);
+                     },
+                 };
+-                total += @intCast(@max(0, w));
++                total +|= @intCast(@max(0, w));
+             }
+             return total;
+         },
+@@ -144,7 +144,7 @@ pub fn gwidth(str: []const u8, method: Method) u16 {
+             var iter = std.mem.splitSequence(u8, str, "\u{200D}");
+             var result: u16 = 0;
+             while (iter.next()) |s| {
+-                result += gwidth(s, .unicode);
++                result +|= gwidth(s, .unicode);
+             }
+             return result;
+         },
+diff --git a/src/InternalScreen.zig b/src/InternalScreen.zig
+index 61f2c2a..0b5a6ba 100644
+--- a/src/InternalScreen.zig
++++ b/src/InternalScreen.zig
+@@ -5,8 +5,6 @@ const Cell = @import("Cell.zig");
+ const MouseShape = @import("Mouse.zig").Shape;
+ const CursorShape = Cell.CursorShape;
+ 
+-const log = std.log.scoped(.vaxis);
+-
+ const InternalScreen = @This();
+ 
+ pub const InternalCell = struct {
+@@ -76,13 +74,14 @@ pub fn deinit(self: *InternalScreen, alloc: std.mem.Allocator) void {
+     self.* = undefined;
+ }
+ 
+-/// writes a cell to a location. 0 indexed
++/// Writes a cell to a location. 0 indexed.
++/// On allocation failure the cell may be partially updated.
+ pub fn writeCell(
+     self: *InternalScreen,
+     col: u16,
+     row: u16,
+     cell: Cell,
+-) void {
++) std.mem.Allocator.Error!void {
+     if (self.width <= col) {
+         // column out of bounds
+         return;
+@@ -94,17 +93,11 @@ pub fn writeCell(
+     const i = (@as(usize, @intCast(row)) * self.width) + col;
+     assert(i < self.buf.len);
+     self.buf[i].char.clearRetainingCapacity();
+-    self.buf[i].char.appendSlice(self.arena.allocator(), cell.char.grapheme) catch |err| {
+-        log.warn("couldn't write grapheme: {t}", .{err});
+-    };
++    try self.buf[i].char.appendSlice(self.arena.allocator(), cell.char.grapheme);
+     self.buf[i].uri.clearRetainingCapacity();
+-    self.buf[i].uri.appendSlice(self.arena.allocator(), cell.link.uri) catch |err| {
+-        log.warn("couldn't write uri: {t}", .{err});
+-    };
++    try self.buf[i].uri.appendSlice(self.arena.allocator(), cell.link.uri);
+     self.buf[i].uri_id.clearRetainingCapacity();
+-    self.buf[i].uri_id.appendSlice(self.arena.allocator(), cell.link.params) catch |err| {
+-        log.warn("couldn't write uri_id: {t}", .{err});
+-    };
++    try self.buf[i].uri_id.appendSlice(self.arena.allocator(), cell.link.params);
+     self.buf[i].style = cell.style;
+     self.buf[i].default = cell.default;
+ }
+@@ -137,10 +130,10 @@ test "InternalScreen: out-of-bounds read/write are ignored" {
+     defer screen.deinit(std.testing.allocator);
+ 
+     const sentinel: Cell = .{ .char = .{ .grapheme = "A", .width = 1 } };
+-    screen.writeCell(0, 1, sentinel);
++    try screen.writeCell(0, 1, sentinel);
+ 
+     const oob_cell: Cell = .{ .char = .{ .grapheme = "X", .width = 1 } };
+-    screen.writeCell(2, 0, oob_cell);
++    try screen.writeCell(2, 0, oob_cell);
+     const read_back = screen.readCell(0, 1) orelse return error.TestUnexpectedResult;
+     try std.testing.expect(std.mem.eql(u8, read_back.char.grapheme, "A"));
+     try std.testing.expect(screen.readCell(2, 0) == null);
+diff --git a/src/Parser.zig b/src/Parser.zig
+index 823686b..1c47dcc 100644
+--- a/src/Parser.zig
++++ b/src/Parser.zig
+@@ -236,6 +236,7 @@ inline fn parseApc(input: []const u8) Result {
+         .event = null,
+         .n = 0,
+     };
++    if (end + 1 == input.len) return .{ .event = null, .n = 0 };
+     const sequence = input[0 .. end + 1 + 1];
+ 
+     switch (input[2]) {
+@@ -480,6 +481,8 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests:
+                 var total: usize = 0;
+                 while (param_iter.next()) |cp_buf| {
+                     const cp = parseParam(u21, cp_buf, null) orelse return null_event;
++                    const length = std.unicode.utf8CodepointSequenceLength(cp) catch return null_event;
++                    if (length > text_buf.len - total) return null_event;
+                     total += std.unicode.utf8Encode(cp, text_buf[total..]) catch return null_event;
+                 }
+                 key.text = text_buf[0..total];
+@@ -559,6 +562,8 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests:
+                 var total: usize = 0;
+                 while (param_iter.next()) |cp_buf| {
+                     const cp = parseParam(u21, cp_buf, null) orelse return null_event;
++                    const length = std.unicode.utf8CodepointSequenceLength(cp) catch return null_event;
++                    if (length > text_buf.len - total) return null_event;
+                     total += std.unicode.utf8Encode(cp, text_buf[total..]) catch return null_event;
+                 }
+                 key.text = text_buf[0..total];
+@@ -693,6 +698,8 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests:
+                 var total: usize = 0;
+                 while (param_iter.next()) |cp_buf| {
+                     const cp = parseParam(u21, cp_buf, null) orelse return null_event;
++                    const length = std.unicode.utf8CodepointSequenceLength(cp) catch return null_event;
++                    if (length > text_buf.len - total) return null_event;
+                     total += std.unicode.utf8Encode(cp, text_buf[total..]) catch return null_event;
+                 }
+                 key.text = text_buf[0..total];
+@@ -1691,3 +1698,50 @@ test "parse: osc 7501 reply followed by da1" {
+     const rest = try parser.parse(input[result.n..], null);
+     try testing.expectEqual(@as(?Event, .cap_da1), rest.event);
+ }
++
++test "parse: fragmented APC terminator retains input" {
++    var parser: Parser = .{};
++    const input = "\x1b_Greply\x1b\\Z";
++    for (1..10) |end| {
++        const partial = try parser.parse(input[0..end], null);
++        // A standalone ESC is ambiguous with the Escape key.
++        if (end == 1) continue;
++        try testing.expectEqual(@as(usize, 0), partial.n);
++        try testing.expect(partial.event == null);
++    }
++    const complete = try parser.parse(input, null);
++    try testing.expectEqual(@as(usize, 10), complete.n);
++    try testing.expectEqual(@as(?Event, .cap_kitty_graphics), complete.event);
++    const rest = try parser.parse(input[complete.n..], null);
++    try testing.expectEqual(@as(usize, 1), rest.n);
++    try testing.expectEqualStrings("Z", rest.event.?.key_press.text.?);
++}
++
++test "parse: CSI associated text respects scratch capacity" {
++    var parser: Parser = .{};
++    for ([_]u8{ 'u', 'A', '~' }) |final| {
++        for (0..3) |boundary| {
++            var bytes: [256]u8 = undefined;
++            var out = std.Io.Writer.fixed(&bytes);
++            try out.writeAll("\x1b[5;1;");
++            for (0..31) |_| try out.writeAll("128512:");
++            // 128 bytes fits; a scalar beginning at 128 or spanning 127..129
++            // must reject the complete event, never publish a partial key.
++            try out.writeAll(if (boundary == 2) "97:97:97:233" else "128512");
++            if (boundary == 1) try out.writeAll(":97");
++            try out.writeByte(final);
++            const input = out.buffered();
++            const result = try parser.parse(input, null);
++            try testing.expectEqual(input.len, result.n);
++            if (boundary != 0) {
++                try testing.expect(result.event == null);
++            } else {
++                const text = result.event.?.key_press.text.?;
++                try testing.expectEqual(@as(usize, 128), text.len);
++                var expected: [128]u8 = undefined;
++                for (0..32) |i| @memcpy(expected[i * 4 ..][0..4], "😀");
++                try testing.expectEqualSlices(u8, &expected, text);
++            }
++        }
++    }
++}
+diff --git a/src/Vaxis.zig b/src/Vaxis.zig
+index 038847a..552ffea 100644
+--- a/src/Vaxis.zig
++++ b/src/Vaxis.zig
+@@ -398,7 +398,11 @@ pub fn queueRefresh(self: *Vaxis) void {
+     self.refresh = true;
+ }
+ 
+-/// draws the screen to the terminal
++/// Draws the screen to the terminal.
++/// On error, output may be partial and cached terminal state may be inaccurate.
++/// Stop rendering with this instance; another render or queueRefresh is not a
++/// recovery operation. Continuing requires a usable output channel and an
++/// explicitly re-established terminal state and render origin.
+ pub fn render(self: *Vaxis, tty: *std.Io.Writer) !void {
+     defer self.refresh = false;
+     assert(self.screen.buf.len == @as(usize, @intCast(self.screen.width)) * self.screen.height); // correct size
+@@ -531,7 +535,7 @@ pub fn render(self: *Vaxis, tty: *std.Io.Writer) !void {
+             link = cell.link;
+         }
+         // Set this cell in the last frame
+-        self.screen_last.writeCell(col, row, cell);
++        try self.screen_last.writeCell(col, row, cell);
+ 
+         // If we support scaled text, we set the flags now
+         if (self.caps.scaled_text and cell.scale.scale > 1) {
+@@ -1685,6 +1689,32 @@ test "queryCursorPosition: failed write does not leave a pending request" {
+     try std.testing.expectEqual(@as(usize, 1), vx.cursor_position_requests.pending());
+ }
+ 
++test "render: propagates cell allocation failures" {
++    var env_map = try std.testing.environ.createMap(std.testing.allocator);
++    defer env_map.deinit();
++    const large = testRepeat("a", 4096);
++    const cells = [_]Cell{
++        .{ .char = .{ .grapheme = large, .width = 1 } },
++        .{ .link = .{ .uri = large } },
++        .{ .link = .{ .params = large } },
++    };
++    for (cells) |cell| {
++        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
++        const allocator = failing.allocator();
++        var vx = try Vaxis.init(std.testing.io, allocator, &env_map, .{});
++        var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
++        defer writer.deinit();
++        defer vx.deinit(allocator, &writer.writer);
++        try vx.resize(allocator, &writer.writer, .{ .rows = 1, .cols = 1, .x_pixel = 0, .y_pixel = 0 });
++        vx.screen.writeCell(0, 0, cell);
++
++        failing.fail_index = failing.alloc_index;
++        failing.resize_fail_index = failing.resize_index;
++        try std.testing.expectError(error.OutOfMemory, vx.render(&writer.writer));
++        try std.testing.expect(failing.has_induced_failure);
++    }
++}
++
+ test "render: no output when no changes" {
+     const io = std.testing.io;
+     var env_map = try std.testing.environ.createMap(std.testing.allocator);

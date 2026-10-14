@@ -445,7 +445,8 @@ def interactive_cases(state, binding=False, null_code=False):
                 if binding and line is not None:
                     marker = reason if route == "/v1/configure" else "Decision not confirmed" if route == "/v1/control/permission-decision" else "Not confirmed"
                     deadline = time.monotonic() + 15
-                    output = human.read_terminal(master, marker, timeout=deadline - time.monotonic(),
+                    reader = human.terminal_return if route == "/v1/configure" else human.read_terminal
+                    output = reader(master, marker, timeout=deadline - time.monotonic(),
                         composer=True)
                     assert "other/session" not in output and '"answer"' not in output, output
                     original = proxy.exchanges[0][0]

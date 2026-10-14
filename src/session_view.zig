@@ -135,6 +135,17 @@ pub fn Indented(comptime Sink: type) type {
                     self.grapheme_state = 0;
                     continue;
                 }
+                if (self.columns == 0) {
+                    // Cell layout owns geometry in the alternate screen.
+                    // Preserve hanging indentation without a second UTF-8,
+                    // grapheme or width pass through the same output.
+                    if (self.line_start) {
+                        try out.writeAll("  ");
+                        self.line_start = false;
+                    }
+                    try out.writeByte(byte);
+                    continue;
+                }
                 self.scalar[self.used] = byte;
                 self.used += 1;
                 const length = try std.unicode.utf8ByteSequenceLength(self.scalar[0]);
@@ -231,6 +242,11 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     try reader.seekTo(0);
     try sink.feed("\n");
     try sink.feed(Style.attention.code(colour));
+    try sink.feed("? ");
+    var label: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .line } };
+    try label.feed(arguments.description.slice());
+    try label.finish();
+    try sink.feed("\n");
     try sink.feed("? Run Bash:");
     try sink.feed(Style.normal.code(colour));
     try sink.feed("\n  ");
@@ -274,7 +290,7 @@ pub fn Escaped(comptime Sink: type) type {
     return struct {
         sink: Sink,
         text: Text,
-        storage: [256]u8 = undefined,
+        storage: [4096]u8 = undefined,
         used: usize = 0,
         pub fn writeAll(self: *@This(), bytes: []const u8) anyerror!void {
             try self.feed(bytes);

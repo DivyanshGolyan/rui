@@ -73,7 +73,9 @@ This creates a fresh conversation in the current directory and starts or connect
 /configure --permission-mode ask
 ```
 
-Type a request at `›`, such as `Investigate the failing test`. In approval mode, Rui shows the proposed command and its working directory. Type `a` and Enter to allow it once, or `d` and Enter to deny it. Pasted choices do not grant approval.
+Rui opens an alternate-screen conversation with a multiline composer. Type a request at `›`, such as `Investigate the failing test`. In approval mode, Rui shows the proposed command and its working directory. After the complete eligible Action frame is rendered, type a fresh `a` and Enter to allow it once, or `d` and Enter to deny it. Pasted or queued choices do not grant approval. Approval pauses while an inspection hides the Action.
+
+Actions whose display exceeds 256 KiB have a bounded preview and cannot be approved in-app. `/help` supplies exact-target shell commands to inspect the complete Action, allow it once, or deny it. Detach before running those commands. Saved arguments and results remain unchanged.
 
 | Command | What it does |
 | --- | --- |
@@ -84,7 +86,11 @@ Type a request at `›`, such as `Investigate the failing test`. In approval mod
 | `/requests` | Lists saved requests for recovery. |
 | `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
 
-You can edit and paste multiline text at the prompt. There is no input history or completion. For input longer than 64 KiB, use `message --text FILE`. If a submission is uncertain, Ctrl-R retries that same request rather than creating a new one.
+Enter sends; Shift-Enter or Alt-J adds a line. You can edit and paste multiline text at the prompt. PgUp and PgDn browse the bounded conversation or inspection, and Ctrl-G returns to the latest conversation or pending Action. Resize may reset browsing but preserves draft bytes and caret. There is no input history or completion. For input longer than 64 KiB, use `message --text FILE`. If a submission is uncertain, Ctrl-R retries that exact original request, independently of the next draft.
+
+Rui asks the terminal whether it measures joined Unicode characters, such as emoji, as one cluster. This terminal feature is called mode 2027. Rui uses the answer to choose matching character widths; if the feature is disabled or the terminal does not answer, it uses conventional character widths. Rui does not change the setting, and you do not need to choose a Rui option. Some terminal emulators remain unqualified. Characters that cannot fit safely are rejected rather than assigned invented widths. Drawing errors end the client after terminal restoration; Rui does not retry a partial frame. Normal CLI and script output and exact saved-content exports do not use this display bound.
+
+The alternate-screen renderer is work in progress: there is no final native Linux candidate qualification or macOS renderer run yet. Earlier conversation and recovery checks do not qualify its physical display behavior.
 
 ## Return to your work
 

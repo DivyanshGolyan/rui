@@ -20,6 +20,7 @@ const server = @import("server.zig");
 // the release build has no default crash handler to use it.
 pub const std_options: std.Options = .{
     .signal_stack_size = if (std.debug.default_enable_segfault_handler) 1 << 18 else null,
+    .log_scope_levels = &.{.{ .scope = .vaxis, .level = .info }},
 };
 
 extern "c" fn rui_launch_detached(executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize) c_int;
@@ -1327,43 +1328,74 @@ fn waitForSession(init: std.process.Init, store: []const u8, session_ref: []cons
     if (presentation != .json) try showResult(init, .{ .io = init.io }, &saved, presentation);
 }
 
-fn showSessionStatus(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8, view: enum { opening, full }) !void {
-    const report = try inspectWork(init, requester, store, session_ref);
+pub fn sessionInspect(init: std.process.Init, requester: client.Requests, store: []const u8, session: []const u8, command: []const u8, out: *std.Io.Writer) anyerror!void {
+    if (std.mem.eql(u8, command, "/status"))
+        return renderSessionStatus(init, requester, store, session, .full, out);
+    if (std.mem.eql(u8, command, "/requests"))
+        return sessionRequests(init, requester, store, session, out);
+    return error.UnknownArgument;
+}
+
+const SessionStatusView = enum { opening, full };
+
+fn showSessionStatus(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8, view: SessionStatusView) !void {
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+    // Keep the primary rendering/inspection error if flushing also fails.
+    defer writer.flush() catch {};
+    try renderSessionStatus(init, requester, store, session_ref, view, &writer.interface);
+    try writer.flush();
+}
+
+fn renderSessionStatus(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8, view: SessionStatusView, out: *std.Io.Writer) !void {
+    const report = try inspectWorkTo(init, requester, store, session_ref, out);
     defer report.file.close(init.io);
     const work = &report.current;
     if (view == .opening) {
         if (work.settings.tools.bash and work.settings.permission_mode.value == .bypass)
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Bash runs without approval.\n");
+            try out.writeAll("Bash runs without approval.\n");
         return;
     }
-    try writeSafeField(init.io, "Session: ", session_ref);
-    try writeSafeField(init.io, "Store: ", store);
-    try writeSafeField(init.io, "Workspace (Bash cwd): ", work.settings.workspace.slice());
-    try writeSafeField(init.io, "Provider: ", @tagName(work.settings.provider.value));
-    try writeSafeField(init.io, "Model: ", work.settings.model.slice());
-    try writeSafeField(init.io, "Permission: ", @tagName(work.settings.permission_mode.value));
-    try writeSafeField(init.io, "Work: ", @tagName(work.work.status.value));
+    try writeSafeFieldTo(out, "Session: ", session_ref);
+    try writeSafeFieldTo(out, "Store: ", store);
+    try writeSafeFieldTo(out, "Workspace (Bash cwd): ", work.settings.workspace.slice());
+    try writeSafeFieldTo(out, "Provider: ", @tagName(work.settings.provider.value));
+    try writeSafeFieldTo(out, "Model: ", work.settings.model.slice());
+    try writeSafeFieldTo(out, "Permission: ", @tagName(work.settings.permission_mode.value));
+    try writeSafeFieldTo(out, "Work: ", @tagName(work.work.status.value));
     if (work.selected_message) |selected|
-        try writeSafeField(init.io, "Current message: ", selected.slice());
-    if (work.actionable_count != 0) try showActionable(init.io, &report, false);
+        try writeSafeFieldTo(out, "Current message: ", selected.slice());
+    if (work.actionable_count != 0) try renderActionable(init.io, &report, false, out);
     if (work.first_indeterminate) |action| {
         var buffer: [20]u8 = undefined;
-        try writeSafeField(init.io, "Indeterminate Action: ", try std.fmt.bufPrint(&buffer, "{d}", .{action}));
+        try writeSafeFieldTo(out, "Indeterminate Action: ", try std.fmt.bufPrint(&buffer, "{d}", .{action}));
         if (work.indeterminate_count > 1) {
             var line: [160]u8 = undefined;
-            try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "Rui: {d} indeterminate Actions in this Turn; inspect-session --profile current lists all IDs.\n", .{work.indeterminate_count}));
+            try out.writeAll(try std.fmt.bufPrint(&line, "Rui: {d} indeterminate Actions in this Turn; inspect-session --profile current lists all IDs.\n", .{work.indeterminate_count}));
         }
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: The command may have run; Rui did not replay it. Check its effects before deciding what to do next.\n");
+        try out.writeAll("Rui: The command may have run; Rui did not replay it. Check its effects before deciding what to do next.\n");
     }
     if (work.recent_count != 0) {
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Recent messages (use /result KEY for an answer):\n");
+        try out.writeAll("Recent messages (use /result KEY for an answer):\n");
         for (work.recent[0..work.recent_count]) |recent| {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "  ");
-            try writeSafeText(init.io, recent.message.slice());
-            try std.Io.File.stdout().writeStreamingAll(init.io, ": ");
-            try writeSafeField(init.io, "", recent.outcome.slice());
+            try out.writeAll("  ");
+            try writeSafeTextTo(out, recent.message.slice());
+            try out.writeAll(": ");
+            try writeSafeFieldTo(out, "", recent.outcome.slice());
         }
     }
+}
+
+fn writeSafeFieldTo(out: *std.Io.Writer, label: []const u8, value: []const u8) !void {
+    try out.writeAll(label);
+    try writeSafeTextTo(out, value);
+    try out.writeByte('\n');
+}
+
+fn writeSafeTextTo(out: *std.Io.Writer, value: []const u8) !void {
+    var text: TerminalText = .{ .mode = .line };
+    try text.feed(out, value);
+    try text.finish(out);
 }
 
 fn writeSafeField(io: std.Io, label: []const u8, value: []const u8) !void {
@@ -1375,9 +1407,7 @@ fn writeSafeField(io: std.Io, label: []const u8, value: []const u8) !void {
 fn writeSafeText(io: std.Io, value: []const u8) !void {
     var buffer: [256]u8 = undefined;
     var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
-    var text: TerminalText = .{ .mode = .line };
-    try text.feed(&writer.interface, value);
-    try text.finish(&writer.interface);
+    try writeSafeTextTo(&writer.interface, value);
     try writer.flush();
 }
 
@@ -1392,7 +1422,11 @@ fn runSession(init: std.process.Init, destination: []const u8, reference: []cons
         const directory = requestDirectory(init, &directory_buffer) catch |err| break :run err;
         const scratch = renderScratch(init) catch |err| break :run err;
         defer scratch.close(init.io);
-        break :run SessionFrontend.run(init, destination, reference, directory, scratch, sessionCommand, initial_text);
+        const action = renderScratch(init) catch |err| break :run err;
+        defer action.close(init.io);
+        const inspection = renderScratch(init) catch |err| break :run err;
+        defer inspection.close(init.io);
+        break :run SessionFrontend.run(init, destination, reference, directory, .{ .scratch = scratch, .action = action, .inspection = inspection }, sessionCommand, sessionInspect, initial_text);
     };
     return outcome catch |err| {
         notice: {
@@ -1499,7 +1533,15 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             TerminalText.diagnostic("rui: status: {s}\n", .{@errorName(err)});
         };
     } else if (std.mem.eql(u8, text, "/requests")) {
-        sessionRequests(init, destination, reference) catch |err| TerminalText.diagnostic("rui: requests: {s}\n", .{@errorName(err)});
+        var buffer: [256]u8 = undefined;
+        var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+        // Preserve already rendered detail on failure; the primary error wins.
+        defer writer.flush() catch {};
+        sessionInspect(init, requests_context, destination, reference, text, &writer.interface) catch |err| {
+            TerminalText.diagnostic("rui: requests: {s}\n", .{@errorName(err)});
+            return;
+        };
+        try writer.flush();
     } else if (std.mem.startsWith(u8, text, "/result ")) {
         const saved = client.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
             TerminalText.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
@@ -1596,11 +1638,11 @@ fn interactiveTokens(input: []u8, tokens: [][]const u8) !usize {
     return count;
 }
 
-fn sessionRequests(init: std.process.Init, store: []const u8, session_ref: []const u8) !void {
+fn sessionRequests(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8, out: *std.Io.Writer) !void {
     const canonical = try platform.resolveClientPaths(init.io, store);
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory = try requestDirectory(init, &path);
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Local recovery handles (not Host work status):\n");
+    try out.writeAll("Rui: Local recovery handles (not Host work status):\n");
     var dir = std.Io.Dir.cwd().openDir(init.io, directory, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
@@ -1609,12 +1651,19 @@ fn sessionRequests(init: std.process.Init, store: []const u8, session_ref: []con
     if ((try dir.stat(init.io)).permissions.toMode() & 0o077 != 0) return error.InsecureRecordDirectory;
     var iterator = dir.iterate();
     while (try iterator.next(init.io)) |entry| {
+        if (requester.cancellation) |token| if (token.stopped.load(.acquire)) return error.Cancelled;
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
         const handle = entry.name[0 .. entry.name.len - ".json".len];
-        const saved = savedRequest(init, handle) catch continue;
+        const saved = savedRequest(init, handle) catch |err| switch (err) {
+            error.Canceled => return err,
+            else => continue,
+        };
         if (!saved.store.eql(canonical.store.slice()) or !saved.session.eql(session_ref)) continue;
-        var line: [100]u8 = undefined;
-        try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "  {s} ({s})\n", .{ handle, saved.kind.slice() }));
+        try out.writeAll("  ");
+        try writeSafeTextTo(out, handle);
+        try out.writeAll(" (");
+        try writeSafeTextTo(out, saved.kind.slice());
+        try out.writeAll(")\n");
     }
 }
 
@@ -2460,6 +2509,17 @@ const SessionObservation = struct {
 };
 
 fn inspectWork(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8) !SessionObservation {
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+    // A typed inspection failure stays primary if diagnostic flushing fails.
+    defer writer.flush() catch {};
+    const report = try inspectWorkTo(init, requester, store, session_ref, &writer.interface);
+    errdefer report.file.close(init.io);
+    try writer.flush();
+    return report;
+}
+
+fn inspectWorkTo(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8, out: *std.Io.Writer) !SessionObservation {
     const file = try renderScratch(init);
     errdefer file.close(init.io);
     var response: client.ReplyBuffer = .{};
@@ -2468,15 +2528,27 @@ fn inspectWork(init: std.process.Init, requester: client.Requests, store: []cons
         .current => |current| return .{ .current = current, .file = file },
         .unconfigured => return error.SessionNotConfigured,
         .failure => |failure| {
-            try writeCommandReply(init.io, reply.command);
+            if (requester.read_failure != null) return requester.failRead(failure);
+            try out.writeAll(reply.command.body);
+            try out.writeByte('\n');
+            try client.checkCanonicalFailure(reply.command);
             return failure.err();
         },
     }
 }
 
 fn showActionable(io: std.Io, report: *const SessionObservation, json: bool) !void {
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
+    // Retain partial output without replacing a traversal/write failure.
+    defer writer.flush() catch {};
+    try renderActionable(io, report, json, &writer.interface);
+    try writer.flush();
+}
+
+fn renderActionable(io: std.Io, report: *const SessionObservation, json: bool, out: *std.Io.Writer) !void {
     const Sink = struct {
-        io: std.Io,
+        out: *std.Io.Writer,
         json: bool,
         first: bool = true,
         pub fn visit(self: *@This(), row: client.Current.Attention) !void {
@@ -2484,19 +2556,19 @@ fn showActionable(io: std.Io, report: *const SessionObservation, json: bool) !vo
                 var buffer: [20]u8 = undefined;
                 const action = try std.fmt.bufPrint(&buffer, "{d}", .{row.actionable.action.value});
                 if (self.json) {
-                    if (!self.first) try std.Io.File.stdout().writeStreamingAll(self.io, ",");
-                    try std.Io.File.stdout().writeStreamingAll(self.io, "\"");
-                    try std.Io.File.stdout().writeStreamingAll(self.io, action);
-                    try std.Io.File.stdout().writeStreamingAll(self.io, "\"");
-                } else try writeSafeField(self.io, "Action requiring attention: ", action);
+                    if (!self.first) try self.out.writeAll(",");
+                    try self.out.writeAll("\"");
+                    try self.out.writeAll(action);
+                    try self.out.writeAll("\"");
+                } else try writeSafeFieldTo(self.out, "Action requiring attention: ", action);
                 self.first = false;
             }
         }
     };
-    var sink: Sink = .{ .io = io, .json = json };
-    if (json) try std.Io.File.stdout().writeStreamingAll(io, "{\"event\":\"actionable_permissions\",\"actions\":[");
+    var sink: Sink = .{ .out = out, .json = json };
+    if (json) try out.writeAll("{\"event\":\"actionable_permissions\",\"actions\":[");
     try report.current.traverse(io, report.file, &sink);
-    if (json) try std.Io.File.stdout().writeStreamingAll(io, "]}\n");
+    if (json) try out.writeAll("]}\n");
 }
 
 fn writeFollowOutcome(init: std.process.Init, observation: *const client.CommandObservation, presentation: Presentation) !void {

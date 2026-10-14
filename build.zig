@@ -156,6 +156,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     configurePosix(b, terminal_module);
+    configureVaxis(b, terminal_module);
     terminal_notice.root_module.addImport("terminal", terminal_module);
     terminal_notice.root_module.link_libc = true;
 
@@ -902,12 +903,34 @@ fn configureHostLaunch(b: *std.Build, compile: *std.Build.Step.Compile) void {
 fn configureTerminalEditor(b: *std.Build, compile: *std.Build.Step.Compile) void {
     const utf8proc = b.dependency("utf8proc", .{});
     configurePosix(b, compile.root_module);
+    configureVaxis(b, compile.root_module);
     compile.root_module.link_libc = true;
     compile.root_module.addIncludePath(utf8proc.path("."));
     compile.root_module.addCSourceFile(.{
         .file = utf8proc.path("utf8proc.c"),
         .flags = &.{ "-std=c99", "-O2" },
     });
+}
+
+fn configureVaxis(b: *std.Build, module: *std.Build.Module) void {
+    const dependency = b.dependency("vaxis", .{
+        .target = module.resolved_target.?,
+        .optimize = module.optimize.?,
+    });
+    const upstream = dependency.module("vaxis");
+    const prepare = b.addSystemCommand(&.{"bash"});
+    prepare.addFileArg(b.path("src/prepare_vaxis.sh"));
+    prepare.addDirectoryArg(dependency.path("."));
+    prepare.addFileArg(b.path("src/vaxis-parser.patch"));
+    const patched = prepare.addOutputDirectoryArg("vaxis");
+    const vaxis = b.createModule(.{
+        .root_source_file = patched.path(b, "src/main.zig"),
+        .target = module.resolved_target.?,
+        .optimize = module.optimize.?,
+    });
+    var imports = upstream.import_table.iterator();
+    while (imports.next()) |entry| vaxis.addImport(entry.key_ptr.*, entry.value_ptr.*);
+    module.addImport("vaxis", vaxis);
 }
 
 fn configureEvaluatorParent(b: *std.Build, compile: *std.Build.Step.Compile) void {
