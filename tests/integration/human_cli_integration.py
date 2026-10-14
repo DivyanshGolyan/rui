@@ -237,11 +237,15 @@ def terminal_wait_oracles():
         thread.start()
         try:
             try:
-                output = read_terminal(reader, marker, timeout=0.5, redraw=redraw, composer=composer, initial=initial)
+                # Only deadline oracles need a short wait. Large semantic inputs
+                # use the reader's ordinary budget, not a throughput requirement.
+                options = {"timeout": 0.5} if error == "deadline" else {}
+                output = read_terminal(reader, marker, redraw=redraw, composer=composer, initial=initial, **options)
             except AssertionError as failure:
                 assert error is not None, failure
                 if error == "deadline":
                     assert isinstance(failure.args[0], tuple) and failure.args[0][0] == marker, failure
+                    assert failure.terminal_metadata["received_bytes"] == sum(map(len, frames)), failure.terminal_metadata
                 elif error == "closed":
                     prefix = initial + b"".join(frames)
                     assert failure.args[0] == ("terminal closed before marker", marker, prefix.decode()), failure
@@ -265,11 +269,17 @@ def terminal_wait_oracles():
     # Each final frame still fits the unchanged retained-output budget.
     frames = [b"\r\x1b[2K\r\n\xe2\x80\xba " + draft.encode()[:n * 1024] + b"\r\x1b[4C"
               for n in range(1, 65)]
+    assert sum(map(len, frames)) > 1024 * 1024
     output = collect(frames, marker, redraw=True)
     assert marker in output and len(output) < 1024 * 1024, "required redraw was not retained within bound"
     collect(frames, marker, error="unexpected unbounded terminal output")
+    # Deadline refusal must observe an incomplete boundary, not time out while
+    # still draining the large retention corpus above.
+    draft = "ab\u0301"
+    marker = draft + "\r\x1b[4C"
     for suffix in (b"", b"\r\x1b[3C"):
-        collect(frames[:-1] + [draft.encode() + suffix], marker, redraw=True, error="deadline")
+        collect([draft.encode() + suffix], marker, redraw=True, error="deadline")
+    assert marker in collect([marker.encode()], marker, redraw=True)
     diagnostic = "RequestBindingMismatch"
     collect([diagnostic.encode()], diagnostic, composer=True, error="deadline")
     output = collect([diagnostic.encode(), b"\n\xe2\x80\xba \r", b"\x1b[2C"], diagnostic, composer=True)
