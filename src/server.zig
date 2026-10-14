@@ -1126,12 +1126,14 @@ fn executionMain(host: *Host) void {
 
     var turn_state = execution_turn.State{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
+    var next_receive_slot: usize = 0;
     while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
         var bash_window: [bash.copy_window_bytes]u8 = undefined;
         var native = NativeTurn{
             .host = host,
             .reactor = if (reactor) |*active| active else null,
             .slots = slots,
+            .next_receive_slot = &next_receive_slot,
             .bash_preparation = &bash_preparation,
             .model_preparation = &model_preparation,
             .model_preparation_active = &model_preparation_active,
@@ -1178,6 +1180,7 @@ const NativeTurn = struct {
     host: *Host,
     reactor: ?*provider.Reactor,
     slots: []ExecutionSlot,
+    next_receive_slot: *usize,
     bash_preparation: *?bash.Preparation,
     model_preparation: *model_adapter.Preparation,
     model_preparation_active: *bool,
@@ -1374,7 +1377,7 @@ const NativeTurn = struct {
     }
 
     pub fn serviceOneCompletion(self: *NativeTurn) bool {
-        return callServiceOneCompletion(self.host, self.reactor, self.slots);
+        return callServiceOneCompletion(self.host, self.reactor, self.slots, self.next_receive_slot);
     }
 
     pub fn modelPreparationAllowance(self: *const NativeTurn) execution_turn.Allowance {
@@ -1404,7 +1407,7 @@ const callAdvanceRetainedCleanup = advanceRetainedCleanup;
 const slotsHaveTransport = hasTransport;
 const slotsHaveBash = hasBash;
 
-fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) bool {
+fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot, next_receive_slot: *usize) bool {
     const active_reactor = reactor orelse return false;
     for (slots) |*slot| switch (slot.*) {
         .provider => |*active| {
@@ -1433,24 +1436,88 @@ fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []Execu
         return false;
     };
     if (completed) return true;
-    for (slots) |*slot| switch (slot.*) {
-        .provider => |*active| {
-            const progress = active_reactor.advance(&active.transfer, &host.faults.response_write_on_resume) catch |err| {
-                fenceDispatch(host, "transport advance", err);
-                return false;
-            };
-            switch (progress) {
-                .progressed => return true,
-                .resume_capture_failure => {
-                    traceSubject(host, "transport_resume_capture_failure", "cause", "local_capture");
-                    return true;
-                },
-                .not_ready => {},
-            }
-        },
-        else => {},
-    };
+    return advanceOneTransfer(host, active_reactor, slots, next_receive_slot);
+}
+
+fn advanceOneTransfer(host: *Host, reactor: anytype, slots: []ExecutionSlot, next_receive_slot: *usize) bool {
+    // This thread is the sole producer. Freeze readiness for the scan so a
+    // worker drain cannot let a later slot bypass an earlier paused one.
+    const resume_allowed = host.capture_writer.?.hasRoom();
+    for (0..slots.len) |offset| {
+        const index = (next_receive_slot.* + offset) % slots.len;
+        const slot = &slots[index];
+        switch (slot.*) {
+            .provider => |*active| {
+                const progress = reactor.advance(&active.transfer, resume_allowed, &host.faults.response_write_on_resume) catch |err| {
+                    fenceDispatch(host, "transport advance", err);
+                    return false;
+                };
+                switch (progress) {
+                    .progressed, .resume_capture_failure => {
+                        next_receive_slot.* = (index + 1) % slots.len;
+                        if (progress == .resume_capture_failure)
+                            traceSubject(host, "transport_resume_capture_failure", "cause", "local_capture");
+                        return true;
+                    },
+                    .not_ready => {},
+                }
+            },
+            else => {},
+        }
+    }
     return false;
+}
+
+test "receive advancement serves paused siblings across recurring queue pressure" {
+    const RecordingReactor = struct {
+        slots: []ExecutionSlot,
+        writer: *provider.CaptureWriter,
+        selected: ?usize = null,
+        drain_during_scan: bool = false,
+
+        fn advance(self: *@This(), transfer: *provider.Transfer, resume_allowed: bool, _: *bool) error{}!provider.Reactor.Advance {
+            // A worker may release space just after a paused candidate was
+            // examined. That must not let a later candidate bypass it.
+            if (self.drain_during_scan) {
+                self.writer.count = 0;
+                self.drain_during_scan = false;
+            }
+            if (!resume_allowed) return .not_ready;
+            for (self.slots, 0..) |*slot, index| {
+                if (slot.* == .provider and &slot.provider.transfer == transfer) {
+                    self.selected = index;
+                    self.writer.count = 16;
+                    return .progressed;
+                }
+            }
+            unreachable;
+        }
+    };
+    var writer = provider.CaptureWriter{ .io = std.testing.io };
+    var host: Host = undefined;
+    host.capture_writer = &writer;
+    host.faults = .{};
+    var slots = [_]ExecutionSlot{ .{ .provider = .{ .owner = .{} } }, .free, .{ .provider = .{ .owner = .{} } } };
+    var reactor = RecordingReactor{ .slots = &slots, .writer = &writer };
+    var next: usize = 0;
+    for ([_]usize{ 0, 2, 0, 2 }) |expected| {
+        writer.count = 0;
+        try std.testing.expect(advanceOneTransfer(&host, &reactor, &slots, &next));
+        try std.testing.expectEqual(expected, reactor.selected.?);
+    }
+    next = 2;
+    reactor.selected = null;
+    reactor.drain_during_scan = true;
+    try std.testing.expectEqual(false, advanceOneTransfer(&host, &reactor, &slots, &next));
+    try std.testing.expectEqual(@as(?usize, null), reactor.selected);
+    try std.testing.expectEqual(@as(usize, 2), next);
+    try std.testing.expect(advanceOneTransfer(&host, &reactor, &slots, &next));
+    try std.testing.expectEqual(@as(usize, 2), reactor.selected.?);
+    slots[2] = .free;
+    writer.count = 0;
+    try std.testing.expect(advanceOneTransfer(&host, &reactor, &slots, &next));
+    try std.testing.expectEqual(@as(usize, 0), reactor.selected.?);
+    try std.testing.expect(!advanceOneTransfer(&host, &reactor, &.{}, &next));
 }
 
 fn cancelSupersededTransfers(

@@ -165,14 +165,16 @@ pub const Reactor = struct {
         transfer.discard();
     }
 
-    pub fn advance(self: *Reactor, transfer: *Transfer, response_write_on_resume: *bool) !Advance {
+    // The execution owner samples shared writer room before its receive scan.
+    // Failure/expiry still progress when that scan cannot resume captures.
+    pub fn advance(self: *Reactor, transfer: *Transfer, resume_allowed: bool, response_write_on_resume: *bool) !Advance {
         if (!transfer.isReceiving()) return .not_ready;
         if (transfer.captureFailure()) |failure| {
             self.cancel(transfer);
             transfer.finish(.{ .response_capture_failed = failure }, 0);
             return .progressed;
         }
-        if (transfer.in_reactor and transfer.timeout_context.isPaused() and transfer.writer.hasRoom()) {
+        if (resume_allowed and transfer.in_reactor and transfer.timeout_context.isPaused()) {
             if (response_write_on_resume.*) {
                 transfer.response.fail_write = true;
                 response_write_on_resume.* = false;
@@ -1242,6 +1244,32 @@ test "Transfer finalization waits for real writer drainage and seals once" {
     try std.testing.expectEqual(@as(usize, 0), writer.count);
     try std.testing.expect(transfer.advanceFinalization(false) == .ready);
     try std.testing.expectEqual(@as(usize, 0), writer.count);
+}
+
+test "receive scans without resume capacity still settle capture failure and queue expiry" {
+    var writer = CaptureWriter{ .io = std.testing.io };
+    var reactor: Reactor = undefined; // Neither case retains a native handle.
+    var inject_resume_failure = false;
+    for ([_]bool{ true, false }) |capture_failed| {
+        var transfer: Transfer = undefined;
+        transfer.writer = &writer;
+        transfer.local = .receiving;
+        transfer.in_reactor = false;
+        transfer.response.failure = if (capture_failed) .write_failed else null;
+        transfer.timeout_context = .{
+            .io = std.testing.io,
+            .inactivity_ns = std.time.ns_per_s,
+            .last_progress = std.Io.Clock.Timestamp.now(std.testing.io, .awake).subDuration(.{ .raw = .fromSeconds(2), .clock = .awake }),
+            .armed = true,
+        };
+        try std.testing.expectEqual(Reactor.Advance.progressed, try reactor.advance(&transfer, false, &inject_resume_failure));
+        const outcome = transfer.local.finished.completion.outcome;
+        if (capture_failed) {
+            try std.testing.expectEqual(CaptureFailure.write_failed, outcome.response_capture_failed);
+        } else {
+            try std.testing.expectEqual(TransportDisposition.temporary_connection, outcome.transport_finished.disposition);
+        }
+    }
 }
 
 test "full capture queue rejects an offer without changing its charge or pending writes" {
