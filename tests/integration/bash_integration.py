@@ -55,6 +55,15 @@ def start_detached_shell(command, ready_path):
     return f"{detached_shell(command)} & while [ ! -s {ready} ]; do :; done"
 
 
+def publish_pid(path, value="$$"):
+    """Publish a fixture-owned shell PID expression atomically for exists waits."""
+    temporary = shlex.quote(str(path.with_suffix(".tmp")))
+    return (
+        f'printf "%s" "{value}" > {temporary} && '
+        f"mv {temporary} {shlex.quote(str(path))}"
+    )
+
+
 def configure(state, store, key, session, permission="ask", workspace=fixture.ROOT):
     result = fixture.command(
         "configure",
@@ -940,7 +949,7 @@ def main():
                 "exited-pipes-call",
                 json.dumps(
                     {
-                        "cmd": f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & printf $! > {exited_child_pid}",
+                        "cmd": f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & {publish_pid(exited_child_pid, '$!')}",
                         "timeout_ms": None,
                         "description": "Start detached pipe-free child",
                     },
@@ -969,8 +978,7 @@ def main():
                     {
                         "cmd": (
                             f"(trap '' TERM; sleep 30) & child=$!; "
-                            f"printf '%s\\n' \"$child\" > {stopped_pipes_child_pid}.tmp; "
-                            f"mv {stopped_pipes_child_pid}.tmp {stopped_pipes_child_pid}; "
+                            f"{publish_pid(stopped_pipes_child_pid, '$child')}; "
                             f"while [ ! -e {stopped_pipes_leader_release} ]; do sleep 0.01; done"
                         ),
                         "timeout_ms": None,
@@ -987,7 +995,7 @@ def main():
         responses,
         "detached-timeout",
         start_detached_shell(
-            f"trap '' TERM PIPE; echo $$ > {detached_pid}; "
+            f"trap '' TERM PIPE; {publish_pid(detached_pid)}; "
             "head -c 32768 /dev/zero; while :; do printf detached; sleep 1; done",
             detached_pid,
         ),
@@ -998,8 +1006,7 @@ def main():
         responses,
         "same-group-timeout",
         f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & child=$!; "
-        f"printf '%s\n' \"$child\" > {same_group_pid}.tmp; "
-        f"mv {same_group_pid}.tmp {same_group_pid}; wait \"$child\"",
+        f"{publish_pid(same_group_pid, '$child')}; wait \"$child\"",
         timeout_ms=100,
     )
     add_exchange(
