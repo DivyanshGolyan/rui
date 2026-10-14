@@ -88,6 +88,11 @@ if "codeberg.org/" in url:
         "https://codeberg.org/ziglang/translate-c/archive/f978dca0f2b2a782d06591989e80aae7c74d0183.tar.gz",
         "https://codeberg.org/ziglang/arocc/archive/ffddc972f7a208bd6e254c27465407270fd8b60c.tar.gz",
     }, "archive URL must preserve the exact commit, without Git query or fragment"
+if "github.com/" in url:
+    assert url in {
+        "https://github.com/ziglang/translate-c/archive/f978dca0f2b2a782d06591989e80aae7c74d0183.tar.gz",
+        "https://github.com/ziglang/arocc/archive/ffddc972f7a208bd6e254c27465407270fd8b60c.tar.gz",
+    }, "archive URL must preserve the exact commit, without .git, query or fragment"
 pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
 ''')
         (self.tools / "curl").chmod(0o755)
@@ -145,23 +150,29 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
         self.assertNotEqual(self.install("--unknown").returncode, 0)
 
     def test_git_dependency_graph_is_prepared_and_hash_checked(self):
+        self.check_git_dependency_graph("codeberg.org")
+
+    def test_github_dependency_graph_is_prepared_and_hash_checked(self):
+        self.check_git_dependency_graph("github.com", suffix=".git")
+
+    def check_git_dependency_graph(self, host, suffix=""):
         translator = '''        .translate_c = .{
-            .url = "git+https://codeberg.org/ziglang/translate-c#f978dca0f2b2a782d06591989e80aae7c74d0183",
+            .url = "git+https://HOST/ziglang/translate-cSUFFIX#f978dca0f2b2a782d06591989e80aae7c74d0183",
             .hash = "test-translator-hash",
         },
-'''
+'''.replace("HOST", host).replace("SUFFIX", suffix)
         manifest = self.manifest.replace('    .dependencies = .{\n', '    .dependencies = .{\n' + translator)
         (self.repo / "build.zig.zon").write_text(manifest)
         manifests = {
             "test-translator-hash": '''.{
     .dependencies = .{
         .aro = .{
-            .url = "git+https://codeberg.org/ziglang/arocc?ref=zig-0.17.x#ffddc972f7a208bd6e254c27465407270fd8b60c",
+            .url = "git+https://HOST/ziglang/aroccSUFFIX?ref=zig-0.17.x#ffddc972f7a208bd6e254c27465407270fd8b60c",
             .hash = "test-parser-hash",
         },
     },
 }
-''',
+'''.replace("HOST", host).replace("SUFFIX", suffix),
             "test-parser-hash": '.{\n    .dependencies = .{},\n}\n',
         }
         environment = {"TEST_PACKAGE_MANIFESTS": json.dumps(manifests)}
@@ -169,14 +180,66 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
         self.assertNotEqual(failed.returncode, 0)
         self.assertIn("Pinned aro dependency hash mismatch", failed.stderr)
         self.assertFalse((self.bin / "rui").exists())
+        self.assertFalse((self.bin / "rui-evaluator").exists())
+        self.assertEqual((self.repo / "build.zig.zon").read_text(), manifest)
+        cached_manifest = self.root / "selected packages/test-translator-hash/build.zig.zon"
+        self.assertEqual(cached_manifest.read_text(), manifests["test-translator-hash"])
+        self.assertFalse((self.root / "selected packages/test-parser-hash").exists())
         # The translator is already cached; its missing child still needs preparation.
         result = self.install(**environment)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.repo / "build.zig.zon").read_text(), manifest)
-        cached_manifest = self.root / "selected packages/test-translator-hash/build.zig.zon"
         self.assertEqual(cached_manifest.read_text(), manifests["test-translator-hash"])
+        self.assertEqual((self.root / "selected packages/test-parser-hash/build.zig.zon").read_text(),
+                         manifests["test-parser-hash"])
         repeated = self.install(**environment, TEST_HASH_FAILURE="1")
         self.assertEqual(repeated.returncode, 0, repeated.stderr)
+
+    def test_github_abbreviated_commit_is_refused_without_install(self):
+        manifest = self.manifest.replace(
+            "https://example.invalid/openssl.tar.gz",
+            "git+https://github.com/ziglang/translate-c.git#f978dca",
+        )
+        (self.repo / "build.zig.zon").write_text(manifest)
+        # If revision validation is removed, fake curl would accept this archive.
+        curl = self.tools / "curl"
+        curl.write_text(curl.read_text().replace(
+            '"https://github.com/ziglang/translate-c/archive/f978dca0f2b2a782d06591989e80aae7c74d0183.tar.gz",',
+            '"https://github.com/ziglang/translate-c/archive/f978dca.tar.gz",',
+        ))
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("Preparing pinned openssl dependency", result.stdout)
+        for name in ("rui", "rui-evaluator"):
+            self.assertFalse((self.bin / name).exists())
+        self.assertFalse((self.root / "selected packages/test-openssl-hash").exists())
+        self.assertEqual((self.repo / "build.zig.zon").read_text(), manifest)
+
+    def test_cached_git_dependencies_still_require_full_commits(self):
+        first = self.install()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        previous = {name: (self.bin / name).resolve() for name in ("rui", "rui-evaluator")}
+        for host in ("github.com", "codeberg.org"):
+            for duplicate in (False, True):
+                with self.subTest(host=host, duplicate=duplicate):
+                    url = f"git+https://{host}/ziglang/translate-c.git#f978dca"
+                    if duplicate:
+                        alias = f'''        .alias = .{{
+            .url = "{url}",
+            .hash = "test-openssl-hash",
+        }},
+'''
+                        manifest = self.manifest.replace('    },\n}\n', alias + '    },\n}\n')
+                    else:
+                        manifest = self.manifest.replace("https://example.invalid/openssl.tar.gz", url)
+                    (self.repo / "build.zig.zon").write_text(manifest)
+                    result = self.install(TEST_GENERATION="rejected")
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertNotIn("Preparing pinned", result.stdout)
+                    for name, target in previous.items():
+                        self.assertEqual((self.bin / name).resolve(), target)
+                        self.assertEqual(subprocess.check_output([self.bin / name], text=True), "first\n")
+                    self.assertEqual((self.repo / "build.zig.zon").read_text(), manifest)
 
     def test_path_conflict_is_actionable(self):
         shadow = self.tools / "rui"
