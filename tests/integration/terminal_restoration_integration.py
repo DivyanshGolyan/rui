@@ -839,8 +839,8 @@ def persistent_cases(state, library, home, store, host):
                 environment["RUI_CAPTURE_SYNC_RELEASE"] = str(release)
                 if case == "sync-handoff":
                     environment["RUI_CAPTURE_SYNC_ERROR"] = "1"
-            caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-                "--session", "terminal/restoration"], env=environment,
+            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+                "--", "terminal/restoration"], env=environment,
                 stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
             human.read_terminal(output_master, "› ")
             if case.startswith("sync-"):
@@ -976,8 +976,8 @@ def consent_boundary_cases(state, library):
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
             human.run(home, "configure", "--store", store, "--session", "consent/boundary",
                 "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
-            caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-                "--session", "consent/boundary"], stdin=slave, stdout=slave, stderr=subprocess.PIPE,
+            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+                "--", "consent/boundary"], stdin=slave, stdout=slave, stderr=subprocess.PIPE,
                 env={**os.environ, "HOME": str(home), "NO_COLOR": "1",
                     "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
                     "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": f"consent-{case}",
@@ -1106,8 +1106,8 @@ def command_interruption_cases(state, library):
                         "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": case})
                     if route is None:
                         environment["RUI_CAPTURE_SYNC_RELEASE"] = str(release)
-                caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-                    "--session", "command/signals"], env=environment, stdin=slave, stdout=slave,
+                caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+                    "--", "command/signals"], env=environment, stdin=slave, stdout=slave,
                     stderr=subprocess.PIPE, pass_fds=(ready_write,),
                     preexec_fn=lambda: (signal.signal(signal.SIGINT, signal.SIG_DFL),
                         signal.signal(signal.SIGTERM, signal.SIG_DFL)))

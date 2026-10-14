@@ -630,12 +630,11 @@ def command_entry_cases():
         newest = [row["reference"] for page in pages for row in page["sessions"]
             if row["workspace"] == str(workspace)][-1]
         for index, (entry, chosen) in enumerate((("last", newest),
-                ("exact", "last/8"), ("legacy", "last/8"))):
+                ("exact", "last/8"))):
             run(home, "setup", "--store", store)
             before_failure = set(records.glob("*.json"))
             proxy = canonical.ReplyProxy(host, "/v1/inspect-session")
-            arguments = ["resume", "--last"] if entry == "last" else (
-                ["resume", chosen] if entry == "exact" else ["session", "--session", chosen])
+            arguments = ["resume", "--last"] if entry == "last" else ["resume", "--", chosen]
             caller = subprocess.Popen([str(fixture.RUI), *arguments], cwd=workspace,
                 env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             output, errors = terminal_exit(caller, master)
@@ -740,8 +739,8 @@ def persistent_opening_case():
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
         original = termios.tcgetattr(slave)
-        caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", "persistent/opening"], env={**os.environ, "HOME": str(home)},
+        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            "--", "persistent/opening"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         output = read_terminal(master, "› ")
         assert output.count("literal **user** é") == 1, ("opening lost or duplicated User", output)
@@ -773,8 +772,8 @@ def persistent_opening_case():
             lambda response: response[:-1] if b"OPENING-COMPLETE" in response else response)
         master, slave = pty.openpty()
         original = termios.tcgetattr(slave)
-        caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", "persistent/opening"], env={**os.environ, "HOME": str(home)},
+        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            "--", "persistent/opening"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         prefix = read_terminal(master, "Saved heading")
         tail, errors = terminal_exit(caller, master)
@@ -831,8 +830,8 @@ def persistent_opening_case():
 
             proxy = canonical.ReplyProxy(host, "/v1/activity-page", hold_first_opening)
             master, slave = pty.openpty()
-            caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-                "--session", "persistent/opening"], env={**os.environ, "HOME": str(home)},
+            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+                "--", "persistent/opening"], env={**os.environ, "HOME": str(home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             startup = terminal_gate(caller, master, opening_held, ("queued opening", handoff, proxy.exchanges))
             os.write(master, b"/history\n" + handoff)
@@ -857,8 +856,8 @@ def persistent_opening_case():
             master = slave = None
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
-        caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", "persistent/opening"], env={**os.environ, "HOME": str(home)},
+        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            "--", "persistent/opening"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         output = read_terminal(master, "› ")
         assert "saved user 09" in output and "literal **user** é" not in output, output
@@ -979,8 +978,8 @@ def persistent_pending_case():
 
         proxy = canonical.ReplyProxy(host, "/v1/activity-page", hold_opening)
         master, slave = pty.openpty()
-        caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", "persistent/pending"], env={**os.environ, "HOME": str(home)},
+        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            "--", "persistent/pending"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         startup = terminal_gate(caller, master, captured, ("pending opening", proxy.exchanges, endpoint.requests))
         admit(home, "message", "--store", store, "--session", "persistent/pending", "late queued beyond snapshot")
@@ -1051,8 +1050,8 @@ def persistent_input_cases():
                 assert next_admission_release.wait(15), "next Admission gate was not released"
             return b"" if len(proxy.exchanges) in (1, 4) else response
 
-        caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", "persistent/input"], env={**os.environ, "HOME": str(home)},
+        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            "--", "persistent/input"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "› ")
         proxy = canonical.ReplyProxy(host, "/v1/message", lost_once)
@@ -1238,8 +1237,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
         original = termios.tcgetattr(slave)
-        caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", reference], env={**os.environ, "HOME": str(home),
+        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            "--", reference], env={**os.environ, "HOME": str(home),
                 "TERM": "xterm-256color", "NO_COLOR": "",
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
@@ -1506,8 +1505,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 read_terminal(master, "+1 more calls · /status", composer=True)
                 terminal_step(master, "\x01\x0b/exit", "Detached.")
                 assert caller.wait(timeout=5) == 0, caller.stderr.read()
-                caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-                    "--session", reference], env={**os.environ, "HOME": str(home), "TERM": "xterm-256color", "NO_COLOR": ""},
+                caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+                    "--", reference], env={**os.environ, "HOME": str(home), "TERM": "xterm-256color", "NO_COLOR": ""},
                     stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 reopened = read_terminal(master, "+1 more calls · /status", composer=True)
                 assert f"✓ {bypass_description}" in reopened and f"• {bypass_description}" in reopened, reopened
@@ -1691,8 +1690,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             hidden_reads.append(len(response))
             return response
         proxy.rewrite = observe_hidden_read
-        caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", reference], env={**os.environ, "HOME": str(home)},
+        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            "--", reference], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         reopened = read_terminal(master, "› ", composer=True)
         assert "Process retirement confirmed" not in reopened and "macOS group signaling returned EPERM" not in reopened, (
@@ -1722,8 +1721,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 fixture.message(state, store, key, reference, f"later input {index}")
                 fixture.wait_for(lambda: fixture.completed_observation(store, key), "age saved Tool Result")
             calls_before_history = len(endpoint.requests)
-            caller = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-                "--session", reference], env={**os.environ, "HOME": str(home)},
+            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+                "--", reference], env={**os.environ, "HOME": str(home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             read_terminal(master, "› ")
             os.write(master, b"/history\n")
@@ -1980,8 +1979,8 @@ int fsync(int fd) {
     assert invalid in listed and unsupported in listed and "not-a-handle" not in listed, listed
     assert run(home, "recover", invalid, success=False) == ""
     assert run(home, "recover", unsupported, success=False) == ""
-    with terminal_process([str(fixture.RUI), "session", "--store", str(store),
-        "--session", "capture/original"], env={**os.environ, "HOME": str(home)},
+    with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+        "--", "capture/original"], env={**os.environ, "HOME": str(home)},
     ) as (entered, master):
         read_terminal(master, "› ")
         listing = terminal_step(master, "/requests", "Local recovery handles", composer=True)
@@ -2178,8 +2177,8 @@ def long_input_case(home, store, workspace, endpoint, host):
     try:
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 40, 0, 0))
-        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", long_session], env={**os.environ, "HOME": str(home)},
+        entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            "--", long_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
         greeting = read_terminal(master, "› ")
         assert "Permission:" not in greeting, greeting
@@ -2300,8 +2299,8 @@ def incomplete_input_case(home, store, session, endpoint, host):
             master, slave = pty.openpty()
             try:
                 original = termios.tcgetattr(slave)
-                entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-                    "--session", session], env={**os.environ, "HOME": str(home)},
+                entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+                    "--", session], env={**os.environ, "HOME": str(home)},
                     stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             except BaseException:
                 dispose_all(lambda: os.close(master), lambda: os.close(slave))
@@ -2607,8 +2606,8 @@ def main(selected="all"):
             "--json", success=False) == ""
         assert json.loads(run(preferences_home, "wait-session", "--store", store,
             "--session", session, "--json")) == {"return": "idle"}
-        with terminal_process([str(fixture.RUI), "session", "--store", str(store),
-            "--session", session], env={**os.environ, "HOME": str(preferences_home)},
+        with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+            "--", session], env={**os.environ, "HOME": str(preferences_home)},
         ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
             assert f"Session: {session}" in terminal_step(master, "/status", "Session: ", composer=True)
@@ -2617,7 +2616,7 @@ def main(selected="all"):
         saved.unlink()
         fallback.parent.mkdir(parents=True)
         fallback.symlink_to(store, target_is_directory=True)
-        with terminal_process([str(fixture.RUI), "session", "--session", session],
+        with terminal_process([str(fixture.RUI), "resume", "--", session],
             env={**os.environ, "HOME": str(preferences_home)},
         ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
@@ -2630,12 +2629,18 @@ def main(selected="all"):
         assert run(preferences_home, "wait-session", "--session", session,
             "--json", success=False) == ""
         master, slave = pty.openpty()
-        entered = subprocess.run([str(fixture.RUI), "session", "--session", session],
-            env={**os.environ, "HOME": str(preferences_home)}, stdin=slave,
-            stdout=slave, stderr=subprocess.PIPE, timeout=5)
-        os.close(slave)
-        os.close(master)
-        assert entered.returncode != 0 and b"FileNotFound" in entered.stderr, entered.stderr
+        # Resume performs Host preflight. Own the empty selected destination's
+        # Host explicitly so this refusal cannot leave a detached process.
+        missing_host = None
+        try:
+            missing_host = fixture.start_host(state / "missing", None)
+            entered = subprocess.run([str(fixture.RUI), "resume", "--", session],
+                env={**os.environ, "HOME": str(preferences_home)}, stdin=slave,
+                stdout=slave, stderr=subprocess.PIPE, timeout=5)
+        finally:
+            dispose_all(lambda: fixture.stop_host(missing_host) if missing_host is not None else None,
+                        lambda: os.close(slave), lambda: os.close(master))
+        assert entered.returncode != 0 and b"SessionNotConfigured" in entered.stderr, entered.stderr
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
         assert json.loads(run(home, "wait-session", "--store", store, "--session", session,
             "--json")) == {"return": "idle"}
@@ -2647,10 +2652,9 @@ def main(selected="all"):
         assert invalid_store.stdout == "" and run(preferences_home, "requests", "--json") == before
         no_tty_home = state / "no-tty-home"
         no_tty_home.mkdir()
-        for flags in ([], ["--persistent"]):
-            no_terminal = subprocess.run([str(fixture.RUI), *flags], cwd=workspace,
-                env={**os.environ, "HOME": str(no_tty_home)}, capture_output=True, text=True, timeout=5)
-            assert no_terminal.returncode != 0 and "InteractiveTerminalRequired" in no_terminal.stderr
+        no_terminal = subprocess.run([str(fixture.RUI)], cwd=workspace,
+            env={**os.environ, "HOME": str(no_tty_home)}, capture_output=True, text=True, timeout=5)
+        assert no_terminal.returncode != 0 and "InteractiveTerminalRequired" in no_terminal.stderr
         assert not (no_tty_home / ".config").exists(), "non-TTY invocation created preferences or a request"
         assert not (no_tty_home / ".local/share/rui/store").exists(), "non-TTY invocation changed the Store"
         before_missing = set(run(preferences_home, "requests").splitlines())
@@ -2803,7 +2807,7 @@ def main(selected="all"):
             selected = listing.split(f"Session: {warning_ref}\n", 1)[1].split("Session: ", 1)[0]
             assert "Bash runs without approval" not in selected, selected
             assert f"Permission: {mode}\n" in selected, selected
-            with terminal_process([str(fixture.RUI), "session", "--store", str(store), "--session", warning_ref],
+            with terminal_process([str(fixture.RUI), "resume", "--store", str(store), "--", warning_ref],
                 env={**os.environ, "HOME": str(preferences_home)},
             ) as (caller, master):
                 welcome = read_terminal(master, "› ")
@@ -2818,10 +2822,10 @@ def main(selected="all"):
                 assert caller.wait(timeout=5) == 0
         created = []
         records = preferences_home / ".config/rui/requests"
-        for persistent in (False, True):
+        for fresh in range(2):
             before_records = set(records.glob("*.json"))
             master, slave = pty.openpty()
-            caller = subprocess.Popen([str(fixture.RUI), *(["--persistent"] if persistent else [])], cwd=workspace,
+            caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
                 env={**os.environ, "HOME": str(preferences_home)},
                 stdin=slave, stdout=slave, stderr=slave)
             try:
@@ -2911,7 +2915,7 @@ def main(selected="all"):
         initial = fixture.command("inspect-session", "--store", store, "--session", session)
         assert initial["selected_message"] is None and initial["recent_messages"] == [], initial
         assert "InteractiveTerminalRequired" in subprocess.run(
-            [str(fixture.RUI), "session", "--store", str(store), "--session", session],
+            [str(fixture.RUI), "resume", "--store", str(store), "--", session],
             env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=5).stderr
         assert config["request"] in json.loads(run(home, "requests", "--json"))
         assert json.loads(run(home, "recover", config["request"], "--json"))["answer"]["replayed"] is True
@@ -3006,7 +3010,7 @@ def main(selected="all"):
         master, slave = pty.openpty()
         ready_read, ready_write = os.pipe()
         try:
-            entered = subprocess.Popen([str(fixture.RUI), "session", "--session", session],
+            entered = subprocess.Popen([str(fixture.RUI), "resume", "--", session],
                 env={**os.environ, "HOME": str(preferences_home),
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
@@ -3138,7 +3142,7 @@ def main(selected="all"):
             "--workspace", workspace, "--provider", "codex", "--model", "model-a",
             "--tools", "bash", "--permission-mode", "ask")
         assert f"configuration: {sibling_session} in {store}" in sibling_config
-        assert "next: rui session (same Store and Session)" in sibling_config
+        assert f"next: rui resume --store $'{store}' -- $'{sibling_session}'" in sibling_config
         sibling_key = admit(home, "message", "--store", store, "--session", sibling_session,
             "two independent Actions")["request"]
         def two_actions():
@@ -3154,8 +3158,8 @@ def main(selected="all"):
         assert attention["return"] == "attention" and attention["action"] == pending, attention
         master, slave = pty.openpty()
         ready_read, ready_write = os.pipe()
-        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", sibling_session], env={**os.environ, "HOME": str(fresh_home),
+        entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            "--", sibling_session], env={**os.environ, "HOME": str(fresh_home),
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=slave)
         try:
@@ -3181,8 +3185,8 @@ def main(selected="all"):
         assert run(home, "result", sibling_key) == "admitted: accepted\nresult: processing\n"
         master, slave = pty.openpty()
         ready_read, ready_write = os.pipe()
-        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", sibling_session], env={**os.environ, "HOME": str(home),
+        entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            "--", sibling_session], env={**os.environ, "HOME": str(home),
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=slave)
         try:
@@ -3249,8 +3253,8 @@ def main(selected="all"):
         assert run(home, "result", failed_key) == "admitted: accepted\nresult: failed\ncode: provider_http_422\n"
         fixture.wait_for(lambda: fixture.completed_observation(store, queued_key), "queued successor")
         assert run(home, "result", queued_key) == "admitted: accepted\nresult: completed\nsuccessor done\n"
-        with terminal_process([str(fixture.RUI), "session", "--store", str(store),
-            "--session", failure_session], env={**os.environ, "HOME": str(home)},
+        with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+            "--", failure_session], env={**os.environ, "HOME": str(home)},
         ) as (entered, master):
             read_terminal(master, "› ")
             failed = terminal_step(master, f"/result {failed_key}", "result: failed", composer=True)
@@ -3335,7 +3339,7 @@ def main(selected="all"):
         prior_receipt = run(home, "message", "--store", store, "--session", race_session, "prior")
         prior = prior_receipt.split("request: ", 1)[1].splitlines()[0]
         assert f"message: {race_session} in {store}" in prior_receipt
-        assert "next: rui session (same Store and Session)" in prior_receipt
+        assert f"next: rui resume --store $'{store}' -- $'{race_session}'" in prior_receipt
         assert "next: rui follow" not in prior_receipt
         fixture.wait_for(lambda: len(endpoint.requests) == 10, "held predecessor request")
         message_a = admit(home, "message", "--store", store, "--session", race_session, "A")["request"]
@@ -3402,8 +3406,8 @@ def main(selected="all"):
         master, slave = pty.openpty()
         ready_read, ready_write = os.pipe()
         try:
-            entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-                "--session", interactive], env={**os.environ, "HOME": str(home),
+            entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+                "--", interactive], env={**os.environ, "HOME": str(home),
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
@@ -3472,8 +3476,8 @@ def main(selected="all"):
         control_session = "human/name\n\x1b[2J\u202e"
         run(home, "configure", "--store", store, "--session", control_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
-        with terminal_process([str(fixture.RUI), "session", "--store", str(store),
-            "--session", control_session], env={**os.environ, "HOME": str(home)},
+        with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+            "--", control_session], env={**os.environ, "HOME": str(home)},
         ) as (entered, master):
             greeting = read_terminal(master, "› ")
             assert "Session:" not in greeting, greeting
@@ -3522,8 +3526,8 @@ def main(selected="all"):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             assert read_pipe_output(waiter.stdout).decode() == "selected message: message\\n\\x1b[2J\\u202e\n"
-            with terminal_process([str(fixture.RUI), "session", "--store", str(store),
-                "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
+            with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+                "--", unsafe_session], env={**os.environ, "HOME": str(home)},
             ) as (entered, master):
                 read_terminal(master, "› ")
                 status = terminal_step(master, "/status", "Session: ", composer=True)
@@ -3539,8 +3543,8 @@ def main(selected="all"):
         fixture.wait_for(lambda: fixture.completed_observation(store, unsafe_key), "unsafe key result")
         assert fixture.command("inspect-session", "--store", store,
             "--session", unsafe_session)["recent_messages"][0]["message"] == unsafe_key
-        with terminal_process([str(fixture.RUI), "session", "--store", str(store),
-            "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
+        with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+            "--", unsafe_session], env={**os.environ, "HOME": str(home)},
         ) as (entered, master):
             greeting = read_terminal(master, "› ")
             assert "Session:" not in greeting and "\n  safe result" in greeting, greeting
@@ -3597,8 +3601,8 @@ def main(selected="all"):
             f"editor-message-{i}", f"edited {i}")[0] for i in range(len(cases)))
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
-        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", editor_session], env={**os.environ, "HOME": str(home)},
+        entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            "--", editor_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
         try:
             read_terminal(master, "› ")
@@ -3693,8 +3697,8 @@ def main(selected="all"):
             dispose_all(lambda: stop_process(entered, timeout=5),
                         lambda: os.close(master), lambda: os.close(slave))
         master, slave = pty.openpty()
-        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", empty_session], env={**os.environ, "HOME": str(fresh_home)},
+        entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            "--", empty_session], env={**os.environ, "HOME": str(fresh_home)},
             stdin=slave, stdout=slave, stderr=slave)
         try:
             assert "Recent messages" not in read_terminal(master, "› ")
@@ -3712,8 +3716,8 @@ def main(selected="all"):
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
             original_terminal = termios.tcgetattr(slave)
             before = set((fresh_home / ".config/rui/requests").glob("*.json"))
-            entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-                "--session", empty_session], env={**os.environ, "HOME": str(fresh_home)},
+            entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+                "--", empty_session], env={**os.environ, "HOME": str(fresh_home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             try:
                 if columns == 8:
@@ -3741,8 +3745,8 @@ def main(selected="all"):
         observation_held, observation_continue = threading.Event(), threading.Event()
         master, slave = pty.openpty()
         original_terminal = termios.tcgetattr(slave)
-        entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
-            "--session", empty_session], env={**os.environ, "HOME": str(home)},
+        entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            "--", empty_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         proxy = None
         try:
