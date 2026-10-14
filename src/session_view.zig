@@ -423,6 +423,94 @@ fn content(requests: client.Requests, store: []const u8, session: []const u8, it
     try sink.feed("\n");
 }
 
+fn Summary(comptime Sink: type) type {
+    return struct {
+        escaped: Escaped(Sink),
+        line: [256]u8 = undefined,
+        length: usize = 0,
+        emitted: bool = false,
+        ended: bool = false,
+        omitted: bool = false,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            for (bytes) |byte| {
+                if (self.ended) return;
+                if (byte == '\n') {
+                    try self.emit();
+                } else if (self.length < self.line.len) {
+                    self.line[self.length] = byte;
+                    self.length += 1;
+                } else {
+                    // Shorten only this line; later capture/cleanup
+                    // warnings remain visible before output tails.
+                    self.omitted = true;
+                }
+            }
+        }
+        fn emit(self: *@This()) !void {
+            const line = self.line[0..self.length];
+            // Only complete, known informational lines are quiet. Unknown or
+            // qualified diagnostics stay visible, even after successful exit.
+            // Keep canonical Bash evidence and detailed inspection unchanged.
+            const routine = !self.omitted and
+                (std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.") or
+                    std.mem.eql(u8, line, "Process retirement confirmed: the child was reaped and the original process group was observed absent. macOS group signaling returned EPERM, which can mean no live targets or permission denial."));
+            if (!self.omitted and (std.mem.eql(u8, line, "stdout tail:") or std.mem.eql(u8, line, "stderr tail:"))) {
+                self.ended = true;
+            } else if (line.len != 0 and !routine) {
+                try self.escaped.feed(if (self.emitted) "\n  " else "  ");
+                try self.escaped.feed(line);
+                if (self.omitted) try self.escaped.feed(" [summary shortened; /details]");
+                self.emitted = true;
+            }
+            self.length = 0;
+            self.omitted = false;
+        }
+        fn finish(self: *@This()) !void {
+            if (self.length != 0) try self.emit();
+            try self.escaped.finish();
+        }
+    };
+}
+
+test "tool summary hides only complete routine metadata and retains warnings" {
+    const Sink = struct {
+        bytes: [2048]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    const retirement = "Process retirement confirmed: the child was reaped and the original process group was observed absent. macOS group signaling returned EPERM, which can mean no live targets or permission denial.";
+    const warning = "Process-group signaling reported a failure.";
+    const incomplete = "Capture may be incomplete because writers outlived process-group termination.";
+    const capture_failure = "Capture failure: read; output may be incomplete.";
+    const cases = .{
+        .{ "Bash succeeded. Exit code: 0.\n" ++ retirement ++ "\nstdout tail:\nhidden", "" },
+        .{ retirement, "" },
+        .{ "Bash succeeded. Exit code: 0.\n" ++ incomplete ++ "\n" ++ retirement ++ "\n" ++ warning ++ "\nstderr tail:\nhidden", "  " ++ incomplete ++ "\n  " ++ warning },
+        .{ "Bash failed. Exit code: 7.\n" ++ retirement ++ "\n" ++ capture_failure, "  Bash failed. Exit code: 7.\n  " ++ capture_failure },
+        .{ "Bash timed_out. Signal: 15.\n" ++ retirement ++ "\n" ++ warning, "  Bash timed_out. Signal: 15.\n  " ++ warning },
+        .{ "Bash cancelled. Signal: 15.\n" ++ retirement, "  Bash cancelled. Signal: 15." },
+        .{ "Bash indeterminate. Unknown process status: 0.\n" ++ warning, "  Bash indeterminate. Unknown process status: 0.\n  " ++ warning },
+        .{ retirement ++ " Additional warning.", "  " ++ retirement ++ " Additional warning." },
+        .{ "Process retirement unconfirmed.\n" ++ warning, "  Process retirement unconfirmed.\n  " ++ warning },
+        .{ "Bash succeeded. Exit code: 0. Additional warning.", "  Bash succeeded. Exit code: 0. Additional warning." },
+        .{ retirement ++ ("x" ** 256) ++ "\n" ++ warning, "  " ++ (retirement ++ ("x" ** 256))[0..256] ++ " [summary shortened; /details]\n  " ++ warning },
+        .{ "stdout tail: unavailable\n" ++ warning, "  stdout tail: unavailable\n  " ++ warning },
+    };
+    inline for (cases) |case| {
+        for (0..case[0].len + 1) |split| {
+            var sink: Sink = .{};
+            var summary: Summary(*Sink) = .{ .escaped = .{ .sink = &sink, .text = .{ .mode = .multiline } } };
+            try summary.feed(case[0][0..split]);
+            try summary.feed(case[0][split..]);
+            try summary.finish();
+            try std.testing.expectEqualStrings(case[1], sink.bytes[0..sink.length]);
+        }
+    }
+}
+
 pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const client.ActivityPage, sink: anytype, columns: usize, colour: bool) !void {
     const historical = page.facts.direction == .backward;
     for (0..page.facts.count) |index| {
@@ -457,47 +545,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 // permission or outcome classification; /details stays exact.
                 try toolHeading(result.presentation, sink, columns, colour);
                 const failed = toolState(result.presentation.code).style == .failure;
-                const Summary = struct {
-                    escaped: Escaped(@TypeOf(sink)),
-                    line: [256]u8 = undefined,
-                    length: usize = 0,
-                    emitted: bool = false,
-                    ended: bool = false,
-                    omitted: bool = false,
-                    pub fn feed(self: *@This(), bytes: []const u8) !void {
-                        for (bytes) |byte| {
-                            if (self.ended) return;
-                            if (byte == '\n') {
-                                try self.emit();
-                            } else if (self.length < self.line.len) {
-                                self.line[self.length] = byte;
-                                self.length += 1;
-                            } else {
-                                // Shorten only this line; later capture/cleanup
-                                // warnings remain visible before output tails.
-                                self.omitted = true;
-                            }
-                        }
-                    }
-                    fn emit(self: *@This()) !void {
-                        const line = self.line[0..self.length];
-                        if (std.mem.eql(u8, line, "stdout tail:") or std.mem.eql(u8, line, "stderr tail:")) {
-                            self.ended = true;
-                        } else if (line.len != 0 and !std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.")) {
-                            try self.escaped.feed(if (self.emitted) "\n  " else "  ");
-                            try self.escaped.feed(line);
-                            if (self.omitted) try self.escaped.feed(" [summary shortened; /details]");
-                            self.emitted = true;
-                        }
-                        self.length = 0;
-                        self.omitted = false;
-                    }
-                    fn finish(self: *@This()) !void {
-                        if (self.length != 0) try self.emit();
-                        try self.escaped.finish();
-                    }
-                };
-                var summary: Summary = .{
+                var summary: Summary(@TypeOf(sink)) = .{
                     .escaped = .{ .sink = sink, .text = .{ .mode = .multiline } },
                     .ended = switch (result.presentation.code) {
                         .denied, .unknown_tool, .invalid_arguments, .tool_unavailable => true,
