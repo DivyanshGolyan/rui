@@ -2106,6 +2106,23 @@ fn completeTransfer(
         }
         return;
     }
+    if (evidence.disposition == .permanent_http or evidence.disposition == .temporary_http) {
+        var response = active.transfer.takeResponse();
+        defer response.deinit();
+        const overflow = model_adapter.Output.contextOverflow(host.io, response.file, response.length, evidence.http_status) catch |err| {
+            stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
+            settleAttemptFailure(host, owner.token, owner.binding, "response_read_failed", .terminal);
+            active.transfer.deinit();
+            beginCleanup(host, slot, owner);
+            return;
+        };
+        if (overflow) {
+            settleAttemptFailure(host, owner.token, owner.binding, "provider_context_overflow", .context_overflow);
+            active.transfer.deinit();
+            beginCleanup(host, slot, owner);
+            return;
+        }
+    }
     var code_buffer: [96]u8 = undefined;
     const code = switch (evidence.disposition) {
         .success => unreachable,
@@ -2187,12 +2204,16 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     };
     defer metadata.deinit();
     traceOperation(host, "validation_started", owner.binding);
-    const validated = model_adapter.Output.validate(host.io, response.file, response.length, &metadata, .{
+    const operation = host.store.modelOperationKind(owner.binding) catch |err| {
+        if (err != error.SupersededByControl) fenceDispatch(host, "model operation purpose", err);
+        return .cleanup;
+    };
+    const validated = model_adapter.Output.validate(host.io, response.file, response.length, &metadata, operation, .{
         .metadata = host.faults.response_metadata,
     }) catch |err| {
         traceOperation(host, "validation_failed", owner.binding);
         stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, owner.token, owner.binding, model_adapter.Output.failureCode(err), .terminal);
+        settleAttemptFailure(host, owner.token, owner.binding, model_adapter.Output.failureCode(err), if (err == error.ContextOverflow) .context_overflow else .terminal);
         return .cleanup;
     };
     traceOperation(host, "validation_completed", owner.binding);
