@@ -141,6 +141,38 @@ The assembled shutdown/caller-owner change at [`2782a70`](https://github.com/Div
 
 `python3 tests/integration/host_allocator_test.py /path/to/rui` observes allocator variables in a test-only library constructor before `main`. On macOS, require one same-PID replacement when defaults are missing, preservation of explicit/empty values, no replacement with both supplied or with `RUI_HOST_MALLOC_DEFAULTS=0`, and no Store effects before replacement. Remove a disposable executable during its initial constructor and require startup failure without a Store. Non-Host CLI invocations must not add defaults; on Linux the same fixture must observe no replacement or additions. Both canonical process gates include this check. Run workload correctness with defaults enabled and disabled, and measure the final uninstrumented binary separately: constructor probes prove startup ordering, not memory savings. Record macOS version and caller overrides; this does not establish compatibility or resource results on untested OS releases.
 
+### Zig 0.17 migration, 2026-10-14
+
+Stock Zig 0.17.0 migration baseline `cfd7621` was qualified natively in the Linux x86-64 orb and on Apple M1 Pro arm64, macOS 15.7.7, Xcode 26.3/SDK 26.2. Baseline production/build inputs match across platforms; complete manifests retain each actual source tree, including bootstrap/CI/documentation overlays. Python 3.11.6/Linux and 3.12.14/Mac used private environments with h2 4.3.0. Native builds used `-j2`, with source-owned transport Make separately bounded at `-j4`. Timing-sensitive suites ran separately.
+
+| Baseline gate | Linux | Native Mac |
+| --- | --- | --- |
+| `check-full` | 87/87 steps; 495/496 tests, one long-witness skip | 87/87; 493/496, two Linux-only and one long-witness skip |
+| `test-logic` | 123/123 tests | 123/123 |
+| Full Debug admission | 34/34 steps | 34/34 |
+| `test-full` | 496/496 tests | 494/496; only two Linux-only skips |
+| `evaluator-churn` | 5/5; 1,000 exact results and descriptor balance | Same native assertions passed |
+| Transport / Codex H2 | 35/35 and 34/34 steps | 35/35 and 34/34 |
+| Synthetic credentials / Current / reply delivery | 28/28, 34/34 and 34/34 | Same gates passed |
+
+Linux additionally passed the 34/34 login-signal target. Native Mac full standalone terminal restoration passed 37/37, including persistent interruption/backpressure and exact restored attributes. Both platforms passed selector/driver tests and all six identical `--seed=0` cache-execution invocations with fresh test execution. Installer checks use disposable HOME/checkouts, not personal installations.
+
+Exact clean exports without packages or output passed the shared dependency helper with genuinely empty local/global compiler caches. Subsequent ReleaseSafe builds passed 38/38: 281.79 s on Linux and 336 s on Mac, excluding bootstrap. Native Mac helper preparation took 106 s. Built help executed successfully. Earlier bare graph-fetch TLS/archive failures, the removed cache/seed CLI spellings and the missing standalone POSIX binding failure remain recorded separately; their failed outcomes are not relabeled. The supported helper uses unchanged pins, verified save-mode imports and the complete graph, not hash or TLS bypasses.
+
+The separately reviewed test-only follow-up exercises allocation failure on accepted and late-rejected escaped client facts without an arena hiding token leaks. The SSE fuzz test checks independently generated decoded length/digest across raw and escaped Unicode encodings and file windows, plus incomplete framing and late malformed UTF-8 rejection. Removing token disposal failed with a 14-byte leak; corrupting surrogate decoding failed the digest assertion. Both mutations were removed before qualification. Initial two-byte corpus seeds selected zero padding under Smith's eight-byte integer format; corrected eight-byte words and a scratch API control verify padding 4,093/4,094/4,095/4,096/8,191. Earlier seeded passes do not establish that window coverage. The normal native test target executes the corrected corpus on both platforms. A bounded Linux campaign on the corrected source passed 1,067 runs:
+
+```sh
+zig build test -Dtest-filter='fuzz provider' --fuzz=1K --summary all -j2
+```
+
+Native Mac live C-linked fuzzing is unavailable on this stock compiler: the campaign failed at link with missing `__sanitizer_cov_trace_*` comparison/switch hooks, before any fuzz run. A tiny C+Zig fuzz link reproduces the failure; the same ordinary C+Zig link and a no-C Zig fuzz link pass. No stubs, compiler forks or instrumentation bypasses were added. Seeded native corpus and allocation passes are not called a Mac live-fuzz pass.
+
+The PR candidate integrates main at [`59df275`](https://github.com/DivyanshGolyan/rui/commit/59df275ce08914a8de5936bef0d824b2caa9f870) through migration merge [`13c22d4`](https://github.com/DivyanshGolyan/rui/commit/13c22d43fd366e11cc8aa597ea97fca279404511). Its merged Linux `check-full` passed 87/87 steps and 498/499 tests with the long-witness skip. `test-full` passed all 499, logic all 129, full Debug admission 34/34 and churn 5/5. Transport H2 passed 35/35, Codex H2 34/34, synthetic credentials 28/28, and Current, reply delivery and login-signal each 34/34. CI discovery passed 51/51, and all six identical `--seed=0` warm-cache invocations executed their tests afresh. Independent bounded Standards, intent and simplicity reviews found no actionable integration issue.
+
+Native Mac merged qualification is in progress on the checksum-verified 2,215-path executable-source snapshot. Earlier native baseline and hardening results do not qualify this merge. Final result documentation and the evidence archive are the only later changes to that snapshot.
+
+The [evidence archive](tests/qualification/zig-0.17-linux-macos-2026-10-14.tar.gz) retains exact manifests, successful and failed logs, controls, reviews and scoped source-input validation. Baseline full/long/cold evidence remains attached to its original inputs; the test-only follow-up uses its mapped final native gates rather than relabeling those baseline runs. [Development measurements](research/build-times-sources.md#zig-017-feedback-2026-10-14) cover the small warm Linux edit loop and failed incremental experiment. ZLS limitations remain in [Build guidance](README.md#build). No live-provider, aggregate-resource, power-loss, candidate-installation or libvaxis/alternate-screen qualification follows from this migration.
+
 ## Qualification workload and measurement boundary
 
 Prove 100 model Operations are simultaneously live, complete their original results correctly, and release scratch and custody. Run two fill/drain rounds on the same Host. Retain smaller 1/8/16-capacity cases as baselines, plus independent payload/item/history growth and failure checks. The startup default remains 1,000; its model/Bash/Edit/mixed proof belongs to assembled finished-product qualification.
