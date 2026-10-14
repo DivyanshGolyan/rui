@@ -90,6 +90,7 @@ test "consent bounded lifecycle sequences preserve exact authority" {
     const count = events.len * events.len * events.len;
     for (0..count) |sequence| {
         for ([_][]const u8{ "a", "d" }) |text| {
+            errdefer std.debug.print("consent sequence={d}, choice={s}\n", .{ sequence, text });
             var consent: Consent = .{};
             consent.adopt(0xfeed);
             var fresh = false;
@@ -97,6 +98,7 @@ test "consent bounded lifecycle sequences preserve exact authority" {
             var index = sequence;
             for (0..3) |_| {
                 const event = events[index % events.len];
+                errdefer std.debug.print("consent event={s}\n", .{@tagName(event)});
                 index /= events.len;
                 switch (event) {
                     .empty => {

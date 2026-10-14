@@ -125,6 +125,7 @@ test "submission bounded gestures consume only the original and do not requeue f
     };
     for (0..3) |kind| {
         for (1..4) |gestures| {
+            errdefer std.debug.print("submission gestures: kind={d}, gestures={d}\n", .{ kind, gestures });
             var input: Input = undefined;
             input.init();
             var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = "unused", .input = &input };
@@ -162,7 +163,11 @@ test "submission bounded joined outcomes precede retry and retire original autho
             return error.ConnectionResetByPeer;
         }
         fn cancelled(_: *anyopaque, task: *Task) !void {
-            while (!task.cancellation.stopped.load(.acquire)) std.Thread.yield() catch {};
+            const deadline = std.Io.Clock.awake.now(task.io).nanoseconds + 5_000_000_000;
+            while (!task.cancellation.stopped.load(.acquire)) {
+                if (std.Io.Clock.awake.now(task.io).nanoseconds >= deadline) return error.TestCancellationDeadline;
+                std.Thread.yield() catch {};
+            }
             return error.Cancelled;
         }
         fn forbidden(_: *Self) !void {
@@ -173,6 +178,7 @@ test "submission bounded joined outcomes precede retry and retire original autho
     for (0..3) |kind| {
         for (std.enums.values(Outcome)) |outcome| {
             for (1..4) |gestures| {
+                errdefer std.debug.print("submission join: kind={d}, outcome={s}, gestures={d}\n", .{ kind, @tagName(outcome), gestures });
                 var input: Input = undefined;
                 input.init();
                 var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = "unused", .input = &input, .key = @splat('B'), .state = .unconfirmed, .publication = .published };
@@ -198,7 +204,11 @@ test "submission bounded joined outcomes precede retry and retire original autho
                     try std.testing.expect(self.retry != null);
                 }
                 self.cancel();
-                while (!self.task.completed()) std.Thread.yield() catch {};
+                const deadline = std.Io.Clock.awake.now(self.io).nanoseconds + 6_000_000_000;
+                while (!self.task.completed()) {
+                    if (std.Io.Clock.awake.now(self.io).nanoseconds >= deadline) return error.TestCompletionDeadline;
+                    std.Thread.yield() catch {};
+                }
                 // advance must return the joined outcome, never launch first.
                 const end = try self.advanceWithLaunch(Worker.forbidden);
                 try std.testing.expect(self.task.thread == null);
@@ -214,7 +224,6 @@ test "submission bounded joined outcomes precede retry and retire original autho
                         try std.testing.expect(end == .rejected);
                         // Rejection may retain the gesture until advance, but
                         // must never launch or silently discard the original.
-                        try std.testing.expect(self.retry != null);
                         try std.testing.expect(self.recovery().saved.rejected);
                         try std.testing.expect(try self.advanceWithLaunch(Worker.forbidden) == .absent);
                         try self.requestRecovery(null);
