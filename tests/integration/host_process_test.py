@@ -1216,11 +1216,16 @@ def prove_caller_disposal():
     for owner in (dispatch, page, bash):
         for body_failed in (False, True):
             endpoint = dispatch.SuccessEndpoint([])
+            serving = threading.Event()
+            endpoint.service_actions = serving.set
             thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
             thread.start()
             primary = AssertionError("body before shutdown refusal")
             shutdown_error = OSError("persistent shutdown refusal")
             try:
+                # Thread.start does not establish selector registration. Closing
+                # earlier could kill the worker instead of leaving live custody.
+                assert serving.wait(timeout=5), "endpoint did not enter serving loop"
                 with patch.object(endpoint, "shutdown", side_effect=shutdown_error), \
                         patch.object(thread, "join", lambda timeout: threading.Thread.join(thread, .01)):
                     try:
@@ -1253,12 +1258,29 @@ def prove_caller_disposal():
 import faulthandler
 faulthandler.dump_traceback_later(8)
 import sys
+import threading
 from unittest.mock import patch
 sys.path.insert(0, sys.argv[1])
 sys.argv = [sys.argv[0], "unused-rui"]
 import conversation_page_integration as page
 primary = AssertionError("whole-stream startup failure")
-with patch.object(page, "start_host", side_effect=primary), \
+serving = threading.Event()
+real_dispose = page.dispose_page
+
+def fail_startup(*args, **kwargs):
+    assert serving.wait(timeout=5), "whole-stream endpoint did not enter serving loop"
+    raise primary
+
+def dispose_without_wait(process, endpoint, thread, timeout):
+    # The witness needs live custody, not five seconds of deliberate refusal.
+    return real_dispose(process, endpoint, thread, timeout=0)
+
+# Reverse DNS is unrelated to this teardown/exit witness. Keep real socket
+# binding and the real serving loop, but give HTTPServer a local fixture name.
+with patch("socket.getfqdn", return_value="localhost"), \
+        patch.object(page.TestHTTPServer, "service_actions", lambda self: serving.set()), \
+        patch.object(page, "start_host", fail_startup), \
+        patch.object(page, "dispose_page", dispose_without_wait), \
         patch.object(page.TestHTTPServer, "shutdown", side_effect=OSError("shutdown refused")):
     try:
         page.whole_stream_shape(0)
@@ -1267,7 +1289,7 @@ with patch.object(page, "start_host", side_effect=primary), \
         assert any("thread did not retire" in note for note in error.__notes__)
     else:
         raise AssertionError("whole-stream failure suppressed")
-print("whole-stream failure survived teardown and interpreter exit")
+print("whole-stream failure survived teardown and interpreter exit", flush=True)
 """, str(pathlib.Path(__file__).resolve().parent)], capture_output=True, text=True, timeout=10)
     except subprocess.TimeoutExpired as error:
         error.add_note(f"whole-stream exit probe stdout={error.stdout!r}; stderr={error.stderr!r}")
