@@ -292,23 +292,28 @@ def main():
             # Both classified headers and captured bodies still belong to
             # intake, not admission. Completing either after stop must not save
             # work that an explicit restart would later execute.
-            for phase in ("header", "body"):
-                body = json.dumps({"version": "1", "kind": "message", "store": str(store),
-                    "key": f"late-{phase}", "session": "direct/stop",
-                    "text": {"state": "value", "value": "x" * 8192}}).encode()
-                header = (b"POST /v1/message HTTP/1.1\r\nHost: local\r\n"
-                    b"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\n"
-                    + f"Content-Length: {len(body)}\r\n\r\n".encode())
-                upload = socket.socket(socket.AF_UNIX)
-                uploads.append((upload, b"\r\n" + body if phase == "header" else body[-3:]))
-                upload.settimeout(5)
-                upload.connect(str(sock))
-                began = time.monotonic_ns()
-                upload.sendall(header[:-2] if phase == "header" else header + body[:-3])
-                exchange_phase(diagnostics,
-                    "ordinary_classification_released" if phase == "header" else "connection_request_message",
-                    began, time.monotonic() + 5,
-                    **({"subject": "message"} if phase == "header" else {}))
+            for kind in ("message", "configure"):
+                for phase in ("header", "body"):
+                    fields = {"text": {"state": "value", "value": "x" * 8192}} if kind == "message" else {
+                        "configuration": {name: {"state": "omitted"} for name in
+                            ("workspace", "provider", "model", "tools", "permission_mode", "output_schema")}}
+                    if kind == "configure":
+                        fields["configuration"]["instructions"] = {"state": "value", "value": "x" * 8192}
+                    body = json.dumps({"version": "1", "kind": kind, "store": str(store),
+                        "key": f"late-{kind}-{phase}", "session": "direct/stop", **fields}).encode()
+                    header = (f"POST /v1/{kind} HTTP/1.1\r\nHost: local\r\n".encode()
+                        + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\n"
+                        + f"Content-Length: {len(body)}\r\n\r\n".encode())
+                    upload = socket.socket(socket.AF_UNIX)
+                    uploads.append((upload, b"\r\n" + body if phase == "header" else body[-3:]))
+                    upload.settimeout(5)
+                    upload.connect(str(sock))
+                    began = time.monotonic_ns()
+                    upload.sendall(header[:-2] if phase == "header" else header + body[:-3])
+                    exchange_phase(diagnostics,
+                        "ordinary_classification_released" if phase == "header" else f"connection_request_{kind}",
+                        began, time.monotonic() + 5,
+                        **({"subject": kind} if phase == "header" else {}))
 
             # Share the original ten-second actor budget with synchronization;
             # connects and header writes alone do not establish classification.
@@ -373,8 +378,9 @@ def main():
             replacement = fixture.start_host(store, None)
             newer = instance(store)
             assert newer != target
-            for phase in ("header", "body"):
-                assert fixture.observe(store, f"late-{phase}") == {"status": "absent"}
+            for kind in ("message", "configure"):
+                for phase in ("header", "body"):
+                    assert fixture.observe(store, f"late-{kind}-{phase}") == {"status": "absent"}
             # The first reply was lost. Retrying A's retained input must not
             # rediscover or stop live replacement B.
             assert actor("stop", store, target) == "instance_changed"

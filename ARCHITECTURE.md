@@ -1251,15 +1251,15 @@ Derive SQL/row/parameter bounds from actual statements and pinned representation
 
 Before Store ownership or readiness, the Host observes inherited descriptors and `RLIMIT_NOFILE`, then computes its simultaneous requirement with checked arithmetic. Linux enumerates `/proc/self/fd`, or checks the bounded range with `F_GETFD` when procfs is unavailable and the limit is finite. An unlimited Linux limit requires procfs; macOS enumerates `/dev/fd`.
 
-For configured Active Capacity \(C\), the requirement is \(I + F + T + 42 + 1 + E(C) + A(C)\):
+For configured Active Capacity \(C\), the supported-burst requirement is \(I + F + T + 403 + 2 + E(C) + A(C)\):
 
 | Term | Descriptor requirement |
 | --- | --- |
 | \(I\) | Inherited open descriptors. |
 | \(F\) | 7 for Store lease, database, journal, temporary storage, directory sync and listener ownership. |
 | \(T\) | 0 without transport; 2 Linux eventfds or 4 descriptors for two macOS curl pipes. |
-| 42 | Ten ordinary exchanges at four descriptors each, plus two control sockets. |
-| 1 | Listener self-wake. |
+| 403 | 100 ordinary exchanges at four descriptors each, plus two controls and one discovery socket. These are workload populations, not admission quotas. |
+| 2 | Intake wake socket pair. |
 | \(E(C)\) | 0 when \(C=0\); otherwise \(5C+5\). |
 | \(A(C)\) | 0 without managed authentication or execution places; otherwise 8 on Linux or 10 on macOS for the independent authentication worker. |
 

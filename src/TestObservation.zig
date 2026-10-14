@@ -184,10 +184,12 @@ fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
         }
         if (std.mem.eql(u8, phase, "ordinary_classification_released"))
             return std.mem.eql(u8, subject orelse "", "message") or
+                std.mem.eql(u8, subject orelse "", "configure") or
                 (std.mem.eql(u8, subject orelse "", "observe") and
                     self.stop_classification_due.load(.acquire));
         return std.mem.eql(u8, phase, "connection_resources_released") or
             std.mem.eql(u8, phase, "connection_request_message") or
+            std.mem.eql(u8, phase, "connection_request_configure") or
             std.mem.eql(u8, phase, "test_gate_waiting") or
             std.mem.eql(u8, phase, "bash_handoff_committed") or
             std.mem.eql(u8, phase, "cleanup_started") or
