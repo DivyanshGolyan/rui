@@ -5300,6 +5300,75 @@ test "execution slots agree with custody across the complete population" {
     try custody.cleanupComplete(reused);
 }
 
+test "no-work admission restores only its temporary custody reservation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite3", .{root});
+    var storage = try store_module.Store.open(std.testing.io, path, root);
+    defer storage.close() catch unreachable;
+
+    // Every call has genuinely free capacity and a real Store with no eligible
+    // work. A represented sibling must survive release of the new reservation.
+    const Kind = enum { bash, retry, message, tool_continuation };
+    inline for (std.meta.tags(Kind)) |kind| {
+        for ([_]bool{ false, true }) |with_sibling| {
+            var records: [3]execution.CustodyRecord = undefined;
+            var host = Host{
+                .io = std.testing.io,
+                .allocator = std.testing.allocator,
+                .lease = undefined,
+                .store = &storage,
+                .faults = .{},
+                .custody = execution.CustodyPool.initialize(&records),
+            };
+            var slots = [_]ExecutionSlot{ .free, .free, .free };
+            const sibling = if (with_sibling) host.custody.reserve().? else null;
+            if (sibling) |token| {
+                var permit = store_module.DispatchPermit{ .binding = .{
+                    .turn_id = 17,
+                    .operation_id = 23,
+                    .attempt_ordinal = 2,
+                } };
+                const binding = try host.custody.attach(token, &permit);
+                slots[1] = .{ .model_preparing = .{ .token = token, .binding = binding } };
+            }
+            defer if (sibling) |token| {
+                host.custody.detach(token) catch unreachable;
+                host.custody.cleanupComplete(token) catch unreachable;
+            };
+            const baseline: usize = if (with_sibling) 1 else 0;
+            var model_preparation: model_adapter.Preparation = undefined;
+            var bash_preparation: ?bash.Preparation = null;
+            const progress = switch (kind) {
+                .bash => admitBashAttempt(&host, &slots[0], &bash_preparation),
+                .retry => admitRetryAttempt(&host, &slots[0], store_module.ActiveOperationFilter.empty(), &model_preparation),
+                .message => admitNewAttempt(&host, &slots[0], .message, &model_preparation),
+                .tool_continuation => admitNewAttempt(&host, &slots[0], .tool_continuation, &model_preparation),
+            };
+            try std.testing.expectEqual(AdmissionProgress.no_work, progress);
+            try std.testing.expect(slots[0] == .free);
+            try std.testing.expect(bash_preparation == null);
+            try std.testing.expect(!host.dispatch_fenced.load(.acquire));
+            try std.testing.expectEqual(baseline, host.custody.occupied());
+            try checkSlotCustodyAgreement(&slots, &host.custody);
+            try std.testing.expect(!(try storage.inspectSession("direct/no-work")).found);
+
+            // Restored accounting must mean immediately reusable capacity,
+            // not just a corrected counter or accidental sibling release.
+            var reused: [records.len]execution.CustodyToken = undefined;
+            const free = records.len - baseline;
+            for (reused[0..free]) |*token| token.* = host.custody.reserve() orelse return error.TestExpectedCapacity;
+            try std.testing.expect(host.custody.reserve() == null);
+            for (reused[0..free]) |token| try host.custody.releaseUnused(token);
+            try std.testing.expectEqual(baseline, host.custody.occupied());
+            try checkSlotCustodyAgreement(&slots, &host.custody);
+        }
+    }
+}
+
 test "closed Bash delivery retains its payload with detached custody" {
     var records: [2]execution.CustodyRecord = undefined;
     var lease = platform.StoreLease{

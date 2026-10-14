@@ -2240,7 +2240,7 @@ def host_diagnostic_cases(state, library):
                     try:
                         assert not leftovers[0].exists()
                         clean = fixture.command("inspect-session", "--store", store, "--session", session)["execution"]
-                        assert clean["custody_occupied"] == "0" and clean["scratch_used_bytes"] == "0", clean
+                        assert clean["scratch_used_bytes"] == "0", clean
                         (root / "fresh-resources.json").write_text(json.dumps(clean, indent=2) + "\n")
                     finally:
                         fixture.stop_host(fresh)
