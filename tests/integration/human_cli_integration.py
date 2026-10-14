@@ -90,6 +90,28 @@ def preference_edits(home, store):
     assert saved.read_text() == pinned
 
 
+def read_pipe_output(stream, *, count=None, timeout=10):
+    """Read one complete line or an exact prefix without consuming later output.
+
+    Use raw descriptor reads consistently: a buffered readline after select can
+    still block, and read-ahead would invalidate the large-result backpressure case.
+    """
+    limit = 16 * 1024
+    assert count is None or 0 < count <= limit, count
+    output = bytearray()
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0 and select.select([stream], [], [], remaining)[0], (
+            "pipe output deadline exceeded", count, bytes(output))
+        chunk = os.read(stream.fileno(), 1 if count is None else count - len(output))
+        assert chunk, ("pipe closed before complete output", count, bytes(output))
+        output.extend(chunk)
+        if (count is None and output.endswith(b"\n")) or len(output) == count:
+            return bytes(output)
+        assert len(output) < limit, ("pipe record exceeds 16 KiB", bytes(output))
+
+
 def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, initial=b""):
     output = initial
     received = 0
@@ -151,6 +173,45 @@ def terminal_redraw(output, composer):
         if composer in frame:
             return frame
     raise AssertionError(("no complete edited redraw", composer, output))
+
+
+def pipe_wait_oracles():
+    reader, writer = os.pipe()
+    with os.fdopen(reader, "rb", buffering=0) as stream:
+        try:
+            os.write(writer, "first café\nsecond\ntail".encode())
+            assert read_pipe_output(stream) == "first café\n".encode()
+            assert read_pipe_output(stream) == b"second\n"
+            assert read_pipe_output(stream, count=2) == b"ta"
+            assert os.read(reader, 2) == b"il", "prefix reader consumed unread output"
+            for prefix in (b"", b"unfinished"):
+                if prefix:
+                    os.write(writer, prefix)
+                try:
+                    read_pipe_output(stream, timeout=0.5)
+                except AssertionError as error:
+                    assert error.args[0] == ("pipe output deadline exceeded", None, prefix), error
+                else:
+                    raise AssertionError("unterminated record accepted")
+            os.write(writer, b"short")
+        finally:
+            os.close(writer)
+        try:
+            read_pipe_output(stream, count=6)
+        except AssertionError as error:
+            assert error.args[0] == ("pipe closed before complete output", 6, b"short"), error
+        else:
+            raise AssertionError("pipe EOF accepted as a complete prefix")
+    with tempfile.TemporaryFile() as stream:
+        stream.write(b"x" * (16 * 1024))
+        stream.seek(0)
+        try:
+            read_pipe_output(stream)
+        except AssertionError as error:
+            assert error.args[0] == ("pipe record exceeds 16 KiB", b"x" * (16 * 1024)), error
+        else:
+            raise AssertionError("unbounded pipe record accepted")
+    print("pipe wait oracles passed: exact records/prefix, unread suffix, EOF, partial deadline and byte bound", flush=True)
 
 
 def terminal_wait_oracles():
@@ -2109,6 +2170,7 @@ def main(selected="all"):
         help_case()
     if selected in ("all", "terminal-waits"):
         prove_terminal_process()
+        pipe_wait_oracles()
         terminal_wait_oracles()
     if selected == "terminal-waits":
         return
@@ -2714,7 +2776,7 @@ def main(selected="all"):
         terminal_waiter = subprocess.Popen([str(fixture.RUI), "wait-session", "--store", str(store),
             "--session", session, "--terminal", "--json"],
             env={**os.environ, "HOME": str(home)}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        assert json.loads(terminal_waiter.stdout.readline()) == selected
+        assert json.loads(read_pipe_output(terminal_waiter.stdout)) == selected
         time.sleep(0.1)
         assert terminal_waiter.poll() is None, "terminal-only wait returned on permission"
         queued = admit(home, "message", "--store", store, "--session", session,
@@ -3077,7 +3139,7 @@ def main(selected="all"):
             env={**os.environ, "HOME": str(home), **render_environment},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
-            assert reader.stdout.read(256).startswith(b'{"observation":')
+            assert read_pipe_output(reader.stdout, count=256).startswith(b'{"observation":')
             assert reader.poll() is None, "large result should block on unread stdout"
             assert list(scratch.iterdir()) == [], "rendering must not leave a named payload"
         finally:
@@ -3303,7 +3365,7 @@ def main(selected="all"):
             "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            assert waiter.stdout.readline() == "selected message: message\\n\\x1b[2J\\u202e\n"
+            assert read_pipe_output(waiter.stdout).decode() == "selected message: message\\n\\x1b[2J\\u202e\n"
             master, slave = pty.openpty()
             entered = subprocess.Popen([str(fixture.RUI), "session", "--store", str(store),
                 "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
@@ -3361,9 +3423,9 @@ def main(selected="all"):
             "--session", empty_session, "--json"],
             env={**os.environ, "HOME": str(home)}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            assert json.loads(empty_wait.stdout.readline()) == {"event": "selection", "session": empty_session, "message": ""}
+            assert json.loads(read_pipe_output(empty_wait.stdout)) == {"event": "selection", "session": empty_session, "message": ""}
             empty_release.set()
-            assert json.loads(empty_wait.stdout.readline())["observation"]["result"]["status"] == "completed"
+            assert json.loads(read_pipe_output(empty_wait.stdout))["observation"]["result"]["status"] == "completed"
             assert empty_wait.wait(timeout=10) == 0
         finally:
             dispose_all(empty_release.set, lambda: stop_process(empty_wait, timeout=5))
