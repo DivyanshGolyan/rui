@@ -31,6 +31,10 @@ STDERR_TAIL_LIMIT = 16 * 1024
 # capture entry and Bash handoff. No release is filtered out by request kind.
 # control: at most 50 inspection attempts (capture + gate), four model owners
 # (ten selected phases), three controls (hint + timing), two boundaries.
+# control_peers: 100 caller-issued numbered exchanges, each with start/release
+# and at most two inspection/control phases; four model owners with ten phases,
+# two lifecycle boundaries, and eight separately issued unnumbered releases.
+# PeerCensus enforces issuance bounds before traffic, not on received records.
 # dispatch: seven controls with queued/acquired/released endpoints; the first
 # rollback or preparation advance per separately observed Host, not retry history.
 # capture: one gate, one exact cancellation and one injected resume failure.
@@ -44,6 +48,7 @@ STDERR_TAIL_LIMIT = 16 * 1024
 OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2 + 2,
                       "stop": 321 + 20 + 5 + 12 + 3 * 2 + 1 + 1,
                       "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 3 + 1,
+                      "control_peers": 4 * 100 + 4 * 10 + 2 + 8,
                       "capture": 3, "recovery": 2 * 4 + 2, "managed": 9,
                       "bash_cleanup": 6 * 3 + 3 * 321 + 601 + 201 + 6,
                       "bash_pipes": 1 + 2}
@@ -486,13 +491,13 @@ class HostDiagnostics:
         elif phase in ("preparation_completed", "codex_transfer"):
             plans = ("managed",)
         elif phase == "prepared_before_handoff":
-            plans = ("managed", "control", "recovery")
+            plans = ("managed", "control", "control_peers", "recovery")
         elif phase in ("cleanup_started", "cleanup_completed"):
-            plans = ("control", "stop", "bash_cleanup")
+            plans = ("control", "control_peers", "stop", "bash_cleanup")
         elif phase == "cleanup_release_observed":
             plans = ("bash_cleanup",)
         elif phase == "inspection_captured":
-            plans = ("control", "bash_cleanup")
+            plans = ("control", "control_peers", "bash_cleanup")
         elif phase in ("bash_leader_observed_with_open_pipes", "control_store_complete"):
             plans = ("bash_pipes",)
         if plans is not None:
@@ -579,6 +584,91 @@ class HostDiagnostics:
     def tail(self):
         with self.condition:
             return bytes(self.stderr_tail)
+
+
+class PeerCensus:
+    """Caller-issued exchanges; reply completion never refunds admission."""
+
+    def __init__(self, diagnostics):
+        assert diagnostics.observations is not None and diagnostics.observations.plan == "control_peers"
+        self.diagnostics = diagnostics
+        self.routes = []
+        self.places = []
+        self.borrowers = {}
+
+    def expect(self, route):
+        assert len(self.routes) < 100, "peer fixture exhausted numbered exchange population"
+        request = len(self.routes)
+        self.routes.append(route)
+        return request
+
+    def started(self, request, deadline):
+        records = self.diagnostics.wait(
+            "connection_request_" + self.routes[request], subject_kind="request_number",
+            subject=str(request), timeout=max(0, deadline - time.monotonic()))
+        assert len(records) == 1, records
+        assert time.monotonic() <= deadline, "peer start exceeded original deadline"
+        return records[0]
+
+    def release(self, request, deadline):
+        record = self.diagnostics.borrower_release(self.started(request, deadline), deadline)
+        assert time.monotonic() <= deadline, "peer release exceeded original deadline"
+        assert int(record["at_ns"]) <= int(deadline * 1e9), record
+        return record
+
+    def call(self, route, invoke, *, timeout=15, deadline=None):
+        if deadline is None:
+            deadline = time.monotonic() + timeout
+        assert time.monotonic() < deadline, "peer invocation exhausted original deadline"
+        request = self.expect(route)
+        value = invoke()
+        self.release(request, deadline)
+        return value
+
+    def held(self, requests):
+        for request in requests:
+            assert not self.diagnostics.matching("connection_resources_released", subject=str(request)), request
+
+    def open(self, route, invoke, *, timeout=15):
+        deadline = time.monotonic() + timeout
+        request = self.expect(route)
+        connection = invoke()
+        try:
+            self.started(request, deadline)
+            self.held([request])
+        except BaseException:
+            connection.close()
+            raise
+        self.borrowers[connection] = request
+        return connection
+
+    def close(self, connections, deadline):
+        for connection in connections:
+            request = self.borrowers[connection]
+            connection.close()
+            self.release(request, deadline)
+            del self.borrowers[connection]
+
+    def release_place(self, place, invoke, *, timeout=3):
+        assert len(self.places) < 8, "peer fixture exhausted unnumbered place population"
+        self.places.append(place)
+        began_ns = time.monotonic_ns()
+        deadline = time.monotonic() + timeout
+        value = invoke()
+        records = self.diagnostics.wait("connection_place_released", count=len(self.places),
+            timeout=max(0, deadline - time.monotonic()))
+        assert len(records) == len(self.places), records
+        record = records[-1]
+        assert record["subject_kind"] == "place" and record["subject"] == place, record
+        assert began_ns <= int(record["at_ns"]) <= int(deadline * 1e9), record
+        assert time.monotonic() <= deadline, "place release exceeded original deadline"
+        return value
+
+    def finish(self, deadline):
+        assert not self.borrowers, "fixture retained peer sockets"
+        self.diagnostics.borrower_census(deadline, self.routes)
+        places = self.diagnostics.matching("connection_place_released")
+        assert [record["subject"] for record in places] == self.places, places
 
 
 class HostStartError(RuntimeError):
