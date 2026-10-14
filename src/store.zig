@@ -470,6 +470,7 @@ pub const HistoricalView = struct {
     outputs_validated: bool = false,
     output_boundary: u64 = 0,
     output_cursor: u64 = 0,
+    output_cursor_id: u64 = 0,
     output_source: u64 = 0,
     output_expected: u64 = 0,
     output_count: u64 = 0,
@@ -5133,13 +5134,14 @@ pub const Store = struct {
         if (view.output_source == 0) {
             const source = try prepare(self.database, "SELECT source.operation_id,source.admission_position,source.output_item_count " ++
                 "FROM model_operation current JOIN model_operation source INDEXED BY model_operation_context_history ON source.session_ref=current.session_ref " ++
-                "WHERE current.operation_id=?1 AND source.admission_position>?2 " ++
+                "WHERE current.operation_id=?1 AND (source.admission_position,source.operation_id)>(?2,?4) " ++
                 "AND source.admission_position<?3 AND source.resolution_code IN ('completed','continued','tool_calls') " ++
-                "ORDER BY source.admission_position LIMIT 1");
+                "ORDER BY source.admission_position,source.operation_id LIMIT 1");
             defer _ = c.sqlite3_finalize(source);
             try bindU64(source, 1, view.binding.operation_id);
             try bindU64(source, 2, view.output_cursor);
             try bindU64(source, 3, view.output_boundary);
+            try bindU64(source, 4, view.output_cursor_id);
             const result = c.sqlite3_step(source);
             if (result == c.SQLITE_DONE) {
                 view.outputs_validated = true;
@@ -5148,6 +5150,7 @@ pub const Store = struct {
             if (result != c.SQLITE_ROW) return error.CorruptStore;
             view.output_source = try readNullableTokens(source, 0, false) orelse return error.CorruptStore;
             view.output_cursor = try readNullableTokens(source, 1, false) orelse return error.CorruptStore;
+            view.output_cursor_id = view.output_source;
             view.output_expected = try readNullableTokens(source, 2, true) orelse return error.CorruptStore;
             view.output_count = 0;
             view.output_previous_position = 0;
@@ -9908,7 +9911,13 @@ test "historical preparation rejects missing extra and reordered sibling classif
 
 test "historical accepted assistant output completeness and provenance fence reads" {
     const Incompatibility = enum { none, model, reasoning, answer };
-    for ([_]struct { fault: ?[:0]const u8 = null, incompatible: Incompatibility = .none, failure: anyerror = error.CorruptStore }{
+    for ([_]struct { fault: ?[:0]const u8 = null, incompatible: Incompatibility = .none, tied_owners: bool = false, failure: anyerror = error.CorruptStore }{
+        .{ .tied_owners = true, .fault = "DELETE FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item)" },
+        .{ .tied_owners = true, .fault = "UPDATE model_operation SET output_item_count=output_item_count+1 WHERE operation_id=(SELECT max(operation_id) FROM model_output_item)" },
+        .{ .tied_owners = true, .fault = "UPDATE model_operation SET output_item_count=output_item_count-1 WHERE operation_id=(SELECT max(operation_id) FROM model_output_item)" },
+        .{ .tied_owners = true, .fault = "DELETE FROM model_output_item WHERE operation_id=(SELECT min(operation_id) FROM model_output_item)" },
+        .{ .tied_owners = true, .fault = "UPDATE model_operation SET output_item_count=output_item_count+1 WHERE operation_id=(SELECT min(operation_id) FROM model_output_item)" },
+        .{ .tied_owners = true, .fault = "UPDATE model_operation SET output_item_count=output_item_count-1 WHERE operation_id=(SELECT min(operation_id) FROM model_output_item)" },
         .{ .fault = "DELETE FROM model_output_item" },
         .{ .fault = "DELETE FROM model_output_item WHERE item_ordinal=1" },
         .{ .fault = "UPDATE model_output_item SET item_ordinal=9 WHERE item_ordinal=1" },
@@ -9940,7 +9949,7 @@ test "historical accepted assistant output completeness and provenance fence rea
         defer storage.close() catch unreachable;
         try configureTestSession(&storage, "output-config", "direct/output");
         try submitTestMessage(&storage, &tmp, "output-input", "output-input", "direct/output", "first");
-        const source_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        var source_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         const reasoning = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}";
         const answer = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}";
         const sse = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ reasoning ++ "}\n\n" ++
@@ -9956,20 +9965,26 @@ test "historical accepted assistant output completeness and provenance fence rea
         var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..length], "output-metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
         defer metadata.deinit();
         const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, .{});
-        try storage.settleModelSuccess(source_binding, &.{
-            .source = source,
-            .source_length = sse.len,
-            .metadata = metadata.file,
-            .item_count = validated.item_count,
-            .call_count = validated.call_count,
-            .answer_length = validated.answer_length,
-            .answer_digest = validated.answer_digest,
-            .response_id = validated.evidence.response_id,
-            .body_model = .{},
-            .openai_model = .{},
-            .x_openai_model = .{},
-            .request_id = .{},
-        }, .{});
+        for (0..@as(usize, if (case.tied_owners) 2 else 1)) |index| {
+            if (index != 0) {
+                try submitTestMessage(&storage, &tmp, "output-second", "output-second", "direct/output", "second");
+                source_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            }
+            try storage.settleModelSuccess(source_binding, &.{
+                .source = source,
+                .source_length = sse.len,
+                .metadata = metadata.file,
+                .item_count = validated.item_count,
+                .call_count = validated.call_count,
+                .answer_length = validated.answer_length,
+                .answer_digest = validated.answer_digest,
+                .response_id = validated.evidence.response_id,
+                .body_model = .{},
+                .openai_model = .{},
+                .x_openai_model = .{},
+                .request_id = .{},
+            }, .{});
+        }
         try configureTestSession(&storage, "output-reconfigure", "direct/output");
         try submitTestMessage(&storage, &tmp, "output-next", "output-next", "direct/output", "next");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -9994,6 +10009,8 @@ test "historical accepted assistant output completeness and provenance fence rea
             },
         }
         try exec(storage.database, "PRAGMA foreign_keys=OFF");
+        if (case.tied_owners) try exec(storage.database, "UPDATE model_operation SET admission_position=" ++
+            "(SELECT min(admission_position) FROM model_operation WHERE output_item_count IS NOT NULL) WHERE output_item_count IS NOT NULL");
         if (case.fault) |fault| try exec(storage.database, fault);
         try exec(storage.database, "PRAGMA foreign_keys=ON");
         var preparation: @import("model_adapter.zig").Preparation = undefined;
