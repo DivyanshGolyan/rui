@@ -215,6 +215,7 @@ pub const Preparation = struct {
     next_phase: Phase = .settings,
     emission: Emission = .none,
     input_comma: bool = false,
+    continuation_unavailable: bool = false,
     history_position: u64 = 0,
     current_entry: ?store.HistoricalEntry = null,
     current_tool_result: ?store.HistoricalToolResult = null,
@@ -393,7 +394,9 @@ pub const Preparation = struct {
                     if (entry) |item| {
                         self.history_position = item.position;
                         if (item.requested_model) |model| {
-                            validateRequestedBinding(model.slice(), self.settings.?.model.slice()) catch |err| return .{ .failed = err };
+                            validateRequestedBinding(model.slice(), self.settings.?.model.slice()) catch {
+                                self.continuation_unavailable = true;
+                            };
                         }
                     }
                     self.current_entry = entry;
@@ -559,11 +562,15 @@ pub const Preparation = struct {
                     };
                     if (!complete) return false;
                     try replay.reader.authenticateItem(&replay.validation);
-                    if (incompatible) return error.ContinuationUnavailable;
+                    if (incompatible) self.continuation_unavailable = true;
                     replay.validated = true;
                 }
-                const source = HistoricalSource{ .reader = &replay.reader, .ranged = true };
-                if (try replay.cursor.advance(source, &self.writer, bytes_left, items_left) == .pending) return false;
+                // Compatibility never excuses unauthenticated later items.
+                // Unusable output stays private; no partial request can seal.
+                if (!self.continuation_unavailable) {
+                    const source = HistoricalSource{ .reader = &replay.reader, .ranged = true };
+                    if (try replay.cursor.advance(source, &self.writer, bytes_left, items_left) == .pending) return false;
+                }
                 replay.reader.close();
             },
         }
@@ -581,6 +588,7 @@ pub const Preparation = struct {
     }
 
     fn seal(self: *Preparation) !PreparationProgress {
+        if (self.continuation_unavailable) return error.ContinuationUnavailable;
         if (self.faults.seal) return error.InjectedRequestSealFailure;
         try self.writer.file.sync(self.writer.io);
         if (try self.readonly.length(self.writer.io) != self.writer.offset) return error.RequestSealFailed;

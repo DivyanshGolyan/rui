@@ -5101,7 +5101,7 @@ pub const Store = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return .{ .ready = self.readHistoricalEntryLocked(view, after_position, bytes_left, items_left) catch |err| switch (err) {
-            error.StaleAttemptBinding, error.SupersededByControl, error.HistoricalPending, error.ContinuationUnavailable => return err,
+            error.StaleAttemptBinding, error.SupersededByControl, error.HistoricalPending => return err,
             else => return self.fenceReadFailure(err),
         } };
     }
@@ -5206,14 +5206,21 @@ pub const Store = struct {
         view.tool_group_scan_after = after_position;
         const statement = try prepare(
             self.database,
-            "SELECT position,kind,content_id,model,provider,item_kind,item_id_digest FROM (" ++
-                "SELECT * FROM (SELECT e.session_position AS position,e.entry_kind AS kind,e.content_id AS content_id,NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest " ++
+            "SELECT position,kind,content_id,model,provider,item_kind,item_id_digest,valid_owner FROM (" ++
+                "SELECT * FROM (SELECT e.session_position AS position,e.entry_kind AS kind,e.content_id AS content_id,NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,NULL AS valid_owner " ++
                 "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
                 "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
                 "AND e.entry_kind IN (1,2) ORDER BY e.session_position LIMIT 1) UNION ALL " ++
-                "SELECT * FROM (SELECT item.session_position AS position,3 AS kind,item.content_id AS content_id,r.model AS model,r.provider AS provider,item.item_kind,item.item_id_digest " ++
+                "SELECT * FROM (SELECT item.session_position AS position,3 AS kind,item.content_id AS content_id,r.model AS model,r.provider AS provider,item.item_kind,item.item_id_digest," ++
+                "owner.resolution_code IN ('completed','continued','tool_calls') AND owner.session_ref=item.session_ref " ++
+                "AND owner_turn.session_ref=item.session_ref " ++
+                "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
+                "AND owner.admission_position<current.admission_position AND " ++
+                "(item.item_kind!=3 OR owner.resolution_code='tool_calls') AND " ++
+                "((owner.resolution_code='tool_calls')=EXISTS(SELECT 1 FROM model_tool_call call WHERE call.operation_id=owner.operation_id)) AS valid_owner " ++
                 "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
                 "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
+                "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
                 "LEFT JOIN session_revision r ON r.session_ref=owner.session_ref AND r.revision=owner.settings_revision " ++
                 "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position ORDER BY item.session_position LIMIT 1)" ++
                 ") ORDER BY position LIMIT 1",
@@ -5237,6 +5244,10 @@ pub const Store = struct {
         const metadata = try self.readContentMetadata(content_id);
         var requested_model: ?protocol.Bounded(protocol.max_model_bytes) = null;
         if (kind == .provider_output) {
+            // Keep contradictory owners visible instead of filtering their
+            // output away. Accepted-population validation cannot see failed
+            // owners; every selected item must independently certify one.
+            if (c.sqlite3_column_int(statement, 7) != 1) return error.CorruptStore;
             var model: protocol.Bounded(protocol.max_model_bytes) = .{};
             try readText(statement, 3, &model);
             if (model.len == 0) return error.CorruptStore;
@@ -5303,12 +5314,10 @@ pub const Store = struct {
                     return count;
                 }
             };
-            var incompatible = false;
             const authenticated = scan.validation.advance(Source{ .storage = self, .scan = scan }, bytes_left, items_left) catch |err| switch (err) {
-                error.ContinuationUnavailable => complete: {
-                    incompatible = true;
-                    break :complete true;
-                },
+                // This scan authenticates canonical calls. Preparation owns
+                // compatibility of the complete selected provider recipe.
+                error.ContinuationUnavailable => true,
                 else => return error.CorruptStore,
             };
             if (!authenticated)
@@ -5317,7 +5326,6 @@ pub const Store = struct {
             try scan.validation.authenticate(scan.fields);
             reader.close();
             scan.reader = null;
-            if (incompatible) return error.ContinuationUnavailable;
             return error.HistoricalPending;
         }
         if (scan.source != 0) {
@@ -9899,21 +9907,33 @@ test "historical preparation rejects missing extra and reordered sibling classif
 }
 
 test "historical accepted assistant output completeness and provenance fence reads" {
-    for ([_][:0]const u8{
-        "DELETE FROM model_output_item",
-        "DELETE FROM model_output_item WHERE item_ordinal=1",
-        "UPDATE model_output_item SET item_ordinal=9 WHERE item_ordinal=1",
-        "UPDATE model_output_item SET session_position=session_position+100 WHERE item_ordinal=1",
-        "UPDATE model_output_item SET attempt_ordinal=attempt_ordinal+1",
-        "UPDATE model_output_item SET session_ref='foreign'",
-        "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1",
-        "UPDATE model_output_item SET content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=1) WHERE item_ordinal=0",
-        "UPDATE model_output_item SET content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=0) WHERE item_ordinal=1",
-        "UPDATE model_output_item SET item_kind=2 WHERE item_ordinal=0",
-        "UPDATE model_output_item SET item_kind=1 WHERE item_ordinal=1",
-        "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=0",
-        "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=1",
-    }) |fault| {
+    const Incompatibility = enum { none, model, reasoning, answer };
+    for ([_]struct { fault: ?[:0]const u8 = null, incompatible: Incompatibility = .none, failure: anyerror = error.CorruptStore }{
+        .{ .fault = "DELETE FROM model_output_item" },
+        .{ .fault = "DELETE FROM model_output_item WHERE item_ordinal=1" },
+        .{ .fault = "UPDATE model_output_item SET item_ordinal=9 WHERE item_ordinal=1" },
+        .{ .fault = "UPDATE model_output_item SET session_position=session_position+100 WHERE item_ordinal=1" },
+        .{ .fault = "UPDATE model_output_item SET attempt_ordinal=attempt_ordinal+1" },
+        .{ .fault = "UPDATE model_output_item SET session_ref='foreign'" },
+        .{ .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1" },
+        .{ .fault = "UPDATE model_output_item SET content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=1) WHERE item_ordinal=0" },
+        .{ .fault = "UPDATE model_output_item SET content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=0) WHERE item_ordinal=1" },
+        .{ .fault = "UPDATE model_output_item SET item_kind=2 WHERE item_ordinal=0" },
+        .{ .fault = "UPDATE model_output_item SET item_kind=1 WHERE item_ordinal=1" },
+        .{ .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=0" },
+        .{ .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=1" },
+        .{ .incompatible = .reasoning, .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=1)" },
+        .{ .incompatible = .reasoning, .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=1" },
+        .{ .incompatible = .answer, .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=0" },
+        .{ .incompatible = .model, .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=0)" },
+        .{ .fault = "UPDATE model_operation SET resolution_code='failed' WHERE output_item_count IS NOT NULL" },
+        .{ .fault = "UPDATE model_operation SET resolution_code='future' WHERE output_item_count IS NOT NULL" },
+        .{ .fault = "UPDATE model_operation SET resolution_code='tool_calls' WHERE output_item_count IS NOT NULL" },
+        .{ .fault = "UPDATE turn SET session_ref='foreign' WHERE turn_id=(SELECT turn_id FROM model_operation WHERE output_item_count IS NOT NULL)" },
+        .{ .incompatible = .reasoning, .failure = error.ContinuationUnavailable },
+        .{ .incompatible = .answer, .failure = error.ContinuationUnavailable },
+        .{ .incompatible = .model, .failure = error.ContinuationUnavailable },
+    }) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage = try testingStore(&tmp, std.testing.io);
@@ -9950,10 +9970,31 @@ test "historical accepted assistant output completeness and provenance fence rea
             .x_openai_model = .{},
             .request_id = .{},
         }, .{});
+        try configureTestSession(&storage, "output-reconfigure", "direct/output");
         try submitTestMessage(&storage, &tmp, "output-next", "output-next", "direct/output", "next");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        switch (case.incompatible) {
+            .none => {},
+            .model => try storage.setHistoricalModelForTesting(source_binding, "different-model"),
+            .reasoning, .answer => {
+                // Preserve canonical content integrity and certified identity;
+                // only current adapter compatibility changes in this sibling.
+                const bytes = if (case.incompatible == .reasoning)
+                    "{\"type\":\"reasoning\",\"id\":\"r\"}"
+                else
+                    "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"}]}";
+                const update = try prepare(storage.database, "UPDATE content SET payload=?1,byte_length=?2,digest=?3 " ++
+                    "WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=?4)");
+                defer _ = c.sqlite3_finalize(update);
+                try bindBlob(update, 1, bytes);
+                try bindU64(update, 2, bytes.len);
+                try bindBlob(update, 3, &protocol.contentDigest(bytes));
+                try bindU64(update, 4, if (case.incompatible == .reasoning) 0 else 1);
+                try expectDone(update);
+            },
+        }
         try exec(storage.database, "PRAGMA foreign_keys=OFF");
-        try exec(storage.database, fault);
+        if (case.fault) |fault| try exec(storage.database, fault);
         try exec(storage.database, "PRAGMA foreign_keys=ON");
         var preparation: @import("model_adapter.zig").Preparation = undefined;
         try preparation.init(std.testing.io, try storage.openHistoricalView(binding), root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
@@ -9963,7 +10004,7 @@ test "historical accepted assistant output completeness and provenance fence rea
             switch (progress) {
                 .pending => {},
                 .failed => |err| {
-                    try std.testing.expectEqual(error.CorruptStore, err);
+                    try std.testing.expectEqual(case.failure, err);
                     break;
                 },
                 .prepared => |*request| {
@@ -9972,14 +10013,14 @@ test "historical accepted assistant output completeness and provenance fence rea
                 },
             }
         }
-        try std.testing.expect(storage.isFenced());
+        try std.testing.expectEqual(case.failure == error.CorruptStore, storage.isFenced());
         preparation.cancel();
         try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
     }
 }
 
 test "historical preparation keeps incompatible authenticated calls distinct from corruption" {
-    for ([_]struct { controls: []const u8, fault: ?[:0]const u8 = null, failure: anyerror }{
+    for ([_]struct { controls: []const u8, fault: ?[:0]const u8 = null, failure: anyerror, incompatible_last: bool = false }{
         .{ .controls = ",\"caller\":{\"type\":\"future\"}", .failure = error.ContinuationUnavailable },
         .{ .controls = ",\"namespace\":\"future\"", .failure = error.ContinuationUnavailable },
         .{ .controls = ",\"caller\":{\"type\":\"future\"},\"late\":[0,]", .failure = error.CorruptStore },
@@ -9987,6 +10028,12 @@ test "historical preparation keeps incompatible authenticated calls distinct fro
         .{ .controls = ",\"namespace\":\"future\"", .fault = "UPDATE model_tool_call SET arguments_content_id=name_content_id,field_metadata=CAST(substr(field_metadata,1,120)||substr(field_metadata,41,40) AS BLOB)", .failure = error.CorruptStore },
         .{ .controls = ",\"status\":\"future\",\"arguments\":\"{}\"", .failure = error.CorruptStore },
         .{ .controls = ",\"status\":\"future\",\"name\":\"unknown\"", .failure = error.CorruptStore },
+        .{ .controls = ",\"namespace\":\"future\"", .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=1)", .failure = error.CorruptStore },
+        .{ .controls = ",\"namespace\":\"future\"", .fault = "UPDATE model_tool_call SET arguments_content_id=name_content_id,field_metadata=CAST(substr(field_metadata,1,120)||substr(field_metadata,41,40) AS BLOB) WHERE call_ordinal=1", .failure = error.CorruptStore },
+        .{ .controls = ",\"namespace\":\"future\"", .incompatible_last = true, .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=0", .failure = error.CorruptStore },
+        .{ .controls = "", .fault = "UPDATE model_operation SET resolution_code='completed' WHERE output_item_count IS NOT NULL", .failure = error.CorruptStore },
+        .{ .controls = "", .fault = "UPDATE model_operation SET resolution_code='continued' WHERE output_item_count IS NOT NULL", .failure = error.CorruptStore },
+        .{ .controls = "", .fault = "UPDATE model_operation SET resolution_code='failed' WHERE output_item_count IS NOT NULL", .failure = error.CorruptStore },
     }) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -9995,7 +10042,10 @@ test "historical preparation keeps incompatible authenticated calls distinct fro
         try configureTestSession(&storage, "incompatible-config", "direct/incompatible");
         try submitTestMessage(&storage, &tmp, "incompatible-input", "incompatible-input", "direct/incompatible", "tools");
         const source = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        const calls = [_]TestingCall{.{ .item_id = "a", .name = "unknown", .encoded_call_id = "a", .decoded_call_id = "a", .encoded_arguments = "{}", .decoded_arguments = "{}", .controls = case.controls }};
+        const calls = [_]TestingCall{
+            .{ .item_id = "a", .name = "unknown", .encoded_call_id = "a", .decoded_call_id = "a", .encoded_arguments = "{}", .decoded_arguments = "{}", .controls = if (case.incompatible_last) "" else case.controls },
+            .{ .item_id = "b", .name = "unknown", .encoded_call_id = "b", .decoded_call_id = "b", .encoded_arguments = "{}", .decoded_arguments = "{}", .controls = if (case.incompatible_last) case.controls else "" },
+        };
         try settleCallsForTesting(&storage, &tmp, source, "incompatible-output", &calls);
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         if (case.fault) |fault| try exec(storage.database, fault);
