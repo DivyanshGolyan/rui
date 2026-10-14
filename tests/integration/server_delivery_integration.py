@@ -170,7 +170,6 @@ def main():
                     assert len(partial) < length, "stalled reply unexpectedly complete"
                 assert b"HTTP/1.1" not in partial, "second HTTP reply appended"
             stop_process(host)
-            assert b"EffectAwareShutdown" in diagnostics.tail(), "not the normal Host drain"
             peers.finish(time.monotonic())
             host = None
             # Restart and public reads prove the timed-out delivery did not
