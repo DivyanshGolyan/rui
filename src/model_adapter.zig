@@ -30,6 +30,17 @@ pub const observation_names: provider.ObservationNames = .{
 pub const Authentication = struct { path: []const u8, fixture: bool = false };
 pub const Credential = codex_credentials.Lease;
 
+/// Codex continuation is qualified only for the same requested model binding.
+/// The caller supplies producing-request evidence, never the served model.
+fn validateRequestedBinding(saved_model: []const u8, requested_model: []const u8) !void {
+    if (!std.mem.eql(u8, saved_model, requested_model)) return error.ContinuationUnavailable;
+}
+
+test "Codex continuation requires identical requested binding" {
+    try validateRequestedBinding("model-a", "model-a");
+    try std.testing.expectError(error.ContinuationUnavailable, validateRequestedBinding("model-a", "model-b"));
+}
+
 pub fn acquireCredentialInto(io: std.Io, authentication: Authentication, destination: *Credential) !void {
     return codex_auth.acquireInto(io, authentication.path, authentication.fixture, destination);
 }
@@ -40,6 +51,7 @@ pub fn authenticationFailureCode(err: anyerror) []const u8 {
 
 pub fn preparationFailureCode(err: anyerror) []const u8 {
     return switch (err) {
+        error.ContinuationUnavailable => "continuation_unavailable",
         error.UnsupportedCodexConfiguration => "unsupported_codex_configuration",
         error.InjectedFirstPreparationFailure => "request_preparation_failed",
         error.RequestScratchExhausted => "request_scratch_exhausted",
@@ -175,12 +187,14 @@ const writePlainJsonRun = request_encoding.writePlainJsonRun;
 // selects a bounded refill size first, and any short canonical read fails.
 const HistoricalSource = struct {
     reader: *store.HistoricalReader,
+    ranged: bool = false,
 
     pub fn contentLength(self: HistoricalSource) u64 {
         return self.reader.reference.length;
     }
 
     pub fn readContent(self: HistoricalSource, offset: u64, destination: []u8) !usize {
+        if (self.ranged) return self.reader.reader.readRange(offset, destination);
         return self.reader.read(offset, destination);
     }
 
@@ -200,8 +214,8 @@ pub const Preparation = struct {
     phase: Phase = .settings,
     next_phase: Phase = .settings,
     emission: Emission = .none,
-    after_position: u64 = 0,
     input_comma: bool = false,
+    history_position: u64 = 0,
     current_entry: ?store.HistoricalEntry = null,
     current_tool_result: ?store.HistoricalToolResult = null,
     active: bool = true,
@@ -209,6 +223,7 @@ pub const Preparation = struct {
 
     const Phase = enum {
         settings,
+        history_validation,
         model_prefix,
         model,
         envelope,
@@ -259,6 +274,8 @@ pub const Preparation = struct {
 
     const ReplayEmission = struct {
         reader: store.HistoricalReader,
+        validation: Output.ReplayValidationCursor = .{},
+        validated: bool = false,
         cursor: request_encoding.ReplayCursor = .{},
     };
 
@@ -340,6 +357,10 @@ pub const Preparation = struct {
                     if (self.faults.managed_route and
                         (self.settings.?.tools_mask & 2 != 0 or self.settings.?.output_schema != null))
                         return .{ .failed = error.UnsupportedCodexConfiguration };
+                    self.phase = .history_validation;
+                },
+                .history_validation => {
+                    if (!(self.view.validateOutputsStep() catch |err| return .{ .failed = err })) continue;
                     self.phase = switch (self.settings.?.provider) {
                         .codex => .model_prefix,
                     };
@@ -363,7 +384,18 @@ pub const Preparation = struct {
                 },
                 .input_prefix => self.emitFixed("\",\"input\":[", .history_next),
                 .history_next => {
-                    const entry = self.view.nextEntry(self.after_position) catch |err| return .{ .failed = err };
+                    items_left += 1; // The semantic cursor charges discovery or parser work.
+                    const progress = self.view.nextEntryStep(self.history_position, &bytes_left, &items_left) catch |err| return .{ .failed = err };
+                    const entry = switch (progress) {
+                        .pending => continue,
+                        .ready => |entry| entry,
+                    };
+                    if (entry) |item| {
+                        self.history_position = item.position;
+                        if (item.requested_model) |model| {
+                            validateRequestedBinding(model.slice(), self.settings.?.model.slice()) catch |err| return .{ .failed = err };
+                        }
+                    }
                     self.current_entry = entry;
                     if (entry == null) {
                         self.phase = .tools_prefix;
@@ -393,7 +425,6 @@ pub const Preparation = struct {
                 },
                 .entry_suffix => {
                     const entry = self.current_entry.?;
-                    self.after_position = entry.position;
                     self.input_comma = true;
                     self.current_entry = null;
                     if (entry.kind == .provider_output) self.phase = .history_next else self.emitFixed("\"}]}", .history_next);
@@ -402,7 +433,6 @@ pub const Preparation = struct {
                     const result = self.view.nextToolResult() catch |err| return .{ .failed = err };
                     self.current_tool_result = result;
                     if (result == null) {
-                        self.after_position = self.current_entry.?.position;
                         self.current_entry = null;
                         self.phase = .history_next;
                     } else self.phase = .tool_result_prefix;
@@ -510,7 +540,21 @@ pub const Preparation = struct {
                 raw.reader.close();
             },
             .replay => |*replay| {
-                const source = HistoricalSource{ .reader = &replay.reader };
+                if (!replay.validated) {
+                    const sequential = HistoricalSource{ .reader = &replay.reader };
+                    const complete = replay.validation.advance(sequential, bytes_left, items_left) catch |err| switch (err) {
+                        error.SyntaxError,
+                        error.UnexpectedEndOfInput,
+                        error.InvalidJsonUtf8,
+                        error.JsonTooDeep,
+                        error.DuplicateJsonField,
+                        => return replay.reader.malformed(),
+                        else => return err,
+                    };
+                    if (!complete) return false;
+                    replay.validated = true;
+                }
+                const source = HistoricalSource{ .reader = &replay.reader, .ranged = true };
                 if (try replay.cursor.advance(source, &self.writer, bytes_left, items_left) == .pending) return false;
                 replay.reader.close();
             },
@@ -1770,6 +1814,9 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
         var preparation: Preparation = undefined;
         try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
         defer if (preparation.active) preparation.cancel();
+        // Validation may precede output; establish the charged checkpoint
+        // independently of the first advance's incidental phase count.
+        try stepPreparationToOffset(&preparation, 1, 4096);
         try std.testing.expectError(error.TestUnexpectedResult, drainLivePreparation(&preparation, probe_allowance[0], probe_allowance[1], 1));
         try std.testing.expect(preparation.active);
         try std.testing.expect(used.load(.acquire) > baseline);
@@ -1796,6 +1843,182 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
         try std.testing.expectEqual(baseline, used.load(.acquire));
         try std.testing.expect(retained == null);
     }
+}
+
+test "request preparation rejects unsupported saved reasoning and fences malformed canonical items" {
+    for ([_]struct { item: []const u8, failure: anyerror }{
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\"}", .failure = error.ContinuationUnavailable },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"\"}", .failure = error.ContinuationUnavailable },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"status\":\"future\"}", .failure = error.ContinuationUnavailable },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":[0,]}", .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":\"\xff\"}", .failure = error.CorruptStore },
+    }) |case| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        try setup.configure("saved-config", "direct/saved");
+        try setup.submit("saved-input", "saved-input-key", "direct/saved", "hi");
+        var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+        const first = try admitted.permit.consume();
+        try setup.submit("saved-next", "saved-next-key", "direct/saved", "next");
+        try settleComposedForTesting(&setup, first, "saved-metadata", case.item, &.{});
+        var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
+        const binding = try successor.permit.consume();
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        defer if (preparation.active) preparation.cancel();
+        if (drainLivePreparation(&preparation, 1, 1, 16384)) |request| {
+            var unexpected = request;
+            unexpected.deinit();
+            return error.ExpectedContinuationUnavailable;
+        } else |err| {
+            try std.testing.expectEqual(case.failure, err);
+        }
+        try std.testing.expectEqual(case.failure == error.CorruptStore, setup.storage.isFenced());
+        try preparation.checkIntegrity(binding);
+        preparation.cancel();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
+}
+
+test "request preparation resumes large private replay validation before emission" {
+    for ([_]bool{ false, true }) |supported| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        try setup.configure("large-config", "direct/large");
+        try setup.submit("large-input", "large-input-key", "direct/large", "hi");
+        var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+        const first = try admitted.permit.consume();
+        try setup.submit("large-next", "large-next-key", "direct/large", "next");
+        var item_buffer: [64 * 1024]u8 = undefined;
+        var item = std.Io.Writer.fixed(&item_buffer);
+        try item.writeAll("{\"encrypted_content\":\"");
+        const window: [protocol.content_window_bytes]u8 = @splat('x');
+        for (0..5) |_| try item.writeAll(&window);
+        try item.writeAll("\",");
+        for (0..1000) |_| try item.writeAll("\"future\":{\"open\":[0,null]},");
+        try item.writeAll(if (supported)
+            "\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}"
+        else
+            "\"id\":\"r\",\"type\":\"reasoning\",\"status\":true}");
+        try settleComposedForTesting(&setup, first, "large-metadata", item.buffered(), &.{});
+        var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
+        const binding = try successor.permit.consume();
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        defer if (preparation.active) preparation.cancel();
+        var validation_turns: usize = 0;
+        var turns: usize = 0;
+        while (true) {
+            turns += 1;
+            try std.testing.expect(turns < 100000);
+            const before = if (preparation.emission == .replay) preparation.emission.replay.validation.position else 0;
+            var progress = preparation.advance(7, 2);
+            try std.testing.expect(preparation.advanceStats().work_bytes <= 7);
+            try std.testing.expect(preparation.advanceStats().work_items <= 2);
+            if (preparation.emission == .replay and !preparation.emission.replay.validated) {
+                validation_turns += 1;
+                try std.testing.expect(preparation.emission.replay.validation.position - before <= 7);
+                try std.testing.expectEqual(@as(u64, 0), preparation.emission.replay.cursor.position);
+                try preparation.checkIntegrity(binding);
+            }
+            switch (progress) {
+                .pending => {},
+                .failed => |err| {
+                    try std.testing.expect(!supported);
+                    try std.testing.expectEqual(error.ContinuationUnavailable, err);
+                    break;
+                },
+                .prepared => |*request| {
+                    defer request.deinit();
+                    try std.testing.expect(supported);
+                    var request_buffer: [64 * 1024]u8 = undefined;
+                    const length = try request.file.readPositionalAll(std.testing.io, &request_buffer, 0);
+                    try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], item.buffered()) != null);
+                    break;
+                },
+            }
+        }
+        try std.testing.expect(validation_turns > 5000);
+        if (preparation.active) preparation.cancel();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
+}
+
+test "request preparation authenticates the historical requested model binding" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = "direct/binding-prep";
+    try setup.configure("binding-config", session);
+    try setup.submit("binding-one", "binding-one", session, "original");
+    const source = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleComposedForTesting(&setup, source, "binding-output", "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}", &.{});
+    var revision: protocol.ConfigureCommand = .{};
+    try revision.key.set("binding-revision");
+    try revision.session.set(session);
+    try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
+    try setup.submit("binding-two", "binding-two", session, "next");
+    const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    {
+        var prep: Preparation = undefined;
+        try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        defer if (prep.active) prep.cancel();
+        var request = try drainLivePreparation(&prep, 1, 1, 32768);
+        defer request.deinit();
+    }
+    try setup.storage.setHistoricalModelForTesting(source, "different-saved-model");
+    var prep: Preparation = undefined;
+    try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+    defer if (prep.active) prep.cancel();
+    if (drainLivePreparation(&prep, 1, 1, 32768)) |prepared| {
+        var unexpected = prepared;
+        unexpected.deinit();
+        return error.ExpectedContinuationUnavailable;
+    } else |err| try std.testing.expectEqual(error.ContinuationUnavailable, err);
+    prep.cancel();
+    try std.testing.expect(!setup.storage.isFenced());
+    try std.testing.expect(retained == null);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "request preparation cancellation yields inside canonical proposal authentication" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const binding = try establishComposedHistory(&setup, "direct/auth-cancel");
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+    defer if (preparation.active) preparation.cancel();
+    var pending_turns: usize = 0;
+    for (0..4096) |_| {
+        const before = preparation.writer.offset;
+        const progress = preparation.advance(1, 1);
+        try std.testing.expect(progress == .pending);
+        try std.testing.expect(preparation.advanceStats().work_bytes <= 1);
+        try std.testing.expect(preparation.advanceStats().work_items <= 1);
+        try preparation.checkIntegrity(binding);
+        if (preparation.phase == .history_next and preparation.writer.offset == before) {
+            pending_turns += 1;
+            if (pending_turns == 12) break;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 12), pending_turns);
+    preparation.cancel();
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+    try std.testing.expect(!setup.storage.isFenced());
 }
 
 test "request preparation composes replay tool results and schema" {
