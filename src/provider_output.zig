@@ -701,6 +701,29 @@ pub const ReplayValidationCursor = struct {
             if (value.shape != .string or (nonempty and value.length == 0)) return error.ContinuationUnavailable;
             return value;
         }
+
+        // Canonical consumed-field ambiguity outranks adapter incompatibility,
+        // including ambiguity inside a later child after an earlier failure.
+        fn validateFields(self: *const Frame, comptime field_names: []const []const u8) !void {
+            inline for (field_names) |name| {
+                const value = try self.get(name);
+                var applicable = true;
+                if (self.kind == .item and value.shape == .array and
+                    (comptime std.mem.eql(u8, name, "content") or std.mem.eql(u8, name, "summary")))
+                {
+                    const kind = try self.get("type");
+                    // Unsupported block kinds do not consume their fields.
+                    applicable = if (kind.is("reasoning"))
+                        (if (comptime std.mem.eql(u8, name, "summary")) value.summary else value.reasoning)
+                    else
+                        value.output;
+                }
+                if (applicable) {
+                    if (value.failure) |err| if (err == error.DuplicateJsonField) return err;
+                    if (value.output_failure) |err| if (err == error.DuplicateJsonField) return err;
+                }
+            }
+        }
     };
 
     fn index(name: []const u8) ?usize {
@@ -735,8 +758,12 @@ pub const ReplayValidationCursor = struct {
             frame.key = null;
         } else {
             frame.aggregate.length += 1;
-            if (value.failure) |err| frame.aggregate.failure = err;
-            if (value.output_failure) |err| frame.aggregate.output_failure = err;
+            if (value.failure) |err| {
+                if (frame.aggregate.failure == null or frame.aggregate.failure.? != error.DuplicateJsonField) frame.aggregate.failure = err;
+            }
+            if (value.output_failure) |err| {
+                if (frame.aggregate.output_failure == null or frame.aggregate.output_failure.? != error.DuplicateJsonField) frame.aggregate.output_failure = err;
+            }
             frame.aggregate.output = frame.aggregate.output and value.shape == .object and value.output;
             frame.aggregate.reasoning = frame.aggregate.reasoning and value.shape == .object and value.reasoning;
             frame.aggregate.summary = frame.aggregate.summary and value.shape == .object and value.summary;
@@ -764,6 +791,25 @@ pub const ReplayValidationCursor = struct {
 
     fn finishFrame(frame: *const Frame) !Value {
         if (!frame.object) return frame.aggregate;
+        switch (frame.kind) {
+            .item => {
+                try frame.validateFields(&.{ "type", "id", "status", "internal_chat_message_metadata_passthrough" });
+                const kind = try frame.get("type");
+                if (kind.is("function_call")) {
+                    try frame.validateFields(&.{ "name", "call_id", "arguments", "caller", "async", "namespace", "encrypted_function_args" });
+                } else if (kind.is("reasoning")) {
+                    try frame.validateFields(&.{ "text", "encrypted_content", "summary", "content" });
+                } else if (kind.is("message")) {
+                    try frame.validateFields(&.{ "role", "phase", "content" });
+                }
+            },
+            .block => {
+                try frame.validateFields(&.{"type"});
+            },
+            .annotation, .caller => try frame.validateFields(&.{"type"}),
+            .metadata => try frame.validateFields(&.{ "cell_id", "executed_tool_calls", "tool_calls_complete" }),
+            else => {},
+        }
         var result = Value{ .shape = .object };
         switch (frame.kind) {
             .item => {
@@ -823,6 +869,14 @@ pub const ReplayValidationCursor = struct {
                 result.reasoning = kind.is("reasoning_text");
                 result.summary = kind.is("summary_text");
                 if (!result.output and !result.reasoning and !result.summary) return result;
+                frame.validateFields(&.{"text"}) catch |err| {
+                    result.failure = err;
+                    return result;
+                };
+                if (result.output) frame.validateFields(&.{"annotations"}) catch |err| {
+                    result.output_failure = err;
+                    return result;
+                };
                 _ = frame.requiredString("text", false) catch |err| {
                     result.failure = err;
                     return result;

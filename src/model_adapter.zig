@@ -1861,6 +1861,8 @@ test "request preparation rejects unsupported saved reasoning and fences malform
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"status\":\"future\"}", .failure = error.ContinuationUnavailable },
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":[0,]}", .failure = error.CorruptStore },
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":\"\xff\"}", .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"status\":\"future\",\"encrypted_content\":\"opaque\",\"encrypted_content\":\"opaque\"}", .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"status\":\"future\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"a\"},{\"type\":\"reasoning_text\",\"text\":true}]}", .failure = error.CorruptStore },
     }) |case| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
