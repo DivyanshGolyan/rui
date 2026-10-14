@@ -1366,7 +1366,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 assert "inspection-only-output" in details, ("saved tool output unavailable on inspection", details)
                 assert f"Exit code: {exit_code}." in details, ("exact exit code unavailable on inspection", details)
                 if retirement in saved_result:
-                    assert retirement in " ".join(details.split()), ("details hid retirement evidence", details)
+                    # Hanging indentation can wrap inside a word. Compare
+                    # visible content here; raw export above checks exact bytes.
+                    assert "".join(retirement.split()) in "".join(details.split()), ("details hid retirement evidence", details)
         if decision == "allow-action" and not any((exit_code, signal_failure, lost_reply, timed_out)):
             # Four real held effects exceed the display bound. Repeated labels
             # must not merge identities. A later, long-labelled failure must
